@@ -19,6 +19,10 @@ router = APIRouter()
 log = get_service_logger(__name__)
 
 
+# Keep well under the bawthub client watchdog (useUnifiedEventStream.ts).
+HEARTBEAT_INTERVAL_S = 15.0
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
@@ -117,24 +121,22 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
         },
     )
 
+    # Named heartbeat event (not an SSE ``: comment``): EventSource never
+    # surfaces comments, so only a named event lets the browser's watchdog
+    # tell a live-but-quiet stream from a silently dead one (a proxy hop that
+    # keeps the client socket open after the upstream died).
     last_ping = asyncio.get_running_loop().time()
     try:
         async for event_data in sub.subscribe_group(
             bot_ids, user_id, consumer_id, timeout_s=86400,
         ):
-            if event_data is None:
-                # Keepalive tick from subscriber — send SSE comment to prevent proxy idle timeout
-                now = asyncio.get_running_loop().time()
-                if now - last_ping > 25:
-                    yield ": ping\n\n"
-                    last_ping = now
-                continue
-            replayed = event_data.pop("_replayed", False)
-            yield _sse("event", {**event_data, "replayed": replayed})
+            if event_data is not None:
+                replayed = event_data.pop("_replayed", False)
+                yield _sse("event", {**event_data, "replayed": replayed})
 
             now = asyncio.get_running_loop().time()
-            if now - last_ping > 25:
-                yield ": ping\n\n"
+            if now - last_ping >= HEARTBEAT_INTERVAL_S:
+                yield _sse("heartbeat", {"ts": datetime.now(timezone.utc).isoformat()})
                 last_ping = now
     except asyncio.CancelledError:
         raise
