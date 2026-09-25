@@ -51,6 +51,7 @@ class WorkspaceCandidateResponse(BaseModel):
     turn_id: str
     trigger_message_id: str | None
     bot_id: str | None
+    session_id: str | None = None
     created_at: datetime
     confidence: Literal["exact", "strong", "partial", "probable"]
     matched_changes: int
@@ -80,6 +81,7 @@ class WorkspaceTurnResponse(BaseModel):
     turn_id: str
     trigger_message_id: str | None
     bot_id: str | None
+    session_id: str | None = None
     created_at: datetime
     prompt: str | None
 

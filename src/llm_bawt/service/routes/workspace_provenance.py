@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import bindparam, text
 from sqlmodel import Session, select
 
 from ..changed_files_store import ChangedFilesStore, TurnChangedFile
@@ -17,6 +18,7 @@ from ..schemas_workspace_provenance import (
     WorkspaceProvenanceResponse,
     WorkspaceTurnResponse,
 )
+from ...memory.message_store import MESSAGES_PARENT
 from ..turn_logs import TurnLog
 from ..workspace_provenance import (
     CurrentWorkspaceFile,
@@ -37,6 +39,36 @@ def _source_ids(row: TurnChangedFile) -> tuple[str, ...]:
     except (TypeError, ValueError):
         return ()
     return tuple(str(value) for value in values) if isinstance(values, list) else ()
+
+
+def _session_ids_by_turn(session: Session, rows: list[TurnChangedFile]) -> dict[str, str]:
+    """Resolve each turn's conversation session through its trigger message.
+
+    ``<bot>_messages`` is the only table in the conversation chain carrying
+    ``session_id`` (turn logs deliberately do not), so one batched lookup on
+    ``(bot_id, trigger_message_id)`` is the canonical turn → session path.
+    """
+    pairs = {
+        (row.bot_id, row.trigger_message_id): row.turn_id
+        for row in rows
+        if row.bot_id and row.trigger_message_id
+    }
+    if not pairs:
+        return {}
+    statement = text(
+        f"SELECT bot_id, id, session_id FROM {MESSAGES_PARENT} "
+        "WHERE id IN :ids AND bot_id IN :bots AND session_id IS NOT NULL"
+    ).bindparams(bindparam("ids", expanding=True), bindparam("bots", expanding=True))
+    result = session.connection().execute(statement, {
+        "ids": sorted({message_id for _, message_id in pairs}),
+        "bots": sorted({bot_id for bot_id, _ in pairs}),
+    })
+    sessions: dict[str, str] = {}
+    for bot_id, message_id, session_id in result:
+        turn_id = pairs.get((bot_id, message_id))
+        if turn_id:
+            sessions[turn_id] = session_id
+    return sessions
 
 
 @router.post(
@@ -65,6 +97,11 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
         turn_rows = list(session.exec(
             select(TurnLog).where(TurnLog.id.in_(turn_ids))  # type: ignore[attr-defined]
         ).all()) if turn_ids else []
+        try:
+            session_ids = _session_ids_by_turn(session, rows)
+        except Exception:
+            # Session links are a navigation nicety; attribution must not fail on them.
+            session_ids = {}
     turns_by_id = {row.id: row for row in turn_rows}
 
     snapshots: list[TurnFileSnapshot] = []
@@ -125,6 +162,7 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
             turn_id=candidate.turn_id,
             trigger_message_id=candidate.trigger_message_id,
             bot_id=candidate.bot_id,
+            session_id=session_ids.get(candidate.turn_id),
             created_at=candidate.created_at,
             confidence=candidate.confidence,
             matched_changes=candidate.matched_changes,
@@ -150,6 +188,7 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
         turn_id=snapshot.turn_id,
         trigger_message_id=snapshot.trigger_message_id,
         bot_id=snapshot.bot_id,
+        session_id=session_ids.get(snapshot.turn_id),
         created_at=snapshot.created_at,
         prompt=snapshot.prompt,
     ) for snapshot in snapshots if snapshot.turn_id in selected_turn_ids]
