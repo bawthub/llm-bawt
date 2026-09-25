@@ -11,42 +11,30 @@ log = get_service_logger(__name__)
 
 @router.post("/v1/llm/complete", response_model=RawCompletionResponse, tags=["LLM"])
 def raw_completion(request: RawCompletionRequest):
-    """Raw LLM completion using the currently loaded model.
-    
-    Use this for utility tasks like:
-    - Memory consolidation (merging similar memories)
-    - Summarization
-    - Classification
-    - Any task that needs LLM but not the full chat pipeline
-    
-    This endpoint uses the already-loaded model in the service.
-    It will NOT load a new model - if no model is loaded, it returns 503.
-    Only one LLM model can be loaded at a time (embedding model is separate).
+    """One-shot model completion without bot identity, history, tools or agent execution.
+
+    An explicit model selects a direct API client from the catalog. Without a
+    model, the global maintenance_model setting selects the job's API client.
     """
     import time
     service = get_service()
     
-    # Check if we have any loaded client
-    if not service._client_cache:
-        raise HTTPException(
-            status_code=503, 
-            detail="No model loaded. Make a chat request first to load a model."
-        )
-    
-    # Use the currently loaded model (there should only be one)
-    loaded_models = list(service._client_cache.keys())
-    model_alias = loaded_models[0]  # Use whatever is loaded
-    
-    # If caller specified a model, warn if it doesn't match
-    if request.model and request.model != model_alias:
-        log.debug(f"Requested model '{request.model}' but using loaded model '{model_alias}'")
-    
+    from ...runtime_settings import resolve_job_model
+
+    # The global maintenance_model is the source of truth for utility calls.
+    # Never pick a cached model by insertion order or borrow a bot's harness.
+    requested_model = request.model or resolve_job_model(service.config, "maintenance_model")
+    if not requested_model:
+        raise HTTPException(status_code=503, detail="No maintenance model configured")
+    client, model_alias = service._get_background_client(model_override=requested_model)
+    if client is None or model_alias is None:
+        raise HTTPException(status_code=422, detail="Configured model has no direct API client")
+
     try:
         start = time.perf_counter()
-        client = service._client_cache[model_alias]
         
         # Build messages as Message objects (required by client.query)
-        from ..models.message import Message
+        from ...models.message import Message
         messages = []
         if request.system:
             messages.append(Message(role="system", content=request.system))
@@ -57,8 +45,12 @@ def raw_completion(request: RawCompletionRequest):
             messages=messages,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
+            plaintext_output=True,
+            stream=False,
         )
-        
+        if not isinstance(response, str) or not response.strip() or response.lstrip().startswith("ERROR:"):
+            raise ValueError("Model returned no usable completion")
+
         elapsed_ms = (time.perf_counter() - start) * 1000
         
         # Estimate tokens
