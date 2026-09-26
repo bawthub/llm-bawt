@@ -424,25 +424,11 @@ class PostgreSQLShortTermManager:
         target_bot = self.bot_id if bot_id is None else bot_id
         target_user = self.user_id if user_id is None else user_id
         new_id = str(uuid.uuid4())
-        with self._backend.engine.begin() as conn:
-            conn.execute(
-                text("""
-                    UPDATE sessions
-                    SET ended_at = CURRENT_TIMESTAMP,
-                        archived_at = CURRENT_TIMESTAMP,
-                        status = 'archived'
-                    WHERE bot_id = :bot_id AND status = 'active' AND ended_at IS NULL
-                      AND (user_id = :user_id OR (:user_id IS NULL AND user_id IS NULL))
-                """),
-                {"bot_id": target_bot, "user_id": target_user},
-            )
-            conn.execute(
-                text("""
-                    INSERT INTO sessions (id, bot_id, user_id, started_at, status)
-                    VALUES (:id, :bot_id, :user_id, CURRENT_TIMESTAMP, 'active')
-                """),
-                {"id": new_id, "bot_id": target_bot, "user_id": target_user},
-            )
+        from .session_reset_lineage import SessionResetLineage
+
+        SessionResetLineage.rotate(
+            self._backend.engine, bot_id=target_bot, user_id=target_user, new_id=new_id,
+        )
         # Point this manager at the freshly opened thread.
         self._session_id_cache = new_id
         return new_id

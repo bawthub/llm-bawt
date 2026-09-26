@@ -17,6 +17,7 @@ from ..approval_models import _as_aware_utc, _utcnow
 from typing import Any
 
 from .dependencies import get_service
+from .approval_continuation_session import approval_delivery_session, approval_origin_session
 
 
 MCP_RESULT_ENVELOPE_PREFIX = "[LLM_BAWT_MCP_TOOL_RESULT]"
@@ -63,12 +64,7 @@ def continuation_payload_from_row(row, *, result_override: Any = None) -> dict[s
 
 
 def _continuation_session(row):
-    if row.caller_context_json:
-        context = json.loads(row.caller_context_json)
-        if not isinstance(context, dict):
-            raise ValueError("Stored caller context is invalid")
-        return context.get("session_id") or None
-    return None
+    return approval_origin_session(row)
 
 
 def _terminal_ops_result(service, row) -> dict[str, Any] | None:
@@ -137,7 +133,7 @@ def validate_approval_continuation_claim(service, request, claim):
             or row.continuation_claim_token != claim[1]
             or row.bot_id != request.bot_id or row.user_id != request.user
             or row.turn_id != request.parent_turn_id
-            or _continuation_session(row) != request.session_id
+            or approval_delivery_session(service, row) != request.session_id
             or request.inter_bot_delivery_id is not None
             or any(getattr(request, key) != value for key, value in _continuation_identity(row).items())
             or row.continuation_next_attempt_at is None
@@ -204,6 +200,18 @@ async def dispatch_mcp_result_continuation(
             if prior.status in ("ok", "completed") and not prior.error_text:
                 return
             raise RuntimeError("Previous continuation turn failed; manual reconciliation required")
+        target_session = await asyncio.to_thread(approval_delivery_session, service, row)
+        if target_session != request.session_id:
+            if prior is not None:
+                # The deterministic turn has already written messages. Do not
+                # reuse their IDs in a different session or replay uncertain work.
+                raise RuntimeError("Cannot redirect an already-started approval continuation after reset")
+            request.session_id = target_session
+            request.messages[0].content += (
+                "\nThe user reset the conversation with /new while this result was pending. "
+                "Continue in this fresh session using its message history; do not restore "
+                "the previous SDK context or re-execute the completed operation."
+            )
         if row.request_kind != KIND_MCP:
             await _send_harness_grant(service, store, row)
         async for chunk in service.chat_completion_stream(request):

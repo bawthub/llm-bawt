@@ -80,6 +80,13 @@ class FakeService:
         self.error = error
         self.config = None
 
+    def get_memory_client(self, bot_id, user_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(get_session=lambda session_id: {
+            "id": session_id, "bot_id": bot_id, "user_id": user_id,
+            "status": "active", "session_metadata": {},
+        })
+
     async def chat_completion_stream(self, request):
         self.requests.append(request)
         if self.error:
@@ -281,3 +288,101 @@ def test_dispatch_failure_reschedules_for_retry():
     assert persisted.continuation_state == CONT_PENDING
     assert persisted.continuation_last_error == "bridge offline"
     assert persisted.continuation_next_attempt_at is not None
+
+
+class ResetService(FakeService):
+    def __init__(self, store):
+        super().__init__()
+        self._tool_approval_policy_store = store
+        self.sessions = {
+            "session-1": {"status": "archived", "session_metadata": {
+                "reset_successor_id": "session-2", "agent_session_keys": {"claude_code": "old-huge-sdk"}}},
+            "session-2": {"status": "active", "session_metadata": {
+                "reset_predecessor_ids": ["session-1"], "agent_session_keys": {"claude_code": "fresh-sdk"}}},
+        }
+
+    def get_memory_client(self, bot_id, user_id):
+        from types import SimpleNamespace
+        assert (bot_id, user_id) == ("snark", "nick")
+        return SimpleNamespace(get_session=lambda id: {
+            "id": id, "bot_id": bot_id, "user_id": user_id, **self.sessions[id],
+        })
+
+    async def chat_completion_stream(self, request):
+        from llm_bawt.service.approval_continuations import validate_approval_continuation_claim
+        validate_approval_continuation_claim(self, request, request._internal_approval_claim)
+        async for chunk in super().chat_completion_stream(request):
+            yield chunk
+
+
+def test_pending_restart_result_follows_new_without_rebinding_original_authority():
+    store = _store()
+    row = _ready_row(store)
+    original_context = row.caller_context_json
+    service = ResetService(store)
+    asyncio.run(dispatch_mcp_result_continuation(service, store, row))
+    request = service.requests[0]
+    assert request.session_id == "session-2"
+    assert request.parent_turn_id == row.turn_id
+    assert request.continuation_payload.original_tool_use_id == row.tool_use_id
+    assert request.continuation_payload.result == {"job_id": "job-1", "state": "queued"}
+    assert "/new" in request.messages[0].content
+    assert "old-huge-sdk" not in request.model_dump_json()
+    saved = store.get_request(row.id)
+    assert saved.caller_context_json == original_context
+    assert saved.execution_attempts == 1
+    assert saved.continuation_state == CONT_DELIVERED
+
+
+def test_reset_again_between_dispatch_and_validation_rejects_stale_target():
+    from llm_bawt.service.approval_continuations import validate_approval_continuation_claim
+    store = _store()
+    row = _ready_row(store)
+
+    class RacingResetService(ResetService):
+        async def chat_completion_stream(self, request):
+            assert request.session_id == "session-2"
+            self.sessions["session-2"]["session_metadata"]["reset_successor_id"] = "session-3"
+            self.sessions["session-3"] = {"status": "active", "session_metadata": {"reset_predecessor_ids": ["session-2"]}}
+            validate_approval_continuation_claim(self, request, request._internal_approval_claim)
+            yield "data: [DONE]\n\n"
+
+    with pytest.raises(ValueError, match="Invalid or stale"):
+        asyncio.run(dispatch_mcp_result_continuation(RacingResetService(store), store, row))
+    assert store.get_request(row.id).continuation_state == CONT_PENDING
+
+
+def test_already_started_continuation_is_not_replayed_in_another_session():
+    from types import SimpleNamespace
+    store = _store()
+    row = _ready_row(store)
+    service = ResetService(store)
+    service._turn_log_store = SimpleNamespace(get_turn=lambda id: SimpleNamespace(ended_at=None))
+    with pytest.raises(RuntimeError, match="already-started"):
+        asyncio.run(dispatch_mcp_result_continuation(service, store, row))
+    assert service.requests == []
+
+
+def test_new_target_retry_retains_deterministic_identity_and_original_execution():
+    from datetime import datetime, timedelta, timezone
+    from sqlmodel import Session
+    from llm_bawt.approval_policies import ToolApprovalRequest
+    store = _store()
+    row = _ready_row(store)
+    service = ResetService(store)
+    service.error = RuntimeError("offline before dispatch")
+    with pytest.raises(RuntimeError, match="offline"):
+        asyncio.run(dispatch_mcp_result_continuation(service, store, row))
+    with Session(store.engine) as session:
+        saved = session.get(ToolApprovalRequest, row.id)
+        saved.continuation_next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.add(saved)
+        session.commit()
+    retried = store.claim_continuation(row.id)
+    service.error = None
+    asyncio.run(dispatch_mcp_result_continuation(service, store, retried))
+    first, second = service.requests
+    assert first.session_id == second.session_id == "session-2"
+    assert first.user_message_id == second.user_message_id
+    assert first.inter_bot_turn_id == second.inter_bot_turn_id
+    assert store.get_request(row.id).execution_attempts == 1

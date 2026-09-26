@@ -274,11 +274,19 @@ def test_client_owner_gets_explicit_grant_failure_not_success(client, store):
     assert saved.continuation_owner == "client"
 
 
+class SessionService:
+    def get_memory_client(self, bot_id, user_id):
+        return SimpleNamespace(get_session=lambda session_id: {
+            "id": session_id, "bot_id": bot_id, "user_id": user_id,
+            "status": "active", "session_metadata": {},
+        })
+
+
 def test_dispatch_is_session_bound_and_retry_has_stable_identity(store):
     row = ready(store)
     requests = []
 
-    class Service:
+    class Service(SessionService):
         _tool_approval_policy_store = store
 
         async def chat_completion_stream(self, request):
@@ -304,7 +312,7 @@ def test_dispatch_is_session_bound_and_retry_has_stable_identity(store):
 def test_error_stream_is_not_marked_delivered(store):
     row = ready(store)
 
-    class Service:
+    class Service(SessionService):
         async def chat_completion_stream(self, request):
             yield 'data: {"error":"bridge failed"}\n\n'
 
@@ -413,7 +421,7 @@ def test_continuation_turn_error_does_not_count_as_delivery(store):
         def get_turn(self, turn_id):
             return SimpleNamespace(ended_at=datetime.now(timezone.utc), status="error", error_text="provider failed") if completed else None
 
-    class Service:
+    class Service(SessionService):
         _turn_log_store = TurnStore()
 
         async def chat_completion_stream(self, request):

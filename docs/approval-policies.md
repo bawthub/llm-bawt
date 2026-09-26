@@ -111,6 +111,29 @@ an operation/policy does not rewrite an already-approved MCP snapshot; changes
 apply to new evaluations. Claude re-evaluates current rules on retry, so a current
 hard deny still wins over an old grant.
 
+### `/new` while an approval is pending (TASK-939)
+
+Session rotation atomically records `reset_successor_id` on the old session and
+`reset_predecessor_ids` on the fresh session, alongside archiving/creating those
+rows. The new session does not inherit the old SDK resume key. These links survive
+app and bridge restarts and preserve other session metadata.
+
+An MCP result continuation follows this explicit reset chain at dispatch, with
+bot/user ownership and reciprocal-link checks. It uses the successor's normal
+SDK binding and seeded message history, not the archived transcript. The original
+approval context, approved arguments, execution count, parent-turn audit link and
+deterministic continuation identity remain unchanged. Claim validation rechecks
+the target, so another reset before validation causes a retry rather than delivery
+to the stale session. An already-started continuation cannot be replayed under the
+same message IDs in a different session; it requires manual reconciliation.
+
+Ordinary archived/task threads without reset lineage are not redirected just
+because another thread is active. Pre-existing archived sessions have no inferred
+successor: the new behavior applies to rotations that record these links.
+
+Native harness grants are not transferable across resets: they fail closed and
+require a fresh tool approval rather than resuming the retired SDK context.
+
 Harness approvals use process-local pending authority bound to the original
 session and approval request. A one-shot grant can be consumed only by the exact
 invocation in its server-owned continuation request; unsolicited, cross-session,
