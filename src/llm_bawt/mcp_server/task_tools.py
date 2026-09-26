@@ -186,7 +186,10 @@ async def update_task(
     one by hand: when status="REVIEW" and you pass bot_id (your bot), it's used
     as the owner automatically. Pass agent_bot_id only to assign a different bot.
 
-    IMPORTANT: Set status to REVIEW when done - only humans mark COMPLETED.
+    IMPORTANT: Submit your own finished work to REVIEW by default. If Nick
+    directly asks you to review and close tasks, you may set verified, complete
+    REVIEW tasks to COMPLETED on his behalf; leave broken or incomplete ones
+    in REVIEW and explain why. This does not permit leaving BUG status.
 
     BUG status is human-locked: you may SET a task to BUG (to flag a defect for
     the user), but you CANNOT move a task OUT of BUG — the server rejects such

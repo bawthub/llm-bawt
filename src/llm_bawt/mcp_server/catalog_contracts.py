@@ -53,7 +53,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_get_context": "Read task and project briefing by UUID or TASK-N before starting work.",
     "tasks_associate_current": "Link this trusted turn when actually starting/resuming a task, never from a mention alone. Supply UUID or TASK-N; unsupported caller context fails closed.",
     "tasks_create": "Create a task with optional steps. Pass your bot_id; associate_current_turn=true links work started now using trusted server context.",
-    "tasks_update": "Patch provided task fields. Finish at REVIEW, never COMPLETED; agents cannot leave BUG. Pass bot_id (default REVIEW owner); associate_current_turn links actual work.",
+    "tasks_update": "Patch provided task fields. Submit your own work to REVIEW; if Nick directly requests task review and closure, close verified, complete REVIEW tasks as COMPLETED. Agents cannot leave BUG. Pass bot_id (default REVIEW owner); associate_current_turn links actual work.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
     "tasks_delete": "Permanently delete task and steps. Prefer tasks_update status=CANCELLED to retain history.",
     "tasks_add_dependency": "Make task_id wait for depends_on_id (UUID or TASK-N). Self-dependencies and cycles are rejected.",
