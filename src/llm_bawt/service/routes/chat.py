@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -143,6 +144,13 @@ class ChatSteerRequest(BaseModel):
     content_offset: int | None = Field(None, ge=0, description="Assistant characters visible when steering")
     bot_id: str = Field(..., description="Bot slug owning the active turn")
     user_id: str = Field("nick", description="User namespace owning the turn")
+    priority: Literal["now", "next"] = Field(
+        "now",
+        description=(
+            "now = interrupt running tools (user redirection); next = deliver at "
+            "the next tool boundary without interrupting (bot deliveries)"
+        ),
+    )
 
 
 class ChatSteerResponse(BaseModel):
@@ -253,6 +261,7 @@ async def steer_active_turn(
                 backend=backend_name,
                 target_request_id=turn.agent_request_id,
                 request_id=steer_request_id,
+                priority=request.priority,
             )
             if result.get("ok") or result.get("error") != "no_active_run":
                 break

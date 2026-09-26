@@ -183,7 +183,11 @@ class ClaudeCommandMixin:
     async def _handle_steer(
         self, fields: dict, msg_id: str, async_redis,
     ) -> None:
-        """Interrupt and redirect one active Claude SDK run in place."""
+        """Steer one active Claude SDK run in place.
+
+        ``priority`` ``now`` (default, user redirection) interrupts running
+        tools; ``next`` (bot deliveries) waits for the next tool boundary.
+        """
         backend = (fields.get("backend") or "").strip()
         if backend and backend != self._backend_name:
             await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
@@ -192,6 +196,7 @@ class ClaudeCommandMixin:
         request_id = (fields.get("request_id") or "").strip()
         session_key = (fields.get("session_key") or "").strip()
         message = (fields.get("message") or "").strip()
+        priority = (fields.get("priority") or "now").strip().lower()
         try:
             if not session_key or not message:
                 raise ValueError("chat.steer requires session_key and message")
@@ -203,14 +208,17 @@ class ClaudeCommandMixin:
             if target_request_id and target_request_id != active_request_id:
                 raise RuntimeError("active_run_mismatch")
 
-            await active_run.steer(message)
             message_id = (fields.get("message_id") or "").strip()
+            await active_run.steer(
+                message, priority=priority, message_id=message_id or None
+            )
             if message_id and active_request_id:
                 self._trigger_message_ids[active_request_id] = message_id
             logger.info(
-                "chat.steer accepted: session=%s active_request=%s chars=%d",
+                "chat.steer accepted: session=%s active_request=%s priority=%s chars=%d",
                 session_key,
                 active_request_id or "?",
+                priority,
                 len(message),
             )
             if request_id:

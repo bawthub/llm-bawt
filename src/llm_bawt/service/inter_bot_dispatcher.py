@@ -232,6 +232,9 @@ class InterBotDeliveryDispatcher:
                     message_id=record.user_message_id,
                     bot_id=record.target_bot_id,
                     user_id=user_id,
+                    # Bot deliveries never kill the target's running tools
+                    # (TASK-934): queue for the next tool boundary.
+                    priority="next",
                 ),
                 steer_request_id=(
                     f"steer_delivery_{record.id.removeprefix('delivery-')}"

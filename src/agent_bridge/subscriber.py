@@ -149,8 +149,13 @@ class RedisSubscriber(CommandPublisherMixin):
         target_request_id: str | None = None,
         timeout_s: float = 10,
         request_id: str | None = None,
+        priority: str = "now",
     ) -> dict:
-        """Interrupt an active run once and await its idempotent RPC result."""
+        """Steer an active run once and await its idempotent RPC result.
+
+        ``priority="now"`` interrupts running tools; ``"next"`` delivers at the
+        next tool boundary (claude-code-bridge only).
+        """
         request_id = request_id or f"steer_{uuid.uuid4().hex}"
         fields: dict[str, str] = {
             "action": "chat.steer",
@@ -159,6 +164,7 @@ class RedisSubscriber(CommandPublisherMixin):
             "message_id": message_id,
             "backend": backend,
             "request_id": request_id,
+            "priority": priority,
         }
         if target_request_id:
             fields["target_request_id"] = target_request_id

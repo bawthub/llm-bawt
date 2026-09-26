@@ -75,6 +75,43 @@ Fallback execution invokes `BackgroundService.chat_completion` with
 turn log, and bridge runtime. Steering instead redirects the existing Claude SDK
 run and persists the inbound message into that same conversation.
 
+### Steer priority: bot deliveries never interrupt (TASK-934)
+
+A steer is delivered at one of two Claude Code CLI queue priorities
+(`ChatSteerRequest.priority` → `chat.steer` `priority` field →
+`ClaudeActiveRun.steer`):
+
+- `now` (default for `/v1/chat/steer`, i.e. user redirection): SDK `interrupt()`
+  plus replacement query. The CLI kills in-flight tool calls.
+- `next` (always used by the inter-bot dispatcher): the message is written to
+  the CLI's stdin with a uuid and `priority: "next"`. Running tools finish; the
+  CLI folds the message into the next model call. If the turn is already
+  producing its final answer, the CLI runs the message as a follow-up turn.
+
+The bridge tracks the CLI's `command_lifecycle` frames (`queued → started →
+completed|cancelled|discarded|refused`) for its injected uuids. The SDK parser
+drops that frame type, so `ClaudeActiveRun.messages()` reads the raw frames. The
+steer RPC succeeds once the CLI reports `queued`. A ResultMessage that arrives
+while an injected command is still unstarted is held back, so the follow-up
+turn's own result ends the llm-bawt request instead of losing the message.
+Previously every bot steer was a `now` interrupt. A reply to a sender blocked
+in `wait_for_reply` killed that sender's pending tool calls and recorded them
+with the CLI's misleading "user doesn't want to proceed" text; steer-killed tool
+results are now relabelled as steering interruptions.
+
+**Proxied (OpenAI/Kimi/…) targets — TASK-937.** Against the bridge's proxy
+(a custom `ANTHROPIC_BASE_URL`), the CLI sends a `next` message absorbed at a
+tool boundary as a positional `role: "system"` message right after the
+`tool_result` ("The user sent a new message while you were working: …"). Its
+environment/skills context block arrives the same way. Both translators
+(`proxy/translate.py`, `proxy/translate_cc.py`) used to drop every
+non-user/assistant role, so OpenAI-routed bots never saw `next` steers or
+that context. They now keep such messages in place as user text wrapped in
+`<system-reminder>` (`inline_system_text`). Moving them into `instructions`
+would break its byte stability and with it the prompt cache. Against real
+Anthropic, the same CLI instead folds the message into the `tool_result`
+string, which Claude models act on.
+
 ### Pre-delivery session policy
 
 The authoritative enum is `continue` (default), `reset_retain_history`, or

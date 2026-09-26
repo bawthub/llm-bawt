@@ -21,7 +21,7 @@ from ._bridge_helpers import (
     _is_cli_crash,
     _is_auth_failure,
 )
-from .active_run import ClaudeActiveRun
+from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
 from .send_boundaries import (
     publish_run_done_once,
     separator_before_new_block,
@@ -404,7 +404,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             client=sdk_client,
                             request_id=request_id,
                         )
-                        msg_stream = sdk_client.receive_messages()
+                        msg_stream = active_run.messages()
 
                         def _publish_turn_health(health: dict) -> None:
                             nonlocal seq
@@ -698,7 +698,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                                 tool_use_id, {}
                                             ),
                                             tool_use_id=tool_use_id,
-                                            tool_result="Interrupted by user steering",
+                                            tool_result=STEER_INTERRUPTED_TOOL_RESULT,
                                             tool_error=True,
                                         )
                                     tool_names_by_id.clear()
