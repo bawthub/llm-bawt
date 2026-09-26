@@ -51,6 +51,11 @@ services:
       # container-only association API. No bearer — the docker network boundary
       # is the auth layer (see llm-bawt security model).
       - BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL=${BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL:-http://frontend-prod:3002}
+      # TASK-915: same operator secret as the BawtHub voice backend; empty
+      # leaves voice park/status unavailable until an authorized recreate.
+      - BAWTHUB_VOICE_ADMISSION_TOKEN=${BAWTHUB_VOICE_ADMISSION_TOKEN:-}
+      # Routed through BawtHub's port-80 reverse proxy; /api prefix is stripped.
+      - BAWTHUB_VOICE_ADMISSION_URL=${BAWTHUB_VOICE_ADMISSION_URL:-http://host.docker.internal/api}
       # TASK-636: CODEX_AUTH_PATH removed — the app reads the codex bundle
       # from the encrypted DB store (provider_connection:openai_chatgpt).
     ports:

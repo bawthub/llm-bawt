@@ -23,6 +23,8 @@ from fastapi.responses import Response
 from ...media.clients import MediaClient, media_provider_registry
 from ...media.db import MediaGenerationStore
 from ...media.generation_service import MediaGenerationService
+from ...media.gpu_handoff_store import GpuHandoffStore
+from ...media.gpu_preflight import GpuPreflight
 from ...media.object_store import BlobBackendUnavailable
 from ...media.schemas import (
     MediaGenerationListResponse,
@@ -33,7 +35,8 @@ from ...media.schemas import (
     MediaProviderListResponse,
 )
 from ...media.storage import MediaStorage
-from ..dependencies import get_media_generation_store, get_service
+from ...utils.db import get_shared_engine
+from ..dependencies import get_media_generation_store, get_ops_service, get_service
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +302,44 @@ async def local_video_model_status():
     return await _get_video_client("local-video").model_status()
 
 
+@router.get("/v1/media/local-video/gpu")
+async def local_video_gpu_status():
+    """Observations, not a switch permit. Stale/failed telemetry is explicit."""
+    ledger = await asyncio.to_thread(
+        GpuHandoffStore, get_shared_engine(get_service().config),
+    )
+    state = await asyncio.to_thread(ledger.status)
+    try:
+        active_video_jobs = await asyncio.to_thread(ledger.active_video_jobs)
+    except Exception:
+        active_video_jobs = None
+    client = _get_video_client("local-video")
+    try:
+        gpu = await client.gpu_telemetry()
+    except Exception as exc:
+        gpu = {"ready": False, "error": f"GPU bridge telemetry unavailable: {type(exc).__name__}"}
+    try:
+        model = await client.model_status()
+    except Exception:
+        model = None
+    import httpx
+    async with httpx.AsyncClient() as http:
+        def operations():
+            return get_ops_service(get_service().config).list_operations_for_agent(include_disabled=True)
+
+        preflight = await GpuPreflight(
+            http=http, ops=lambda: asyncio.to_thread(operations),
+        ).assess(state=state, gpu=gpu, model=model, active_video_jobs=active_video_jobs)
+    return {
+        "owner": state.owner, "phase": state.phase, "generation": state.generation,
+        "pending_target": state.target, "pending_actions": state.actions,
+        "next_action": state.next_action, "pending_action": state.pending_action,
+        "last_job_id": state.last_job_id, "last_error": state.last_error,
+        "gpu": gpu, "model": model, "active_video_jobs": active_video_jobs,
+        "preflight": preflight,
+    }
+
+
 @router.post("/v1/media/local-video/model/install")
 async def install_local_video_model():
     return await _get_video_client("local-video").install_model()
@@ -344,6 +385,12 @@ async def create_generation(request: MediaGenerationRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if provider == "local-video":
+        ledger = await asyncio.to_thread(GpuHandoffStore, get_shared_engine(get_service().config))
+        handoff = await asyncio.to_thread(ledger.status)
+        if handoff.phase != "idle" or handoff.owner != "video":
+            raise HTTPException(status_code=409, detail="GPU does not belong to video; a consented handoff is required")
 
     gen_id = _gen_id()
     store.insert({

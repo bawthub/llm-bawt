@@ -245,6 +245,7 @@ class OpsOperation(SQLModel, table=True):
             args_defaults = {}
         return {
             "slug": self.slug,
+            "enabled": self.enabled,
             "title": self.title,
             "description": self.description,
             "risk_level": self.risk_level,

@@ -57,6 +57,11 @@ class LocalVideoClient(MediaClient):
         response.raise_for_status()
         return response.json()
 
+    async def gpu_telemetry(self) -> dict:
+        response = await self._client.get("/gpu/telemetry")
+        response.raise_for_status()
+        return response.json()
+
     async def install_model(self) -> dict:
         response = await self._client.post("/models/wan2.2-ti2v-5b/install")
         response.raise_for_status()

@@ -203,6 +203,31 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 _BAWTHUB_SEEDS: list[dict[str, Any]] = [
+    # TASK-915: narrowly scoped voice controls. Seeds stay disabled until the
+    # operator reviews/enables each one; no generic container action is exposed.
+    *[
+        {
+            "slug": f"bawthub.{action}-moshi-{service}",
+            "title": f"{action.title()} Moshi {service.upper()}",
+            "description": (
+                f"{action.title()} the dedicated Moshi {service.upper()} container for an explicitly "
+                "consented GPU handoff. Voice admission and active calls must be checked separately."
+            ),
+            "enabled": False,
+            "executor_kind": EXECUTOR_DOCKER,
+            "target_host": "",
+            "working_directory": None,
+            "command_script": _spec(action=action, compose_project=_BAWTHUB_PROJECT, compose_service=service),
+            "args_schema_json": _no_args_schema(),
+            "args_defaults_json": _defaults(),
+            "timeout_seconds": 120,
+            "start_delay_seconds": 0,
+            "risk_level": RISK_HIGH,
+            "category": "gpu-handoff",
+            "approval_prompt_prefix": f"{action.title()} Moshi {service.upper()} for a GPU handoff",
+        }
+        for action in ("stop", "start") for service in ("stt", "tts")
+    ],
     {
         "slug": "bawthub.restart-backend",
         "title": "Restart bawthub backend",

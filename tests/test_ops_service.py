@@ -22,9 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from llm_bawt.ops import (
     JOB_DISPATCHING,
-    JOB_FAILED,
     JOB_QUEUED,
-    JOB_RUNNING,
     JOB_SUCCEEDED,
     OpsDispatchError,
     OpsService,
@@ -284,8 +282,10 @@ def test_list_operations_for_agent_hides_disabled():
     service, _ = _make(store)
     slugs = [row["slug"] for row in service.list_operations_for_agent()]
     assert slugs == ["live"]
-    slugs = [row["slug"] for row in service.list_operations_for_agent(include_disabled=True)]
-    assert set(slugs) == {"live", "dark"}
+    summaries = {row["slug"]: row for row in service.list_operations_for_agent(include_disabled=True)}
+    assert set(summaries) == {"live", "dark"}
+    assert summaries["live"]["enabled"] is True
+    assert summaries["dark"]["enabled"] is False
 
 
 # ---- caller provenance (TASK-639) ------------------------------------------

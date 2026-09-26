@@ -322,6 +322,14 @@ async def lifespan(app):
     from .usage.codex_oauth import proactive_refresh_loop as _codex_loop
     service._codex_refresh_task = asyncio.create_task(_codex_loop())
 
+    # GPU transition intent is durable. An app restart cannot replay an
+    # unconfirmed stop/start or assume that the old owner still holds the GPU.
+    from ..media.gpu_handoff_store import GpuHandoffStore
+    gpu_handoff = await asyncio.to_thread(GpuHandoffStore, model_engine)
+    gpu_state = await asyncio.to_thread(gpu_handoff.mark_interrupted)
+    if gpu_state.phase == "recovery_required":
+        log.warning("GPU handoff requires operator reconciliation: %s", gpu_state.last_error)
+
     # Durable speech playback belongs to the app, not a short-lived MCP call.
     from ..integrations.home_audio_store import HomeAudioStore
     from ..integrations.home_audio_worker import HomeAudioWorker

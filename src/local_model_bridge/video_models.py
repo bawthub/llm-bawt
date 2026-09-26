@@ -68,6 +68,9 @@ class VideoModelManager:
             "model": "wan2.2-ti2v-5b",
             "worker_ready": importlib.util.find_spec("diffusers") is not None,
             "installed": self.installed(),
+            # The current worker exits after each render; disk installation is
+            # never evidence of a GPU-resident pipeline.
+            "resident": False,
             "installing": installing,
             "active": active,
             "size_bytes": size,
