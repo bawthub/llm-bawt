@@ -42,7 +42,12 @@ import json
 import logging
 from typing import Any
 
-from .translate import _SERVER_TOOL_TYPE_RE, _flatten_system, image_block_to_url
+from .translate import (
+    _SERVER_TOOL_TYPE_RE,
+    _flatten_system,
+    image_block_to_url,
+    inline_system_text,
+)
 from .tool_discovery import model_tool_description
 
 logger = logging.getLogger(__name__)
@@ -295,8 +300,12 @@ def anthropic_to_chat_completions(body: dict, upstream_model: str) -> dict:
             converted = _assistant_content_to_cc(content)
             if converted is not None:
                 messages.append(converted)
+        elif role == "system":
+            text = inline_system_text(content)
+            if text:
+                messages.append({"role": "user", "content": text})
         else:
-            logger.debug("Dropping non-user/assistant message role=%r", role)
+            logger.warning("Dropping unsupported message role=%r", role)
 
     payload_out: dict[str, Any] = {"model": upstream_model, "messages": messages}
 

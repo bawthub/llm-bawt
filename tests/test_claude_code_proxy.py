@@ -870,6 +870,81 @@ def test_translate_function_call_arguments_are_sort_key_canonical() -> None:
     assert fc_a["arguments"] == '{"command":"ls","description":"list","timeout":5000}'
 
 
+def test_translate_mid_turn_text_follows_tool_output() -> None:
+    """A user message carrying tool_result + a sibling text block must
+    translate to function_call_output FIRST, then the text.
+    Text-before-output put user text ahead of the tool output it followed."""
+    body = {
+        "model": "openai_chatgpt/gpt-5.4",
+        "system": "test",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "Bash",
+                 "input": {"command": "sleep 45"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "SLEEP-DONE"},
+                {"type": "text", "text": "<system-reminder>marker MANGO-3</system-reminder>"},
+            ]},
+        ],
+    }
+
+    items = anthropic_to_responses(body, "gpt-5.4")["input"]
+    kinds = [i.get("type") or i.get("role") for i in items]
+
+    call_at = kinds.index("function_call")
+    assert kinds[call_at + 1] == "function_call_output"
+    assert items[call_at + 2]["role"] == "user"
+    assert "MANGO-3" in items[call_at + 2]["content"][0]["text"]
+
+
+# Shape captured from Claude Code CLI 2.1.280 against the bridge proxy
+# (2026-09-26): a ``next`` steer absorbed at a tool boundary is a positional
+# ``system`` message after the tool_result, not part of it.
+_ABSORBED_STEER_BODY = {
+    "model": "openai_chatgpt/gpt-6-astra",
+    "system": "test",
+    "messages": [
+        {"role": "user", "content": "run sleep"},
+        {"role": "system", "content": [{"type": "text", "text": "# Environment\nPlatform: linux"}]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "Bash", "input": {"command": "sleep 8"}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu_1", "content": "slept"},
+        ]},
+        {"role": "system", "content": [{"type": "text", "text": (
+            "The user sent a new message while you were working:\n"
+            "Message from bot 'probe': include the word BANANA in your final reply."
+        )}]},
+    ],
+}
+
+
+def test_translate_keeps_positional_system_messages_in_place() -> None:
+    """TASK-937: dropping role=system made OpenAI bots blind to next-steers."""
+    items = anthropic_to_responses(_ABSORBED_STEER_BODY, "gpt-6-astra")["input"]
+    kinds = [i.get("type") or i.get("role") for i in items]
+
+    assert kinds == ["user", "user", "function_call", "function_call_output", "user"]
+    assert items[3]["output"] == "slept"
+    steer = items[4]["content"][0]["text"]
+    assert steer.startswith("<system-reminder>\n") and "BANANA" in steer
+    assert "# Environment" in items[1]["content"][0]["text"]
+
+
+def test_translate_cc_keeps_positional_system_messages_in_place() -> None:
+    from claude_code_bridge.proxy.translate_cc import anthropic_to_chat_completions
+
+    msgs = anthropic_to_chat_completions(_ABSORBED_STEER_BODY, "k3")["messages"]
+    roles = [m["role"] for m in msgs]
+
+    assert roles == ["system", "user", "user", "assistant", "tool", "user"]
+    assert msgs[4]["content"] == "slept"
+    assert "BANANA" in msgs[5]["content"]
+
+
 def test_translate_tools_array_sorted_by_name() -> None:
     """Tools must be sorted by name so an SDK-side reorder doesn't bust the
     upstream prompt cache."""

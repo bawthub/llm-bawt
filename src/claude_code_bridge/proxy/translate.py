@@ -98,6 +98,24 @@ def _flatten_system(system: Any) -> str | None:
     return None
 
 
+def inline_system_text(content: Any) -> str | None:
+    """Render a mid-conversation ``role: "system"`` message as user text.
+
+    Against a custom base URL the Claude Code CLI sends harness context as
+    positional ``system`` messages: the environment/skills block, and mid-turn
+    messages absorbed at a tool boundary ("The user sent a new message while
+    you were working: …"). Upstreams have no universally accepted positional
+    system role, and hoisting into ``instructions`` would break its byte
+    stability (prompt cache), so they ride in place as a user message wrapped
+    the way the CLI presents the same content to Claude. Dropping them made
+    OpenAI-routed bots blind to that context and to ``next`` steers (TASK-937).
+    """
+    text = _flatten_system(content)
+    if not text:
+        return None
+    return f"<system-reminder>\n{text}\n</system-reminder>"
+
+
 def _split_leading_temporal_context(system_text: str | None) -> tuple[str | None, str | None]:
     """Move the volatile leading datetime line out of ``instructions``.
 
@@ -365,10 +383,13 @@ def anthropic_to_responses(
             if temporal_prefix and not temporal_prefix_attached:
                 parts = [{"type": "input_text", "text": temporal_prefix}, *parts]
                 temporal_prefix_attached = True
-            if parts:
-                # All parts are input_text/input_image; user content items
-                # take the list directly.
-                input_items.append({"role": "user", "content": parts})
+            # ORDER IS LOAD-BEARING (mirrors translate_cc): function_call_output
+            # items must immediately follow the assistant function_call, then
+            # tool images, then the user's own text. Anthropic puts text AFTER
+            # tool_result blocks, so emitting text first placed it before the
+            # tool output it arrived after. (The CLI's absorbed mid-turn steer
+            # is NOT a sibling block — it is appended inside the tool_result
+            # string; hoisting that safely is TASK-937.)
             input_items.extend(tool_results)
             # Images returned inside a tool_result can't ride in a
             # function_call_output (its output must be a string), so surface
@@ -383,13 +404,20 @@ def anthropic_to_responses(
                         *followup_images,
                     ],
                 })
+            if parts:
+                # All parts are input_text/input_image; user content items
+                # take the list directly.
+                input_items.append({"role": "user", "content": parts})
         elif role == "assistant":
             input_items.extend(_assistant_content_to_responses(content, reasoning_codec))
+        elif role == "system":
+            text = inline_system_text(content)
+            if text:
+                input_items.append(
+                    {"role": "user", "content": [{"type": "input_text", "text": text}]}
+                )
         else:
-            # Anthropic Messages API technically only has user/assistant
-            # message roles; anything else is the caller's mistake. Drop it
-            # but log so we notice if a client starts sending something new.
-            logger.debug("Dropping non-user/assistant message role=%r", role)
+            logger.warning("Dropping unsupported message role=%r", role)
 
     payload: dict[str, Any] = {
         "model": upstream_model,
