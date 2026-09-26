@@ -784,7 +784,7 @@ def _skip_translate(monkeypatch):
     """anthropic_to_responses does real work; stub to identity for tests."""
     monkeypatch.setattr(
         "claude_code_bridge.proxy.translate.anthropic_to_responses",
-        lambda body, upstream: {"model": upstream, "input": [], "instructions": "x", "stream": True, "store": False},
+        lambda body, upstream, **kwargs: {"model": upstream, "input": [], "instructions": "x", "stream": True, "store": False},
     )
 
 

@@ -144,6 +144,10 @@ class ProviderAdapter(ABC):
         """
         return responses_body
 
+    def reasoning_codec(self, upstream_model: str, base_url: str):
+        """Opt-in native reasoning replay after credentials have been resolved."""
+        return None
+
     async def open_stream(self, *, client, body, headers, bearer, base_url, context):
         """Ordinary HTTP, supervised independently of the selected model."""
         from ..responses_supervisor import ResponsesSSEStream
@@ -188,8 +192,9 @@ class ProviderAdapter(ABC):
         bearer, base_url = await self.authorize()
         await self.start()
         assert self._responses_client is not None
+        reasoning_codec = self.reasoning_codec(upstream_model, base_url)
         responses_body = translate.anthropic_to_responses(
-            anthropic_body, upstream_model
+            anthropic_body, upstream_model, reasoning_codec=reasoning_codec,
         )
         responses_body = self.prepare_request(responses_body, context)
         headers = self.extra_headers(responses_body, context) or None
@@ -309,6 +314,12 @@ class ProviderAdapter(ABC):
                         if hasattr(self, "_cached_expires_at"):
                             self._cached_expires_at = 0  # type: ignore[attr-defined]
                         bearer, base_url = await self.authorize()
+                        if self.reasoning_codec(upstream_model, base_url) != reasoning_codec:
+                            yield _final_error_frame(
+                                "authentication_error",
+                                "Reasoning account scope changed during authorization; start a new request",
+                            )
+                            return
                         headers = self.extra_headers(responses_body, context) or None
                         client = self._responses_client.with_options(
                             api_key=bearer, base_url=base_url,
@@ -337,6 +348,7 @@ class ProviderAdapter(ABC):
                     on_usage=record_usage_fn,
                     state=state,
                     resumed_from_index=resumed_from_index,
+                    reasoning_codec=reasoning_codec,
                 ):
                     yield chunk
             except (asyncio.CancelledError, GeneratorExit):

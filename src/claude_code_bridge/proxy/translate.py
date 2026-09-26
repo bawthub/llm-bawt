@@ -51,6 +51,7 @@ import re
 from typing import Any
 
 from .tool_discovery import model_tool_description
+from .reasoning import ReasoningCodec
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,9 @@ def _user_content_to_responses(content: Any) -> tuple[list[dict], list[dict], li
     return parts, tool_results, followup_images
 
 
-def _assistant_content_to_responses(content: Any) -> list[dict]:
+def _assistant_content_to_responses(
+    content: Any, reasoning_codec: ReasoningCodec | None = None,
+) -> list[dict]:
     """Assistant content → text item(s) + function_call items.
 
     Anthropic packs text and tool_use blocks together in one assistant
@@ -261,14 +264,13 @@ def _assistant_content_to_responses(content: Any) -> list[dict]:
         if btype == "text":
             text_buf.append(block.get("text") or "")
         elif btype in ("thinking", "redacted_thinking"):
-            # Reasoning we surfaced on the way OUT (stream.py turns Responses
-            # reasoning into Anthropic thinking blocks). On the return trip we
-            # DROP it: the upstream runs store:false / stateless, so reasoning
-            # is reconstructed fresh each turn and must NOT be replayed as input
-            # (OpenAI rejects foreign reasoning items; the signature we minted
-            # is a local sentinel, not a real encrypted_content). See the
-            # TASK-270 stateless note in the skill doc.
-            continue
+            # Replay only native state with compatible, explicit provenance.
+            # store:false makes client-carried encrypted state necessary; it is
+            # not a reason to discard it. Legacy/foreign blocks stay display-only.
+            native = reasoning_codec.decode(block.get("signature")) if reasoning_codec else None
+            if native is not None:
+                flush_text()
+                items.append(native)
         elif btype == "tool_use":
             flush_text()
             tool_input = block.get("input") or {}
@@ -338,7 +340,9 @@ def _tools_to_responses(tools: list[dict] | None) -> list[dict] | None:
     return converted
 
 
-def anthropic_to_responses(body: dict, upstream_model: str) -> dict:
+def anthropic_to_responses(
+    body: dict, upstream_model: str, *, reasoning_codec: ReasoningCodec | None = None,
+) -> dict:
     """Translate an Anthropic Messages request body to a Responses API body.
 
     ``upstream_model`` is the post-prefix model name (e.g. ``gpt-5.4``),
@@ -380,7 +384,7 @@ def anthropic_to_responses(body: dict, upstream_model: str) -> dict:
                     ],
                 })
         elif role == "assistant":
-            input_items.extend(_assistant_content_to_responses(content))
+            input_items.extend(_assistant_content_to_responses(content, reasoning_codec))
         else:
             # Anthropic Messages API technically only has user/assistant
             # message roles; anything else is the caller's mistake. Drop it

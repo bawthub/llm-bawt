@@ -86,7 +86,9 @@ def phase_from_state(state: "TranslatorState | None") -> RetryPhase:
         return RetryPhase.CONNECTING
     if state.tool_committed:
         return RetryPhase.TOOL_COMMITTED
-    if state.text_delta_yielded:
+    # Native reasoning already persisted downstream cannot be retracted by a
+    # splice. Use the same fail-upward barrier as visible text.
+    if state.text_delta_yielded or getattr(state, "reasoning_committed", False):
         return RetryPhase.TEXT
     if state.thinking_yielded:
         return RetryPhase.THINKING

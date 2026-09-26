@@ -440,7 +440,8 @@ def test_ordinary_sse_keeps_reasoning_continuity_and_parallel_tools():
 
     body = OpenAIChatGPTAdapter().prepare_request(copy.deepcopy(BODY))
 
-    assert body["reasoning"]["context"] == "all_turns"
+    # Native Codex standard Responses leaves context at the server default.
+    assert "context" not in body["reasoning"]
     assert "reasoning.encrypted_content" in body["include"]
     assert body.get("parallel_tool_calls") is not False
 

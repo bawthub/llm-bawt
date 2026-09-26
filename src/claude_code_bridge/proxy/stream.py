@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
 from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
+from .reasoning import ReasoningCodec
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class TranslatorState:
     # ── Yield markers (drive RetryPhase classification in retry.py) ─────────
     message_start_yielded: bool = False
     thinking_yielded: bool = False       # any thinking_delta emitted
+    reasoning_committed: bool = False    # replayable state forwarded; no splice retry
     text_delta_yielded: bool = False     # ANY text_delta emitted (partial visible output)
     tool_committed: bool = False         # content_block_start(tool_use) emitted — hard no-retry
     terminal_event_seen: bool = False    # response.completed / response.incomplete
@@ -225,6 +227,7 @@ async def responses_to_anthropic_sse(
     *,
     state: TranslatorState | None = None,
     resumed_from_index: int | None = None,
+    reasoning_codec: ReasoningCodec | None = None,
 ) -> AsyncIterator[bytes]:
     """Translate a Responses API event stream into Anthropic SSE bytes.
 
@@ -514,17 +517,25 @@ async def responses_to_anthropic_sse(
                 item = getattr(event, "item", None)
                 itype = getattr(item, "type", "") if item else ""
                 if itype == "reasoning":
-                    # Surface the opaque reasoning blob as Anthropic's thinking
-                    # signature so the block is well-formed. encrypted_content is
-                    # only present when the provider returns it; fall back to a
-                    # deterministic non-empty sentinel (the SDK requires a
-                    # non-empty signature, and our return-trip drops it anyway —
-                    # store:false stateless reasoning).
+                    # Persist a native, origin-tagged replay item in the SDK
+                    # signature, independently of whether a summary was shown.
+                    signature = reasoning_codec.encode(item) if reasoning_codec else None
+                    if signature and (open_block is None or open_block["kind"] != "thinking"):
+                        if open_block is not None:
+                            yield _stop_frame(open_block["index"])
+                        idx = _alloc_index()
+                        _set_open({"index": idx, "kind": "thinking",
+                                   "item_id": getattr(item, "id", "")})
+                        yield _open_start_frame("thinking", idx)
                     if open_block is not None and open_block["kind"] == "thinking":
-                        sig = (
+                        sig = signature or (
                             getattr(item, "encrypted_content", None)
-                            or f"reasoning:{getattr(item, 'id', '') or message_id}"
-                        )
+                            if reasoning_codec is None else None
+                        ) or f"reasoning:{getattr(item, 'id', '') or message_id}"
+                        if signature and state is not None:
+                            # A retry splice cannot retract committed native
+                            # state; fail upward rather than mixing attempts.
+                            state.reasoning_committed = True
                         yield _sse(
                             "content_block_delta",
                             {

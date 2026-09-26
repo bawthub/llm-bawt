@@ -238,6 +238,17 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
         assert self._cached_token is not None
         return self._cached_token, base_url
 
+    def reasoning_codec(self, upstream_model: str, base_url: str):
+        from ..reasoning import ReasoningCodec
+
+        # Missing account identity must not collapse unrelated credentials into
+        # a shared replay scope. Token refresh does not change account identity.
+        if not self._cached_account_id:
+            return None
+        return ReasoningCodec.for_account(
+            self.name, upstream_model, base_url, self._cached_account_id,
+        )
+
     # ── upstream quirks (unchanged from TASK-270) ────────────────────────
     def extra_headers(
         self,
@@ -285,10 +296,13 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
                 effort = DEFAULT_REASONING_EFFORT
             responses_body["reasoning"] = {"effort": effort}
         responses_body["reasoning"].setdefault("summary", "auto")
-        # Reasoning continuity is not Lite-specific. With store=false the
-        # encrypted item must be returned and replayed on later tool hops. Keep
-        # these ordinary Responses fields on supervised SSE too.
-        responses_body["reasoning"].setdefault("context", "all_turns")
+        # Match Codex: standard Responses leaves context to the server default
+        # (current_turn); Lite explicitly retains all turns. Native reasoning
+        # items are replayed in BOTH modes, including with store:false.
+        if self._responses_transport(context) == RESPONSES_TRANSPORT_LITE_WS:
+            responses_body["reasoning"]["context"] = "all_turns"
+        else:
+            responses_body["reasoning"].pop("context", None)
         responses_body.setdefault("include", [])
         if "reasoning.encrypted_content" not in responses_body["include"]:
             responses_body["include"].append("reasoning.encrypted_content")
