@@ -37,6 +37,7 @@ from .send_preflight import prepare_send
 from .send_result import ClaudeResultMixin
 from .send_stream import ClaudeStreamMixin
 from .send_usage import ClaudeUsageMixin, LiveUsagePublisher
+from .subagent_usage import SubagentUsage
 from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
 
 logger = logging.getLogger("claude_code_bridge.bridge")
@@ -346,6 +347,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     # AssistantMessage's usage reflects the actual final API
                     # call's view of the context.
                     latest_assistant_usage: dict | None = None
+                    subagent_usage = SubagentUsage()
                     # One request-local publisher merges sparse message_delta
                     # frames and de-duplicates AssistantMessage echoes.
                     live_usage = LiveUsagePublisher(
@@ -535,7 +537,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 # emission extracted into _emit_subagent_task_events.
                                 seq = self._emit_subagent_task_events(
                                     msg, request_id=request_id,
-                                    session_key=session_key, seq=seq,
+                                    session_key=session_key, seq=seq, usage_ledger=subagent_usage,
                                 )
                             msg_type = type(msg).__name__
                             if not isinstance(msg, (StreamEvent, SystemMessage)):
@@ -636,6 +638,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                         current_tool_input = ""
 
                             elif isinstance(msg, AssistantMessage):
+                                subagent_usage.observe(msg)
                                 # TASK-623: AssistantMessage tool_use / snapshot
                                 # handling extracted into _on_assistant_message.
                                 prior_seq = seq

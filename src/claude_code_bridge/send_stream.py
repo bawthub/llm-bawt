@@ -47,6 +47,7 @@ from .proxy.request_context import (
     durable_conversation_identity,
 )
 from .send_errors import is_auth_failure_text
+from .subagent_usage import SubagentUsage
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
@@ -300,8 +301,10 @@ class ClaudeStreamMixin:
 
     def _emit_subagent_task_events(
         self, msg, *, request_id: str, session_key: str, seq: int,
+        usage_ledger: SubagentUsage | None = None,
     ) -> int:
         """Publish structured sub-agent lifecycle events; return the new ``seq``."""
+        ledger = usage_ledger if usage_ledger is not None else SubagentUsage()
         # ── Sub-agent task lifecycle (TASK-344) ──
         # The SDK emits TaskStarted/Progress/Updated/
         # Notification messages (SystemMessage subclasses)
@@ -336,11 +339,7 @@ class ClaudeStreamMixin:
                 extra_raw={
                     "task_id": msg.task_id,
                     "description": msg.description or "",
-                    "usage": {
-                        "total_tokens": usage.get("total_tokens", 0),
-                        "tool_uses": usage.get("tool_uses", 0),
-                        "duration_ms": usage.get("duration_ms", 0),
-                    },
+                    "usage": ledger.for_event(msg.tool_use_id, usage),
                 },
             )
         elif isinstance(msg, TaskUpdatedMessage):
@@ -372,11 +371,7 @@ class ClaudeStreamMixin:
                     "task_id": msg.task_id,
                     "status": msg.status,
                     "output_file": getattr(msg, "output_file", ""),
-                    "usage": {
-                        "total_tokens": usage.get("total_tokens", 0),
-                        "tool_uses": usage.get("tool_uses", 0),
-                        "duration_ms": usage.get("duration_ms", 0),
-                    } if usage else None,
+                    "usage": ledger.for_event(msg.tool_use_id, usage),
                 },
             )
         return seq
