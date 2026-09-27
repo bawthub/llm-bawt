@@ -83,8 +83,13 @@ while their arguments are still arriving. `tests/test_responses_long_progress.py
 simulates ten minutes of productive text, reasoning, and tool arguments on both
 WebSocket and ordinary SSE, followed by either completion or a real idle stall.
 
-A stalled WebSocket attempt with no forwarded assistant output is closed and
-retried once over a fresh HTTPS/SSE stream. Before that retry, the proxy emits a
+A stalled attempt before committed output is closed and retried once over a
+fresh HTTPS/SSE stream (ordinary SSE reconnects; WebSocket falls back to Lite
+SSE). Unfinished thinking summaries may also recover this way: the proxy closes
+the abandoned thinking block and resumes with monotonically increasing block
+indices inside the same Anthropic message. The upstream request/history and
+cache identity remain unchanged; completed tools from earlier model requests
+are history, not actions to execute again. Before that retry, the proxy emits a
 structured `upstream_status` event (`reconnecting`, transport, fallback,
 attempt, stall phase, elapsed time, and productive-idle time). The first
 non-failure productive event on the fallback emits `recovered`. The bridge
@@ -92,14 +97,28 @@ publishes these onto the active Redis run; the app forwards them on unified SSE;
 the frontend renders the reconnect state inside the in-flight assistant bubble.
 Status text is transient and never enters persisted assistant content.
 
-Reasoning, visible text, and tool commitment all make a supervised replay unsafe.
-A stall after any of them fails upward as `api_error` without retry. If the SSE
-fallback also stalls, it likewise fails immediately without handing the request
-back to the Claude CLI for another replay. In every final stalled path, the
+Completed native reasoning (a persisted replayable signature), visible answer
+text, and tool dispatch still make replay unsafe. A stall after any of those
+fails upward as `api_error` without retry. Merely streaming an unsigned thinking
+summary is **not** that commitment barrier (TASK-950). The reasoning-summary
+idle limit remains 90 seconds: it detects absence of observable progress, not
+proof that upstream computation has stopped.
+
+The shared retry policy owns the supervised limit: at most two total attempts,
+respecting any smaller adapter budget. A second stall fails as `api_error`
+without handing the request back to the Claude CLI for another replay. A stalled
+request is not restarted as a new agent turn. In every final stalled path, the
 unfinished routing lease and underlying connection are discarded rather than
-returned to the pool. Structured transport and retry logs record the same stall
+returned to the pool. Structured transport and retry logs record the stall
 phase, timings, attempt, selected transport, fallback, decision, and final
-disposition.
+disposition. Cancellation still propagates without retry.
+
+`tests/test_proxy_progress_recovery.py` reproduces Snark's thinking-only stall
+on ordinary SSE and WS-to-SSE fallback, checks recovery through the real
+Anthropic streaming parser, preserves tool-result history and native reasoning
+scope, and covers exhaustion, cancellation, and every commitment barrier.
+These are hermetic regressions; activation still requires an explicitly
+approved Claude bridge restart.
 
 ## Ownership and bounds
 

@@ -119,6 +119,8 @@ class RetryDecision:
 # so proxy retries pay for themselves by preserving prompt-cache identity, not
 # by unlimited stubbornness. See TASK-714 spec.
 DEFAULT_MAX_ATTEMPTS = 3
+# One supervised reconnect, then a terminal error (no outer CLI retry loop).
+MAX_PROGRESS_STALL_ATTEMPTS = 2
 DEFAULT_BASE_BACKOFF_S = 0.2
 DEFAULT_BACKOFF_CAP_S = 5.0
 DEFAULT_JITTER_S = 0.2
@@ -243,9 +245,9 @@ def classify_stream_exception(exc: BaseException) -> FailureBucket:
     the initial-request boundary — the caller has already checked the phase and
     decided whether phase permits any retry at all.
     """
-    # The Responses supervisor marks its own liveness failures. Keep them
-    # distinct from ordinary transport errors: replay is safe before output,
-    # but not after reasoning has already been forwarded to the SDK.
+    # Supervised liveness failures get one reconnect before commitment, including
+    # unfinished thinking summaries. Their exhausted budget is terminal to the
+    # CLI; ordinary transient failures retain their existing retry policy.
     if getattr(exc, "proxy_retry_owner", False):
         return FailureBucket.G_PROGRESS_STALL
 
@@ -436,13 +438,17 @@ def decide(
             final_error_type="api_error",
         )
 
-    # Reasoning is already assistant output on the Anthropic stream. Existing
-    # transient/5xx handling can splice it for compatibility, but a supervised
-    # stall must never replay an attempt after any output has been observed.
-    if bucket is FailureBucket.G_PROGRESS_STALL and phase is RetryPhase.THINKING:
+    # TASK-950: partial thinking summaries are not committed native reasoning.
+    # The existing splice closes their open block before starting a fresh sample.
+    # Completed replayable reasoning is already protected by the TEXT barrier
+    # above (phase_from_state), as are visible text and dispatched tools.
+    # Own the supervised budget here, not in a second adapter-level override.
+    if bucket is FailureBucket.G_PROGRESS_STALL and (
+        policy.attempt >= MAX_PROGRESS_STALL_ATTEMPTS or policy.attempts_remaining <= 0
+    ):
         return RetryDecision(
             retry=False,
-            reason="thinking_stall_no_replay",
+            reason="progress-stall retry budget exhausted",
             final_error_type="api_error",
         )
 
@@ -506,8 +512,8 @@ def decide(
             reason="auth_broker_force_refresh",
         )
 
-    # Buckets A / B — retryable transient / 5xx.
-    # THINKING phase: replay whole call; the retry loop is responsible for the
+    # Buckets A / B / G — transient / 5xx / supervised stall before commitment.
+    # THINKING phase: replay this model request; the retry loop is responsible for the
     # block-index hygiene (Al #1) — closing the open thinking block before the
     # retry resumes, then re-indexing new blocks from state.next_block_index.
     if policy.attempts_remaining <= 0:

@@ -388,12 +388,6 @@ class ProviderAdapter(ABC):
                 retry_after_s=retry_after,
                 permanent_error_type=permanent_type,
             )
-            # Bound supervised stalls to one safe reconnect across all models.
-            if getattr(stream_exc, "proxy_retry_owner", False) and attempt >= 2:
-                decision = retry_mod.RetryDecision(
-                    retry=False, reason="progress-stall retry budget exhausted",
-                    final_error_type="api_error",
-                )
             logger.warning(
                 "proxy_retry attempt=%d/%d bucket=%s phase=%s decision=%s "
                 "reason=%r backoff_ms=%.0f detail=%r",
@@ -424,7 +418,9 @@ class ProviderAdapter(ABC):
                         "provider": context.provider,
                         "attempt": attempt,
                         "next_attempt": attempt + 1,
-                        "max_attempts": policy.max_attempts,
+                        "max_attempts": min(
+                            policy.max_attempts, retry_mod.MAX_PROGRESS_STALL_ATTEMPTS,
+                        ),
                         "transport": getattr(stream_exc, "transport", "unknown"),
                         "fallback_transport": fallback_transport,
                         "stall_phase": getattr(stream_exc, "phase", "unknown"),
@@ -451,13 +447,6 @@ class ProviderAdapter(ABC):
             if discard_stream is not None:
                 await discard_stream()
             final_error_type = decision.final_error_type or "api_error"
-            if stream_exc is not None and getattr(
-                stream_exc, "proxy_retry_owner", False
-            ):
-                # The proxy has already spent its complete retry budget on this
-                # no-event timeout. Keep the Claude CLI from replaying the whole
-                # /v1/messages request and colliding with the bridge watchdog.
-                final_error_type = "api_error"
             yield _final_error_frame(
                 final_error_type,
                 f"Proxy stream failed: {exc_repr}",

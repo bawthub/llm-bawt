@@ -539,6 +539,12 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
                     "type": "response.reasoning_text.delta", "delta": "thinking",
                     "item_id": "rs_1", "output_index": 0, "content_index": 0,
                 })
+                await socket.events.put({
+                    "type": "response.output_item.done", "item": {
+                        "type": "reasoning", "id": "rs_1", "summary": [],
+                        "encrypted_content": "opaque-completed-reasoning",
+                    },
+                })
             elif committed_kind == "text":
                 await socket.events.put({
                     "type": "response.output_item.added",
@@ -567,6 +573,7 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
 
         statuses = []
         adapter = OpenAIChatGPTAdapter()
+        adapter._cached_account_id = "fixture-account"
         adapter.authorize = AsyncMock(return_value=("token", "https://example.test"))
         adapter._chatgpt_transport = ChatGPTResponsesTransport(
             connector=AsyncMock(side_effect=connect),

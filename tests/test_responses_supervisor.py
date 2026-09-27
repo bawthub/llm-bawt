@@ -58,7 +58,7 @@ def test_http_progress_bounds_close_stream(phase):
 
 
 @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.4", "future-model"])
-@pytest.mark.parametrize("committed", [None, "text", "reasoning", "tool", "exhausted"])
+@pytest.mark.parametrize("committed", [None, "text", "thinking", "reasoning", "tool", "exhausted"])
 def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
     from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapter
     from claude_code_bridge.proxy import responses_supervisor, retry
@@ -70,8 +70,12 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
         async def first_events():
             if committed == "text":
                 yield NS(type="response.output_text.delta", delta="visible")
-            elif committed == "reasoning":
+            elif committed in ("thinking", "reasoning"):
                 yield NS(type="response.reasoning_summary_text.delta", delta="thinking")
+                if committed == "reasoning":
+                    yield NS(type="response.output_item.done", item=NS(
+                        type="reasoning", id="rs_done", summary=[], encrypted_content="opaque",
+                    ))
             elif committed == "tool":
                 yield NS(type="response.output_item.added", item=NS(type="function_call", id="fc", call_id="call", name="check"))
             await asyncio.sleep(10)
@@ -81,6 +85,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
         request_client = NS(responses=NS(create=create))
         request_client.with_options = lambda **kw: (options.append(kw) or request_client)
         adapter = OpenAIChatGPTAdapter()
+        adapter._cached_account_id = "fixture-account"
         adapter.authorize = AsyncMock(return_value=("test-token", "https://example.test"))
         adapter._http_client = NS()
         adapter._responses_client = NS(with_options=lambda **kw: (options.append(kw) or request_client), close=AsyncMock())
@@ -90,7 +95,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
         try:
             output = b"".join([chunk async for chunk in adapter.call(
                 {"model": model, "max_tokens": 100, "messages": [{"role": "user", "content": "ping"}]}, model, context)])
-            should_retry = committed in (None, "exhausted")
+            should_retry = committed in (None, "thinking", "exhausted")
             assert create.await_count == (2 if should_retry else 1)
             assert options and all(o["max_retries"] == 0 for o in options)
             # Retain ordinary Responses payload; no Lite developer item migration.
@@ -102,7 +107,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
                 assert statuses[0]["state"] == "reconnecting"
                 assert statuses[0]["transport"] == "sse"
                 assert streams[1].close.await_count == 1
-            if committed is None:
+            if committed in (None, "thinking"):
                 assert b"message_stop" in output
                 assert statuses[-1]["state"] == "recovered"
             else:

@@ -262,7 +262,7 @@ class TestDecideStateMachine:
         )
         assert d.retry is True
 
-    def test_thinking_progress_stall_never_replays(self):
+    def test_uncommitted_thinking_progress_stall_retries(self):
         policy = retry_mod.RetryPolicy(max_attempts=3)
         policy.start_attempt()
         d = retry_mod.decide(
@@ -270,9 +270,8 @@ class TestDecideStateMachine:
             phase=retry_mod.RetryPhase.THINKING,
             policy=policy,
         )
-        assert d.retry is False
-        assert d.final_error_type == "api_error"
-        assert d.reason == "thinking_stall_no_replay"
+        assert d.retry is True
+        assert d.final_error_type is None
 
     def test_bucket_c_never_retries_even_pre_output(self):
         policy = retry_mod.RetryPolicy(max_attempts=5)
