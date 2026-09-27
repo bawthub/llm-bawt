@@ -501,6 +501,7 @@ class RecentByBotsResponse(BaseModel):
 class ToolCallEvent(BaseModel):
     """Tool-call event linked to one trigger history message."""
     turn_id: str
+    turn_ended_at: datetime | None = None
     created_at: datetime
     request_id: str | None = None
     model: str | None = None

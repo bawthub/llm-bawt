@@ -619,6 +619,7 @@ def get_tool_call_events(
         events.append(
             ToolCallEvent(
                 turn_id=row.id,
+                turn_ended_at=row.ended_at,
                 created_at=row.created_at,
                 request_id=row.request_id,
                 model=row.model,
