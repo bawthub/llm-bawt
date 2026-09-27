@@ -23,6 +23,8 @@ class MediaGenerationRequest(BaseModel):
         default=None,
         description="Model to use. Auto-selected if omitted (e.g. grok-imagine-video)",
     )
+    calibration_generation: int | None = Field(default=None, ge=0, strict=True,
+        description="One-use local calibration reservation generation; never an ordinary render bypass")
     source_image: Optional[str] = Field(
         default=None,
         description="Base64 data URI or URL used as a generation reference",

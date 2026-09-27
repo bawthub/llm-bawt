@@ -37,10 +37,12 @@ from ...media.schemas import (
 from ...media.storage import MediaStorage
 from ...utils.db import get_shared_engine
 from ..dependencies import get_media_generation_store, get_ops_service, get_service
+from .media_handoff import router as handoff_router
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Media"])
+router.include_router(handoff_router)
 
 # Module-level non-DB helpers initialised lazily
 _storage: MediaStorage | None = None
@@ -322,14 +324,15 @@ async def local_video_gpu_status():
         model = await client.model_status()
     except Exception:
         model = None
+    calibration = await asyncio.to_thread(ledger.calibration)
     import httpx
     async with httpx.AsyncClient() as http:
         def operations():
             return get_ops_service(get_service().config).list_operations_for_agent(include_disabled=True)
 
         preflight = await GpuPreflight(
-            http=http, ops=lambda: asyncio.to_thread(operations),
-        ).assess(state=state, gpu=gpu, model=model, active_video_jobs=active_video_jobs)
+            config=get_service().config, http=http, ops=lambda: asyncio.to_thread(operations),
+        ).assess(state=state, gpu=gpu, model=model, active_video_jobs=active_video_jobs, calibration=calibration)
     return {
         "owner": state.owner, "phase": state.phase, "generation": state.generation,
         "pending_target": state.target, "pending_actions": state.actions,
@@ -337,6 +340,8 @@ async def local_video_gpu_status():
         "last_job_id": state.last_job_id, "last_error": state.last_error,
         "gpu": gpu, "model": model, "active_video_jobs": active_video_jobs,
         "preflight": preflight,
+        "handoff_available": True,
+        "calibration": calibration,
     }
 
 
@@ -389,8 +394,22 @@ async def create_generation(request: MediaGenerationRequest):
     if provider == "local-video":
         ledger = await asyncio.to_thread(GpuHandoffStore, get_shared_engine(get_service().config))
         handoff = await asyncio.to_thread(ledger.status)
-        if handoff.phase != "idle" or handoff.owner != "video":
+        calibration = request.calibration_generation
+        required_owner = "video_calibration" if calibration is not None else "video"
+        if (handoff.phase != "idle" or handoff.owner != required_owner
+                or (calibration is not None and handoff.generation != calibration)):
             raise HTTPException(status_code=409, detail="GPU does not belong to video; a consented handoff is required")
+        from ...media.gpu_profile import require_calibration_profile
+        try:
+            require_calibration_profile({"resolution": resolution, "aspect_ratio": aspect_ratio,
+                "duration": request.duration or 5, "num_outputs": request.num_outputs,
+                "image_conditioned": bool(source_image)})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if calibration is None and not (await asyncio.to_thread(ledger.calibration) or {}).get("supported"):
+            raise HTTPException(status_code=409, detail="A measured local video profile is required")
+    elif request.calibration_generation is not None:
+        raise HTTPException(status_code=400, detail="Calibration is only available for local video")
 
     gen_id = _gen_id()
     store.insert({
@@ -437,6 +456,8 @@ async def create_generation(request: MediaGenerationRequest):
                 duration=request.duration or 5,
                 resolution=resolution,
                 num_outputs=request.num_outputs,
+                **({"calibration_generation": request.calibration_generation}
+                   if request.calibration_generation is not None else {}),
             )
             store.update(gen_id, {
                 "status": result.status,

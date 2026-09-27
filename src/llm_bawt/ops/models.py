@@ -85,6 +85,17 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _iso_utc(value: datetime | None) -> str | None:
+    """Stable UTC ISO string. Pooled DB connections may carry different session
+    TimeZones, so the same instant can load as +00:00 or -04:00; serializing
+    un-normalized values makes ops snapshot hashes flap between reads."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -222,12 +233,12 @@ class OpsOperation(SQLModel, table=True):
             "approval_prompt_prefix": self.approval_prompt_prefix,
             "version": int(self.version or 1),
             "script_hash": self.script_hash,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": _iso_utc(self.created_at),
+            "updated_at": _iso_utc(self.updated_at),
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "soft_deleted_at": (
-                self.soft_deleted_at.isoformat() if self.soft_deleted_at else None
+                _iso_utc(self.soft_deleted_at)
             ),
         }
 
@@ -395,17 +406,17 @@ class OpsJob(SQLModel, table=True):
             "approval_request_id": self.approval_request_id,
             "state": self.state,
             "host_unit_name": self.host_unit_name,
-            "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
-            "dispatched_at": self.dispatched_at.isoformat() if self.dispatched_at else None,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "submitted_at": _iso_utc(self.submitted_at),
+            "dispatched_at": _iso_utc(self.dispatched_at),
+            "started_at": _iso_utc(self.started_at),
+            "finished_at": _iso_utc(self.finished_at),
             "exit_code": self.exit_code,
             "error_text": self.error_text,
             "idempotency_key": self.idempotency_key,
             "retry_count": int(self.retry_count or 0),
             "terminal": self.state in JOB_TERMINAL_STATES,
             "last_reconcile_at": (
-                self.last_reconcile_at.isoformat() if self.last_reconcile_at else None
+                _iso_utc(self.last_reconcile_at)
             ),
         }
         if include_output:
@@ -431,7 +442,7 @@ class OpsOperationRevision(SQLModel, table=True):
         import json
         return {"operation_id": self.operation_id, "operation_slug": self.operation_slug,
                 "version": self.version, "actor": self.actor,
-                "recorded_at": self.recorded_at.isoformat(),
+                "recorded_at": _iso_utc(self.recorded_at),
                 "operation": json.loads(self.snapshot_json)}
 
 

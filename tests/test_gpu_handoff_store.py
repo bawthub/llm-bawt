@@ -84,8 +84,12 @@ def test_orphaned_video_claim_needs_recovery_not_replay(store):
     with pytest.raises(HandoffConflict):
         store.claim_video("new-render")
     with pytest.raises(HandoffConflict):
-        store.offer(user="nick", target="voice", actions=("start_moshi_tts",),
+        store.offer(user="nick", target="video", actions=("stop_moshi_tts",),
                     expected_generation=recovered.generation)
+    # Restoring voice is the recovery path; its worker reset clears the claims.
+    token, offer = store.offer(user="nick", target="voice", actions=("reset_video_worker",),
+                               expected_generation=recovered.generation)
+    assert offer.target == "voice" and store.active_video_jobs() == 1
 
 
 def test_video_worker_restart_loses_owner_even_without_claim(store):
@@ -156,3 +160,12 @@ def test_invalid_offer_does_not_mutate(store):
     with pytest.raises(ValueError):
         store.offer(user="nick", target="video", actions=(), expected_generation=0)
     assert store.status().generation == 0
+
+
+def test_state_columns_fit_every_owner_and_target():
+    """SQLite ignores varchar lengths; PostgreSQL enforces them (TASK-927)."""
+    from llm_bawt.media.gpu_handoff_store import _state
+
+    for name in ("unknown", "voice", "video", "video_calibration", "recovery_required"):
+        assert len(name) <= _state.c.owner.type.length
+        assert len(name) <= _state.c.offer_target.type.length

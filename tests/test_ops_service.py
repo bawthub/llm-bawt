@@ -330,3 +330,18 @@ def test_ops_run_provenance_is_empty_without_any_trusted_context():
     from llm_bawt.mcp_server import ops_tools
 
     assert ops_tools._caller_provenance() == {}
+
+
+def test_operation_api_timestamps_are_utc_normalized():
+    """Same instant loaded under different DB session TimeZones must serialize
+    identically, or approval snapshot hashes flap between reads (TASK-927)."""
+    from datetime import datetime, timedelta, timezone as tz
+
+    from llm_bawt.ops.models import OpsOperation
+
+    instant = datetime(2026, 9, 27, 1, 45, 12, 776194, tzinfo=tz.utc)
+    eastern = instant.astimezone(tz(timedelta(hours=-4)))
+    a = OpsOperation(id="x", slug="x", created_at=instant, updated_at=instant).to_api()
+    b = OpsOperation(id="x", slug="x", created_at=eastern, updated_at=eastern).to_api()
+    assert a == b
+    assert a["created_at"] == "2026-09-27T01:45:12.776194+00:00"

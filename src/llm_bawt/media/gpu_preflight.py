@@ -5,11 +5,12 @@ estimate, and configured Docker operations are not permission to execute them.
 """
 from __future__ import annotations
 
-import os
+import asyncio
 from datetime import UTC, datetime
-from urllib.parse import urlparse
 
 import httpx
+
+from llm_bawt.integrations.home_audio import HomeAudioSettings
 
 MORPH_OPS = (
     "bawthub.stop-moshi-stt", "bawthub.stop-moshi-tts",
@@ -18,19 +19,21 @@ MORPH_OPS = (
 
 
 class GpuPreflight:
-    def __init__(self, *, http: httpx.AsyncClient, ops):
+    def __init__(self, *, config, http: httpx.AsyncClient, ops):
+        self.config = config
         self.http = http
         self.ops = ops
 
     async def voice_status(self) -> tuple[dict | None, str | None]:
-        token = os.getenv("BAWTHUB_VOICE_ADMISSION_TOKEN", "")
-        url = os.getenv("BAWTHUB_VOICE_ADMISSION_URL", "")
-        parsed = urlparse(url)
-        if len(token) < 32 or parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            return None, "Voice admission credentials or endpoint not configured"
+        # Voice admission lives on the same backend as speech rendering. Reuse
+        # its existing DB-backed address; the network boundary supplies trust.
         try:
-            result = await self.http.get(url.rstrip("/") + "/v1/internal/voice/sessions",
-                                         headers={"Authorization": f"Bearer {token}"}, timeout=3)
+            settings = await asyncio.to_thread(HomeAudioSettings.load, self.config)
+        except Exception:
+            return None, "Voice backend runtime settings unavailable"
+        try:
+            result = await self.http.get(settings.tts_url.rstrip("/") + "/v1/internal/voice/sessions",
+                                         timeout=3)
             result.raise_for_status()
             data = result.json()
             if (not isinstance(data, dict) or type(data.get("active_count")) is not int
@@ -45,7 +48,7 @@ class GpuPreflight:
             return None, f"Voice admission unavailable ({type(exc).__name__})"
 
     async def assess(self, *, state, gpu: dict, model: dict | None = None,
-                     active_video_jobs: int | None = None) -> dict:
+                     active_video_jobs: int | None = None, calibration: dict | None = None) -> dict:
         issues: list[str] = []
         if not isinstance(model, dict) or type(model.get("installed")) is not bool or not model["installed"]:
             issues.append("Wan model installation is unavailable or incomplete")
@@ -79,7 +82,7 @@ class GpuPreflight:
         if voice_error:
             issues.append(voice_error)
         else:
-            if voice["parked"]:
+            if voice["parked"] and state.owner not in ("video", "video_calibration"):
                 issues.append("Voice admission is already parked; reconcile its lease before handoff")
             if voice["active_count"] or voice["active_gpu_work"]:
                 issues.append("Active voice or Moshi speech must finish before handoff")
@@ -94,7 +97,8 @@ class GpuPreflight:
                 issues.append("Moshi start/stop operations are not enabled: " + ", ".join(missing))
         except Exception:
             issues.append("Ops catalog unavailable")
-        # Peak VRAM has not been measured on this GPU. A valid driver snapshot
-        # cannot establish headroom or safety for 480p/720p Wan renders.
-        issues.append("Wan peak VRAM and safety margin have not been measured")
+        # A measured profile is evidence for that profile only, never a permit
+        # to switch or silently extend the supported resolution/duration.
+        if not calibration or calibration.get("supported") is not True:
+            issues.append("Wan peak VRAM and safety margin have not been measured")
         return {"switch_ready": False, "issues": issues, "voice": voice}

@@ -13,7 +13,7 @@ def test_gpu_status_reports_unavailable_bridge(monkeypatch):
     monkeypatch.setattr(media, "get_service", lambda: SimpleNamespace(config=object()))
     monkeypatch.setattr(media, "get_shared_engine", lambda config: object())
     monkeypatch.setattr(media, "GpuHandoffStore", lambda engine: SimpleNamespace(
-        status=lambda: state, active_video_jobs=lambda: 1))
+        status=lambda: state, active_video_jobs=lambda: 1, calibration=lambda: None))
 
     class FailedClient:
         async def gpu_telemetry(self):

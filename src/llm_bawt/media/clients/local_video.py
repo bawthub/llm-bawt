@@ -6,6 +6,7 @@ import os
 
 import httpx
 
+from ..gpu_handoff_store import HandoffConflict
 from .base import GenerationResult, MediaClient
 
 
@@ -17,12 +18,14 @@ class LocalVideoClient(MediaClient):
     async def generate(
         self, prompt: str, media_type: str, model: str, *, source_image: str | None = None,
         aspect_ratio: str = "16:9", duration: float = 5, resolution: str = "480p", num_outputs: int = 1,
+        calibration_generation: int | None = None,
     ) -> GenerationResult:
         if media_type != "video" or model != "wan2.2-ti2v-5b":
             raise ValueError("Local video supports only wan2.2-ti2v-5b")
         response = await self._client.post("/videos", json={
             "prompt": prompt, "source_image": source_image, "aspect_ratio": aspect_ratio,
             "duration": duration, "resolution": resolution,
+            **({"calibration_generation": calibration_generation} if calibration_generation is not None else {}),
         })
         response.raise_for_status()
         data = response.json()
@@ -69,6 +72,14 @@ class LocalVideoClient(MediaClient):
 
     async def remove_model(self) -> dict:
         response = await self._client.delete("/models/wan2.2-ti2v-5b")
+        response.raise_for_status()
+        return response.json()
+
+    async def reset_worker(self) -> dict:
+        # Terminating the child can take up to ~40s; keep the budget explicit.
+        response = await self._client.post("/worker/reset", timeout=60)
+        if response.status_code == 409:
+            raise HandoffConflict(response.json().get("detail") or "Video worker is busy")
         response.raise_for_status()
         return response.json()
 

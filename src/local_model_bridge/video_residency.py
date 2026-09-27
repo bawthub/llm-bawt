@@ -16,6 +16,10 @@ class WorkerOutcomeUnknown(RuntimeError):
     """The child may still own GPU allocations or have completed its work."""
 
 
+class WorkerBusy(RuntimeError):
+    """A render command is in flight; recovery must wait for its outcome."""
+
+
 class ResidentVideoWorker:
     def __init__(self, *, startup=None, timeout: float = 3600):
         self._startup = startup or asyncio.create_subprocess_exec
@@ -85,12 +89,34 @@ class ResidentVideoWorker:
             if not result["ok"]:
                 # The worker exits after any failed command. Never reuse it.
                 self._uncertain = True
-                raise WorkerOutcomeUnknown("Wan render failed; inspect worker output and GPU state")
+                detail = result.get("error") if isinstance(result.get("error"), str) else "no worker detail"
+                raise WorkerOutcomeUnknown(f"Wan render failed: {detail[-600:]}")
             if (not self.resident or not isinstance(result.get("metadata"), dict)
                     or not output.is_file() or output.stat().st_size == 0):
                 self._uncertain = True
                 raise WorkerOutcomeUnknown("Wan worker did not confirm a resident render and output")
             return result["metadata"]
+
+    async def reset(self) -> None:
+        """Operator recovery: end the child (and every CUDA allocation it holds).
+
+        Refuses while a command is in flight. Terminating the process is the
+        only reliable release after an uncertain outcome; weights stay on disk.
+        """
+        if self._lock.locked():
+            raise WorkerBusy("A Wan render is in progress")
+        async with self._lock:
+            process = self._process
+            if process is not None and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=30)
+                except TimeoutError:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=10)
+            self._process = None
+            self._resident = False
+            self._uncertain = False
 
     async def unload(self) -> None:
         """Release the child after all queued work drains; never delete weights."""

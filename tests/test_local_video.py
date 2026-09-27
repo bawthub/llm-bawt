@@ -16,6 +16,18 @@ from local_model_bridge.video_server import VideoJobs, VideoRequest
 from local_model_bridge.video_worker import dimensions, load_source_image
 
 
+@pytest.fixture(autouse=True)
+def isolated_memory_admission(monkeypatch):
+    # These are queue/process tests. Real measurement/profile gates have their
+    # own tests in test_video_calibration; never query a live GPU here.
+    from llm_bawt.media.gpu_handoff_store import GpuHandoffStore
+    monkeypatch.setattr(GpuHandoffStore, "validate_video_profile", lambda *args: None)
+    monkeypatch.setattr(video_server.GpuTelemetry, "observe", lambda self: {})
+    async def parked(ledger):
+        return None
+    monkeypatch.setattr(video_server, "verify_voice_park", parked)
+
+
 def test_provider_is_visible_without_changing_default() -> None:
     capability = media_provider_registry.capabilities("local-video")
     assert capability.media_types == ("video",)
@@ -342,3 +354,136 @@ def test_local_video_client_submit_poll_and_download() -> None:
 
     asyncio.run(exercise())
     assert [r.url.path for r in requests] == ["/videos", "/videos/job1", "/videos/job1/content", "/videos/job1"]
+
+
+def test_offload_mode_prefetches_groups_only_when_they_fit() -> None:
+    from local_model_bridge.video_worker import GROUP_OFFLOAD_MIN_FREE_MIB, offload_mode
+
+    assert offload_mode(15_000) == "group"          # Moshi stopped: full card
+    assert offload_mode(GROUP_OFFLOAD_MIN_FREE_MIB) == "group"
+    assert offload_mode(3_800) == "sequential"      # Moshi resident: layer streaming
+
+
+def test_worker_reports_denoising_progress_and_offload_mode(tmp_path) -> None:
+    from local_model_bridge.video_worker import NUM_INFERENCE_STEPS, WanPipelineRunner
+
+    seen = []
+
+    class Pipeline:
+        offload_mode = "group"
+
+        def __call__(self, **kwargs):
+            for step in range(kwargs["num_inference_steps"]):
+                kwargs["callback_on_step_end"](self, step, None, {})
+                seen.append((tmp_path / "out.progress").read_text())
+            return type("Out", (), {"frames": [[object()] * kwargs["num_frames"]]})()
+
+    runner = WanPipelineRunner(loader=lambda image_mode: Pipeline(), exporter=lambda frames, path, fps: None)
+    result = runner.render({"prompt": "p", "resolution": "480p", "aspect_ratio": "16:9", "duration": 5},
+                           tmp_path / "out.mp4")
+    assert result["offload_mode"] == "group"
+    assert len(seen) == NUM_INFERENCE_STEPS and '"step": 35' in seen[-1]
+
+    jobs = VideoJobs(tmp_path)
+    jobs.jobs["out"] = {"status": "processing", "progress": 10}
+    assert jobs.status("out")["progress"] == 95
+
+
+def _video_owned_ledger(engine):
+    from llm_bawt.media.gpu_handoff_store import GpuHandoffStore
+
+    ledger = GpuHandoffStore(engine)
+    token, offered = ledger.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
+    transition = ledger.confirm(user="nick", token=token, expected_generation=offered.generation)
+    ledger.begin_action(generation=transition.generation, action="verify")
+    ledger.finish_action(generation=transition.generation, action="verify")
+    ledger.complete(generation=transition.generation, target="video")
+    return ledger
+
+
+def test_worker_failure_reports_real_reason_and_reset_recovers(monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from local_model_bridge.video_residency import WorkerOutcomeUnknown
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    ledger = _video_owned_ledger(engine)
+    monkeypatch.setattr(video_server.models, "installed", lambda: True)
+    monkeypatch.setattr(video_server.models, "status", lambda: {"worker_ready": True})
+    monkeypatch.setattr(video_server, "get_shared_engine", lambda config: engine)
+    resets = []
+
+    class Worker:
+        uncertain = False
+        resident = False
+        running = False
+
+        async def render(self, job, output):
+            raise WorkerOutcomeUnknown("Wan render failed: OutOfMemoryError: CUDA out of memory")
+
+        async def reset(self):
+            resets.append(True)
+
+    async def exercise():
+        jobs = VideoJobs(tmp_path)
+        jobs.worker = Worker()
+        job = await jobs.submit(VideoRequest(prompt="first"))
+        await jobs._drain_task
+        assert "CUDA out of memory" in jobs.status(job["id"])["error"]
+        assert ledger.active_video_jobs() == 1 and jobs._blocked
+        result = await jobs.reset()
+        assert result == {"reset": True, "released_claims": 1}
+        assert resets and not jobs._blocked and ledger.active_video_jobs() == 0
+
+    asyncio.run(exercise())
+    engine.dispose()
+
+
+def test_reset_refuses_while_rendering(tmp_path) -> None:
+    jobs = VideoJobs(tmp_path)
+    jobs._active_job = "busy"
+    with pytest.raises(HTTPException, match="still running"):
+        asyncio.run(jobs.reset())
+
+
+def test_rejected_calibration_evidence_still_delivers_video(monkeypatch, tmp_path) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from llm_bawt.media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    ledger = _video_owned_ledger(engine)
+    monkeypatch.setattr(video_server.models, "installed", lambda: True)
+    monkeypatch.setattr(video_server.models, "status", lambda: {"worker_ready": True})
+    monkeypatch.setattr(video_server, "get_shared_engine", lambda config: engine)
+
+    def reject(self, job_id, measurement):
+        raise HandoffConflict("Calibration memory evidence is inconsistent")
+
+    monkeypatch.setattr(GpuHandoffStore, "finish_calibration", reject)
+    monkeypatch.setattr(GpuHandoffStore, "claim_calibration",
+                        lambda self, job_id, **kw: self.claim_video(job_id))
+
+    class Worker:
+        uncertain = False
+        resident = True
+        running = True
+
+        async def render(self, job, output):
+            output.write_bytes(b"mp4")
+            return {"width": 832, "height": 480, "gpu_measurement": {}}
+
+    async def exercise():
+        jobs = VideoJobs(tmp_path)
+        jobs.worker = Worker()
+        job = await jobs.submit(VideoRequest(prompt="calibrate", calibration_generation=ledger.status().generation))
+        await jobs._drain_task
+        status = jobs.status(job["id"])
+        assert status["status"] == "completed"
+        assert "not recorded" in status["warning"]
+        assert not jobs._blocked and ledger.active_video_jobs() == 0
+        state = ledger.status()
+        assert state.phase == "recovery_required" and "inconsistent" in state.last_error
+
+    asyncio.run(exercise())
+    engine.dispose()
