@@ -35,12 +35,15 @@ def consume_stream_chunks(
     loop: asyncio.AbstractEventLoop,
     chunk_queue: asyncio.Queue,
     full_response_holder: list[str],
+    stop_on_cancel: bool = False,
 ) -> bool:
     """Consume stream chunks without losing text when cancelled/disconnected.
 
     Returns True when cancellation was observed at least once.
     """
     cancelled = False
+    if stop_on_cancel:
+        stream_iter = _until_cancelled(stream_iter, cancel_event)
     for chunk in stream_iter:
         append_text_chunk(full_response_holder, chunk)
         delivered = put_queue_item_threadsafe(loop, chunk_queue, chunk)
@@ -53,4 +56,22 @@ def consume_stream_chunks(
             )
         if cancel_event.is_set():
             cancelled = True
-    return cancelled
+    return cancelled or cancel_event.is_set()
+
+
+def _until_cancelled(stream_iter, cancel_event):
+    """Close native generation on its owning thread, not the HTTP reader."""
+    iterator = iter(stream_iter)
+    try:
+        while not cancel_event.is_set():
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                break
+            if cancel_event.is_set():
+                break
+            yield chunk
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()

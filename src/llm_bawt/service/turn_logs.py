@@ -568,12 +568,31 @@ class TurnLogStore:
         if self.engine is None:
             return
         with Session(self.engine) as session:
-            row = session.get(TurnLog, turn_id)
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
             if row is None:
                 logger.debug("update_turn: no row with id=%s", turn_id)
                 return
             prior_status = row.status
             prior_end_reason = row.end_reason
+            if prior_status == "cancelling":
+                if _is_terminal(status, end_reason):
+                    status, end_reason = "aborted", "aborted"
+                else:
+                    status = None  # a late streaming update cannot revoke intent
+            # Terminal outcomes are monotonic. Preserve the existing stale-reap
+            # repair exception, but never let EOF/late errors undo cancellation.
+            repair_timeout = (prior_status == "timeout" and prior_end_reason == "timeout"
+                              and status in ("ok", "completed") and end_reason not in (None, "timeout"))
+            if row.ended_at is not None and not repair_timeout:
+                # Preserve diagnostic enrichment for the same outcome (notably
+                # approval_persist_failed), but reject a conflicting late error.
+                if status not in (None, prior_status) or (
+                    prior_end_reason is not None and end_reason not in (None, prior_end_reason)
+                ):
+                    error_text = None
+                status = None
+                if row.end_reason is not None:
+                    end_reason = None
             if status is not None:
                 row.status = status
             if latency_ms is not None:
@@ -581,7 +600,8 @@ class TurnLogStore:
             if response_text is not None:
                 row.response_text = response_text
             if request_payload is not None:
-                row.request_json = json.dumps(request_payload, ensure_ascii=False, default=str)
+                from .turn_termination import request_payload_with_audit
+                row.request_json = request_payload_with_audit(row.request_json, request_payload)
                 # Backfill trigger_message_id if it wasn't set on initial persist
                 # (common when prepared_messages were empty at creation time).
                 if not row.trigger_message_id:
@@ -628,6 +648,9 @@ class TurnLogStore:
                 # drains the queue. In that repair path, the successful
                 # finalization is authoritative and should also repair ended_at.
                 row.ended_at = _terminal_ended_at(row.created_at, latency_ms)
+            if row.ended_at is not None:
+                from .turn_termination import interrupt_unresolved_tools
+                interrupt_unresolved_tools(session, row.id, row.ended_at)
             session.add(row)
             session.commit()
 
@@ -687,8 +710,9 @@ class TurnLogStore:
         mid-turn). They are stamped ``status='timeout'``,
         ``end_reason='timeout'`` and ``ended_at=now`` atomically.
 
-        At most one turn per bot is ever open afterward, and the system is
-        self-healing: a stuck turn cannot outlive the next confirmed turn.
+        Registered live/queued workers and cancellation intent are excluded:
+        another turn's first output is not evidence that those workers stopped.
+        Unresolved tools of genuinely reaped turns settle in the same transaction.
 
         Returns the reaped rows as ``[{"id": ..., "user_id": ...}]`` so the
         caller can emit a ``turn_complete`` per row to clear UI indicators on
@@ -701,33 +725,8 @@ class TurnLogStore:
         if self.engine is None or not bot_id or not current_turn_id:
             return []
         try:
-            with self.engine.begin() as conn:
-                current_created_at = conn.execute(
-                    sa_text(
-                        "SELECT created_at FROM turn_logs"
-                        " WHERE id = :current_id"
-                    ),
-                    {"current_id": current_turn_id},
-                ).scalar_one_or_none()
-                if current_created_at is None:
-                    return []
-                rows = conn.execute(
-                    sa_text(
-                        "UPDATE turn_logs SET status = 'timeout',"
-                        " end_reason = 'timeout', ended_at = :now"
-                        " WHERE bot_id = :bid AND ended_at IS NULL"
-                        " AND id != :current_id"
-                        " AND created_at < :current_created_at"
-                        " RETURNING id, user_id"
-                    ),
-                    {
-                        "now": datetime.now(timezone.utc),
-                        "bid": bot_id,
-                        "current_id": current_turn_id,
-                        "current_created_at": current_created_at,
-                    },
-                ).all()
-            return [{"id": r[0], "user_id": r[1]} for r in rows]
+            from .turn_termination import reap_unowned_turns
+            return reap_unowned_turns(self, bot_id, current_turn_id)
         except Exception as e:
             logger.debug("reap_other_open_turns failed for %s: %s", bot_id, e)
             return []

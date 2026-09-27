@@ -822,6 +822,8 @@ class ChatStreamingBridgeMixin:
                             pass
 
                 elif event.kind == AgentEventKind.ASSISTANT_DONE:
+                    if isinstance(event.raw, dict) and event.raw.get("end_reason") == "aborted":
+                        self._update_turn_log(turn_id=turn_log_id, status="aborted", end_reason="aborted")
                     # ASSISTANT_DONE carries the complete response text.
                     # Yield any portion not already streamed as deltas.
                     # Capture token_usage from agent backends (bridge sends it

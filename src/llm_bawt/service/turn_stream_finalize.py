@@ -30,7 +30,7 @@ class TurnStreamFinalizer:
     def _turn_was_aborted(self) -> bool:
         try:
             current_turn = self.ctx.svc._turn_log_store.get_turn(self.ctx.turn_log_id)
-            return current_turn is not None and current_turn.status == "aborted"
+            return current_turn is not None and current_turn.status in ("aborted", "cancelling")
         except Exception:
             return False
 
@@ -60,19 +60,35 @@ class TurnStreamFinalizer:
 
     def _usage_so_far(self) -> dict | None:
         ctx = self.ctx
-        return ctx.svc._resolve_turn_token_usage(
-            ctx.llm_bawt,
-            ctx.token_usage_holder[0],
-        )
+        try:
+            return ctx.svc._resolve_turn_token_usage(ctx.llm_bawt, ctx.token_usage_holder[0])
+        except Exception:
+            return ctx.token_usage_holder[0] if isinstance(ctx.token_usage_holder[0], dict) else None
 
     def finalize(self, *, prepared_messages: list[Any]) -> None:
-        """Finalize persistence, public events, and generation bookkeeping."""
+        """No logger, publisher or persistence failure may strand the HTTP stream."""
+        ctx = self.ctx
+        try:
+            self._finalize(prepared_messages=prepared_messages)
+        finally:
+            try:
+                put_queue_item_threadsafe(ctx.loop, ctx.chunk_queue, None)
+            finally:
+                from .turn_execution import turn_executions
+                turn_executions.remove(ctx.turn_log_id)
+                if ctx.is_agent_backend:
+                    ctx.done_event.set()
+                else:
+                    ctx.svc._end_generation(ctx.cancel_event, ctx.done_event, ctx.bot_id)
+
+    def _finalize(self, *, prepared_messages: list[Any]) -> None:
+        """Finalize persistence and publish the authoritative terminal outcome."""
         ctx = self.ctx
         svc = ctx.svc
         end_time = ctx.timing_holder[1] or time.time()
         start_time = ctx.timing_holder[0] or end_time
         elapsed_ms = (end_time - start_time) * 1000
-        externally_aborted = self._turn_was_aborted()
+        externally_aborted = ctx.cancelled_holder[0] or self._turn_was_aborted()
         if externally_aborted:
             ctx.cancelled_holder[0] = True
 
@@ -116,6 +132,7 @@ class TurnStreamFinalizer:
                         turn_id=ctx.turn_log_id,
                         latency_ms=elapsed_ms,
                         tool_calls=ctx.tool_call_details_holder or None,
+                        status="aborted",
                         end_reason="aborted",
                     )
             elif upstream_error:
@@ -178,6 +195,13 @@ class TurnStreamFinalizer:
                     assistant_message_id=ctx.assistant_message_id,
                 )
             elif ctx.full_response_holder[0]:
+                # Commit the real outcome on the first terminal write; later
+                # enrichment cannot rewrite a provisional "stop" outcome.
+                deferred_reason = (
+                    "question" if ctx.question_id_holder[0] else
+                    "approval" if ctx.approval_id_holder[0] else
+                    "approval_persist_failed" if ctx.approval_persist_failed_holder[0] else "stop"
+                )
                 svc._finalize_turn(
                     llm_bawt=ctx.llm_bawt,
                     turn_id=ctx.turn_log_id,
@@ -196,6 +220,7 @@ class TurnStreamFinalizer:
                     attachments=ctx.agent_attachments_holder or None,
                     reasoning=ctx.reasoning_holder[0] or None,
                     assistant_message_id=ctx.assistant_message_id,
+                    end_reason=deferred_reason,
                 )
             else:
                 # Persist any tool details captured before a failed follow-up.
@@ -207,7 +232,11 @@ class TurnStreamFinalizer:
                     token_usage=self._usage_so_far(),
                 )
         except Exception as fin_err:
-            log.error("Finalization failed (turn %s): %s", ctx.turn_log_id, fin_err)
+            upstream_error, upstream_error_text = True, f"finalize_error: {fin_err}"
+            try:
+                log.error("Finalization failed (turn %s): %s", ctx.turn_log_id, fin_err)
+            except Exception:
+                pass  # Diagnostics must not prevent terminal publication.
             try:
                 svc._update_turn_log(
                     turn_id=ctx.turn_log_id,
@@ -239,14 +268,14 @@ class TurnStreamFinalizer:
         question_id = ctx.question_id_holder[0]
         approval_id = ctx.approval_id_holder[0]
         approval_persist_failed = ctx.approval_persist_failed_holder[0]
-        if question_id:
+        if ctx.cancelled_holder[0]:
+            end_reason = "aborted"
+        elif question_id:
             end_reason = "question"
         elif approval_id:
             end_reason = "approval"
         elif approval_persist_failed:
             end_reason = "approval_persist_failed"
-        elif ctx.cancelled_holder[0]:
-            end_reason = "aborted"
         elif upstream_error:
             # TASK-714: new terminal value for the turn_complete wire — additive
             # only; consumers that don't switch on it fall through to their
@@ -275,10 +304,28 @@ class TurnStreamFinalizer:
                 end_reason_err,
             )
 
+        # Cancellation may win while response persistence is running. Publish
+        # the outcome that won the row lock, never a stale local success guess.
+        try:
+            current = svc._turn_log_store.get_turn(ctx.turn_log_id)
+        except Exception:
+            current = None
+        if current is not None and current.status in {
+            "aborted", "cancelled", "ok", "completed", "error", "timeout",
+        }:
+            status = {"aborted": "cancelled", "ok": "completed"}.get(current.status, current.status)
+            end_reason = current.end_reason or end_reason
+            if status == "error":
+                upstream_error_text = current.error_text or upstream_error_text
+                upstream_error = True
+
         # The TTS consumer closes input on turn_complete, so commit the final
         # scrubbed tail before publishing that terminal event.
         if ctx.tts_scrubber is not None and status not in ("cancelled", "aborted"):
-            tts_tail = ctx.tts_scrubber.flush()
+            try:
+                tts_tail = ctx.tts_scrubber.flush()
+            except Exception:
+                tts_tail = ""  # Optional speech cleanup cannot strand text clients.
             if tts_tail:
                 tts_tail_future = self._publish_event_direct({
                     "_type": "tts_delta",
@@ -339,11 +386,11 @@ class TurnStreamFinalizer:
         # ("⚠️ openclaw bridge error\n\n```\n...\n```") to full_response_holder
         # before ERROR is raised — preserving it here lets the client-side
         # assistant bubble still render the honest failure if the partial
-        # buffer is empty. cancelled/timeout paths remain None because their
-        # terminal is owned elsewhere.
+        # buffer is empty. Cancellation carries the preserved partial too;
+        # timeout without content remains None.
         _response_text = (
             ctx.full_response_holder[0]
-            if status in ("completed", "error")
+            if status in ("completed", "error", "cancelled")
             else None
         )
         self._publish_event_direct({
@@ -378,10 +425,3 @@ class TurnStreamFinalizer:
             "model": ctx.model_alias,
             "ts": time.time(),
         })
-
-        put_queue_item_threadsafe(ctx.loop, ctx.chunk_queue, None)
-
-        if ctx.is_agent_backend:
-            ctx.done_event.set()
-        else:
-            svc._end_generation(ctx.cancel_event, ctx.done_event, ctx.bot_id)

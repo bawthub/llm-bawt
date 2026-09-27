@@ -50,7 +50,7 @@ def _parse_token_usage(value: str | None) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _records_to_calls(records: list[ToolCallRecord]) -> list[dict]:
+def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> list[dict]:
     """Shape ``tool_call_records`` rows into the frontend tool-card dict list.
 
     TASK-364: ``ToolCallRecord`` is the single canonical source of tool-call
@@ -69,6 +69,9 @@ def _records_to_calls(records: list[ToolCallRecord]) -> list[dict]:
             args = {"raw": args}
         # In-flight calls (no ended_at) MUST have result=None so the frontend
         # renders "running…".  Empty string would be treated as completed.
+        interrupted = row.result_text is None and (
+            turn_ended_at is not None or (row.ended_at is not None and row.result_complete is False)
+        )
         is_finished = row.ended_at is not None or (row.result_text is not None and row.result_text != "")
         result_value = row.result_text if is_finished else None
         out.append({
@@ -79,7 +82,7 @@ def _records_to_calls(records: list[ToolCallRecord]) -> list[dict]:
             "arguments": args,
             "parameters": args,
             "result": result_value,
-            "status": "completed" if is_finished else "pending",
+            "status": "interrupted" if interrupted else ("completed" if is_finished else "pending"),
             "call_id": row.call_id,
             "started_at": row.started_at,
             "ended_at": row.ended_at,
@@ -128,7 +131,8 @@ def _live_tool_calls(store: TurnLogStore, turn_id: str) -> list[dict]:
             )
     except Exception:
         return []
-    return _records_to_calls(rows)
+    parent = store.get_turn(turn_id)
+    return _records_to_calls(rows, turn_ended_at=parent.ended_at if parent else None)
 
 
 def _live_tool_call_counts(store: TurnLogStore, turn_ids: list[str]) -> dict[str, int]:
@@ -594,7 +598,7 @@ def get_tool_call_events(
         # TASK-364: tool cards render straight from the canonical
         # tool_call_records rows (batch-fetched above), which already carry
         # per-call timing — no blob, no separate timing-enrich pass.
-        parsed_tools = _records_to_calls(records_by_turn.get(row.id, []))
+        parsed_tools = _records_to_calls(records_by_turn.get(row.id, []), turn_ended_at=row.ended_at)
         if not parsed_tools:
             continue
 

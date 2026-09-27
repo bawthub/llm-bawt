@@ -237,6 +237,10 @@ class AgentBackendClient(LLMClient):
         if bridge_request_id:
             config["request_id"] = bridge_request_id
 
+        execution = kwargs.pop("turn_execution", None)
+        if execution is not None:
+            config["turn_execution"] = execution
+
         if hasattr(self._backend, "stream_raw"):
             backend_kwargs: dict[str, Any] = {"attachments": attachments}
             # Only forward trigger_message_id to backends that accept it

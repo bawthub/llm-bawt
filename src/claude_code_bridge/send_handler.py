@@ -78,6 +78,24 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
         task_turn_capability = req.task_turn_capability
 
         queue_seq = 0
+        run_done_published = False
+
+        async def _publish_early_cancel() -> None:
+            nonlocal run_done_published
+            if run_done_published:
+                return
+            self._publish_event(
+                request_id, session_key, queue_seq + 1,
+                kind=AgentEventKind.ASSISTANT_DONE, text="",
+                extra_raw={"end_reason": "aborted", "status": "cancelled"},
+            )
+            run_done_published = publish_run_done_once(
+                self._publisher, request_id, already_published=run_done_published,
+            )
+            self._discard_changed_file_request(request_id)
+            self._proxy_request_sessions.pop(request_id, None)
+            self._trigger_message_ids.pop(request_id, None)
+            await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
 
         def _publish_queue_heartbeat() -> None:
             nonlocal queue_seq
@@ -99,6 +117,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
         async with self._session_queue.active(
             session_key,
             on_wait=_publish_queue_heartbeat,
+            on_cancel=_publish_early_cancel,
             request_id=request_id,
         ):
             logger.info(
@@ -136,7 +155,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
             if not direct_anthropic:
                 self._proxy_request_sessions[request_id] = session_key
             interrupted_usage: dict | None = None
-            run_done_published = False
             try:
                 # Inject MCP tool context so Claude passes the right identifiers.
                 # Body comes from the registry (TASK-490) with a byte-identical
@@ -209,9 +227,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                 cancel_event = (
                     self._session_queue.cancel_event(session_key) if session_key else None
                 )
-                if cancel_event is not None and cancel_event.is_set():
-                    # Stale signal from a previous run — clear so this turn can proceed.
-                    cancel_event.clear()
                 while True:
                     interrupted_usage = None
                     # An async generator is single-use and the auth/session retry
@@ -386,15 +401,26 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     model_side_effects = False
 
                     def _publish_partial(text: str, *, attachments=None) -> None:
-                        nonlocal seq, interrupted_usage
-                        seq, interrupted_usage = self._publish_interrupted_done(
-                            request_id=request_id, session_key=session_key, seq=seq,
-                            text=text, actual_model=actual_model, model=model,
+                        nonlocal seq, interrupted_usage, assistant_done_emitted
+                        if assistant_done_emitted:
+                            return
+                        cancelled = aborted or (cancel_event is not None and cancel_event.is_set())
+                        if cancelled and assistant_snapshot_text.startswith(text):
+                            text = assistant_snapshot_text
+                        interrupted_usage = interrupted_usage or self._compute_interrupted_usage(
+                            actual_model=actual_model, model=model,
                             bot_context_window=bot_context_window,
                             latest_assistant_usage=latest_assistant_usage,
                             latest_stream_usage=live_usage.stream_usage,
-                            attachments=attachments,
                         )
+                        seq += 1
+                        self._publish_event(
+                            request_id, session_key, seq, kind=AgentEventKind.ASSISTANT_DONE,
+                            text=text, model=actual_model, token_usage=interrupted_usage,
+                            attachments=attachments or turn_screenshot_assets or None,
+                            extra_raw={"end_reason": "aborted", "status": "cancelled"} if cancelled else None,
+                        )
+                        assistant_done_emitted = True
 
                     sdk_client = None
                     active_run = None
@@ -679,6 +705,15 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 )
 
                             elif isinstance(msg, ResultMessage):
+                                interrupted_usage, _, _ = self._compute_result_usage(
+                                    msg, actual_model=actual_model, model=model,
+                                    bot_context_window=bot_context_window,
+                                    latest_assistant_usage=latest_assistant_usage,
+                                    latest_stream_usage=live_usage.stream_usage,
+                                )
+                                if cancel_event is not None and cancel_event.is_set():
+                                    aborted = True
+                                    break
                                 if (
                                     active_run is not None
                                     and active_run.consume_replaced_result(msg)
@@ -706,6 +741,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                         )
                                     tool_names_by_id.clear()
                                     tool_arguments_by_id.clear()
+                                    interrupted_usage = None
                                     logger.info(
                                         "Drained steer interrupt boundary: request_id=%s "
                                         "session=%s",
@@ -726,6 +762,9 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     native_context_usage = await self._read_native_context_usage(
                                         sdk_client
                                     )
+                                if cancel_event is not None and cancel_event.is_set():
+                                    aborted = True
+                                    break
                                 seq = await self._finalize_result_message(
                                     msg,
                                     request_id=request_id,
@@ -748,46 +787,24 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     turn_screenshot_assets=turn_screenshot_assets,
                                 )
                                 assistant_done_emitted = True
-                                # ASSISTANT_DONE is now terminal for the app-side
-                                # subscription. Publish the run sentinel immediately
-                                # so persistence/UI finalization does not wait for the
-                                # SDK subprocess's graceful-shutdown window. The
-                                # session lock remains held through disconnect below,
-                                # so a successor turn still cannot overlap cleanup.
+                                # Publish the terminal sentinel before SDK cleanup;
+                                # the session lock still prevents successor overlap.
                                 run_done_published = publish_run_done_once(
                                     self._publisher,
                                     request_id,
                                     already_published=run_done_published,
                                 )
-                                # Turn complete — release the prompt generator so
-                                # the SDK closes its input stream.  Kept open until
-                                # now so the can_use_tool control channel survived
-                                # any AskUserQuestion pause earlier in the turn.
+                                # Release input and stop at ResultMessage: waiting for
+                                # EOF after AskUserQuestion can deadlock (TASK-269).
                                 turn_done.set()
-                                # ResultMessage is terminal for this send (one user
-                                # message -> one assistant turn), so stop iterating
-                                # NOW instead of looping back to await a trailing
-                                # StopAsyncIteration. After a deferred
-                                # AskUserQuestion the streaming-input session stays
-                                # alive — heartbeat/stream events keep re-arming the
-                                # per-message timeout — so that await can block
-                                # indefinitely while STILL holding the per-session
-                                # lock, deadlocking the next continuation turn on the
-                                # same session (TASK-269). The `finally` below closes
-                                # the stream and kills the subprocess cleanly.
                                 break
+                        aborted = aborted or (cancel_event is not None and cancel_event.is_set())
                         if aborted:
-                            # Cooperative abort fired — publish the partial text +
-                            # provider-reported usage accumulated before cancellation.
+                            # EOF during disconnect is cancellation, not success.
                             _publish_partial("".join(text_parts))
-                            assistant_done_emitted = True
                         elif not assistant_done_emitted:
-                            # Clean EOF without a ResultMessage. z.ai / GLM via
-                            # the Claude SDK can end a turn after an
-                            # AssistantMessage snapshot only (text and/or tool
-                            # uses already captured above). Publish a fallback
-                            # terminal DONE so the app persists the reply instead
-                            # of timing out with response_chars=0.
+                            # Some providers end at an AssistantMessage snapshot;
+                            # clean EOF still needs a terminal event for persistence.
                             full_text = "".join(text_parts)
                             if assistant_snapshot_text:
                                 if not full_text:
@@ -811,7 +828,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             _publish_partial(
                                 full_text, attachments=turn_screenshot_assets or None,
                             )
-                            assistant_done_emitted = True
                             logger.info(
                                 "EOF fallback ASSISTANT_DONE: chars=%d request_id=%s session=%s",
                                 len(full_text), request_id, session_key,
@@ -824,17 +840,13 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             )
                         break
                     except asyncio.CancelledError:
-                        # task.cancel() arrived from elsewhere (legacy path /
-                        # belt-and-suspenders fallback). Make sure the run is
-                        # finalized before we re-raise so the frontend doesn't
-                        # see a stuck `streaming` turn.
+                        aborted = True
                         logger.info(
                             "Send cancelled via task.cancel: request_id=%s session=%s",
                             request_id, session_key,
                         )
                         try:
                             _publish_partial("".join(text_parts))
-                            assistant_done_emitted = True
                         except Exception:
                             logger.debug("Failed to publish ASSISTANT_DONE on cancel", exc_info=True)
                         try:
@@ -854,7 +866,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             )
                             aborted = True
                             _publish_partial("".join(text_parts))
-                            assistant_done_emitted = True
                             run_done_published = publish_run_done_once(
                                 self._publisher,
                                 request_id,
@@ -921,17 +932,9 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
 
                         raise
                     finally:
-                        # Guarantee the prompt generator is released on EVERY exit
-                        # path (StopAsyncIteration, the ResultMessage break above,
-                        # abort, or exception). If it stays parked on
-                        # `await done_event.wait()` the SDK input stream never closes
-                        # and this session's lock can never be reacquired — the
-                        # TASK-269 deadlock. Event.set() is idempotent.
+                        # Always release SDK input and pending steer waiters,
+                        # including EOF/abort/error paths (TASK-269).
                         turn_done.set()
-                        # Wake any concurrent steer that is waiting for the SDK
-                        # CLI to acknowledge interrupt. A turn can finish in the
-                        # narrow window after the bridge accepted the steer
-                        # command but before the CLI handles its control request.
                         if active_run is not None:
                             active_run.mark_completed()
                         # Always deregister this iteration's client so a
@@ -966,11 +969,8 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     logger.info("Send completed: request_id=%s session=%s", request_id, session_key)
 
             except asyncio.CancelledError:
-                # Already handled inside the inner try (we published run_done
-                # before re-raising). Suppress here so the asyncio task ends
-                # cleanly without the "Task was destroyed but it is pending"
-                # noise.
-                logger.debug("Send cancellation propagated past inner handler")
+                # Also cover cancellation during setup, before the SDK loop exists.
+                await _publish_early_cancel()
                 raise
             except Exception as e:
                 logger.exception("Send failed: request_id=%s", request_id)

@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from datetime import datetime, timezone
 from typing import Any
 
@@ -233,7 +234,20 @@ class LocalModelBridge:
         if trigger_message_id:
             self._trigger_message_ids[request_id] = trigger_message_id
 
-        async with self._session_queue.active(session_key):
+        finalized = False
+
+        async def finalize() -> None:
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            self._publisher.publish_run_done(request_id)
+            self._trigger_message_ids.pop(request_id, None)
+            await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
+
+        async with self._session_queue.active(
+            session_key, request_id=request_id, on_cancel=finalize,
+        ):
             logger.info(
                 "Handling send: request_id=%s session=%s model=%s system_prompt=%s msg=%.60s...",
                 request_id, session_key, model_alias,
@@ -245,22 +259,22 @@ class LocalModelBridge:
             cancel_event = (
                 self._session_queue.cancel_event(session_key) if session_key else None
             )
-            if cancel_event is not None and cancel_event.is_set():
-                cancel_event.clear()
-
             seq = 0
             text_parts: list[str] = []
             loop = asyncio.get_running_loop()
+            stop_generation = Event()
+            worker = None
 
             try:
                 # Load (or switch to) the requested model on the inference
                 # worker thread so VRAM allocation doesn't block the event loop.
-                client = await loop.run_in_executor(
+                worker = loop.run_in_executor(
                     self._executor,
                     lambda: self._loader.get_client(
                         model_alias, fallback_definition=fallback_def
                     ),
                 )
+                client = await asyncio.shield(worker)
 
                 messages = self._build_messages(system_prompt, message)
 
@@ -273,6 +287,8 @@ class LocalModelBridge:
                 def _produce() -> None:
                     try:
                         for chunk in client.stream_raw(messages):
+                            if stop_generation.is_set():
+                                break
                             loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
                     except Exception as exc:  # noqa: BLE001 — forwarded below
                         loop.call_soon_threadsafe(
@@ -281,7 +297,7 @@ class LocalModelBridge:
                     finally:
                         loop.call_soon_threadsafe(chunk_queue.put_nowait, _SENTINEL)
 
-                producer = loop.run_in_executor(self._executor, _produce)
+                worker = loop.run_in_executor(self._executor, _produce)
 
                 aborted = False
                 while True:
@@ -290,12 +306,10 @@ class LocalModelBridge:
                         break
                     if isinstance(item, tuple) and len(item) == 2 and item[0] == "__error__":
                         raise item[1]
-                    # Cooperative abort: stop forwarding deltas. The producer
-                    # keeps draining in the background until the generator ends
-                    # (we can't interrupt llama.cpp mid-token), but the user
-                    # sees the turn stop immediately.
+                    # Stop the worker at its next token boundary.
                     if cancel_event is not None and cancel_event.is_set():
                         aborted = True
+                        stop_generation.set()
                         logger.info(
                             "chat.abort honored mid-stream: session=%s request_id=%s",
                             session_key, request_id,
@@ -315,18 +329,19 @@ class LocalModelBridge:
                 # Wait for the producer to finish so the worker is free for the
                 # next turn (it cannot be cancelled mid-token).
                 try:
-                    await producer
+                    await asyncio.shield(worker)
                 except Exception:
                     logger.debug("producer task raised after drain", exc_info=True)
 
                 full_text = "".join(text_parts)
                 seq += 1
-                self._publish_event(
-                    request_id, session_key, seq,
-                    kind=AgentEventKind.ASSISTANT_DONE,
-                    text=full_text,
-                    model=model_alias,
-                )
+                if not aborted:
+                    self._publish_event(
+                        request_id, session_key, seq,
+                        kind=AgentEventKind.ASSISTANT_DONE,
+                        text=full_text,
+                        model=model_alias,
+                    )
                 if aborted:
                     logger.info(
                         "Send aborted: request_id=%s session=%s (%d chars streamed)",
@@ -337,13 +352,16 @@ class LocalModelBridge:
                 logger.info(
                     "Send cancelled: request_id=%s session=%s", request_id, session_key,
                 )
-                # Emit whatever we have so far as the done event.
-                self._publish_event(
-                    request_id, session_key, seq + 1,
-                    kind=AgentEventKind.ASSISTANT_DONE,
-                    text="".join(text_parts),
-                    model=model_alias,
-                )
+                stop_generation.set()
+                # Cancellation cannot interrupt native model loading/a token.
+                # Retain the lock until the worker stops, not merely until the
+                # asyncio wrapper is cancelled. Repeated aborts are idempotent.
+                if worker is not None:
+                    try:
+                        await asyncio.shield(worker)
+                    except Exception:
+                        logger.debug("worker failed during abort", exc_info=True)
+                raise
             except Exception as e:
                 logger.exception("Local model send failed: %s", e)
                 self._publish_event(
@@ -353,11 +371,7 @@ class LocalModelBridge:
                     model=model_alias,
                 )
             finally:
-                self._publisher.publish_run_done(request_id)
-                self._trigger_message_ids.pop(request_id, None)
-                if session_key:
-                    self._session_queue.clear_cancel_event(session_key)
-                await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
+                await finalize()
 
     @staticmethod
     def _build_messages(system_prompt: str | None, message: str) -> list[Message]:
@@ -383,13 +397,17 @@ class LocalModelBridge:
         try:
             if method == "chat.abort":
                 session_key = params.get("sessionKey", "")
-                self._session_queue.signal_cancel(session_key)
-                cancelled = self._session_queue.cancel_active(session_key)
-                detail = "task_cancelled" if cancelled else "signalled"
-                logger.info("chat.abort: session=%s detail=%s", session_key, detail)
+                target_request_id = params.get("requestId", "")
+                if (
+                    not isinstance(session_key, str) or not session_key.strip()
+                    or not isinstance(target_request_id, str) or not target_request_id.strip()
+                ):
+                    raise ValueError("chat.abort requires sessionKey and requestId")
+                cancelled = self._session_queue.cancel_request(session_key, target_request_id)
                 self._publisher.publish_rpc_result(
                     request_id,
-                    {"ok": True, "aborted": session_key, "detail": detail},
+                    {"ok": True, "aborted": cancelled, "requestId": target_request_id,
+                     "detail": "task_cancelled" if cancelled else "no_matching_request"},
                 )
             else:
                 # Not a method this bridge handles — only ack legacy/no-backend

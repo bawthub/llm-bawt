@@ -33,6 +33,7 @@ def _internal_inter_bot_sender(http_request: Request) -> str | None:
 class ChatAbortRequest(BaseModel):
     """Request to abort an in-flight turn."""
     turn_id: str = Field(..., description="Turn log ID to abort")
+    source: Literal["unknown", "chat_stop", "bot_list_stop"] = "unknown"
 
 
 class ChatAbortResponse(BaseModel):
@@ -42,98 +43,21 @@ class ChatAbortResponse(BaseModel):
 
 
 @router.post("/v1/chat/abort", tags=["OpenAI Compatible"])
-async def chat_abort(request: ChatAbortRequest) -> ChatAbortResponse:
-    """Abort a turn by ID.
-
-    Looks up the turn's agent_session_key to send chat.abort to the
-    OpenClaw gateway, then marks the turn as aborted.  If the turn has
-    no agent_session_key (native model), just marks it aborted.
-    """
+async def chat_abort(request: ChatAbortRequest, http_request: Request) -> ChatAbortResponse:
+    """Persist cancellation before requesting teardown of the exact bridge run."""
     service = get_service()
     store = service._turn_log_store
     turn = store.get_turn(request.turn_id)
     if not turn:
         raise HTTPException(status_code=404, detail="Turn not found")
 
-    # If it's already terminal, nothing to do
-    if turn.status not in ("streaming", "pending"):
-        return ChatAbortResponse(
-            ok=True,
-            detail="already_completed",
-            turn_id=turn.id,
-        )
+    from ..turn_abort import abort_turn
 
-    # Send chat.abort to the gateway if this is an OpenClaw turn
-    gateway_aborted = False
-    gateway_detail: str | None = None
-    if turn.agent_session_key:
-        from ...agent_backends.agent_bridge import get_agent_subscriber
-        from ...bots import BotManager
-
-        # Resolve the bot's agent_backend so the abort RPC can be routed to
-        # the right bridge (claude-code, codex, openclaw). Bridges that
-        # filter on `backend` will skip RPCs that aren't theirs, preventing
-        # cross-bridge RPC races.
-        backend_name = None
-        if turn.bot_id:
-            try:
-                bot = BotManager(service.config).get_bot(turn.bot_id)
-                backend_name = getattr(bot, "agent_backend", None) if bot else None
-            except Exception:
-                backend_name = None
-
-        subscriber = get_agent_subscriber()
-        if subscriber:
-            params: dict = {"sessionKey": turn.agent_session_key}
-            abort_req_id = f"abort_{uuid.uuid4().hex}"
-            try:
-                rpc_result = await subscriber.send_rpc(
-                    "chat.abort", params, abort_req_id,
-                    timeout_s=10, backend=backend_name,
-                )
-                gateway_detail = str(rpc_result.get("detail") or "") or None
-                gateway_aborted = bool(rpc_result.get("ok")) and gateway_detail != "no_active_task"
-            except Exception as e:
-                log.warning("chat.abort RPC failed for turn %s: %s", turn.id, e)
-
-    # Mark the turn as aborted regardless
-    store.update_turn(
-        turn_id=turn.id,
-        status="aborted",
-        end_reason="aborted",
-        error_text="Aborted via chat.abort",
+    detail = await abort_turn(
+        service, turn, source=request.source,
+        peer=http_request.client.host if http_request.client else None,
     )
-    log.info("Marked turn %s as aborted (gateway_aborted=%s)", turn.id, gateway_aborted)
-
-    # Emit turn_complete so live SSE consumers (the bot bar "in progress"
-    # indicator) clear their active state WITHOUT a page reload. The streaming
-    # generator publishes this from its finally block, but turns terminated via
-    # this route (agent backends / codex) never reach that block — so without
-    # this the bot stays lit as "in turn" until hydration on next refresh.
-    redis_sub = getattr(service, "_redis_subscriber", None)
-    if redis_sub is not None and turn.bot_id:
-        try:
-            await redis_sub.publish_tool_event(
-                turn.bot_id,
-                turn.user_id or "nick",
-                {
-                    "_type": "turn_complete",
-                    "turn_id": turn.id,
-                    "bot_id": turn.bot_id,
-                    "user_id": turn.user_id,
-                    "status": "cancelled",
-                    "end_reason": "aborted",
-                    "ts": time.time(),
-                },
-            )
-        except Exception as e:
-            log.debug("turn_complete publish on abort failed for %s: %s", turn.id, e)
-
-    return ChatAbortResponse(
-        ok=True,
-        detail=(f"aborted:{gateway_detail}" if gateway_detail else "aborted"),
-        turn_id=turn.id,
-    )
+    return ChatAbortResponse(ok=True, detail=detail, turn_id=turn.id)
 
 class ChatSteerRequest(BaseModel):
     """Redirect an in-flight Claude agent turn without creating another turn."""

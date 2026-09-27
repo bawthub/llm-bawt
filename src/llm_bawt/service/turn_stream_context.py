@@ -67,3 +67,4 @@ class TurnStreamContext:
     # TASK-701: opaque, signed current-turn capability forwarded only to
     # harnesses that support request-local MCP headers (Claude SDK today).
     task_turn_capability: str | None = None
+    execution: Any = None

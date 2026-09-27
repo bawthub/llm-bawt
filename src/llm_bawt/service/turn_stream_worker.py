@@ -81,7 +81,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
         def _turn_was_aborted() -> bool:
             try:
                 current_turn = self._turn_log_store.get_turn(turn_log_id)
-                return current_turn is not None and current_turn.status == "aborted"
+                return current_turn is not None and current_turn.status in ("aborted", "cancelled", "cancelling")
             except Exception:
                 return False
 
@@ -220,6 +220,10 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # Track when first token arrives
             timing_holder[0] = time.time()
 
+            if cancel_event.is_set():
+                cancelled_holder[0] = True
+                return
+
             # Choose streaming method based on whether bot uses tools.
             # Agent-backend models (e.g. claude-code/openclaw) already handle
             # tool execution in their own bridge/runtime and may report
@@ -283,6 +287,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                         has_executed_tools = False
 
                         for iteration in range(max_iterations):
+                            if cancel_event.is_set():
+                                return
                             # After first tool execution, keep tools_schema
                             # but force tool_choice="none" so the model
                             # generates a text response.  Dropping the schema
@@ -324,6 +330,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 tool_choice=current_tool_choice,
                                 **gen_kwargs,
                             ):
+                                if cancel_event.is_set():
+                                    return
                                 if isinstance(item, str):
                                     # Stream immediately — no buffering.
                                     yielded_text.append(item)
@@ -349,6 +357,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                     # Emit tool calls as OpenAI delta.tool_calls, then execute
                                     tool_results = []
                                     for idx, tc in enumerate(real_tool_calls):
+                                        if cancel_event.is_set():
+                                            return
                                         func = tc.get("function", {})
                                         name = func.get("name", "")
                                         call_id = tc.get("id", f"call_{uuid.uuid4().hex[:8]}")
@@ -522,6 +532,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 adapter = getattr(llm_bawt, 'adapter', None)
                 adapter_stops = adapter.get_stop_sequences() if adapter else []
                 extra_kwargs = {}
+                if is_agent_backend:
+                    extra_kwargs["turn_execution"] = ctx.execution
                 if is_agent_backend and user_attachments:
                     extra_kwargs["attachments"] = user_attachments
                 if is_agent_backend and trigger_message_id:
@@ -558,7 +570,6 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # that do not expose one.
             _oc_tool_calls = PendingToolCallCorrelator()
 
-            _oc_request_id_captured = [False]
             # Fires once, on the SDK/bridge-CONFIRMED first output of this
             # turn, to reap any other still-open turns for this bot.
             _confirmed_start_reaped = [False]
@@ -653,6 +664,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                             })
 
                 for item in inner:
+                    if not is_agent_backend and cancel_event.is_set():
+                        break  # do not publish a post-Stop delta/tool start to Redis
                     # CONFIRMED turn start. This first item is the backend/
                     # SDK's first real output (native first chunk, or an
                     # agent-bridge ASSISTANT_DELTA/tool event) — proof the
@@ -714,17 +727,6 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                             log.debug(
                                 "confirmed-start reap failed for %s: %s",
                                 bot_id, _reap_err,
-                            )
-
-                    # Capture agent_request_id on first yielded item
-                    if is_agent_backend and not _oc_request_id_captured[0]:
-                        _oc_request_id_captured[0] = True
-                        backend = getattr(llm_bawt.client, "_backend", None)
-                        oc_req_id = getattr(backend, "_active_request_id", None)
-                        if oc_req_id:
-                            self._update_turn_log(
-                                turn_id=turn_log_id,
-                                agent_request_id=oc_req_id,
                             )
 
                     # Inject paragraph break when transitioning from
@@ -800,6 +802,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                     "ts": time.time(),
                                 })
                                 yield {"_type": "reasoning_delta", "delta": _rtext}
+                            continue
+                        if evt == "turn_cancelled":
+                            self._update_turn_log(turn_id=turn_log_id, status="aborted", end_reason="aborted")
                             continue
                         if evt == "metadata":
                             if item.get("upstream_model"):
@@ -1115,6 +1120,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 loop=loop,
                 chunk_queue=chunk_queue,
                 full_response_holder=full_response_holder,
+                stop_on_cancel=not is_agent_backend,
             )
             if cancelled_holder[0]:
                 log.info("Generation cancelled - newer request received")
@@ -1153,6 +1159,13 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     token_usage=_usage_so_far(),
                 )
         finally:
+            if not is_agent_backend and "stream_iter" in locals():
+                try:
+                    close = getattr(stream_iter, "close", None)
+                    if close is not None:
+                        close()
+                except Exception:
+                    log.warning("Native stream close failed for %s", turn_log_id)
             prepared_messages = (
                 _logged_messages
                 if "_logged_messages" in locals()

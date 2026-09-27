@@ -271,6 +271,10 @@ class ClaudeCommandMixin:
         self, fields: dict, msg_id: str, async_redis,
     ) -> None:
         """Handle RPC commands (e.g. session.reset)."""
+        backend = fields.get("backend", "")
+        if backend and backend != self._backend_name:
+            await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
+            return
         import json as _json
 
         request_id = fields.get("request_id", "")
@@ -322,28 +326,17 @@ class ClaudeCommandMixin:
                 )
             elif method == "chat.abort":
                 session_key = params.get("sessionKey", "")
-                # Three-layer abort:
-                #   1. Set the cooperative cancel event so the SDK message loop
-                #      breaks out at the next iteration boundary.
-                #   2. Pop and disconnect() the active ClaudeSDKClient — this
-                #      closes Query/transport and kills the underlying `claude`
-                #      CLI subprocess mid-tool-call. Without (2), task.cancel()
-                #      only raises CancelledError at the next `await` point,
-                #      which can be tens of seconds away inside a long Bash/Read
-                #      tool call.
-                #   3. Fall back to task.cancel() so a runaway task that didn't
-                #      respect (1) and (2) still gets torn down.
-                self._session_queue.signal_cancel(session_key)
-                # DIAGNOSTIC (abort-not-killing-subprocess): dump the live
-                # registry keys so we can see whether the active stream is
-                # registered under a different key than the abort target.
-                logger.info(
-                    "chat.abort registry probe: target=%r stream_keys=%r task_keys=%r",
-                    session_key,
-                    list(self._session_queue._active_clients.keys()),
-                    list(self._session_queue._active_tasks.keys()),
-                )
-                client = self._session_queue.pop_active_client(session_key)
+                target_request_id = params.get("requestId", "")
+                if not session_key or not target_request_id:
+                    raise ValueError("chat.abort requires sessionKey and requestId")
+                # Claim and cancel only this request before yielding. Disconnect
+                # may outlive the run and a successor may own the session by then.
+                client = self._session_queue.get_active_client(session_key)
+                cancelled = self._session_queue.cancel_request(session_key, target_request_id)
+                if cancelled and getattr(client, "request_id", None) == target_request_id:
+                    client = self._session_queue.pop_active_client(session_key)
+                else:
+                    client = None
                 client_disconnected = False
                 if client is not None:
                     try:
@@ -360,7 +353,6 @@ class ClaudeCommandMixin:
                             session_key,
                             exc_info=True,
                         )
-                cancelled = self._session_queue.cancel_active(session_key)
                 detail_parts: list[str] = []
                 if cancelled:
                     detail_parts.append("task_cancelled")
@@ -378,6 +370,8 @@ class ClaudeCommandMixin:
                     {
                         "ok": True,
                         "aborted": session_key,
+                        "cancelled": cancelled,
+                        "request_id": target_request_id,
                         "detail": ",".join(detail_parts),
                     },
                 )

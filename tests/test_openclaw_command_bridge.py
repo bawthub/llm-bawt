@@ -18,7 +18,11 @@ class _StubWsClient:
         # bridge.py:237. No-op is sufficient for this test.
         pass
 
-    async def send_and_stream(self, session_key: str, text: str, *, attachments=None):
+    async def send_and_stream(
+        self, session_key: str, text: str, *, attachments=None, on_run_started=None,
+    ):
+        if on_run_started is not None:
+            on_run_started("run_err")
         yield {
             "type": "event",
             "event": "agent",

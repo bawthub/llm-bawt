@@ -302,18 +302,23 @@ class ServiceLogger:
     # -------------------------------------------------------------------------
 
     def debug(self, msg: str, *args, **kwargs) -> None:
+        kwargs.setdefault("extra", {}).setdefault("markup", False)
         self._logger.debug(msg, *args, **kwargs)
 
     def info(self, msg: str, *args, **kwargs) -> None:
+        kwargs.setdefault("extra", {}).setdefault("markup", False)
         self._logger.info(msg, *args, **kwargs)
 
     def warning(self, msg: str, *args, **kwargs) -> None:
+        kwargs.setdefault("extra", {}).setdefault("markup", False)
         self._logger.warning(msg, *args, **kwargs)
 
     def error(self, msg: str, *args, **kwargs) -> None:
+        kwargs.setdefault("extra", {}).setdefault("markup", False)
         self._logger.error(msg, *args, **kwargs)
 
     def exception(self, msg: str, *args, **kwargs) -> None:
+        kwargs.setdefault("extra", {}).setdefault("markup", False)
         self._logger.exception(msg, *args, **kwargs)
 
     # -------------------------------------------------------------------------
@@ -469,7 +474,7 @@ class ServiceLogger:
 
     def model_error(self, model_alias: str, error: str) -> None:
         """Log model loading error."""
-        self._logger.error(f"{ICONS['error']} [model.name]{model_alias}[/model.name] [bold red]failed:[/bold red] {error}")
+        self.error("%s %s failed: %s", ICONS['error'], model_alias, error)
 
     def mcp_operation(
         self, 
@@ -667,9 +672,7 @@ class ServiceLogger:
 
     def task_failed(self, task_id: str, task_type: str, error: str, elapsed_ms: float) -> None:
         """Log background task failure."""
-        self._logger.error(
-            f"{ICONS['error']} [task]{task_type}[/task] [bold red]failed[/bold red] [timing]{elapsed_ms:.0f}ms[/timing]: {error}"
-        )
+        self.error("%s %s failed %.0fms: %s", ICONS['error'], task_type, elapsed_ms, error)
 
     def cache_hit(self, cache_type: str, key: str) -> None:
         """Log cache hit (verbose only)."""
@@ -838,7 +841,7 @@ class ServiceLogger:
         self._console.print(" | ".join(parts))
         
         # Show full response
-        self._console.print(f"  [blue]response:[/blue] {response}")
+        self._console.print("  response: " + response, markup=False)
 
     def _log_payload(self, label: str, data: dict[str, Any], max_content_len: int = 500) -> None:
         """Log a payload (for verbose mode)."""

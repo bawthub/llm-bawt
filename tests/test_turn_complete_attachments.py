@@ -39,25 +39,18 @@ def test_finalizer_carries_response_text_on_completed_turn_complete() -> None:
     empty (subscriber gap, packed flush, dropped delta). Symmetric with
     the nonstream inter-bot emit in background_service.py.
 
-    Guarded by status in ("completed", "error") — TASK-714 widened the
-    TASK-779 completed-only gate so upstream-error terminals can still render
-    the honest failure text client-side. cancelled/timeout paths own their
-    own terminal state via _finalize_turn and must NOT leak partial text.
+    TASK-714 preserves error text; TASK-952 also preserves cancelled partials
+    for clients that missed the last delta. Empty timeout paths carry no text.
     """
     import inspect
 
-    source = inspect.getsource(TurnStreamFinalizer.finalize)
+    source = inspect.getsource(TurnStreamFinalizer._finalize)
     # Field is present in the emit dict:
     assert '"response_text": _response_text' in source, (
         "streaming turn_complete emit must carry response_text (TASK-779 safety net)"
     )
-    # Value is guarded by terminal status — cancelled/timeout must not leak
-    # partial text. completed + error (TASK-714) are the only carriers.
-    assert 'if status in ("completed", "error")' in source, (
-        "response_text must be gated on status in ('completed', 'error') — "
-        "completed per TASK-779, error per TASK-714; cancelled/timeout paths "
-        "must not leak partial text"
-    )
+    # TASK-952: cancellation preserves the same server-authoritative partial.
+    assert 'if status in ("completed", "error", "cancelled")' in source
     # The value pulls from the accumulated streaming text holder, not empty:
     assert "ctx.full_response_holder[0]" in source, (
         "response_text must pull from full_response_holder[0] (the accumulated "

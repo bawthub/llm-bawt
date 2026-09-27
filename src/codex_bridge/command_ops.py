@@ -192,7 +192,19 @@ class CodexCommandMixin:
                 session_key, request_id,
             )
 
-        async with self._session_queue.active(session_key):
+        cleanup_complete = False
+
+        async def on_cancel() -> None:
+            # Includes cancellation while queued or during pre-SDK setup.
+            self._publisher.publish_run_done(request_id)
+            if not cleanup_complete:
+                self._discard_changed_file_request(request_id)
+                self._trigger_message_ids.pop(request_id, None)
+                await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
+
+        async with self._session_queue.active(
+            session_key, request_id=request_id, on_cancel=on_cancel,
+        ):
             logger.info(
                 "Handling send: request_id=%s session=%s model=%s system_prompt=%s msg=%.60s...",
                 request_id, session_key, model,
@@ -232,9 +244,6 @@ class CodexCommandMixin:
                 cancel_event = (
                     self._session_queue.cancel_event(session_key) if session_key else None
                 )
-                if cancel_event is not None and cancel_event.is_set():
-                    cancel_event.clear()
-
                 fresh_session_retry = False
                 while True:
                     try:
@@ -416,14 +425,6 @@ class CodexCommandMixin:
                                 model=actual_model,
                                 token_usage=token_usage,
                             )
-                        elif aborted:
-                            seq += 1
-                            self._publish_event(
-                                request_id, session_key, seq,
-                                kind=AgentEventKind.ASSISTANT_DONE,
-                                text="".join(text_parts),
-                                model=actual_model,
-                            )
                         break
 
                     except asyncio.CancelledError:
@@ -431,20 +432,8 @@ class CodexCommandMixin:
                             "Send cancelled via task.cancel: request_id=%s session=%s",
                             request_id, session_key,
                         )
-                        seq += 1
-                        try:
-                            self._publish_event(
-                                request_id, session_key, seq,
-                                kind=AgentEventKind.ASSISTANT_DONE,
-                                text="".join(text_parts),
-                                model=actual_model,
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            self._publisher.publish_run_done(request_id)
-                        except Exception:
-                            pass
+                        # The app persists partial text and aborted status.
+                        # Do not emit a successful assistant completion.
                         try:
                             controller.abort("task_cancelled")
                         except Exception:
@@ -452,20 +441,13 @@ class CodexCommandMixin:
                         raise
 
                     except AbortError:
-                        # Triggered by controller.abort() — treat as a normal
-                        # aborted turn so the user sees their partial response.
+                        # Triggered by controller.abort(); the app owns partial
+                        # persistence, so only publish the transport terminal.
                         logger.info(
                             "Codex turn aborted: request_id=%s session=%s",
                             request_id, session_key,
                         )
                         aborted = True
-                        seq += 1
-                        self._publish_event(
-                            request_id, session_key, seq,
-                            kind=AgentEventKind.ASSISTANT_DONE,
-                            text="".join(text_parts),
-                            model=actual_model,
-                        )
                         break
 
                     except Exception as e:
@@ -542,6 +524,7 @@ class CodexCommandMixin:
                 # Drop the per-run trigger_message_id mapping so we don't leak.
                 self._trigger_message_ids.pop(request_id, None)
                 await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
+                cleanup_complete = True
 
     async def _handle_rpc(
         self, fields: dict, msg_id: str, async_redis,
@@ -595,37 +578,19 @@ class CodexCommandMixin:
                     )
             elif method == "chat.abort":
                 session_key = params.get("sessionKey", "")
-                self._session_queue.signal_cancel(session_key)
-                controller = self._session_queue.pop_active_client(session_key)
-                turn_interrupted = False
-                if controller is not None:
-                    try:
-                        controller.abort("chat.abort")
-                        turn_interrupted = True
-                    except Exception:
-                        logger.debug(
-                            "controller.abort raised on chat.abort for session %s",
-                            session_key, exc_info=True,
-                        )
-                cancelled = self._session_queue.cancel_active(session_key)
-                detail_parts: list[str] = []
-                if cancelled:
-                    detail_parts.append("task_cancelled")
-                if turn_interrupted:
-                    detail_parts.append("turn_interrupted")
-                if not detail_parts:
-                    detail_parts.append("no_active_task")
-                logger.info(
-                    "chat.abort: session=%s detail=%s",
-                    session_key, ",".join(detail_parts),
-                )
+                target_request_id = params.get("requestId", "")
+                if (
+                    not isinstance(session_key, str) or not session_key.strip()
+                    or not isinstance(target_request_id, str) or not target_request_id.strip()
+                ):
+                    raise ValueError("chat.abort requires sessionKey and requestId")
+                # The targeted send owns its AbortController and interrupts it
+                # in its cancellation handler; never take a sibling's handle.
+                cancelled = self._session_queue.cancel_request(session_key, target_request_id)
                 self._publisher.publish_rpc_result(
                     request_id,
-                    {
-                        "ok": True,
-                        "aborted": session_key,
-                        "detail": ",".join(detail_parts),
-                    },
+                    {"ok": True, "aborted": cancelled, "requestId": target_request_id,
+                     "detail": "task_cancelled" if cancelled else "no_matching_request"},
                 )
             else:
                 self._publisher.publish_rpc_result(

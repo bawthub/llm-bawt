@@ -173,7 +173,10 @@ class AgentBridgeBackend(AgentBackend):
         timeout = int(config.get("timeout_seconds", 600))
         configured_request_id = str(config.get("request_id") or "").strip()
         request_id = configured_request_id or f"req_{uuid.uuid4().hex}"
-        self._active_request_id = request_id
+        self._active_request_id = request_id  # diagnostics only; never abort authority
+        execution = config.get("turn_execution")
+        if execution is not None:
+            execution.bind_bridge(backend=self.name, session_key=session_key, request_id=request_id)
         # Fall back to config so callers that thread it through agent_backend_config
         # (rather than as a kwarg) still propagate.
         if not trigger_message_id:
@@ -229,6 +232,8 @@ class AgentBridgeBackend(AgentBackend):
                     await local_sub.connect()
                     pending_error: RuntimeError | None = None
                     try:
+                        if execution is not None:
+                            execution.check_cancelled()
                         await local_sub.send_command(
                             session_key=session_key,
                             message=prompt,
@@ -284,6 +289,15 @@ class AgentBridgeBackend(AgentBackend):
                                 or None
                             ),
                         )
+                        if execution is not None and execution.dispatched():
+                            # Stop won while send_command was in flight. Publish
+                            # AFTER chat.send so cancellation cannot overtake it.
+                            result = await local_sub.send_rpc(
+                                "chat.abort", {"sessionKey": session_key, "requestId": request_id},
+                                f"abort_{uuid.uuid4().hex}", timeout_s=25, backend=self.name,
+                            )
+                            if not (result.get("cancelled") is True or result.get("aborted") is True):
+                                logger.warning("Dispatch-time abort unconfirmed request=%s", request_id)
                         logger.info(
                             "%s request via bridge: session=%s request_id=%s",
                             self.name,
@@ -335,6 +349,8 @@ class AgentBridgeBackend(AgentBackend):
                                 })
 
                             elif event.kind == AgentEventKind.ASSISTANT_DONE:
+                                if isinstance(event.raw, dict) and event.raw.get("end_reason") == "aborted":
+                                    result_queue.put({"event": "turn_cancelled"})
                                 # Capture actual upstream model if provided
                                 if event.model:
                                     nonlocal upstream_model

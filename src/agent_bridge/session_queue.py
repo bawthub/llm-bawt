@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -112,6 +112,7 @@ class SessionQueue:
         session_key: str,
         *,
         on_wait: Callable[[], None] | None = None,
+        on_cancel: Callable[[], Awaitable[None]] | None = None,
         wait_interval: float = 30.0,
         request_id: str | None = None,
     ):
@@ -152,8 +153,14 @@ class SessionQueue:
 
             task = asyncio.current_task()
             if task is not None:
+                self.clear_cancel_event(session_key)
                 self.set_active_task(session_key, task)
             yield
+        except asyncio.CancelledError:
+            # Also finalize callers cancelled while waiting for the session lock.
+            if on_cancel is not None:
+                await on_cancel()
+            raise
         finally:
             if not acquire_task.done():
                 acquire_task.cancel()
@@ -179,7 +186,11 @@ class SessionQueue:
         task = self._request_tasks.get((session_key, request_id))
         if task is None or task.done():
             return False
-        task.cancel()
+        if self._active_tasks.get(session_key) is task:
+            self.signal_cancel(session_key)
+        # Repeated cancellation must not interrupt terminal publication/cleanup.
+        if not task.cancelling():
+            task.cancel()
         return True
 
     def cancel_active(self, session_key: str) -> bool:

@@ -19,9 +19,10 @@ def test_mcp_resolution_replaces_placeholder_on_original_tool_row():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    from llm_bawt.service.turn_logs import TurnLog
     SQLModel.metadata.create_all(
         bind=engine,
-        tables=[ToolCallRecord.__table__, ToolCallResultPayloadRecord.__table__],
+        tables=[TurnLog.__table__, ToolCallRecord.__table__, ToolCallResultPayloadRecord.__table__],
     )
     calls = ToolCallStore(engine)
     calls.save_start(

@@ -22,7 +22,8 @@ from llm_bawt.service.turn_logs import (
 
 def _store():
     engine = create_engine("sqlite://")
-    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    from llm_bawt.service.tool_call_store import ToolCallRecord
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__, ToolCallRecord.__table__])
     store = TurnLogStore.__new__(TurnLogStore)
     store.engine = engine
     return store

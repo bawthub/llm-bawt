@@ -1,11 +1,9 @@
 """Tests for confirmed-start turn reaping (turn_logs.reap_other_open_turns).
 
-Invariant: when a new turn is CONFIRMED started by the SDK/bridge (first real
-output — see chat_streaming's confirmed-start hook), every OTHER still-open
-turn for the same bot is atomically closed as a timeout. This makes "at most
-one open turn per bot" self-healing: a zombie turn (dropped bridge, abort
-without finalize, server restart mid-turn) cannot outlive the next confirmed
-turn.
+On confirmed start, older abandoned ordinary turns are reaped atomically.
+TASK-952 excludes registered live workers and pending cancellation intent;
+new output is not proof those workers stopped. Reaped tool rows are settled
+in the same transaction. Review regressions cover these exclusions.
 
 Engine-backed against in-memory SQLite (RETURNING + partial-predicate UPDATE
 both supported) so the real SQL path is exercised without a live Postgres.
@@ -20,7 +18,8 @@ from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
 
 def _store():
     engine = create_engine("sqlite://")
-    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    from llm_bawt.service.tool_call_store import ToolCallRecord
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__, ToolCallRecord.__table__])
     store = TurnLogStore.__new__(TurnLogStore)  # bypass config-driven __init__
     store.engine = engine
     return store

@@ -38,6 +38,10 @@ class SessionBridge(ChangedFileLifecycleMixin):
         # Shared session queue — serializes sends per session and tracks
         # active tasks for abort support.
         self._session_queue = SessionQueue()
+        # Active request identity -> gateway run id. Never infer identity from
+        # the session after awaiting a remote abort (a sibling may have begun).
+        self._request_runs: dict[tuple[str, str], dict] = {}
+        self._abort_run_id_timeout_s = 5.0
         # When the live run stream ends without assistant text, poll history
         # briefly to recover replies produced by upstream provider fallback.
         self._history_reply_timeout_s = 45.0
@@ -231,7 +235,25 @@ class SessionBridge(ChangedFileLifecycleMixin):
                 await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
                 return
 
-        async with self._session_queue.lock(session_key):
+        cleanup_complete = False
+        request_key = (session_key, request_id)
+
+        async def on_cancel() -> None:
+            self._publisher.publish_run_done(request_id)
+            if not cleanup_complete:
+                self._discard_changed_file_request(request_id)
+                await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
+
+        async with self._session_queue.active(
+            session_key, request_id=request_id, on_cancel=on_cancel,
+        ):
+            run_state = {"run_id": None, "run_ready": asyncio.Event(), "abort_task": None}
+            self._request_runs[request_key] = run_state
+
+            def on_run_started(run_id: str) -> None:
+                run_state["run_id"] = run_id
+                run_state["run_ready"].set()
+
             event_seq = 0
             try:
                 # Clear any previous cancel signal before starting a new send
@@ -243,6 +265,7 @@ class SessionBridge(ChangedFileLifecycleMixin):
 
                 async for raw_event in self._ws_client.send_and_stream(
                     session_key, message, attachments=attachments,
+                    on_run_started=on_run_started,
                 ):
                     # Parse through ingest pipeline to get structured event
                     event = self._ingest.parse(raw_event, session_key)
@@ -332,8 +355,12 @@ class SessionBridge(ChangedFileLifecycleMixin):
                 self._publisher.publish_run_event(request_id, err_event)
                 self._publisher.publish_run_done(request_id)
             finally:
+                if self._request_runs.get(request_key) is run_state:
+                    self._request_runs.pop(request_key, None)
+                run_state["run_ready"].set()
                 self._discard_changed_file_request(request_id)
                 await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
+                cleanup_complete = True
 
     async def _handle_rpc_command(
         self, fields: dict, msg_id: str, async_redis
@@ -358,12 +385,10 @@ class SessionBridge(ChangedFileLifecycleMixin):
         logger.info("Handling RPC command: method=%s request_id=%s", method, request_id)
 
         try:
-            # If this is a chat.abort, signal the active send_and_stream to stop
-            # so the session lock is released and the next send can proceed.
             if method == "chat.abort":
-                params_session = params.get("sessionKey", "")
-                if params_session:
-                    self._ws_client.cancel_session(params_session)
+                payload = await self._abort_request(params)
+                self._publisher.publish_rpc_result(request_id, {"ok": True, **payload})
+                return
 
             # session.reset doesn't exist as a gateway-side RPC.  Intercept
             # it here so the frontend gets a deterministic SESSION_RESET
@@ -421,6 +446,65 @@ class SessionBridge(ChangedFileLifecycleMixin):
             self._publisher.publish_rpc_result(request_id, {"ok": False, "error": str(e)})
         finally:
             await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
+
+    async def _abort_request(self, params: dict) -> dict:
+        session_key = params.get("sessionKey", "")
+        target_request_id = params.get("requestId", "")
+        if (
+            not isinstance(session_key, str) or not session_key.strip()
+            or not isinstance(target_request_id, str) or not target_request_id.strip()
+        ):
+            raise ValueError("chat.abort requires sessionKey and requestId")
+        key = (session_key, target_request_id)
+        state = self._request_runs.get(key)
+        if state is None:
+            # Only queued requests are cancellable without a gateway runId.
+            cancelled = self._session_queue.cancel_request(session_key, target_request_id)
+            return {"aborted": cancelled, "requestId": target_request_id,
+                    "detail": "task_cancelled" if cancelled else "no_matching_request"}
+        if not state["run_id"]:
+            # chat.send may still be awaiting its ack. Never kill the local
+            # task while the gateway might have accepted an unidentified run.
+            try:
+                await asyncio.wait_for(
+                    state["run_ready"].wait(), timeout=self._abort_run_id_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "Gateway send acknowledgement is pending; retry request-scoped abort"
+                ) from None
+            if self._request_runs.get(key) is not state:
+                return {"aborted": False, "requestId": target_request_id,
+                        "detail": "no_matching_request"}
+            if not state["run_id"]:
+                raise RuntimeError("Gateway runId is unavailable; retry request-scoped abort")
+
+        async def abort_remote() -> dict:
+            response = await self._ws_client._request(
+                "chat.abort", {"sessionKey": session_key, "runId": state["run_id"]},
+            )
+            if not response.get("ok"):
+                raise RuntimeError(f"Gateway rejected request-scoped abort: {response.get('error')}")
+            payload = response.get("payload") or {}
+            if payload.get("aborted") is False:
+                raise RuntimeError("Gateway did not abort the requested run")
+            # The old run may have completed while the gateway RPC awaited.
+            # Never cancel the new session owner or its stream cancel event.
+            if self._request_runs.get(key) is state:
+                self._session_queue.cancel_request(session_key, target_request_id)
+            return {"aborted": True, "requestId": target_request_id,
+                    "detail": "run_aborted", "payload": payload}
+
+        if state["abort_task"] is None:
+            state["abort_task"] = asyncio.create_task(abort_remote())
+        task = state["abort_task"]
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            # A failed remote abort leaves the stream running and can be retried.
+            if state["abort_task"] is task:
+                state["abort_task"] = None
+            raise
 
     async def _reset_openclaw_session(self, session_key: str) -> bool:
         """Best-effort: ask the OpenClaw gateway to clear server-side context.

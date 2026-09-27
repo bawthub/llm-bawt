@@ -489,6 +489,11 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             _await_handled=_await_handled,
             _upstream_model=_upstream_model,
         )
+        from .turn_execution import TurnExecution, turn_executions
+        _turn_ctx.execution = TurnExecution(
+            turn_log_id, cancel_event, is_agent=is_agent_backend, store=self._turn_log_store,
+        )
+        turn_executions.register(_turn_ctx.execution)
         _turn_worker = TurnStreamWorker(_turn_ctx)
 
         # Announce turn kickoff to the unified SSE stream BEFORE the worker

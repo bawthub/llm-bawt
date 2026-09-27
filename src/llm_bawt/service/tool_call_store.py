@@ -208,6 +208,11 @@ class ToolCallStore:
         if self.engine is None:
             return None
         with Session(self.engine) as session:
+            # Serialize starts with parent termination, including late/replayed
+            # starts arriving after the terminal event.
+            from .turn_logs import TurnLog
+            parent = (session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+                      if turn_id else None)
             row = None
             if turn_id and call_id:
                 row = session.exec(
@@ -215,6 +220,11 @@ class ToolCallStore:
                     .where(ToolCallRecord.turn_id == turn_id)
                     .where(ToolCallRecord.call_id == call_id)
                 ).first()
+            if row is None and turn_id and tool_use_id:
+                row = session.exec(select(ToolCallRecord).where(
+                    ToolCallRecord.turn_id == turn_id,
+                    ToolCallRecord.tool_use_id == tool_use_id,
+                )).first()
             if row is None:
                 row = ToolCallRecord(turn_id=turn_id, call_id=call_id)
             row.bot_id = bot_id
@@ -226,6 +236,9 @@ class ToolCallStore:
             row.text_offset = text_offset
             row.tool_use_id = tool_use_id
             row.parent_tool_use_id = parent_tool_use_id
+            if parent is not None and parent.ended_at is not None and row.ended_at is None and row.result_text is None:
+                row.ended_at = parent.ended_at.replace(tzinfo=timezone.utc).timestamp()
+                row.result_complete = False
             session.add(row)
             session.commit()
             session.refresh(row)

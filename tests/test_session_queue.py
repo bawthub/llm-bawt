@@ -123,3 +123,52 @@ def test_uncontended_task_does_not_emit_queue_heartbeat() -> None:
         assert heartbeats == []
 
     asyncio.run(run())
+
+
+def test_repeated_request_cancel_does_not_interrupt_cleanup_or_signal_successor():
+    async def run():
+        queue = SessionQueue()
+        entered = asyncio.Event()
+        cleaning = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        successor_entered = asyncio.Event()
+        release_successor = asyncio.Event()
+        cancelled = []
+
+        async def on_cancel():
+            cancelled.append("first")
+            cleaning.set()
+            await release_cleanup.wait()
+
+        async def first_send():
+            async with queue.active("session", request_id="first", on_cancel=on_cancel):
+                entered.set()
+                await asyncio.Event().wait()
+
+        async def successor_send():
+            async with queue.active("session", request_id="second"):
+                successor_entered.set()
+                await release_successor.wait()
+
+        first = asyncio.create_task(first_send())
+        await entered.wait()
+        assert not queue.cancel_request("other-session", "first")
+        assert not queue.cancel_request("session", "unknown")
+        assert queue.cancel_request("session", "first")
+        await cleaning.wait()
+        assert queue.cancel_request("session", "first")
+        assert first.cancelling() == 1
+        assert queue.cancel_event("session").is_set()
+        second = asyncio.create_task(successor_send())
+        release_cleanup.set()
+        await asyncio.gather(first, return_exceptions=True)
+        await successor_entered.wait()
+        assert not queue.cancel_event("session").is_set()
+        assert not queue.cancel_request("session", "first")
+        assert not second.done()
+        assert cancelled == ["first"]
+        release_successor.set()
+        await second
+        assert queue._request_tasks == {}
+
+    asyncio.run(asyncio.wait_for(run(), timeout=5))

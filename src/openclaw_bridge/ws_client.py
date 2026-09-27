@@ -578,6 +578,7 @@ class OpenClawWsClient:
         *,
         attachments: list | None = None,
         timeout: float | None = None,
+        on_run_started: Callable[[str], None] | None = None,
     ) -> AsyncIterator[dict]:
         """Send a message via chat.send and yield raw WS events for the resulting run.
 
@@ -597,6 +598,10 @@ class OpenClawWsClient:
         cancel_event = self._session_cancel_events[session_key]
 
         try:
+            # Expose the exact acknowledged run before waiting for its first
+            # event, so callers can abort a silent/long-running gateway turn.
+            if on_run_started is not None:
+                on_run_started(run_id)
             deadline = (asyncio.get_event_loop().time() + timeout) if timeout else None
             while True:
                 # Check if session was cancelled (chat.abort)
