@@ -382,7 +382,7 @@ def test_worker_reports_denoising_progress_and_offload_mode(tmp_path) -> None:
     result = runner.render({"prompt": "p", "resolution": "480p", "aspect_ratio": "16:9", "duration": 5},
                            tmp_path / "out.mp4")
     assert result["offload_mode"] == "group"
-    assert len(seen) == NUM_INFERENCE_STEPS and '"step": 35' in seen[-1]
+    assert len(seen) == NUM_INFERENCE_STEPS and f'"step": {NUM_INFERENCE_STEPS}' in seen[-1]
 
     jobs = VideoJobs(tmp_path)
     jobs.jobs["out"] = {"status": "processing", "progress": 10}

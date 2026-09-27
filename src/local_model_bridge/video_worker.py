@@ -17,7 +17,16 @@ from typing import Any, Callable
 
 MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 FPS = 24
-NUM_INFERENCE_STEPS = 35
+# Official Wan 2.2 TI2V-5B sampling config (wan/configs/wan_ti2v_5B.py):
+# 50 steps, guide_scale 5.0, and the stock negative prompt. diffusers
+# defaults negative_prompt to "", which leaves CFG pushing toward exactly
+# what this prompt suppresses — renders came out oversaturated and blown out.
+NUM_INFERENCE_STEPS = 50
+NEGATIVE_PROMPT = (
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，"
+    "低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，"
+    "毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+)
 # Group offload streams leaf modules onto the GPU and prefetches the next one
 # on a side CUDA stream while the current one computes: near whole-component
 # speed without ever holding a whole component. Whole-component (model)
@@ -163,7 +172,7 @@ class WanPipelineRunner:
         progress = ProgressFile(destination, NUM_INFERENCE_STEPS)
         progress.write(0)
         kwargs = {
-            "prompt": job["prompt"], "height": height, "width": width,
+            "prompt": job["prompt"], "negative_prompt": NEGATIVE_PROMPT, "height": height, "width": width,
             "num_frames": num_frames, "num_inference_steps": NUM_INFERENCE_STEPS, "guidance_scale": 5.0,
             "callback_on_step_end": progress.callback,
         }
