@@ -21,8 +21,8 @@ No proxy code branches on `gpt-6-astra` or any other model identity.
 
 TASK-884: transport choice no longer controls liveness protection. Ordinary
 Responses HTTP streams (including Sol and API-key Responses adapters using the
-shared base) use the same first-event, productive-idle, and absolute deadlines
-below. The first-event budget includes waiting for HTTP headers. They keep their
+shared base) use the same first-event and productive-idle deadlines below.
+The first-event budget includes waiting for HTTP headers. They keep their
 existing non-Lite payloads and reconnect once over a fresh ordinary SSE stream
 only before output commitment. Underlying SDK automatic retries are disabled so
 the proxy owns the budget; HTTP/auth errors retain their existing classification
@@ -74,8 +74,14 @@ Each sampling attempt is bounded by the earliest applicable deadline:
 
 - 60 seconds to the first transport event;
 - 240 seconds between transport events;
-- 90 seconds without productive model progress; and
-- 240 seconds absolute wall time, regardless of incoming frames.
+- 90 seconds without productive model progress.
+
+There is no absolute response-duration cap. Productive text, reasoning, or tool
+argument streams may run beyond four minutes; the same idle bounds still apply
+if progress stops. This prevents large report-writing calls from being truncated
+while their arguments are still arriving. `tests/test_responses_long_progress.py`
+simulates ten minutes of productive text, reasoning, and tool arguments on both
+WebSocket and ordinary SSE, followed by either completion or a real idle stall.
 
 A stalled WebSocket attempt with no forwarded assistant output is closed and
 retried once over a fresh HTTPS/SSE stream. Before that retry, the proxy emits a
@@ -105,7 +111,7 @@ calls cannot reuse a lease. Token rotation cannot reuse an old authenticated soc
 At most 32 active leases and 32 idle entries are retained. Idle entries expire
 after 60 seconds; connect/pool waits are bounded at 15 seconds and sends at 60.
 The first event after `response.create` is bounded at 60 seconds; later event
-inactivity is bounded at 240 seconds, with the productive and absolute bounds
+inactivity is bounded at 240 seconds, with the productive-idle bound
 above applied independently. Astra gets one safe proxy retry. A fully silent
 WebSocket plus fallback is bounded near 120 seconds; lifecycle chatter plus
 fallback is bounded near 180 seconds, both below the bridge's 300-second SDK
@@ -152,7 +158,7 @@ remain outside this transport scope.
 ## TASK-872 verification and activation
 
 Hermetic coverage drives silent and endlessly chattering WebSocket/SSE streams,
-absolute-deadline streams that remain productive, successful fallback recovery,
+successful fallback recovery,
 fallback exhaustion, and stalls after reasoning/text/tool commitment. Bridge and
 frontend tests cover the structured status path and its transient bubble mapping.
 The exact command receipts live in TASK-872.

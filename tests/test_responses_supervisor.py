@@ -30,24 +30,20 @@ async def done():
     yield NS(type="response.completed", response=NS(usage=None, status="completed"))
 
 
-@pytest.mark.parametrize("phase", ["headers", "first", "productive", "absolute"])
+@pytest.mark.parametrize("phase", ["headers", "first", "productive"])
 def test_http_progress_bounds_close_stream(phase):
     async def run():
         async def chatter():
             while True:
                 await asyncio.sleep(.001)
                 yield NS(type="response.in_progress")
-        async def productive():
-            while True:
-                await asyncio.sleep(.001)
-                yield NS(type="response.output_text.delta", delta="x")
-        http = HTTPStream(chatter() if phase == "productive" else productive() if phase == "absolute" else silent())
+        http = HTTPStream(chatter() if phase == "productive" else silent())
         async def open_http():
             if phase == "headers":
                 await asyncio.sleep(10)
             return http
         stream = ResponsesSSEStream(open_http, first_event_timeout=.02,
-                                    productive_idle_timeout=.03, attempt_timeout=.06)
+                                    productive_idle_timeout=.03)
         try:
             with pytest.raises(ChatGPTEventTimeout) as error:
                 async for _ in stream:
@@ -68,7 +64,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
     from claude_code_bridge.proxy import responses_supervisor, retry
     monkeypatch.setattr(retry, "compute_backoff", lambda *a, **k: 0)
     monkeypatch.setattr(responses_supervisor, "ResponsesSSEStream", lambda opener, **kw: ResponsesSSEStream(
-        opener, first_event_timeout=.01, productive_idle_timeout=.015, attempt_timeout=.08, **kw))
+        opener, first_event_timeout=.01, productive_idle_timeout=.015, **kw))
 
     async def run():
         async def first_events():

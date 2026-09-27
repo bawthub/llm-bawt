@@ -38,7 +38,6 @@ PRODUCTIVE_DELTAS = {
 }
 TOOL_ITEM_TYPES = {"function_call", "custom_tool_call"}
 DEFAULT_PRODUCTIVE_IDLE_TIMEOUT = 90.0
-DEFAULT_ATTEMPT_TIMEOUT = 240.0
 
 
 def lite_request(body: dict, scope: str) -> dict:
@@ -124,12 +123,10 @@ class ChatGPTResponsesTransport:
     def __init__(self, *, idle_timeout: float = 240,
                  first_event_timeout: float = 60, keepalive: float = 60,
                  productive_idle_timeout: float = DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
-                 attempt_timeout: float = DEFAULT_ATTEMPT_TIMEOUT,
                  max_connections: int = 32, connector=connect):
         self.idle_timeout = idle_timeout
         self.first_event_timeout = first_event_timeout
         self.productive_idle_timeout = productive_idle_timeout
-        self.attempt_timeout = attempt_timeout
         self.keepalive = keepalive
         self.max_connections = max_connections
         self.connector = connector
@@ -339,6 +336,8 @@ class ChatGPTStream:
             if not self.event_seen
             else self.last_transport_activity_at + self.owner.idle_timeout
         )
+        # Do not cap total duration: large tool arguments can legitimately
+        # take minutes to stream. Only absence of progress is a stall.
         candidates = [
             (transport_deadline, "first" if not self.event_seen else "next"),
             (
@@ -346,7 +345,6 @@ class ChatGPTStream:
                 + self.owner.productive_idle_timeout,
                 "productive",
             ),
-            (self.started_at + self.owner.attempt_timeout, "absolute"),
         ]
         return min(candidates, key=lambda candidate: candidate[0])
 
@@ -402,8 +400,6 @@ class ChatGPTStream:
                         "attempt": self.attempt,
                         "transport": self.transport,
                     })
-            elif now >= self.started_at + self.owner.attempt_timeout:
-                raise self._timeout("absolute", now)
             elif now >= (
                 self.last_productive_activity_at
                 + self.owner.productive_idle_timeout

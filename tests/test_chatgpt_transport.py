@@ -185,7 +185,6 @@ def test_nonproductive_chatter_hits_productive_progress_deadline(kind):
             first_event_timeout=.1,
             idle_timeout=.2,
             productive_idle_timeout=.025,
-            attempt_timeout=.2,
         )
         stream = await client.open(**kwargs())
 
@@ -217,43 +216,6 @@ def test_nonproductive_chatter_hits_productive_progress_deadline(kind):
             await stream.close()
             await client.close()
         assert socket.close.await_count == 1
-
-    asyncio.run(run())
-
-
-def test_productive_stream_still_hits_absolute_attempt_deadline():
-    async def run():
-        socket = Socket()
-        client = ChatGPTResponsesTransport(
-            connector=AsyncMock(return_value=socket),
-            first_event_timeout=.1,
-            idle_timeout=.2,
-            productive_idle_timeout=.2,
-            attempt_timeout=.025,
-        )
-        stream = await client.open(**kwargs())
-
-        async def chatter():
-            while True:
-                await socket.events.put({
-                    "type": "response.output_text.delta",
-                    "delta": "x",
-                })
-                await asyncio.sleep(.002)
-
-        producer = asyncio.create_task(chatter())
-        try:
-            with pytest.raises(ChatGPTEventTimeout) as error:
-                while True:
-                    await anext(stream)
-            assert error.value.phase == "absolute"
-            assert error.value.elapsed_seconds >= .02
-            assert error.value.productive_idle_seconds < .02
-        finally:
-            producer.cancel()
-            await asyncio.gather(producer, return_exceptions=True)
-            await stream.close()
-            await client.close()
 
     asyncio.run(run())
 
@@ -611,7 +573,6 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
             first_event_timeout=.1,
             idle_timeout=.2,
             productive_idle_timeout=.025,
-            attempt_timeout=.2,
         )
         body = {
             "model": "openai_chatgpt/gpt-6-astra", "max_tokens": 128,
@@ -684,7 +645,6 @@ def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):
             first_event_timeout=.1,
             idle_timeout=.2,
             productive_idle_timeout=.025,
-            attempt_timeout=.2,
         )
         request_client = NS(post=AsyncMock(return_value=HTTPStream()))
         adapter._http_client = NS()

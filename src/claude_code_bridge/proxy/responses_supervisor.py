@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 from .chatgpt_transport import (
     ChatGPTStream,
-    DEFAULT_ATTEMPT_TIMEOUT,
     DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
 )
 
@@ -25,12 +24,10 @@ class ResponsesSSEStream(ChatGPTStream):
     """
 
     def __init__(self, opener, *, context=None, first_event_timeout=60.0,
-                 productive_idle_timeout=DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
-                 attempt_timeout=DEFAULT_ATTEMPT_TIMEOUT):
+                 productive_idle_timeout=DEFAULT_PRODUCTIVE_IDLE_TIMEOUT):
         limits = SimpleNamespace(
             first_event_timeout=first_event_timeout, idle_timeout=240.0,
             productive_idle_timeout=productive_idle_timeout,
-            attempt_timeout=attempt_timeout,
         )
         super().__init__(limits, None, SimpleNamespace(turn_state=None), context=context)
         self._opener = opener
