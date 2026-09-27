@@ -22,6 +22,7 @@ import copy
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterable
 
 from agent_bridge.events import AgentEventKind
@@ -110,6 +111,10 @@ class ClaudeStreamMixin:
             )
         return seq, attempt, last_error, already_surfaced
 
+    def _uses_claude_oauth_gateway(self) -> bool:
+        """Keep standalone env/file credentials on the legacy direct path."""
+        return bool(self._proxy_base_url and os.environ.get("LLM_BAWT_API_URL"))
+
     def _build_sdk_env(
         self,
         *,
@@ -193,10 +198,14 @@ class ClaudeStreamMixin:
                 model, self._proxy_base_url, effective_subagent_model,
             )
         else:
-            # Read fresh token on each request (auto-refresh from credentials file)
+            # Keep the CLI in native OAuth mode (models, beta headers, signed
+            # thinking, tools unchanged). The loopback transport replaces this
+            # bootstrap bearer on EVERY HTTP request, including after tools.
             fresh_token = _get_fresh_oauth_token(force_refresh=force_refresh)
             if fresh_token:
                 sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = fresh_token
+            if self._uses_claude_oauth_gateway():
+                sdk_env["ANTHROPIC_BASE_URL"] = f"{self._proxy_base_url}/claude-oauth"
         return sdk_env
 
     def _build_agent_options(

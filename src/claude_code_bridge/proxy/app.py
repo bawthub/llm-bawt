@@ -17,6 +17,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from .adapters import close_all, start_all
+from .claude_oauth import ClaudeOAuthGateway, router as claude_oauth_router
 from .routes import router as messages_router
 from .request_context import ProxyStatusCallback
 
@@ -27,9 +28,11 @@ logger = logging.getLogger(__name__)
 async def _lifespan(app: FastAPI):
     logger.info("Proxy app starting")
     await start_all()
+    app.state.claude_oauth_gateway = ClaudeOAuthGateway()
     try:
         yield
     finally:
+        await app.state.claude_oauth_gateway.close()
         await close_all()
         logger.info("Proxy app shutting down")
 
@@ -50,6 +53,7 @@ def create_app(status_callback: ProxyStatusCallback | None = None) -> FastAPI:
     )
     app.state.proxy_status_callback = status_callback
     app.include_router(messages_router)
+    app.include_router(claude_oauth_router)
 
     @app.get("/healthz")
     async def healthz() -> dict:

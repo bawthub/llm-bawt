@@ -12,7 +12,7 @@ of truth; consumers:
 
 * the ``/v1/usage`` Claude adapter (same process — calls :func:`load_usage_token`),
 * the claude-code bridge (broker endpoint ``GET /v1/providers/claude/token``
-  with an in-memory cache — no credential bind mounts at all).
+  on each native inference request — no token cache or credential bind mounts).
 
 One-time cutover: on first load, if the DB row has no bundle but the legacy
 file exists (:func:`claude_credentials_path`), the file is imported into the
@@ -36,6 +36,7 @@ DB secret it is stored as the bare bundle (``accessToken``/``refreshToken``/
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -285,7 +286,9 @@ def _refresh_upstream(bundle: dict) -> dict:
     }
 
 
-def _refresh_serialized(*, buffer_ms: int, force: bool = False) -> dict | None:
+def _refresh_serialized(
+    *, buffer_ms: int, force: bool = False, rejected_token_sha256: str | None = None,
+) -> dict | None:
     """Refresh + persist the bundle under the lock.
 
     Re-loads inside the lock and skips the upstream call if another caller
@@ -296,6 +299,15 @@ def _refresh_serialized(*, buffer_ms: int, force: bool = False) -> dict | None:
         raw, bundle = _load()
         if not bundle:
             return None
+        # A 401 refers to the token used by ONE request, not necessarily the
+        # current bundle. Compare under the same lock as rotation: concurrent
+        # rejected-A callers must reuse B, not each rotate B -> C -> D.
+        if force and rejected_token_sha256:
+            current_hash = hashlib.sha256(
+                str(bundle.get("accessToken") or "").encode()
+            ).hexdigest()
+            if current_hash != rejected_token_sha256:
+                force = False
         if not force and not _expired(bundle.get("expiresAt"), buffer_ms=buffer_ms):
             return bundle  # someone else refreshed while we waited
         try:
@@ -312,11 +324,14 @@ def _refresh_serialized(*, buffer_ms: int, force: bool = False) -> dict | None:
         return refreshed
 
 
-def get_access_token(*, force_refresh: bool = False) -> UsageToken:
+def get_access_token(
+    *, force_refresh: bool = False, rejected_token_sha256: str | None = None,
+) -> UsageToken:
     """Resolve the app-owned Claude access token.
 
-    Refreshes (serialized) when expired-or-near-expiry, or unconditionally
-    with ``force_refresh`` (e.g. a reader got a 401).
+    Refreshes when near expiry or forced. A reader recovering from a 401
+    supplies the rejected token's SHA-256 so an already-rotated bundle is
+    reused instead of revoking tokens held by other concurrent requests.
     """
     raw, bundle = _load()
     if not bundle:
@@ -326,7 +341,10 @@ def get_access_token(*, force_refresh: bool = False) -> UsageToken:
     needs = force_refresh or _expired(bundle.get("expiresAt"), buffer_ms=_REFRESH_BUFFER_MS)
     if needs:
         try:
-            bundle = _refresh_serialized(buffer_ms=_REFRESH_BUFFER_MS, force=force_refresh) or bundle
+            bundle = _refresh_serialized(
+                buffer_ms=_REFRESH_BUFFER_MS, force=force_refresh,
+                rejected_token_sha256=rejected_token_sha256,
+            ) or bundle
             expired = _expired(bundle.get("expiresAt"))
         except Exception as e:  # noqa: BLE001 — fall back to existing token
             logger.warning("Failed to refresh Claude token: %s", e)

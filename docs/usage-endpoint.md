@@ -88,6 +88,41 @@ so it never lapses even when idle). Consumers are read-only:
 The bridge never refreshes — the old dual-login (`claude-sub` + `claude-usage`)
 and its refresh-rotation race are gone.
 
+### TASK-845: recover rotation inside an active native Claude turn
+
+TASK-636 moved the authoritative bundle to the encrypted provider connection
+row; the app remains the sole refresher. TASK-671 fetches a fresh token when
+starting a turn, but that token can be revoked while the SDK is executing tools.
+Restarting/replaying the whole turn is unsafe once tools or text have run.
+
+With the bridge's loopback server and app broker configured, native Claude SDK
+requests now pass through `/claude-oauth/v1/messages` (also `count_tokens`).
+This is a byte-preserving HTTP gateway, **not** a Responses API translator:
+model IDs, beta headers, signed thinking and the SDK's tool loop remain native.
+
+- Read the broker token for **each HTTP request**, including requests after tools.
+- On an HTTP 401, ask the app for recovery using
+  `force=true&rejected_token_sha256=<digest>`. Under its refresh lock, the app
+  reuses a newer token if one already exists; only the current rejected token
+  triggers another rotation. Concurrent rejected-A callers therefore reuse B.
+- Retry that rejected HTTP request at most once, before any response is
+  forwarded. Never retry a partial stream or restart the SDK turn. Repeated
+  401s retain the existing terminal credential-error/reconnect contract.
+- Broker outage does not silently use an old bootstrap bearer. The gateway
+  reports unavailability. Deployments without an app broker, or with the
+  loopback proxy explicitly disabled, retain the legacy direct path (and its
+  startup-only recovery limitation).
+
+Activation requires app reload **before** the explicitly approved bridge
+reload, so conditional refresh is present before the gateway uses it. Source
+changes alone do not update either already-running process. No dependency or
+image rebuild is needed.
+
+Verification: `test_claude_oauth_rotation.py`, `test_claude_oauth_gateway.py`,
+and the opt-in `RUN_CLAUDE_OAUTH_SDK_PROBE=1` test in
+`test_claude_oauth_gateway_sdk.py` (installed CLI, fake upstream, isolated HOME,
+one local Read; no live provider traffic/credentials or bot sessions).
+
 ## Relevant environment variables
 
 | Variable | Default | Purpose |

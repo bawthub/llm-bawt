@@ -29,3 +29,25 @@ def test_confirmed_401_force_fetches_broker(monkeypatch):
 
     assert helpers._get_fresh_oauth_token(force_refresh=True) == "token-b"
     assert calls == [True]
+
+
+def test_conditional_recovery_sends_digest_not_bearer(monkeypatch):
+    import hashlib
+    import httpx
+
+    digest = hashlib.sha256(b"rejected-bearer").hexdigest()
+    captured = []
+
+    def get(url, **kwargs):
+        captured.append((url, kwargs))
+        return httpx.Response(200, json={"access_token": "current", "expires_at": 2000})
+
+    monkeypatch.setenv("LLM_BAWT_API_URL", "http://app-fixture")
+    monkeypatch.setenv("BRIDGE_CLAUDE_TOKEN_SECRET", "guard-fixture")
+    monkeypatch.setattr(helpers.httpx, "get", get)
+    assert helpers._fetch_broker_token(force=True, rejected_token_sha256=digest) == ("current", 2000)
+    url, kwargs = captured[0]
+    assert url == "http://app-fixture/v1/providers/claude/token"
+    assert kwargs["params"] == {"force": "true", "rejected_token_sha256": digest}
+    assert kwargs["headers"] == {"X-Bridge-Token": "guard-fixture"}
+    assert "rejected-bearer" not in str(captured)

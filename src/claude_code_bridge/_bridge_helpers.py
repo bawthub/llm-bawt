@@ -245,10 +245,13 @@ def _token_expired_or_stale(expires_at: int | None) -> bool:
     return (now_ms + _REFRESH_BUFFER_MS) >= int(expires_at)
 
 
-def _fetch_broker_token(*, force: bool = False) -> tuple[str | None, int | None]:
-    """Ask the app for the current access token (it refreshes if needed).
+def _fetch_broker_token(
+    *, force: bool = False, rejected_token_sha256: str | None = None,
+) -> tuple[str | None, int | None]:
+    """Read the app-owned token; optionally recover a specific rejected token.
 
-    Returns ``(token, expires_at)`` so the caller can populate the cache.
+    The digest lets the sole refresher reuse a newer generation under its lock.
+    No bearer/refresh token is placed in a query string or log.
     """
     api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
     if not api_url:
@@ -257,10 +260,13 @@ def _fetch_broker_token(*, force: bool = False) -> tuple[str | None, int | None]
     secret = os.environ.get("BRIDGE_CLAUDE_TOKEN_SECRET")
     if secret:
         headers["X-Bridge-Token"] = secret
+    params = {"force": "true"} if force else {}
+    if force and rejected_token_sha256:
+        params["rejected_token_sha256"] = rejected_token_sha256
     try:
         resp = httpx.get(
             f"{api_url}/v1/providers/claude/token",
-            params={"force": "true"} if force else None,
+            params=params or None,
             headers=headers,
             timeout=25.0,  # a broker-side upstream refresh can take ~15s
         )

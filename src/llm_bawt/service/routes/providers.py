@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
@@ -224,13 +224,17 @@ async def disconnect(provider_id: str):
 
 # --- Claude token broker (TASK-635) -----------------------------------------
 @router.get("/v1/providers/claude/token")
-async def claude_access_token(request: Request, force: bool = False):
+async def claude_access_token(
+    request: Request,
+    force: bool = False,
+    rejected_token_sha256: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+):
     """Internal: hand a reader the current app-owned Claude access token.
 
-    The claude-code bridge calls this when its read-only view of the bundle
-    looks stale (or with ``?force=true`` after a 401). The app is the SOLE
-    refresher of the underlying rotate-on-use refresh chain — readers never
-    refresh. Same trust model as the git-credential endpoint above: internal
+    The claude-code bridge reads this per native inference request. After a
+    401 it supplies ``force=true`` and ``rejected_token_sha256`` so an already
+    rotated token is reused. The app is the SOLE refresher of the rotate-on-use
+    chain — readers never refresh. Same trust model as git credentials: internal
     network only; if ``BRIDGE_CLAUDE_TOKEN_SECRET`` is set we additionally
     require it via the ``X-Bridge-Token`` header for defense in depth.
     """
@@ -240,7 +244,9 @@ async def claude_access_token(request: Request, force: bool = False):
     if expected and request.headers.get("X-Bridge-Token") != expected:
         raise HTTPException(status_code=401, detail="bad bridge token")
 
-    result = await run_in_threadpool(get_access_token, force_refresh=force)
+    result = await run_in_threadpool(
+        get_access_token, force_refresh=force, rejected_token_sha256=rejected_token_sha256,
+    )
     if result.token is None:
         raise HTTPException(status_code=503, detail="no Claude credential installed")
     return {

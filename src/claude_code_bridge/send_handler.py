@@ -867,8 +867,8 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             latest_stream_usage=live_usage.stream_usage,
                         )
 
-                        # 1) Direct-Claude auth failure with no model/tool side
-                        #    effects → force-fetch the app broker and retry once.
+                        # 1) Legacy direct path only: the OAuth gateway already
+                        #    owns request-level recovery; never replay its turn.
                         auth_failure = (
                             e.credential_error
                             if isinstance(e, TerminalSDKResultError)
@@ -876,7 +876,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         )
                         if auth_retry.claim(
                             is_auth_failure=auth_failure,
-                            direct_anthropic=not use_proxy,
+                            direct_anthropic=not use_proxy and not self._uses_claude_oauth_gateway(),
                             model_side_effects=model_side_effects,
                         ):
                             logger.warning(
