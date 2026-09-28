@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     media_type       TEXT NOT NULL DEFAULT 'video',
     prompt           TEXT NOT NULL,
     revised_prompt   TEXT,
+    original_prompt  TEXT,
+    negative_prompt  TEXT,
     provider         TEXT NOT NULL DEFAULT 'xai',
     model            TEXT NOT NULL DEFAULT 'grok-imagine-video',
     aspect_ratio     TEXT DEFAULT '16:9',
@@ -47,6 +49,13 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     completed_at     TIMESTAMPTZ
 )
 """
+
+# Columns added after the table first shipped; CREATE TABLE IF NOT EXISTS
+# never alters an existing table.
+ADD_COLUMNS_SQL = [
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS original_prompt TEXT",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN IF NOT EXISTS negative_prompt TEXT",
+]
 
 CREATE_INDEXES_SQL = [
     f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_status ON {TABLE_NAME}(status)",
@@ -84,6 +93,8 @@ class MediaGenerationStore:
         """Create the media_generations table if it doesn't exist."""
         def bootstrap(conn) -> None:
             conn.execute(text(CREATE_TABLE_SQL))
+            for column_sql in ADD_COLUMNS_SQL:
+                conn.execute(text(column_sql))
             for idx_sql in CREATE_INDEXES_SQL:
                 conn.execute(text(idx_sql))
 

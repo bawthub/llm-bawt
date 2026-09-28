@@ -34,6 +34,7 @@ from .prompt_default_loaders import (
     load_global_recall_guidance,
     load_history_summarization_batch,
     load_history_summarization_single,
+    load_media_prompt_expansion_video,
     load_memory_extraction_fact,
     load_memory_extraction_summary,
     load_memory_extraction_update,
@@ -416,6 +417,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "work). No placeholders — the transcript is passed as a separate "
                 "user message, so the body is used verbatim (never .format()-ed). "
                 "Bot-scoped overrides supported via scope_type=bot."
+            ),
+        },
+    ),
+    "media.prompt_expansion.video": PromptDefinition(
+        key="media.prompt_expansion.video",
+        title="Video Prompt Expansion",
+        category="media",
+        required_vars=("prompt", "duration", "aspect_ratio"),
+        loader=load_media_prompt_expansion_video,
+        metadata={
+            "notes": (
+                "Studio's magic button (TASK-958) sends this to the global "
+                "maintenance_model to turn a short idea into a detailed "
+                "text-to-video prompt. {prompt} is the user's text, {duration} "
+                "the clip seconds, {aspect_ratio} e.g. 16:9."
             ),
         },
     ),

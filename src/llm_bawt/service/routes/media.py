@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import mimetypes
 import uuid
 from datetime import datetime, timezone
 
@@ -33,6 +34,8 @@ from ...media.schemas import (
     MediaOutput,
     MediaProviderCapabilitiesResponse,
     MediaProviderListResponse,
+    PromptExpansionRequest,
+    PromptExpansionResponse,
 )
 from ...media.storage import MediaStorage
 from ...utils.db import get_shared_engine
@@ -126,6 +129,8 @@ def _row_to_response(row: dict) -> MediaGenerationResponse:
         status=row["status"],
         media_type=row["media_type"],
         prompt=row["prompt"],
+        original_prompt=row.get("original_prompt"),
+        negative_prompt=row.get("negative_prompt"),
         revised_prompt=row.get("revised_prompt"),
         progress=row.get("progress", 0),
         outputs=outputs,
@@ -355,6 +360,39 @@ async def remove_local_video_model():
     return await _get_video_client("local-video").remove_model()
 
 
+def _original_prompt(request: MediaGenerationRequest) -> str | None:
+    """Keep the pre-expansion text only when it differs from what was sent."""
+    original = (request.original_prompt or "").strip()
+    return original if original and original != request.prompt.strip() else None
+
+
+@router.post("/v1/media/prompts/expand", response_model=PromptExpansionResponse)
+async def expand_media_prompt(request: PromptExpansionRequest):
+    """Rewrite a short idea into a detailed prompt with the registry template
+    and the global maintenance_model. Nothing is stored; Studio shows the result
+    for editing and sends it back with ``original_prompt`` on submit."""
+    from ...media.prompt_expansion import PromptExpansionError, expand_prompt
+    from .llm import complete_utility
+
+    try:
+        expanded = await asyncio.to_thread(
+            expand_prompt,
+            prompt=request.prompt,
+            media_type=request.media_type,
+            duration=request.duration,
+            aspect_ratio=request.aspect_ratio,
+            complete=complete_utility,
+        )
+    except PromptExpansionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return PromptExpansionResponse(
+        prompt=expanded.prompt,
+        original_prompt=expanded.original_prompt,
+        model=expanded.model,
+        template_key=expanded.template_key,
+    )
+
+
 @router.post("/v1/media/generations", response_model=MediaGenerationResponse)
 async def create_generation(request: MediaGenerationRequest):
     """Submit a provider-routed media generation job."""
@@ -410,6 +448,9 @@ async def create_generation(request: MediaGenerationRequest):
             raise HTTPException(status_code=409, detail="A measured local video profile is required")
     elif request.calibration_generation is not None:
         raise HTTPException(status_code=400, detail="Calibration is only available for local video")
+    negative_prompt = (request.negative_prompt or "").strip() or None
+    if negative_prompt and not media_provider_registry.capabilities(provider).negative_prompt:
+        raise HTTPException(status_code=400, detail=f"{provider} does not support a negative prompt")
 
     gen_id = _gen_id()
     store.insert({
@@ -417,6 +458,8 @@ async def create_generation(request: MediaGenerationRequest):
         "status": "pending",
         "media_type": request.media_type,
         "prompt": request.prompt,
+        "original_prompt": _original_prompt(request),
+        "negative_prompt": negative_prompt,
         "provider": provider,
         "model": model,
         "aspect_ratio": aspect_ratio,
@@ -458,6 +501,7 @@ async def create_generation(request: MediaGenerationRequest):
                 num_outputs=request.num_outputs,
                 **({"calibration_generation": request.calibration_generation}
                    if request.calibration_generation is not None else {}),
+                **({"negative_prompt": negative_prompt} if negative_prompt else {}),
             )
             store.update(gen_id, {
                 "status": result.status,
@@ -630,5 +674,12 @@ async def serve_thumbnail(gen_id: str):
     return Response(
         content=data,
         status_code=200,
-        media_type=row.get("mime_type") or "image/jpeg",
+        media_type=thumbnail_mime_type(thumb_path),
     )
+
+
+def thumbnail_mime_type(thumb_path: str) -> str:
+    """The thumbnail's own type. A video's row mime is video/mp4, but its poster
+    frame is a JPEG; Safari refuses to paint an <img> labelled video/mp4."""
+    guessed, _ = mimetypes.guess_type(thumb_path)
+    return guessed if guessed and guessed.startswith("image/") else "image/jpeg"

@@ -27,6 +27,14 @@ NEGATIVE_PROMPT = (
     "低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，"
     "毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 )
+
+
+def negative_prompt_for(extra: str | None) -> str:
+    """Wan's stock negative prompt plus the user's additions, never replacing it."""
+    extra = (extra or "").strip()
+    return f"{NEGATIVE_PROMPT}，{extra}" if extra else NEGATIVE_PROMPT
+
+
 # Group offload streams leaf modules onto the GPU and prefetches the next one
 # on a side CUDA stream while the current one computes: near whole-component
 # speed without ever holding a whole component. Whole-component (model)
@@ -172,7 +180,7 @@ class WanPipelineRunner:
         progress = ProgressFile(destination, NUM_INFERENCE_STEPS)
         progress.write(0)
         kwargs = {
-            "prompt": job["prompt"], "negative_prompt": NEGATIVE_PROMPT, "height": height, "width": width,
+            "prompt": job["prompt"], "negative_prompt": negative_prompt_for(job.get("negative_prompt")), "height": height, "width": width,
             "num_frames": num_frames, "num_inference_steps": NUM_INFERENCE_STEPS, "guidance_scale": 5.0,
             "callback_on_step_end": progress.callback,
         }

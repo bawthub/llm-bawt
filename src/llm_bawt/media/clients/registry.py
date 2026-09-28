@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
+from ..gpu_profile import CALIBRATION_PROFILE
 from .base import MediaClient
 from .grok_media import GrokMediaClient
 from .local_video import LocalVideoClient
@@ -25,6 +26,10 @@ class MediaProviderCapabilities:
     resolutions: dict[str, tuple[str, ...]] = field(default_factory=dict)
     default_aspect_ratios: dict[str, str] = field(default_factory=dict)
     default_resolutions: dict[str, str] = field(default_factory=dict)
+    durations: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    default_durations: dict[str, int] = field(default_factory=dict)
+    # Accepts `negative_prompt` (things to avoid) on generate().
+    negative_prompt: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -131,6 +136,8 @@ def build_default_registry() -> MediaProviderRegistry:
             },
             default_aspect_ratios={"image": "2:3", "video": "16:9"},
             default_resolutions={"image": "1k", "video": "720p"},
+            durations={"video": (3, 5, 8, 10, 15)},
+            default_durations={"video": 5},
         ),
         GrokMediaClient,
         aliases=("xai",),
@@ -142,11 +149,17 @@ def build_default_registry() -> MediaProviderRegistry:
             media_types=("video",),
             default_models={"video": "wan2.2-ti2v-5b"},
             models={"video": ("wan2.2-ti2v-5b",)},
-            image_input=True,
-            aspect_ratios={"video": ("16:9", "9:16", "1:1")},
-            resolutions={"video": ("480p", "720p")},
-            default_aspect_ratios={"video": "16:9"},
-            default_resolutions={"video": "480p"},
+            # Wan runs only the measured calibration profile; the submit gate
+            # (gpu_profile.require_calibration_profile) rejects anything else,
+            # so advertise exactly that and nothing the UI could pick wrongly.
+            image_input=False,
+            aspect_ratios={"video": (CALIBRATION_PROFILE["aspect_ratio"],)},
+            resolutions={"video": (CALIBRATION_PROFILE["resolution"],)},
+            default_aspect_ratios={"video": CALIBRATION_PROFILE["aspect_ratio"]},
+            default_resolutions={"video": CALIBRATION_PROFILE["resolution"]},
+            durations={"video": (CALIBRATION_PROFILE["duration"],)},
+            default_durations={"video": CALIBRATION_PROFILE["duration"]},
+            negative_prompt=True,
         ),
         LocalVideoClient,
     )

@@ -487,3 +487,36 @@ def test_rejected_calibration_evidence_still_delivers_video(monkeypatch, tmp_pat
 
     asyncio.run(exercise())
     engine.dispose()
+
+
+def test_negative_prompt_extends_wan_default_and_flows_to_the_bridge() -> None:
+    from local_model_bridge.video_worker import NEGATIVE_PROMPT, negative_prompt_for
+
+    # User text is appended to the official default, never replaces it.
+    assert negative_prompt_for(None) == NEGATIVE_PROMPT
+    assert negative_prompt_for("   ") == NEGATIVE_PROMPT
+    assert negative_prompt_for(" text, logos ") == f"{NEGATIVE_PROMPT}，text, logos"
+    # The job file is the request dump, so the field reaches the worker.
+    assert VideoRequest(prompt="dog", negative_prompt="cats").model_dump()["negative_prompt"] == "cats"
+    assert media_provider_registry.capabilities("local-video").negative_prompt is True
+    assert media_provider_registry.capabilities("grok").negative_prompt is False
+
+    bodies: list[bytes] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        return httpx.Response(200, json={"id": "job1", "status": "processing", "progress": 0})
+
+    async def exercise() -> None:
+        client = LocalVideoClient(base_url="http://local-model-bridge:8685")
+        await client.close()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=client.base_url)
+        try:
+            await client.generate("dog", "video", "wan2.2-ti2v-5b", negative_prompt="cats")
+            await client.generate("dog", "video", "wan2.2-ti2v-5b")
+        finally:
+            await client.close()
+
+    asyncio.run(exercise())
+    assert b'"negative_prompt":"cats"' in bodies[0].replace(b" ", b"")
+    assert b"negative_prompt" not in bodies[1]

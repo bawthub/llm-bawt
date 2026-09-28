@@ -34,6 +34,8 @@ MAX_PENDING_VIDEO_JOBS = 8
 
 class VideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
+    # Extra things to avoid; the worker appends them to Wan's stock negative prompt.
+    negative_prompt: str | None = Field(default=None, max_length=2000)
     source_image: str | None = None
     aspect_ratio: str = "16:9"
     duration: float = Field(default=5, ge=1, le=15)

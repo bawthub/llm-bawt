@@ -16,9 +16,19 @@ def raw_completion(request: RawCompletionRequest):
     An explicit model selects a direct API client from the catalog. Without a
     model, the global maintenance_model setting selects the job's API client.
     """
+    return complete_utility(request)
+
+
+def complete_utility(request: RawCompletionRequest) -> RawCompletionResponse:
+    """Run one botless utility completion; the single implementation behind
+    ``/v1/llm/complete`` and in-process callers such as media prompt expansion.
+
+    Raises HTTPException: 503 when no maintenance model is configured, 422 when
+    the model has no direct API client, 500 when the model call fails.
+    """
     import time
     service = get_service()
-    
+
     from ...runtime_settings import resolve_job_model
 
     # The global maintenance_model is the source of truth for utility calls.
@@ -32,15 +42,13 @@ def raw_completion(request: RawCompletionRequest):
 
     try:
         start = time.perf_counter()
-        
-        # Build messages as Message objects (required by client.query)
+
         from ...models.message import Message
         messages = []
         if request.system:
             messages.append(Message(role="system", content=request.system))
         messages.append(Message(role="user", content=request.prompt))
-        
-        # Query the model directly
+
         response = client.query(
             messages=messages,
             max_tokens=request.max_tokens,
@@ -52,17 +60,15 @@ def raw_completion(request: RawCompletionRequest):
             raise ValueError("Model returned no usable completion")
 
         elapsed_ms = (time.perf_counter() - start) * 1000
-        
-        # Estimate tokens
         tokens = len(response) // 4 if response else 0
-        
+
         return RawCompletionResponse(
             content=response,
             model=model_alias,
             tokens=tokens,
             elapsed_ms=elapsed_ms,
         )
-        
+
     except Exception as e:
         log.error(f"Raw completion failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -89,3 +89,9 @@ def load_self_recap_system() -> str:
     from .mcp_server.recap_prompt import RECAP_SYSTEM_PROMPT
 
     return RECAP_SYSTEM_PROMPT
+
+
+def load_media_prompt_expansion_video() -> str:
+    from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
+
+    return VIDEO_PROMPT_EXPANSION_TEMPLATE

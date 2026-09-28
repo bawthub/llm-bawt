@@ -11,6 +11,15 @@ class MediaGenerationRequest(BaseModel):
     """Request body for POST /v1/media/generations."""
 
     prompt: str = Field(..., description="Text prompt describing the desired media")
+    original_prompt: Optional[str] = Field(
+        default=None,
+        description="User's text before prompt expansion; set only when `prompt` was expanded",
+    )
+    negative_prompt: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Things to avoid; only for providers whose capabilities set negative_prompt",
+    )
     provider: str = Field(
         default="grok",
         description="Stable provider ID. Defaults to grok for compatibility.",
@@ -55,6 +64,22 @@ class MediaGenerationRequest(BaseModel):
     )
 
 
+class PromptExpansionRequest(BaseModel):
+    """Request body for POST /v1/media/prompts/expand."""
+
+    prompt: str = Field(..., min_length=1, description="The user's short prompt")
+    media_type: str = Field(default="video", description="Selects media.prompt_expansion.<media_type>")
+    duration: Optional[float] = Field(default=None, ge=1, le=15)
+    aspect_ratio: Optional[str] = Field(default=None)
+
+
+class PromptExpansionResponse(BaseModel):
+    prompt: str = Field(..., description="Expanded, model-ready prompt")
+    original_prompt: str
+    model: str = Field(..., description="Model that expanded it (global maintenance_model)")
+    template_key: str
+
+
 class MediaOutput(BaseModel):
     """A single generated media output."""
 
@@ -75,7 +100,9 @@ class MediaGenerationResponse(BaseModel):
     id: str = Field(..., description="Generation ID (prefixed with 'gen_')")
     status: str = Field(..., description="Job status: pending|processing|completed|failed")
     media_type: str = Field(..., description="Type of media: video or image")
-    prompt: str = Field(..., description="Original prompt")
+    prompt: str = Field(..., description="Prompt sent to the provider")
+    original_prompt: Optional[str] = Field(default=None, description="User's text before prompt expansion")
+    negative_prompt: Optional[str] = Field(default=None, description="User's things-to-avoid text, if any")
     revised_prompt: Optional[str] = Field(default=None, description="Provider-revised prompt")
     progress: int = Field(default=0, description="Progress percentage 0-100")
     outputs: list[MediaOutput] = Field(default_factory=list, description="Generated outputs (populated when completed)")
@@ -109,6 +136,9 @@ class MediaProviderCapabilitiesResponse(BaseModel):
     resolutions: dict[str, list[str]] = Field(default_factory=dict)
     default_aspect_ratios: dict[str, str] = Field(default_factory=dict)
     default_resolutions: dict[str, str] = Field(default_factory=dict)
+    durations: dict[str, list[int]] = Field(default_factory=dict)
+    default_durations: dict[str, int] = Field(default_factory=dict)
+    negative_prompt: bool = False
 
 
 class MediaProviderListResponse(BaseModel):

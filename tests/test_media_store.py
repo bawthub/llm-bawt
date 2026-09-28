@@ -654,3 +654,11 @@ def test_legacy_row_without_kind_reads_as_image(store: MediaStore) -> None:
     assert mime == VARIANT_MIME and data[:4] == b"RIFF"
     store.delete(asset.id)
     assert store.stat(asset.id) is None
+
+
+def test_thumbnail_mime_type_follows_the_thumbnail_not_the_generation():
+    from llm_bawt.service.routes.media import thumbnail_mime_type
+    assert thumbnail_mime_type("thumbnails/03/76/abc.jpg") == "image/jpeg"
+    assert thumbnail_mime_type("images/aa/bb/abc.png") == "image/png"
+    assert thumbnail_mime_type("images/aa/bb/abc.webp") == "image/webp"
+    assert thumbnail_mime_type("videos/aa/bb/abc.mp4") == "image/jpeg"

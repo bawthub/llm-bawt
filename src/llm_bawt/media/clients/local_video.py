@@ -18,13 +18,14 @@ class LocalVideoClient(MediaClient):
     async def generate(
         self, prompt: str, media_type: str, model: str, *, source_image: str | None = None,
         aspect_ratio: str = "16:9", duration: float = 5, resolution: str = "480p", num_outputs: int = 1,
-        calibration_generation: int | None = None,
+        calibration_generation: int | None = None, negative_prompt: str | None = None,
     ) -> GenerationResult:
         if media_type != "video" or model != "wan2.2-ti2v-5b":
             raise ValueError("Local video supports only wan2.2-ti2v-5b")
         response = await self._client.post("/videos", json={
             "prompt": prompt, "source_image": source_image, "aspect_ratio": aspect_ratio,
             "duration": duration, "resolution": resolution,
+            **({"negative_prompt": negative_prompt} if negative_prompt else {}),
             **({"calibration_generation": calibration_generation} if calibration_generation is not None else {}),
         })
         response.raise_for_status()
