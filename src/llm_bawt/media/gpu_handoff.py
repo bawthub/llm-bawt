@@ -6,10 +6,13 @@ Restore: reset the Wan worker, start Moshi, wait for health, unpark voice. It
 is also the recovery path: it may start from ``recovery_required`` because every
 step converges on a known state (docker start is idempotent, reset ends the
 worker). Nothing retries automatically; each run needs fresh consent.
+Resume: leave recovery back to video with no side effects, when live state
+still is video's (voice parked under our lease, Moshi stopped, Wan idle).
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 
@@ -21,6 +24,8 @@ START_OPERATIONS = ("bawthub.start-moshi-stt", "bawthub.start-moshi-tts")
 ACTIONS = ("park_voice", "stop_moshi_stt", "stop_moshi_tts", "verify_video_capacity")
 RESTORE_ACTIONS = ("reset_video_worker", "start_moshi_stt", "start_moshi_tts", "verify_voice", "unpark_voice")
 SERVICES = ("stt", "tts")
+
+logger = logging.getLogger(__name__)
 
 
 class HandoffAdapter(ABC):
@@ -196,6 +201,21 @@ class GpuHandoff:
                         raise HandoffConflict(f"{slug} failed; inspect ops job {job_id}")
                     return
                 await asyncio.sleep(self.poll_interval)
+
+    async def resume_video(self, *, user: str, expected_generation: int) -> dict:
+        """Recovery toward video. Touches nothing: it re-verifies, with the same
+        live check the forward switch ends on, that the GPU is still video's."""
+        lease = await asyncio.to_thread(self.store.voice_lease)
+        if not lease:
+            raise HandoffConflict("No recorded voice pause to resume under; restore voice first")
+        calibration = await asyncio.to_thread(self.store.calibration)
+        if not (calibration and calibration.get("supported")):
+            raise HandoffConflict("No passing memory calibration; restore voice, then switch to video")
+        observed = await self.adapter.observe()
+        self._check(observed, stopped=SERVICES, lease=lease)
+        state = await asyncio.to_thread(self.store.resume_video, expected_generation=expected_generation)
+        logger.info("GPU resumed to video for %s after verification (generation %s)", user, state.generation)
+        return {"owner": state.owner, "generation": state.generation}
 
     @staticmethod
     def _check_restorable(observed: dict) -> None:

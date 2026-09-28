@@ -92,18 +92,22 @@ def test_orphaned_video_claim_needs_recovery_not_replay(store):
     assert offer.target == "voice" and store.active_video_jobs() == 1
 
 
-def test_video_worker_restart_loses_owner_even_without_claim(store):
+def test_idle_video_worker_restart_keeps_owner(store):
+    # Ownership is "voice parked, Moshi stopped"; an idle worker restart changes
+    # neither, and each render re-verifies the lease and VRAM before its claim.
     token, offer = store.offer(user="nick", target="video", actions=("verify",), expected_generation=0)
     transition = store.confirm(user="nick", token=token, expected_generation=offer.generation)
     store.begin_action(generation=transition.generation, action="verify")
     store.finish_action(generation=transition.generation, action="verify")
-    store.complete(generation=transition.generation, target="video")
+    before = store.complete(generation=transition.generation, target="video")
     assert store.active_video_jobs() == 0
-    recovered = store.recover_orphaned_video(worker_restarted=True)
-    assert recovered.owner == "unknown" and recovered.phase == "recovery_required"
-    assert "residency" in recovered.last_error
-    with pytest.raises(HandoffConflict):
-        store.claim_video("after-restart")
+    after = store.recover_orphaned_video(worker_restarted=True)
+    assert (after.owner, after.phase, after.generation) == ("video", "idle", before.generation)
+    store.claim_video("after-restart")
+    # A restart with an unresolved render still fences.
+    fenced = store.recover_orphaned_video(worker_restarted=True)
+    assert fenced.owner == "unknown" and fenced.phase == "recovery_required"
+    assert "render claims" in fenced.last_error
 
 
 def test_stop_requires_receipt_before_advance(store):

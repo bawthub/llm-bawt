@@ -320,3 +320,46 @@ def test_unhealthy_moshi_fences_with_reason(setup):
     assert "Switch to voice failed" in state.last_error and "unhealthy" in state.last_error
     # Voice stays parked: nothing reopened admission on a failed start.
     assert adapter.voice["parked"] is True and "unpark" not in adapter.effects
+
+
+def _fenced_after_calibration_switch(setup, monkeypatch):
+    """Voice parked + Moshi stopped under lease 'a'*32, then a worker restart fence."""
+    store, adapter, controller = setup
+    asyncio.run(confirm(controller, asyncio.run(offer(controller))))
+    store.recover_orphaned_video(worker_restarted=True)
+    monkeypatch.setattr(store, "calibration", lambda: {"supported": True})
+    state = store.status()
+    assert state.phase == "recovery_required"
+    return store, adapter, controller, state
+
+
+def test_resume_video_from_recovery_verifies_live_state_without_side_effects(setup, monkeypatch):
+    store, adapter, controller, fenced = _fenced_after_calibration_switch(setup, monkeypatch)
+    effects = list(adapter.effects)
+    result = asyncio.run(controller.resume_video(user="nick", expected_generation=fenced.generation))
+    assert result["owner"] == "video"
+    assert adapter.effects == effects  # no park/stop/start/reset
+    state = store.status()
+    assert (state.owner, state.phase, state.last_error) == ("video", "idle", None)
+    store.claim_video("after-resume")
+
+
+@pytest.mark.parametrize("drift", ["moshi_running", "lease_lost", "stale_generation", "claims", "uncalibrated"])
+def test_resume_video_refuses_when_live_state_is_not_videos(setup, monkeypatch, drift):
+    store, adapter, controller, fenced = _fenced_after_calibration_switch(setup, monkeypatch)
+    generation = fenced.generation
+    if drift == "moshi_running":
+        adapter.stopped.remove("tts")
+    elif drift == "lease_lost":
+        adapter.voice.update(parked=False, park_id=None)
+    elif drift == "stale_generation":
+        generation -= 1
+    elif drift == "claims":
+        with store.engine.begin() as conn:
+            from llm_bawt.media.gpu_handoff_store import _video_jobs
+            conn.execute(_video_jobs.insert().values(id="orphan", generation=generation))
+    else:
+        monkeypatch.setattr(store, "calibration", lambda: None)
+    with pytest.raises(HandoffConflict):
+        asyncio.run(controller.resume_video(user="nick", expected_generation=generation))
+    assert store.status().phase == "recovery_required"

@@ -81,6 +81,12 @@ class RestoreOfferRequest(BaseModel):
     expected_generation: int = Field(ge=0)
 
 
+@router.post("/resume-video")
+async def resume_video(body: RestoreOfferRequest):
+    """Side-effect free: re-verify live state and, if it is still video's, clear the fence."""
+    return await _run("resume_video", **body.model_dump())
+
+
 # Restore waits minutes for Moshi to load, longer than proxies should hold a
 # request open. Consent is consumed synchronously; progress is the GPU status.
 _restores: set[asyncio.Task] = set()

@@ -133,15 +133,19 @@ class GpuHandoffStore:
             return len(conn.execute(select(_video_jobs.c.id)).all())
 
     def recover_orphaned_video(self, *, worker_restarted: bool = False) -> HandoffState:
-        """Fence orphaned render claims or a lost video worker after restart.
+        """Fence orphaned render claims or an interrupted calibration after restart.
 
-        A fresh worker is not evidence that the prior GPU owner and residency
-        survived. No claim or lease timeout automatically grants a new owner.
+        Video ownership records "voice parked under a lease, Moshi stopped"; a
+        clean restart of an idle worker changes neither, and every render
+        re-verifies the lease and live VRAM before its claim, so it keeps the
+        owner. Unresolved claims (unknown render outcome) and a calibration
+        reservation (its measurement belongs to the lost process) still fence.
+        No claim or lease timeout automatically grants a new owner.
         """
         with self.engine.begin() as conn:
             row = self._locked(conn)
             has_claims = conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None
-            lost_owner = worker_restarted and row["owner"] in ("video", "video_calibration")
+            lost_owner = worker_restarted and row["owner"] == "video_calibration"
             if (has_claims or lost_owner) and row["phase"] != "recovery_required":
                 reason = ("Video worker restarted with unresolved render claims; verify GPU and jobs"
                           if has_claims else "Video worker restarted; verify model residency and GPU owner")
@@ -415,6 +419,22 @@ class GpuHandoffStore:
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 owner="unknown", phase="recovery_required", generation=generation + 1,
                 last_error=reason[:1000],
+            ))
+            return self._view(self._locked(conn))
+
+    def resume_video(self, *, expected_generation: int) -> HandoffState:
+        """Leave a fence back to video. Caller must first verify, live, that voice
+        is still parked under the recorded lease and Moshi is stopped."""
+        with self.engine.begin() as conn:
+            row = self._locked(conn)
+            if row["phase"] != "recovery_required" or row["generation"] != expected_generation:
+                raise HandoffConflict("GPU state changed; refresh and try again")
+            if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
+                raise HandoffConflict("A render's outcome is unknown; restore voice to reset the video worker")
+            conn.execute(_state.update().where(_state.c.id == 1).values(
+                owner="video", phase="idle", generation=row["generation"] + 1, last_error=None,
+                offer_hash=None, offer_user=None, offer_target=None, offer_expires=None,
+                actions=None, next_action=0, pending_action=None, last_job_id=None,
             ))
             return self._view(self._locked(conn))
 
