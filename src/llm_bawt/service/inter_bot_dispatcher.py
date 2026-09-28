@@ -370,6 +370,16 @@ class InterBotDeliveryDispatcher:
             turn_status, turn_ended_at = self.store.turn_state(record.id)
             turn = self.service._turn_log_store.get_turn(record.turn_id)
             turn_error = getattr(turn, "error_text", None) if turn else None
+            if turn_status in {"aborted", "cancelled", "cancelling"}:
+                stopped = self.store.cancel_stopped_claim(record.id, claim_token)
+                if stopped:
+                    await self._emit(stopped)
+                    return
+                if turn_status in {"aborted", "cancelled"}:
+                    failed = self.store.fail_claim(record.id, claim_token, error)
+                    if failed:
+                        await self._emit(failed)
+                    return
             if self._is_context_overflow(error):
                 from ..bots import BotManager
 

@@ -12,6 +12,7 @@ from .dependencies import (
     set_service,
 )
 from .logging import get_service_logger, setup_service_logging
+from .partial_text import PartialText
 
 log = get_service_logger(__name__)
 
@@ -171,6 +172,7 @@ async def lifespan(app):
             # COLD reload (and a turn that completes after the client
             # disconnects) recovers the response TEXT, not just tool calls.
             _partial_text: dict[str, str] = {}
+            _partial_text_chunks: dict[str, PartialText] = {}
             # TASK-360 (P4): accumulate per-turn reasoning ("thinking") the
             # same way, flushed to turn_logs.reasoning so a COLD reload
             # mid-turn recovers already-produced reasoning, not just text.
@@ -202,15 +204,7 @@ async def lifespan(app):
                         return
                     delta = event_data.get("delta", "") or ""
                     offset = event_data.get("text_offset")
-                    buf = _partial_text.get(turn_id, "")
-                    # Offset-aware splice: contiguous deltas append; an
-                    # overlapping/replayed delta rewrites in place rather
-                    # than duplicating; a gap (offset past the buffer) falls
-                    # back to append (best effort — finalize fixes the rest).
-                    if isinstance(offset, int) and 0 <= offset <= len(buf):
-                        buf = buf[:offset] + delta
-                    else:
-                        buf = buf + delta
+                    buf = _partial_text_chunks.setdefault(turn_id, PartialText()).add(delta, offset)
                     _partial_text[turn_id] = buf
                     store.update_partial_response(turn_id=turn_id, response_text=buf)
                     return
@@ -218,6 +212,7 @@ async def lifespan(app):
                     tid = event_data.get("turn_id")
                     if tid:
                         _partial_text.pop(tid, None)
+                        _partial_text_chunks.pop(tid, None)
                         _partial_reasoning.pop(tid, None)
                     return
                 event_type = event_data.get("event", "")

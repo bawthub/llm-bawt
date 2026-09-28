@@ -557,6 +557,68 @@ def test_recovered_queued_cancel_removes_reservation(delivery_store):
     assert count == 0
 
 
+def _request_stop_for_delivery(store, turn_id):
+    from llm_bawt.service.turn_termination import TurnAbortCoordinator
+
+    turn_store = TurnLogStore(Config())
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET status='streaming' WHERE id=:id"), {"id": turn_id})
+    assert TurnAbortCoordinator(turn_store).request(turn_id, source="chat_stop", peer=None)
+
+
+def test_stopped_delivery_cannot_requeue_or_be_reclaimed(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stop this delivery")
+    claim = store.claim_next(target, claim_owner="old-owner", steer_capable=True)
+    assert store.mark_transport_accepted(original.id, claim.claim_token or "")
+    _request_stop_for_delivery(store, original.turn_id)
+
+    result = store.requeue(original.id, claim.claim_token or "", "detached request ended", delay_seconds=0)
+    assert result and result.status == "CANCELLED"
+    assert result.next_retry_at is None
+    assert store.claim_next(target, claim_owner="new-owner", steer_capable=True) is None
+
+
+def test_explicit_stop_cancels_only_the_claimed_delivery(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stop this")
+    following, _ = _enqueue(store, sender, target, "keep this")
+    claim = store.claim_next(target, claim_owner="old-owner", steer_capable=True)
+    _request_stop_for_delivery(store, original.turn_id)
+    cancelled = store.cancel_stopped_claim(original.id, claim.claim_token or "")
+    assert cancelled and cancelled.status == "CANCELLED"
+    assert store.requeue(original.id, claim.claim_token or "", "late", delay_seconds=0) is None
+    next_claim = store.claim_next(target, claim_owner="new-owner", steer_capable=True)
+    assert next_claim and next_claim.id == following.id
+
+
+def test_stopped_delivery_lease_recovery_does_not_requeue(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stop during app failure")
+    claim = store.claim_next(target, claim_owner="old-owner", steer_capable=True)
+    assert claim
+    _request_stop_for_delivery(store, original.turn_id)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second' WHERE id=:id"), {"id": original.id})
+    recovered = store.recover_expired()
+    assert len(recovered) == 1 and recovered[0].status == "CANCELLED"
+    assert store.claim_next(target, claim_owner="new-owner", steer_capable=True) is None
+
+
+def test_queued_stopped_delivery_cannot_resurrect_when_claimed(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stop before reclaim")
+    claim = store.claim_next(target, claim_owner="old-owner", steer_capable=True)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET status='streaming' WHERE id=:id"), {"id": original.turn_id})
+    assert store.mark_transport_accepted(original.id, claim.claim_token or "")
+    queued = store.requeue(original.id, claim.claim_token or "", "transient", delay_seconds=0)
+    assert queued.status == QUEUED
+    _request_stop_for_delivery(store, original.turn_id)
+    assert store.claim_next(target, claim_owner="new-owner", steer_capable=True) is None
+    assert store.get(original.id).status == "CANCELLED"
+
+
 def test_accepted_run_beyond_retention_dead_letters_without_replay(delivery_store):
     store, sender, target = delivery_store
     original, _ = _enqueue(store, sender, target, "expired accepted run")

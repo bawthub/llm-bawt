@@ -212,8 +212,9 @@ class ClaudeCommandMixin:
             await active_run.steer(
                 message, priority=priority, message_id=message_id or None
             )
-            if message_id and active_request_id:
-                self._trigger_message_ids[active_request_id] = message_id
+            # A steer adds a separate user message to this run; it does not
+            # change the originating turn's trigger. All run events (including
+            # tools and terminal usage) retain that canonical owner.
             logger.info(
                 "chat.steer accepted: session=%s active_request=%s priority=%s chars=%d",
                 session_key,

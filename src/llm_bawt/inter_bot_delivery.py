@@ -484,6 +484,40 @@ class InterBotDeliveryStore:
             """), {"limit": limit}).all()
         return [row[0] for row in rows]
 
+    @staticmethod
+    def _explicit_stop_requested(conn, turn_id: str) -> bool:
+        """Only a human Stop of this delivery's own turn ends its retry chain."""
+        raw = conn.execute(sa_text(
+            "SELECT request_json FROM turn_logs WHERE id=:turn_id"
+        ), {"turn_id": turn_id}).scalar_one_or_none()
+        try:
+            request = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            return False
+        audit = request.get("abort_request") if isinstance(request, dict) else None
+        return isinstance(audit, dict) and audit.get("source") in ("chat_stop", "bot_list_stop")
+
+    def cancel_stopped_claim(self, delivery_id: str, claim_token: str) -> DeliveryRecord | None:
+        """Fence an explicitly stopped delivery, but never an unrelated steer."""
+        if self.engine is None or not claim_token:
+            return None
+        with self.engine.begin() as conn:
+            row = conn.execute(sa_text("""
+                SELECT turn_id, delivery_mode FROM inter_bot_deliveries
+                WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim
+                FOR UPDATE
+            """), {"id": delivery_id, "claim": claim_token}).mappings().first()
+            if not row or row["delivery_mode"] != "turn" or not self._explicit_stop_requested(conn, row["turn_id"]):
+                return None
+            cancelled = conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries SET status='CANCELLED',
+                    lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
+                    next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
+                WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim
+                RETURNING *
+            """), {"id": delivery_id, "claim": claim_token}).mappings().first()
+        return DeliveryRecord.from_mapping(cancelled) if cancelled else None
+
     def claim_next(
         self,
         target_bot_id: str,
@@ -509,6 +543,13 @@ class InterBotDeliveryStore:
                 or head["status"] != QUEUED
                 or head["available_at"] > datetime.now(timezone.utc)
             ):
+                return None
+            if self._explicit_stop_requested(conn, head["turn_id"]):
+                conn.execute(sa_text("""
+                    UPDATE inter_bot_deliveries SET status='CANCELLED',
+                        next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
+                    WHERE id=:id AND status='QUEUED'
+                """), {"id": head["id"]})
                 return None
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
@@ -678,6 +719,18 @@ class InterBotDeliveryStore:
         with self.engine.begin() as conn:
             if clear_delivery_mode and reject_steer_target:
                 raise ValueError("clear_delivery_mode and reject_steer_target are mutually exclusive")
+            claim = conn.execute(sa_text("""
+                SELECT turn_id, delivery_mode FROM inter_bot_deliveries
+                WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token FOR UPDATE
+            """), values).mappings().first()
+            if claim and claim["delivery_mode"] == "turn" and self._explicit_stop_requested(conn, claim["turn_id"]):
+                row = conn.execute(sa_text("""
+                    UPDATE inter_bot_deliveries SET status='CANCELLED', lease_expires_at=NULL,
+                        claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
+                        last_error='Stopped by user', updated_at=now()
+                    WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token RETURNING *
+                """), values).mappings().first()
+                return DeliveryRecord.from_mapping(row) if row else None
             mode_reset = (
                 ", delivery_mode=NULL, target_turn_id=NULL, transport_accepted_at=NULL"
                 if clear_delivery_mode else ""
@@ -896,7 +949,9 @@ class InterBotDeliveryStore:
             """)).mappings().all()
             for row in rows:
                 is_turn = row.get("delivery_mode") != "steer"
-                if is_turn and row.get("turn_ended_at") is not None:
+                if is_turn and self._explicit_stop_requested(conn, row["turn_id"]):
+                    assignments = "status='CANCELLED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, last_error='Stopped by user'"
+                elif is_turn and row.get("turn_ended_at") is not None:
                     success = (
                         row.get("turn_status") in ("ok", "completed")
                         and not row.get("turn_error_text")
