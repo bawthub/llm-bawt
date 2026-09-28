@@ -107,12 +107,17 @@ def test_local_video_capabilities_advertise_only_the_enforced_wan_profile():
     from llm_bawt.media.gpu_profile import CALIBRATION_PROFILE, require_calibration_profile
 
     caps = media_provider_registry.capabilities("local-video")
-    assert caps.aspect_ratios["video"] == (CALIBRATION_PROFILE["aspect_ratio"],)
+    assert caps.aspect_ratios["video"] == tuple(CALIBRATION_PROFILE["aspect_ratios"])
     assert caps.resolutions["video"] == (CALIBRATION_PROFILE["resolution"],)
     assert caps.durations["video"] == (CALIBRATION_PROFILE["duration"],)
-    assert caps.image_input is False
+    assert caps.image_input is True
     # Every combination the UI can offer passes the submit gate.
-    require_calibration_profile({
-        "resolution": caps.default_resolutions["video"], "aspect_ratio": caps.default_aspect_ratios["video"],
-        "duration": caps.default_durations["video"], "num_outputs": 1, "image_conditioned": caps.image_input,
-    })
+    for aspect in caps.aspect_ratios["video"]:
+        for image_conditioned in (False, True):
+            require_calibration_profile({
+                "resolution": caps.default_resolutions["video"], "aspect_ratio": aspect,
+                "duration": caps.default_durations["video"], "num_outputs": 1, "image_conditioned": image_conditioned,
+            })
+    with pytest.raises(ValueError):
+        require_calibration_profile({"resolution": "720p", "aspect_ratio": "16:9", "duration": 5,
+                                     "num_outputs": 1, "image_conditioned": False})

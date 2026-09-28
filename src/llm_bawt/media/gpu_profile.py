@@ -1,5 +1,11 @@
-"""The single supported calibration profile; expansion requires new evidence."""
-CALIBRATION_PROFILE = {"resolution": "480p", "aspect_ratio": "16:9", "duration": 5, "num_outputs": 1}
+"""The measured local-video envelope; expansion requires new evidence.
+
+Calibration measures one 480p, 5-second render. Every shape in the envelope
+denoises at most the calibrated token count: 9:16 is the 16:9 transpose
+(832x480 pixels either way) and 1:1 is 512x512 (fewer). Image conditioning
+adds one tiled VAE encode of the source frame to the same pipeline.
+"""
+CALIBRATION_PROFILE = {"resolution": "480p", "aspect_ratios": ["16:9", "9:16", "1:1"], "duration": 5, "num_outputs": 1}
 
 
 def video_profile(request) -> dict:
@@ -9,5 +15,10 @@ def video_profile(request) -> dict:
 
 
 def require_calibration_profile(profile: dict) -> None:
-    if profile != {**CALIBRATION_PROFILE, "image_conditioned": False}:
-        raise ValueError("Local video currently supports only calibrated text-to-video: 480p, 16:9, 5 seconds, one output")
+    if (profile.get("resolution") != CALIBRATION_PROFILE["resolution"]
+            or profile.get("aspect_ratio") not in CALIBRATION_PROFILE["aspect_ratios"]
+            or profile.get("duration") != CALIBRATION_PROFILE["duration"]
+            or profile.get("num_outputs") != CALIBRATION_PROFILE["num_outputs"]
+            or type(profile.get("image_conditioned")) is not bool):
+        raise ValueError("Local video supports only its calibrated profile: 480p, "
+                         f"{', '.join(CALIBRATION_PROFILE['aspect_ratios'])}, 5 seconds, one output")

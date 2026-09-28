@@ -170,7 +170,7 @@ class GpuHandoffStore:
             return row["generation"]
 
     def claim_calibration(self, job_id: str, *, generation: int, profile: dict) -> None:
-        from .gpu_profile import require_calibration_profile
+        from .gpu_profile import CALIBRATION_PROFILE, require_calibration_profile
 
         require_calibration_profile(profile)
         with self.engine.begin() as conn:
@@ -178,7 +178,8 @@ class GpuHandoffStore:
             if row["generation"] != generation or row["owner"] != "video_calibration" or row["phase"] != "idle":
                 raise HandoffConflict("Calibration reservation is no longer current")
             plan_row = conn.execute(select(_plans.c.plan_json).where(_plans.c.generation == generation - 2)).first()
-            if not plan_row or json.loads(plan_row[0])["calibration_profile"] != {k: v for k, v in profile.items() if k != "image_conditioned"}:
+            # Consent covered this envelope; the render must fall inside it (checked above).
+            if not plan_row or json.loads(plan_row[0])["calibration_profile"] != CALIBRATION_PROFILE:
                 raise HandoffConflict("Calibration profile does not match the consented plan")
             if conn.execute(select(_video_jobs.c.id).limit(1)).first() or conn.execute(
                 select(_calibrations.c.generation).where(_calibrations.c.generation == generation)

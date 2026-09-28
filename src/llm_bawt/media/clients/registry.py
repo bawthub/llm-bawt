@@ -149,13 +149,13 @@ def build_default_registry() -> MediaProviderRegistry:
             media_types=("video",),
             default_models={"video": "wan2.2-ti2v-5b"},
             models={"video": ("wan2.2-ti2v-5b",)},
-            # Wan runs only the measured calibration profile; the submit gate
+            # Wan runs only the measured calibration envelope; the submit gate
             # (gpu_profile.require_calibration_profile) rejects anything else,
             # so advertise exactly that and nothing the UI could pick wrongly.
-            image_input=False,
-            aspect_ratios={"video": (CALIBRATION_PROFILE["aspect_ratio"],)},
+            image_input=True,
+            aspect_ratios={"video": tuple(CALIBRATION_PROFILE["aspect_ratios"])},
             resolutions={"video": (CALIBRATION_PROFILE["resolution"],)},
-            default_aspect_ratios={"video": CALIBRATION_PROFILE["aspect_ratio"]},
+            default_aspect_ratios={"video": CALIBRATION_PROFILE["aspect_ratios"][0]},
             default_resolutions={"video": CALIBRATION_PROFILE["resolution"]},
             durations={"video": (CALIBRATION_PROFILE["duration"],)},
             default_durations={"video": CALIBRATION_PROFILE["duration"]},

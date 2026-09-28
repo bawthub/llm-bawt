@@ -79,9 +79,13 @@ class ProgressFile:
         return callback_kwargs
 
 
-def load_source_image(source_image: str):
-    """Only accept embedded image bytes, never fetch user-supplied URLs from the GPU worker."""
-    from PIL import Image
+def load_source_image(source_image: str, width: int, height: int):
+    """Decode embedded image bytes, center-cropped and scaled to the render size.
+
+    Never fetches user-supplied URLs from the GPU worker. diffusers would
+    stretch a mismatched aspect to fit, so crop here instead of distorting.
+    """
+    from PIL import Image, ImageOps
 
     if not source_image.startswith("data:image/") or ";base64," not in source_image:
         raise ValueError("Local video requires an embedded image (data:image/...;base64,...)")
@@ -90,7 +94,7 @@ def load_source_image(source_image: str):
         raise ValueError("Source image is too large")
     with Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))) as image:
         image.load()
-        return image.convert("RGB")
+        return ImageOps.fit(ImageOps.exif_transpose(image).convert("RGB"), (width, height), Image.Resampling.LANCZOS)
 
 
 class WanPipelineRunner:
@@ -186,7 +190,7 @@ class WanPipelineRunner:
         }
         try:
             if source_image:
-                kwargs["image"] = load_source_image(source_image)
+                kwargs["image"] = load_source_image(source_image, width, height)
             output = self._pipeline(**kwargs).frames[0]
             if self._exporter is None:
                 from diffusers.utils import export_to_video

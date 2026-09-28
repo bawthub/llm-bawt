@@ -44,9 +44,29 @@ def test_video_dimensions_and_image_input_are_bounded() -> None:
     with pytest.raises(ValueError, match="Unsupported"):
         dimensions("4k", "16:9")
     with pytest.raises(ValueError, match="embedded image"):
-        load_source_image("https://example.com/private")
+        load_source_image("https://example.com/private", 832, 480)
     with pytest.raises(Exception):
-        load_source_image("data:image/png;base64," + base64.b64encode(b"not an image").decode())
+        load_source_image("data:image/png;base64," + base64.b64encode(b"not an image").decode(), 832, 480)
+
+
+def test_source_image_is_cropped_to_render_size_not_stretched() -> None:
+    import io
+
+    from PIL import Image
+
+    # Portrait source, red top half / blue bottom half, rendered 16:9. A
+    # center crop keeps the middle band at the exact render size.
+    source = Image.new("RGB", (400, 800), "red")
+    source.paste(Image.new("RGB", (400, 400), "blue"), (0, 400))
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    image = load_source_image(data_url, 832, 480)
+    assert image.size == (832, 480)
+    assert image.getpixel((416, 5)) == (255, 0, 0)
+    assert image.getpixel((416, 474)) == (0, 0, 255)
+    portrait = load_source_image(data_url, 480, 832)
+    assert portrait.size == (480, 832)
 
 
 def test_video_jobs_reject_invalid_size_without_starting_process(tmp_path) -> None:

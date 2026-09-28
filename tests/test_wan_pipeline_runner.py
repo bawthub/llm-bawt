@@ -85,7 +85,7 @@ def test_input_mode_change_reloads_pipeline(monkeypatch, tmp_path):
         def __call__(self, **kwargs):
             return SimpleNamespace(frames=[[object()] * kwargs["num_frames"]])
 
-    monkeypatch.setattr(worker, "load_source_image", lambda image: object())
+    monkeypatch.setattr(worker, "load_source_image", lambda image, width, height: object())
     runner = WanPipelineRunner(loader=lambda mode: loaded.append(mode) or Pipeline(),
                                exporter=lambda frames, path, fps: None)
     job = {"prompt": "dog", "resolution": "480p", "aspect_ratio": "16:9", "duration": 1}

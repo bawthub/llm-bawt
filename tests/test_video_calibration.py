@@ -52,8 +52,9 @@ def test_calibration_claim_is_one_use_and_binds_profile(reserved):
     ledger.validate_video_profile(profile, gpu, 9500)
     with pytest.raises(HandoffConflict):
         ledger.validate_video_profile(profile, gpu | {"free_mib": 1000}, 9500)
+    ledger.validate_video_profile(profile | {"image_conditioned": True, "aspect_ratio": "9:16"}, gpu, 9500)
     with pytest.raises(ValueError):
-        ledger.validate_video_profile(profile | {"image_conditioned": True}, gpu, 9500)
+        ledger.validate_video_profile(profile | {"resolution": "720p"}, gpu, 9500)
 
 
 @pytest.mark.parametrize("change", [{"gpu_uuid": "GPU-other"}, {"peak_reserved_mib": -1}, {"peak_allocated_mib": True}])

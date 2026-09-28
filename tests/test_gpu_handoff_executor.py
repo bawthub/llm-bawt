@@ -285,7 +285,8 @@ def test_restore_recovers_fenced_state_and_clears_stale_claims(setup):
     async def run():
         await confirm(controller, await offer(controller))
         store.claim_calibration("job1", generation=store.status().generation,
-                                profile={**CALIBRATION_PROFILE, "image_conditioned": False})
+                                profile={"resolution": "480p", "aspect_ratio": "16:9", "duration": 5,
+                                         "num_outputs": 1, "image_conditioned": False})
         store.recover_orphaned_video(worker_restarted=True)
         assert store.status().phase == "recovery_required"
         # Worker reset (the adapter's job) is what clears claims live.
