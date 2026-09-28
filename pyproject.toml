@@ -1,6 +1,6 @@
 [project]
 name = "llm-bawt"
-version = "0.1.38"
+version = "0.1.39"
 description = "llm-bawt - Model-agnostic LLM platform providing a unified, OpenAI-compatible API for configurable chatbots and multi-agent systems across cloud and local models."
 readme = "README.md"
 license = { file = "LICENSE" }
