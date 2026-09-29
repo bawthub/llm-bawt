@@ -1,6 +1,7 @@
 """Studio prompt expansion (TASK-958): registry-owned template, maintenance model."""
 
 import asyncio
+import base64
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -54,6 +55,33 @@ def test_expand_renders_registry_template_and_leaves_model_to_maintenance_settin
     assert sent.model is None  # inherits global maintenance_model
     assert "a man talking" in sent.prompt
     assert "8 seconds" in sent.prompt and "9:16" in sent.prompt
+
+
+def test_expand_passes_reference_image_to_maintenance_completion():
+    image = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nvalid-image-bytes").decode()
+    complete, calls = _completion("A detailed scene based on the image")
+    with patch("llm_bawt.prompt_registry.get_prompt_resolver", return_value=_resolver()):
+        result = expand_prompt(prompt="make her wave", media_type="video", duration=5,
+                               aspect_ratio="16:9", source_image=image, complete=complete)
+    assert result.prompt == "A detailed scene based on the image"
+    assert calls[0].image_url == image
+    assert calls[0].model is None
+
+
+@pytest.mark.parametrize("image", [
+    "https://example.com/image.png",
+    "data:text/plain;base64,AAAA",
+    "data:image/png;base64,%%%%",
+    "data:image/jpeg;base64,",
+    "data:image/png;base64," + base64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode(),
+])
+def test_expansion_rejects_invalid_reference_before_calling_model(image):
+    complete, calls = _completion("expanded")
+    with patch("llm_bawt.prompt_registry.get_prompt_resolver", return_value=_resolver()):
+        with pytest.raises(PromptExpansionError, match="Reference image"):
+            expand_prompt(prompt="cat", media_type="video", duration=5,
+                          aspect_ratio="1:1", source_image=image, complete=complete)
+    assert calls == []
 
 
 def test_edited_template_in_registry_changes_what_is_sent():

@@ -71,6 +71,8 @@ class PromptExpansionRequest(BaseModel):
     media_type: str = Field(default="video", description="Selects media.prompt_expansion.<media_type>")
     duration: Optional[float] = Field(default=None, ge=1, le=15)
     aspect_ratio: Optional[str] = Field(default=None)
+    source_image: Optional[str] = Field(default=None, max_length=7_000_000,
+        description="Optional reference image as a base64 data URI for visual prompt expansion")
 
 
 class PromptExpansionResponse(BaseModel):

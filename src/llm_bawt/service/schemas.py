@@ -622,6 +622,7 @@ class RawCompletionRequest(BaseModel):
     """
     prompt: str
     system: str | None = None
+    image_url: str | None = None  # Validated data URI from the media prompt-expansion route
     model: str | None = None  # Inherits global maintenance_model when omitted
     max_tokens: int = 500
     temperature: float = 0.7

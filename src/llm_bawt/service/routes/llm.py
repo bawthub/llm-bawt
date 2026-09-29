@@ -47,7 +47,13 @@ def complete_utility(request: RawCompletionRequest) -> RawCompletionResponse:
         messages = []
         if request.system:
             messages.append(Message(role="system", content=request.system))
-        messages.append(Message(role="user", content=request.prompt))
+        image_parts = None
+        if request.image_url:
+            from ...media.prompt_expansion import validate_reference_image
+            image_parts = [{"type": "image_url", "image_url": {
+                "url": validate_reference_image(request.image_url), "detail": "low",
+            }}]
+        messages.append(Message(role="user", content=request.prompt, content_parts=image_parts))
 
         response = client.query(
             messages=messages,
@@ -70,6 +76,15 @@ def complete_utility(request: RawCompletionRequest) -> RawCompletionResponse:
         )
 
     except Exception as e:
+        if request.image_url:
+            from ...media.prompt_expansion import PromptExpansionError
+            if isinstance(e, PromptExpansionError):
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            log.error("Image-aware utility completion failed: %s", e)
+            raise HTTPException(
+                status_code=422,
+                detail="The configured maintenance model could not process the reference image; choose a vision-capable model in settings",
+            ) from e
         log.error(f"Raw completion failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

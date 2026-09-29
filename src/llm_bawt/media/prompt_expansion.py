@@ -9,6 +9,8 @@ prompts UI; this module only owns the code default and the call.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass
 from typing import Callable
 
@@ -63,6 +65,33 @@ def _clean(text: str) -> str:
     return cleaned.strip("“”").strip()
 
 
+def validate_reference_image(source_image: str) -> str:
+    """Only inline, bounded raster images reach the utility vision client."""
+    prefix, sep, payload = source_image.partition(",")
+    if not sep or prefix not in {
+        "data:image/jpeg;base64", "data:image/png;base64",
+        "data:image/webp;base64", "data:image/gif;base64",
+    }:
+        raise PromptExpansionError("Reference image must be a JPEG, PNG, WebP or GIF data URI")
+    if len(payload) > 7_000_000:
+        raise PromptExpansionError("Reference image is too large (5 MB maximum)")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise PromptExpansionError("Reference image is not valid base64") from exc
+    if not raw or len(raw) > 5 * 1024 * 1024:
+        raise PromptExpansionError("Reference image is empty or larger than 5 MB")
+    signatures = {
+        "data:image/jpeg;base64": raw.startswith(b"\xff\xd8\xff"),
+        "data:image/png;base64": raw.startswith(b"\x89PNG\r\n\x1a\n"),
+        "data:image/gif;base64": raw.startswith((b"GIF87a", b"GIF89a")),
+        "data:image/webp;base64": raw.startswith(b"RIFF") and raw[8:12] == b"WEBP",
+    }
+    if not signatures[prefix]:
+        raise PromptExpansionError("Reference image bytes do not match its image type")
+    return source_image
+
+
 def expand_prompt(
     *,
     prompt: str,
@@ -70,6 +99,7 @@ def expand_prompt(
     duration: float | None,
     aspect_ratio: str | None,
     complete: Callable[[RawCompletionRequest], RawCompletionResponse],
+    source_image: str | None = None,
 ) -> ExpandedPrompt:
     """Render the registry template and run it through the utility completion.
 
@@ -94,7 +124,10 @@ def expand_prompt(
     except (KeyError, IndexError, ValueError) as exc:
         raise PromptExpansionError(f"Prompt template '{key}' failed to render: {exc}") from exc
 
-    result = complete(RawCompletionRequest(prompt=rendered, max_tokens=600, temperature=0.7))
+    image = validate_reference_image(source_image) if source_image else None
+    result = complete(RawCompletionRequest(
+        prompt=rendered, image_url=image, max_tokens=600, temperature=0.7,
+    ))
     expanded = _clean(result.content)
     if not expanded:
         raise PromptExpansionError("The model returned an empty prompt")

@@ -381,6 +381,7 @@ async def expand_media_prompt(request: PromptExpansionRequest):
             media_type=request.media_type,
             duration=request.duration,
             aspect_ratio=request.aspect_ratio,
+            source_image=request.source_image,
             complete=complete_utility,
         )
     except PromptExpansionError as exc:
