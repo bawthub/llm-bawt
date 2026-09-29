@@ -321,6 +321,26 @@ def build_agent_image_manifest(
     return header + "\n" + "\n".join(lines)
 
 
+def attachment_refs(attachments: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """Reduce attachment envelopes (or refs) to persisted ``{asset_id, kind}`` refs.
+
+    Inverse of :func:`enrich_attachments_for_messages`: durable rows keep only
+    the tiny ref and are re-enriched on read, so URLs never go stale. Order is
+    preserved, duplicate asset ids collapse, entries without an id drop out.
+    """
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        aid = item.get("asset_id")
+        if not isinstance(aid, str) or not aid or aid in seen:
+            continue
+        seen.add(aid)
+        refs.append({"asset_id": aid, "kind": item.get("kind") or "image"})
+    return refs
+
+
 def enrich_attachments_for_messages(
     messages: Iterable[dict[str, Any]],
     asset_store,

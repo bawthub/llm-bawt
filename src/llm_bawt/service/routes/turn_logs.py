@@ -1,6 +1,7 @@
 """Turn log retrieval routes."""
 
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -21,6 +22,8 @@ from ..schemas import (
 from ..tool_call_events import extract_trigger_message, message_id_matches, parse_message_filters
 from ..tool_call_store import ToolCallRecord, ToolCallStore
 from ..turn_logs import TurnLogStore
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -96,6 +99,9 @@ def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> l
             "approval_request_id": row.approval_request_id,
             "approval_status": row.approval_status,
             "preapproved": row.preapproved,
+            # TASK-977: raw {asset_id, kind} refs; _enrich_call_attachments
+            # turns them into URL envelopes before the response leaves.
+            "attachments": _parse_json(row.attachments_json) or [],
             "result_meta": {
                 "record_id": row.id,
                 "preview_chars": len(row.result_text or ""),
@@ -110,6 +116,28 @@ def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> l
             },
         })
     return out
+
+
+def _enrich_call_attachments(calls: list[dict]) -> None:
+    """Resolve per-call attachment refs into envelopes in place (TASK-977).
+
+    One batched media_assets lookup for every call, through the same
+    serializer /v1/history uses, so tool-card previews are wire-identical to
+    the live tool_end envelopes. Unresolvable refs drop out; any failure
+    degrades to no inline media rather than failing the tool-call listing.
+    """
+    carriers = [c for c in calls if c.get("attachments")]
+    if not carriers:
+        return
+    try:
+        from ...media.serializers import enrich_attachments_for_messages
+        from ..dependencies import get_media_asset_store
+
+        enrich_attachments_for_messages(carriers, get_media_asset_store(get_service().config))
+    except Exception as exc:
+        log.warning("Tool-call attachment enrichment failed: %s", exc)
+        for call in carriers:
+            call["attachments"] = []
 
 
 def _live_tool_calls(store: TurnLogStore, turn_id: str) -> list[dict]:
@@ -132,7 +160,9 @@ def _live_tool_calls(store: TurnLogStore, turn_id: str) -> list[dict]:
     except Exception:
         return []
     parent = store.get_turn(turn_id)
-    return _records_to_calls(rows, turn_ended_at=parent.ended_at if parent else None)
+    calls = _records_to_calls(rows, turn_ended_at=parent.ended_at if parent else None)
+    _enrich_call_attachments(calls)
+    return calls
 
 
 def _live_tool_call_counts(store: TurnLogStore, turn_ids: list[str]) -> dict[str, int]:
@@ -638,6 +668,8 @@ def get_tool_call_events(
         )
         if len(events) >= limit:
             break
+
+    _enrich_call_attachments([call for event in events for call in event.tool_calls])
 
     events.sort(key=lambda event: event.created_at)
     return ToolCallEventsResponse(

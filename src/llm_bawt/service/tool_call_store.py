@@ -108,6 +108,10 @@ class ToolCallRecord(SQLModel, table=True):
     # relative to the tool_results backend's toolblobs/ prefix). NULL => result
     # fits in result_text preview, or overflow lives in the legacy payload table.
     result_blob_key: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
+    # TASK-977: media produced by this call (generate_image, screenshots) as
+    # tiny ``[{"asset_id", "kind"}]`` refs; enriched to envelopes on read so the
+    # tool card's inline preview survives activity refresh and reload.
+    attachments_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
 
 class ToolCallResultPayloadRecord(SQLModel, table=True):
@@ -181,6 +185,8 @@ class ToolCallStore:
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_payload_available BOOLEAN NOT NULL DEFAULT FALSE",
                 # TASK-594: object-store key for overflow tool-result bytes.
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_blob_key VARCHAR(128)",
+                # TASK-977: per-call media refs for tool-card previews.
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS attachments_json TEXT",
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_turn_call ON tool_call_records (turn_id, call_id)",
                 # TASK-594: content-addressed lookup for the TTL prune keep-set.
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_blob_key ON tool_call_records (result_blob_key)",
@@ -314,8 +320,14 @@ class ToolCallStore:
         is_error: bool | None,
         iteration: int = 1,
         parent_tool_use_id: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> tuple[int | None, bool]:
-        """Persist payload and metadata atomically. Returns (record id, available)."""
+        """Persist payload and metadata atomically. Returns (record id, available).
+
+        ``attachments`` are ``{asset_id, kind}`` refs (TASK-977). Empty/None
+        leaves any previously stored refs untouched so a replayed or
+        approval-resolved tool_end without media never erases them.
+        """
         if self.engine is None:
             return None, False
         try:
@@ -360,6 +372,8 @@ class ToolCallStore:
                 row.result_complete = payload.complete
                 row.ended_at = ended_at
                 row.is_error = is_error
+                if attachments:
+                    row.attachments_json = json.dumps(attachments)
                 if ended_at and row.started_at:
                     row.duration_ms = (ended_at - row.started_at) * 1000
                 session.add(row)

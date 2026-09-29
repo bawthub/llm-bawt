@@ -6,6 +6,7 @@ from typing import Any
 
 from agent_bridge.tool_results import ToolResultPayload, payload_from_event
 
+from ..media.serializers import attachment_refs
 from .tool_call_store import ToolCallStore
 
 
@@ -49,6 +50,9 @@ class ToolEventCoordinator:
             is_error=event.get("is_error"),
             iteration=int(event.get("iteration") or 1),
             parent_tool_use_id=event.get("parent_tool_use_id"),
+            # TASK-977: the live event carries enriched envelopes; persist
+            # only the refs so /v1/tool-calls can re-enrich on reload.
+            attachments=attachment_refs(event.get("attachments")) or None,
         )
         public = dict(event)
         public.pop("tool_result_payload", None)
