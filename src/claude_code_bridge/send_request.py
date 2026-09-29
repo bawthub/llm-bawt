@@ -54,6 +54,8 @@ class SendRequest:
     # HTTP header. The bridge never opens or logs the payload.
     task_turn_capability: str | None = None
     skill_bundle: str | None = None
+    # App-resolved Claude Code auto-compact window (None = CLI default).
+    compact_threshold: int | None = None
 
     @classmethod
     def from_fields(cls, fields: dict) -> "SendRequest":
@@ -131,6 +133,21 @@ class SendRequest:
                     cw_raw, bot_slug,
                 )
 
+        # App-resolved Claude Code auto-compact window (catalog per-model value,
+        # else the global agent_compact_threshold). Absent/invalid -> None ->
+        # the CLI's own default.
+        ct_raw = (fields.get("compact_threshold") or "").strip()
+        compact_threshold: int | None = None
+        if ct_raw:
+            try:
+                ct = int(ct_raw)
+                compact_threshold = ct if ct > 0 else None
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid compact_threshold=%r for %s (must be positive int)",
+                    ct_raw, bot_slug,
+                )
+
         # TASK-896: app-resolved endpoint transport policy. The model catalog is
         # authoritative; absent/invalid values fall back to ordinary supervised
         # SSE in the adapter rather than guessing from the model name.
@@ -197,6 +214,7 @@ class SendRequest:
             bot_max_turns=bot_max_turns,
             subagent_model=subagent_model,
             bot_context_window=bot_context_window,
+            compact_threshold=compact_threshold,
             responses_transport=responses_transport,
             mcp_tool_timeout_ms=mcp_tool_timeout_ms,
             configured_disallowed_tools=configured_disallowed_tools,

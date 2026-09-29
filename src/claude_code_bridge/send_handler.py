@@ -275,6 +275,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         model=model,
                         subagent_model=subagent_model,
                         context_window=bot_context_window,
+                        compact_threshold=req.compact_threshold,
                         responses_transport=responses_transport,
                         force_refresh=auth_retry.attempted,
                         bot_id=bot_slug,

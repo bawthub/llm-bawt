@@ -121,3 +121,12 @@ def test_delete_catalog_model_removes_normalized_row():
     stmt = str(conn.execute.call_args.args[0])
     assert "DELETE FROM models" in stmt
     assert conn.execute.call_args.args[1] == {"key": "grok-old"}
+
+
+def test_model_write_compact_threshold_is_optional_and_bounded():
+    base = {"vendor": "anthropic", "display_name": "Opus", "default_context_window": 1_000_000}
+    assert ModelWrite(**base).compact_threshold is None
+    assert ModelWrite(**base, compact_threshold=400_000).compact_threshold == 400_000
+    for bad in (99_999, 1_000_001):
+        with pytest.raises(ValidationError):
+            ModelWrite(**base, compact_threshold=bad)

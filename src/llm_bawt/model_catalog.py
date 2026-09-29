@@ -68,6 +68,7 @@ class ModelIdentity:
     description: str | None = None
     default_context_window: int | None = None
     default_tool_support: str | None = None
+    compact_threshold: int | None = None
 
 
 @dataclass(frozen=True)
@@ -347,6 +348,8 @@ class ModelCatalog:
         )
         if context_window is not None:
             config["context_window"] = context_window
+        if endpoint.model.compact_threshold is not None:
+            config["compact_threshold"] = endpoint.model.compact_threshold
         tool_support = (
             endpoint.tool_support_override or endpoint.model.default_tool_support
         )
@@ -382,6 +385,7 @@ class ModelCatalogStore:
                     m.description,
                     m.default_context_window,
                     m.default_tool_support,
+                    m.compact_threshold,
                     a.id AS access_path_id,
                     a.key AS access_path_key,
                     a.vendor AS access_vendor,
@@ -410,6 +414,7 @@ class ModelCatalogStore:
                 description=row["description"],
                 default_context_window=row["default_context_window"],
                 default_tool_support=row["default_tool_support"],
+                compact_threshold=row["compact_threshold"],
             )
             access_path = AccessPath(
                 id=int(row["access_path_id"]),

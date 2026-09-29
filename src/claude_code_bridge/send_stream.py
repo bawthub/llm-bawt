@@ -40,7 +40,7 @@ from claude_agent_sdk.types import (
 from claude_code_bridge.tool_events import normalize_tool_result
 
 from ._bridge_helpers import _get_fresh_oauth_token
-from .context_env import proxy_context_window_env
+from .context_env import compact_window_env, proxy_context_window_env
 from .proxy.request_context import (
     ProxyRequestContext,
     custom_header_env,
@@ -128,6 +128,7 @@ class ClaudeStreamMixin:
         thread_session_id: str | None,
         request_id: str,
         context_window: int | None = None,
+        compact_threshold: int | None = None,
         responses_transport: str | None = None,
     ) -> dict:
         """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``."""
@@ -207,6 +208,9 @@ class ClaudeStreamMixin:
                 sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = fresh_token
             if self._uses_claude_oauth_gateway():
                 sdk_env["ANTHROPIC_BASE_URL"] = f"{self._proxy_base_url}/claude-oauth"
+        # Both paths: the app-resolved compact threshold drives when the CLI
+        # auto-compacts (the CLI caps it at the model's window).
+        sdk_env.update(compact_window_env(compact_threshold))
         return sdk_env
 
     def _build_agent_options(

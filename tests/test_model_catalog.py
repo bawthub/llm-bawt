@@ -286,3 +286,13 @@ def test_local_chat_completions_path_keeps_no_namespace():
     )
     resolved = ModelCatalog([endpoint]).resolve("qwen3.8-27b-chat")
     assert resolved["model_id"] == "qwen3.8:27b"
+
+
+def test_model_compact_threshold_reaches_dispatch_config_only_when_set():
+    from dataclasses import replace
+
+    endpoint = _endpoint(31, "opus", "anthropic-oauth", "anthropic", "anthropic-messages", "claude-opus-5-5")
+    assert "compact_threshold" not in ModelCatalog([endpoint]).resolve("opus", harness="claude-code")
+
+    tuned = replace(endpoint, model=replace(endpoint.model, compact_threshold=400_000))
+    assert ModelCatalog([tuned]).resolve("opus", harness="claude-code")["compact_threshold"] == 400_000

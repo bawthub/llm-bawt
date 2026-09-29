@@ -12,11 +12,14 @@ from __future__ import annotations
 import pytest
 
 from claude_code_bridge.context_env import (
+    AUTO_COMPACT_WINDOW_ENV,
     MAX_CONTEXT_TOKENS_ENV,
     MAX_OUTPUT_TOKENS_ENV,
+    compact_window_env,
     output_reserve_for_window,
     proxy_context_window_env,
 )
+from claude_code_bridge.send_request import SendRequest
 from claude_code_bridge.send_stream import ClaudeStreamMixin
 
 
@@ -24,7 +27,9 @@ class _Harness(ClaudeStreamMixin):
     _proxy_base_url = "http://127.0.0.1:12345"
 
 
-def _env(*, use_proxy: bool, context_window: int | None) -> dict:
+def _env(
+    *, use_proxy: bool, context_window: int | None, compact_threshold: int | None = None
+) -> dict:
     return _Harness()._build_sdk_env(
         use_proxy=use_proxy,
         model="local/qwen3.8:27b-64k",
@@ -35,6 +40,7 @@ def _env(*, use_proxy: bool, context_window: int | None) -> dict:
         thread_session_id="thread-1",
         request_id="request-1",
         context_window=context_window,
+        compact_threshold=compact_threshold,
     )
 
 
@@ -162,3 +168,44 @@ def test_direct_turn_never_sets_hints(monkeypatch) -> None:
     assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
     for tier in ("HAIKU", "FABLE", "SONNET", "OPUS"):
         assert f"ANTHROPIC_DEFAULT_{tier}_MODEL" not in env
+
+
+# --- compact threshold (CLAUDE_CODE_AUTO_COMPACT_WINDOW) --------------------
+
+def test_compact_window_env_passes_threshold_through() -> None:
+    assert compact_window_env(200_000) == {AUTO_COMPACT_WINDOW_ENV: "200000"}
+
+
+@pytest.mark.parametrize("threshold", [None, 0, -5])
+def test_unset_compact_threshold_defers_to_cli(threshold) -> None:
+    assert compact_window_env(threshold) == {}
+
+
+@pytest.mark.parametrize("use_proxy", [True, False])
+def test_compact_threshold_applies_on_both_paths(monkeypatch, use_proxy) -> None:
+    monkeypatch.setattr(
+        "claude_code_bridge.send_stream._get_fresh_oauth_token", lambda **_: None
+    )
+    env = _env(use_proxy=use_proxy, context_window=1_000_000, compact_threshold=400_000)
+    assert env[AUTO_COMPACT_WINDOW_ENV] == "400000"
+
+
+def test_no_compact_threshold_sets_no_window(monkeypatch) -> None:
+    env = _env(use_proxy=True, context_window=65_536)
+    assert AUTO_COMPACT_WINDOW_ENV not in env
+
+
+def _fields(**extra) -> dict:
+    return {
+        "request_id": "r1", "session_key": "caid:nick", "bot_id": "caid", "message": "hi",
+        "model": "claude-opus-5-5", **extra,
+    }
+
+
+def test_send_request_parses_compact_threshold() -> None:
+    assert SendRequest.from_fields(_fields(compact_threshold="200000")).compact_threshold == 200_000
+
+
+@pytest.mark.parametrize("raw", ["", "abc", "0", "-1"])
+def test_send_request_ignores_invalid_compact_threshold(raw) -> None:
+    assert SendRequest.from_fields(_fields(compact_threshold=raw)).compact_threshold is None

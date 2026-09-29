@@ -33,6 +33,9 @@ class ModelWrite(BaseModel):
     # (NOT NULL + CHECK > 0) in model_catalog_migration.py.
     default_context_window: int = Field(gt=0)
     default_tool_support: str | None = None
+    # Claude Code auto-compact window. None = global agent_compact_threshold.
+    # Bounds mirror the CLI's accepted CLAUDE_CODE_AUTO_COMPACT_WINDOW range.
+    compact_threshold: int | None = Field(default=None, ge=100_000, le=1_000_000)
 
 
 class AccessPathWrite(BaseModel):
@@ -172,21 +175,30 @@ def put_catalog_model(model_key: str, request: ModelWrite):
     sql = """
         INSERT INTO models
             (key, vendor, display_name, description, default_context_window,
-             default_tool_support, created_at, updated_at)
+             default_tool_support, compact_threshold, created_at, updated_at)
         VALUES
             (:key, :vendor, :display_name, :description, :default_context_window,
-             :default_tool_support, NOW(), NOW())
+             :default_tool_support, :compact_threshold, NOW(), NOW())
         ON CONFLICT (key) DO UPDATE SET
             vendor = EXCLUDED.vendor,
             display_name = EXCLUDED.display_name,
             description = EXCLUDED.description,
             default_context_window = EXCLUDED.default_context_window,
             default_tool_support = EXCLUDED.default_tool_support,
+            -- Only overwrite when the caller sent the field, so older PUT
+            -- callers that don't know it can't silently clear it.
+            compact_threshold = CASE WHEN :compact_threshold_sent
+                THEN EXCLUDED.compact_threshold ELSE models.compact_threshold END,
             updated_at = NOW()
         RETURNING *
     """
     with _engine().begin() as conn:
-        row = dict(conn.execute(text(sql), {"key": model_key, **request.model_dump()}).mappings().one())
+        params = {
+            "key": model_key,
+            **request.model_dump(),
+            "compact_threshold_sent": "compact_threshold" in request.model_fields_set,
+        }
+        row = dict(conn.execute(text(sql), params).mappings().one())
     _refresh_catalog()
     return row
 
@@ -293,6 +305,7 @@ def list_endpoints(
         SELECT e.*, m.key AS model_key, m.vendor AS model_vendor,
                m.display_name, m.description,
                m.default_context_window, m.default_tool_support,
+               m.compact_threshold,
                a.key AS access_path_key, a.vendor AS access_vendor,
                a.protocol, a.base_url, a.auth_mechanism, a.engine_kind
         FROM model_endpoints e

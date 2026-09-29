@@ -107,6 +107,12 @@ UPDATE access_paths SET system_prompt_overrides = '{}'::jsonb
 ALTER TABLE access_paths
     ALTER COLUMN system_prompt_overrides SET DEFAULT '{}'::jsonb,
     ALTER COLUMN system_prompt_overrides SET NOT NULL;
+
+-- Per-model Claude Code auto-compact window; NULL = global agent_compact_threshold.
+ALTER TABLE models ADD COLUMN IF NOT EXISTS compact_threshold INTEGER;
+ALTER TABLE models DROP CONSTRAINT IF EXISTS models_compact_threshold_positive;
+ALTER TABLE models ADD CONSTRAINT models_compact_threshold_positive
+    CHECK (compact_threshold IS NULL OR compact_threshold > 0);
 """
 
 

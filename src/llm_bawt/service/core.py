@@ -159,6 +159,7 @@ class ServiceLLMBawt(BaseLLMBawt):
                 # is pinned (e.g. direct-Anthropic bots).
                 try:
                     window = None
+                    compact_threshold = None
                     ep_id = model_def.get("endpoint_id") or getattr(self.bot, "endpoint_id", None)
                     if ep_id is not None:
                         ep_def = self.config.resolve_model(
@@ -168,10 +169,23 @@ class ServiceLLMBawt(BaseLLMBawt):
                         )
                         if isinstance(ep_def, dict):
                             window = ep_def.get("context_window")
+                            compact_threshold = ep_def.get("compact_threshold")
                     if window is None:
                         window = model_def.get("context_window")
+                    if compact_threshold is None:
+                        compact_threshold = model_def.get("compact_threshold")
                     if window and int(window) > 0:
                         self.client._bot_config["context_window"] = int(window)
+                    # Claude Code auto-compact window: catalog per-model value,
+                    # else the global agent_compact_threshold setting.
+                    if compact_threshold is None:
+                        from ..runtime_setting_resolution import resolve_global_runtime_setting
+
+                        compact_threshold = resolve_global_runtime_setting(
+                            self.config, "agent_compact_threshold"
+                        )
+                    if compact_threshold and int(compact_threshold) > 0:
+                        self.client._bot_config["compact_threshold"] = int(compact_threshold)
                 except Exception:
                     logger.debug(
                         "TASK-609: could not resolve context_window "

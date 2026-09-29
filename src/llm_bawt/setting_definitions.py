@@ -408,6 +408,22 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "model in the catalog instead."
         ),
     ),
+    "agent_compact_threshold": SettingDefinition(
+        key="agent_compact_threshold",
+        type="int",
+        default=200000,
+        applies_to=(),  # GLOBAL-ONLY: per-model overrides live in the catalog
+                        # (models.compact_threshold), not on bots.
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Agent compact threshold",
+        help=(
+            "Claude Code auto-compact window (tokens) for agent bots, used when "
+            "the model has no compact threshold in the catalog. Sent as "
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW; the CLI floors it at 100k, caps it "
+            "at the model's context window, and compacts a little before it "
+            "(~33k early on Claude models, for the output reserve and buffer)."
+        ),
+    ),
     "max_output_tokens": SettingDefinition(
         key="max_output_tokens",
         type="int",

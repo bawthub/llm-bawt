@@ -31,6 +31,7 @@ class CommandPublisherMixin:
         disallowed_tools: list[str] | None = None,
         inject_messages: list | None = None,
         context_window: int | None = None,
+        compact_threshold: int | None = None,
         responses_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
         thread_session_id: str | None = None,
@@ -70,6 +71,8 @@ class CommandPublisherMixin:
             fields["subagent_model"] = subagent_model
         if context_window is not None and context_window > 0:
             fields["context_window"] = str(context_window)
+        if compact_threshold is not None and compact_threshold > 0:
+            fields["compact_threshold"] = str(compact_threshold)
         if responses_transport:
             fields["responses_transport"] = responses_transport
         if mcp_tool_timeout_ms is not None and mcp_tool_timeout_ms > 0:
