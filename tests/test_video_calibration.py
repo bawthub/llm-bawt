@@ -50,7 +50,9 @@ def test_calibration_claim_is_one_use_and_binds_profile(reserved):
     gpu = {"ready": True, "uuid": "GPU-test", "total_mib": 16000, "free_mib": 5500,
            "observed_at": datetime.now(UTC).isoformat()}
     ledger.validate_video_profile(profile, gpu, 9500)
-    with pytest.raises(HandoffConflict):
+    with pytest.raises(HandoffConflict, match="GPU telemetry unavailable"):
+        ledger.validate_video_profile(profile, {"ready": False, "error": "GPU telemetry unavailable: CalledProcessError"}, 9500)
+    with pytest.raises(HandoffConflict, match="Current GPU memory"):
         ledger.validate_video_profile(profile, gpu | {"free_mib": 1000}, 9500)
     ledger.validate_video_profile(profile | {"image_conditioned": True, "aspect_ratio": "9:16"}, gpu, 9500)
     with pytest.raises(ValueError):

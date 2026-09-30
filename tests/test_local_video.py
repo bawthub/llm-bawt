@@ -376,6 +376,25 @@ def test_local_video_client_submit_poll_and_download() -> None:
     assert [r.url.path for r in requests] == ["/videos", "/videos/job1", "/videos/job1/content", "/videos/job1"]
 
 
+def test_local_video_client_preserves_bridge_rejection_reason() -> None:
+    from llm_bawt.media.gpu_handoff_store import HandoffConflict
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "Current GPU memory does not satisfy the measured profile and margin"})
+
+    async def exercise() -> None:
+        client = LocalVideoClient(base_url="http://local-model-bridge:8685")
+        await client.close()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=client.base_url)
+        try:
+            with pytest.raises(HandoffConflict, match="Current GPU memory does not satisfy"):
+                await client.generate("running dog", "video", "wan2.2-ti2v-5b")
+        finally:
+            await client.close()
+
+    asyncio.run(exercise())
+
+
 def test_offload_mode_prefetches_groups_only_when_they_fit() -> None:
     from local_model_bridge.video_worker import GROUP_OFFLOAD_MIN_FREE_MIB, offload_mode
 

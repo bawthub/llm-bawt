@@ -28,6 +28,8 @@ class LocalVideoClient(MediaClient):
             **({"negative_prompt": negative_prompt} if negative_prompt else {}),
             **({"calibration_generation": calibration_generation} if calibration_generation is not None else {}),
         })
+        if response.status_code == 409:
+            raise HandoffConflict(response.json().get("detail") or "Local video generation was rejected")
         response.raise_for_status()
         data = response.json()
         return GenerationResult(provider_job_id=data["id"], status=data["status"], progress=data["progress"])

@@ -245,6 +245,8 @@ class GpuHandoffStore:
         measured = self.calibration()
         if not measured or not measured["supported"]:
             raise HandoffConflict("A successful calibrated memory profile is required")
+        if gpu.get("ready") is not True:
+            raise HandoffConflict("GPU telemetry unavailable; cannot verify video memory margin")
         try:
             age = (datetime.now(UTC) - datetime.fromisoformat(gpu["observed_at"])).total_seconds()
             free = gpu["free_mib"]
