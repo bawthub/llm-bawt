@@ -21,6 +21,11 @@ from .history_search import (
     search_history,
     search_history_get,
 )
+from .history_timeline import (
+    get_history_timeline,
+    get_history_timeline_prompts,
+    router as timeline_router,
+)
 from .history_seed import (
     build_context_seed,
     get_context_seed,
@@ -42,6 +47,7 @@ router = APIRouter()
 # Preserve the original method/path registration order. Besides keeping OpenAPI
 # output stable, this makes static routes visibly precede future dynamic peers.
 router.include_router(read_router)
+router.include_router(timeline_router)
 router.include_router(search_router)
 router.include_router(mutation_router)
 router.include_router(summary_management_router)
@@ -55,6 +61,8 @@ __all__ = [
     "get_context_seed",
     "get_history",
     "get_history_around",
+    "get_history_timeline",
+    "get_history_timeline_prompts",
     "search_history",
     "search_history_get",
     "search_all_history",

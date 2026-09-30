@@ -128,7 +128,7 @@ def test_missing_scheduling_tables_fail_closed_without_breaking_history(fixture)
 def make_app(monkeypatch, service, rows):
     monkeypatch.setattr(history_pages, "get_service", lambda: service)
     monkeypatch.setattr(history_pages, "_load_sorted_visible_messages", lambda *a, **kw: rows)
-    monkeypatch.setattr(history_pages, "_load_all_messages_via_sql", lambda *a: rows)
+    monkeypatch.setattr(history_pages, "_load_window_via_sql", lambda *a, **kw: (rows, False, False))
     for name in ["_hydrate_attachments_for_page", "_hydrate_reasoning_for_page", "_hydrate_reply_links_for_page", "_hydrate_interrupt_anchors_for_page"]:
         monkeypatch.setattr(history_pages, name, lambda *a: {})
     app = FastAPI()

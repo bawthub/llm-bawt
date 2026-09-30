@@ -12,6 +12,12 @@ def test_history_facade_preserves_route_order_and_names() -> None:
     assert routes == [
         ("/v1/history", ("GET",), "get_history"),
         ("/v1/history/around", ("GET",), "get_history_around"),
+        ("/v1/history/timeline", ("GET",), "get_history_timeline"),
+        (
+            "/v1/history/timeline/prompts",
+            ("GET",),
+            "get_history_timeline_prompts",
+        ),
         ("/v1/history/search", ("POST",), "search_history"),
         ("/v1/history/search", ("GET",), "search_history_get"),
         ("/v1/history/search_all", ("POST",), "search_all_history"),

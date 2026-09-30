@@ -345,27 +345,41 @@ def _message_author_payload(message: dict) -> dict:
         return author
     return {"entity_type": None, "entity_id": None, "status": "unknown"}
 
-def _load_all_messages_via_sql(
+class _WindowAnchorNotFound(LookupError):
+    """The anchor id is absent from the (optionally session-scoped) timeline."""
+
+
+def _hydrate_window_authors(rows: list[dict], bot_id: str) -> list[dict]:
+    from ...mcp_server.storage import get_storage
+
+    return get_storage().hydrate_message_authors(rows, bot_id=bot_id)
+
+
+def _load_window_via_sql(
     service,
     bot_id: str,
-) -> list[dict] | None:
-    """Direct-SQL read of the entire ``{bot}_messages`` table.
+    message_id: str,
+    before: int,
+    after: int,
+    session_id: str | None = None,
+) -> tuple[list[dict], bool, bool] | None:
+    """Indexed direct-SQL window around one anchor message (TASK-980).
 
-    Bypasses :meth:`PostgreSQLShortTermManager.get_messages`'s
-    summarization filter so deep-link routes (``/v1/history/around``) can
-    locate ANY message that exists in the table — including messages whose
-    content has been folded into a summary and is therefore hidden from
-    the live chat tail. The summarization filter is correct for
-    "build a prompt" / "show the live conversation" but wrong for
-    "land me on this specific message that an upstream surface (Spotlight
-    Search, an external link) already found and referenced."
+    Returns ``(page_messages, has_older, has_newer)`` in ``(timestamp, id)``
+    order, or ``None`` when the backend is unavailable. Raises
+    :class:`_WindowAnchorNotFound` if the anchor isn't in scope.
 
-    Mirrors the data-access pattern that powers
-    ``mcp_server.storage.search_all_messages``, so search hits and
-    deep-link landings see the same set of rows.
+    Reads the bot's partition directly rather than
+    :meth:`PostgreSQLShortTermManager.get_messages`, whose summarization
+    filter hides folded rows: a deep link (Spotlight, timeline rail,
+    external URL) must land on ANY stored non-system/summary message.
 
-    Returns ``None`` on backend unavailability so the caller can surface
-    a 503 with its own message rather than letting the exception bubble.
+    Cost is O(before + after), not O(history): one pkey lookup for the
+    anchor, then two ``LIMIT`` range scans on ``(timestamp)`` (or
+    ``(session_id, timestamp)`` when scoped). Each side fetches one extra
+    row so the boundary flags need no count query. Ordering matches the
+    previous full-table loader exactly: ``timestamp`` then ``id`` in the
+    database collation. Authors are hydrated for the returned page only.
     """
     from sqlalchemy import text
     from ...media.assets import _build_engine
@@ -376,23 +390,45 @@ def _load_all_messages_via_sql(
         return None
 
     table = partition_name(MESSAGES_PARENT, bot_id)
-    sql = text(
-        f"""
-        SELECT id, role, content, timestamp, session_id,
-               author_entity_type, author_entity_id
-        FROM {table}
-        WHERE role NOT IN ('system', 'summary')
-        ORDER BY timestamp ASC, id ASC
-        """
+    columns = (
+        "id, role, content, timestamp, session_id, "
+        "author_entity_type, author_entity_id"
     )
+    scope = "role NOT IN ('system', 'summary')"
+    if session_id:
+        scope += " AND session_id = :session_id"
+    older_sql = text(
+        f"SELECT {columns} FROM {table} WHERE {scope} "
+        "AND (timestamp < :ts OR (timestamp = :ts AND id < :id)) "
+        "ORDER BY timestamp DESC, id DESC LIMIT :lim"
+    )
+    newer_sql = text(
+        f"SELECT {columns} FROM {table} WHERE {scope} "
+        "AND (timestamp > :ts OR (timestamp = :ts AND id > :id)) "
+        "ORDER BY timestamp ASC, id ASC LIMIT :lim"
+    )
+    base = {"session_id": session_id} if session_id else {}
 
     try:
         with engine.connect() as conn:
-            rows = conn.execute(sql).mappings().all()
+            anchor = conn.execute(
+                text(f"SELECT {columns} FROM {table} WHERE id = :id AND {scope}"),
+                {**base, "id": message_id},
+            ).mappings().first()
+            if anchor is None:
+                raise _WindowAnchorNotFound(message_id)
+            cursor = {**base, "ts": anchor["timestamp"], "id": anchor["id"]}
+            older = conn.execute(older_sql, {**cursor, "lim": before + 1}).mappings().all()
+            newer = conn.execute(newer_sql, {**cursor, "lim": after + 1}).mappings().all()
+    except _WindowAnchorNotFound:
+        raise
     except Exception as e:
-        log.warning(f"_load_all_messages_via_sql failed for {bot_id}: {e}")
+        log.warning(f"_load_window_via_sql failed for {bot_id}: {e}")
         return None
 
+    has_older = len(older) > before
+    has_newer = len(newer) > after
+    ordered = [*reversed(older[:before]), anchor, *newer[:after]]
     raw_rows = [
         {
             "id": str(row["id"] or ""),
@@ -403,11 +439,9 @@ def _load_all_messages_via_sql(
             "author_entity_type": row.get("author_entity_type"),
             "author_entity_id": row.get("author_entity_id"),
         }
-        for row in rows
+        for row in ordered
     ]
-    from ...mcp_server.storage import get_storage
-
-    return get_storage().hydrate_message_authors(raw_rows, bot_id=bot_id)
+    return _hydrate_window_authors(raw_rows, bot_id), has_older, has_newer
 
 
 def _build_history_response(
@@ -598,6 +632,13 @@ def get_history_around(
     before: int = Query(30, ge=0, le=200, description="Number of older messages to include"),
     after: int = Query(10, ge=0, le=200, description="Number of newer messages to include"),
     user_id: str | None = Query(None, description="Owner scope for scheduling origin enrichment only"),
+    session_id: str | None = Query(
+        None,
+        description=(
+            "TASK-980: scope the window to one thread's transcript (thread "
+            "viewer / timeline jumps). Absent = continuous timeline."
+        ),
+    ),
 ):
     """Return a window of messages around an anchor.
 
@@ -614,28 +655,24 @@ def get_history_around(
     service = get_service()
 
     try:
-        visible_messages = _load_all_messages_via_sql(service, bot_id)
-        if visible_messages is None:
-            raise HTTPException(status_code=503, detail="Memory service unavailable")
-        target_idx = next(
-            (i for i, m in enumerate(visible_messages) if str(m.get("id") or "") == message_id),
-            -1,
-        )
-        if target_idx < 0:
+        try:
+            window = _load_window_via_sql(
+                service, bot_id, message_id, before, after, session_id=session_id
+            )
+        except _WindowAnchorNotFound:
             raise HTTPException(status_code=404, detail=f"Message {message_id!r} not found")
-
-        start = max(0, target_idx - before)
-        end = min(len(visible_messages), target_idx + after + 1)
-        page_messages = visible_messages[start:end]
+        if window is None:
+            raise HTTPException(status_code=503, detail="Memory service unavailable")
+        page_messages, has_older, has_newer = window
 
         return _build_history_response(
             service,
             bot_id,
-            visible_messages,
+            page_messages,
             page_messages,
             candidate_count=None,
-            has_older=start > 0,
-            has_newer=end < len(visible_messages),
+            has_older=has_older,
+            has_newer=has_newer,
             anchor_id=message_id,
             origin_user_id=user_id,
         )
