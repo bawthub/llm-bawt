@@ -27,7 +27,11 @@ from agent_bridge.mcp_call_context import (
 )
 from mcp.server.fastmcp import FastMCP
 
-from ..approval_policies import ApprovalPersistError, ApprovalStoreUnavailable
+from ..approval_policies import (
+    ApprovalDuplicatePending,
+    ApprovalPersistError,
+    ApprovalStoreUnavailable,
+)
 from ..task_turn_context import (
     TaskTurnContext,
     TaskTurnContextError,
@@ -158,14 +162,13 @@ class ApprovalAwareFastMCP(FastMCP):
         arguments: dict[str, Any],
         *,
         expected_invocation_hash: str,
-        trusted_argument_overrides: dict[str, Any] | None = None,
         caller_context: ApprovedCallerContext | None = None,
     ):
         """Invoke an already-approved exact stored call without policy recursion.
 
-        The persisted public arguments are hash-verified *before* optional
-        server-owned transport overrides (currently the ops idempotency key) are
-        added. A caller cannot use the override seam through public MCP input.
+        The persisted arguments are hash-verified and replayed unchanged — a
+        caller-supplied ``idempotency_key`` survives approval (TASK-959).
+        Server-owned provenance travels in ``caller_context``, never in args.
         """
         # The FastAPI process reaches this without ever importing the tool
         # modules, so the singleton would otherwise be bare (TASK-639).
@@ -176,8 +179,6 @@ class ApprovalAwareFastMCP(FastMCP):
         actual_hash = canonical_invocation_hash(name, received)
         if actual_hash != str(expected_invocation_hash or ""):
             raise ValueError("approved MCP invocation hash mismatch")
-        if trusted_argument_overrides:
-            received.update(trusted_argument_overrides)
         token = _approved_caller_context.set(caller_context)
         try:
             return await super().call_tool(name, received)
@@ -339,6 +340,18 @@ class ApprovalAwareFastMCP(FastMCP):
                 session_key=call_context.session_key,
                 with_created=True,
             )
+        except ApprovalDuplicatePending as duplicate:
+            return {
+                "status": "approval_pending",
+                "approval_request_id": duplicate.existing_request_id,
+                "tool": name,
+                "is_error": True,
+                "message": (
+                    "An identical request is already awaiting approval; the call "
+                    "was not executed and no new approval was created. Wait for "
+                    "its result instead of re-sending."
+                ),
+            }
         except ApprovalPersistError as error:
             logger.error("Could not persist MCP approval for %s: %s", name, error)
             return {

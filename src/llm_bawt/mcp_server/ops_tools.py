@@ -162,8 +162,12 @@ async def ops_run(
     snapshot = approved.operations_snapshot if approved else None
     if approved is not None and snapshot is None:
         raise RuntimeError("[snapshot_invalid] approved operation has no persisted invocation snapshot; request fresh approval")
+    # The caller's key wins, including through approval replay, so identical
+    # approved calls collapse onto one job (TASK-959). Without one, an approved
+    # call keys on its durable approval id: a reclaimed execution lease after a
+    # crash then returns the already-created job instead of dispatching again.
     idem = (idempotency_key or "").strip() or (
-        f"approval-{approved.approval_request_id}" if approved and approved.approval_request_id else uuid.uuid4().hex
+        approved.approval_request_id if approved and approved.approval_request_id else uuid.uuid4().hex
     )
     provenance = _caller_provenance()
     try:

@@ -41,8 +41,9 @@ def client(store, monkeypatch):
         yield value
 
 
-def record(store, request_id="req-1", tool_name="generic", **kwargs):
-    arguments = {"operation": "demo", "args": {}} if tool_name == "ops_run" else {"x": 1}
+def record(store, request_id="req-1", tool_name="generic", arguments=None, **kwargs):
+    if arguments is None:
+        arguments = {"operation": "demo", "args": {}} if tool_name == "ops_run" else {"x": 1}
     caller_context = {
         "session_id": "original-session", "turn_id": "turn-1",
         "trigger_message_id": "message-1", "bot_id": "test-bot",
@@ -149,7 +150,8 @@ def test_deleted_seed_is_not_resurrected(store):
 
 def test_request_pagination_reports_all_matches(client, store):
     for index in range(7):
-        record(store, request_id=f"r-{index}")
+        # Distinct args: identical pending calls are refused (TASK-959).
+        record(store, request_id=f"r-{index}", arguments={"x": index})
     store.resolve_request("r-0", status=REQ_DENIED)
     response = client.get("/v1/tool-approval-requests?status=pending&limit=2&offset=2").json()
     assert response["total"] == 6
@@ -344,7 +346,8 @@ def test_ops_recovery_uses_same_key_and_immutable_snapshot(store, monkeypatch):
     async def execute(name, arguments, **kwargs):
         calls.append(kwargs)
         assert kwargs["caller_context"].operations_snapshot == snapshot
-        assert kwargs["trusted_argument_overrides"] == {"idempotency_key": row.id}
+        assert "trusted_argument_overrides" not in kwargs
+        assert kwargs["caller_context"].approval_request_id == row.id
         assert kwargs["expected_invocation_hash"] == row.invocation_hash
         return {"job_id": "same-job", "state": "queued"}
 

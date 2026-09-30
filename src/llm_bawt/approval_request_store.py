@@ -8,9 +8,11 @@ from datetime import timedelta
 from typing import Any
 from hashlib import sha256
 from sqlalchemy import and_, or_, update, func
+from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 from .approval_models import (
+    ApprovalDuplicatePending,
     ApprovalPersistError,
     ApprovalStoreUnavailable,
     CONT_DELIVERED,
@@ -129,6 +131,43 @@ def _same_mcp_invocation(
         and row.turn_id == turn_id
         and row.backend == backend
     )
+
+
+def _lock_mcp_invocation(
+    session: Session, bot_id: str, user_id: str, invocation_hash: str
+) -> None:
+    """Transaction-scoped lock on one caller's identical invocation (Postgres).
+
+    SQLite (tests) serializes writers on its own, so there is nothing to take.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"mcp-approval\x1f{bot_id}\x1f{user_id}\x1f{invocation_hash}"},
+    )
+
+
+def _pending_duplicate_id(
+    session: Session, bot_id: str, user_id: str, invocation_hash: str
+) -> str | None:
+    """Id of an identical MCP call still awaiting approval, if any.
+
+    ``invocation_hash`` is the canonical hash of tool name + arguments, so it
+    already includes a caller-supplied ``idempotency_key``.
+    """
+    return session.exec(
+        select(ToolApprovalRequest.id)
+        .where(
+            ToolApprovalRequest.request_kind == KIND_MCP,
+            ToolApprovalRequest.status == REQ_PENDING,
+            ToolApprovalRequest.bot_id == bot_id,
+            ToolApprovalRequest.user_id == user_id,
+            ToolApprovalRequest.invocation_hash == invocation_hash,
+        )
+        .order_by(ToolApprovalRequest.created_at)
+        .limit(1)
+    ).first()
 
 
 class ApprovalRequestStoreMixin:
@@ -331,7 +370,17 @@ class ApprovalRequestStoreMixin:
             )
         try:
             with Session(self.engine) as session:
+                # TASK-959: one pending approval per identical call. The lock
+                # serializes concurrent identical calls through the pending
+                # check + insert below; it is released at commit/rollback.
+                _lock_mcp_invocation(session, bot_id, user_id, invocation_hash)
                 existing = session.get(ToolApprovalRequest, request_id)
+                if existing is None:
+                    pending = _pending_duplicate_id(
+                        session, bot_id, user_id, invocation_hash
+                    )
+                    if pending is not None:
+                        raise ApprovalDuplicatePending(pending)
                 if existing is not None:
                     if not _same_mcp_invocation(
                         existing,

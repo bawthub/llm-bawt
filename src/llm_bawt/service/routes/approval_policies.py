@@ -390,20 +390,12 @@ async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolv
             stored_args = _decode_stored_args(claimed)
             if claimed.tool_name == "ops_run" and not claimed.operations_snapshot_json:
                 raise ValueError("Legacy operation approval has no immutable snapshot; create a new approval")
-            # Approved ops calls derive job idempotency from the durable approval
-            # request. A stale execution lease may be reclaimed after a crash,
-            # but the operation service then returns the already-created job.
-            trusted_overrides = (
-                {"idempotency_key": claimed.id}
-                if claimed.tool_name == "ops_run" else None
-            )
             from ..approval_execution import run_with_execution_lease
 
             result = await run_with_execution_lease(store, claimed, mcp.call_approved_tool(
                 claimed.tool_name,
                 stored_args,
                 expected_invocation_hash=claimed.invocation_hash or "",
-                trusted_argument_overrides=trusted_overrides,
                 # Provenance the tool records in its own ledger. Read from the
                 # persisted row, never from agent-supplied input.
                 caller_context=ApprovedCallerContext(

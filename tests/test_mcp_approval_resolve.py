@@ -83,19 +83,17 @@ class FakeMcp:
         arguments,
         *,
         expected_invocation_hash,
-        trusted_argument_overrides=None,
         caller_context=None,
     ):
         if self.fail:
             raise self.fail
         assert expected_invocation_hash == canonical_invocation_hash(name, arguments)
-        effective = {**arguments, **(trusted_argument_overrides or {})}
-        self.calls.append((name, arguments, trusted_argument_overrides))
+        self.calls.append((name, arguments))
         self.caller_contexts.append(caller_context)
         return [SimpleNamespace(text=json.dumps({
             "job_id": "job-1",
-            "operation": effective["operation"],
-            "idempotency_key": effective.get("idempotency_key"),
+            "operation": arguments["operation"],
+            "idempotency_key": arguments.get("idempotency_key") or caller_context.approval_request_id,
             "state": "queued",
         }))]
 
@@ -134,10 +132,10 @@ def test_approve_executes_stored_call_once_and_persists_actual_result(monkeypatc
     second = _run(store, store.get_request(row.id))
 
     assert len(fake.calls) == 1
-    name, public_args, overrides = fake.calls[0]
+    name, public_args = fake.calls[0]
     assert name == "ops_run"
+    # Stored args replay unchanged; no server-side key override (TASK-959).
     assert public_args == {"operation": "llm-bawt.restart-app", "args": {}}
-    assert overrides == {"idempotency_key": row.id}
     # Provenance comes from the persisted row, so the executed job is
     # traceable back to the approval that authorized it (TASK-639).
     caller = fake.caller_contexts[0]

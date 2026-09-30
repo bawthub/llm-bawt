@@ -471,7 +471,8 @@ def test_mark_continuation_failed_terminates_after_max_attempts():
 def test_find_pending_returns_due_pending_rows():
     store = _store()
     store.record_mcp_request(**_mcp_req(request_id="req-1"))
-    store.record_mcp_request(**_mcp_req(request_id="req-2"))
+    # Distinct invocation: identical pending calls are refused (TASK-959).
+    store.record_mcp_request(**_mcp_req(request_id="req-2", invocation_hash="cafebabe" * 8))
     for rid in ("req-1", "req-2"):
         _approve(store, rid)
         store.claim_mcp_execution(rid)
@@ -541,6 +542,54 @@ def test_existing_record_request_still_defaults_to_kind_harness():
     assert row.execution_state == EXEC_NOT_APPLICABLE
     assert row.continuation_state == CONT_NOT_NEEDED
     assert row.tool_use_id is None
+
+
+# ---- TASK-959: one pending approval per identical call ----------------------
+
+def _dup(**over):
+    """A second transport call of the same invocation: new tool_use id/turn."""
+    return _mcp_req(request_id="req-mcp-2", tool_use_id="toolu_02DEF",
+                    turn_id="turn-2", **over)
+
+
+def test_identical_pending_call_is_refused_with_existing_id():
+    from llm_bawt.approval_policies import ApprovalDuplicatePending
+    store = _store()
+    store.record_mcp_request(**_mcp_req())
+    with pytest.raises(ApprovalDuplicatePending) as refused:
+        store.record_mcp_request(**_dup())
+    assert refused.value.existing_request_id == "req-mcp-1"
+    assert isinstance(refused.value, ApprovalPersistError)  # fails closed
+    assert store.get_request("req-mcp-2") is None
+
+
+def test_same_request_id_retry_is_still_idempotent_not_refused():
+    store = _store()
+    first = store.record_mcp_request(**_mcp_req())
+    again, created = store.record_mcp_request(**_mcp_req(), with_created=True)
+    assert again.id == first.id and created is False
+
+
+@pytest.mark.parametrize("terminal", ["approved", "denied", "expired"])
+def test_identical_call_allowed_again_after_resolution(terminal):
+    from llm_bawt.approval_policies import REQ_DENIED, REQ_EXPIRED
+    store = _store()
+    store.record_mcp_request(**_mcp_req())
+    status = {"approved": REQ_APPROVED, "denied": REQ_DENIED, "expired": REQ_EXPIRED}[terminal]
+    store.resolve_request("req-mcp-1", status=status)
+    row, created = store.record_mcp_request(**_dup(), with_created=True)
+    assert created and row.id == "req-mcp-2" and row.status == REQ_PENDING
+
+
+def test_different_args_or_caller_are_not_duplicates():
+    store = _store()
+    store.record_mcp_request(**_mcp_req())
+    other_args = store.record_mcp_request(**_dup(invocation_hash="cafebabe" * 8))
+    assert other_args.status == REQ_PENDING
+    other_bot = store.record_mcp_request(**_mcp_req(
+        request_id="req-mcp-3", tool_use_id="toolu_03", turn_id="turn-3",
+        bot_id="caid", session_key="caid:nick"))
+    assert other_bot.status == REQ_PENDING
 
 
 if __name__ == "__main__":

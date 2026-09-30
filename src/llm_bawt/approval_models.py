@@ -52,6 +52,23 @@ class ApprovalPersistError(RuntimeError):
     """
 
 
+class ApprovalDuplicatePending(ApprovalPersistError):
+    """An identical MCP call already has an approval awaiting a decision.
+
+    TASK-959: the caller (same bot + user, same tool + canonical args) re-sent
+    a gated call while the first is still pending. No new approval is created;
+    the caller must wait for ``existing_request_id``. Subclasses
+    ``ApprovalPersistError`` so any caller that does not handle it explicitly
+    still fails closed (nothing executes, nothing new is persisted).
+    """
+
+    def __init__(self, existing_request_id: str):
+        super().__init__(
+            f"identical MCP call already awaiting approval: {existing_request_id}"
+        )
+        self.existing_request_id = existing_request_id
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 

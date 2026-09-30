@@ -300,8 +300,11 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
 
 
 @pytest.fixture
-def approved_ops(system, monkeypatch):
-    """Real interception, SQLite approval ledger, replay, and ops implementation."""
+def ops_gate(system, monkeypatch):
+    """Real interception + SQLite approval ledger; returns (approvals, call).
+
+    ``call(args, tool_use_id)`` issues one trusted ``ops_run`` transport call.
+    """
     from cryptography.fernet import Fernet
     from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY, mint_mcp_call_context
     from llm_bawt import task_turn_context as codec
@@ -321,18 +324,29 @@ def approved_ops(system, monkeypatch):
     fernet = Fernet(Fernet.generate_key())
     monkeypatch.setattr(codec, "_get_fernet", lambda: fernet)
     import uuid
-    capability = codec.mint_task_turn_context(session_id=str(uuid.uuid4()),
-        turn_id="turn-" + "b" * 32, trigger_message_id=str(uuid.uuid4()),
-        bot_id="ops-test", user_id="unit-user")
-    args = {"operation": op.slug, "args": {}}
-    stamp = mint_mcp_call_context(capability=capability, tool_name="ops_run", tool_input=args,
-        tool_use_id="toolu_ops", agent_request_id="req_ops", session_key="ops-test:unit-user",
-        backend="claude-code")
-    token = task_association.set_current_task_turn_capability(capability)
-    try:
-        pending = asyncio.run(registry.mcp.call_tool("ops_run", {**args, MCP_CALL_CONTEXT_KEY: stamp}))
-    finally:
-        task_association.reset_current_task_turn_capability(token)
+
+    def call(args, tool_use_id="toolu_ops"):
+        capability = codec.mint_task_turn_context(session_id=str(uuid.uuid4()),
+            turn_id="turn-" + uuid.uuid4().hex, trigger_message_id=str(uuid.uuid4()),
+            bot_id="ops-test", user_id="unit-user")
+        stamp = mint_mcp_call_context(capability=capability, tool_name="ops_run", tool_input=args,
+            tool_use_id=tool_use_id, agent_request_id="req_ops", session_key="ops-test:unit-user",
+            backend="claude-code")
+        token = task_association.set_current_task_turn_capability(capability)
+        try:
+            return asyncio.run(registry.mcp.call_tool("ops_run", {**args, MCP_CALL_CONTEXT_KEY: stamp}))
+        finally:
+            task_association.reset_current_task_turn_capability(token)
+
+    return approvals, call
+
+
+@pytest.fixture
+def approved_ops(system, ops_gate):
+    """Real interception, SQLite approval ledger, replay, and ops implementation."""
+    store, service, executor, op = system
+    approvals, call = ops_gate
+    pending = call({"operation": op.slug, "args": {}})
     assert pending["status"] == "approval_required"
     assert not executor.calls and store.count_jobs() == 0
     row = approvals.get_request(pending["approval_request_id"])
@@ -378,6 +392,59 @@ def test_real_interception_approval_ops_execution_preserves_snapshot(system, app
     assert approvals.get_request(row.id).continuation_state == CONT_PENDING
     executor.result = ReconcileResult("succeeded", 0)
     assert service.get_job_status(job.id)["terminal"] is True
+
+
+def _approve_via_route(approvals, request_id, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from llm_bawt.service.routes import approval_policies as routes
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(routes, "_store", lambda: approvals)
+    monkeypatch.setattr(routes, "_subscriber", lambda: None)
+    monkeypatch.setattr(routes, "get_turn_log_store", lambda: SimpleNamespace(set_approval_status=lambda **kwargs: None))
+    app = FastAPI()
+    app.include_router(routes.router)
+    with TestClient(app) as client:
+        response = client.post(f"/v1/chat/approvals/{request_id}/resolve", json={"decision": "approve"})
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_identical_pending_ops_run_is_refused_not_duplicated(system, ops_gate):
+    """TASK-959: a re-sent identical call gets the existing approval, no new one."""
+    store, _, executor, op = system
+    approvals, call = ops_gate
+    args = {"operation": op.slug, "args": {}, "idempotency_key": "TASK-958-restart-app-1"}
+    first = call(args, tool_use_id="toolu_first")
+    second = call(args, tool_use_id="toolu_second")
+    assert first["status"] == "approval_required"
+    assert second["status"] == "approval_pending" and second["is_error"] is True
+    assert second["approval_request_id"] == first["approval_request_id"]
+    assert approvals.count_requests(status="pending") == 1
+    different = call({**args, "idempotency_key": "other-key"}, tool_use_id="toolu_third")
+    assert different["status"] == "approval_required"
+    assert not executor.calls and store.count_jobs() == 0
+
+
+def test_caller_key_survives_approval_and_collapses_repeat_to_one_job(system, ops_gate, monkeypatch):
+    """TASK-959: approved replays keep the caller's key, so ops dedupes them."""
+    store, _, executor, op = system
+    approvals, call = ops_gate
+    args = {"operation": op.slug, "args": {}, "idempotency_key": "TASK-958-restart-app-1"}
+    first = call(args, tool_use_id="toolu_first")
+    done = _approve_via_route(approvals, first["approval_request_id"], monkeypatch)
+    assert done["result"]["idempotency_key"] == "TASK-958-restart-app-1"
+    job = store.get_job_by_key("TASK-958-restart-app-1")
+    assert job is not None and job.approval_request_id == first["approval_request_id"]
+    # After resolution an identical call may ask again; if approved it must
+    # land on the same job, not dispatch a second one.
+    again = call(args, tool_use_id="toolu_second")
+    assert again["status"] == "approval_required"
+    assert again["approval_request_id"] != first["approval_request_id"]
+    replay = _approve_via_route(approvals, again["approval_request_id"], monkeypatch)
+    assert replay["result"]["job_id"] == job.id
+    assert len(executor.calls) == 1 and store.count_jobs() == 1
 
 
 @pytest.mark.parametrize("snapshot_json", [None, "", "{}", "null", "[]"])
