@@ -30,6 +30,7 @@ from ..schemas_history_timeline import (
     TimelinePrompt,
     TimelinePromptsResponse,
     TimelineResponse,
+    TimelineSegment,
     TimelineSession,
 )
 
@@ -120,26 +121,38 @@ def build_timeline(
         d["n"] += n
         d["prompts"] += int(g["prompts"])
         if sid:
-            prior = d["sessions"].get(sid)
-            d["sessions"][sid] = first if prior is None else _earliest(prior, first)
+            # One group row per (day, session), so this is that day's segment.
+            d["sessions"][sid] = TimelineSegment(
+                session_id=sid,
+                first_message_id=first[1],
+                first_ts=first[0],
+                last_ts=last_ts,
+                message_count=n,
+                user_prompt_count=int(g["prompts"]),
+            )
 
             s = sessions.setdefault(sid, {"first": first, "last_ts": last_ts, "n": 0})
             s["first"] = _earliest(s["first"], first)
             s["last_ts"] = max(s["last_ts"], last_ts)
             s["n"] += n
 
-    day_models = [
-        TimelineDay(
-            date=day,
-            first_message_id=d["first"][1],
-            first_ts=d["first"][0],
-            last_ts=d["last_ts"],
-            message_count=d["n"],
-            user_prompt_count=d["prompts"],
-            session_ids=[sid for sid, _ in sorted(d["sessions"].items(), key=lambda kv: kv[1])],
+    day_models = []
+    for day, d in sorted(days.items()):
+        segments = sorted(
+            d["sessions"].values(), key=lambda seg: (seg.first_ts, seg.first_message_id)
         )
-        for day, d in sorted(days.items())
-    ]
+        day_models.append(
+            TimelineDay(
+                date=day,
+                first_message_id=d["first"][1],
+                first_ts=d["first"][0],
+                last_ts=d["last_ts"],
+                message_count=d["n"],
+                user_prompt_count=d["prompts"],
+                session_ids=[seg.session_id for seg in segments],
+                segments=segments,
+            )
+        )
 
     session_models = []
     for sid, s in sorted(sessions.items(), key=lambda kv: kv[1]["first"]):

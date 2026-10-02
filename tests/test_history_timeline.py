@@ -173,6 +173,10 @@ def test_build_timeline_folds_groups():
     assert d1.session_ids == ["s1"]
     assert d2.session_ids == ["s1", "s2"]  # ordered by first activity that day
     assert (d2.first_message_id, d2.last_ts) == ("b", 45.0)
+    # Per-day conversation segments: the rail's blips and their jump targets.
+    assert [(s.session_id, s.first_message_id, s.first_ts, s.last_ts, s.message_count, s.user_prompt_count)
+            for s in d2.segments] == [("s1", "b", 30.0, 35.0, 3, 1), ("s2", "c", 40.0, 45.0, 2, 1)]
+    assert [s.first_message_id for s in d1.segments] == ["a"]  # orphan rows get no segment
 
     assert [s.id for s in sessions] == ["s1", "s2"]
     s1, s2 = sessions

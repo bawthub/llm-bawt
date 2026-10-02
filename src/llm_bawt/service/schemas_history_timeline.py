@@ -5,6 +5,17 @@ from typing import Literal
 from pydantic import BaseModel
 
 
+class TimelineSegment(BaseModel):
+    """One thread's messages within one day: a conversation blip on the rail."""
+
+    session_id: str
+    first_message_id: str  # jump target: the thread's first message that day
+    first_ts: float
+    last_ts: float
+    message_count: int
+    user_prompt_count: int
+
+
 class TimelineDay(BaseModel):
     """One active calendar day in the viewer's timezone."""
 
@@ -14,7 +25,8 @@ class TimelineDay(BaseModel):
     last_ts: float
     message_count: int
     user_prompt_count: int
-    session_ids: list[str]
+    session_ids: list[str]  # same order as `segments`
+    segments: list[TimelineSegment]  # chronological by first message
 
 
 class TimelineSession(BaseModel):
