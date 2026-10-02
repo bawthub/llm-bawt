@@ -140,15 +140,20 @@ def test_postgres_migration_terminalizes_orphans_before_enforcing_constraint():
 
 def test_seed_defaults_adds_ops_rules_and_is_idempotent():
     store = _store()
-    assert store.seed_defaults() == 9  # six legacy Bash rules + three ops rules
+    assert store.seed_defaults() == 11  # six legacy Bash rules + five ops rules
     assert store.seed_defaults() == 0
     rows = store.list_all()
     ops_rows = [row for row in rows if row.tool_name == "ops_run"]
     assert [row.id for row in ops_rows] == [
         "seed-ops-run-bridge-restart",
         "seed-ops-run-redis-restart",
+        "seed-ops-run-bawthub-deploy-prod-image",
+        "seed-ops-run-bawthub-rollback-prod-image",
         "seed-ops-run-require-approval",
     ]
+    deploy_rules = {row.id: row for row in ops_rows if "prod-image" in row.id}
+    assert all(row.action == "require_approval" and row.matcher_type == "prefix" for row in deploy_rules.values())
+    assert deploy_rules["seed-ops-run-bawthub-rollback-prod-image"].severity == "critical"
     assert ops_rows[-1].matcher_type == "always"
     assert ops_rows[-1].action == "require_approval"
 
@@ -174,9 +179,9 @@ def test_seed_defaults_preserves_operator_edited_ops_rule():
 def test_seed_defaults_adds_missing_ops_rule_to_existing_policy_table():
     store = _store()
     store.create({"tool_name": "Bash", "matcher_type": "always"}, actor="nick")
-    assert store.seed_defaults() == 3
+    assert store.seed_defaults() == 5
     assert store.get("seed-ops-run-require-approval") is not None
-    assert len(store.list_all()) == 4
+    assert len(store.list_all()) == 6
 
 
 # ---- record_mcp_request ----------------------------------------------------

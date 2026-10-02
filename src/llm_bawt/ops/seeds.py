@@ -274,6 +274,87 @@ _BAWTHUB_SEEDS: list[dict[str, Any]] = [
 
 
 # ---------------------------------------------------------------------------
+# BawtHub production image deploy / rollback (TASK-997).
+#
+# Fixed target, fixed GHCR repository, fixed release workflow. Arguments only
+# NAME a release that the app verifies against GitHub before approval; the
+# worker re-verifies the pulled digest + labels + /api/health. Both rows ship
+# disabled and are covered by dedicated require_approval policies.
+# ---------------------------------------------------------------------------
+
+_PROD_TARGET = dict(
+    container_name="bawthub-frontend-prod-1",
+    compose_project=_BAWTHUB_PROJECT,
+    compose_service="frontend-prod",
+    image_repository="ghcr.io/bawthub/frontend",
+    github_repository="bawthub/bawthub",
+    workflow_path=".github/workflows/release-frontend.yml",
+    canonical_branch="main",
+    stop_grace_seconds=20,
+    health_timeout_seconds=180,
+)
+
+_IMAGE_SEEDS: list[dict[str, Any]] = [
+    {
+        "slug": "bawthub.deploy-prod-image",
+        "title": "Deploy BawtHub production image",
+        "description": (
+            "Replace frontend-prod with a GitHub Actions release image pinned by digest. "
+            "The run, receipt, tag and digest are verified before approval; the previous "
+            "container is restored automatically if health/release verification fails."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="deploy_image", **_PROD_TARGET),
+        "args_schema_json": _schema(
+            {
+                "workflow_run_id": {"type": "string", "pattern": "^[0-9]{1,20}$"},
+                "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+            },
+            required=["workflow_run_id", "digest", "source_sha", "version"],
+        ),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 900,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_HIGH,
+        "category": "deploy",
+        "approval_prompt_prefix": "Deploy BawtHub production image",
+    },
+    {
+        "slug": "bawthub.rollback-prod-image",
+        "title": "Roll back BawtHub production image",
+        "description": (
+            "Restore the last-known-good image recorded by a succeeded deploy job. "
+            "Never pulls; refuses if the target no longer runs that deploy's image."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="rollback_image", **_PROD_TARGET),
+        "args_schema_json": _schema(
+            {"deploy_job_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}},
+            required=["deploy_job_id"],
+        ),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 600,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_CRITICAL,
+        "category": "deploy",
+        "approval_prompt_prefix": "Roll back BawtHub production image",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
 # Standalone container restarts (not managed by a compose file the app owns).
 # ---------------------------------------------------------------------------
 
@@ -326,6 +407,7 @@ SEEDS: list[dict[str, Any]] = [
     *_LLM_BAWT_SEEDS,
     *_BAWTHUB_SEEDS,
     *_STANDALONE_CONTAINER_SEEDS,
+    *_IMAGE_SEEDS,
 ]
 
 

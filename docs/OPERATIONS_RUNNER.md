@@ -106,6 +106,63 @@ claim. Receipts contain resolved arguments (possibly secrets); restrict volume
 access and backups. Public job JSON uses schema-sensitive argument redaction;
 operator revision endpoints intentionally expose operator configuration.
 
+## Digest-bound image deploy/rollback (TASK-997)
+
+Two fixed actions extend the same worker; they are **not** a generic image
+runner. `deploy_image` / `rollback_image` specs pin `container_name`,
+`compose_project`/`compose_service`, `image_repository` (`ghcr.io/...`),
+`github_repository`, `workflow_path`, `canonical_branch` and
+`health_timeout_seconds`; selector arguments are rejected
+(`executor.validate_image_spec`). Seeds `bawthub.deploy-prod-image` and
+`bawthub.rollback-prod-image` ship **disabled** with dedicated
+`require_approval` policies (orders 7/8), separate from the GitHub build
+approval (`workflow_dispatch` of `.github/workflows/release-frontend.yml`).
+
+Before an approval snapshot exists, `prepare_invocation` binds (module
+`ops/release.py`):
+
+* **deploy** args `workflow_run_id`, `digest`, `source_sha`, `version` (regex
+  re-checked in code). `GitHubReleaseVerifier` requires the run to be a
+  completed, successful `workflow_dispatch` of the pinned workflow on the
+  canonical branch in the pinned repo; its single `release-receipt` artifact
+  (`bawthub.release-receipt/v1`, `status: complete`) must equal the args, with
+  `base_sha` = the run head SHA; tag `v<version>` (annotated tags peeled) must
+  resolve to `source_sha`. The signed artifact redirect is followed WITHOUT the
+  GitHub token. Any failure → `release_unverified`; no snapshot, no job.
+* **rollback** arg `deploy_job_id`: a SUCCEEDED deploy of the same target with
+  a complete deployment record; its `previous` image becomes the target.
+* both: a compare-and-swap on the image the target runs now
+  (`expected_current_image_id` / `from_image_id`). `_verify_snapshot` rejects a
+  release/rollback binding that disagrees with the args or appears on an
+  ordinary operation.
+
+The worker (`ops/image_deploy.py`, stdlib only) takes a per-target flock
+(`<receipt volume>/.target-locks`), re-checks Compose identity and the CAS,
+pulls `repo@digest` with the scoped credential only when not already local,
+requires the `RepoDigest` and release labels to match, then creates a clone of
+the live container (Compose labels/env/host config/networks preserved, old
+image's labels/env/cmd not carried), stops and renames the old one to
+`-prev-<job>`, starts the new one, waits for Docker health and verifies
+`/api/health` reports `healthy` and the approved baked release. On any failure
+after the stop it restores the previous container; a verified restore is a
+known `failed`, an unverified restore is `lost` (never retried). Rollback never
+pulls. The receipt `output_tail` is a JSON deployment record
+(`llm-bawt.ops.image-deploy/v1`), surfaced as `job.deployment` in the API.
+
+Activation prerequisites (operator actions, none performed by TASK-997):
+
+1. Rebuild the worker image (it now COPYs `worker.py` + `image_deploy.py` into
+   `/ops/`) and update `LLM_BAWT_OPS_WORKER_IMAGE`. Old queued jobs keep their
+   snapshotted image.
+2. Create a dedicated volume containing only `registry-auth.json`
+   (`{"username","password","serveraddress":"ghcr.io"}`, a `read:packages`
+   token) and set `LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME`. It is mounted read-only
+   at `/registry-auth` for `deploy_image` workers only.
+3. Set `LLM_BAWT_GITHUB_RELEASE_TOKEN` (fine-grained, Actions:read +
+   Contents:read on `bawthub/bawthub` only) for the app.
+4. Recreate app with the updated override (compose env change), review the
+   seeded rows and policies, then enable — each a separate explicit decision.
+
 ## Approval integration
 
 Trusted interception calls:

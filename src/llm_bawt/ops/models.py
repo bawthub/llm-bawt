@@ -419,6 +419,10 @@ class OpsJob(SQLModel, table=True):
                 _iso_utc(self.last_reconcile_at)
             ),
         }
+        # TASK-997: structured deploy/rollback record (None for ordinary ops),
+        # so the UI never has to parse raw output for release state.
+        from .image_deploy import parse_deployment
+        row["deployment"] = parse_deployment(self.output_tail)
         if include_output:
             row["output_tail"] = self.output_tail
             row["status_file_path"] = self.status_file_path

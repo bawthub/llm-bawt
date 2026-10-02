@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .executor import DockerExecutor, Executor, ExecutorError, validate_spec
+from .image_deploy import IMAGE_ACTIONS
+from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
+                      bind_image_invocation, binding_matches_args)
 from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, JOB_QUEUED,
                      JOB_RUNNING, JOB_TERMINAL_STATES, OpsOperation)
 from .store import IdempotencyConflict, OpsStore
@@ -40,8 +43,10 @@ def _timestamp(raw):
 
 
 class OpsService:
-    def __init__(self, store: OpsStore, *, executor: Executor | None = None):
+    def __init__(self, store: OpsStore, *, executor: Executor | None = None,
+                 release_verifier: ReleaseVerifier | None = None):
         self.store = store
+        self._release_verifier = release_verifier or GitHubReleaseVerifier()
         default = executor or DockerExecutor()
         self._executors = {default.kind(): default}
 
@@ -84,10 +89,18 @@ class OpsService:
         executor = self._resolve_executor(op.executor_kind)
         execution = {key: getattr(op, key) for key in ("executor_kind", "target_host", "run_as_user",
             "working_directory", "timeout_seconds", "start_delay_seconds", "max_output_bytes", "max_concurrent")}
-        execution.update(executor.execution_settings())
+        execution.update(executor.execution_settings(spec))
         snapshot = {"snapshot_version": 1, "operation": op.to_api(), "spec": spec,
                     "schema": json.loads(op.args_schema_json), "defaults": json.loads(op.args_defaults_json),
                     "input_args": {} if args is None else args, "resolved_args": merged, "execution": execution}
+        if spec["action"] in IMAGE_ACTIONS:
+            # TASK-997: the approver sees and the worker executes ONE verified
+            # release (or recorded last-known-good) plus an image CAS.
+            try:
+                snapshot.update(bind_image_invocation(spec=spec, args=merged, store=self.store,
+                                                      executor=executor, verifier=self._release_verifier))
+            except (ReleaseVerificationError, ExecutorError) as exc:
+                raise OpsDispatchError("release_unverified", str(exc)) from exc
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
         return json.loads(canonical_json(snapshot))
 
@@ -111,6 +124,8 @@ class OpsService:
                         "start_delay_seconds", "max_output_bytes", "max_concurrent"):
                 if detached["execution"][key] != op[key]:
                     raise ValueError(f"snapshot execution {key} mismatch")
+            if not binding_matches_args(detached):
+                raise ValueError("snapshot release/rollback binding mismatch")
             return detached
         except (ValueError, TypeError, KeyError) as exc:
             raise OpsDispatchError("snapshot_invalid", str(exc)) from exc

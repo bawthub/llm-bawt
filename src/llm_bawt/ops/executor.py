@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS, REGISTRY_AUTH_MOUNT
 from .validation import canonical_json
 from .worker import atomic_json
 
@@ -54,7 +55,7 @@ class Executor(ABC):
     @abstractmethod
     def reconcile(self, **kwargs) -> ReconcileResult: ...
 
-    def execution_settings(self) -> dict:
+    def execution_settings(self, spec: dict | None = None) -> dict:
         return {}
 
     def preflight(self, snapshot: dict) -> None:
@@ -62,12 +63,47 @@ class Executor(ABC):
         if not self.available():
             raise ExecutorError("executor not available")
 
+    def inspect_target_image(self, spec: dict) -> str:
+        """Image ID the fixed image-action target runs now (approval-time CAS)."""
+        raise ExecutorError(f"{self.kind()} executor cannot inspect image deploy targets")
+
+
+_IMAGE_SPEC_PATTERNS = {
+    "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
+    "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
+    "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
+    "image_repository": r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*",
+    "github_repository": r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+    "workflow_path": r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml",
+    "canonical_branch": r"[A-Za-z0-9][A-Za-z0-9_./-]{0,99}",
+}
+
+
+def validate_image_spec(spec: dict) -> dict:
+    """Fixed digest deploy/rollback target (TASK-997). No selector arguments:
+    every identity is pinned in the operator-reviewed spec, never in job args."""
+    allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", *_IMAGE_SPEC_PATTERNS}
+    if set(spec) - allowed or set(_IMAGE_SPEC_PATTERNS) - set(spec):
+        raise ValueError(f"image spec requires exactly {sorted(allowed)} (stop_grace_seconds optional)")
+    for key, pattern in _IMAGE_SPEC_PATTERNS.items():
+        if not isinstance(spec[key], str) or not re.fullmatch(pattern, spec[key]):
+            raise ValueError(f"image spec {key} is invalid")
+    grace = spec.get("stop_grace_seconds", 10)
+    if type(grace) is not int or not 0 <= grace <= 300:
+        raise ValueError("stop_grace_seconds must be an integer in 0..300")
+    health = spec.get("health_timeout_seconds")
+    if type(health) is not int or not 10 <= health <= 900:
+        raise ValueError("health_timeout_seconds must be an integer in 10..900")
+    return spec
+
 
 def validate_spec(command_script: str) -> dict:
     try:
         spec = json.loads(command_script)
     except (ValueError, TypeError) as exc:
         raise ValueError("command_script must be a Docker JSON spec") from exc
+    if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
+        return validate_image_spec(spec)
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
                "compose_service", "compose_service_from_arg", "stop_grace_seconds"}
     if not isinstance(spec, dict) or set(spec) - allowed:
@@ -96,6 +132,9 @@ class DockerExecutor(Executor):
         self.worker_image = worker_image or os.getenv("LLM_BAWT_OPS_WORKER_IMAGE", "")
         self.receipt_volume = receipt_volume or os.getenv("LLM_BAWT_OPS_RECEIPT_VOLUME", "")
         self.receipt_root = receipt_root or os.getenv("LLM_BAWT_OPS_RECEIPT_ROOT", "/var/lib/llm-bawt-ops")
+        # Read-only named volume holding ONLY registry-auth.json (scoped GHCR
+        # pull token). Mounted solely into deploy_image workers (TASK-997).
+        self.registry_auth_volume = os.getenv("LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME", "")
 
     def kind(self):
         return "docker"
@@ -110,9 +149,18 @@ class DockerExecutor(Executor):
                 self._client = docker.from_env(timeout=15)
         return self._client
 
-    def execution_settings(self):
-        return {"worker_image": self.worker_image, "receipt_volume": self.receipt_volume,
-                "receipt_root": self.receipt_root}
+    def execution_settings(self, spec=None):
+        settings = {"worker_image": self.worker_image, "receipt_volume": self.receipt_volume,
+                    "receipt_root": self.receipt_root}
+        if spec and spec.get("action") == DEPLOY_ACTION:
+            settings["registry_auth_volume"] = self.registry_auth_volume
+        return settings
+
+    def inspect_target_image(self, spec):
+        try:
+            return self.client.containers.get(spec["container_name"]).attrs["Image"]
+        except Exception as exc:
+            raise ExecutorError(f"cannot inspect deploy target {spec['container_name']}: {exc}") from exc
 
     def available(self):
         try:
@@ -152,6 +200,11 @@ class DockerExecutor(Executor):
         if not any(m.get("Type") == "volume" and m.get("Name") == volume and
                    m.get("Destination") == root and m.get("RW") for m in mounts):
             raise ExecutorError("configured receipt path is not the configured writable named volume in this container")
+        if "registry_auth_volume" in settings:
+            auth = settings["registry_auth_volume"]
+            if not auth or auth == volume:
+                raise ExecutorError("deploy_image requires LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME (dedicated, not the receipt volume)")
+            self.client.volumes.get(auth)  # Never let Docker implicitly create it.
 
     @staticmethod
     def worker_name(job_id):
@@ -211,6 +264,10 @@ class DockerExecutor(Executor):
             digest = hashlib.sha256(raw).hexdigest()
             name = self.worker_name(job_id)
             worker = self._get_worker(name)
+            volumes = {settings["receipt_volume"]: {"bind": "/receipts", "mode": "rw"},
+                       "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}}
+            if settings.get("registry_auth_volume"):
+                volumes[settings["registry_auth_volume"]] = {"bind": REGISTRY_AUTH_MOUNT, "mode": "ro"}
             if worker is None:
                 try:
                     worker = self.client.containers.create(
@@ -231,8 +288,7 @@ class DockerExecutor(Executor):
                             "llm-bawt.ops.job": job_id,
                             "llm-bawt.ops.request": digest,
                         },
-                        volumes={settings["receipt_volume"]: {"bind": "/receipts", "mode": "rw"},
-                                 "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}},
+                        volumes=volumes,
                     )
                 except Exception as exc:
                     if getattr(exc, "status_code", None) != 409:

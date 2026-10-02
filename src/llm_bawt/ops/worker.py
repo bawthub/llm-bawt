@@ -19,6 +19,17 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
 
+# Image deploy/rollback (TASK-997) lives in the sibling stdlib-only module. The
+# app/tests import it as a package; the worker image runs this file directly
+# (see __main__). Single source of truth for IMAGE_ACTIONS is image_deploy.
+if __package__:
+    from .image_deploy import IMAGE_ACTIONS, ImageDeployer
+else:  # pragma: no cover - standalone worker image
+    # `python3 -I` drops the script directory from sys.path; re-add ONLY this
+    # file's own image-owned, read-only directory.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from image_deploy import IMAGE_ACTIONS, ImageDeployer
+
 
 class UnixHTTPConnection(http.client.HTTPConnection):
     def connect(self):
@@ -32,11 +43,23 @@ class DockerAPI:
         self.timeout = timeout
         self.side_effect_started = False
 
-    def request(self, method: str, path: str):
+    def request(self, method: str, path: str, *, body: dict | None = None,
+                headers: dict | None = None, raw: bool = False):
         conn = UnixHTTPConnection("localhost", timeout=self.timeout)
         try:
-            conn.request(method, path)
+            send_headers = dict(headers or {})
+            payload = None
+            if body is not None:
+                payload = json.dumps(body).encode()
+                send_headers["Content-Type"] = "application/json"
+            conn.request(method, path, body=payload, headers=send_headers)
             response = conn.getresponse()
+            if raw:
+                # Exec attach stream: bounded, returned verbatim for demuxing.
+                data = response.read(1024 * 1024 + 1)
+                if response.status >= 300 or len(data) > 1024 * 1024:
+                    raise RuntimeError(f"Docker HTTP {response.status} (raw stream)")
+                return data
             # Pull emits an unbounded progress stream. Drain in bounded chunks;
             # retain only the tail to catch Docker's in-stream error response.
             tail = b""
@@ -156,14 +179,23 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         old_handler = signal.signal(signal.SIGALRM, deadline)
         signal.setitimer(signal.ITIMER_REAL, execution["timeout_seconds"])
         try:
-            output = api.execute(snapshot["spec"], snapshot["resolved_args"])
+            if snapshot["spec"]["action"] in IMAGE_ACTIONS:
+                output = ImageDeployer(api, snapshot, job_id,
+                                           lock_root=request_path.parent.parent / ".target-locks").run()
+            else:
+                output = api.execute(snapshot["spec"], snapshot["resolved_args"])
             receipt.update(state="succeeded", exit_code=0, output_tail=output)
         except TimeoutError as exc:
             receipt.update(state="timed_out", exit_code=None, error=str(exc),
                            side_effect_unknown=api.side_effect_started)
         except Exception as exc:
-            receipt.update(state="lost" if api.side_effect_started else "failed", exit_code=None,
-                           error=str(exc), side_effect_unknown=api.side_effect_started)
+            # A deploy that verifiably restored the previous container is a
+            # KNOWN outcome even though production was touched.
+            uncertain = api.side_effect_started and not getattr(exc, "outcome_known", False)
+            receipt.update(state="lost" if uncertain else "failed", exit_code=None,
+                           error=str(exc), side_effect_unknown=uncertain)
+            if getattr(exc, "output", None):
+                receipt["output_tail"] = exc.output
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, old_handler)
