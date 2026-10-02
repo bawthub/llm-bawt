@@ -93,7 +93,7 @@ These are the endpoints BawtHub depends on most:
 This is the closest match to how BawtHub uses the repo.
 
 ```bash
-git clone https://github.com/zenoran/llm-bawt.git
+git clone https://github.com/bawthub/llm-bawt.git
 cd llm-bawt
 
 # Create .env manually in the repo root.
@@ -124,7 +124,7 @@ make docker-status
 ### Local development
 
 ```bash
-git clone https://github.com/zenoran/llm-bawt.git
+git clone https://github.com/bawthub/llm-bawt.git
 cd llm-bawt
 ./install.sh --dev
 ./server.sh start --dev --stdout

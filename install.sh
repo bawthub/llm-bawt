@@ -3,10 +3,10 @@
 # llm-bawt installer
 # 
 # Usage (from GitHub):
-#   curl -fsSL https://raw.githubusercontent.com/zenoran/llm-bawt/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/bawthub/llm-bawt/master/install.sh | bash
 #
 # Or with options:
-#   curl -fsSL https://raw.githubusercontent.com/zenoran/llm-bawt/master/install.sh | bash -s -- --with-llama --with-hf
+#   curl -fsSL https://raw.githubusercontent.com/bawthub/llm-bawt/master/install.sh | bash -s -- --with-llama --with-hf
 #
 # Options:
 #   --with-llama    Install llama-cpp-python for local GGUF models
@@ -37,7 +37,7 @@ INSTALL_SEARCH=false
 WITH_CUDA=true
 UNINSTALL=false
 EDITABLE=false
-REPO="git+https://github.com/zenoran/llm-bawt.git"
+REPO="git+https://github.com/bawthub/llm-bawt.git"
 DEV_SYNC=false
 FORCE_REBUILD=false
 DEPS_ONLY=false  # Install only dependencies, not the project itself (for Docker layer caching)
@@ -51,7 +51,7 @@ USAGE:
     ./install.sh [OPTIONS]
 
     # From GitHub (one-liner):
-    curl -fsSL https://raw.githubusercontent.com/zenoran/llm-bawt/master/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/bawthub/llm-bawt/master/install.sh | bash
 
 OPTIONS:
     -h, --help          Show this help message

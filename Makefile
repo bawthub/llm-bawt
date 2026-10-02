@@ -48,7 +48,7 @@ else
 endif
 
 # ── Configurable variables ──────────────────────────────────────
-REPO           ?= git+https://github.com/zenoran/llm-bawt.git
+REPO           ?= git+https://github.com/bawthub/llm-bawt.git
 CUDA_ARCHS     ?= 75;80;86;89;90;120  # used by dev-llama
 WITH_CUDA      ?= true                # used by dev-llama
 
