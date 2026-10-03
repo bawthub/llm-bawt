@@ -12,6 +12,7 @@ from .base import ProviderAdapter
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .github import GitHubAdapter
+from .github_deploy import GhcrPullAdapter, GitHubReleaseAdapter
 from .openai_key import OpenAIKeyAdapter
 from .openrouter import OpenRouterAdapter
 from .xai import XaiAdapter
@@ -32,6 +33,9 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     OpenAIKeyAdapter.id: OpenAIKeyAdapter,
     AnthropicKeyAdapter.id: AnthropicKeyAdapter,
     XAdapter.id: XAdapter,
+    # TASK-997: release-deploy credentials (DB-stored, never env).
+    GitHubReleaseAdapter.id: GitHubReleaseAdapter,
+    GhcrPullAdapter.id: GhcrPullAdapter,
 }
 
 

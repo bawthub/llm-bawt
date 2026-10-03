@@ -12,14 +12,13 @@ secrets), so the operator approves an exact, verified release:
   last-known-good image, and a CAS that the target still runs what it deployed.
 
 The worker independently re-verifies the pulled bytes (RepoDigest + release
-labels + in-container /api/health), so GHCR access stays in the worker's
-read-only pull credential and the app needs only a read-only GitHub token.
+labels + in-container /api/health). Both GitHub credentials live in the
+encrypted CredentialStore (providers ``github-release`` / ``ghcr-pull``).
 """
 from __future__ import annotations
 
 import io
 import json
-import os
 import re
 import urllib.error
 import urllib.request
@@ -57,6 +56,15 @@ class ReleaseVerifier(ABC):
         """Return the verified release binding or raise ReleaseVerificationError."""
 
 
+def _stored_release_token() -> str:
+    from ..service.providers.github_deploy import GitHubReleaseAdapter
+    from ..utils.config import Config
+    try:
+        return GitHubReleaseAdapter(Config()).api_key() or ""
+    except Exception as exc:  # noqa: BLE001 - DB/key trouble must surface as "unverified"
+        raise ReleaseVerificationError(f"release verification token unavailable: {type(exc).__name__}") from exc
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
         return None
@@ -64,13 +72,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class GitHubReleaseVerifier(ReleaseVerifier):
     """Read-only GitHub API checks. Token: fine-grained, Actions+Contents READ
-    on the pinned repository only (``LLM_BAWT_GITHUB_RELEASE_TOKEN``)."""
+    on the pinned repository only, stored as the ``github-release`` provider
+    credential (CredentialStore). Resolved per verification, so a reconnect
+    takes effect without a restart."""
 
     API = "https://api.github.com"
     MAX_ARTIFACT_BYTES = 1024 * 1024
 
     def __init__(self, token: str | None = None, *, opener=None):
-        self._token = token if token is not None else os.getenv("LLM_BAWT_GITHUB_RELEASE_TOKEN", "")
+        self._fixed_token = token
+        self._token = ""
         self._opener = opener or urllib.request.build_opener(_NoRedirect)
 
     def _fetch(self, url: str, *, auth: bool = True, limit: int = MAX_ARTIFACT_BYTES):
@@ -122,8 +133,10 @@ class GitHubReleaseVerifier(ReleaseVerifier):
 
     def verify(self, spec, args):
         _require_args(args, _DEPLOY_ARGS)
+        self._token = self._fixed_token if self._fixed_token is not None else _stored_release_token()
         if not self._token:
-            raise ReleaseVerificationError("release verification token not configured (LLM_BAWT_GITHUB_RELEASE_TOKEN)")
+            raise ReleaseVerificationError(
+                "release verification token not connected (Providers: GitHub release verification)")
         repo, run_id = spec["github_repository"], args["workflow_run_id"]
         run = self._json(f"/repos/{repo}/actions/runs/{run_id}")
         checks = {

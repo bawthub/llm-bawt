@@ -128,7 +128,8 @@ Before an approval snapshot exists, `prepare_invocation` binds (module
   (`bawthub.release-receipt/v1`, `status: complete`) must equal the args, with
   `base_sha` = the run head SHA; tag `v<version>` (annotated tags peeled) must
   resolve to `source_sha`. The signed artifact redirect is followed WITHOUT the
-  GitHub token. Any failure → `release_unverified`; no snapshot, no job.
+  GitHub token. The token is the DB-stored `github-release` provider credential,
+  read per verification. Any failure → `release_unverified`; no snapshot, no job.
 * **rollback** arg `deploy_job_id`: a SUCCEEDED deploy of the same target with
   a complete deployment record; its `previous` image becomes the target.
 * both: a compare-and-swap on the image the target runs now
@@ -136,9 +137,14 @@ Before an approval snapshot exists, `prepare_invocation` binds (module
   release/rollback binding that disagrees with the args or appears on an
   ordinary operation.
 
+Deploy preflight (app side, `DockerExecutor.ensure_release_image`) pulls
+`repo@digest` with the DB-stored `ghcr-pull` provider credential when it is not
+already local. Pulling touches no container; a missing credential or failed pull
+leaves the job QUEUED with the reason visible. The worker holds no credential.
+
 The worker (`ops/image_deploy.py`, stdlib only) takes a per-target flock
 (`<receipt volume>/.target-locks`), re-checks Compose identity and the CAS,
-pulls `repo@digest` with the scoped credential only when not already local,
+refuses (known, nothing changed) if the approved image is not on the daemon,
 requires the `RepoDigest` and release labels to match, then creates a clone of
 the live container (Compose labels/env/host config/networks preserved, old
 image's labels/env/cmd not carried), stops and renames the old one to
@@ -154,14 +160,14 @@ Activation prerequisites (operator actions, none performed by TASK-997):
 1. Rebuild the worker image (it now COPYs `worker.py` + `image_deploy.py` into
    `/ops/`) and update `LLM_BAWT_OPS_WORKER_IMAGE`. Old queued jobs keep their
    snapshotted image.
-2. Create a dedicated volume containing only `registry-auth.json`
-   (`{"username","password","serveraddress":"ghcr.io"}`, a `read:packages`
-   token) and set `LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME`. It is mounted read-only
-   at `/registry-auth` for `deploy_image` workers only.
-3. Set `LLM_BAWT_GITHUB_RELEASE_TOKEN` (fine-grained, Actions:read +
-   Contents:read on `bawthub/bawthub` only) for the app.
-4. Recreate app with the updated override (compose env change), review the
-   seeded rows and policies, then enable — each a separate explicit decision.
+2. Connect two provider credentials (encrypted in the CredentialStore; Providers
+   UI or `POST /v1/providers/{id}/connect/api-key`, validated against GitHub):
+   `github-release` — fine-grained, Actions:read + Contents:read on
+   `bawthub/bawthub` only; `ghcr-pull` — classic, `read:packages` only (ghcr.io
+   rejects fine-grained tokens; the GitHub login becomes the registry user).
+   No env var or volume: nothing to recreate for credentials.
+3. Restart app (code reload), review the seeded rows and policies, then
+   enable — each a separate explicit decision.
 
 ## Approval integration
 

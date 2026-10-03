@@ -3,11 +3,13 @@
 Runs inside the one-shot ops worker (TASK-997) next to ``worker.py``; the app
 imports only the constants and :func:`parse_deployment` from here. The worker
 still has no network, no repository checkout and no shell: every effect is a
-Docker Engine API call on the fixed target named by the validated spec.
+Docker Engine API call on the fixed target named by the validated spec, and it
+holds no registry credential.
 
 Deploy and rollback share ONE replace path:
 
-  inspect target → (deploy: pull ``repo@digest``) → verify image identity →
+  inspect target → (deploy: ``repo@digest`` must already be on the daemon —
+  the app pulls it in preflight) → verify image identity →
   create clone ``<name>-next-<job8>`` → stop old → rename old ``-prev-<job8>`` →
   rename new to canonical → start → wait for Docker health → verify release
   identity via in-container ``/api/health`` → remove old container.
@@ -19,7 +21,6 @@ verified restore is a known outcome (``failed``); anything else is uncertain
 """
 from __future__ import annotations
 
-import base64
 import fcntl
 import json
 import struct
@@ -31,8 +32,6 @@ DEPLOY_SCHEMA = "llm-bawt.ops.image-deploy/v1"
 DEPLOY_ACTION = "deploy_image"
 ROLLBACK_ACTION = "rollback_image"
 IMAGE_ACTIONS = frozenset({DEPLOY_ACTION, ROLLBACK_ACTION})
-REGISTRY_AUTH_MOUNT = "/registry-auth"
-REGISTRY_AUTH_FILE = "registry-auth.json"
 HEALTH_URL = "http://127.0.0.1:3000/api/health"
 
 # Container.Config keys a Compose service may override; when equal to the OLD
@@ -79,13 +78,12 @@ class DeployFailed(RuntimeError):
 
 class ImageDeployer:
     def __init__(self, api, snapshot: dict, job_id: str, *, lock_root: Path,
-                 auth_dir: Path = Path(REGISTRY_AUTH_MOUNT), sleep=time.sleep, clock=time.monotonic):
+                 sleep=time.sleep, clock=time.monotonic):
         self.api = api
         self.spec = snapshot["spec"]
         self.snapshot = snapshot
         self.job_id = job_id
         self.lock_root = lock_root
-        self.auth_dir = auth_dir
         self.sleep = sleep
         self.clock = clock
         self.name = self.spec["container_name"]
@@ -124,13 +122,10 @@ class ImageDeployer:
         old, old_image = self._target(expected_image_id=release["expected_current_image_id"])
         if old["Config"].get("Image") == ref:
             self._fail("target already runs this release digest; nothing to deploy", known=True)
-        self._phase("pull")
-        if self._image(ref) is None:
-            self._pull(ref)
         self._phase("verify-image")
         new_image = self._image(ref)
         if new_image is None:
-            self._fail("pulled image is not present on the daemon", known=True)
+            self._fail("approved image is not on the daemon (deploy preflight pulls it); nothing changed", known=True)
         repo_digest = f"{self.spec['image_repository']}@{release['digest']}"
         if repo_digest not in (new_image.get("RepoDigests") or []):
             self._fail(f"image does not carry RepoDigest {repo_digest}", known=True)
@@ -232,21 +227,6 @@ class ImageDeployer:
             if "HTTP 404" in str(exc):
                 return None
             raise
-
-    def _pull(self, ref: str):
-        path = Path(self.auth_dir) / REGISTRY_AUTH_FILE
-        try:
-            auth = json.loads(path.read_text())
-            header = base64.urlsafe_b64encode(json.dumps(
-                {"username": auth["username"], "password": auth["password"],
-                 "serveraddress": auth.get("serveraddress", "ghcr.io")}).encode()).decode()
-        except (OSError, ValueError, KeyError) as exc:
-            self._fail(f"registry pull credentials unavailable ({type(exc).__name__}); nothing changed", known=True)
-        try:
-            self.api.request("POST", "/images/create?" + urlencode({"fromImage": ref}),
-                             headers={"X-Registry-Auth": header})
-        except Exception as exc:  # noqa: BLE001 - a pull does not touch the target
-            self._fail(f"image pull failed: {exc}", known=True)
 
     def _rename(self, container_id, name):
         self.api.request("POST", f"/containers/{container_id}/rename?" + urlencode({"name": name}))

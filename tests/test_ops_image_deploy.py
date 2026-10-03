@@ -21,9 +21,9 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import create_engine
 
 from llm_bawt.ops import OpsDispatchError, OpsService, OpsStore
-from llm_bawt.ops.executor import (DispatchResult, DockerExecutor, Executor, ReconcileResult,
+from llm_bawt.ops.executor import (DispatchResult, DockerExecutor, Executor, ExecutorError, ReconcileResult,
                                    validate_spec)
-from llm_bawt.ops.image_deploy import (DEPLOY_SCHEMA, REGISTRY_AUTH_FILE, DeployFailed, ImageDeployer,
+from llm_bawt.ops.image_deploy import (DEPLOY_SCHEMA, DeployFailed, ImageDeployer,
                                        clone_create_body, parse_deployment)
 from llm_bawt.ops.release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                                   binding_matches_args)
@@ -59,11 +59,10 @@ class FakeDocker:
     """Just enough of the Engine API for ImageDeployer, keyed like dockerd."""
 
     def __init__(self, *, new_health="healthy", new_labels=None, repo_digests=None,
-                 local_new=False, old_restart_fails=False):
+                 local_new=True, old_restart_fails=False):
         self.side_effect_started = False
         self._seq = 13  # created container ids: "e"*64, "f"*64, ...
         self.calls: list[tuple[str, str]] = []
-        self.pull_headers: list[dict] = []
         self.create_bodies: list[dict] = []
         self.old_restart_fails = old_restart_fails
         self.images = {OLD_ID: {"Id": OLD_ID, "RepoDigests": [], "_health": "healthy",
@@ -117,9 +116,7 @@ class FakeDocker:
         if parts[0] == "images" and method == "GET":
             return copy.deepcopy(self._find_image(parts[1]))
         if parts[0] == "images" and parts[1] == "create":
-            self.pull_headers.append(dict(headers or {}))
-            self.images[NEW_ID] = self._new
-            return None
+            raise AssertionError("the worker must never pull; the app pulls in preflight")
         if parts[0] == "containers" and parts[1] == "create":
             self.create_bodies.append(body)
             image = self._find_image(body["Image"])
@@ -160,33 +157,23 @@ class FakeDocker:
         return None
 
 
-@pytest.fixture()
-def auth_dir(tmp_path):
-    path = tmp_path / "auth"
-    path.mkdir()
-    (path / REGISTRY_AUTH_FILE).write_text(json.dumps({"username": "puller", "password": "s3cret"}))
-    return path
-
-
-def _deployer(api, tmp_path, auth_dir, *, snapshot=None):
+def _deployer(api, tmp_path, *, snapshot=None):
     snapshot = snapshot or {"spec": SPEC, "release": _release()}
-    return ImageDeployer(api, snapshot, JOB_ID, lock_root=tmp_path / "locks", auth_dir=auth_dir,
+    return ImageDeployer(api, snapshot, JOB_ID, lock_root=tmp_path / "locks",
                          sleep=lambda _s: None, clock=iter(range(0, 10_000, 5)).__next__)
 
 
 # ── worker: deploy ─────────────────────────────────────────────────────────
 
-def test_deploy_success_swaps_by_digest_and_records_last_known_good(tmp_path, auth_dir):
+def test_deploy_success_swaps_by_digest_and_records_last_known_good(tmp_path):
     api = FakeDocker()
-    record = json.loads(_deployer(api, tmp_path, auth_dir).run())
+    record = json.loads(_deployer(api, tmp_path).run())
     live = api.by_name(NAME)
     assert live["Image"] == NEW_ID and live["Config"]["Image"] == f"{REPO}@{DIGEST}"
     assert api.old_id not in api.containers  # previous container cleaned up
     assert record["schema"] == DEPLOY_SCHEMA and record["phase"] == "done"
     assert record["previous"]["image_id"] == OLD_ID and record["deployed"]["image_id"] == NEW_ID
     assert record["health"]["release"]["sourceSha"] == SOURCE
-    assert "X-Registry-Auth" in api.pull_headers[0]
-    assert "s3cret" not in json.dumps(record)
     body = api.create_bodies[0]
     assert api.old_id[:12] not in body["NetworkingConfig"]["EndpointsConfig"]["bawthub_default"]["Aliases"]
     assert body["Labels"]["com.docker.compose.image"] == NEW_ID
@@ -196,10 +183,10 @@ def test_deploy_success_swaps_by_digest_and_records_last_known_good(tmp_path, au
     assert parse_deployment(json.dumps(record)) == record
 
 
-def test_deploy_health_failure_restores_previous_container(tmp_path, auth_dir):
+def test_deploy_health_failure_restores_previous_container(tmp_path):
     api = FakeDocker(new_health="unhealthy")
     with pytest.raises(DeployFailed) as caught:
-        _deployer(api, tmp_path, auth_dir).run()
+        _deployer(api, tmp_path).run()
     assert caught.value.outcome_known is True
     assert caught.value.detail["restored"] is True and caught.value.detail["failed_phase"] == "health"
     live = api.by_name(NAME)
@@ -207,10 +194,10 @@ def test_deploy_health_failure_restores_previous_container(tmp_path, auth_dir):
     assert "e" * 64 not in api.containers
 
 
-def test_deploy_restore_failure_is_uncertain(tmp_path, auth_dir):
+def test_deploy_restore_failure_is_uncertain(tmp_path):
     api = FakeDocker(new_health="unhealthy", old_restart_fails=True)
     with pytest.raises(DeployFailed) as caught:
-        _deployer(api, tmp_path, auth_dir).run()
+        _deployer(api, tmp_path).run()
     assert caught.value.outcome_known is False
     assert "RESTORE FAILED" in str(caught.value)
 
@@ -220,50 +207,44 @@ def test_deploy_restore_failure_is_uncertain(tmp_path, auth_dir):
     ({"new_labels": _labels(source="3" * 40)}, {}, "labels do not match"),
     ({"repo_digests": [f"ghcr.io/evil/frontend@{DIGEST}"]}, {}, "RepoDigest"),
 ])
-def test_deploy_refuses_before_touching_production(tmp_path, auth_dir, api_kwargs, snapshot_release, message):
+def test_deploy_refuses_before_touching_production(tmp_path, api_kwargs, snapshot_release, message):
     api = FakeDocker(**api_kwargs)
     snapshot = {"spec": SPEC, "release": _release(**snapshot_release)}
     with pytest.raises(DeployFailed, match=message) as caught:
-        _deployer(api, tmp_path, auth_dir, snapshot=snapshot).run()
+        _deployer(api, tmp_path, snapshot=snapshot).run()
     assert caught.value.outcome_known and not api.side_effect_started
     assert not api.create_bodies and api.by_name(NAME)["Id"] == api.old_id
 
 
-def test_deploy_without_pull_credentials_changes_nothing(tmp_path):
-    api = FakeDocker()
-    with pytest.raises(DeployFailed, match="credentials unavailable") as caught:
-        _deployer(api, tmp_path, tmp_path / "missing").run()
-    assert caught.value.outcome_known and not api.side_effect_started and not api.pull_headers
+def test_deploy_refuses_when_approved_image_absent_and_never_pulls(tmp_path):
+    api = FakeDocker(local_new=False)
+    with pytest.raises(DeployFailed, match="not on the daemon") as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known and not api.side_effect_started and not api.create_bodies
+    assert not any("/images/create" in path for _m, path in api.calls)
 
 
-def test_deploy_uses_local_digest_without_credentials(tmp_path):
-    api = FakeDocker(local_new=True)
-    _deployer(api, tmp_path, tmp_path / "missing").run()
-    assert not api.pull_headers and api.by_name(NAME)["Image"] == NEW_ID
-
-
-def test_target_lock_excludes_concurrent_image_actions(tmp_path, auth_dir):
+def test_target_lock_excludes_concurrent_image_actions(tmp_path):
     api = FakeDocker()
     (tmp_path / "locks").mkdir()
     with (tmp_path / "locks" / f"{NAME}.lock").open("a") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         with pytest.raises(DeployFailed, match="holds this target") as caught:
-            _deployer(api, tmp_path, auth_dir).run()
+            _deployer(api, tmp_path).run()
     assert caught.value.outcome_known and not api.calls
 
 
-def test_rollback_restores_recorded_image_without_pulling(tmp_path, auth_dir):
+def test_rollback_restores_recorded_image_without_pulling(tmp_path):
     api = FakeDocker(local_new=True)
-    _deployer(api, tmp_path, auth_dir).run()
+    _deployer(api, tmp_path).run()
     snapshot = {"spec": {**SPEC, "action": "rollback_image"},
                 "rollback": {"deploy_job_id": JOB_ID, "from_image_id": NEW_ID, "from_image_ref": f"{REPO}@{DIGEST}",
                              "to_image_id": OLD_ID, "to_image_ref": "bawthub-frontend-prod:latest",
                              "to_release": None}}
-    api.pull_headers.clear()
     record = json.loads(ImageDeployer(api, snapshot, "0" * 32, lock_root=tmp_path / "locks",
-                                      auth_dir=auth_dir, sleep=lambda _s: None).run())
+                                      sleep=lambda _s: None).run())
     assert record["action"] == "rollback" and record["rollback_of"] == JOB_ID
-    assert api.by_name(NAME)["Image"] == OLD_ID and not api.pull_headers
+    assert api.by_name(NAME)["Image"] == OLD_ID
 
 
 def test_clone_keeps_compose_overrides_that_differ_from_image():
@@ -285,7 +266,7 @@ def _worker_request(tmp_path, snapshot):
 
 
 @pytest.mark.parametrize("api_kwargs, state", [
-    ({}, "failed"),  # missing auth at /registry-auth: known, nothing touched
+    ({"local_new": False}, "failed"),  # approved image absent: known, nothing touched
     ({"local_new": True, "new_health": "unhealthy"}, "failed"),  # restored
     ({"local_new": True, "new_health": "unhealthy", "old_restart_fails": True}, "lost"),
 ])
@@ -326,14 +307,64 @@ def test_image_spec_rejects_selector_or_registry_drift(mutate):
         validate_spec(json.dumps(spec))
 
 
-def test_registry_auth_volume_only_for_deploy():
-    executor = object.__new__(DockerExecutor)
-    executor.worker_image, executor.receipt_volume, executor.receipt_root = "img", "receipts", "/receipts"
-    executor.registry_auth_volume = "ghcr-pull"
-    assert executor.execution_settings(SPEC)["registry_auth_volume"] == "ghcr-pull"
-    assert "registry_auth_volume" not in executor.execution_settings({**SPEC, "action": "rollback_image"})
-    assert "registry_auth_volume" not in executor.execution_settings({"action": "restart", "container_name": "x"})
-    assert "registry_auth_volume" not in executor.execution_settings()
+class _NotFound(Exception):
+    status_code = 404
+
+
+class _FakeImages:
+    def __init__(self, present=False, pull_error=None):
+        self.present, self.pull_error, self.pulls = present, pull_error, []
+
+    def get(self, ref):
+        if not self.present:
+            raise _NotFound(ref)
+
+    def pull(self, ref, auth_config=None):
+        self.pulls.append((ref, auth_config))
+        if self.pull_error:
+            raise self.pull_error
+        self.present = True
+
+
+def _pull_executor(images, auth=lambda: {"username": "puller", "password": "s3cret"}):
+    client = type("Client", (), {"images": images})()
+    return DockerExecutor(client_factory=lambda: client, worker_image="sha256:" + "0" * 64,
+                          receipt_volume="receipts", receipt_root="/receipts", pull_auth=auth)
+
+
+def test_execution_settings_carry_no_credential_plumbing():
+    executor = _pull_executor(_FakeImages())
+    assert executor.execution_settings(SPEC) == executor.execution_settings() == {
+        "worker_image": "sha256:" + "0" * 64, "receipt_volume": "receipts", "receipt_root": "/receipts"}
+
+
+def test_preflight_pulls_absent_release_image_with_db_credential():
+    images = _FakeImages()
+    executor = _pull_executor(images)
+    executor.ensure_release_image(f"{REPO}@{DIGEST}")
+    assert images.pulls == [(f"{REPO}@{DIGEST}", {"username": "puller", "password": "s3cret"})]
+    executor.ensure_release_image(f"{REPO}@{DIGEST}")  # idempotent: already local
+    assert len(images.pulls) == 1
+
+
+def test_preflight_pull_failures_are_prerequisite_errors_without_secrets():
+    with pytest.raises(ExecutorError, match="connect the ghcr-pull"):
+        _pull_executor(_FakeImages(), auth=lambda: None).ensure_release_image(f"{REPO}@{DIGEST}")
+    with pytest.raises(ExecutorError, match="pull failed") as caught:
+        _pull_executor(_FakeImages(pull_error=RuntimeError("denied"))).ensure_release_image(f"{REPO}@{DIGEST}")
+    assert "s3cret" not in str(caught.value)
+
+
+def test_preflight_only_pulls_for_deploy(monkeypatch):
+    images = _FakeImages()
+    executor = _pull_executor(images)
+    monkeypatch.setattr(executor, "_check_settings", lambda _s: None)
+    executor.client.ping = lambda: True
+    executor.preflight({"spec": {**SPEC, "action": "rollback_image"}, "execution": {}})
+    executor.preflight({"spec": {"action": "restart"}, "execution": {}})
+    assert images.pulls == []
+    executor.preflight({"spec": SPEC, "execution": {}, "release": _release()})
+    assert [ref for ref, _a in images.pulls] == [f"{REPO}@{DIGEST}"]
 
 
 # ── app side: approval-time binding ───────────────────────────────────────
@@ -450,7 +481,6 @@ def test_rollback_binds_last_known_good_from_succeeded_deploy():
     executor.current_image = NEW_ID
     snapshot = service.prepare_invocation("bawthub.rollback-prod-image", {"deploy_job_id": deploy_id})
     assert snapshot["rollback"]["to_image_id"] == OLD_ID and snapshot["rollback"]["from_image_id"] == NEW_ID
-    assert "registry_auth_volume" not in snapshot["execution"]
 
 
 def test_rollback_refuses_when_target_moved_on_or_job_not_a_deploy():
@@ -537,5 +567,5 @@ def test_github_verifier_rejects_mismatches(gh_kwargs, message):
 
 
 def test_github_verifier_fails_closed_without_token():
-    with pytest.raises(ReleaseVerificationError, match="token not configured"):
+    with pytest.raises(ReleaseVerificationError, match="token not connected"):
         GitHubReleaseVerifier("", opener=FakeGitHub()).verify(SPEC, ARGS)

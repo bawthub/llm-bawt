@@ -6,13 +6,8 @@ services:
       LLM_BAWT_OPS_WORKER_IMAGE: ${LLM_BAWT_OPS_WORKER_IMAGE:?Set immutable worker image ID or digest}
       LLM_BAWT_OPS_RECEIPT_VOLUME: ${LLM_BAWT_OPS_RECEIPT_VOLUME:?Set dedicated named volume name}
       LLM_BAWT_OPS_RECEIPT_ROOT: /var/lib/llm-bawt-ops
-      # TASK-997 (optional; empty = image deploys refuse at preflight). Name of a
-      # pre-created volume holding ONLY registry-auth.json (GHCR read:packages).
-      # Mounted read-only into deploy_image workers; never into ordinary ops.
-      LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME: ${LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME:-}
-      # Read-only fine-grained GitHub token (Actions+Contents read on
-      # bawthub/bawthub) used to verify a release before approval. Set in .env.
-      LLM_BAWT_GITHUB_RELEASE_TOKEN: ${LLM_BAWT_GITHUB_RELEASE_TOKEN:-}
+      # TASK-997 release-deploy credentials are NOT env: they are the DB-stored
+      # github-release / ghcr-pull provider connections (CredentialStore).
     volumes:
       - ops-receipts:/var/lib/llm-bawt-ops
 

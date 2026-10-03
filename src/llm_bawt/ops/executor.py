@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS, REGISTRY_AUTH_MOUNT
+from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .validation import canonical_json
 from .worker import atomic_json
 
@@ -124,17 +124,25 @@ def validate_spec(command_script: str) -> dict:
     return spec
 
 
+def _stored_pull_auth() -> dict | None:
+    """ghcr.io pull credential from the encrypted CredentialStore (TASK-997)."""
+    from ..service.providers.github_deploy import GhcrPullAdapter
+    from ..utils.config import Config
+    return GhcrPullAdapter(Config()).pull_auth()
+
+
 class DockerExecutor(Executor):
     def __init__(self, *, client_factory=None, worker_image: str | None = None,
-                 receipt_volume: str | None = None, receipt_root: str | None = None):
+                 receipt_volume: str | None = None, receipt_root: str | None = None,
+                 pull_auth=None):
         self._client_factory = client_factory
         self._client = None
         self.worker_image = worker_image or os.getenv("LLM_BAWT_OPS_WORKER_IMAGE", "")
         self.receipt_volume = receipt_volume or os.getenv("LLM_BAWT_OPS_RECEIPT_VOLUME", "")
         self.receipt_root = receipt_root or os.getenv("LLM_BAWT_OPS_RECEIPT_ROOT", "/var/lib/llm-bawt-ops")
-        # Read-only named volume holding ONLY registry-auth.json (scoped GHCR
-        # pull token). Mounted solely into deploy_image workers (TASK-997).
-        self.registry_auth_volume = os.getenv("LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME", "")
+        # TASK-997: release images are pulled HERE (deploy preflight) with the
+        # DB-stored ghcr-pull credential; the worker never holds one.
+        self._pull_auth = pull_auth or _stored_pull_auth
 
     def kind(self):
         return "docker"
@@ -150,11 +158,8 @@ class DockerExecutor(Executor):
         return self._client
 
     def execution_settings(self, spec=None):
-        settings = {"worker_image": self.worker_image, "receipt_volume": self.receipt_volume,
-                    "receipt_root": self.receipt_root}
-        if spec and spec.get("action") == DEPLOY_ACTION:
-            settings["registry_auth_volume"] = self.registry_auth_volume
-        return settings
+        return {"worker_image": self.worker_image, "receipt_volume": self.receipt_volume,
+                "receipt_root": self.receipt_root}
 
     def inspect_target_image(self, spec):
         try:
@@ -178,6 +183,30 @@ class DockerExecutor(Executor):
             raise
         except Exception as exc:
             raise ExecutorError(f"Docker worker prerequisites unavailable: {exc}") from exc
+        if snapshot["spec"].get("action") == DEPLOY_ACTION:
+            self.ensure_release_image(snapshot["release"]["image_ref"])
+
+    def ensure_release_image(self, ref):
+        """Pull the approved ``repo@digest`` if absent. Idempotent and touches no
+        container, so a failure leaves the job QUEUED with a visible reason. The
+        worker still re-verifies RepoDigest and release labels before any swap."""
+        try:
+            self.client.images.get(ref)
+            return
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                raise ExecutorError(f"cannot inspect release image: {exc}") from exc
+        try:
+            auth = self._pull_auth()
+        except Exception as exc:  # noqa: BLE001 - DB/key trouble is a prerequisite, not a crash
+            raise ExecutorError(f"registry pull credential unavailable: {type(exc).__name__}") from exc
+        if not auth:
+            raise ExecutorError("connect the ghcr-pull provider credential (Providers: GitHub container registry pull)")
+        try:
+            self.client.images.pull(ref, auth_config=auth)
+        except Exception as exc:
+            # Docker errors carry the registry message, never the credential.
+            raise ExecutorError(f"release image pull failed: {exc}") from exc
 
     def _check_settings(self, settings):
         image = settings.get("worker_image", "")
@@ -200,11 +229,6 @@ class DockerExecutor(Executor):
         if not any(m.get("Type") == "volume" and m.get("Name") == volume and
                    m.get("Destination") == root and m.get("RW") for m in mounts):
             raise ExecutorError("configured receipt path is not the configured writable named volume in this container")
-        if "registry_auth_volume" in settings:
-            auth = settings["registry_auth_volume"]
-            if not auth or auth == volume:
-                raise ExecutorError("deploy_image requires LLM_BAWT_OPS_REGISTRY_AUTH_VOLUME (dedicated, not the receipt volume)")
-            self.client.volumes.get(auth)  # Never let Docker implicitly create it.
 
     @staticmethod
     def worker_name(job_id):
@@ -266,8 +290,6 @@ class DockerExecutor(Executor):
             worker = self._get_worker(name)
             volumes = {settings["receipt_volume"]: {"bind": "/receipts", "mode": "rw"},
                        "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}}
-            if settings.get("registry_auth_volume"):
-                volumes[settings["registry_auth_volume"]] = {"bind": REGISTRY_AUTH_MOUNT, "mode": "ro"}
             if worker is None:
                 try:
                     worker = self.client.containers.create(
