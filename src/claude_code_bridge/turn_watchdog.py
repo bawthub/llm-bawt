@@ -152,6 +152,13 @@ class TurnWatchdog:
                 deadline, phase = self._deadline(wait_started_at)
                 remaining = deadline - now
                 if remaining <= 0:
+                    logger.warning(
+                        "turn_watchdog_failure request_id=%s session=%s phase=%s "
+                        "wait_elapsed_ms=%.0f active_tools=%s",
+                        request_id, session_key, phase,
+                        (now - wait_started_at) * 1000,
+                        ",".join(tool.name for tool in self._active_tools.values()) or "none",
+                    )
                     raise TurnWatchdogTimeout(
                         self._timeout_message(phase),
                         phase=phase,

@@ -77,7 +77,7 @@ def success_frames():
 
 
 class Harness:
-    def __init__(self, monkeypatch, mode, first, second, *, idle=.025):
+    def __init__(self, monkeypatch, mode, first, second, *, idle=.05):
         from claude_code_bridge.proxy import responses_supervisor, retry, usage_capture
         monkeypatch.setattr(retry, "compute_backoff", lambda *a, **kw: 0)
         monkeypatch.setattr(usage_capture, "schedule_capture", lambda _: None)
@@ -214,13 +214,21 @@ def test_committed_output_still_prevents_stall_replay(monkeypatch, mode, barrier
 
 
 @pytest.mark.parametrize("mode", ["sse", "lite_ws"])
-def test_thinking_stall_exhaustion_is_bounded_and_terminal(monkeypatch, mode):
+def test_thinking_stall_exhaustion_is_bounded_and_terminal(monkeypatch, mode, caplog):
     async def run():
         h = Harness(monkeypatch, mode, [THINKING], [THINKING])
         try:
             await h.collect()
             assert h.attempts == 2
             assert h.statuses[0]["state"] == "reconnecting"
+            failures = [r.message for r in caplog.records if "proxy_retry" in r.message]
+            assert len(failures) == 2
+            assert "boundary=stream" in failures[0]
+            assert "bucket=G_progress_stall" in failures[0]
+            assert "stall_phase=productive" in failures[0]
+            assert "decision=retry" in failures[0]
+            assert "decision=final" in failures[1]
+            assert all("attempt_elapsed_ms=" in f and "total_elapsed_ms=" in f for f in failures)
             output = b"".join(h.frames)
             assert output.count(b"event: error\n") == 1
             assert b'"type":"api_error"' in output

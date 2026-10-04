@@ -231,6 +231,7 @@ class ProviderAdapter(ABC):
 
         while True:
             attempt = policy.start_attempt()
+            attempt_started = time.perf_counter()
             if context is not None:
                 context.attempt = attempt
             # Only treat this as a resumed attempt if the PRIOR attempt actually
@@ -299,12 +300,21 @@ class ProviderAdapter(ABC):
                     ),
                 )
                 logger.warning(
-                    "proxy_retry attempt=%d/%d bucket=%s phase=%s decision=%s "
-                    "reason=%r backoff_ms=%.0f exc=%s",
-                    attempt, policy.max_attempts, bucket.value, phase.value,
-                    "retry" if decision.retry else "final",
-                    decision.reason, decision.backoff_s * 1000,
-                    type(initial_exc).__name__,
+                    "proxy_retry request_id=%s bot_id=%s boundary=open "
+                    "transport=%s bucket=%s phase=%s stall_phase=%s "
+                    "attempt=%d/%d decision=%s reason=%r "
+                    "attempt_elapsed_ms=%.0f total_elapsed_ms=%.0f "
+                    "backoff_ms=%.0f exc=%s",
+                    context.request_id if context else "unknown",
+                    context.bot_id if context else "unknown",
+                    context.responses_transport if context else "unknown",
+                    bucket.value, phase.value,
+                    getattr(initial_exc, "phase", "none"),
+                    attempt, policy.max_attempts,
+                    "retry" if decision.retry else "final", decision.reason,
+                    (time.perf_counter() - attempt_started) * 1000,
+                    (time.perf_counter() - call_started) * 1000,
+                    decision.backoff_s * 1000, type(initial_exc).__name__,
                 )
                 if decision.retry:
                     # Bucket F (auth-broker) → invalidate cached token so the
@@ -389,11 +399,25 @@ class ProviderAdapter(ABC):
                 permanent_error_type=permanent_type,
             )
             logger.warning(
-                "proxy_retry attempt=%d/%d bucket=%s phase=%s decision=%s "
-                "reason=%r backoff_ms=%.0f detail=%r",
-                attempt, policy.max_attempts, bucket.value, phase.value,
-                "retry" if decision.retry else "final",
-                decision.reason, decision.backoff_s * 1000, exc_repr,
+                "proxy_retry request_id=%s bot_id=%s boundary=stream "
+                "transport=%s bucket=%s phase=%s stall_phase=%s "
+                "attempt=%d/%d decision=%s reason=%r "
+                "attempt_elapsed_ms=%.0f total_elapsed_ms=%.0f "
+                "productive_idle_ms=%s backoff_ms=%.0f detail=%r",
+                context.request_id if context else "unknown",
+                context.bot_id if context else "unknown",
+                getattr(stream_exc, "transport", None)
+                or (context.responses_transport if context else "unknown"),
+                bucket.value, phase.value,
+                getattr(stream_exc, "phase", "none"),
+                attempt, policy.max_attempts,
+                "retry" if decision.retry else "final", decision.reason,
+                (time.perf_counter() - attempt_started) * 1000,
+                (time.perf_counter() - call_started) * 1000,
+                round(stream_exc.productive_idle_seconds * 1000)
+                if stream_exc is not None
+                and hasattr(stream_exc, "productive_idle_seconds") else "unknown",
+                decision.backoff_s * 1000, exc_repr,
             )
 
             if decision.retry:

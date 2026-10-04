@@ -66,7 +66,7 @@ async def _silent_stream():
     yield UserMessage(content="too late")
 
 
-def test_silent_sdk_still_hits_idle_watchdog() -> None:
+def test_silent_sdk_still_hits_idle_watchdog(caplog) -> None:
     async def run() -> None:
         watchdog = TurnWatchdog(idle_timeout=0.02, health_interval=0.005)
 
@@ -78,6 +78,12 @@ def test_silent_sdk_still_hits_idle_watchdog() -> None:
             )
         assert raised.value.phase == "sdk_idle"
         assert raised.value.retry_fresh_session is True
+        assert any(
+            "turn_watchdog_failure request_id=req-idle" in record.message
+            and "phase=sdk_idle" in record.message
+            and "wait_elapsed_ms=" in record.message
+            for record in caplog.records
+        )
 
     asyncio.run(run())
 
