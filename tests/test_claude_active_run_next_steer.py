@@ -355,6 +355,77 @@ async def test_escalation_missing_cancellation_receipt_never_replays_on_retry():
 
 
 @pytest.mark.anyio
+async def test_cancel_queued_user_message_withdraws_only_that_uuid_and_releases_result():
+    client = _FakeClient()
+    client._query.receipt = {"cancelled": True}
+    events: list[tuple[str, str]] = []
+    run = ClaudeActiveRun(client=client, request_id="req-1", on_user_lifecycle=lambda *e: events.append(e))
+    yielded, task = await _start(run)
+    await run.steer("don't send this", priority="next", message_id=CMD, origin="user")
+    await client._query.frames.put(_result("original result"))
+    await asyncio.sleep(0.01)
+    assert _results(yielded) == []
+
+    assert await run.cancel_queued(CMD) == "cancelled"
+    assert await run.cancel_queued(CMD) == "cancelled"
+    await client._query.frames.put(_lifecycle(CMD, "cancelled"))
+    await _finish(client, task)
+
+    assert client._query.control_requests == [{"subtype": "cancel_async_message", "message_uuid": CMD}]
+    assert _results(yielded) == ["original result"]
+    assert events == [(CMD, "queued"), (CMD, "cancelled")]
+    client.interrupt.assert_not_awaited()
+    assert client.replacements == []
+    with pytest.raises(RuntimeError, match="steer_already_cancelled"):
+        await run.steer("don't send this", priority="next", message_id=CMD, origin="user")
+
+
+@pytest.mark.anyio
+async def test_cancel_rejects_started_or_non_user_message_without_control():
+    client = _FakeClient()
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    _, task = await _start(run)
+    await run.steer("bot note", priority="next", message_id=CMD, origin="bot")
+    with pytest.raises(RuntimeError, match="unknown_user_steer"):
+        await run.cancel_queued(CMD)
+    other = "736a3206-0000-4000-8000-000000000002"
+    await run.steer("user note", priority="next", message_id=other, origin="user")
+    run.note_lifecycle(other, "started")
+    with pytest.raises(RuntimeError, match="steer_already_started"):
+        await run.cancel_queued(other)
+    assert client._query.control_requests == []
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
+async def test_cancel_false_receipt_never_claims_message_was_cancelled():
+    client = _FakeClient()
+    client._query.receipt = {"cancelled": False}
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    _, task = await _start(run)
+    await run.steer("note", priority="next", message_id=CMD, origin="user")
+    with pytest.raises(RuntimeError, match="steer_already_started"):
+        await run.cancel_queued(CMD)
+    assert run._commands[CMD] == "queued"
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
+async def test_cancel_timeout_does_not_issue_a_second_control_request():
+    client = _FakeClient()
+    client._query._send_control_request = AsyncMock(side_effect=asyncio.TimeoutError)
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    _, task = await _start(run)
+    await run.steer("user note", priority="next", message_id=CMD, origin="user")
+    with pytest.raises(asyncio.TimeoutError):
+        await run.cancel_queued(CMD)
+    with pytest.raises(RuntimeError, match="cancellation_uncertain"):
+        await run.cancel_queued(CMD)
+    client._query._send_control_request.assert_awaited_once()
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
 async def test_unknown_priority_rejected():
     run = ClaudeActiveRun(client=_FakeClient(), request_id="req-1")
     with pytest.raises(ValueError, match="priority"):

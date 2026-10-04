@@ -152,8 +152,9 @@ class RedisSubscriber(CommandPublisherMixin):
         priority: str = "now",
         origin: str = "system",
         escalate: bool = False,
+        cancel: bool = False,
     ) -> dict:
-        """Steer or escalate an active run once and await its idempotent RPC result.
+        """Steer, escalate, or cancel an active run message and await its RPC result.
 
         ``priority="now"`` interrupts running tools; ``"next"`` delivers at the
         next tool boundary (claude-code-bridge only).
@@ -169,8 +170,10 @@ class RedisSubscriber(CommandPublisherMixin):
             "priority": priority,
             "origin": origin,
         }
-        if escalate:
-            fields["steer_action"] = "escalate"
+        if escalate and cancel:
+            raise ValueError("Cannot escalate and cancel the same message")
+        if escalate or cancel:
+            fields["steer_action"] = "escalate" if escalate else "cancel"
         if target_request_id:
             fields["target_request_id"] = target_request_id
 

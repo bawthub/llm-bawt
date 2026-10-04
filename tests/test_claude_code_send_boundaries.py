@@ -252,7 +252,7 @@ def test_queued_cancellation_leaves_active_run_untouched(monkeypatch, method):
 def test_steer_defaults_to_next_and_requires_origin_for_user_lifecycle():
     async def run():
         harness = _SendHarness()
-        active = SimpleNamespace(request_id="target-run", steer=AsyncMock())
+        active = SimpleNamespace(request_id="target-run", steer=AsyncMock(), cancel_queued=AsyncMock())
         harness._session_queue.set_active_client(SESSION, active)
         await harness._handle_steer({
             "session_key": SESSION, "request_id": "steer-1",
@@ -263,7 +263,7 @@ def test_steer_defaults_to_next_and_requires_origin_for_user_lifecycle():
             "note", priority="next", message_id="id-1", origin="user",
         )
         harness._publisher.publish_rpc_result.assert_called_once_with(
-            "steer-1", {"ok": True, "detail": "steered", "active_request_id": "target-run", "can_escalate": False},
+            "steer-1", {"ok": True, "detail": "steered", "active_request_id": "target-run", "can_escalate": False, "can_cancel": True},
         )
     asyncio.run(run())
 
@@ -282,7 +282,25 @@ def test_escalation_calls_active_run_without_resending_message():
         active.escalate.assert_awaited_once_with("id-1")
         active.steer.assert_not_awaited()
         harness._publisher.publish_rpc_result.assert_called_once_with(
-            "escalate-1", {"ok": True, "detail": "escalated", "active_request_id": "target-run", "can_escalate": False},
+            "escalate-1", {"ok": True, "detail": "escalated", "active_request_id": "target-run", "can_escalate": False, "can_cancel": False},
+        )
+    asyncio.run(run())
+
+
+def test_cancel_queued_targets_one_active_message_without_interrupting():
+    async def run():
+        harness = _SendHarness()
+        active = SimpleNamespace(request_id="target-run", steer=AsyncMock(),
+                                 cancel_queued=AsyncMock(return_value="cancelled"))
+        harness._session_queue.set_active_client(SESSION, active)
+        await harness._handle_steer({
+            "session_key": SESSION, "request_id": "cancel-1", "steer_action": "cancel",
+            "target_request_id": "target-run", "message_id": "id-1",
+        }, "command-1", harness.redis)
+        active.cancel_queued.assert_awaited_once_with("id-1")
+        active.steer.assert_not_awaited()
+        harness._publisher.publish_rpc_result.assert_called_once_with(
+            "cancel-1", {"ok": True, "detail": "cancelled", "active_request_id": "target-run", "can_escalate": False, "can_cancel": False},
         )
     asyncio.run(run())
 

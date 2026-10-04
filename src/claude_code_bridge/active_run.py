@@ -90,6 +90,7 @@ class ClaudeActiveRun:
     _user_commands: set[str] = field(default_factory=set)
     _user_prompts: dict[str, str] = field(default_factory=dict)
     _escalations: dict[str, str] = field(default_factory=dict)
+    _cancellations: dict[str, str] = field(default_factory=dict)
     _escalated_pending: set[str] = field(default_factory=set)
     _cli_capabilities: set[str] = field(default_factory=set)
     on_user_lifecycle: Callable[[str, str], None] | None = None
@@ -137,6 +138,8 @@ class ClaudeActiveRun:
                 raise RuntimeError("no_active_run")
             if command_uuid in self._escalations:
                 raise RuntimeError("steer_already_escalated")
+            if command_uuid in self._cancellations:
+                raise RuntimeError("steer_already_cancelled")
             state = self._commands.get(command_uuid)
             if state is None or state in _REJECTED:
                 self._commands[command_uuid] = "sent"
@@ -174,6 +177,47 @@ class ClaudeActiveRun:
             final = self._commands.get(command_uuid)
             if final in _REJECTED:
                 raise RuntimeError(f"steer_{final}")
+
+    async def cancel_queued(self, message_id: str) -> str:
+        """Withdraw one user message without interrupting the running tool.
+
+        ``cancel_async_message`` is per UUID and returns false if the CLI has
+        already folded the message into a turn. Never report success without
+        its positive receipt, and never turn a timeout into a speculative retry.
+        """
+        async with self._steer_lock:
+            prior = self._cancellations.get(message_id)
+            if prior == "cancelled":
+                return prior
+            if prior is not None:
+                raise RuntimeError(prior)
+            if self._completed.is_set():
+                raise RuntimeError("no_active_run")
+            if message_id not in self._user_commands:
+                raise RuntimeError("unknown_user_steer")
+            if message_id in self._escalations:
+                raise RuntimeError("steer_already_escalated")
+            if self._commands.get(message_id) not in _UNSTARTED:
+                raise RuntimeError("steer_already_started")
+            handle = _sdk_query_handle(self.client)
+            if handle is None:
+                raise RuntimeError("cancel_unsupported_sdk")
+            self._cancellations[message_id] = "cancellation_uncertain"
+            receipt = await asyncio.wait_for(
+                handle._send_control_request(
+                    {"subtype": "cancel_async_message", "message_uuid": message_id},
+                    timeout=self._steer_timeout_s,
+                ),
+                timeout=self._steer_timeout_s,
+            )
+            if receipt.get("cancelled") is not True:
+                # A false receipt means it was no longer removable. Its
+                # lifecycle frame will reveal whether it started or ended.
+                self._cancellations.pop(message_id)
+                raise RuntimeError("steer_already_started")
+            self._cancellations[message_id] = "cancelled"
+            self.note_lifecycle(message_id, "cancelled")
+            return "cancelled"
 
     async def escalate(self, message_id: str) -> str:
         """Atomically replace one queued user steer with an interrupt-now turn.

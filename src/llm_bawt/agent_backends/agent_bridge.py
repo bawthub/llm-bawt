@@ -339,11 +339,14 @@ class AgentBridgeBackend(AgentBackend):
                                 message_id, state = meta.get("message_id"), meta.get("state")
                                 bot_id, user_id = config.get("bot_id"), config.get("user_id")
                                 if message_id and state and bot_id and user_id:
-                                    await local_sub.publish_tool_event(bot_id, user_id, {
-                                        "_type": "steer_lifecycle", "bot_id": bot_id,
-                                        "user_id": user_id, "message_id": message_id,
-                                        "state": state, "ts": time.time(),
-                                    })
+                                    try:
+                                        await local_sub.publish_tool_event(bot_id, user_id, {
+                                            "_type": "steer_lifecycle", "bot_id": bot_id,
+                                            "user_id": user_id, "message_id": message_id,
+                                            "state": state, "ts": time.time(),
+                                        })
+                                    except Exception:
+                                        logger.warning("Could not publish user steer lifecycle", exc_info=True)
 
                             elif event.kind == AgentEventKind.UPSTREAM_STATUS:
                                 meta = event.raw.get("upstream_status", {}) if isinstance(event.raw, dict) else {}

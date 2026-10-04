@@ -199,11 +199,14 @@ class ClaudeCommandMixin:
         message = (fields.get("message") or "").strip()
         priority = (fields.get("priority") or "next").strip().lower()
         escalate = fields.get("escalate") == "1" or fields.get("steer_action") == "escalate"
+        cancel = fields.get("steer_action") == "cancel"
         try:
             if not session_key:
                 raise ValueError("chat.steer requires session_key")
-            if not escalate and not message:
+            if not (escalate or cancel) and not message:
                 raise ValueError("chat.steer requires message")
+            if escalate and cancel:
+                raise ValueError("chat.steer cannot escalate and cancel together")
             active_run = self._session_queue.get_active_client(session_key)
             if active_run is None or not hasattr(active_run, "steer"):
                 raise RuntimeError("no_active_run")
@@ -213,14 +216,16 @@ class ClaudeCommandMixin:
                 raise RuntimeError("active_run_mismatch")
 
             message_id = (fields.get("message_id") or "").strip()
-            if escalate:
+            if escalate or cancel:
+                action = "escalation" if escalate else "cancellation"
                 if message:
-                    raise ValueError("chat.steer escalation must not include message")
+                    raise ValueError(f"chat.steer {action} must not include message")
                 if not message_id or not target_request_id:
-                    raise ValueError("chat.steer escalation requires message_id and target_request_id")
-                if not hasattr(active_run, "escalate"):
-                    raise RuntimeError("escalation_unsupported_sdk")
-                detail = await active_run.escalate(message_id)
+                    raise ValueError(f"chat.steer {action} requires message_id and target_request_id")
+                method = "escalate" if escalate else "cancel_queued"
+                if not hasattr(active_run, method):
+                    raise RuntimeError(f"{action}_unsupported_sdk")
+                detail = await getattr(active_run, method)(message_id)
             else:
                 await active_run.steer(
                     message, priority=priority, message_id=message_id or None,
@@ -245,9 +250,10 @@ class ClaudeCommandMixin:
                         "detail": detail,
                         "active_request_id": active_request_id or None,
                         "can_escalate": (
-                            not escalate
+                            not escalate and not cancel
                             and "interrupt_cancel_queued_v1" in getattr(active_run, "_cli_capabilities", set())
                         ),
+                        "can_cancel": not escalate and not cancel and hasattr(active_run, "cancel_queued"),
                     },
                 )
         except Exception as exc:

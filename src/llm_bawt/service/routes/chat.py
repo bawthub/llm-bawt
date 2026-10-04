@@ -80,6 +80,7 @@ class ChatSteerResponse(BaseModel):
     message_id: str
     persisted: bool = False
     can_escalate: bool = False
+    can_cancel: bool = False
 
 
 def _persist_interrupt_anchor(
@@ -250,6 +251,7 @@ async def steer_active_turn(
         message_id=request.message_id,
         persisted=persisted,
         can_escalate=bool(result.get("can_escalate")) and request.priority == "next",
+        can_cancel=bool(result.get("can_cancel")) and request.priority == "next",
     )
 
 
@@ -304,6 +306,42 @@ async def chat_steer_escalate(request: ChatSteerEscalateRequest) -> dict:
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=str(result.get("error") or "escalation rejected"))
     return {"ok": True, "detail": result.get("detail", "escalated"), "message_id": request.message_id}
+
+
+@router.post("/v1/chat/steer/cancel", tags=["Agent Backends"])
+async def chat_steer_cancel(request: ChatSteerEscalateRequest) -> dict:
+    """Withdraw one still-queued user steer; never interrupt active work."""
+    service = get_service()
+    turn = service._turn_log_store.get_turn(request.turn_id)
+    if turn is None:
+        raise HTTPException(status_code=404, detail="Turn not found")
+    if (turn.ended_at is not None or turn.status not in ("streaming", "pending")
+            or turn.bot_id != request.bot_id.strip().lower()
+            or (turn.user_id or "").lower() != request.user_id.strip().lower()):
+        raise HTTPException(status_code=409, detail="Turn is no longer active or ownership mismatch")
+    if not turn.agent_session_key or not turn.agent_request_id:
+        raise HTTPException(status_code=409, detail="Active bridge run is not ready")
+    from ...agent_backends.agent_bridge import get_agent_subscriber
+    from ...bots import BotManager
+
+    backend = (getattr(BotManager(service.config).get_bot(turn.bot_id), "agent_backend", None) or "").strip()
+    if backend != "claude-code":
+        raise HTTPException(status_code=409, detail="Cancellation requires claude-code")
+    subscriber = get_agent_subscriber()
+    if subscriber is None:
+        raise HTTPException(status_code=503, detail="Agent bridge unavailable")
+    try:
+        result = await subscriber.send_steer(
+            session_key=turn.agent_session_key, message="", message_id=request.message_id,
+            backend=backend, target_request_id=turn.agent_request_id,
+            request_id=f"cancel_{request.turn_id}_{request.message_id}",
+            origin="user", cancel=True,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=str(result.get("error") or "cancellation rejected"))
+    return {"ok": True, "detail": result.get("detail", "cancelled"), "message_id": request.message_id}
 
 
 class ToolResultRequest(BaseModel):
