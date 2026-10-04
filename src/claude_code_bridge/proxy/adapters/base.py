@@ -194,7 +194,10 @@ class ProviderAdapter(ABC):
         assert self._responses_client is not None
         reasoning_codec = self.reasoning_codec(upstream_model, base_url)
         responses_body = translate.anthropic_to_responses(
-            anthropic_body, upstream_model, reasoning_codec=reasoning_codec,
+            anthropic_body,
+            upstream_model,
+            reasoning_codec=reasoning_codec,
+            allowed_skill_names=context.skill_names if context else (),
         )
         responses_body = self.prepare_request(responses_body, context)
         headers = self.extra_headers(responses_body, context) or None
@@ -359,6 +362,7 @@ class ProviderAdapter(ABC):
                     state=state,
                     resumed_from_index=resumed_from_index,
                     reasoning_codec=reasoning_codec,
+                    allowed_skill_names=context.skill_names if context else (),
                 ):
                     yield chunk
             except (asyncio.CancelledError, GeneratorExit):

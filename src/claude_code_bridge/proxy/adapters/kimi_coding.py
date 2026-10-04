@@ -58,7 +58,11 @@ class KimiCodingAdapter(ProviderAdapter):
         context: ProxyRequestContext | None = None,
     ) -> AsyncIterator[bytes]:
         key, base_url = await self.authorize()
-        body = anthropic_to_chat_completions(anthropic_body, upstream_model)
+        body = anthropic_to_chat_completions(
+            anthropic_body,
+            upstream_model,
+            allowed_skill_names=context.skill_names if context else (),
+        )
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
         url = f"{base_url}/chat/completions"
@@ -88,5 +92,6 @@ class KimiCodingAdapter(ProviderAdapter):
                 resp.aiter_lines(),
                 anthropic_model=anthropic_body.get("model", upstream_model),
                 tool_schemas=anthropic_body.get("tools"),
+                allowed_skill_names=context.skill_names if context else (),
             ):
                 yield frame

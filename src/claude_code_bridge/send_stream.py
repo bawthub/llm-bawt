@@ -130,6 +130,7 @@ class ClaudeStreamMixin:
         context_window: int | None = None,
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
+        skill_bundle: str | None = None,
     ) -> dict:
         """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``."""
         sdk_env = {}
@@ -157,6 +158,8 @@ class ClaudeStreamMixin:
             # ANTHROPIC_AUTH_TOKEN inside the CLI; clear it so
             # the SDK doesn't fall back to api.anthropic.com.
             sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
+            from agent_bridge.skill_selection import claude_skill_names
+
             # The durable DB thread is the canonical conversation boundary.
             # Normal app dispatch always supplies it; the request id is a
             # non-prompt fallback for legacy/direct bridge commands.
@@ -172,6 +175,7 @@ class ClaudeStreamMixin:
                     bot_id=bot_id,
                     conversation_id=conversation_id,
                     responses_transport=responses_transport,
+                    skill_names=claude_skill_names(skill_bundle),
                 )
             )
             # TASK-546: Override every internal/subagent model selector with a

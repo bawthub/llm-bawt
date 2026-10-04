@@ -29,8 +29,10 @@ from .request_context import (
     CONVERSATION_HEADER,
     REQUEST_HEADER,
     RESPONSES_TRANSPORT_HEADER,
+    SKILL_NAMES_HEADER,
     ProxyRequestContext,
     valid_conversation_identity,
+    valid_skill_names,
 )
 from .transport_policy import normalize_responses_transport
 
@@ -379,12 +381,22 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
         responses_transport=normalize_responses_transport(
             request_headers.get(RESPONSES_TRANSPORT_HEADER)
         ),
+        skill_names=valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
         status_callback=getattr(
             getattr(getattr(request, "app", None), "state", None),
             "proxy_status_callback",
             None,
         ),
     )
+
+    cancellations = getattr(
+        getattr(getattr(request, "app", None), "state", None),
+        "proxy_cancellations",
+        None,
+    )
+    if cancellations is not None and cancellations.is_cancelled(context.request_id):
+        logger.info("proxy_request_rejected_cancelled request_id=%s", context.request_id)
+        raise anthropic_error(499, "Request cancelled", error_type="api_error")
 
     logger.info(
         "proxy_stream_start request_id=%s provider=%s bot=%s session_hash=%s "

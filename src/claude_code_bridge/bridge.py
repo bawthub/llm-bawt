@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import httpx
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, StreamEvent
@@ -147,6 +148,8 @@ class ClaudeCodeBridge(
         # ANTHROPIC_BASE_URL pointing here so its outbound /v1/messages
         # call lands on the proxy instead of api.anthropic.com.
         self._proxy_base_url: str | None = None
+        self._proxy_cancel_request: Callable[[str], None] | None = None
+        self._proxy_clear_request: Callable[[str], None] | None = None
         # ---- Approval-gated tool policies (TASK-291 / TASK-292) ----
         # Compiled bundle fetched from the app, TTL-cached. Grants are one-shot
         # allows keyed by grant_key, populated by approval.grant commands when a
@@ -174,6 +177,23 @@ class ClaudeCodeBridge(
         after ``ProxyServer.start()`` binds its ephemeral port."""
         self._proxy_base_url = url
         logger.info("Bridge proxy base_url set: %s", url)
+
+    def set_proxy_request_controls(
+        self,
+        cancel: Callable[[str], None],
+        clear: Callable[[str], None],
+    ) -> None:
+        """Wire the request tombstone shared with the in-process proxy."""
+        self._proxy_cancel_request = cancel
+        self._proxy_clear_request = clear
+
+    def _cancel_proxy_sampling(self, request_id: str) -> None:
+        if self._proxy_cancel_request is not None:
+            self._proxy_cancel_request(request_id)
+
+    def _clear_proxy_sampling_cancel(self, request_id: str) -> None:
+        if self._proxy_clear_request is not None:
+            self._proxy_clear_request(request_id)
 
     @staticmethod
     def _model_provider_prefix(model: str) -> str | None:
@@ -348,7 +368,6 @@ class ClaudeCodeBridge(
     #: - generate_image: Grok Imagine output (TASK-599). The tool already stored
     #:   the identical raw bytes, so this re-upload dedups to the same asset.
     _IMAGE_RESULT_TOOL_TAILS = frozenset({"browser_take_screenshot", "generate_image"})
-
 
 
 

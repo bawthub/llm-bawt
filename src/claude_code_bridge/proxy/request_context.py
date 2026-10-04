@@ -20,11 +20,43 @@ CONVERSATION_HEADER = "X-LLM-Bawt-Conversation-ID"
 BOT_HEADER = "X-LLM-Bawt-Bot-ID"
 REQUEST_HEADER = "X-LLM-Bawt-Request-ID"
 RESPONSES_TRANSPORT_HEADER = "X-LLM-Bawt-Responses-Transport"
+SKILL_NAMES_HEADER = "X-LLM-Bawt-Skill-Names"
 
 _OPAQUE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 ProxyStatusCallback = Callable[[str, dict[str, Any]], None]
 logger = logging.getLogger(__name__)
+
+
+class ProxyCancellationRegistry:
+    """In-process request tombstones checked before any upstream sampling."""
+
+    def __init__(self) -> None:
+        self._cancelled: set[str] = set()
+
+    def cancel(self, request_id: str) -> None:
+        if request_id:
+            self._cancelled.add(request_id)
+
+    def clear(self, request_id: str) -> None:
+        self._cancelled.discard(request_id)
+
+    def is_cancelled(self, request_id: str) -> bool:
+        return request_id in self._cancelled
+
+
+def valid_skill_names(value: str | None) -> tuple[str, ...]:
+    """Parse the bounded comma-separated selector catalog from the bridge."""
+    if not value or len(value) > 16384:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            candidate
+            for raw in value.split(",")
+            if (candidate := raw.strip()) and _SKILL_NAME_RE.fullmatch(candidate)
+        )
+    )[:256]
 
 
 def durable_conversation_identity(
@@ -59,6 +91,7 @@ class ProxyRequestContext:
     bot_id: str | None = None
     conversation_id: str | None = None
     responses_transport: str | None = None
+    skill_names: tuple[str, ...] = ()
     started_at: float = 0.0
     account_hash: str = "default"
     active_provider: int = 0
@@ -121,4 +154,8 @@ def custom_header_env(context: ProxyRequestContext) -> str:
         lines.append(
             f"{RESPONSES_TRANSPORT_HEADER}: {context.responses_transport}"
         )
+    if context.skill_names:
+        names = [name for name in context.skill_names if _SKILL_NAME_RE.fullmatch(name)]
+        if names:
+            lines.append(f"{SKILL_NAMES_HEADER}: {','.join(names[:256])}")
     return "\n".join(lines)

@@ -7,6 +7,33 @@ from pathlib import Path
 from .skill_registry import SkillRegistry, _name
 
 
+def claude_skill_names(bundle: str | None) -> tuple[str, ...]:
+    """Return the exact Skill selectors available to one Claude CLI run.
+
+    Explicit bundles already carry their authoritative selector list in the
+    registry. Legacy/ambient runs discover the direct children of Claude's
+    skill directory, matching the CLI's own ``<name>/SKILL.md`` convention.
+    """
+    if bundle is not None:
+        return tuple(claude_skill_options(bundle).get("skills") or ())
+
+    configured = os.environ.get("CLAUDE_CODE_SKILLS_PATH")
+    roots = (
+        [Path(value) for value in configured.split(os.pathsep) if value]
+        if configured
+        else [Path.home() / ".claude" / "skills"]
+    )
+    names: set[str] = set()
+    for root in roots:
+        try:
+            for child in root.iterdir():
+                if child.is_dir() and (child / "SKILL.md").is_file():
+                    names.add(child.name)
+        except OSError:
+            continue
+    return tuple(sorted(names))
+
+
 def guard_resumed_bundle(bundle: str | None, *, thread: str | None, resume: str | None,
                          harness: str = 'claude') -> None:
     """Require a fresh conversation when its configured skill bundle changes."""

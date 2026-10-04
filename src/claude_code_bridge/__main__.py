@@ -150,6 +150,10 @@ def main() -> None:
         if proxy_server is not None:
             await proxy_server.start()
             bridge.set_proxy_base_url(proxy_server.base_url)
+            bridge.set_proxy_request_controls(
+                proxy_server.cancel_request,
+                proxy_server.clear_request,
+            )
             logger.info("Anthropic-compat proxy active at %s", proxy_server.base_url)
 
         health_task = asyncio.create_task(

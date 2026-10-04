@@ -343,9 +343,17 @@ class ClaudeCommandMixin:
                 # session: a queued caller must never abort its running sibling.
                 session_key = params.get("sessionKey", "")
                 target_request_id = params.get("requestId", "")
+                if target_request_id:
+                    cancel_proxy = getattr(self, "_cancel_proxy_sampling", None)
+                    if cancel_proxy is not None:
+                        cancel_proxy(target_request_id)
                 cancelled = bool(target_request_id) and self._session_queue.cancel_request(
                     session_key, target_request_id,
                 )
+                if target_request_id and not cancelled:
+                    clear_proxy = getattr(self, "_clear_proxy_sampling_cancel", None)
+                    if clear_proxy is not None:
+                        clear_proxy(target_request_id)
                 self._publisher.publish_rpc_result(
                     request_id,
                     {"ok": True, "cancelled": cancelled, "request_id": target_request_id},
@@ -358,7 +366,14 @@ class ClaudeCommandMixin:
                 # Claim and cancel only this request before yielding. Disconnect
                 # may outlive the run and a successor may own the session by then.
                 client = self._session_queue.get_active_client(session_key)
+                cancel_proxy = getattr(self, "_cancel_proxy_sampling", None)
+                if cancel_proxy is not None:
+                    cancel_proxy(target_request_id)
                 cancelled = self._session_queue.cancel_request(session_key, target_request_id)
+                if not cancelled:
+                    clear_proxy = getattr(self, "_clear_proxy_sampling_cancel", None)
+                    if clear_proxy is not None:
+                        clear_proxy(target_request_id)
                 if cancelled and getattr(client, "request_id", None) == target_request_id:
                     client = self._session_queue.pop_active_client(session_key)
                 else:

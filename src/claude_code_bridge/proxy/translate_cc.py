@@ -44,9 +44,12 @@ from typing import Any
 
 from .translate import (
     _SERVER_TOOL_TYPE_RE,
+    _SKILL_RETRY_FUSE_MESSAGE,
     _flatten_system,
+    harden_skill_parameters,
     image_block_to_url,
     inline_system_text,
+    should_disable_skill_tool,
 )
 from .tool_discovery import model_tool_description
 
@@ -210,7 +213,12 @@ def _assistant_content_to_cc(content: Any) -> dict | None:
     return msg
 
 
-def _tools_to_cc(tools: list[dict] | None) -> list[dict] | None:
+def _tools_to_cc(
+    tools: list[dict] | None,
+    *,
+    allowed_skill_names: tuple[str, ...] = (),
+    disable_skill: bool = False,
+) -> list[dict] | None:
     """Anthropic tools → Chat Completions tools (nested under ``function``).
 
     Sorted by name so an SDK-side reorder doesn't bust the prompt cache, and
@@ -231,12 +239,19 @@ def _tools_to_cc(tools: list[dict] | None) -> list[dict] | None:
                 "Stripping Anthropic server-side tool type=%r from CC request", ttype
             )
             continue
+        if disable_skill and tool.get("name") == "Skill":
+            continue
         fn: dict[str, Any] = {"name": tool.get("name") or ""}
         if "description" in tool or tool.get("name") == "ToolSearch":
             fn["description"] = model_tool_description(tool)
         params = tool.get("input_schema") or tool.get("parameters")
         if params is not None:
-            fn["parameters"] = params
+            fn["parameters"] = (
+                harden_skill_parameters(params, allowed_skill_names)
+                if tool.get("name") == "Skill" and allowed_skill_names
+                and isinstance(params, dict)
+                else params
+            )
         converted.append({"type": "function", "function": fn})
     if not converted:
         return None
@@ -260,7 +275,12 @@ def _tool_choice_to_cc(tc: Any) -> Any | None:
     return None
 
 
-def anthropic_to_chat_completions(body: dict, upstream_model: str) -> dict:
+def anthropic_to_chat_completions(
+    body: dict,
+    upstream_model: str,
+    *,
+    allowed_skill_names: tuple[str, ...] = (),
+) -> dict:
     """Translate an Anthropic Messages request body to a Chat Completions body.
 
     ``upstream_model`` is the post-prefix model name (e.g. ``k3``), already
@@ -272,6 +292,9 @@ def anthropic_to_chat_completions(body: dict, upstream_model: str) -> dict:
     if system:
         messages.append({"role": "system", "content": system})
 
+    disable_skill = should_disable_skill_tool(
+        body.get("messages"), allowed_skill_names
+    )
     for msg in body.get("messages") or []:
         if not isinstance(msg, dict):
             continue
@@ -307,6 +330,10 @@ def anthropic_to_chat_completions(body: dict, upstream_model: str) -> dict:
         else:
             logger.warning("Dropping unsupported message role=%r", role)
 
+    if disable_skill:
+        messages.append({"role": "user", "content": _SKILL_RETRY_FUSE_MESSAGE})
+        logger.warning("Disabled Skill tool after two identical unknown selectors")
+
     payload_out: dict[str, Any] = {"model": upstream_model, "messages": messages}
 
     if "max_tokens" in body:
@@ -334,10 +361,18 @@ def anthropic_to_chat_completions(body: dict, upstream_model: str) -> dict:
         # zero tokens and lose all cache-hit visibility.
         payload_out["stream_options"] = {"include_usage": True}
 
-    tools = _tools_to_cc(body.get("tools"))
+    tools = _tools_to_cc(
+        body.get("tools"),
+        allowed_skill_names=allowed_skill_names,
+        disable_skill=disable_skill,
+    )
     if tools:
         payload_out["tools"] = tools
-        choice = _tool_choice_to_cc(body.get("tool_choice"))
+        choice = (
+            None
+            if disable_skill
+            else _tool_choice_to_cc(body.get("tool_choice"))
+        )
         if choice is not None:
             # Live Kimi For Coding receipt (2026-07-27): a named/forced tool
             # choice with reasoning enabled returns HTTP 400

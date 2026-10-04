@@ -228,6 +228,7 @@ async def responses_to_anthropic_sse(
     state: TranslatorState | None = None,
     resumed_from_index: int | None = None,
     reasoning_codec: ReasoningCodec | None = None,
+    allowed_skill_names: tuple[str, ...] = (),
 ) -> AsyncIterator[bytes]:
     """Translate a Responses API event stream into Anthropic SSE bytes.
 
@@ -670,7 +671,11 @@ async def responses_to_anthropic_sse(
                         if parsed.get("isolation") == "worktree":
                             del parsed["isolation"]
                         # Tool-specific sanitizers (JS trailing-token strip, etc.)
-                        parsed = sanitize_tool_arguments(parsed, tool_name)
+                        parsed = sanitize_tool_arguments(
+                            parsed,
+                            tool_name,
+                            allowed_skill_names=allowed_skill_names,
+                        )
                     cleaned = json.dumps(parsed, separators=(",", ":"))
                 except (json.JSONDecodeError, TypeError):
                     # Try to recover valid JSON with trailing leaked reasoning.

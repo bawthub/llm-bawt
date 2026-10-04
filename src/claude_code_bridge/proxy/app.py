@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from .adapters import close_all, start_all
 from .claude_oauth import ClaudeOAuthGateway, router as claude_oauth_router
 from .routes import router as messages_router
-from .request_context import ProxyStatusCallback
+from .request_context import ProxyCancellationRegistry, ProxyStatusCallback
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,10 @@ async def _lifespan(app: FastAPI):
         logger.info("Proxy app shutting down")
 
 
-def create_app(status_callback: ProxyStatusCallback | None = None) -> FastAPI:
+def create_app(
+    status_callback: ProxyStatusCallback | None = None,
+    cancellation_registry: ProxyCancellationRegistry | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="Claude Code Bridge — Anthropic-compatible proxy",
         description=(
@@ -52,6 +55,7 @@ def create_app(status_callback: ProxyStatusCallback | None = None) -> FastAPI:
         openapi_url=None,
     )
     app.state.proxy_status_callback = status_callback
+    app.state.proxy_cancellations = cancellation_registry or ProxyCancellationRegistry()
     app.include_router(messages_router)
     app.include_router(claude_oauth_router)
 
@@ -77,7 +81,8 @@ class ProxyServer:
     ) -> None:
         self._host = host
         self._requested_port = port
-        self._app = create_app(status_callback)
+        self._cancellations = ProxyCancellationRegistry()
+        self._app = create_app(status_callback, self._cancellations)
         self._server: Optional[uvicorn.Server] = None
         self._serve_task: Optional[asyncio.Task[None]] = None
         self._actual_port: Optional[int] = None
@@ -93,6 +98,12 @@ class ProxyServer:
         if self._actual_port is None:
             raise RuntimeError("ProxyServer not started yet")
         return self._actual_port
+
+    def cancel_request(self, request_id: str) -> None:
+        self._cancellations.cancel(request_id)
+
+    def clear_request(self, request_id: str) -> None:
+        self._cancellations.clear(request_id)
 
     async def start(self) -> None:
         config = uvicorn.Config(

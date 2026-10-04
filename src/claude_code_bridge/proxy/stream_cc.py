@@ -48,6 +48,7 @@ def _clean_tool_arguments(
     *,
     tool_name: str,
     required_by_tool: dict[str, frozenset[str]],
+    allowed_skill_names: tuple[str, ...] = (),
 ) -> str:
     """Remove invalid optional empty strings, strip leaked reasoning tokens."""
     raw = raw or "{}"
@@ -76,7 +77,9 @@ def _clean_tool_arguments(
     if parsed.get("isolation") == "worktree":
         del parsed["isolation"]
     # Tool-specific sanitizers (JS trailing-token strip, etc.)
-    parsed = sanitize_tool_arguments(parsed, tool_name)
+    parsed = sanitize_tool_arguments(
+        parsed, tool_name, allowed_skill_names=allowed_skill_names
+    )
     return json.dumps(parsed, separators=(",", ":"))
 
 
@@ -98,6 +101,7 @@ async def chat_completions_to_anthropic_sse(
     *,
     anthropic_model: str,
     tool_schemas: list[dict] | None = None,
+    allowed_skill_names: tuple[str, ...] = (),
 ) -> AsyncIterator[bytes]:
     """Translate one Chat Completions SSE stream into Anthropic SSE bytes."""
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -291,6 +295,7 @@ async def chat_completions_to_anthropic_sse(
                 call["arguments"],
                 tool_name=call["name"],
                 required_by_tool=required_by_tool,
+                allowed_skill_names=allowed_skill_names,
             )
             yield _sse(
                 "content_block_delta",

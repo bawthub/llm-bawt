@@ -93,10 +93,11 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                 self._publisher, request_id, already_published=run_done_published,
             )
             self._discard_changed_file_request(request_id)
-            self._proxy_request_sessions.pop(request_id, None)
             self._trigger_message_ids.pop(request_id, None)
+            if request_id not in self._proxy_request_sessions:
+                self._clear_proxy_sampling_cancel(request_id)
+            self._proxy_request_sessions.pop(request_id, None)
             await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
-
         def _publish_queue_heartbeat() -> None:
             nonlocal queue_seq
             queue_seq += 1
@@ -268,8 +269,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         use_proxy=use_proxy,
                     )
 
-                    # TASK-623: proxy-vs-direct SDK env construction extracted
-                    # into _build_sdk_env (behavior-identical).
                     sdk_env = self._build_sdk_env(
                         use_proxy=use_proxy,
                         model=model,
@@ -282,6 +281,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         session_key=session_key,
                         thread_session_id=thread_session_id,
                         request_id=request_id,
+                        skill_bundle=req.skill_bundle,
                     )
                     if mcp_tool_timeout_ms:
                         # TASK-618: DB-backed app policy, delivered per turn so
@@ -993,8 +993,8 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                 )
                 self._publisher.publish_run_done(request_id)
             finally:
+                self._clear_proxy_sampling_cancel(request_id)
                 self._discard_changed_file_request(request_id)
                 self._proxy_request_sessions.pop(request_id, None)
-                # Drop the per-run trigger_message_id mapping so we don't leak.
                 self._trigger_message_ids.pop(request_id, None)
                 await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

@@ -59,6 +59,35 @@ def test_run_done_is_published_exactly_once() -> None:
     assert publisher.request_ids == ["req-terminal"]
 
 
+def test_abort_arms_proxy_gate_before_task_cancel_and_disconnect() -> None:
+    async def run():
+        harness = _SendHarness()
+        order: list[str] = []
+
+        class Client:
+            request_id = "turn-request"
+
+            async def disconnect(self):
+                order.append("disconnect")
+
+        harness._cancel_proxy_sampling = lambda request_id: order.append(
+            f"gate:{request_id}"
+        )
+        harness._clear_proxy_sampling_cancel = lambda request_id: order.append(
+            f"clear:{request_id}"
+        )
+        harness._session_queue.set_active_client(SESSION, Client())
+        harness._session_queue.cancel_request = Mock(
+            side_effect=lambda *_args: order.append("cancel") or True
+        )
+
+        await harness.abort()
+
+        assert order == ["gate:turn-request", "cancel", "disconnect"]
+
+    asyncio.run(run())
+
+
 SESSION = "claude-code:test:thread"
 MODEL = "claude-sonnet-4-6"
 CANCELLED = {"end_reason": "aborted", "status": "cancelled"}
@@ -84,6 +113,9 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
         self._discard_changed_file_request = Mock()
         self._read_native_context_usage = AsyncMock(return_value=None)
         self.queued = asyncio.Event()
+
+    def _clear_proxy_sampling_cancel(self, request_id):
+        pass
 
     @staticmethod
     def _model_provider_prefix(model):

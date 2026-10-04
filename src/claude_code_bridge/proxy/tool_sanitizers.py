@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -341,6 +343,8 @@ def register(
 def sanitize_tool_arguments(
     parsed: dict[str, Any],
     tool_name: str,
+    *,
+    allowed_skill_names: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run all matching sanitizers on a parsed tool argument dict.
 
@@ -358,6 +362,57 @@ def sanitize_tool_arguments(
                 getattr(sanitizer, "__name__", repr(sanitizer)),
                 tool_name,
             )
+    if tool_name == "Skill" and allowed_skill_names:
+        result = normalize_skill_arguments(result, allowed_skill_names)
+    return result
+
+
+_SKILL_ARGS_SUFFIX_RE = re.compile(r"^(?P<name>.+?);args=(?P<args>.*?);?$", re.DOTALL)
+
+
+def normalize_skill_arguments(
+    args: dict[str, Any], allowed_skill_names: tuple[str, ...]
+) -> dict[str, Any]:
+    """Repair only malformed Skill selectors that resolve to an exact catalog entry.
+
+    This intentionally does not fuzzy-match or resurrect removed skills. It
+    handles the observed proxy-model corruptions: Unicode format controls,
+    trailing punctuation, and an ``;args=...`` fragment appended to ``skill``.
+    """
+    raw = args.get("skill")
+    if not isinstance(raw, str):
+        return args
+    allowed = set(allowed_skill_names)
+    if raw in allowed:
+        return args
+
+    candidate = "".join(ch for ch in raw if unicodedata.category(ch) != "Cf").strip()
+    recovered_args: str | None = None
+    suffix = _SKILL_ARGS_SUFFIX_RE.fullmatch(candidate)
+    if suffix:
+        candidate = suffix.group("name").strip()
+        encoded_args = suffix.group("args").strip()
+        if encoded_args:
+            try:
+                decoded = json.loads(encoded_args)
+            except json.JSONDecodeError:
+                return args
+            if not isinstance(decoded, str):
+                return args
+            recovered_args = decoded
+    candidate = candidate.rstrip(";:").strip()
+    if candidate not in allowed:
+        return args
+
+    result = dict(args)
+    result["skill"] = candidate
+    if recovered_args and not result.get("args"):
+        result["args"] = recovered_args
+    logger.warning(
+        "Normalized malformed Skill selector to %r (removed_or_moved=%d chars)",
+        candidate,
+        max(len(raw) - len(candidate), 0),
+    )
     return result
 
 

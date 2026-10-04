@@ -45,13 +45,16 @@ Responses-API side so the codebase stays consistent on that shape.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
+from collections import Counter
 from typing import Any
 
 from .tool_discovery import model_tool_description
 from .reasoning import ReasoningCodec
+from .tool_sanitizers import normalize_skill_arguments
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,91 @@ logger = logging.getLogger(__name__)
 _SERVER_TOOL_TYPE_RE = re.compile(
     r"^(web_search|web_fetch|bash|text_editor|code_execution|computer)_\d{6,}$"
 )
+
+_SKILL_RETRY_FUSE_MESSAGE = (
+    "The Skill tool is unavailable for this sampling step after two identical "
+    "rejected selectors. Do not retry it; continue with already loaded tools "
+    "or another available tool."
+)
+
+
+def _tool_result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def should_disable_skill_tool(
+    messages: list[dict] | None,
+    allowed_skill_names: tuple[str, ...],
+) -> bool:
+    """Fuse Skill after the same truly unknown selector fails twice."""
+    skill_calls: dict[str, str] = {}
+    failures: Counter[str] = Counter()
+    allowed = set(allowed_skill_names)
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        if message.get("role") == "assistant":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                if block.get("name") != "Skill":
+                    continue
+                tool_input = block.get("input")
+                selector = tool_input.get("skill") if isinstance(tool_input, dict) else None
+                call_id = block.get("id")
+                if isinstance(call_id, str) and isinstance(selector, str):
+                    skill_calls[call_id] = selector
+        elif message.get("role") == "user":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                output = _tool_result_text(block.get("content"))
+                if "<tool_use_error>Unknown skill:" not in output:
+                    continue
+                selector = skill_calls.get(str(block.get("tool_use_id") or ""))
+                if selector is None:
+                    continue
+                normalized = normalize_skill_arguments(
+                    {"skill": selector}, allowed_skill_names
+                ).get("skill")
+                if normalized in allowed:
+                    continue
+                failures[selector] += 1
+                if failures[selector] >= 2:
+                    return True
+    return False
+
+
+def harden_skill_parameters(
+    params: dict[str, Any], allowed_skill_names: tuple[str, ...]
+) -> dict[str, Any]:
+    """Constrain Skill.skill to exact selectors without mutating SDK schemas."""
+    hardened = copy.deepcopy(params)
+    properties = hardened.get("properties")
+    if not isinstance(properties, dict):
+        return hardened
+    skill = properties.get("skill")
+    if not isinstance(skill, dict):
+        return hardened
+    skill["enum"] = list(allowed_skill_names)
+    guidance = (
+        "Use exactly one enum value. Put optional skill arguments in the "
+        "separate args field; never append punctuation or args to this value."
+    )
+    prior = skill.get("description")
+    skill["description"] = f"{prior.rstrip()} {guidance}" if isinstance(prior, str) and prior else guidance
+    return hardened
 
 
 def _effort_from_budget(budget: Any) -> str | None:
@@ -310,7 +398,12 @@ def _assistant_content_to_responses(
     return items
 
 
-def _tools_to_responses(tools: list[dict] | None) -> list[dict] | None:
+def _tools_to_responses(
+    tools: list[dict] | None,
+    *,
+    allowed_skill_names: tuple[str, ...] = (),
+    disable_skill: bool = False,
+) -> list[dict] | None:
     """Anthropic tools schema → Responses API tools schema.
 
     Anthropic:  {name, description, input_schema}
@@ -338,6 +431,8 @@ def _tools_to_responses(tools: list[dict] | None) -> list[dict] | None:
         if isinstance(ttype, str) and _SERVER_TOOL_TYPE_RE.match(ttype):
             logger.debug("Stripping Anthropic server-side tool type=%r from proxy request", ttype)
             continue
+        if disable_skill and tool.get("name") == "Skill":
+            continue
         item: dict[str, Any] = {
             "type": "function",
             "name": tool.get("name") or "",
@@ -348,7 +443,12 @@ def _tools_to_responses(tools: list[dict] | None) -> list[dict] | None:
         # ``parameters`` so honor both.
         params = tool.get("input_schema") or tool.get("parameters")
         if params is not None:
-            item["parameters"] = params
+            item["parameters"] = (
+                harden_skill_parameters(params, allowed_skill_names)
+                if tool.get("name") == "Skill" and allowed_skill_names
+                and isinstance(params, dict)
+                else params
+            )
         converted.append(item)
     if not converted:
         return None
@@ -359,7 +459,11 @@ def _tools_to_responses(tools: list[dict] | None) -> list[dict] | None:
 
 
 def anthropic_to_responses(
-    body: dict, upstream_model: str, *, reasoning_codec: ReasoningCodec | None = None,
+    body: dict,
+    upstream_model: str,
+    *,
+    reasoning_codec: ReasoningCodec | None = None,
+    allowed_skill_names: tuple[str, ...] = (),
 ) -> dict:
     """Translate an Anthropic Messages request body to a Responses API body.
 
@@ -372,6 +476,9 @@ def anthropic_to_responses(
     input_items: list[dict] = []
     temporal_prefix_attached = False
 
+    disable_skill = should_disable_skill_tool(
+        body.get("messages"), allowed_skill_names
+    )
     for msg in body.get("messages") or []:
         if not isinstance(msg, dict):
             continue
@@ -418,6 +525,13 @@ def anthropic_to_responses(
                 )
         else:
             logger.warning("Dropping unsupported message role=%r", role)
+
+    if disable_skill:
+        input_items.append({
+            "role": "user",
+            "content": [{"type": "input_text", "text": _SKILL_RETRY_FUSE_MESSAGE}],
+        })
+        logger.warning("Disabled Skill tool after two identical unknown selectors")
 
     payload: dict[str, Any] = {
         "model": upstream_model,
@@ -466,11 +580,15 @@ def anthropic_to_responses(
             },
         )
 
-    tools = _tools_to_responses(body.get("tools"))
+    tools = _tools_to_responses(
+        body.get("tools"),
+        allowed_skill_names=allowed_skill_names,
+        disable_skill=disable_skill,
+    )
     if tools:
         payload["tools"] = tools
         tc = body.get("tool_choice")
-        if tc:
+        if tc and not disable_skill:
             payload["tool_choice"] = tc
 
     return payload
