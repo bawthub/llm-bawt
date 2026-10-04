@@ -46,24 +46,23 @@ the configured image cannot rewrite queued jobs: historical image IDs and volume
 mounts must remain available for their lifetime. `max_concurrent` counts claimed,
 accepted, and running jobs; the smallest limit among overlapping snapshots wins.
 
-## Deployment prerequisites (not applied by this change)
+## Deployment setup checklist (original TASK-861 setup; installed on echo)
 
-Repository inspection verified the base compose app mounts Docker's socket and
-`./.logs:/app/.logs`; the dev overlay mounts `./src:/app/src`. Those host bind
-sources are not safe to guess from a bridge container. This change instead adds
-`docker-compose.ops.yml`, a separate override with a dedicated **named volume**.
-It does not alter existing compose hunks. The implementation session had no
-Docker CLI/socket, so actual deployed mounts, daemon behavior and app-restart
-survival have **not** been live-tested.
+The base compose app mounts Docker's socket and `./.logs:/app/.logs`; the dev
+overlay mounts `./src:/app/src`. Do not guess host bind sources from a bridge
+container. `docker-compose.ops.yml` adds a dedicated **named volume** without
+altering existing compose hunks. The original implementation lacked a live
+Docker check; the ops worker and receipt path are now deployed on echo. For a
+new installation or topology change, verify each step below again.
 
-An operator deploying this must:
+An operator setting up a new installation must:
 
 1. Inspect the current app image ID, current compose file list, Docker daemon,
    app mounts and networks. Verify the daemon is the one owning the target
    containers. Do not infer host bind paths from `/app/src` in a bridge.
 2. Build `docker/Dockerfile.ops-worker` with `OPS_PYTHON_BASE` set to an
-   operator-verified local Python image ID/digest. It only COPYs `worker.py`;
-   no pip/uv/apt install is required. Record the resulting immutable image ID
+   operator-verified local Python image ID/digest. It COPYs `worker.py` and
+   `image_deploy.py`; no pip/uv/apt install is required. Record the immutable image ID
    (or published digest) as `LLM_BAWT_OPS_WORKER_IMAGE`. Mutable tags are rejected.
 3. Choose a dedicated per-stack volume name and set
    `LLM_BAWT_OPS_RECEIPT_VOLUME`. Set `LLM_BAWT_OPS_RECONCILER_IMAGE` to the
@@ -155,7 +154,8 @@ known `failed`, an unverified restore is `lost` (never retried). Rollback never
 pulls. The receipt `output_tail` is a JSON deployment record
 (`llm-bawt.ops.image-deploy/v1`), surfaced as `job.deployment` in the API.
 
-Activation prerequisites (operator actions, none performed by TASK-997):
+Activation checklist (echo activated 2026-10-03; recheck for a new
+installation, not permission for another deployment):
 
 1. Rebuild the worker image (it now COPYs `worker.py` + `image_deploy.py` into
    `/ops/`) and update `LLM_BAWT_OPS_WORKER_IMAGE`. Old queued jobs keep their
@@ -166,8 +166,13 @@ Activation prerequisites (operator actions, none performed by TASK-997):
    `bawthub/bawthub` only; `ghcr-pull` — classic, `read:packages` only (ghcr.io
    rejects fine-grained tokens; the GitHub login becomes the registry user).
    No env var or volume: nothing to recreate for credentials.
-3. Restart app (code reload), review the seeded rows and policies, then
-   enable — each a separate explicit decision.
+3. Reload the app with the ops worker configuration, review the seeded rows and
+   policies, then enable — each a separate explicit decision.
+
+On echo both operations are enabled. The first approved deploy (v0.1.58, run
+`37079842420`, job `e728475475c0433ba72c83a42bd5381f`) succeeded. No live
+rollback has been verified; a rollback needs its own explicit request and
+approval, not an automatic test of the enabled action.
 
 ## Approval integration
 
