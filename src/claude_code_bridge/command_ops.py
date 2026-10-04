@@ -185,8 +185,9 @@ class ClaudeCommandMixin:
     ) -> None:
         """Steer one active Claude SDK run in place.
 
-        ``priority`` ``now`` (default, user redirection) interrupts running
-        tools; ``next`` (bot deliveries) waits for the next tool boundary.
+        ``priority`` ``next`` queues at the next tool boundary; explicit
+        ``now`` interrupts running tools. Escalation atomically cancels an
+        already-queued user message before replacing it with an interrupt.
         """
         backend = (fields.get("backend") or "").strip()
         if backend and backend != self._backend_name:
@@ -196,10 +197,13 @@ class ClaudeCommandMixin:
         request_id = (fields.get("request_id") or "").strip()
         session_key = (fields.get("session_key") or "").strip()
         message = (fields.get("message") or "").strip()
-        priority = (fields.get("priority") or "now").strip().lower()
+        priority = (fields.get("priority") or "next").strip().lower()
+        escalate = fields.get("escalate") == "1" or fields.get("steer_action") == "escalate"
         try:
-            if not session_key or not message:
-                raise ValueError("chat.steer requires session_key and message")
+            if not session_key:
+                raise ValueError("chat.steer requires session_key")
+            if not escalate and not message:
+                raise ValueError("chat.steer requires message")
             active_run = self._session_queue.get_active_client(session_key)
             if active_run is None or not hasattr(active_run, "steer"):
                 raise RuntimeError("no_active_run")
@@ -209,9 +213,20 @@ class ClaudeCommandMixin:
                 raise RuntimeError("active_run_mismatch")
 
             message_id = (fields.get("message_id") or "").strip()
-            await active_run.steer(
-                message, priority=priority, message_id=message_id or None
-            )
+            if escalate:
+                if message:
+                    raise ValueError("chat.steer escalation must not include message")
+                if not message_id or not target_request_id:
+                    raise ValueError("chat.steer escalation requires message_id and target_request_id")
+                if not hasattr(active_run, "escalate"):
+                    raise RuntimeError("escalation_unsupported_sdk")
+                detail = await active_run.escalate(message_id)
+            else:
+                await active_run.steer(
+                    message, priority=priority, message_id=message_id or None,
+                    origin=(fields.get("origin") or "system").strip().lower(),
+                )
+                detail = "steered"
             # A steer adds a separate user message to this run; it does not
             # change the originating turn's trigger. All run events (including
             # tools and terminal usage) retain that canonical owner.
@@ -227,8 +242,12 @@ class ClaudeCommandMixin:
                     request_id,
                     {
                         "ok": True,
-                        "detail": "steered",
+                        "detail": detail,
                         "active_request_id": active_request_id or None,
+                        "can_escalate": (
+                            not escalate
+                            and "interrupt_cancel_queued_v1" in getattr(active_run, "_cli_capabilities", set())
+                        ),
                     },
                 )
         except Exception as exc:

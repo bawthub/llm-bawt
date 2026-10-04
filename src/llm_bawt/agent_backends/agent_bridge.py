@@ -334,6 +334,17 @@ class AgentBridgeBackend(AgentBackend):
                                         "model": event.model,
                                     })
 
+                            elif event.kind == AgentEventKind.STEER_LIFECYCLE:
+                                meta = event.raw if isinstance(event.raw, dict) else {}
+                                message_id, state = meta.get("message_id"), meta.get("state")
+                                bot_id, user_id = config.get("bot_id"), config.get("user_id")
+                                if message_id and state and bot_id and user_id:
+                                    await local_sub.publish_tool_event(bot_id, user_id, {
+                                        "_type": "steer_lifecycle", "bot_id": bot_id,
+                                        "user_id": user_id, "message_id": message_id,
+                                        "state": state, "ts": time.time(),
+                                    })
+
                             elif event.kind == AgentEventKind.UPSTREAM_STATUS:
                                 meta = event.raw.get("upstream_status", {}) if isinstance(event.raw, dict) else {}
                                 result_queue.put({

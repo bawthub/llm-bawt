@@ -249,6 +249,63 @@ def test_queued_cancellation_leaves_active_run_untouched(monkeypatch, method):
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
+def test_steer_defaults_to_next_and_requires_origin_for_user_lifecycle():
+    async def run():
+        harness = _SendHarness()
+        active = SimpleNamespace(request_id="target-run", steer=AsyncMock())
+        harness._session_queue.set_active_client(SESSION, active)
+        await harness._handle_steer({
+            "session_key": SESSION, "request_id": "steer-1",
+            "target_request_id": "target-run", "message_id": "id-1",
+            "message": "note", "origin": "user",
+        }, "command-1", harness.redis)
+        active.steer.assert_awaited_once_with(
+            "note", priority="next", message_id="id-1", origin="user",
+        )
+        harness._publisher.publish_rpc_result.assert_called_once_with(
+            "steer-1", {"ok": True, "detail": "steered", "active_request_id": "target-run", "can_escalate": False},
+        )
+    asyncio.run(run())
+
+
+def test_escalation_calls_active_run_without_resending_message():
+    async def run():
+        harness = _SendHarness()
+        active = SimpleNamespace(request_id="target-run", steer=AsyncMock(),
+                                 escalate=AsyncMock(return_value="escalated"))
+        harness._session_queue.set_active_client(SESSION, active)
+        fields = {
+            "session_key": SESSION, "request_id": "escalate-1",
+            "target_request_id": "target-run", "message_id": "id-1", "escalate": "1",
+        }
+        await harness._handle_steer(fields, "command-1", harness.redis)
+        active.escalate.assert_awaited_once_with("id-1")
+        active.steer.assert_not_awaited()
+        harness._publisher.publish_rpc_result.assert_called_once_with(
+            "escalate-1", {"ok": True, "detail": "escalated", "active_request_id": "target-run", "can_escalate": False},
+        )
+    asyncio.run(run())
+
+
+def test_escalation_validates_target_and_refuses_message_payload():
+    async def run():
+        harness = _SendHarness()
+        active = SimpleNamespace(request_id="target-run", steer=AsyncMock())
+        harness._session_queue.set_active_client(SESSION, active)
+        base = {"session_key": SESSION, "request_id": "escalate-1", "escalate": "1"}
+        cases = [
+            ({"target_request_id": "other-run", "message_id": "id-1"}, "active_run_mismatch"),
+            ({"target_request_id": "target-run", "message_id": "id-1", "message": "duplicate"}, "must not include message"),
+            ({"target_request_id": "target-run"}, "requires message_id and target_request_id"),
+            ({"message_id": "id-1"}, "requires message_id and target_request_id"),
+        ]
+        for i, (extra, error) in enumerate(cases):
+            await harness._handle_steer(base | extra, f"command-{i}", harness.redis)
+            assert error in harness._publisher.publish_rpc_result.call_args.args[1]["error"]
+        active.steer.assert_not_awaited()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("result", [False, True], ids=["EOF", "ResultMessage"])
 def test_normal_completion_still_emits_one_success(monkeypatch, result):
     async def run():

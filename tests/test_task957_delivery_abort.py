@@ -88,5 +88,5 @@ def test_steering_does_not_reassign_active_turn_tool_ownership(priority):
                           token_usage={"input_tokens": 1})
     assert [event.trigger_message_id for event in bridge.published] == ["new-trigger"] * 3
     bridge._session_queue.get_active_client("loopy:nick").steer.assert_awaited_once_with(
-        "old delivery", priority=priority, message_id="old-trigger"
+        "old delivery", priority=priority, message_id="old-trigger", origin="system"
     )

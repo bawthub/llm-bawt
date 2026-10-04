@@ -32,6 +32,12 @@ class _FakeQuery(Query):
 
     def __init__(self) -> None:  # noqa: D401 - deliberately skip SDK init
         self.frames: asyncio.Queue = asyncio.Queue()
+        self.receipt = {"still_queued": [], "cancelled": [CMD]}
+        self.control_requests: list[dict] = []
+
+    async def _send_control_request(self, request, timeout=60):
+        self.control_requests.append(request)
+        return self.receipt
 
     async def receive_messages(self):
         while True:
@@ -45,10 +51,14 @@ class _FakeClient:
     def __init__(self) -> None:
         self._query = _FakeQuery()
         self.written: list[dict] = []
+        self.replacements: list[str] = []
         self.interrupt = AsyncMock()
         self.disconnect = AsyncMock()
 
     async def query(self, prompt):
+        if isinstance(prompt, str):
+            self.replacements.append(prompt)
+            return
         async for frame in prompt:
             self.written.append(frame)
             # The CLI acknowledges uuid-tagged stdin commands immediately.
@@ -197,6 +207,151 @@ async def test_now_steer_still_interrupts_and_relabels_killed_tools():
     # The interrupt boundary result passes through for the consumer to drain.
     assert _results(yielded) == ["interrupted"]
     assert run.consume_replaced_result(yielded[-1]) is True
+
+
+@pytest.mark.anyio
+async def test_user_next_lifecycle_reports_only_owned_uuid_and_no_duplicate_frames():
+    client = _FakeClient()
+    events: list[tuple[str, str]] = []
+    run = ClaudeActiveRun(client=client, request_id="req-1", on_user_lifecycle=lambda *e: events.append(e))
+    yielded, task = await _start(run)
+
+    await run.steer("user note", priority="next", message_id=CMD, origin="user")
+    await run.steer("user note", priority="next", message_id=CMD, origin="user")
+    assert len(client.written) == 1
+    for frame in (
+        _lifecycle("12345678-0000-4000-8000-000000000000", "queued"),
+        _lifecycle(CMD, "queued"),
+        _lifecycle(CMD, "started"),
+        _lifecycle(CMD, "started"),
+        _lifecycle(CMD, "completed"),
+        _result("final"),
+    ):
+        await client._query.frames.put(frame)
+    await _finish(client, task)
+
+    assert events == [(CMD, "queued"), (CMD, "started"), (CMD, "completed")]
+    assert _results(yielded) == ["final"]
+    client.interrupt.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_user_late_completion_is_published_before_result_reaches_send_handler():
+    client = _FakeClient()
+    events: list[tuple[str, str]] = []
+    run = ClaudeActiveRun(client=client, request_id="req-1", on_user_lifecycle=lambda *e: events.append(e))
+    stream = run.messages()
+    pending = asyncio.create_task(stream.__anext__())
+    await asyncio.sleep(0)
+    await run.steer("late user note", priority="next", message_id=CMD, origin="user")
+    await client._query.frames.put(_result("first turn"))
+    await client._query.frames.put(_lifecycle(CMD, "started"))
+    await client._query.frames.put(_result("follow-up"))
+    await asyncio.sleep(0.01)
+    assert not pending.done()
+    await client._query.frames.put(_lifecycle(CMD, "completed"))
+    result = await asyncio.wait_for(pending, 1)
+    assert result.result == "follow-up"
+    assert events == [(CMD, "queued"), (CMD, "started"), (CMD, "completed")]
+    await stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_bot_origin_next_has_no_user_lifecycle_and_rejected_user_id_is_not_queued():
+    client = _FakeClient()
+    events: list[tuple[str, str]] = []
+    run = ClaudeActiveRun(client=client, request_id="req-1", on_user_lifecycle=lambda *e: events.append(e))
+    yielded, task = await _start(run)
+    with pytest.raises(ValueError, match="UUID message_id"):
+        await run.steer("user note", priority="next", message_id="not-a-uuid", origin="user")
+    await run.steer("bot note", priority="next", message_id=CMD, origin="bot")
+    await client._query.frames.put(_lifecycle(CMD, "started"))
+    await client._query.frames.put(_lifecycle(CMD, "completed"))
+    await _finish(client, task)
+    assert len(client.written) == 1
+    assert events == []
+    assert yielded == []
+
+
+@pytest.mark.anyio
+async def test_escalation_atomically_replaces_queued_message_once():
+    client = _FakeClient()
+    await client._query.frames.put({
+        "type": "system", "subtype": "init", "capabilities": ["interrupt_cancel_queued_v1"],
+    })
+    events: list[tuple[str, str]] = []
+    run = ClaudeActiveRun(client=client, request_id="req-1", on_user_lifecycle=lambda *e: events.append(e))
+    yielded, task = await _start(run)
+    await run.steer("urgent direction", priority="next", message_id=CMD, origin="user")
+    await client._query.frames.put(_result("old turn"))
+    await asyncio.sleep(0.01)
+    assert _results(yielded) == []
+    assert await run.escalate(CMD) == "escalated"
+    assert await run.escalate(CMD) == "escalated"
+    assert client._query.control_requests == [{"subtype": "interrupt", "cancel_queued": True}]
+    assert len(client.replacements) == 1
+    assert "urgent direction" in client.replacements[0]
+    await client._query.frames.put(_lifecycle(CMD, "cancelled"))
+    await client._query.frames.put(_result("replacement"))
+    await _finish(client, task)
+    assert _results(yielded) == ["replacement"]
+    assert run.consume_replaced_result(yielded[-1]) is False
+    assert events == [(CMD, "queued"), (CMD, "started"), (CMD, "completed")]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state", ["started", "completed"])
+async def test_escalation_does_not_interrupt_if_command_already_started(state):
+    client = _FakeClient()
+    await client._query.frames.put({
+        "type": "system", "subtype": "init", "capabilities": ["interrupt_cancel_queued_v1"],
+    })
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    _, task = await _start(run)
+    await run.steer("user note", priority="next", message_id=CMD, origin="user")
+    run.note_lifecycle(CMD, state)
+    with pytest.raises(RuntimeError, match="steer_already_started"):
+        await run.escalate(CMD)
+    assert client._query.control_requests == []
+    assert client.replacements == []
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
+async def test_escalation_refuses_missing_capability_or_other_queued_messages():
+    client = _FakeClient()
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    _, task = await _start(run)
+    await run.steer("user note", priority="next", message_id=CMD, origin="user")
+    with pytest.raises(RuntimeError, match="escalation_unsupported_cli"):
+        await run.escalate(CMD)
+    run._cli_capabilities.add("interrupt_cancel_queued_v1")
+    other = "736a3206-0000-4000-8000-000000000002"
+    await run.steer("bot note", priority="next", message_id=other, origin="bot")
+    with pytest.raises(RuntimeError, match="escalation_other_queued_commands"):
+        await run.escalate(CMD)
+    assert client._query.control_requests == []
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
+async def test_escalation_missing_cancellation_receipt_never_replays_on_retry():
+    client = _FakeClient()
+    client._query.receipt = {"still_queued": [], "cancelled": []}
+    await client._query.frames.put({
+        "type": "system", "subtype": "init", "capabilities": ["interrupt_cancel_queued_v1"],
+    })
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    _, task = await _start(run)
+    await run.steer("user note", priority="next", message_id=CMD, origin="user")
+    with pytest.raises(RuntimeError, match="escalation_not_cancelled"):
+        await run.escalate(CMD)
+    with pytest.raises(RuntimeError, match="escalation_uncertain"):
+        await run.escalate(CMD)
+    assert len(client._query.control_requests) == 1
+    assert client.replacements == []
+    client.disconnect.assert_awaited_once()
+    await _finish(client, task)
 
 
 @pytest.mark.anyio

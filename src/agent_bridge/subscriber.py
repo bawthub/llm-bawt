@@ -150,8 +150,10 @@ class RedisSubscriber(CommandPublisherMixin):
         timeout_s: float = 10,
         request_id: str | None = None,
         priority: str = "now",
+        origin: str = "system",
+        escalate: bool = False,
     ) -> dict:
-        """Steer an active run once and await its idempotent RPC result.
+        """Steer or escalate an active run once and await its idempotent RPC result.
 
         ``priority="now"`` interrupts running tools; ``"next"`` delivers at the
         next tool boundary (claude-code-bridge only).
@@ -165,7 +167,10 @@ class RedisSubscriber(CommandPublisherMixin):
             "backend": backend,
             "request_id": request_id,
             "priority": priority,
+            "origin": origin,
         }
+        if escalate:
+            fields["steer_action"] = "escalate"
         if target_request_id:
             fields["target_request_id"] = target_request_id
 

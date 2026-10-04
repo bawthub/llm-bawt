@@ -16,6 +16,9 @@ class AgentEventKind(str, Enum):
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     USER_MESSAGE = "user_message"
+    # CLI command_lifecycle state for a user-origin mid-turn message.
+    # raw: {"message_id": <user message UUID>, "state": <CLI state>}.
+    STEER_LIFECYCLE = "steer_lifecycle"
     RUN_STARTED = "run_started"
     RUN_COMPLETED = "run_completed"
     SYSTEM_NOTE = "system_note"

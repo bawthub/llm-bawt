@@ -429,22 +429,22 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     try:
                         sdk_client = ClaudeSDKClient(options=options)
                         await sdk_client.connect(prompt_input)
+                        def _publish_run_signal(kind: AgentEventKind, raw: dict) -> None:
+                            nonlocal seq
+                            seq += 1
+                            self._publish_event(request_id, session_key, seq, kind=kind, extra_raw=raw)
+
                         active_run = ClaudeActiveRun(
                             client=sdk_client,
                             request_id=request_id,
+                            on_user_lifecycle=lambda mid, state: _publish_run_signal(
+                                AgentEventKind.STEER_LIFECYCLE, {"message_id": mid, "state": state},
+                            ),
                         )
                         msg_stream = active_run.messages()
 
                         def _publish_turn_health(health: dict) -> None:
-                            nonlocal seq
-                            seq += 1
-                            self._publish_event(
-                                request_id,
-                                session_key,
-                                seq,
-                                kind=AgentEventKind.SYSTEM_NOTE,
-                                extra_raw={"turn_health": health},
-                            )
+                            _publish_run_signal(AgentEventKind.SYSTEM_NOTE, {"turn_health": health})
 
                         watchdog = TurnWatchdog(
                             self._request_timeout,
