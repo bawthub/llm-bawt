@@ -272,11 +272,12 @@ services:
       - CODEX_DEV_ROOT=${CODEX_DEV_ROOT:-/home/bridge/dev}
       - CODEX_BAWTHUB_MCP_URL=${CODEX_BAWTHUB_MCP_URL:-http://app:8001/mcp}
       - CODEX_CRAWL4AI_MCP_URL=${CODEX_CRAWL4AI_MCP_URL:-http://crawl4ai:11235/mcp/sse}
-      # The openai-codex-sdk wheel ships without the codex Rust binary.
-      # The host's @openai/codex npm package provides it, but its layout
-      # (vendor/<triple>/bin/codex) differs from what the SDK expects
-      # (vendor/<triple>/codex/codex). Point CODEX_BIN at the actual path.
-      - CODEX_BIN=/app/.venv/lib/python3.12/site-packages/openai_codex_sdk/vendor/x86_64-unknown-linux-musl/bin/codex
+      # The openai-codex-sdk wheel ships without the codex Rust binary; use the
+      # one baked into the image by openai-codex-cli-bin (Dockerfile.agent-bridge).
+      # Never bind-mount the host's npm @openai/codex vendor dir: `codex` self-update
+      # swaps that dir for a new inode and the running container's mount goes empty
+      # (TASK-1009).
+      - CODEX_BIN=${CODEX_BIN:-/app/.venv/lib/python3.12/site-packages/codex_cli_bin/bin/codex}
       - LLM_BAWT_API_URL=http://app:8642
       # Override SERVICE_HOST inherited from .env (which is 0.0.0.0 — meant
       # for the app container's bind address). From inside a bridge, the
@@ -304,10 +305,6 @@ services:
       # HTTPS). Wire it with `tenant.sh bridge-git-setup`. BRIDGE_SSH_DIR remains
       # available for any non-GitHub SSH remotes a bridge still needs.
       - ${BRIDGE_SSH_DIR:-${HOME}/.ssh}:/home/bridge/.ssh:ro
-      # The openai-codex-sdk wheel ships without the codex Rust binary;
-      # bind-mount the host's @openai/codex npm package vendor dir so
-      # the SDK's find_codex_path picks up the static-pie musl binary.
-      - ${HOME}/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor:/app/.venv/lib/python3.12/site-packages/openai_codex_sdk/vendor:ro
       # Shared agent scripts (bw-secret etc.) — live, no rebuild needed
       - ${HOME}/dev/agent-skills/scripts:/opt/agent-skills/bin:ro
     depends_on:
