@@ -378,12 +378,14 @@ _STANDALONE_CONTAINER_SEEDS: list[dict[str, Any]] = [
             {
                 "container": {
                     "type": "string",
+                    # Only containers on the executor's own Docker host (echo).
+                    # NginxProxyManager (Unraid) and the retired
+                    # bawthub-public-site were dropped in TASK-1002: the
+                    # Docker-only executor cannot reach them.
                     "enum": [
                         "bawthub-frontend-1",
-                        "NginxProxyManager",
                         "bawthub-nocodb-1",
                         "llm-bawt-local-model-bridge",
-                        "bawthub-public-site",
                     ],
                 }
             },

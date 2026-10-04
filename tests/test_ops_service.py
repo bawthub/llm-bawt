@@ -146,6 +146,50 @@ def test_dispatch_invalid_args_raises_with_reason():
     raise AssertionError("expected OpsDispatchError")
 
 
+class MissingTargetExecutor(FakeExecutor):
+    def __init__(self):
+        super().__init__()
+        self.checked: list[tuple[dict, dict]] = []
+
+    def check_target(self, spec, args):
+        self.checked.append((spec, args))
+        raise ExecutorError("target container 'test' does not exist on this executor's Docker host")
+
+
+def test_prepare_invocation_rejects_missing_target_before_approval():
+    # TASK-1002: the snapshot is built BEFORE the approval card; a target the
+    # executor cannot reach must fail here, not as a 404 after approval.
+    store = _store()
+    store.create_operation(_op_data())
+    executor = MissingTargetExecutor()
+    service = OpsService(store, executor=executor)
+    try:
+        service.prepare_invocation("test.restart-thing", {"target": "a"})
+    except OpsDispatchError as exc:
+        assert exc.code == "target_unavailable"
+        assert "does not exist" in str(exc)
+        assert executor.checked == [({"action": "restart", "container_name": "test"}, {"target": "a"})]
+        assert executor.dispatch_calls == []
+        return
+    raise AssertionError("expected OpsDispatchError")
+
+
+def test_dispatch_without_snapshot_also_checks_target():
+    store = _store()
+    store.create_operation(_op_data())
+    executor = MissingTargetExecutor()
+    service = OpsService(store, executor=executor)
+    try:
+        service.dispatch_job(operation_slug="test.restart-thing", args={"target": "a"},
+                             idempotency_key="k-missing")
+    except OpsDispatchError as exc:
+        assert exc.code == "target_unavailable"
+        assert executor.dispatch_calls == []
+        assert store.get_job_by_key("k-missing") is None
+        return
+    raise AssertionError("expected OpsDispatchError")
+
+
 def test_dispatch_success_records_dispatching_and_unit_name():
     store = _store()
     store.create_operation(_op_data())

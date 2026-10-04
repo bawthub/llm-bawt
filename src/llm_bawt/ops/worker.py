@@ -31,6 +31,30 @@ else:  # pragma: no cover - standalone worker image
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
 
 
+OPS_JOB_LABEL = "llm-bawt.ops.job"
+
+
+def target_selector(spec: dict, args: dict) -> tuple[str | None, dict | None]:
+    """The container a restart/start/stop/pull spec targets.
+
+    Returns ``(name, None)`` or ``(None, compose label filters)``. Single source
+    of truth shared by the worker (execution) and the app's approval-time
+    target check (TASK-1002), so both resolve exactly the same container.
+    """
+    if "container_name" in spec or "container_name_from_arg" in spec:
+        return str(spec.get("container_name") or args[spec["container_name_from_arg"]]), None
+    service = spec.get("compose_service") or args[spec["compose_service_from_arg"]]
+    return None, {"label": [f"com.docker.compose.project={spec['compose_project']}",
+                            f"com.docker.compose.service={service}"]}
+
+
+def is_ops_worker(labels: dict | None) -> bool:
+    """Images can carry inherited Compose labels. An operation worker built from
+    such an image must never qualify as its own target, even if a future
+    dispatcher forgets to neutralize those labels."""
+    return OPS_JOB_LABEL in (labels or {})
+
+
 class UnixHTTPConnection(http.client.HTTPConnection):
     def connect(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -88,21 +112,12 @@ class DockerAPI:
             conn.close()
 
     def execute(self, spec: dict, args: dict) -> str:
-        if "container_name" in spec or "container_name_from_arg" in spec:
-            name = spec.get("container_name") or args[spec["container_name_from_arg"]]
-            container = self.request("GET", f"/containers/{quote(str(name), safe='')}/json")
+        name, filters = target_selector(spec, args)
+        if name is not None:
+            container = self.request("GET", f"/containers/{quote(name, safe='')}/json")
         else:
-            service = spec.get("compose_service") or args[spec["compose_service_from_arg"]]
-            filters = {"label": [f"com.docker.compose.project={spec['compose_project']}",
-                                 f"com.docker.compose.service={service}"]}
             matches = self.request("GET", "/containers/json?" + urlencode({"all": "1", "filters": json.dumps(filters)}))
-            # Images can carry inherited Compose labels. An operation worker
-            # built from such an image must never qualify as its own target,
-            # even if a future dispatcher forgets to neutralize those labels.
-            matches = [
-                row for row in matches
-                if "llm-bawt.ops.job" not in (row.get("Labels") or {})
-            ]
+            matches = [row for row in matches if not is_ops_worker(row.get("Labels"))]
             if len(matches) != 1:
                 raise RuntimeError(f"selector matched {len(matches)} containers, expected one")
             container = self.request("GET", f"/containers/{matches[0]['Id']}/json")

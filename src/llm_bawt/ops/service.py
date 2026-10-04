@@ -101,6 +101,13 @@ class OpsService:
                                                       executor=executor, verifier=self._release_verifier))
             except (ReleaseVerificationError, ExecutorError) as exc:
                 raise OpsDispatchError("release_unverified", str(exc)) from exc
+        else:
+            # TASK-1002: never ask a human to approve a container this
+            # executor's Docker daemon does not have.
+            try:
+                executor.check_target(spec, merged)
+            except ExecutorError as exc:
+                raise OpsDispatchError("target_unavailable", str(exc)) from exc
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
         return json.loads(canonical_json(snapshot))
 

@@ -243,6 +243,7 @@ def dispatch_job(body: DispatchRequest):
             "args_invalid": 400,
             "idempotency_conflict": 409,
             "snapshot_invalid": 409,
+            "target_unavailable": 409,
             "executor_unavailable": 503,
             "dispatch_failed": 502,
             "executor_kind_unknown": 500,

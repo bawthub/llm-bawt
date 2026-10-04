@@ -45,6 +45,11 @@ class FakeContainers:
             raise NotFound(name)
         return self.rows[name]
 
+    def list(self, **kwargs):  # Docker SDK signature: list(all=..., filters=...)
+        wanted = dict(item.split("=", 1) for item in (kwargs.get("filters") or {}).get("label", []))
+        return [row for row in self.rows.values()
+                if all(row.labels.get(k) == v for k, v in wanted.items())]
+
     def create(self, image, **kwargs):
         self.creates.append((image, kwargs))
         row = FakeContainer(kwargs["labels"])
@@ -322,3 +327,49 @@ def test_restart_app_seed_targets_stable_explicit_container_name():
 def test_invalid_spec_rejected(spec):
     with pytest.raises(ValueError):
         validate_spec(json.dumps(spec))
+
+
+# --- TASK-1002: approval-time target check ---------------------------------
+
+def test_check_target_accepts_container_on_this_daemon(tmp_path, monkeypatch):
+    executor, _client, _ = setup(tmp_path, monkeypatch)
+    executor.check_target({"action": "restart", "container_name_from_arg": "container"},
+                          {"container": "fake-app"})
+
+
+def test_check_target_rejects_container_on_another_host(tmp_path, monkeypatch):
+    # The live bug: NginxProxyManager lives on Unraid, not echo's daemon.
+    executor, _client, _ = setup(tmp_path, monkeypatch)
+    with pytest.raises(ExecutorError, match="'NginxProxyManager' does not exist"):
+        executor.check_target({"action": "restart", "container_name_from_arg": "container"},
+                              {"container": "NginxProxyManager"})
+
+
+def test_check_target_compose_selector_ignores_ops_workers(tmp_path, monkeypatch):
+    executor, client, _ = setup(tmp_path, monkeypatch)
+    spec = {"action": "restart", "compose_project": "llm-bawt", "compose_service": "app"}
+    compose = {"com.docker.compose.project": "llm-bawt", "com.docker.compose.service": "app"}
+    # A worker carrying inherited Compose labels alone must not satisfy the check.
+    client.containers.rows["worker"] = FakeContainer({**compose, "llm-bawt.ops.job": JOB})
+    with pytest.raises(ExecutorError, match="matched 0 containers"):
+        executor.check_target(spec, {})
+    client.containers.rows["llm-bawt-app-1"] = FakeContainer(compose)
+    executor.check_target(spec, {})
+
+
+def test_check_target_daemon_error_is_executor_error(tmp_path, monkeypatch):
+    executor, client, _ = setup(tmp_path, monkeypatch)
+
+    def boom(_name):
+        raise RuntimeError("socket closed")
+
+    client.containers.get = boom
+    with pytest.raises(ExecutorError, match="cannot inspect target container"):
+        executor.check_target({"action": "restart", "container_name": "x"}, {})
+
+
+def test_container_restart_seed_lists_only_local_targets():
+    seed = next(s for s in SEEDS if s["slug"] == "container.restart")
+    enum = json.loads(seed["args_schema_json"])["properties"]["container"]["enum"]
+    assert "NginxProxyManager" not in enum
+    assert "bawthub-public-site" not in enum

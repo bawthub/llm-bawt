@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .validation import canonical_json
-from .worker import atomic_json
+from .worker import OPS_JOB_LABEL, atomic_json, is_ops_worker, target_selector
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 
@@ -66,6 +66,10 @@ class Executor(ABC):
     def inspect_target_image(self, spec: dict) -> str:
         """Image ID the fixed image-action target runs now (approval-time CAS)."""
         raise ExecutorError(f"{self.kind()} executor cannot inspect image deploy targets")
+
+    def check_target(self, spec: dict, args: dict) -> None:
+        """Approval-time, read-only: the spec's target exists where this executor
+        acts. Raise ExecutorError so nobody approves a guaranteed failure."""
 
 
 _IMAGE_SPEC_PATTERNS = {
@@ -166,6 +170,27 @@ class DockerExecutor(Executor):
             return self.client.containers.get(spec["container_name"]).attrs["Image"]
         except Exception as exc:
             raise ExecutorError(f"cannot inspect deploy target {spec['container_name']}: {exc}") from exc
+
+    def check_target(self, spec, args):
+        # TASK-1002: this executor only reaches its own Docker daemon. A target
+        # that lives on another host (e.g. Unraid) must fail HERE, before an
+        # approval card, not as a 404 after a human approved it.
+        name, filters = target_selector(spec, args)
+        try:
+            if name is not None:
+                self.client.containers.get(name)
+                return
+            rows = self.client.containers.list(all=True, filters=filters)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                raise ExecutorError(
+                    f"target container {name!r} does not exist on this executor's Docker host") from exc
+            raise ExecutorError(f"cannot inspect target container: {exc}") from exc
+        matches = [row for row in rows if not is_ops_worker(row.labels)]
+        if len(matches) != 1:
+            raise ExecutorError(
+                f"compose selector {filters['label']} matched {len(matches)} containers on this "
+                "executor's Docker host, expected one")
 
     def available(self):
         try:
@@ -307,7 +332,7 @@ class DockerExecutor(Executor):
                         labels={
                             "com.docker.compose.project": "llm-bawt-ops-worker",
                             "com.docker.compose.service": "ops-worker",
-                            "llm-bawt.ops.job": job_id,
+                            OPS_JOB_LABEL: job_id,
                             "llm-bawt.ops.request": digest,
                         },
                         volumes=volumes,
