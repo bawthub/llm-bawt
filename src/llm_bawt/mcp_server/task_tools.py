@@ -168,6 +168,7 @@ async def update_task(
     model_id: str | None = None,
     title: str | None = None,
     description: str | None = None,
+    outcome: str | None = None,
     priority: str | None = None,
     planned: bool | None = None,
     project_id: str | None = None,
@@ -179,7 +180,8 @@ async def update_task(
 
     Common patterns:
     - Start work: status="IN_PROGRESS", model_id="claude-opus-4-6"
-    - Finish work: status="REVIEW", response="Summary of what was done"
+    - Finish work: status="REVIEW", response="Summary of what was done",
+      outcome="What now behaves differently, in plain language"
     - Report failure: status="FAILED", response="What went wrong"
 
     Moving a task to REVIEW requires it to have an owner. You don't need to set
@@ -204,6 +206,9 @@ async def update_task(
         model_id: Model identifier (e.g. "claude-opus-4-6").
         title: Updated task title.
         description: Updated description / spec.
+        outcome: Plain-language behavior change for a non-engineer (1-3
+                 sentences, no file names/checklists). Draft when planning;
+                 overwrite with what actually shipped at REVIEW.
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE.
         planned: True after writing spec + steps.
         project_id: Move task to a different project (UUID).
@@ -231,6 +236,8 @@ async def update_task(
         body["title"] = title
     if description is not None:
         body["description"] = description
+    if outcome is not None:
+        body["outcome"] = outcome
     if priority is not None:
         body["priority"] = priority
     if planned is not None:
@@ -451,6 +458,7 @@ async def regenerate_task(
 async def create_task(
     title: str,
     description: str | None = None,
+    outcome: str | None = None,
     project_id: str | None = None,
     priority: str = "MEDIUM",
     status: str = "QUEUED",
@@ -465,6 +473,8 @@ async def create_task(
     Args:
         title: Task title (required).
         description: Detailed description or spec.
+        outcome: Intended plain-language behavior change for a non-engineer
+                 (1-3 sentences). Optional; can be filled in later.
         project_id: Assign to a project (UUID). Omit for unassigned.
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE (default MEDIUM).
         status: Initial status (default QUEUED).
@@ -487,6 +497,8 @@ async def create_task(
     }
     if description is not None:
         body["description"] = description
+    if outcome is not None:
+        body["outcome"] = outcome
     if project_id is not None:
         body["projectId"] = project_id
     if steps is not None:

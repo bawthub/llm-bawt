@@ -272,3 +272,35 @@ def test_http_error_falls_back_to_str_when_body_not_json() -> None:
     assert result["status"] == 500
     # No JSON error field -> fall back to the exception's own string.
     assert result["error"] == str(err)
+
+
+def test_update_forwards_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_patch(monkeypatch)
+
+    result = _run(
+        task_tools.update_task(
+            "TASK-1", status="IN_PROGRESS", outcome="Tasks now show what changed."
+        )
+    )
+
+    # TASK-1010: outcome is a first-class task field, forwarded verbatim.
+    assert calls[0]["json"] == {
+        "status": "IN_PROGRESS",
+        "outcome": "Tasks now show what changed.",
+    }
+    assert result["updated"] == ["outcome", "status"]
+
+
+def test_create_forwards_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_post(path: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"path": path, **kwargs})
+        return _full_task()
+
+    monkeypatch.setattr(task_tools, "_api_post", fake_post)
+
+    _run(task_tools.create_task("New thing", outcome="Users can do X."))
+
+    assert calls[0]["path"] == "/tasks"
+    assert calls[0]["json"]["outcome"] == "Users can do X."

@@ -107,8 +107,11 @@ directly. The tools handle auth, base URL, and JSON shape.
      `tasks_add_dependency(task_id=<id>, depends_on_id=<other-task-id>)`.
 
 5. **Submit for review.** When the spec is complete:
-   `tasks_update(task_id=<id>, status="REFINED", planned=True, response="<2-4 sentence TL;DR>")`.
-   The full plan lives in `description`; `response` is the executive summary.
+   `tasks_update(task_id=<id>, status="REFINED", planned=True, response="<2-4 sentence TL;DR>", outcome="<intended behavior change>")`.
+   The full plan lives in `description`; `response` is the executive summary;
+   `outcome` is 1-3 plain-language sentences a non-engineer understands —
+   what will behave differently for the user once this ships. No file names,
+   code, or checklists.
 
 ## Tool Cheat Sheet
 
@@ -116,7 +119,7 @@ directly. The tools handle auth, base URL, and JSON shape.
 - `tasks_get_context(task_id=...)` — formatted briefing with steps,
   dependencies, project context.
 - `tasks_update(task_id=..., status=..., description=..., response=...,
-  model_id=..., planned=..., priority=..., title=...)` — patch task fields.
+  outcome=..., model_id=..., planned=..., priority=..., title=...)` — patch task fields.
 - `steps_add` / `steps_update` / `steps_delete` — manage steps.
 - `tasks_add_dependency(task_id=..., depends_on_id=...)` /
   `tasks_remove_dependency(task_id=..., depends_on_id=...)`.
@@ -166,9 +169,10 @@ All state changes go through **MCP tool calls**. Do not call the HTTP API
 directly.
 
 1. **Start.** Mark the task as actively being worked:
-   `tasks_update(task_id=<id>, status="IN_PROGRESS", model_id="<your-model>")`
-   where `<your-model>` is your identifier (e.g. `claude-opus-4-6`,
-   `gpt-4o`).
+   `tasks_update(task_id=<id>, status="IN_PROGRESS")`. The `model_id` field
+   is auto-filled by the dispatcher from your bot configuration — only set
+   it yourself if you detect runtime drift (the SDK reports a different
+   upstream model than configured).
 
 2. **Work the steps in order.** For each step in the task:
    - Starting it:  `steps_update(task_id=<id>, step_id=<sid>, status="RUNNING")`.
@@ -189,7 +193,9 @@ directly.
 
 ## Tool Cheat Sheet
 
-- `tasks_update(task_id=..., status="IN_PROGRESS"|"REVIEW"|"FAILED", response=..., model_id=...)`.
+- `tasks_update(task_id=..., status="IN_PROGRESS"|"REVIEW"|"FAILED", response=..., outcome=...)`.
+  At REVIEW, `outcome` = 1-3 plain-language sentences on what now behaves
+  differently for the user (overwrite any planning draft with what shipped).
 - `steps_update(task_id=..., step_id=..., status="RUNNING"|"COMPLETED"|"FAILED"|"SKIPPED", output=...)`.
 - `steps_add(task_id=..., steps=[{{"title": "...", "type": "..."}}])`.
 - `tasks_get_context(task_id=...)` — formatted briefing.
@@ -350,7 +356,8 @@ All state changes go through **MCP tool calls**.
 
 ## Tool Cheat Sheet
 
-- `tasks_update(task_id=..., status="IN_PROGRESS"|"REVIEW"|"FAILED", response=..., model_id=...)`.
+- `tasks_update(task_id=..., status="IN_PROGRESS"|"REVIEW"|"FAILED", response=..., outcome=..., model_id=...)`.
+  Refresh `outcome` (plain-language behavior change) if review changed what ships.
 - `steps_update(task_id=..., step_id=..., status=..., output=...)`.
 - `steps_add(task_id=..., steps=[...])`.
 - `tasks_get_context(task_id=...)` — formatted briefing.
@@ -409,10 +416,10 @@ These wrap the HTTP API. They handle auth, base URL, and JSON shape.
 - `tasks_associate_current(task_id=)` — link the trusted current chat session
   and exact turn to an existing task. Supply only the task reference; the server
   owns all correlation IDs. Never persist a link from TASK-N text detection alone.
-- `tasks_create(title=, description=, project_id=, priority=, status=, steps=,
+- `tasks_create(title=, description=, outcome=, project_id=, priority=, status=, steps=,
   associate_current_turn=)` — set the flag when newly queued work belongs to the
   current ordinary-chat turn.
-- `tasks_update(task_id=, status=, response=, model_id=, title=,
+- `tasks_update(task_id=, status=, response=, outcome=, model_id=, title=,
   description=, priority=, planned=, project_id=, agent_bot_id=,
   associate_current_turn=)` — set the flag when claiming/resuming existing work.
   An association-only call may omit all update fields.
@@ -495,7 +502,7 @@ refuses updates that would retarget an existing model to another access path.
       `status="SKIPPED"` with a reason if it's no longer needed.
 3. When everything is done:
    - Success: `tasks_update(task_id=<id>, status="REVIEW",
-     response="<what you accomplished>")`.
+     response="<what you accomplished>", outcome="<plain-language behavior change>")`.
    - Failure: `tasks_update(task_id=<id>, status="FAILED",
      response="<what went wrong + what would unblock>")`.
 
@@ -510,12 +517,13 @@ Spec mode is dispatched explicitly. The flow is:
 3. Optionally rewrite the step list with `steps_add` / `steps_update` /
    `steps_delete`.
 4. `tasks_update(task_id=<id>, status="REFINED", planned=True,
-   response="<short summary>")`. Do not implement code in this mode.
+   response="<short summary>", outcome="<intended behavior change>")`.
+   Do not implement code in this mode.
 
 ## Field Reference
 
-Task fields (PATCH-able): `status`, `description`, `response`, `modelId`,
-`planned`, `priority` (`LOW`|`MEDIUM`|`HIGH`|`URGENT`), `projectId`,
+Task fields (PATCH-able): `status`, `description`, `outcome`, `response`,
+`modelId`, `planned`, `priority` (`LOW`|`MEDIUM`|`HIGH`|`URGENT`), `projectId`,
 `agentBotId`, `title`.
 
 Step fields (PATCH-able): `status`, `output`. Steps also have an
