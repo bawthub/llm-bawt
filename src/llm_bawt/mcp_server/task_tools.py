@@ -160,6 +160,16 @@ async def associate_task_to_current_turn(task_id: str) -> dict:
         return {"error": str(error)}
 
 
+async def _task_is_unowned(task_id: str) -> bool:
+    """True only when the task is confirmed to have no owner (fail closed)."""
+    try:
+        current = await _api_get(f"/tasks/{task_id}")
+    except (httpx.HTTPError, ValueError) as error:
+        logger.warning("tasks_update: owner lookup for %s failed: %s", task_id, error)
+        return False
+    return isinstance(current, dict) and not current.get("agentBotId")
+
+
 @mcp.tool(name="tasks_update")
 async def update_task(
     task_id: str,
@@ -185,8 +195,9 @@ async def update_task(
     - Report failure: status="FAILED", response="What went wrong"
 
     Moving a task to REVIEW requires it to have an owner. You don't need to set
-    one by hand: when status="REVIEW" and you pass bot_id (your bot), it's used
-    as the owner automatically. Pass agent_bot_id only to assign a different bot.
+    one by hand: when status="REVIEW", the task has no owner, and you pass
+    bot_id (your bot), it becomes the owner. bot_id never reassigns an owned
+    task; pass agent_bot_id only to deliberately hand it to a different bot.
 
     IMPORTANT: Submit your own finished work to REVIEW by default. If Nick
     directly asks you to review and close tasks, you may set verified, complete
@@ -213,10 +224,11 @@ async def update_task(
         planned: True after writing spec + steps.
         project_id: Move task to a different project (UUID).
         agent_bot_id: Assign task to a specific bot. Defaults to bot_id when
-                      moving to REVIEW (see note above); pass explicitly only to
+                      moving an UNOWNED task to REVIEW; pass explicitly only to
                       hand the task to a different bot.
-        bot_id: Your bot ID for activity attribution. Also becomes the task
-                owner when moving to REVIEW without an explicit agent_bot_id.
+        bot_id: YOUR bot ID (the actor) for activity attribution. Never pass
+                another bot's id. Fills the owner only for an unowned task
+                moving to REVIEW.
         associate_current_turn: Also link this trusted current chat turn to the
                 task. Use when claiming/starting ordinary-chat work. The server
                 supplies all correlation IDs; unsupported harnesses fail closed.
@@ -248,14 +260,14 @@ async def update_task(
         body["agentBotId"] = agent_bot_id
 
     # REVIEW requires the task to have an owner (server guard
-    # reviewTransitionMissingBot). The bot submitting its finished work IS that
-    # owner, and we already have its id in bot_id, so default agentBotId to it
-    # when the caller didn't set one explicitly. Without this, moving a task to
-    # REVIEW would 400 unless the caller happened to know the internal rule and
-    # pass agent_bot_id by hand. Only fills on REVIEW and only when unset —
-    # an explicit agent_bot_id always wins.
+    # reviewTransitionMissingBot). When the task has NO owner, the submitting
+    # bot (bot_id) fills it so the caller needn't know the internal rule.
+    # TASK-1015: bot_id is the ACTOR, never an ownership claim — it must not
+    # reassign a task that already has an owner (TASK-1013 became Al's when
+    # Caid passed bot_id="al"). Reassignment requires explicit agent_bot_id.
     if status == "REVIEW" and agent_bot_id is None and bot_id:
-        body["agentBotId"] = bot_id
+        if await _task_is_unowned(task_id):
+            body["agentBotId"] = bot_id
 
     if not body:
         if associate_current_turn:

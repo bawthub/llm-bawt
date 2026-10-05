@@ -100,6 +100,11 @@ def test_tasks_update_returns_compact_task(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(task_tools, "_api_patch", fake_patch)
 
+    async def unowned(_path: str, params: dict | None = None) -> dict[str, Any]:
+        return {"agentBotId": None}
+
+    monkeypatch.setattr(task_tools, "_api_get", unowned)
+
     result = _run(
         task_tools.update_task(
             "TASK-266",
@@ -172,9 +177,16 @@ def test_projects_list_returns_compact_projects(
 # --- Issue 2: REVIEW auto-assigns the owner (reviewTransitionMissingBot guard) ---
 
 
-def _capture_patch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+def _capture_patch(
+    monkeypatch: pytest.MonkeyPatch, *, current_owner: str | None = None,
+) -> list[dict[str, Any]]:
     """Patch _api_patch to record bodies and return a minimal valid task."""
     calls: list[dict[str, Any]] = []
+
+    async def fake_get(_path: str, params: dict | None = None) -> dict[str, Any]:
+        return {"agentBotId": current_owner}
+
+    monkeypatch.setattr(task_tools, "_api_get", fake_get)
 
     async def fake_patch(
         path: str,
@@ -196,6 +208,33 @@ def test_review_autofills_owner_from_bot_id(monkeypatch: pytest.MonkeyPatch) -> 
     # The guard requires an owner; bot_id supplies it without the caller knowing.
     assert calls[0]["json"] == {"status": "REVIEW", "agentBotId": "byte"}
     assert result["updated"] == ["agentBotId", "status"]
+
+
+def test_review_actor_bot_id_never_reassigns_owned_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TASK-1015: TASK-1013 became Al's because Caid passed bot_id="al"."""
+    calls = _capture_patch(monkeypatch, current_owner="caid")
+
+    result = _run(task_tools.update_task("TASK-1013", status="REVIEW", bot_id="al"))
+
+    assert calls[0]["json"] == {"status": "REVIEW"}
+    assert calls[0]["headers"] == {"X-Agent-Bot-Id": "al"}  # still attributed
+    assert result["updated"] == ["status"]
+
+
+def test_review_owner_lookup_failure_does_not_guess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _capture_patch(monkeypatch)
+
+    async def broken_get(_path: str, params: dict | None = None) -> dict[str, Any]:
+        raise task_tools.httpx.ConnectError("down")
+
+    monkeypatch.setattr(task_tools, "_api_get", broken_get)
+    _run(task_tools.update_task("TASK-1", status="REVIEW", bot_id="byte"))
+    # Fail closed: the server's own REVIEW guard reports a missing owner.
+    assert calls[0]["json"] == {"status": "REVIEW"}
 
 
 def test_review_explicit_agent_bot_id_wins(monkeypatch: pytest.MonkeyPatch) -> None:
