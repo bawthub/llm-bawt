@@ -17,22 +17,26 @@ def _run(coro: Any) -> Any:
 
 
 def _stub_idle_and_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Waited sends are durable enqueue + bounded wait; record the wait budget."""
     observed: list[float] = []
 
     async def fake_check(_target_bot_id: str) -> None:
         return None
 
-    async def fake_dispatch(
-        _payload: dict,
-        _target_bot_id: str,
-        _sender_bot_id: str,
-        timeout_seconds: float,
-    ) -> dict:
-        observed.append(timeout_seconds)
-        return {"success": True, "content": "done"}
+    async def fake_find(*_args) -> None:
+        return None
+
+    async def fake_enqueue(**_kwargs) -> dict:
+        return {"delivery_id": "delivery-1", "status": "QUEUED"}
+
+    async def fake_await(receipt: dict, wait_seconds: float) -> dict:
+        observed.append(wait_seconds)
+        return {**receipt, "status": "DELIVERED", "success": True, "content": "done"}
 
     monkeypatch.setattr(server, "_check_bot_in_turn", fake_check)
-    monkeypatch.setattr(server, "_dispatch_bot_message", fake_dispatch)
+    monkeypatch.setattr(server, "_find_delivery_by_key", fake_find)
+    monkeypatch.setattr(server, "_enqueue_durable", fake_enqueue)
+    monkeypatch.setattr(server, "_await_delivery", fake_await)
     return observed
 
 

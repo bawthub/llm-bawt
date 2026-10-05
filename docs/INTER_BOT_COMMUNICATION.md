@@ -14,11 +14,30 @@ and the application-owned drain loop lives in
 |---|---|---|---|---|
 | Steer or idle (default async) | omit `wait_for_reply`/`delivery` | steers the active Claude Code turn in place; otherwise starts one safe idle turn | Yes | Delegation, corrections, READY/BLOCKED/PROGRESS callbacks |
 | When idle | `delivery="when_idle"` or `queue_if_busy=true` | never steers; waits for one fresh idle turn | Yes | Work that must begin in a separate turn |
-| Waited | `wait_for_reply=true` | rejects a busy target; never overlaps it | No | Bounded synchronous compatibility calls |
+| Waited | `wait_for_reply=true` (or `fire_and_forget=false`) | unkeyed: rejects a busy target with no side effect; keyed: re-attaches to the existing delivery | Yes (`when_idle`) | Bounded wait for the exact target turn's reply |
 | Forced compatibility | `force=true` | uses the same durable steer-or-idle path | Yes | Legacy callers; never authorizes agent concurrency |
 
-Every asynchronous send is durable and immediately returns a stable delivery ID.
-A waited timeout can still mean the target is running; do not blindly retry it.
+Every send is durable. Async sends return a stable delivery ID immediately; a
+waited send enqueues the same durable `when_idle` row first, then polls it
+(bounded) and returns the exact target turn's reply.
+
+### Mode resolution and idempotency (TASK-1015)
+
+`mcp_server/inter_bot_send_mode.resolve_send_mode` is the single resolver.
+Conflicting flags are rejected **before any side effect** (`dispatched: false`):
+`wait_for_reply` + `fire_and_forget=true`; `queue_if_busy` + a steer delivery;
+a waited send + an explicit steer delivery; an unknown `delivery`; and a waited
+task handoff (`task_id`) without an `idempotency_key`. Every result carries
+`mode` (`async`/`waited`) and `dispatched`.
+
+The idempotency key spans both modes: the (sender, target, key) unique index
+returns the original row, and a waited send first looks the key up
+(`GET /v1/inter-bot-deliveries?idempotency_key=`) and re-attaches. A caller
+interrupted mid-wait (or timed out: `error="timeout"`, `in_flight=true`) retries
+with the SAME key in either mode and gets `duplicate=true`, never a second
+target turn. Before TASK-1015 the waited path posted a non-durable
+`/v1/chat/completions` that ignored the key; the 2026-10-04 Al → Caid
+`TASK-1013:START` retry created a second Caid turn that way.
 
 ## Durable steer-or-safe-deliver contract
 
@@ -70,8 +89,8 @@ fallback turn. If a normal turn wins first, the callback stays queued. If it
 appears after a fallback claim but before target execution, `DeliveryTargetBusy`
 releases the reservation and atomically returns the delivery to `QUEUED`.
 
-Fallback execution invokes `BackgroundService.chat_completion` with
-`stream=false`, so it receives the normal prompt, memory/session, tools, history,
+Fallback execution consumes `BackgroundService.chat_completion_stream`, so it
+receives the normal prompt, memory/session, tools, history,
 turn log, and bridge runtime. Steering instead redirects the existing Claude SDK
 run and persists the inbound message into that same conversation.
 

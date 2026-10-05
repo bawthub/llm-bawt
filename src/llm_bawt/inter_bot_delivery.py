@@ -416,6 +416,7 @@ class InterBotDeliveryStore:
         sender_bot_id: str | None = None,
         target_bot_id: str | None = None,
         status: str | None = None,
+        idempotency_key: str | None = None,
         limit: int = 50,
         exclude_prompt_origin: bool = False,
     ) -> list[DeliveryRecord]:
@@ -439,6 +440,9 @@ class InterBotDeliveryStore:
         if status:
             where.append("status=:status")
             params["status"] = status.strip().upper()
+        if idempotency_key and idempotency_key.strip():
+            where.append("idempotency_key=:idem")
+            params["idem"] = idempotency_key.strip()
         sql = "SELECT * FROM inter_bot_deliveries WHERE " + " AND ".join(where) + " ORDER BY ordinal DESC LIMIT :limit"
         with self.engine.connect() as conn:
             rows = conn.execute(sa_text(sql), params).mappings().all()

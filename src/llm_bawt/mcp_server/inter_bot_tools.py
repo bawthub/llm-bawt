@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import uuid
+import time
 from typing import Any
 
 import httpx
 
+from .inter_bot_send_mode import SendModeError, resolve_send_mode
 from .server import _get_storage, mcp
 
 logger = logging.getLogger(__name__)
@@ -41,71 +43,94 @@ def _bot_send_wait_ceiling_seconds() -> float:
         return 300.0
 
 
-async def _dispatch_bot_message(
-    payload: dict,
-    target_bot_id: str,
-    sender_bot_id: str,
-    timeout_seconds: float,
-) -> dict:
-    """Perform the normal chat-completion call for an immediate bot message."""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{_APP_BASE_URL}/v1/chat/completions",
-                json=payload,
-                headers=(
-                    {"X-LLM-Bawt-Inter-Bot-Sender": sender_bot_id}
-                    if sender_bot_id != "unknown"
-                    else None
-                ),
-                timeout=timeout_seconds,
-            )
-            response.raise_for_status()
-            result = response.json()
-        if "choices" in result and result["choices"]:
-            content = result["choices"][0]["message"]["content"] or ""
-            return {
-                "success": True,
-                "content": content,
-                "bot_id": target_bot_id,
-                "sender": sender_bot_id,
-                "response_model": result.get("model"),
-            }
-        return {
-            "success": False,
-            "error": f"Invalid response format: {result}",
-            "content": "",
-            "bot_id": target_bot_id,
-            "sender": sender_bot_id,
-        }
-    except httpx.TimeoutException as exc:
-        logger.warning(
-            "Inter-bot send to %s timed out after %.1fs (request still in flight server-side)",
-            target_bot_id, timeout_seconds,
+async def _find_delivery_by_key(
+    sender_bot_id: str, target_bot_id: str, idempotency_key: str,
+) -> dict | None:
+    """Return the durable row already owning this key, if any (read-only)."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{_APP_BASE_URL}/v1/inter-bot-deliveries",
+            params={
+                "sender_bot_id": sender_bot_id,
+                "target_bot_id": target_bot_id,
+                "idempotency_key": idempotency_key,
+                "limit": 5,
+            },
+            timeout=10.0,
         )
-        return {
-            "success": False,
-            "error": "timeout",
-            "error_detail": str(exc),
-            "in_flight": True,
-            "warning": (
-                f"Target bot did not respond within {timeout_seconds:.0f}s. "
-                "The request is likely still being processed server-side. "
-                "DO NOT RETRY — that will cause the target bot to receive the message twice."
-            ),
-            "content": "",
-            "bot_id": target_bot_id,
-            "sender": sender_bot_id,
-        }
-    except Exception as exc:
-        logger.error("Inter-bot communication failed: %s", exc)
-        return {
-            "success": False,
-            "error": str(exc) or exc.__class__.__name__,
-            "content": "",
-            "bot_id": target_bot_id,
-            "sender": sender_bot_id,
-        }
+        response.raise_for_status()
+        rows = response.json().get("deliveries") or []
+    for row in rows:
+        author = row.get("author") or {}
+        if author.get("entity_type", "bot") == "bot":
+            return row
+    return None
+
+
+async def _get_json(path: str) -> dict | None:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{_APP_BASE_URL}{path}", timeout=10.0)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+
+_TERMINAL_DELIVERY = {"DELIVERED", "FAILED", "CANCELLED"}
+_now = time.monotonic  # patch point; never patch time.monotonic (event loop)
+
+
+async def _await_delivery(receipt: dict, wait_seconds: float) -> dict:
+    """Bounded wait on ONE durable delivery; never re-sends anything.
+
+    The receipt is already persisted before this runs, so a caller interrupted
+    mid-wait (steer, Stop, timeout) can retry with the same idempotency key and
+    re-attach to the same delivery/turn instead of creating another.
+    """
+    get_json = _compat_hook("_get_json", _get_json)
+    delivery_id = receipt.get("delivery_id")
+    deadline = _now() + max(1.0, wait_seconds)
+    current = receipt
+    delay = 0.5
+    while str(current.get("status") or "").upper() not in _TERMINAL_DELIVERY:
+        remaining = deadline - _now()
+        if remaining <= 0:
+            return {
+                **current,
+                "success": False,
+                "dispatched": True,
+                "error": "timeout",
+                "in_flight": True,
+                "warning": (
+                    f"Target bot did not finish within {wait_seconds:.0f}s. The delivery "
+                    "is durable and still progressing. DO NOT send a new message; inspect "
+                    f"bots_delivery_get('{delivery_id}') or retry with the SAME "
+                    "idempotency_key to re-attach."
+                ),
+                "content": "",
+            }
+        await asyncio.sleep(min(delay, remaining))
+        delay = min(delay * 2, 3.0)
+        fetched = await get_json(f"/v1/inter-bot-deliveries/{delivery_id}")
+        if fetched is None:
+            return {**current, "success": False, "dispatched": True,
+                    "error": "delivery disappeared", "content": ""}
+        current = {**current, **fetched}
+
+    status = str(current.get("status")).upper()
+    if status != "DELIVERED":
+        return {**current, "success": False, "dispatched": True,
+                "error": current.get("last_error") or f"delivery {status.lower()}",
+                "content": ""}
+    turn = await get_json(f"/v1/turn-logs/{current.get('turn_id')}") or {}
+    return {
+        **current,
+        "success": True,
+        "dispatched": True,
+        "content": turn.get("response") or "",
+        "response_model": current.get("response_model") or turn.get("model"),
+        "turn_status": turn.get("status"),
+    }
 
 
 async def _check_bot_in_turn(target_bot_id: str) -> dict | None:
@@ -222,97 +247,122 @@ async def send_message_to_bot(
 ) -> dict:
     """Send a message to another bot without creating concurrent agent turns.
 
-    Asynchronous sends are durable by default and return a stable ``delivery_id``.
-    If the target has an active steer-capable Claude Code turn, the message is
-    persisted and steers that exact run in place. If steering is not ready yet,
-    delivery retries in FIFO order. If the target is idle—or the backend cannot
-    steer—the delivery starts exactly one normal turn when safe.
+    Every send is durable and returns a stable ``delivery_id``; an
+    ``idempotency_key`` deduplicates across ALL modes, so retrying the same key
+    re-attaches to the original delivery and can never start a second turn.
 
-    Pass ``delivery="when_idle"`` (or ``queue_if_busy=True``) to explicitly skip
-    steering and wait for a fresh idle turn. ``wait_for_reply=True`` remains the
-    bounded synchronous compatibility mode. ``force=True`` is accepted for
-    compatibility but never permits agent concurrency; asynchronous force sends
-    use the same steer-or-safe-deliver contract.
+    Mode flags (validated together before any side effect; contradictions are
+    rejected with ``dispatched: false``):
+
+    * default — steer an active Claude Code turn in place, else start exactly
+      one safe idle turn. Returns immediately.
+    * ``delivery="when_idle"`` (or ``queue_if_busy=True``) — never steer; wait
+      for one separate idle turn. Returns immediately.
+    * ``wait_for_reply=True`` (or ``fire_and_forget=False``) — when_idle delivery
+      plus a bounded wait for the reply. A busy target is rejected without side
+      effects unless the key already owns a delivery. Cannot be combined with
+      ``delivery="steer_or_idle"``; task handoffs (``task_id``) require a key.
+
+    ``force=True`` is accepted for compatibility but never permits concurrency.
+    Results carry ``mode`` and ``dispatched`` so a caller can tell whether the
+    target received anything.
     """
-    normalized_delivery = (delivery or "").strip().lower().replace("-", "_")
-    if delivery and normalized_delivery not in {
-        "when_idle", "queued", "queue_if_busy", "immediate", "steer_or_idle"
-    }:
-        return {"success": False, "error": f"Unknown delivery mode '{delivery}'"}
-
-    do_wait = wait_for_reply or (fire_and_forget is False)
-    if not do_wait:
-        prefer_steer = not (
-            queue_if_busy
-            or normalized_delivery in {"when_idle", "queued", "queue_if_busy"}
-        )
-        return await _enqueue_durable(
-            prefer_steer=prefer_steer,
-            target_bot_id=target_bot_id,
-            message=message,
-            sender_bot_id=sender_bot_id,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            timeout_seconds=max(timeout_seconds, 1800.0),
-            idempotency_key=idempotency_key,
-            project_id=project_id,
+    try:
+        mode = resolve_send_mode(
+            delivery=delivery,
+            queue_if_busy=queue_if_busy,
+            fire_and_forget=fire_and_forget,
+            wait_for_reply=wait_for_reply,
             task_id=task_id,
-            message_kind=message_kind,
-            metadata=metadata,
-            session_policy=session_policy,
-            reset_session_before_delivery=reset_session_before_delivery,
-            retain_history=retain_history,
-            reset_reason=reset_reason,
+            idempotency_key=idempotency_key,
         )
-
-    # Waited calls preserve bounded inline response behavior. They never use
-    # force to create a second active agent turn.
-    force = False
-    active = await _compat_hook("_check_bot_in_turn", _check_bot_in_turn)(target_bot_id)
-    if active is not None:
+    except SendModeError as exc:
         return {
             "success": False,
-            "sent": False,
-            "in_turn": True,
+            "dispatched": False,
+            "error": str(exc),
             "bot_id": target_bot_id,
             "sender": sender_bot_id,
-            "content": "",
-            "turn_id": active.get("turn_id"),
-            "turn_status": active.get("status"),
-            "note": (
-                f"Agent '{target_bot_id}' is in turn — waited send not started. "
-                "Use the default asynchronous mode to durably steer or safely queue it."
-            ),
         }
 
-    formatted = message
-    if sender_bot_id != "unknown":
-        formatted = f"Message from bot '{sender_bot_id}': {message}"
-    payload = {
-        "messages": [{"role": "user", "content": formatted}],
-        "bot_id": target_bot_id,
-        "user_message_id": str(uuid.uuid4()),
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "extract_memory": False,
-        "augment_memory": True,
-        "stream": False,
-    }
+    durable_kwargs = dict(
+        target_bot_id=target_bot_id,
+        message=message,
+        sender_bot_id=sender_bot_id,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        # The target turn's own bridge budget; never the caller's wait budget.
+        timeout_seconds=max(timeout_seconds, 1800.0),
+        idempotency_key=idempotency_key,
+        project_id=project_id,
+        task_id=task_id,
+        message_kind=message_kind,
+        metadata=metadata,
+        session_policy=session_policy,
+        reset_session_before_delivery=reset_session_before_delivery,
+        retain_history=retain_history,
+        reset_reason=reset_reason,
+    )
+    enqueue = _compat_hook("_enqueue_durable", _enqueue_durable)
+    if not mode.wait:
+        receipt = await enqueue(prefer_steer=mode.prefer_steer, **durable_kwargs)
+        return {**receipt, "mode": mode.label,
+                "dispatched": bool(receipt.get("delivery_id"))}
 
     ceiling = _compat_hook(
         "_bot_send_wait_ceiling_seconds", _bot_send_wait_ceiling_seconds
     )()
-    effective_timeout = min(timeout_seconds, ceiling)
-    result = await _compat_hook(
-        "_dispatch_bot_message", _dispatch_bot_message
-    )(payload, target_bot_id, sender_bot_id, effective_timeout)
-    if timeout_seconds > ceiling:
-        result.update({
+    wait_seconds = min(timeout_seconds, ceiling)
+    clamp = (
+        {
             "timeout_clamped": True,
             "requested_timeout_seconds": timeout_seconds,
-            "effective_timeout_seconds": effective_timeout,
-        })
-    return result
+            "effective_timeout_seconds": wait_seconds,
+        }
+        if timeout_seconds > ceiling else {}
+    )
+
+    existing = None
+    key = (idempotency_key or "").strip()
+    if key:
+        existing = await _compat_hook("_find_delivery_by_key", _find_delivery_by_key)(
+            sender_bot_id.strip().lower() or "unknown",
+            target_bot_id.strip().lower(),
+            key,
+        )
+    if existing is None:
+        active = await _compat_hook("_check_bot_in_turn", _check_bot_in_turn)(target_bot_id)
+        if active is not None:
+            return {
+                "success": False,
+                "dispatched": False,
+                "mode": mode.label,
+                "in_turn": True,
+                "bot_id": target_bot_id,
+                "sender": sender_bot_id,
+                "content": "",
+                "turn_id": active.get("turn_id"),
+                "turn_status": active.get("status"),
+                "note": (
+                    f"Agent '{target_bot_id}' is in turn — waited send not started. "
+                    "Use the default asynchronous mode to durably steer or safely queue it."
+                ),
+                **clamp,
+            }
+        receipt = await enqueue(prefer_steer=False, **durable_kwargs)
+        if not receipt.get("delivery_id"):
+            return {**receipt, "mode": mode.label, "dispatched": False, **clamp}
+    else:
+        receipt = {**existing, "duplicate": True}
+
+    result = await _compat_hook("_await_delivery", _await_delivery)(receipt, wait_seconds)
+    return {
+        **result,
+        "mode": mode.label,
+        "bot_id": target_bot_id,
+        "sender": sender_bot_id,
+        **clamp,
+    }
 
 
 @mcp.tool(name="bots_delivery_get")

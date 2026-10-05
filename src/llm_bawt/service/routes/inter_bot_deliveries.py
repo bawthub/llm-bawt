@@ -239,12 +239,14 @@ def list_deliveries(
     sender_bot_id: str | None = None,
     target_bot_id: str | None = None,
     status: str | None = None,
+    idempotency_key: str | None = Query(None, max_length=256),
     limit: int = Query(50, ge=1, le=200),
 ):
     rows = _dispatcher().store.list(
         sender_bot_id=sender_bot_id,
         target_bot_id=target_bot_id,
         status=status,
+        idempotency_key=idempotency_key,
         limit=limit,
         exclude_prompt_origin=True,
     )

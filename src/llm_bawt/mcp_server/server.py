@@ -782,9 +782,12 @@ from .session_tools import (  # noqa: E402,F401
     rotate_session,
 )
 from .inter_bot_tools import (  # noqa: E402,F401
+    _await_delivery,
     _bot_send_wait_ceiling_seconds,
     _check_bot_in_turn,
-    _dispatch_bot_message,
+    _enqueue_durable,
+    _find_delivery_by_key,
+    _get_json,
     cancel_delivery,
     get_delivery,
     list_available_bots,
