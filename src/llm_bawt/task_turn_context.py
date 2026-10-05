@@ -148,6 +148,39 @@ def mint_task_turn_context(
     return _get_fernet().encrypt(payload.encode("utf-8")).decode("ascii")
 
 
+def mint_for_agent_turn(
+    *,
+    backend: str | None,
+    session_id: str | None,
+    turn_id: str,
+    trigger_message_id: str,
+    bot_id: str,
+    user_id: str,
+) -> str | None:
+    """Best-effort capability for one agent turn, shared by stream/non-stream.
+
+    Association is optional metadata: a signing/config failure must never block
+    the chat turn. The MCP tool later fails closed with a clear no-context error.
+    """
+    if not (backend_supports_task_turn_context(backend) and session_id):
+        return None
+    try:
+        return mint_task_turn_context(
+            session_id=session_id,
+            turn_id=turn_id,
+            trigger_message_id=trigger_message_id,
+            bot_id=bot_id,
+            user_id=user_id,
+        )
+    except Exception as error:  # noqa: BLE001 - see docstring
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Could not mint trusted task-turn context for %s: %s", turn_id, error,
+        )
+        return None
+
+
 def open_task_turn_context(
     token: str | None,
     *,

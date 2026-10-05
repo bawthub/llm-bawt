@@ -33,8 +33,25 @@ def request_payload_with_audit(previous: str | None, payload: dict) -> str:
     return json.dumps(merged, ensure_ascii=False, default=str)
 
 
+# TASK-1015: an unacknowledged Stop is bounded. Fresh cancellation intent is
+# never reaped (the worker may still acknowledge), but once no live owner
+# exists in this process and the request is older than the longest bridge
+# budget, nothing can ever acknowledge it — the row would read "cancelling"
+# forever. It settles as aborted/abort_unconfirmed: honest about the unknown.
+UNCONFIRMED_ABORT_GRACE_SECONDS = 1800.0
+
+
+def _abort_requested_at(row) -> datetime | None:
+    try:
+        audit = json.loads(row.request_json or "{}").get("abort_request") or {}
+        stamp = datetime.fromisoformat(str(audit.get("requested_at")))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
-    """Reap abandoned ordinary turns, never live owners or cancellation intent."""
+    """Reap abandoned ordinary turns, never live owners or fresh cancellation intent."""
     from .turn_execution import turn_executions
     from .turn_logs import TurnLog
 
@@ -45,7 +62,6 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
         rows = session.exec(select(TurnLog).where(
             TurnLog.bot_id == bot_id,
             TurnLog.ended_at.is_(None),
-            TurnLog.status != "cancelling",
             TurnLog.id != current_turn_id,
             TurnLog.created_at < current.created_at,
             TurnLog.id.not_in(turn_executions.active_ids()),
@@ -53,7 +69,14 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
         now = datetime.now(timezone.utc)
         result = []
         for row in rows:
-            row.status, row.end_reason, row.ended_at = "timeout", "timeout", now
+            if row.status == "cancelling":
+                requested = _abort_requested_at(row)
+                if requested is None or (now - requested).total_seconds() < UNCONFIRMED_ABORT_GRACE_SECONDS:
+                    continue
+                row.status, row.end_reason = "aborted", "abort_unconfirmed"
+            else:
+                row.status, row.end_reason = "timeout", "timeout"
+            row.ended_at = now
             interrupt_unresolved_tools(session, row.id, now)
             session.add(row)
             result.append({"id": row.id, "user_id": row.user_id})

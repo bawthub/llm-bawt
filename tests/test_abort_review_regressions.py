@@ -298,6 +298,23 @@ def test_reaper_preserves_cancelling_and_active_siblings(store):
     assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == []
     assert store.get_turn("A").status == "cancelling"
     store.update_turn(turn_id="A", status="ok", end_reason="stop")
+
+
+def test_reaper_bounds_unacknowledged_cancel_without_live_owner(store, monkeypatch):
+    """TASK-1015: fresh intent survives; a stale ownerless Stop settles."""
+    import llm_bawt.service.turn_termination as termination
+
+    TurnAbortCoordinator(store).request("A", source="chat_stop", peer=None)
+    assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == []
+    monkeypatch.setattr(termination, "UNCONFIRMED_ABORT_GRACE_SECONDS", -1.0)
+    owner = execution(store)  # a live owner still blocks the bound
+    assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == []
+    turn_executions.remove(owner.turn_id)
+    reaped = store.reap_other_open_turns(bot_id="test", current_turn_id="B")
+    assert [r["id"] for r in reaped] == ["A"]
+    row = store.get_turn("A")
+    assert (row.status, row.end_reason) == ("aborted", "abort_unconfirmed")
+    assert row.ended_at is not None
     assert store.get_turn("A").status == "aborted"
 
 

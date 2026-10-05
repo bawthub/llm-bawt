@@ -353,29 +353,16 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                 str(thread_binding.get("thread_session_id") or "").strip()
                 if thread_binding else ""
             )
-            backend_name = str(getattr(llm_bawt.bot, "agent_backend", "") or "")
-            from ..task_turn_context import backend_supports_task_turn_context
+            from ..task_turn_context import mint_for_agent_turn
 
-            if backend_supports_task_turn_context(backend_name) and session_id:
-                try:
-                    from ..task_turn_context import mint_task_turn_context
-
-                    task_turn_capability = mint_task_turn_context(
-                        session_id=session_id,
-                        turn_id=turn_log_id,
-                        trigger_message_id=trigger_message_id,
-                        bot_id=bot_id,
-                        user_id=user_id,
-                    )
-                except Exception as capability_error:
-                    # Association is optional metadata; a signing/config failure
-                    # must never block the actual chat turn. The MCP tool fails
-                    # closed later with a clear no-context error.
-                    log.warning(
-                        "Could not mint trusted task-turn context for %s: %s",
-                        turn_log_id,
-                        capability_error,
-                    )
+            task_turn_capability = mint_for_agent_turn(
+                backend=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
+                session_id=session_id,
+                turn_id=turn_log_id,
+                trigger_message_id=trigger_message_id,
+                bot_id=bot_id,
+                user_id=user_id,
+            )
 
         # Persist turn log immediately so the user's prompt is recorded
         # even if the backend times out or errors before responding.

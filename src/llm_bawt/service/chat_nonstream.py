@@ -283,6 +283,18 @@ class ChatNonStreamMixin:
                 },
             )
 
+        # TASK-1015: register the request-local execution handle exactly like
+        # the streaming path so Stop/steer/reaper see this live owner and the
+        # bridge binds agent_session_key + agent_request_id before dispatch.
+        turn_execution = None
+        if is_agent_backend:
+            from .turn_execution import TurnExecution, turn_executions
+
+            turn_execution = TurnExecution(
+                turn_log_id, cancel_event, is_agent=True, store=self._turn_log_store,
+            )
+            turn_executions.register(turn_execution)
+
         try:
             # Run the blocking query in single-thread executor
             loop = asyncio.get_event_loop()
@@ -461,6 +473,19 @@ class ChatNonStreamMixin:
                     if _final_sid:
                         resolved_session_id = _final_sid
 
+                task_turn_capability = None
+                if _is_agent:
+                    from ..task_turn_context import mint_for_agent_turn
+
+                    task_turn_capability = mint_for_agent_turn(
+                        backend=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
+                        session_id=resolved_session_id,
+                        turn_id=turn_log_id,
+                        trigger_message_id=trigger_message_id,
+                        bot_id=bot_id,
+                        user_id=user_id,
+                    )
+
                 # Execute the query with prepared messages
                 response, tool_context, tool_call_details = llm_bawt.execute_llm_query(
                     prepared_messages,
@@ -471,6 +496,8 @@ class ChatNonStreamMixin:
                     bridge_request_id=getattr(request, "inter_bot_bridge_request_id", None),
                     bridge_timeout_seconds=getattr(request, "inter_bot_timeout_seconds", None),
                     bridge_event_callback=bridge_event_callback,
+                    turn_execution=turn_execution,
+                    task_turn_capability=task_turn_capability,
                 )
 
                 # Splice the injected seed into the logged prompt so the turn
@@ -630,6 +657,10 @@ class ChatNonStreamMixin:
                     },
                 )
         finally:
+            if turn_execution is not None:
+                from .turn_execution import turn_executions
+
+                turn_executions.remove(turn_log_id)
             self._end_generation(cancel_event, done_event, bot_id)
 
         # Post-process for voice_optimized bots (strip emotes for TTS)

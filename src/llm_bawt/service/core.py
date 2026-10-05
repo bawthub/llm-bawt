@@ -591,6 +591,8 @@ class ServiceLLMBawt(BaseLLMBawt):
         bridge_request_id: str | None = None,
         bridge_timeout_seconds: float | None = None,
         bridge_event_callback=None,
+        turn_execution=None,
+        task_turn_capability: str | None = None,
     ) -> tuple[str, str, list[dict]]:
         """Execute the LLM query and return response.
         
@@ -621,6 +623,12 @@ class ServiceLLMBawt(BaseLLMBawt):
             _q_kwargs["bridge_timeout_seconds"] = bridge_timeout_seconds
         if bridge_event_callback is not None:
             _q_kwargs["bridge_event_callback"] = bridge_event_callback
+        # TASK-1015: request-local execution handle + trusted task capability,
+        # identical to what the streaming worker hands the agent client.
+        if turn_execution is not None:
+            _q_kwargs["turn_execution"] = turn_execution
+        if task_turn_capability:
+            _q_kwargs["task_turn_capability"] = task_turn_capability
 
         # Agent backends (claude-code/openclaw) execute tools in their OWN
         # bridge/runtime — they must NOT go through llm-bawt's tool loop. The

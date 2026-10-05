@@ -120,6 +120,17 @@ class AgentBackendClient(LLMClient):
         bridge_request_id = kwargs.pop("bridge_request_id", None)
         bridge_timeout_seconds = kwargs.pop("bridge_timeout_seconds", None)
         bridge_event_callback = kwargs.pop("bridge_event_callback", None)
+        # TASK-1015: same request-local identity the streaming path threads.
+        # Without turn_execution the bridge request id was never persisted, so
+        # Stop/steer on a non-stream turn could not target it.
+        request_local = {
+            key: value
+            for key, value in {
+                "turn_execution": kwargs.pop("turn_execution", None),
+                "task_turn_capability": kwargs.pop("task_turn_capability", None),
+            }.items()
+            if value is not None
+        }
 
         # Run the async backend call synchronously.
         # If there's already a running loop we schedule via run_in_executor.
@@ -141,6 +152,7 @@ class AgentBackendClient(LLMClient):
                         bridge_request_id,
                         bridge_timeout_seconds,
                         bridge_event_callback,
+                        request_local,
                     ),
                 ).result()
         else:
@@ -152,6 +164,7 @@ class AgentBackendClient(LLMClient):
                     bridge_request_id,
                     bridge_timeout_seconds,
                     bridge_event_callback,
+                    request_local,
                 )
             )
 
@@ -325,6 +338,7 @@ class AgentBackendClient(LLMClient):
         bridge_request_id: str | None = None,
         bridge_timeout_seconds: float | None = None,
         bridge_event_callback=None,
+        request_local: dict | None = None,
     ) -> Any:
         """Call the backend's ``chat_full`` (or fall back to ``chat``)."""
         # TASK-501: merge the seed into the config the backend forwards to the
@@ -339,8 +353,9 @@ class AgentBackendClient(LLMClient):
             or bridge_request_id
             or bridge_timeout_seconds
             or bridge_event_callback is not None
+            or request_local
         ):
-            config = {**self._bot_config}
+            config = {**self._bot_config, **(request_local or {})}
             if inject_messages is not None:
                 config["inject_messages"] = inject_messages
             if thread_binding:
