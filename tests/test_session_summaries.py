@@ -398,7 +398,7 @@ class TestMaybeSummarizeOnNew:
 class TestCallSiteGuards:
     @pytest.mark.parametrize("path", [
         "llm_bawt/service/chat_streaming.py",
-        "llm_bawt/service/background_service.py",
+        "llm_bawt/service/chat_nonstream.py",
     ])
     def test_summarize_before_seed_in_both_dispatch_paths(self, path):
         """TASK-641 ordering: _maybe_summarize_on_new must run BEFORE

@@ -116,7 +116,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     )
     service._get_llm_bawt = Mock(return_value=llm_bawt)
     monkeypatch.setattr(
-        "llm_bawt.service.background_service.get_bot", lambda _bot_id: None
+        "llm_bawt.service.chat_nonstream.get_bot", lambda _bot_id: None
     )
     monkeypatch.setattr(
         "llm_bawt.service.routes.history.maybe_build_session_seed",
@@ -169,7 +169,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     # TASK-709: turn_start and turn_complete carry the durable session_id so
     # a receiving BawtHub window can route lifecycle events to the correct
     # thread without a follow-up DB fetch. Value comes from the pre-emit
-    # session resolve (see background_service ~line 405) — either
+    # session resolve (see chat_nonstream.chat_completion) — either
     # ``request.session_id`` (dispatcher-written target for reset deliveries;
     # explicit thread selection for chat clients) or the target bot's
     # active-thread fallback.
@@ -245,7 +245,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
     )
     service._get_llm_bawt = Mock(return_value=llm_bawt)
     monkeypatch.setattr(
-        "llm_bawt.service.background_service.get_bot", lambda _bot_id: None
+        "llm_bawt.service.chat_nonstream.get_bot", lambda _bot_id: None
     )
     monkeypatch.setattr(
         "llm_bawt.service.routes.history.maybe_build_session_seed",

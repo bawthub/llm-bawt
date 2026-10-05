@@ -221,7 +221,7 @@ class TestDispatchSetsOverrideFresh:
     ASSIGN = re.compile(r"llm_bawt\._session_id_override\s*=")
     SITES = [
         "llm_bawt/service/turn_stream_worker.py",   # streaming dispatch
-        "llm_bawt/service/background_service.py",   # non-streaming dispatch
+        "llm_bawt/service/chat_nonstream.py",   # non-streaming dispatch
     ]
 
     @pytest.mark.parametrize("rel", SITES)
