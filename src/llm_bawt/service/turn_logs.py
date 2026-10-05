@@ -787,8 +787,9 @@ class TurnLogStore:
         conditions: list = []
         if after is not None:
             conditions.append(TurnLog.created_at >= datetime.fromtimestamp(after, tz=timezone.utc))
-        elif before is None:
-            # Only apply since_hours if no explicit time range given.
+        elif before is None and not active_only:
+            # Active turns remain active regardless of when they started.
+            # The recency window is only for historical turn browsing.
             since_cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(since_hours)))
             conditions.append(TurnLog.created_at >= since_cutoff)
         if before is not None:

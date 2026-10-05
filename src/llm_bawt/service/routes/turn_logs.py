@@ -246,7 +246,7 @@ def list_turn_logs(
     active_only: bool = Query(False, description="Only in-progress turns (ended_at IS NULL), path-agnostic"),
     stream: bool | None = Query(None, description="Filter by streaming mode"),
     has_tools: bool | None = Query(None, description="Filter by presence of tool calls"),
-    since_hours: int = Query(168, ge=1, le=168, description="Only include turns from recent N hours"),
+    since_hours: int = Query(168, ge=1, le=168, description="Recent N hours for historical turns; ignored with active_only"),
     limit: int = Query(100, ge=1, le=200, description="Max rows to return"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
 ):

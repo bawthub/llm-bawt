@@ -121,6 +121,25 @@ def test_timeout_transition_persists_partial_token_usage():
     assert row.ended_at is not None
 
 
+def test_active_turns_are_not_hidden_by_the_history_age_window():
+    store = _store()
+    store.ttl_hours = None
+    old = datetime.now(timezone.utc) - timedelta(hours=8)
+    with Session(store.engine) as session:
+        session.add_all([
+            TurnLog(id="old-active", bot_id="al", status="streaming", created_at=old),
+            TurnLog(id="old-finished", bot_id="al", status="ok", created_at=old, ended_at=old),
+        ])
+        session.commit()
+
+    active, total = store.list_turns(bot_id="al", active_only=True, since_hours=1)
+    assert total == 1
+    assert [turn.id for turn in active] == ["old-active"]
+    historical, total = store.list_turns(bot_id="al", since_hours=1)
+    assert total == 0
+    assert historical == []
+
+
 def test_successful_late_completion_repairs_stale_timeout_ended_at():
     store = _store()
     created_at = datetime(2026, 7, 10, 16, 37, 43, tzinfo=timezone.utc)
