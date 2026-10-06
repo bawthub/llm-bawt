@@ -125,5 +125,9 @@ def bootstrap_claude_home() -> None:
             logger.warning("Failed to parse %s, rebuilding it: %s", settings_path, exc)
 
     normalized = _normalize_mcp_settings(settings)
+    # Suppress Claude Code's built-in Co-Authored-By/PR attribution. Bots sign
+    # commits with their own per-bot trailer (agent-skills git-commits skill);
+    # the harness default otherwise gets appended alongside it.
+    normalized["attribution"] = {"commit": "", "pr": ""}
     if _write_json_if_changed(settings_path, normalized):
         logger.info("Claude settings bootstrapped at %s", settings_path)
