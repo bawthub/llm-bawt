@@ -72,6 +72,8 @@ def window_db(monkeypatch):
             "CREATE TABLE messages_p_bot (id TEXT, role TEXT, content TEXT, timestamp REAL, "
             "session_id TEXT, author_entity_type TEXT, author_entity_id TEXT)"
         ))
+        conn.execute(text("CREATE TABLE sessions (id TEXT, bot_id TEXT, user_id TEXT)"))
+        conn.execute(text("INSERT INTO sessions (id, bot_id, user_id) VALUES ('sA', 'bot', 'nick'), ('sB', 'bot', 'other')"))
         for r in rows:
             conn.execute(text(
                 "INSERT INTO messages_p_bot (id, role, content, timestamp, session_id) "
@@ -107,6 +109,34 @@ def test_window_excludes_system_and_summary_anchors(window_db):
     for hidden in ("sys", "sum", "nope"):
         with pytest.raises(history_pages._WindowAnchorNotFound):
             history_pages._load_window_via_sql(service, "bot", hidden, 5, 5)
+
+
+def test_history_pages_keep_timeline_owner_after_jump(window_db, monkeypatch):
+    service, rows = window_db
+    service.get_memory_client = lambda _bot: SimpleNamespace(get_messages=lambda **_kw: rows)
+    monkeypatch.setattr(history_pages, "get_service", lambda: service)
+    for name in [
+        "_hydrate_attachments_for_page", "_hydrate_reasoning_for_page",
+        "_hydrate_reply_links_for_page", "_hydrate_interrupt_anchors_for_page",
+    ]:
+        monkeypatch.setattr(history_pages, name, lambda *a: {})
+    monkeypatch.setattr(history_pages, "hydrate_scheduler_for_page", lambda *a: {})
+    app = FastAPI()
+    app.include_router(history_pages.read_router)
+    with TestClient(app) as client:
+        query = "bot_id=bot&user_id=nick"
+        around = client.get(f"/v1/history/around?{query}&message_id=m03&before=2&after=2")
+        assert around.status_code == 200
+        assert [m["id"] for m in around.json()["messages"]] == ["m01", "m02", "m03", "m04", "m05"]
+        assert client.get(f"/v1/history/around?{query}&message_id=m08").status_code == 404
+        for cursor in ("after=102", "before=105"):
+            page = client.get(f"/v1/history?{query}&{cursor}&limit=20")
+            assert page.status_code == 200
+            assert all(m["id"] in {f"m{i:02d}" for i in range(6)} for m in page.json()["messages"])
+        assert client.get("/v1/history?bot_id=bot&user_id=other&after=105").json()["messages"][0]["id"] == "m06"
+        # The legacy unscoped read remains available, but cannot be used to
+        # continue an explicitly owned timeline window.
+        assert any(m["id"] == "m08" for m in client.get("/v1/history?bot_id=bot").json()["messages"])
 
 
 def test_around_route_session_scope_and_404(window_db, monkeypatch):
@@ -201,6 +231,29 @@ def test_prompts_route_validates_inputs(monkeypatch):
         assert client.get("/v1/history/timeline/prompts?bot_id=b&user_id=u&date=2026-01-01&tz=Nope/Zone").status_code == 400
         assert client.get("/v1/history/timeline?bot_id=b&user_id=u&tz=Nope/Zone").status_code == 400
         assert client.get("/v1/history/timeline?bot_id=b&user_id=u&mode=custom").status_code == 400
+
+
+def test_default_timeline_is_exact_seven_local_days(monkeypatch):
+    from datetime import timedelta
+
+    calls = []
+    def rows(_bot, _user, _session, _tz, start, end, recent, overview_only, _cursor):
+        calls.append((start, end, recent, overview_only))
+        return [], {}, {}, [], start
+
+    monkeypatch.setattr(history_timeline, "_load_timeline_rows", rows)
+    app = FastAPI()
+    app.include_router(history_timeline.router)
+    with TestClient(app) as client:
+        response = client.get("/v1/history/timeline?bot_id=snark&user_id=nick&tz=America/New_York")
+        assert response.status_code == 200
+        coverage = response.json()["coverage"]
+        assert (date.fromisoformat(coverage["to_date"]) - date.fromisoformat(coverage["from_date"])) == timedelta(days=6)
+        assert calls[0][2:] == (False, False)  # never extend the seven-day default
+        wider_start = (datetime.now(ET).date() - timedelta(days=29)).isoformat()
+        wider = client.get(f"/v1/history/timeline?bot_id=snark&user_id=nick&mode=recent&from_date={wider_start}")
+        assert wider.status_code == 200
+        assert calls[1][2:] == (True, False)  # deliberate wider preset retains fallback
 
 
 def test_scoped_timeline_dst_and_range_bounds():

@@ -228,13 +228,14 @@ def get_history_timeline(
         raise HTTPException(status_code=400, detail="Older-month cursor requires all mode and a month's first day")
     if mode != "all" and to_date and to_date > today:
         raise HTTPException(status_code=400, detail="Timeline cannot end in the future")
-    start_date = from_date or today - timedelta(days=29)
+    start_date = from_date or today - timedelta(days=6)
     end_date = to_date or today
     start, end = local_day_bounds(start_date, end_date, tz)
     try:
         groups, session_meta, first_prompts, months, start = _load_timeline_rows(
             bot_id, user_id, session_id, tz, start, end,
-            mode == "recent", mode == "all",
+            mode == "recent" and (end_date - start_date).days >= 7,
+            mode == "all",
             local_day_bounds(overview_before, overview_before, tz)[0] if overview_before else None,
         )
         days, sessions, version = build_timeline(groups, session_meta, first_prompts)

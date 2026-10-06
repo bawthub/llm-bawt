@@ -546,7 +546,7 @@ def _build_history_response(
 def get_history(
     bot_id: str = Query(None, description="Bot ID (uses default if not specified)"),
     limit: int = Query(50, description="Maximum number of messages to return"),
-    user_id: str | None = Query(None, description="Owner scope for scheduling origin enrichment only"),
+    user_id: str | None = Query(None, description="Optional owner scope for history and scheduling"),
     before: str | None = Query(
         None,
         description="Cursor for older history pages (ISO timestamp, unix timestamp, or message ID)",
@@ -595,7 +595,7 @@ def get_history(
 
     try:
         visible_messages = _load_sorted_visible_messages(
-            service, effective_bot_id, session_id=session_id
+            service, effective_bot_id, session_id=session_id, user_id=user_id
         )
 
         before_ts = _resolve_cursor(before, visible_messages) if before else None

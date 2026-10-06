@@ -13,6 +13,7 @@ def test_history_facade_preserves_route_order_and_names() -> None:
         ("/v1/history", ("GET",), "get_history"),
         ("/v1/history/around", ("GET",), "get_history_around"),
         ("/v1/history/timeline", ("GET",), "get_history_timeline"),
+        ("/v1/history/timeline/anchors", ("POST",), "get_history_timeline_anchors"),
         (
             "/v1/history/timeline/prompts",
             ("GET",),
