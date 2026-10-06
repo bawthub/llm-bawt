@@ -14,6 +14,7 @@ class TimelineSegment(BaseModel):
     last_ts: float
     message_count: int
     user_prompt_count: int
+    continued: bool = False  # earliest message in the session precedes this segment
 
 
 class TimelineDay(BaseModel):
@@ -46,8 +47,12 @@ class TimelineSession(BaseModel):
 
 class TimelineResponse(BaseModel):
     bot_id: str
+    user_id: str
     session_id: str | None
     tz: str
+    from_utc: float
+    to_utc: float
+    coverage: dict  # start/end, overview, bounded continuation and exclusions
     # Opaque revalidation token: changes whenever a visible message is added
     # or removed. Compare for equality only.
     version: str
@@ -64,8 +69,26 @@ class TimelinePrompt(BaseModel):
 
 class TimelinePromptsResponse(BaseModel):
     bot_id: str
+    user_id: str
     date: str | None
     session_id: str | None
     tz: str
     prompts: list[TimelinePrompt]
     truncated: bool
+
+
+class TimelineAnchorsRequest(BaseModel):
+    bot_id: str
+    user_id: str
+    session_id: str | None = None
+    message_ids: list[str]
+
+
+class TimelineAnchor(BaseModel):
+    id: str
+    session_id: str
+    ts: float
+
+
+class TimelineAnchorsResponse(BaseModel):
+    anchors: list[TimelineAnchor]

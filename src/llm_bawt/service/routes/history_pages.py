@@ -310,6 +310,7 @@ def _load_sorted_visible_messages(
     service,
     effective_bot_id: str,
     session_id: str | None = None,
+    user_id: str | None = None,
 ) -> list[dict]:
     """Pull all visible messages for a bot, sorted chronologically.
 
@@ -333,6 +334,21 @@ def _load_sorted_visible_messages(
     else:
         messages = client.get_messages(since_seconds=None)
     visible = [m for m in messages if m.get("role") not in ("system", "summary")]
+    if user_id:
+        # Match the timeline/around owner rule without changing the legacy
+        # unscoped history contract. Do not infer ownership from message author.
+        from sqlalchemy import text
+        from ...media.assets import _build_engine
+
+        engine = _build_engine(service.config)
+        if engine is None:
+            raise HTTPException(status_code=503, detail="Session ownership unavailable")
+        with engine.connect() as conn:
+            owned = set(conn.execute(
+                text("SELECT id FROM sessions WHERE bot_id=:bot_id AND user_id=:user_id"),
+                {"bot_id": effective_bot_id, "user_id": user_id},
+            ).scalars().all())
+        visible = [m for m in visible if m.get("session_id") in owned]
     visible.sort(key=lambda m: (float(m.get("timestamp") or 0.0), str(m.get("id") or "")))
     return visible
 
@@ -362,6 +378,7 @@ def _load_window_via_sql(
     before: int,
     after: int,
     session_id: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[list[dict], bool, bool] | None:
     """Indexed direct-SQL window around one anchor message (TASK-980).
 
@@ -389,30 +406,34 @@ def _load_window_via_sql(
     if engine is None:
         return None
 
+    from .history_scope import owned_message_scope
+
     table = partition_name(MESSAGES_PARENT, bot_id)
     columns = (
-        "id, role, content, timestamp, session_id, "
-        "author_entity_type, author_entity_id"
+        "m.id, m.role, m.content, m.timestamp, m.session_id, "
+        "m.author_entity_type, m.author_entity_id"
     )
-    scope = "role NOT IN ('system', 'summary')"
+    scope = "m.role NOT IN ('system', 'summary')"
     if session_id:
-        scope += " AND session_id = :session_id"
+        scope += " AND m.session_id = :session_id"
+    if user_id:
+        scope += f" AND {owned_message_scope()}"
     older_sql = text(
-        f"SELECT {columns} FROM {table} WHERE {scope} "
-        "AND (timestamp < :ts OR (timestamp = :ts AND id < :id)) "
-        "ORDER BY timestamp DESC, id DESC LIMIT :lim"
+        f"SELECT {columns} FROM {table} m WHERE {scope} "
+        "AND (m.timestamp < :ts OR (m.timestamp = :ts AND m.id < :id)) "
+        "ORDER BY m.timestamp DESC, m.id DESC LIMIT :lim"
     )
     newer_sql = text(
-        f"SELECT {columns} FROM {table} WHERE {scope} "
-        "AND (timestamp > :ts OR (timestamp = :ts AND id > :id)) "
-        "ORDER BY timestamp ASC, id ASC LIMIT :lim"
+        f"SELECT {columns} FROM {table} m WHERE {scope} "
+        "AND (m.timestamp > :ts OR (m.timestamp = :ts AND m.id > :id)) "
+        "ORDER BY m.timestamp ASC, m.id ASC LIMIT :lim"
     )
-    base = {"session_id": session_id} if session_id else {}
+    base = {"bot_id": bot_id, "user_id": user_id, "session_id": session_id}
 
     try:
         with engine.connect() as conn:
             anchor = conn.execute(
-                text(f"SELECT {columns} FROM {table} WHERE id = :id AND {scope}"),
+                text(f"SELECT {columns} FROM {table} m WHERE m.id = :id AND {scope}"),
                 {**base, "id": message_id},
             ).mappings().first()
             if anchor is None:
@@ -657,7 +678,8 @@ def get_history_around(
     try:
         try:
             window = _load_window_via_sql(
-                service, bot_id, message_id, before, after, session_id=session_id
+                service, bot_id, message_id, before, after, session_id=session_id,
+                user_id=user_id,
             )
         except _WindowAnchorNotFound:
             raise HTTPException(status_code=404, detail=f"Message {message_id!r} not found")

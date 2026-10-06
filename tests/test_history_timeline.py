@@ -8,7 +8,7 @@ real bot partition. It never writes rows or creates partitions.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -194,10 +194,79 @@ def test_prompts_route_validates_inputs(monkeypatch):
     app = FastAPI()
     app.include_router(history_timeline.router)
     with TestClient(app) as client:
-        assert client.get("/v1/history/timeline/prompts?bot_id=b").status_code == 400
-        assert client.get("/v1/history/timeline/prompts?bot_id=b&date=2026-13-40").status_code == 400
-        assert client.get("/v1/history/timeline/prompts?bot_id=b&date=2026-01-01&tz=Nope/Zone").status_code == 400
-        assert client.get("/v1/history/timeline?bot_id=b&tz=Nope/Zone").status_code == 400
+        assert client.get("/v1/history/timeline/prompts?bot_id=b").status_code == 422
+        assert client.get("/v1/history/timeline?bot_id=b").status_code == 422
+        assert client.get("/v1/history/timeline/prompts?bot_id=b&user_id=u").status_code == 400
+        assert client.get("/v1/history/timeline/prompts?bot_id=b&user_id=u&date=2026-13-40").status_code == 400
+        assert client.get("/v1/history/timeline/prompts?bot_id=b&user_id=u&date=2026-01-01&tz=Nope/Zone").status_code == 400
+        assert client.get("/v1/history/timeline?bot_id=b&user_id=u&tz=Nope/Zone").status_code == 400
+        assert client.get("/v1/history/timeline?bot_id=b&user_id=u&mode=custom").status_code == 400
+
+
+def test_scoped_timeline_dst_and_range_bounds():
+    from llm_bawt.service.routes.history_scope import local_day_bounds, owned_message_scope
+
+    spring = local_day_bounds(date(2026, 3, 8), date(2026, 3, 8), "America/New_York")
+    autumn = local_day_bounds(date(2026, 11, 1), date(2026, 11, 1), "America/New_York")
+    assert spring[1] - spring[0] == 23 * 3600
+    assert autumn[1] - autumn[0] == 25 * 3600
+    assert spring[0] == _et_epoch(2026, 3, 8)
+    assert "owner.user_id = :user_id" in owned_message_scope()
+    assert "owner.bot_id = :bot_id" in owned_message_scope()
+    with pytest.raises(HTTPException):
+        local_day_bounds(date(2026, 1, 1), date(2026, 4, 1), "America/New_York")
+
+
+def test_timeline_repository_constant_sql_and_owner_predicates():
+    from llm_bawt.service.routes.history_timeline_store import timeline_rows
+
+    class Result:
+        def __init__(self, values):
+            self.values = values
+        def mappings(self):
+            return self
+        def __iter__(self):
+            return iter(self.values)
+
+    class Connection:
+        def __init__(self):
+            self.calls = []
+        def execute(self, statement, params):
+            sql = str(statement)
+            self.calls.append((sql, params))
+            if "WITH groups" in sql:
+                return Result([{"day": date(2026, 10, 6), "session_id": "own", "first_id": "id",
+                    "n": 2, "prompts": 1, "first_ts": 20., "last_ts": 30., "title": "Hi",
+                    "status": "active", "continued": False}])
+            if "AS month" in sql:
+                return Result([{"month": date(2026, 10, 1), "messages": 2}])
+            raise AssertionError("Unexpected query")
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+
+    class Engine:
+        def __init__(self):
+            self.conn = Connection()
+        def connect(self):
+            return self.conn
+
+    for count in (10, 1000):
+        engine = Engine()
+        result = timeline_rows(engine, "messages_p_snark", "snark", "nick", None,
+                               "America/New_York", 1., 100.)
+        assert len(result[0]) == 1
+        assert len(engine.conn.calls) == 2
+        assert all("owner.user_id = :user_id" in sql for sql, _ in engine.conn.calls)
+        assert all(params["user_id"] == "nick" for _, params in engine.conn.calls)
+
+
+def test_timeline_anchors_reject_oversize_without_sql():
+    from llm_bawt.service.routes.history_timeline_store import anchor_rows
+    with pytest.raises(HTTPException) as error:
+        anchor_rows(None, "messages_p_test", "bot", "user", None, ["x"] * 2001)
+    assert error.value.status_code == 413
 
 
 # ── integration: live PostgreSQL, read-only ───────────────────────────────

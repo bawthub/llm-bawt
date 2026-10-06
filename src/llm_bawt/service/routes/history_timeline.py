@@ -17,15 +17,23 @@ Jump targets (``first_message_id``) are meant for the existing
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from datetime import date as date_cls
+from datetime import date as date_cls, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query
 
+from .history_scope import local_day_bounds, owned_message_scope
+from .history_timeline_store import anchor_rows, timeline_rows
+
 from ..dependencies import get_service
 from ..logging import get_service_logger
 from ..schemas_history_timeline import (
+    TimelineAnchor,
+    TimelineAnchorsRequest,
+    TimelineAnchorsResponse,
     TimelineDay,
     TimelinePrompt,
     TimelinePromptsResponse,
@@ -129,6 +137,7 @@ def build_timeline(
                 last_ts=last_ts,
                 message_count=n,
                 user_prompt_count=int(g["prompts"]),
+                continued=bool(g.get("continued", False)),
             )
 
             s = sessions.setdefault(sid, {"first": first, "last_ts": last_ts, "n": 0})
@@ -187,63 +196,13 @@ def _engine_and_table(bot_id: str):
     return engine, partition_name(MESSAGES_PARENT, bot_id)
 
 
-def _load_timeline_rows(
-    bot_id: str, session_id: str | None, tz: str
-) -> tuple[list[dict], dict[str, dict], dict[str, str]]:
-    from sqlalchemy import text
-
+def _load_timeline_rows(bot_id: str, user_id: str, session_id: str | None,
+                        tz: str, start: float, end: float, recent: bool,
+                        overview_only: bool, overview_before: float | None):
     engine, table = _engine_and_table(bot_id)
-    scope = VISIBLE_ROLES_SQL
-    params: dict = {"tz": tz}
-    if session_id:
-        scope += " AND session_id = :session_id"
-        params["session_id"] = session_id
-
-    groups_sql = text(
-        f"""
-        SELECT {LOCAL_DATE_SQL} AS day, session_id,
-               count(*) AS n,
-               count(*) FILTER (WHERE role = 'user') AS prompts,
-               min(timestamp) AS first_ts, max(timestamp) AS last_ts,
-               (array_agg(id ORDER BY timestamp, id))[1] AS first_id
-        FROM {table}
-        WHERE {scope}
-        GROUP BY 1, 2
-        """
-    )
-    with engine.connect() as conn:
-        groups = [dict(r) for r in conn.execute(groups_sql, params).mappings().all()]
-        session_ids = sorted({g["session_id"] for g in groups if g.get("session_id")})
-        session_meta: dict[str, dict] = {}
-        first_prompts: dict[str, str] = {}
-        if session_ids:
-            meta_rows = conn.execute(
-                text(
-                    "SELECT id, status, session_metadata->>'title' AS title "
-                    "FROM sessions WHERE id = ANY(:ids)"
-                ),
-                {"ids": session_ids},
-            ).mappings().all()
-            session_meta = {str(r["id"]): dict(r) for r in meta_rows}
-            untitled = [
-                sid for sid in session_ids
-                if not ((session_meta.get(sid) or {}).get("title") or "").strip()
-            ]
-            if untitled:
-                prompt_rows = conn.execute(
-                    text(
-                        f"""
-                        SELECT DISTINCT ON (session_id) session_id, content
-                        FROM {table}
-                        WHERE role = 'user' AND session_id = ANY(:ids)
-                          AND ltrim(content) NOT LIKE :slash
-                        ORDER BY session_id, timestamp, id
-                        """
-                    ),
-                    {"ids": untitled, "slash": "/%"},
-                ).mappings().all()
-                first_prompts = {str(r["session_id"]): r["content"] for r in prompt_rows}
-    return groups, session_meta, first_prompts
+    return timeline_rows(engine, table, bot_id, user_id, session_id, tz, start, end,
+                         recent=recent, overview_only=overview_only,
+                         overview_before=overview_before)
 
 
 # ── routes ────────────────────────────────────────────────────────────────
@@ -251,30 +210,75 @@ def _load_timeline_rows(
 
 @router.get("/v1/history/timeline", response_model=TimelineResponse, tags=["History"])
 def get_history_timeline(
-    bot_id: str = Query(..., description="Bot ID"),
-    session_id: str | None = Query(
-        None, description="Scope the index to one thread (thread viewer)."
-    ),
-    tz: str = Query(DEFAULT_TZ, description="Viewer IANA timezone for day buckets"),
+    bot_id: str = Query(...),
+    user_id: str = Query(..., min_length=1),
+    session_id: str | None = Query(None),
+    tz: str = Query(DEFAULT_TZ),
+    from_date: date_cls | None = Query(None),
+    to_date: date_cls | None = Query(None),
+    mode: str = Query("recent", pattern="^(recent|custom|all)$"),
+    overview_before: date_cls | None = Query(None, description="Older-month cursor for all-history overview"),
 ):
-    """Compact day + session index powering the chat timeline rail."""
+    """Owned, bounded segments; `all` returns coarse months until explicit zoom."""
     validate_tz(tz)
+    today = datetime.now(ZoneInfo(tz)).date()
+    if mode == "custom" and (from_date is None or to_date is None):
+        raise HTTPException(status_code=400, detail="Custom range needs both dates")
+    if overview_before and (mode != "all" or overview_before.day != 1):
+        raise HTTPException(status_code=400, detail="Older-month cursor requires all mode and a month's first day")
+    if mode != "all" and to_date and to_date > today:
+        raise HTTPException(status_code=400, detail="Timeline cannot end in the future")
+    start_date = from_date or today - timedelta(days=29)
+    end_date = to_date or today
+    start, end = local_day_bounds(start_date, end_date, tz)
     try:
-        groups, session_meta, first_prompts = _load_timeline_rows(bot_id, session_id, tz)
+        groups, session_meta, first_prompts, months, start = _load_timeline_rows(
+            bot_id, user_id, session_id, tz, start, end,
+            mode == "recent", mode == "all",
+            local_day_bounds(overview_before, overview_before, tz)[0] if overview_before else None,
+        )
         days, sessions, version = build_timeline(groups, session_meta, first_prompts)
+        revision = hashlib.sha256(json.dumps([
+            version, [(s.id, s.title, s.status) for s in sessions],
+            [(g['first_id'], g['last_ts'], g['continued']) for g in groups],
+            [(str(m['month']), m['messages']) for m in months],
+        ], sort_keys=True).encode()).hexdigest()[:24]
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"Failed to build history timeline for {bot_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        log.error("Failed to build owned timeline for %s: %s", bot_id, e)
+        raise HTTPException(status_code=500, detail="Timeline unavailable")
+    from datetime import timezone
+    from_day = datetime.fromtimestamp(start, timezone.utc).astimezone(ZoneInfo(tz)).date().isoformat()
     return TimelineResponse(
-        bot_id=bot_id,
-        session_id=session_id,
-        tz=tz,
-        version=version,
-        days=days,
-        sessions=sessions,
+        bot_id=bot_id, user_id=user_id, session_id=session_id, tz=tz,
+        from_utc=start, to_utc=end, version=revision, days=days, sessions=sessions,
+        coverage={
+            'from_date': from_day, 'to_date': end_date.isoformat(),
+            'mode': mode, 'segments_complete': mode != 'all',
+            'overview': [{'month': str(m['month']), 'messages': int(m['messages'])}
+                         for m in months[:240]],
+            'overview_has_older': len(months) > 240,
+            'older_month': str(months[239]['month']) if len(months) > 240 else None,
+            'legacy_unowned_excluded': True,
+        },
     )
+
+
+@router.post("/v1/history/timeline/anchors", response_model=TimelineAnchorsResponse, tags=["History"])
+def get_history_timeline_anchors(body: TimelineAnchorsRequest):
+    """One bounded read of canonical message timestamps for exact task turns."""
+    try:
+        engine, table = _engine_and_table(body.bot_id)
+        rows = anchor_rows(engine, table, body.bot_id, body.user_id,
+                           body.session_id, body.message_ids)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Failed to load timeline anchors: %s", e)
+        raise HTTPException(status_code=500, detail="Timeline anchors unavailable")
+    return TimelineAnchorsResponse(anchors=[TimelineAnchor(id=str(r['id']),
+        session_id=str(r['session_id']), ts=float(r['ts'])) for r in rows])
 
 
 @router.get(
@@ -284,6 +288,7 @@ def get_history_timeline(
 )
 def get_history_timeline_prompts(
     bot_id: str = Query(..., description="Bot ID"),
+    user_id: str = Query(..., min_length=1),
     date: str | None = Query(None, description="Local day YYYY-MM-DD in `tz`"),
     session_id: str | None = Query(None, description="Thread to list prompts for"),
     tz: str = Query(DEFAULT_TZ, description="Viewer IANA timezone"),
@@ -301,14 +306,14 @@ def get_history_timeline_prompts(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid date {date!r}")
 
-    clauses = ["role = 'user'"]
-    params: dict = {"tz": tz, "lim": limit + 1}
+    clauses = ["m.role = 'user'", owned_message_scope()]
+    params: dict = {"tz": tz, "lim": limit + 1, "user_id": user_id, "bot_id": bot_id}
     if session_id:
-        clauses.append("session_id = :session_id")
+        clauses.append("m.session_id = :session_id")
         params["session_id"] = session_id
     if date:
-        clauses.append(f"timestamp >= {LOCAL_DAY_START_SQL}")
-        clauses.append(f"timestamp < {LOCAL_DAY_END_SQL}")
+        clauses.append(f"m.timestamp >= {LOCAL_DAY_START_SQL}")
+        clauses.append(f"m.timestamp < {LOCAL_DAY_END_SQL}")
         params["day"] = date
 
     try:
@@ -316,9 +321,9 @@ def get_history_timeline_prompts(
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    f"SELECT id, timestamp, session_id, content FROM {table} "
+                    f"SELECT m.id, m.timestamp, m.session_id, m.content FROM {table} m "
                     f"WHERE {' AND '.join(clauses)} "
-                    "ORDER BY timestamp, id LIMIT :lim"
+                    "ORDER BY m.timestamp, m.id LIMIT :lim"
                 ),
                 params,
             ).mappings().all()
@@ -330,6 +335,7 @@ def get_history_timeline_prompts(
 
     return TimelinePromptsResponse(
         bot_id=bot_id,
+        user_id=user_id,
         date=date,
         session_id=session_id,
         tz=tz,
