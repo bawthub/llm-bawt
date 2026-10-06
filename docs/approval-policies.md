@@ -131,6 +131,12 @@ Ordinary archived/task threads without reset lineage are not redirected just
 because another thread is active. Pre-existing archived sessions have no inferred
 successor: the new behavior applies to rotations that record these links.
 
+Redirection applies only to a reset that happened *while* the approval was
+pending. Rotation stamps the archived session with an absolute `reset_at` epoch;
+if that precedes the approval's `created_at`, the user deliberately reopened the
+archived thread, so the result (or native grant) stays in that thread. Rotations
+recorded before `reset_at` existed keep the follow-the-chain fallback.
+
 Native harness grants are not transferable across resets: they fail closed and
 require a fresh tool approval rather than resuming the retired SDK context.
 

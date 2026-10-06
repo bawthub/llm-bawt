@@ -1,5 +1,7 @@
 """Hermetic /new lineage coverage: no live sessions or agent calls."""
 import json
+import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -96,6 +98,48 @@ def test_invalid_reset_chain_fails_closed(sessions, bad):
                status="deleted" if bad == "deleted" else "active", metadata=metadata)
     with pytest.raises(ValueError):
         resolve(sessions, "old")
+
+
+def _approval_row(origin, created_at, kind="mcp"):
+    return SimpleNamespace(caller_context_json=json.dumps({"session_id": origin}), bot_id="test-bot",
+                           user_id="test-user", request_kind=kind, created_at=created_at)
+
+
+def _service(engine):
+    return SimpleNamespace(get_memory_client=lambda bot, user: SimpleNamespace(get_session=lambda id: read(engine, id)))
+
+
+def test_rotation_stamps_absolute_reset_time(sessions):
+    insert(sessions, "old")
+    before = time.time()
+    rotate(sessions)
+    reset_at = json.loads(read(sessions, "old")["session_metadata"])["reset_at"]
+    assert before <= reset_at <= time.time()
+
+
+@pytest.mark.parametrize("kind", ["mcp", "harness"])
+def test_approval_from_reopened_archived_thread_stays_there(sessions, kind):
+    # /new happened first; the user then reopened the archived thread and the
+    # approval was raised there. Its result belongs to that thread, not /new.
+    insert(sessions, "old")
+    rotate(sessions)
+    created = datetime.now(timezone.utc) + timedelta(seconds=5)
+    assert approval_delivery_session(_service(sessions), _approval_row("old", created, kind)) == "old"
+
+
+def test_reset_while_pending_still_follows_new(sessions):
+    insert(sessions, "old")
+    created = datetime.now(timezone.utc) - timedelta(seconds=5)
+    latest = rotate(sessions)
+    assert approval_delivery_session(_service(sessions), _approval_row("old", created)) == latest
+
+
+def test_reopened_thread_stays_put_even_with_later_resets(sessions):
+    insert(sessions, "old")
+    rotate(sessions)
+    created = datetime.now(timezone.utc) + timedelta(seconds=5)
+    rotate(sessions)
+    assert approval_delivery_session(_service(sessions), _approval_row("old", created)) == "old"
 
 
 def test_native_grant_cannot_be_rebound_to_fresh_sdk_session(sessions):

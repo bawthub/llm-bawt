@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from sqlalchemy import text
 
@@ -10,6 +11,7 @@ class SessionResetLineage:
     @staticmethod
     def rotate(engine, *, bot_id: str, user_id: str | None, new_id: str) -> None:
         """Archive + successor link + fresh thread commit as one transaction."""
+        reset_at = time.time()
         with engine.begin() as conn:
             postgres = conn.dialect.name == "postgresql"
             if postgres:
@@ -25,6 +27,10 @@ class SessionResetLineage:
             for row in rows:
                 metadata = SessionResetLineage.metadata(row["session_metadata"])
                 metadata["reset_successor_id"] = new_id
+                # Absolute epoch (sessions timestamps are naive DB-local) so
+                # callers can tell "reset while pending" from "work started in
+                # an already-archived thread".
+                metadata["reset_at"] = reset_at
                 conn.execute(text(f"""
                     UPDATE sessions SET ended_at=CURRENT_TIMESTAMP,
                         archived_at=CURRENT_TIMESTAMP, status='archived',
@@ -47,8 +53,14 @@ class SessionResetLineage:
         return dict(value)
 
     @classmethod
-    def resolve(cls, read_session: Callable, origin: str, *, bot_id: str, user_id: str) -> str:
-        """Follow explicit /new lineage only; never pick an arbitrary active thread."""
+    def resolve(cls, read_session: Callable, origin: str, *, bot_id: str, user_id: str,
+                started_at: float | None = None) -> str:
+        """Follow explicit /new lineage only; never pick an arbitrary active thread.
+
+        ``started_at`` (epoch) is when the work bound to ``origin`` began. If the
+        origin was already reset before then, the user deliberately reopened the
+        archived thread, so it stays the target instead of jumping to /new.
+        """
         current = origin
         seen: set[str] = set()
         previous = None
@@ -64,6 +76,10 @@ class SessionResetLineage:
                 raise ValueError("Approval continuation reset lineage is inconsistent")
             successor = metadata.get("reset_successor_id")
             if not successor:
+                return current
+            reset_at = metadata.get("reset_at")
+            if (previous is None and started_at is not None
+                    and isinstance(reset_at, (int, float)) and reset_at <= started_at):
                 return current
             if not isinstance(successor, str):
                 raise ValueError("Invalid approval continuation reset successor")
