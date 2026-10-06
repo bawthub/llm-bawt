@@ -649,7 +649,21 @@ async def responses_to_anthropic_sse(
                          "response.custom_tool_call_input.done"):
                 item_id = getattr(event, "item_id", "") or ""
                 block = blocks_by_item.get(item_id) or open_block
-                raw = tool_arg_buffers.pop(item_id, "{}")
+                # The .done event carries the complete payload and is
+                # authoritative. Some ChatGPT backend paths (hex32 call ids,
+                # typically parallel batches) emit NO argument deltas at all,
+                # so the delta buffer alone yields "{}" and every call reaches
+                # the SDK with empty input. Buffer is the fallback only.
+                buffered = tool_arg_buffers.pop(item_id, "")
+                complete = (
+                    getattr(event, "arguments", None)
+                    if etype == "response.function_call_arguments.done"
+                    else getattr(event, "input", None)
+                )
+                raw = (
+                    complete if isinstance(complete, str) and complete
+                    else buffered or "{}"
+                )
                 tool_name = block.get("name", "") if block else ""
                 # Sanitize tool arguments before the SDK sees them. GPT fills
                 # optional params with empty strings (pages: ""), but empty

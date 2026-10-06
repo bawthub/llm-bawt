@@ -192,6 +192,40 @@ def _streamed_tool_arguments(frames: list[bytes]) -> dict:
     return json.loads(delta)
 
 
+def test_stream_uses_done_arguments_when_upstream_sends_no_deltas() -> None:
+    """ChatGPT backend's hex32-call-id path (parallel batches) emits no
+    argument deltas; args arrive only on .done / output_item.done. Captured
+    live 2026-10-06 — previously every such call reached the SDK as {}."""
+    paths = ["/etc/hosts", "/etc/passwd", "/etc/hostname"]
+    events: list[object] = []
+    for i, path in enumerate(paths):
+        args = json.dumps({"file_path": path})
+        added = SimpleNamespace(
+            id=f"fc_{i}", call_id=f"call_{i:032x}", type="function_call",
+            name="Read", arguments="",
+        )
+        done = SimpleNamespace(**{**vars(added), "arguments": args})
+        events += [
+            SimpleNamespace(type="response.output_item.added", output_index=i, item=added),
+            SimpleNamespace(
+                type="response.function_call_arguments.done",
+                output_index=i, item_id=added.id, arguments=args,
+            ),
+            SimpleNamespace(type="response.output_item.done", output_index=i, item=done),
+        ]
+    events.append(SimpleNamespace(type="response.completed", response=None))
+
+    frames = __import__("asyncio").run(_collect_stream_frames(events))
+    streamed = [
+        json.loads(p["delta"]["partial_json"])
+        for p in _sse_payloads(frames)
+        if p.get("type") == "content_block_delta"
+        and p.get("delta", {}).get("type") == "input_json_delta"
+    ]
+
+    assert streamed == [{"file_path": p} for p in paths]
+
+
 def test_stream_preserves_required_empty_string_tool_argument() -> None:
     tool_schemas = [{
         "name": "Edit",
