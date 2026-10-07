@@ -45,10 +45,12 @@ RISK_HIGH = "high"
 RISK_CRITICAL = "critical"
 
 # ---------------------------------------------------------------------------
-# Executor kinds (only docker is implemented — see :mod:`.executor`)
+# Executor kinds — docker (:mod:`.executor`) and the durable BawtHub release
+# coordinator (TASK-1030, :mod:`.release_executor`); each accepts only its spec.
 # ---------------------------------------------------------------------------
 
 EXECUTOR_DOCKER = "docker"
+EXECUTOR_RELEASE = "release"
 
 # ---------------------------------------------------------------------------
 # Job state machine
@@ -460,6 +462,7 @@ __all__ = [
     "RISK_HIGH",
     "RISK_CRITICAL",
     "EXECUTOR_DOCKER",
+    "EXECUTOR_RELEASE",
     "JOB_QUEUED",
     "JOB_DISPATCHING",
     "JOB_RUNNING",

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
+from .release_spec import is_release_spec, validate_release_spec
 from .validation import canonical_json
 from .worker import OPS_JOB_LABEL, atomic_json, is_ops_worker, target_selector
 
@@ -67,6 +68,10 @@ class Executor(ABC):
         """Image ID the fixed image-action target runs now (approval-time CAS)."""
         raise ExecutorError(f"{self.kind()} executor cannot inspect image deploy targets")
 
+    def inspect_target_health(self, spec: dict) -> str:
+        """Live health of the fixed target after a worker's verified swap."""
+        raise ExecutorError(f"{self.kind()} executor cannot inspect deploy target health")
+
     def check_target(self, spec: dict, args: dict) -> None:
         """Approval-time, read-only: the spec's target exists where this executor
         acts. Raise ExecutorError so nobody approves a guaranteed failure."""
@@ -108,6 +113,8 @@ def validate_spec(command_script: str) -> dict:
         raise ValueError("command_script must be a Docker JSON spec") from exc
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
+    if is_release_spec(spec):
+        return validate_release_spec(spec)
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
                "compose_service", "compose_service_from_arg", "stop_grace_seconds"}
     if not isinstance(spec, dict) or set(spec) - allowed:
@@ -171,6 +178,14 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError(f"cannot inspect deploy target {spec['container_name']}: {exc}") from exc
 
+    def inspect_target_health(self, spec):
+        try:
+            target = self.client.containers.get(spec["container_name"])
+            target.reload()
+            return ((target.attrs.get("State") or {}).get("Health") or {}).get("Status") or "unknown"
+        except Exception as exc:
+            raise ExecutorError(f"cannot inspect deploy target health {spec['container_name']}: {exc}") from exc
+
     def check_target(self, spec, args):
         # TASK-1002: this executor only reaches its own Docker daemon. A target
         # that lives on another host (e.g. Unraid) must fail HERE, before an
@@ -201,6 +216,8 @@ class DockerExecutor(Executor):
             return False
 
     def preflight(self, snapshot):
+        if is_release_spec(snapshot.get("spec")):
+            raise ExecutorError("release orchestration specs run only on the release executor")
         try:
             self._check_settings(snapshot["execution"])
             self.client.ping()

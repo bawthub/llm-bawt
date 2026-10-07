@@ -180,6 +180,48 @@ def seed_defaults():
 
 
 # ---------------------------------------------------------------------------
+# Durable release lifecycle (read-only)
+# ---------------------------------------------------------------------------
+
+@router.get("/v1/ops/releases", tags=["Ops"])
+def list_releases(limit: int = Query(25, ge=1, le=200), offset: int = Query(0, ge=0)):
+    releases = _service().releases
+    if releases.engine is None:
+        raise HTTPException(status_code=503, detail="Release store database unavailable")
+    return {"releases": [row.to_api() for row in releases.list(limit=limit, offset=offset)],
+            "total": releases.count(), "limit": limit, "offset": offset}
+
+
+@router.get("/v1/ops/releases/{release_id}", tags=["Ops"])
+def get_release(release_id: str):
+    releases = _service().releases
+    if releases.engine is None:
+        raise HTTPException(status_code=503, detail="Release store database unavailable")
+    row = releases.get(release_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"release not found: {release_id}")
+    result = row.to_api(events=releases.events(row.id))
+    if row.state == "deployed" and row.deploy_job_id:
+        from ...ops.image_deploy import parse_deployment
+
+        job = _service().store.get_job(row.deploy_job_id)
+        record = parse_deployment(job.output_tail) if job and job.state == "succeeded" else None
+        baked = ((record or {}).get("health") or {}).get("release") or {}
+        deployed = (record or {}).get("deployed") or {}
+        if (baked.get("version") == row.version and baked.get("sourceSha") == row.source_sha
+                and str(baked.get("workflowRunId")) == str(row.github_run_id)
+                and (record or {}).get("health", {}).get("status") == "healthy"
+                and deployed.get("image_ref") == f"{row.image_repository}@{row.digest}"):
+            # Historical verified identity; never claim this is a live health read.
+            result["production_identity"] = {
+                "version": row.version, "source_sha": row.source_sha, "digest": row.digest,
+                "workflow_run_id": row.github_run_id,
+                "verified_at": result["finished_at"],
+            }
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Job listing + status
 # ---------------------------------------------------------------------------
 

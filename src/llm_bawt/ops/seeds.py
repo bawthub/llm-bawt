@@ -32,6 +32,7 @@ from typing import Any
 
 from .models import (
     EXECUTOR_DOCKER,
+    EXECUTOR_RELEASE,
     RISK_CRITICAL,
     RISK_HIGH,
     RISK_LOW,
@@ -310,12 +311,9 @@ _IMAGE_SEEDS: list[dict[str, Any]] = [
         "command_script": _spec(action="deploy_image", **_PROD_TARGET),
         "args_schema_json": _schema(
             {
-                "workflow_run_id": {"type": "string", "pattern": "^[0-9]{1,20}$"},
-                "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+                "release_run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
             },
-            required=["workflow_run_id", "digest", "source_sha", "version"],
+            required=["release_run_id"],
         ),
         "args_defaults_json": _defaults(),
         "timeout_seconds": 900,
@@ -350,6 +348,51 @@ _IMAGE_SEEDS: list[dict[str, Any]] = [
         "risk_level": RISK_CRITICAL,
         "category": "deploy",
         "approval_prompt_prefix": "Roll back BawtHub production image",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# One-command release: a durable coordinator, never a shell or local clone.
+# A separate human approval is required after the build before deploy.
+# ---------------------------------------------------------------------------
+
+_RELEASE_SEEDS: list[dict[str, Any]] = [
+    {
+        "slug": "bawthub.release-prod",
+        "title": "Build and approve BawtHub production release",
+        "description": (
+            "Build a GitHub Actions release from remote branch heads, recover partial "
+            "attempts on the same run, then ask for a separate production deploy "
+            "approval. No local checkout, shell command, or automatic deploy."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_RELEASE,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(
+            action="release_orchestrate",
+            github_repository="bawthub/bawthub",
+            workflow_path=".github/workflows/release-frontend.yml",
+            canonical_branch="main",
+            llm_bawt_repository="bawthub/llm-bawt",
+            llm_bawt_branch="master",
+            image_repository="ghcr.io/bawthub/frontend",
+            deploy_operation="bawthub.deploy-prod-image",
+        ),
+        "args_schema_json": _schema({
+            "release_task": {"type": "string", "pattern": "^TASK-[0-9]+$"},
+            "bump": {"type": "string", "enum": ["patch", "minor", "major"]},
+            "llm_bawt_mode": {"type": "string", "enum": ["off", "auto", "required"]},
+        }, required=["release_task"]),
+        "args_defaults_json": _defaults({"bump": "patch", "llm_bawt_mode": "auto"}),
+        "timeout_seconds": 86400,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_HIGH,
+        "category": "deploy",
+        "approval_prompt_prefix": "Build BawtHub production release (deploy requires separate approval)",
     },
 ]
 
@@ -410,6 +453,7 @@ SEEDS: list[dict[str, Any]] = [
     *_BAWTHUB_SEEDS,
     *_STANDALONE_CONTAINER_SEEDS,
     *_IMAGE_SEEDS,
+    *_RELEASE_SEEDS,
 ]
 
 

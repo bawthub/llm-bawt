@@ -174,6 +174,114 @@ On echo both operations are enabled. The first approved deploy (v0.1.58, run
 rollback has been verified; a rollback needs its own explicit request and
 approval, not an automatic test of the enabled action.
 
+## Durable one-command BawtHub release orchestration (TASK-1030)
+
+`bawthub.release-prod` is a typed release executor operation. It is not a shell,
+SSH, Make, Docker-build, or generic GitHub executor. One approved call starts one
+durable parent ops job and one `ops_release_runs` row. The caller supplies only:
+
+```json
+{
+  "operation": "bawthub.release-prod",
+  "args": {
+    "release_task": "TASK-N",
+    "bump": "patch",
+    "llm_bawt_mode": "auto"
+  },
+  "idempotency_key": "stable-logical-release-key"
+}
+```
+
+`bump` defaults to `patch`; `llm_bawt_mode` defaults to `auto`. The agent does
+not dispatch Actions, find a run, download a receipt, transcribe a digest, create
+a deploy job, poll either job, or recover a partial release. The parent job stays
+active while the server-owned coordinator advances this lifecycle:
+
+```text
+PREFLIGHT -> DISPATCHING_BUILD -> BUILDING
+          -> BUILD_FAILED_SAFE | BUILD_PARTIAL | BUILD_COMPLETE
+BUILD_COMPLETE -> AWAITING_DEPLOY_APPROVAL -> DEPLOYING
+               -> DEPLOYED | DEPLOY_FAILED_RESTORED
+any uncertain external side effect -> LOST_REQUIRES_INSPECTION
+```
+
+The release run is the orchestration source of truth and has append-only events,
+a lease/claim for multi-process reconciliation, the parent ops job id, a unique
+`release_request_id`, exact remote source SHAs, GitHub workflow run/attempt,
+verified receipt, deployability/warnings, deployment approval id, and child deploy
+job id. Transitions are compare-and-swap updates. State is persisted before each
+external side effect. App or reconciler restarts resume from the row; agent polling
+is never the scheduler.
+
+### Build authorization, source authority, and dispatch correlation
+
+The ordinary fail-closed `ops_run` approval is the **build/release authorization**.
+Before that approval is shown, read-only preflight resolves the canonical remote
+BawtHub and llm-bawt branch heads through a dedicated `github-release-dispatch`
+credential. Echo working trees are not consulted: dirty, ahead, behind, divergent,
+or absent local clones cannot alter a remote release. The immutable approval
+snapshot includes those SHAs and the release plan.
+
+GitHub `workflow_dispatch` does not return a run id. The coordinator therefore
+creates one unique `release_request_id`, passes it as a workflow input, requires it
+in the workflow `run-name` and receipt, and persists dispatch intent before the
+HTTP request. A missing/ambiguous dispatch response is reconciled by that exact
+correlation before any retry. Zero matches remains pending or fails safe after a
+bounded window; multiple matches are `LOST_REQUIRES_INSPECTION`. Never redispatch
+merely because the run id was not returned.
+
+Workflow receipts are attempt-aware and bind request id, repository, workflow,
+run id, run attempt, source SHA, semantic version/tag and image digest. The
+coordinator verifies this identity before a release becomes deployable. A rerun
+uses GitHub's rerun-failed-jobs API only for a classified-safe failed job and stays
+on the same release row, run id, version and tag. It never dispatches a second
+workflow and never increments semver again.
+
+`llm_bawt_mode=auto` compares the remote canonical llm-bawt SHA with remote tags
+and tags only pushed remote commits when needed. Its outcome is one of `tagged`,
+`unchanged`, `skipped`, or `failed`. An auxiliary auto-tag failure may produce a
+verified `complete_with_warning` receipt with `deployable=true`; it must not strand
+a valid frontend image. A future explicit `required` mode may make that same
+failure non-deployable. Recovery never runs `make rebuild-prod`,
+`make snapshot-rebuild`, or `make -o version-release snapshot-rebuild`.
+
+### Separate server-owned deployment approval
+
+A verified deployable build creates a second, deterministic approval request of
+kind `orchestration`. It is bound to the release run and the canonical invocation:
+
+```json
+{
+  "operation": "bawthub.deploy-prod-image",
+  "args": {"release_run_id": "<durable-release-id>"}
+}
+```
+
+This is the separate **production deployment authorization**. It is always
+required by the coordinator and rendered in the existing approval UI; agent
+`ops_run` calls still go through the compiled approval-policy bundle. It has no MCP execution claim, bridge grant, synthetic agent turn, or
+continuation outbox. The first terminal human decision wins. Denial/cancellation
+leaves the verified release undeployed and terminates the parent safely.
+
+Approval lets the coordinator create exactly one child
+`bawthub.deploy-prod-image` job with a deterministic idempotency key. The existing
+credential-free, network-disabled Docker worker remains the only production
+mutator. Its release verifier loads the stored release by `release_run_id` and
+re-verifies the frozen receipt binding; agents no longer supply workflow run id,
+digest, SHA, or version. A known failed deployment with verified restoration maps
+to `DEPLOY_FAILED_RESTORED`; an ambiguous deploy remains
+`LOST_REQUIRES_INSPECTION` and is never blindly retried. Parent success requires
+the child job to succeed and final production health/identity to equal the
+approved SHA, version, digest and workflow run.
+
+The Actions credential is separate from `github-release` (read-only verification)
+and `ghcr-pull` (registry pull). It is least-privilege Actions read/write plus
+Contents read on the release repositories. The release executor runs in the app
+and independent reconciler processes; no GitHub credential enters the Docker
+worker. The operation ships disabled. Implementation, catalog activation, each
+build approval, and each deployment approval are distinct decisions; implementing
+this contract authorizes no live release.
+
 ## Approval integration
 
 Trusted interception calls:

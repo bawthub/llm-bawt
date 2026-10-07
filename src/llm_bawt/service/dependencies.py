@@ -182,14 +182,13 @@ def get_ops_store(config: Any):
 def get_ops_service(config: Any):
     """Process-wide ``OpsService`` singleton (TASK-639).
 
-    Wraps the shared OpsStore + the default DockerExecutor. Callers that
-    need to swap the executor (tests) should construct their own OpsService
-    directly rather than going through this cache.
+    Registers both the Docker worker and durable release executors. Callers
+    swapping executors for tests should construct their own OpsService.
     """
-    from ..ops import OpsService
+    from ..ops.release_executor import build_ops_service
 
     return _get_or_build_store(
-        "ops_service", config, lambda: OpsService(get_ops_store(config))
+        "ops_service", config, lambda: build_ops_service(config, get_ops_store(config))
     )
 
 

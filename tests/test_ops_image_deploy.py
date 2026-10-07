@@ -18,7 +18,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import create_engine
+from sqlmodel import Session, create_engine
+
+from llm_bawt.ops.release_models import RELEASE_AWAITING_DEPLOY_APPROVAL, ReleaseRun
 
 from llm_bawt.ops import OpsDispatchError, OpsService, OpsStore
 from llm_bawt.ops.executor import (DispatchResult, DockerExecutor, Executor, ExecutorError, ReconcileResult,
@@ -39,7 +41,9 @@ JOB_ID = "f" * 32
 NAME = "bawthub-frontend-prod-1"
 SEED = {s["slug"]: s for s in SEEDS}
 SPEC = json.loads(SEED["bawthub.deploy-prod-image"]["command_script"])
-ARGS = {"workflow_run_id": "123456", "digest": DIGEST, "source_sha": SOURCE, "version": "1.4.2"}
+VERIFY_ARGS = {"workflow_run_id": "123456", "digest": DIGEST, "source_sha": SOURCE, "version": "1.4.2"}
+RELEASE_ID = "e" * 32
+ARGS = {"release_run_id": RELEASE_ID}
 
 
 def _labels(source=SOURCE, version="1.4.2", run="123456"):
@@ -396,18 +400,42 @@ class FakeVerifier(ReleaseVerifier):
     def verify(self, spec, args):
         if self.error:
             raise ReleaseVerificationError(self.error)
-        return {**args, "tag": f"v{args['version']}", "image_ref": f"{REPO}@{args['digest']}",
-                "workflow_run_url": "u"}
+        return {**args, "tag": f"v{args['version']}", "image_repository": REPO,
+                "workflow_run_attempt": "1", "trigger_sha": TRIGGER,
+                "image_ref": f"{REPO}@{args['digest']}", "workflow_run_url": "u"}
 
 
 def _service(verifier=None, *, enable=True):
+    from datetime import datetime, timezone
+    from llm_bawt.ops.release_store import ReleaseStore
+
     store = object.__new__(OpsStore)
     store.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     store._ensure_tables_exist()
+    releases = ReleaseStore(None, engine=store.engine)
+    receipt = {"schema": "bawthub.release-receipt/v1", "repository": "bawthub/bawthub",
+               "release_request_id": "release-test", "workflow_run_id": "123456",
+               "workflow_run_attempt": "1", "base_sha": TRIGGER, "source_sha": SOURCE,
+               "version": "1.4.2", "tag": "v1.4.2", "digest": DIGEST,
+               "image_repository": REPO, "status": "complete"}
+    with Session(store.engine) as session:
+        session.add(ReleaseRun(id=RELEASE_ID, parent_job_id="0" * 32,
+                               release_request_id="release-test", release_task="TASK-1030",
+                               github_repository=SPEC["github_repository"],
+                               workflow_path=SPEC["workflow_path"],
+                               canonical_branch=SPEC["canonical_branch"],
+                               state=RELEASE_AWAITING_DEPLOY_APPROVAL, deployable=True,
+                               receipt_json=json.dumps(receipt),
+                               receipt_verified_at=datetime.now(timezone.utc),
+                               github_run_id="123456", github_run_attempt=1,
+                               source_sha=SOURCE, version="1.4.2", tag="v1.4.2",
+                               digest=DIGEST, image_repository=REPO))
+        session.commit()
     for slug in ("bawthub.deploy-prod-image", "bawthub.rollback-prod-image"):
         store.create_operation({**SEED[slug], "enabled": enable})
     executor = FakeExecutor()
-    return OpsService(store, executor=executor, release_verifier=verifier or FakeVerifier()), store, executor
+    return OpsService(store, executor=executor, release_store=releases,
+                      release_verifier=verifier or FakeVerifier()), store, executor
 
 
 def _rehash(snapshot):
@@ -440,14 +468,42 @@ def test_unverified_release_is_refused_before_approval():
 
 @pytest.mark.parametrize("args", [
     {**ARGS, "digest": "sha256:" + "D" * 64},
-    {**ARGS, "workflow_run_id": "12; rm -rf /"},
-    {k: v for k, v in ARGS.items() if k != "source_sha"},
+    {"release_run_id": "12; rm -rf /"},
+    {},
 ])
 def test_malformed_deploy_args_never_reach_the_verifier(args):
     service, _store, _ex = _service(FakeVerifier("must not be called"))
     with pytest.raises(OpsDispatchError) as caught:
         service.prepare_invocation("bawthub.deploy-prod-image", args)
     assert caught.value.code == "args_invalid"
+
+
+def test_unverified_or_foreign_release_id_is_refused_before_approval():
+    service, _store, _ex = _service()
+    with pytest.raises(OpsDispatchError) as caught:
+        service.prepare_invocation("bawthub.deploy-prod-image", {"release_run_id": "0" * 32})
+    assert caught.value.code == "release_unverified"
+    with Session(service.releases.engine) as session:
+        row = session.get(ReleaseRun, RELEASE_ID)
+        row.image_repository = "ghcr.io/other/frontend"
+        session.add(row)
+        session.commit()
+    with pytest.raises(OpsDispatchError, match="stored release binding mismatch"):
+        service.prepare_invocation("bawthub.deploy-prod-image", ARGS)
+
+
+def test_deploy_snapshot_is_rejected_if_release_record_changes_after_approval():
+    service, _store, _ex = _service()
+    snapshot = service.prepare_invocation("bawthub.deploy-prod-image", ARGS)
+    with Session(service.releases.engine) as session:
+        row = session.get(ReleaseRun, RELEASE_ID)
+        row.digest = "sha256:" + "b" * 64
+        session.add(row)
+        session.commit()
+    with pytest.raises(OpsDispatchError) as caught:
+        service.dispatch_job(operation_slug="bawthub.deploy-prod-image", args=ARGS,
+                             approved_snapshot=snapshot)
+    assert caught.value.code == "snapshot_invalid"
 
 
 def test_forged_release_binding_in_snapshot_is_rejected():
@@ -510,7 +566,7 @@ class _Resp:
 
 
 class FakeGitHub:
-    def __init__(self, *, run=None, receipt=None, tag_commit=SOURCE, annotated=True):
+    def __init__(self, *, run=None, receipt=None, tag_commit=SOURCE, annotated=True, artifact="release-receipt"):
         api = "https://api.github.com/repos/bawthub/bawthub"
         self.seen: list[tuple[str, str | None]] = []
         run = {"status": "completed", "conclusion": "success", "path": SPEC["workflow_path"] + "@refs/heads/main",
@@ -526,8 +582,8 @@ class FakeGitHub:
         tag_obj = {"type": "tag", "sha": "9" * 40} if annotated else {"type": "commit", "sha": tag_commit}
         self.routes = {
             f"{api}/actions/runs/123456": _Resp(body=json.dumps(run).encode()),
-            f"{api}/actions/runs/123456/artifacts?name=release-receipt": _Resp(body=json.dumps({"artifacts": [
-                {"name": "release-receipt", "expired": False, "archive_download_url": f"{api}/zip"}]}).encode()),
+            f"{api}/actions/runs/123456/artifacts?name={artifact}": _Resp(body=json.dumps({"artifacts": [
+                {"name": artifact, "expired": False, "archive_download_url": f"{api}/zip"}]}).encode()),
             f"{api}/zip": _Resp(302, location="https://blob.example/signed"),
             "https://blob.example/signed": _Resp(body=archive.getvalue()),
             f"{api}/git/ref/tags/v1.4.2": _Resp(body=json.dumps({"object": tag_obj}).encode()),
@@ -537,6 +593,9 @@ class FakeGitHub:
     def open(self, request, timeout):
         self.seen.append((request.full_url, request.get_header("Authorization")))
         resp = self.routes.get(request.full_url)
+        if resp is None and "/artifacts?name=" in request.full_url:
+            # Like GitHub: an unknown artifact name is an empty listing, not 404.
+            return _Resp(body=b'{"total_count": 0, "artifacts": []}')
         if resp is None:
             raise urllib.error.HTTPError(request.full_url, 404, "nf", {}, None)
         return resp
@@ -544,7 +603,7 @@ class FakeGitHub:
 
 def test_github_verifier_accepts_bound_release_and_strips_auth_on_redirect():
     gh = FakeGitHub()
-    release = GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, ARGS)
+    release = GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, VERIFY_ARGS)
     assert release["image_ref"] == f"{REPO}@{DIGEST}" and release["trigger_sha"] == TRIGGER
     auth = dict(gh.seen)
     assert auth["https://blob.example/signed"] is None
@@ -563,9 +622,46 @@ def test_github_verifier_accepts_bound_release_and_strips_auth_on_redirect():
 ])
 def test_github_verifier_rejects_mismatches(gh_kwargs, message):
     with pytest.raises(ReleaseVerificationError, match=message):
-        GitHubReleaseVerifier("tok", opener=FakeGitHub(**gh_kwargs)).verify(SPEC, ARGS)
+        GitHubReleaseVerifier("tok", opener=FakeGitHub(**gh_kwargs)).verify(SPEC, VERIFY_ARGS)
+
+
+def test_github_verifier_reads_latest_attempt_receipt_and_accepts_warning():
+    # TASK-1030: re-run attempt 2 publishes release-receipt-2; an auto-mode
+    # llm-bawt skip is a deployable warning carried into the binding.
+    gh = FakeGitHub(run={"run_attempt": 2}, artifact="release-receipt-2",
+                    receipt={"workflow_run_attempt": "2", "status": "complete_with_warning",
+                             "warnings": ["llm-bawt not tagged: origin master is X, authorized Y"]})
+    release = GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, VERIFY_ARGS)
+    assert release["workflow_run_attempt"] == "2"
+    assert release["receipt_status"] == "complete_with_warning"
+    assert release["warnings"] == ["llm-bawt not tagged: origin master is X, authorized Y"]
+    # The attempt-specific artifact was used; the legacy name never consulted.
+    urls = [u for u, _ in gh.seen]
+    assert any(u.endswith("artifacts?name=release-receipt-2") for u in urls)
+    assert not any(u.endswith("artifacts?name=release-receipt") for u in urls)
+
+
+def test_github_verifier_rejects_attempt_receipt_for_other_attempt():
+    gh = FakeGitHub(run={"run_attempt": 2}, artifact="release-receipt-2",
+                    receipt={"workflow_run_attempt": "1"})
+    with pytest.raises(ReleaseVerificationError, match="workflow_run_attempt"):
+        GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, VERIFY_ARGS)
+
+
+def test_github_verifier_never_falls_back_to_an_earlier_attempt_artifact():
+    # Attempt 2 has no receipt yet; attempt 1's artifact must not satisfy it.
+    gh = FakeGitHub(run={"run_attempt": 2}, artifact="release-receipt-1",
+                    receipt={"workflow_run_attempt": "1"})
+    with pytest.raises(ReleaseVerificationError, match="release-receipt-2"):
+        GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, VERIFY_ARGS)
+
+
+def test_github_verifier_legacy_receipt_still_verifies_when_attempt_known():
+    gh = FakeGitHub(run={"run_attempt": 1})
+    release = GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, VERIFY_ARGS)
+    assert release["receipt_status"] == "complete"
 
 
 def test_github_verifier_fails_closed_without_token():
     with pytest.raises(ReleaseVerificationError, match="token not connected"):
-        GitHubReleaseVerifier("", opener=FakeGitHub()).verify(SPEC, ARGS)
+        GitHubReleaseVerifier("", opener=FakeGitHub()).verify(SPEC, VERIFY_ARGS)

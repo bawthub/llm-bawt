@@ -21,7 +21,8 @@ from sqlmodel import Session, SQLModel, select
 from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
 from .executor import validate_spec
-from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUEUED, JOB_RUNNING,
+from .release_spec import is_release_spec
+from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUEUED, JOB_RUNNING,
                      JOB_TERMINAL_STATES, OpsJob, OpsOperation, OpsOperationRevision)
 from .validation import canonical_json, validate_catalog
 
@@ -154,11 +155,15 @@ class OpsStore:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{field} must be an integer in {low}..{high}")
         schema, _ = validate_catalog(op.args_schema_json, op.args_defaults_json)
-        if op.executor_kind != "docker":
-            raise ValueError("only docker executor is supported")
+        if op.executor_kind not in (EXECUTOR_DOCKER, EXECUTOR_RELEASE):
+            raise ValueError("executor_kind must be 'docker' or 'release'")
         if op.target_host or op.run_as_user or op.working_directory:
-            raise ValueError("Docker operations do not support target_host/run_as_user/working_directory; no SSH or shell runner")
+            raise ValueError("Operations do not support target_host/run_as_user/working_directory; no SSH or shell runner")
         spec = validate_spec(op.command_script)
+        # TASK-1030: the release coordinator runs ONLY the pinned release spec,
+        # and that spec never reaches the Docker executor.
+        if (op.executor_kind == EXECUTOR_RELEASE) != is_release_spec(spec):
+            raise ValueError("release_orchestrate specs require executor_kind 'release' and vice versa")
         for key in ("container_name_from_arg", "compose_service_from_arg"):
             if key in spec and schema.get("properties", {}).get(spec[key], {}).get("type") != "string":
                 raise ValueError(f"{key} must reference a declared string argument")

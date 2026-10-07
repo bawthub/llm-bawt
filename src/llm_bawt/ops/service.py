@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .executor import DockerExecutor, Executor, ExecutorError, validate_spec
-from .image_deploy import IMAGE_ACTIONS
+from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
+from .release_spec import is_release_spec
+from .release_store import ReleaseStore
 from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                       bind_image_invocation, binding_matches_args)
 from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, JOB_QUEUED,
@@ -44,8 +46,10 @@ def _timestamp(raw):
 
 class OpsService:
     def __init__(self, store: OpsStore, *, executor: Executor | None = None,
-                 release_verifier: ReleaseVerifier | None = None):
+                 release_verifier: ReleaseVerifier | None = None,
+                 release_store: ReleaseStore | None = None):
         self.store = store
+        self.releases = release_store or ReleaseStore(None, engine=store.engine)
         self._release_verifier = release_verifier or GitHubReleaseVerifier()
         default = executor or DockerExecutor()
         self._executors = {default.kind(): default}
@@ -98,7 +102,8 @@ class OpsService:
             # release (or recorded last-known-good) plus an image CAS.
             try:
                 snapshot.update(bind_image_invocation(spec=spec, args=merged, store=self.store,
-                                                      executor=executor, verifier=self._release_verifier))
+                                                      releases=self.releases, executor=executor,
+                                                      verifier=self._release_verifier))
             except (ReleaseVerificationError, ExecutorError) as exc:
                 raise OpsDispatchError("release_unverified", str(exc)) from exc
         else:
@@ -106,6 +111,8 @@ class OpsService:
             # executor's Docker daemon does not have.
             try:
                 executor.check_target(spec, merged)
+                if is_release_spec(spec):
+                    snapshot["release_source"] = executor.approval_source(spec, merged)
             except ExecutorError as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
@@ -133,6 +140,22 @@ class OpsService:
                     raise ValueError(f"snapshot execution {key} mismatch")
             if not binding_matches_args(detached):
                 raise ValueError("snapshot release/rollback binding mismatch")
+            if is_release_spec(detached["spec"]):
+                source = detached.get("release_source") or {}
+                if (not isinstance(source.get("expected_sha"), str)
+                        or len(source["expected_sha"]) != 40
+                        or any(char not in "0123456789abcdef" for char in source["expected_sha"])
+                        or source.get("llm_bawt_expected_sha") not in (None, "")
+                        and (len(source["llm_bawt_expected_sha"]) != 40
+                             or any(char not in "0123456789abcdef" for char in source["llm_bawt_expected_sha"]))):
+                    raise ValueError("snapshot approved release sources are invalid")
+            if detached["spec"].get("action") == DEPLOY_ACTION:
+                binding = self.releases.verified_binding(detached["resolved_args"]["release_run_id"])
+                release = detached.get("release") or {}
+                for key in ("workflow_run_id", "workflow_run_attempt", "source_sha", "version",
+                            "tag", "digest", "image_repository", "trigger_sha"):
+                    if str(release.get(key)) != str(binding.get(key)):
+                        raise ValueError(f"snapshot release binding changed: {key}")
             return detached
         except (ValueError, TypeError, KeyError) as exc:
             raise OpsDispatchError("snapshot_invalid", str(exc)) from exc
@@ -157,7 +180,11 @@ class OpsService:
             except IdempotencyConflict as exc:
                 raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
             # Including queued: a replay is a read, not another submission.
-            return existing.to_api()
+            result = existing.to_api()
+            if existing.operation_slug == "bawthub.release-prod":
+                release = self.releases.get_by_parent_job(existing.id)
+                result["release_id"] = release.id if release else None
+            return result
         snapshot = snapshot or self.prepare_invocation(operation_slug, supplied)
         current = self.store.get_operation_by_slug(operation_slug)
         if current is None or not current.enabled or current.soft_deleted_at is not None:
@@ -176,7 +203,11 @@ class OpsService:
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
         self._dispatch_queued(job)
-        return self.store.get_job(job.id).to_api()
+        result = self.store.get_job(job.id).to_api()
+        if op.executor_kind == "release":
+            release = self.releases.get_by_parent_job(job.id)
+            result["release_id"] = release.id if release else None
+        return result
 
     def _dispatch_queued(self, job):
         if job.state != JOB_QUEUED:

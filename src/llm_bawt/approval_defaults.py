@@ -4,6 +4,20 @@ from typing import Any
 # Conservative default rule set (TASK-296). High/critical, shell-destructive only.
 _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
     {
+        "id": "seed-agent-deny-local-prod-build",
+        "backend_scope": "*", "tool_name": "Bash", "matcher_type": "regex",
+        # Anchor at a command invocation: search-text in rg/tests is not a release.
+        # Covers direct make and the common SSH+cd shell wrapper.
+        "pattern": r"(?i)^\s*(?:ssh\s+(?:-[a-z]+\s+)*[^\s;&|]+\s+['\"]?)?(?:cd\s+[^;&|]+\s*&&\s*)?make\s+(?:-o\s+version-release\s+)?(?:rebuild-prod|snapshot-rebuild)\b",
+        "action": "deny", "severity": "critical", "category": "deploy", "order": 1,
+    },
+    {
+        "id": "seed-agent-deny-direct-prod-container-mutation",
+        "backend_scope": "*", "tool_name": "Bash", "matcher_type": "regex",
+        "pattern": r"(?i)^\s*(?:ssh\s+(?:-[a-z]+\s+)*[^\s;&|]+\s+['\"]?)?(?:cd\s+[^;&|]+\s*&&\s*)?docker\s+(?:(?:container\s+)?(?:stop|start|restart|rm|kill)\s+[^;&|]*\bbawthub-frontend-prod-1\b|compose\s+(?:-f\s+[^\s]+\s+)*(?:up|down|stop|restart|rm|build)\s+[^;&|]*\bfrontend-prod\b)",
+        "action": "deny", "severity": "critical", "category": "deploy", "order": 2,
+    },
+    {
         "id": "seed-ops-run-bridge-restart",
         "backend_scope": "*",
         "tool_name": "ops_run",
@@ -51,6 +65,18 @@ _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
         "category": "deploy",
         "approval_prompt": "Roll BawtHub production back to the recorded last-known-good image? Approve?",
         "order": 8,
+    },
+    {
+        "id": "seed-ops-run-bawthub-release-prod",
+        "backend_scope": "*",
+        "tool_name": "ops_run",
+        "matcher_type": "prefix",
+        "pattern": "operation=bawthub.release-prod ",
+        "action": "require_approval",
+        "severity": "high",
+        "category": "deploy",
+        "approval_prompt": "Build this BawtHub release? Production deploy requires a separate approval after the build.",
+        "order": 9,
     },
     {
         "id": "seed-ops-run-require-approval",

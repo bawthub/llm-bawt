@@ -36,6 +36,7 @@ from ...approval_policies import (
     EXEC_SKIPPED,
     EXEC_SUCCEEDED,
     KIND_MCP,
+    KIND_ORCHESTRATION,
     REQ_APPROVED,
     REQ_CANCELLED,
     REQ_DENIED,
@@ -485,6 +486,28 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
     bot_id = row.bot_id
     user_id = row.user_id
     message = (body.message or "").strip()
+
+    if row.request_kind == KIND_ORCHESTRATION:
+        # A durable server-side release coordinator owns the follow-up. Never
+        # grant an agent tool, send a continuation, or run the deploy here.
+        already_resolved = row.status != "pending"
+        new_status = {"approve": REQ_APPROVED, "deny": REQ_DENIED,
+                      "cancel": REQ_CANCELLED, "respond": REQ_RESPONDED}[outcome]
+        row = store.resolve_request(
+            request_id, status=new_status, resolved_by=body.resolved_by,
+            message=message, continuation_owner="none",
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Request disappeared during resolve")
+        await _fanout_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
+        return {
+            "ok": True, "detail": "already_resolved" if already_resolved else row.status,
+            "status": row.status, "request_id": request_id, "bot_id": bot_id,
+            "continuation_prompt": None, "parent_turn_id": row.turn_id,
+            "already_resolved": already_resolved,
+            "cancelled": row.status == REQ_CANCELLED,
+            "server_dispatched": False, "continuation_owner": "none",
+        }
 
     if row.request_kind == KIND_MCP:
         # MCP approvals are server-owned: execute the exact stored invocation

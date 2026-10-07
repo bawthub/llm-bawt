@@ -1,7 +1,7 @@
 """PostgreSQL approval locks must use a text-safe key."""
 from types import SimpleNamespace
 
-from llm_bawt.approval_request_store import _lock_mcp_invocation
+from llm_bawt.approval_mcp_store import _lock_mcp_invocation
 
 
 def test_mcp_approval_advisory_lock_uses_postgres_safe_distinct_keys():

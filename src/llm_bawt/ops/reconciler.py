@@ -10,6 +10,7 @@ import logging
 import os
 import time
 
+from .release_executor import build_ops_service
 from .service import OpsService
 from .store import OpsStore
 from ..utils.config import Config
@@ -48,7 +49,7 @@ def main():
     interval = float(os.getenv("LLM_BAWT_OPS_RECONCILE_INTERVAL", "5"))
     if interval < 1:
         raise ValueError("LLM_BAWT_OPS_RECONCILE_INTERVAL must be at least 1 second")
-    OpsReconciler(OpsService(store), interval=interval).run()
+    OpsReconciler(build_ops_service(Config(), store), interval=interval).run()
 
 
 if __name__ == "__main__":

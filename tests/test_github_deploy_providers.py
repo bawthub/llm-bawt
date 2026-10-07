@@ -6,7 +6,11 @@ import pytest
 
 from llm_bawt.service.providers import github_deploy
 from llm_bawt.service.providers.base import ConnectionRecord
-from llm_bawt.service.providers.github_deploy import GhcrPullAdapter, GitHubReleaseAdapter
+from llm_bawt.service.providers.github_deploy import (
+    GhcrPullAdapter,
+    GitHubReleaseAdapter,
+    GitHubReleaseDispatchAdapter,
+)
 from llm_bawt.service.providers.registry import _ADAPTER_CLASSES
 
 
@@ -41,6 +45,13 @@ def _github(monkeypatch, *, status=200, scopes="", login="zenoran"):
 def test_both_adapters_are_registered_api_key_providers():
     assert _ADAPTER_CLASSES["github-release"] is GitHubReleaseAdapter
     assert _ADAPTER_CLASSES["ghcr-pull"] is GhcrPullAdapter
+
+
+def test_release_dispatch_credential_is_separate_from_read_only_verifier():
+    assert _ADAPTER_CLASSES["github-release-dispatch"] is GitHubReleaseDispatchAdapter
+    assert GitHubReleaseDispatchAdapter.id not in {GitHubReleaseAdapter.id, GhcrPullAdapter.id}
+    assert "Read and write" in GitHubReleaseDispatchAdapter.credential_help
+    assert "Read and write" not in GitHubReleaseAdapter.credential_help
 
 
 def test_release_token_connects_with_login_as_account(monkeypatch):

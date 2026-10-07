@@ -144,10 +144,8 @@ async def ops_run(
             returns the pre-existing job without re-dispatching.
 
     Returns:
-        ``{job_id, operation, state, submitted_at, host_unit_name}`` on
-        success. On failure raises with a machine-readable ``code`` in the
-        error message: ``operation_not_found`` | ``operation_disabled`` |
-        ``args_invalid`` | ``executor_unavailable`` | ``dispatch_failed``.
+        Job metadata (`job_id`, optional `release_id`, state). Errors carry
+        a machine-readable code; inspect it rather than retrying blindly.
     """
     from ..ops.service import OpsDispatchError
 
@@ -187,6 +185,7 @@ async def ops_run(
     return {
         "id": result["id"],
         "job_id": result["id"],
+        "release_id": result.get("release_id"),
         "operation": result["operation"],
         "state": result["state"],
         "submitted_at": result["submitted_at"],

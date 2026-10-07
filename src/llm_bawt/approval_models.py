@@ -116,6 +116,11 @@ REQ_SUPERSEDED = "superseded"
 # unambiguous.
 KIND_HARNESS = "harness"
 KIND_MCP = "mcp"
+# TASK-1030: a server-owned orchestration decision (e.g. the deploy step of a
+# durable BawtHub release). The coordinator that recorded it observes the
+# decision and acts; resolving it grants nothing and dispatches no agent
+# continuation (continuation_owner="none").
+KIND_ORCHESTRATION = "orchestration"
 
 # TASK-639: execution state machine for MCP-kind approvals. Harness-kind rows
 # leave this at EXEC_NOT_APPLICABLE — execution happens on the CLIENT after

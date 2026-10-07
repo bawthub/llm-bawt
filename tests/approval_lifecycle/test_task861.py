@@ -267,6 +267,28 @@ def test_admin_resolve_defaults_durable_server_owner_and_retries_no_duplicate(cl
     assert len(store.find_pending_continuations()) == 1
 
 
+@pytest.mark.parametrize("first, expected", [("approve", REQ_APPROVED), ("deny", REQ_DENIED)])
+def test_orchestration_approval_first_decision_wins_without_grant_or_continuation(client, store, first, expected):
+    row, created = store.record_orchestration_request(
+        request_id="release-deploy-test", bot_id="test-bot", user_id="test-user",
+        turn_id="turn-1", backend="ops-release", tool_name="ops_release_deploy",
+        tool_arguments={"operation": "bawthub.deploy-prod-image"}, subject="release 1.2.3",
+        grant_key="g" * 64, severity="high", prompt="Deploy?",
+        operations_snapshot={"release": {"version": "1.2.3"}},
+    )
+    assert created
+    first_reply = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": first}).json()
+    second = "deny" if first == "approve" else "approve"
+    second_reply = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": second}).json()
+    assert first_reply["status"] == second_reply["status"] == expected
+    assert first_reply["continuation_prompt"] is None and not first_reply["server_dispatched"]
+    assert second_reply["already_resolved"]
+    saved = store.get_request(row.id)
+    assert saved.continuation_owner == "none" and saved.grant_state == "not_applicable"
+    assert store.claim_client_grant(row.id) is False
+    assert store.find_pending_continuations() == []
+
+
 def test_client_owner_gets_explicit_grant_failure_not_success(client, store):
     row = harness(store)
     response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "approve", "dispatch_continuation": False})

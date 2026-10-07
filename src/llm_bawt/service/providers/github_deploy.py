@@ -7,6 +7,9 @@ Two static tokens, stored like every other API key: encrypted in the
 - ``github-release`` — fine-grained token, Actions+Contents READ on the release
   repository. :class:`llm_bawt.ops.release.GitHubReleaseVerifier` uses it to
   verify a workflow run/receipt/tag before an approval snapshot exists.
+- ``github-release-dispatch`` — separate fine-grained token, Actions READ+WRITE
+  and Contents READ on the release repositories. The durable release coordinator
+  uses it for remote preflight, workflow dispatch, status and safe failed-job reruns.
 - ``ghcr-pull`` — classic token with ``read:packages``. The ops executor uses it
   to pull the approved ``repo@digest`` during deploy preflight, so the one-shot
   worker never holds a registry credential.
@@ -73,6 +76,20 @@ class GitHubReleaseAdapter(_GitHubTokenAdapter):
                    "before a production deploy approval is shown.")
     credential_help = ("Fine-grained token, resource owner bawthub, only the bawthub repository, "
                        "permissions Actions: Read and Contents: Read.")
+    setup_url = "https://github.com/settings/personal-access-tokens/new"
+
+
+class GitHubReleaseDispatchAdapter(_GitHubTokenAdapter):
+    id = "github-release-dispatch"
+    label = "GitHub release workflow dispatch"
+    description = (
+        "Runs and reconciles the durable BawtHub release workflow; separate from "
+        "the read-only deployment verifier."
+    )
+    credential_help = (
+        "Fine-grained token, resource owner bawthub, only the bawthub and llm-bawt "
+        "repositories, permissions Actions: Read and write and Contents: Read."
+    )
     setup_url = "https://github.com/settings/personal-access-tokens/new"
 
 

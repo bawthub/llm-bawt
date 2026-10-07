@@ -315,6 +315,17 @@ class ApprovalAwareFastMCP(FastMCP):
                 )
                 if not isinstance(operations_snapshot, dict):
                     raise ValueError("Operation preparer must return a snapshot object")
+            approval_prompt = decision.prompt
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("release_source"):
+                source = operations_snapshot["release_source"]
+                spec = operations_snapshot["spec"]
+                approval_prompt = (
+                    f"{decision.prompt or 'Authorize remote BawtHub release build?'}\n"
+                    f"BawtHub {spec['github_repository']}@{source['expected_sha']}\n"
+                    f"llm-bawt {spec['llm_bawt_repository']}@"
+                    f"{source.get('llm_bawt_expected_sha') or 'off'}\n"
+                    "Production deployment requires a separate approval."
+                )
             row, created = store.record_mcp_request(
                 request_id=request_id,
                 tool_use_id=call_context.tool_use_id,
@@ -329,7 +340,7 @@ class ApprovalAwareFastMCP(FastMCP):
                 grant_key=decision.grant_key,
                 policy_id=getattr(decision.policy, "id", None),
                 severity=decision.severity.value,
-                prompt=decision.prompt,
+                prompt=approval_prompt,
                 invocation_hash=invocation_hash,
                 operations_snapshot=operations_snapshot,
                 caller_context_json=json.dumps(
