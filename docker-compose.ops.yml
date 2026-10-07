@@ -26,6 +26,9 @@ services:
       LLM_BAWT_OPS_RECEIPT_ROOT: /var/lib/llm-bawt-ops
     volumes:
       - ./src:/app/src:ro
+      # Read only the app's existing encryption key, not its full config directory.
+      # Release reconciliation must decrypt the same DB-stored provider credentials.
+      - ${HOME}/.config/llm-bawt/secret.key:/root/.config/llm-bawt/secret.key:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - ops-receipts:/var/lib/llm-bawt-ops
     restart: unless-stopped

@@ -74,8 +74,11 @@ An operator setting up a new installation must:
    override mounts the volume at `/var/lib/llm-bawt-ops` in app and reconciler,
    and starts a separate `python -m llm_bawt.ops.reconciler` service. It uses
    the existing app image, `.env` DB configuration, default stack network and
-   read-only dev source mount. Adapt that mount/network explicitly for a baked
-   production image or alternate database network; do not guess.
+   read-only dev source mount. It also mounts the app's existing credential key
+   file read-only, not the entire app config directory; reconciliation needs the
+   same key to decrypt DB-stored GitHub tokens. Validate the merged Compose config
+   and separately authorize recreation of an existing reconciler to add the mount.
+   Adapt the source mount/network for a baked image or alternate DB network.
 5. With explicit deployment permission, recreate **only** app and the new
    ops-reconciler service. A restart alone cannot add mounts/environment. Never
    restart bridges/Redis as part of this setup. Applying the override/building
@@ -165,7 +168,8 @@ installation, not permission for another deployment):
    `github-release` — fine-grained, Actions:read + Contents:read on
    `bawthub/bawthub` only; `ghcr-pull` — classic, `read:packages` only (ghcr.io
    rejects fine-grained tokens; the GitHub login becomes the registry user).
-   No env var or volume: nothing to recreate for credentials.
+   No new env var is needed for connection changes. The reconciler must have the
+   existing app encryption key mounted read-only before it can use these tokens.
 3. Reload the app with the ops worker configuration, review the seeded rows and
    policies, then enable — each a separate explicit decision.
 
