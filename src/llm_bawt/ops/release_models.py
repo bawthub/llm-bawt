@@ -72,15 +72,11 @@ class ReleaseRun(SQLModel, table=True):
     )
     release_task: str = Field(sa_column=Column(String(64), nullable=False))
     bump: str = Field(default="patch", sa_column=Column(String(16), nullable=False))
-    llm_bawt_mode: str = Field(default="auto", sa_column=Column(String(16), nullable=False))
 
     github_repository: str = Field(sa_column=Column(String(256), nullable=False))
     workflow_path: str = Field(sa_column=Column(String(512), nullable=False))
     canonical_branch: str = Field(sa_column=Column(String(256), nullable=False))
-    llm_bawt_repository: str | None = Field(default=None, sa_column=Column(String(256), nullable=True))
-    llm_bawt_branch: str | None = Field(default=None, sa_column=Column(String(256), nullable=True))
     source_sha: str | None = Field(default=None, sa_column=Column(String(40), nullable=True))
-    llm_bawt_sha: str | None = Field(default=None, sa_column=Column(String(40), nullable=True))
     release_plan_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
     dispatch_started_at: datetime | None = Field(
@@ -98,7 +94,6 @@ class ReleaseRun(SQLModel, table=True):
     deployable: bool = Field(
         default=False, sa_column=Column(Boolean, nullable=False, server_default="false")
     )
-    warning_text: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     version: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
     tag: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     digest: str | None = Field(default=None, sa_column=Column(String(80), nullable=True))
@@ -147,14 +142,10 @@ class ReleaseRun(SQLModel, table=True):
             "terminal": self.state in RELEASE_TERMINAL_STATES,
             "release_task": self.release_task,
             "bump": self.bump,
-            "llm_bawt_mode": self.llm_bawt_mode,
             "github_repository": self.github_repository,
             "workflow_path": self.workflow_path,
             "canonical_branch": self.canonical_branch,
-            "llm_bawt_repository": self.llm_bawt_repository,
-            "llm_bawt_branch": self.llm_bawt_branch,
             "source_sha": self.source_sha,
-            "llm_bawt_sha": self.llm_bawt_sha,
             "release_plan": _loads(self.release_plan_json, {}),
             "dispatch_started_at": _iso(self.dispatch_started_at),
             "github_run_id": self.github_run_id,
@@ -164,7 +155,6 @@ class ReleaseRun(SQLModel, table=True):
             "receipt": _loads(self.receipt_json),
             "receipt_verified_at": _iso(self.receipt_verified_at),
             "deployable": bool(self.deployable),
-            "warning_text": self.warning_text,
             "version": self.version,
             "tag": self.tag,
             "digest": self.digest,

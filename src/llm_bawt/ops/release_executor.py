@@ -36,18 +36,12 @@ class ReleaseExecutor(Executor):
             raise ExecutorError(f"deploy operation {slug} is unavailable or disabled")
 
     def approval_source(self, spec: dict, args: dict) -> dict:
-        """Freeze remote heads before the build approval is shown."""
+        """Freeze the remote head before the build approval is shown."""
         from .github_workflow import GitHubWorkflowError
 
         try:
-            gateway = self.coordinator.gateway
-            source = {"expected_sha": gateway.resolve_branch_head(
-                spec["github_repository"], spec["canonical_branch"]),
-                "llm_bawt_expected_sha": None}
-            if args["llm_bawt_mode"] != "off":
-                source["llm_bawt_expected_sha"] = gateway.resolve_branch_head(
-                    spec["llm_bawt_repository"], spec["llm_bawt_branch"])
-            return source
+            return {"expected_sha": self.coordinator.gateway.resolve_branch_head(
+                spec["github_repository"], spec["canonical_branch"])}
         except GitHubWorkflowError as exc:
             raise ExecutorError(f"remote release source unavailable: {exc}") from exc
 

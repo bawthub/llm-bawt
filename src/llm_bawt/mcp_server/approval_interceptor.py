@@ -322,8 +322,6 @@ class ApprovalAwareFastMCP(FastMCP):
                 approval_prompt = (
                     f"{decision.prompt or 'Authorize remote BawtHub release build?'}\n"
                     f"BawtHub {spec['github_repository']}@{source['expected_sha']}\n"
-                    f"llm-bawt {spec['llm_bawt_repository']}@"
-                    f"{source.get('llm_bawt_expected_sha') or 'off'}\n"
                     "Production deployment requires a separate approval."
                 )
             row, created = store.record_mcp_request(

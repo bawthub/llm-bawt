@@ -19,8 +19,6 @@ RELEASE_SPEC_PATTERNS = {
     "github_repository": _REPOSITORY,
     "workflow_path": r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml",
     "canonical_branch": _BRANCH,
-    "llm_bawt_repository": _REPOSITORY,
-    "llm_bawt_branch": _BRANCH,
     "image_repository": r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*",
     "deploy_operation": r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
 }

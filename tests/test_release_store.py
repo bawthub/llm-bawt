@@ -21,12 +21,9 @@ from llm_bawt.ops.release_store import ReleaseStore, ReleaseStoreUnavailable
 PLAN = dict(
     release_task="TASK-1030",
     bump="patch",
-    llm_bawt_mode="auto",
     github_repository="bawthub/bawthub",
     workflow_path=".github/workflows/release-frontend.yml",
     canonical_branch="main",
-    llm_bawt_repository="bawthub/llm-bawt",
-    llm_bawt_branch="master",
 )
 DIGEST = "sha256:" + "d" * 64
 SOURCE = "1" * 40
@@ -53,6 +50,23 @@ def test_create_is_idempotent_per_parent_and_rejects_plan_drift(store):
     other = store.create(parent_job_id="b" * 32, **PLAN)
     assert other.release_request_id != first.release_request_id
     assert store.get_by_request_id(first.release_request_id).id == first.id
+
+
+def test_bootstrap_drops_removed_llm_bawt_tagging_columns(tmp_path):
+    from sqlalchemy import inspect, text
+
+    path = tmp_path / "old.sqlite"
+    ReleaseStore(None, engine=create_engine(f"sqlite:///{path}"))
+    removed = {"llm_bawt_mode", "llm_bawt_repository", "llm_bawt_branch", "llm_bawt_sha", "warning_text"}
+    old = create_engine(f"sqlite:///{path}")
+    with old.begin() as conn:
+        conn.execute(text("ALTER TABLE ops_release_runs ADD COLUMN llm_bawt_mode VARCHAR(16) NOT NULL DEFAULT 'auto'"))
+        for column in sorted(removed - {"llm_bawt_mode"}):
+            conn.execute(text(f"ALTER TABLE ops_release_runs ADD COLUMN {column} TEXT"))
+    upgraded = ReleaseStore(None, engine=create_engine(f"sqlite:///{path}"))
+    columns = {col["name"] for col in inspect(upgraded.engine).get_columns("ops_release_runs")}
+    assert not columns & removed
+    assert upgraded.create(parent_job_id="a" * 32, **PLAN).state == RELEASE_PREFLIGHT
 
 
 def test_store_without_engine_is_unavailable_for_writes():

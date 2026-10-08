@@ -23,14 +23,11 @@ SPEC = {
     "github_repository": "bawthub/bawthub",
     "workflow_path": ".github/workflows/release-frontend.yml",
     "canonical_branch": "main",
-    "llm_bawt_repository": "bawthub/llm-bawt",
-    "llm_bawt_branch": "master",
     "image_repository": "ghcr.io/bawthub/frontend",
     "deploy_operation": "bawthub.deploy-prod-image",
 }
-SNAPSHOT = {"spec": SPEC, "resolved_args": {"release_task": "TASK-1030", "bump": "patch",
-                                               "llm_bawt_mode": "auto"},
-            "release_source": {"expected_sha": BASE, "llm_bawt_expected_sha": "3" * 40}}
+SNAPSHOT = {"spec": SPEC, "resolved_args": {"release_task": "TASK-1030", "bump": "patch"},
+            "release_source": {"expected_sha": BASE}}
 
 
 class FakeGateway:
@@ -42,8 +39,9 @@ class FakeGateway:
         self.receipts = {}
 
     def resolve_branch_head(self, repo, branch):
+        assert repo == "bawthub/bawthub", f"release must not consult {repo}"
         self.heads.append((repo, branch))
-        return BASE if repo == "bawthub/bawthub" else "3" * 40
+        return BASE
 
     def dispatch_workflow(self, repo, path, branch, inputs):
         self.dispatches.append((repo, path, branch, inputs.copy()))
@@ -87,8 +85,7 @@ def _receipt(row, *, attempt, status):
             "workflow_run_attempt": str(attempt), "release_request_id": row.release_request_id,
             "base_sha": BASE, "source_sha": SOURCE, "version": "0.1.63", "tag": "v0.1.63",
             "digest": DIGEST, "image_repository": SPEC["image_repository"],
-            "image_ref": f'{SPEC["image_repository"]}@{DIGEST}', "llm_bawt_mode": "auto",
-            "warnings": []}
+            "image_ref": f'{SPEC["image_repository"]}@{DIGEST}'}
 
 
 def _start(coordinator, store, gateway, advance):
@@ -96,7 +93,7 @@ def _start(coordinator, store, gateway, advance):
     assert isinstance(first, ReconcileResult)
     row = store.get_by_parent_job("a" * 32)
     assert row.state == RELEASE_DISPATCHING_BUILD
-    assert gateway.heads == [("bawthub/bawthub", "main"), ("bawthub/llm-bawt", "master")]
+    assert gateway.heads == [("bawthub/bawthub", "main")]
     assert gateway.dispatches[0][1] == "release-frontend.yml"
     assert gateway.dispatches[0][3]["expected_sha"] == BASE
     return row
@@ -120,21 +117,10 @@ def test_dispatch_intent_survives_restart_and_does_not_double_bump(rig):
 
 def test_remote_branch_moved_since_approval_never_dispatches(rig):
     coordinator, store, gateway, _advance = rig
-    snapshot = {**SNAPSHOT, "release_source": {"expected_sha": "4" * 40,
-                                                "llm_bawt_expected_sha": "3" * 40}}
+    snapshot = {**SNAPSHOT, "release_source": {"expected_sha": "4" * 40}}
     result = coordinator.pump("a" * 32, snapshot)
     assert result.state == "failed"
     assert store.get_by_parent_job("a" * 32).error_code == "approved_source_moved"
-    assert gateway.dispatches == []
-
-
-def test_optional_remote_branch_moved_since_approval_never_dispatches(rig):
-    coordinator, store, gateway, _advance = rig
-    snapshot = {**SNAPSHOT, "release_source": {"expected_sha": BASE,
-                                                "llm_bawt_expected_sha": "4" * 40}}
-    result = coordinator.pump("a" * 32, snapshot)
-    assert result.state == "failed"
-    assert store.get_by_parent_job("a" * 32).error_code == "approved_llm_bawt_source_moved"
     assert gateway.dispatches == []
 
 
@@ -259,7 +245,7 @@ def test_denied_deploy_never_dispatches_child_and_keeps_verified_build(rig):
     assert declined.deploy_job_id is None and ops.dispatches == []
 
 
-def test_warning_build_requires_separate_approval_and_dispatches_one_child(rig):
+def test_complete_build_requires_separate_approval_and_dispatches_one_child(rig):
     import json
 
     from llm_bawt.approval_models import REQ_APPROVED
@@ -316,14 +302,12 @@ def test_warning_build_requires_separate_approval_and_dispatches_one_child(rig):
     coordinator._publisher = published.append
     row = _start(coordinator, store, gateway, advance)
     gateway.runs = [_run(conclusion="success")]
-    gateway.receipts[1] = _receipt(row, attempt=1, status="complete_with_warning")
-    gateway.receipts[1]["warnings"] = ["optional llm-bawt tag skipped"]
+    gateway.receipts[1] = _receipt(row, attempt=1, status="complete")
     advance()
     result = coordinator.pump(row.parent_job_id, SNAPSHOT)
     assert result.state == "running"
     waiting = store.get(row.id)
     assert waiting.state == RELEASE_AWAITING_DEPLOY_APPROVAL
-    assert "optional llm-bawt tag skipped" in waiting.warning_text
     assert approvals.get_request(waiting.deploy_approval_request_id).status == "pending"
     approval_cards = [event for event in published if event["_type"] == "tool_approval_required"]
     assert len(approval_cards) == 1 and approval_cards[0]["continuation_capable"] is False

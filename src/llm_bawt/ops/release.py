@@ -10,8 +10,7 @@ secrets), so the operator approves an exact, verified release:
   SHA; plus a compare-and-swap on the image the target runs right now. The
   receipt is read from the run's LATEST attempt (``release-receipt-<attempt>``,
   TASK-1030) with a fallback to the pre-TASK-1030 single ``release-receipt``
-  artifact. ``complete_with_warning`` (llm-bawt tagging skipped/failed in
-  ``auto`` mode) is deployable; the warning travels in the binding.
+  artifact. Only a ``complete`` receipt is deployable.
 * rollback — a SUCCEEDED deploy job for the same target, its recorded
   last-known-good image, and a CAS that the target still runs what it deployed.
 
@@ -34,7 +33,7 @@ from .image_deploy import DEPLOY_ACTION, ROLLBACK_ACTION, parse_deployment
 
 RECEIPT_SCHEMA = "bawthub.release-receipt/v1"
 RECEIPT_ARTIFACT = "release-receipt"
-DEPLOYABLE_RECEIPT_STATUSES = ("complete", "complete_with_warning")
+DEPLOYABLE_RECEIPT_STATUSES = ("complete",)
 # Public deploy input is a durable release ID. The four identity fields below
 # are derived from the verified release row, never accepted from the caller.
 _DEPLOY_ARGS = {"release_run_id": r"[0-9a-f]{32}"}
@@ -205,7 +204,6 @@ class GitHubReleaseVerifier(ReleaseVerifier):
                 "tag": tag, "digest": args["digest"], "image_repository": spec["image_repository"],
                 "image_ref": f"{spec['image_repository']}@{args['digest']}",
                 "receipt_status": receipt["status"],
-                "warnings": [str(w) for w in (receipt.get("warnings") or []) if w][:10],
                 "verified_at": datetime.now(timezone.utc).isoformat()}
 
 

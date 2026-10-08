@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, inspect, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
@@ -21,6 +21,11 @@ from .validation import canonical_json
 
 class ReleaseStoreUnavailable(RuntimeError):
     pass
+
+
+_REMOVED_COLUMNS = frozenset({
+    "llm_bawt_mode", "llm_bawt_repository", "llm_bawt_branch", "llm_bawt_sha", "warning_text",
+})
 
 
 def _utcnow() -> datetime:
@@ -50,7 +55,6 @@ class ReleaseStore:
     _MUTABLE = {
         "state",
         "source_sha",
-        "llm_bawt_sha",
         "release_plan_json",
         "dispatch_started_at",
         "github_run_id",
@@ -60,7 +64,6 @@ class ReleaseStore:
         "receipt_json",
         "receipt_verified_at",
         "deployable",
-        "warning_text",
         "version",
         "tag",
         "digest",
@@ -90,8 +93,14 @@ class ReleaseStore:
                 bind=conn,
                 tables=[ReleaseRun.__table__, ReleaseEvent.__table__],
             )
+            # llm-bawt release tagging was removed; drop its columns from
+            # databases created before that. Historical values remain in each
+            # run's plan/receipt JSON and events.
+            existing = {col["name"] for col in inspect(conn).get_columns(ReleaseRun.__tablename__)}
+            for column in sorted(_REMOVED_COLUMNS & existing):
+                conn.execute(text(f"ALTER TABLE {ReleaseRun.__tablename__} DROP COLUMN {column}"))
 
-        self._schema_guard.run(self.engine, "ops-release-store-task1030-v2", bootstrap)
+        self._schema_guard.run(self.engine, "ops-release-store-task1030-v3", bootstrap)
 
     def _require(self) -> None:
         if self.engine is None:
@@ -124,12 +133,9 @@ class ReleaseStore:
         parent_job_id: str,
         release_task: str,
         bump: str,
-        llm_bawt_mode: str,
         github_repository: str,
         workflow_path: str,
         canonical_branch: str,
-        llm_bawt_repository: str | None = None,
-        llm_bawt_branch: str | None = None,
     ) -> ReleaseRun:
         """Create once per parent job; duplicate delivery returns the same row."""
         self._require()
@@ -141,12 +147,9 @@ class ReleaseStore:
             release_request_id=request_id,
             release_task=release_task,
             bump=bump,
-            llm_bawt_mode=llm_bawt_mode,
             github_repository=github_repository,
             workflow_path=workflow_path,
             canonical_branch=canonical_branch,
-            llm_bawt_repository=llm_bawt_repository,
-            llm_bawt_branch=llm_bawt_branch,
         )
         with Session(self.engine) as session:
             session.add(row)
@@ -158,25 +161,13 @@ class ReleaseStore:
                 existing = self.get_by_parent_job(parent_job_id)
                 if existing is None:
                     raise
-                expected = (
-                    release_task,
-                    bump,
-                    llm_bawt_mode,
-                    github_repository,
-                    workflow_path,
-                    canonical_branch,
-                    llm_bawt_repository,
-                    llm_bawt_branch,
-                )
+                expected = (release_task, bump, github_repository, workflow_path, canonical_branch)
                 actual = (
                     existing.release_task,
                     existing.bump,
-                    existing.llm_bawt_mode,
                     existing.github_repository,
                     existing.workflow_path,
                     existing.canonical_branch,
-                    existing.llm_bawt_repository,
-                    existing.llm_bawt_branch,
                 )
                 if actual != expected:
                     raise ValueError("parent ops job is already bound to another release plan")
@@ -405,7 +396,7 @@ class ReleaseStore:
             raise ValueError("release run has no active verified deployable receipt")
         receipt = json.loads(row.receipt_json)
         if (receipt.get("schema") != "bawthub.release-receipt/v1"
-                or receipt.get("status") not in ("complete", "complete_with_warning")
+                or receipt.get("status") != "complete"
                 or receipt.get("repository") != row.github_repository):
             raise ValueError("stored release receipt is not deployable or belongs to another repository")
         # GitHub exposes run id/attempt as strings in env; the row stores the
@@ -442,7 +433,6 @@ class ReleaseStore:
             "image_ref": f"{row.image_repository}@{row.digest}",
             "verified_at": _aware(row.receipt_verified_at).isoformat(),
             "receipt_status": receipt.get("status"),
-            "warning": row.warning_text,
         }
 
 

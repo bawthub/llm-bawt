@@ -16,8 +16,6 @@ Invariants (each has a regression test in tests/test_release_coordinator.py):
   workflow is dispatched at most once per release, a partial run is recovered
   with "Re-run failed jobs" on the SAME run (no second version bump), and the
   child deploy is keyed by a deterministic idempotency key.
-* An optional (``llm_bawt_mode=auto``) llm-bawt tag failure yields a deployable
-  ``complete_with_warning`` receipt, never a stranded image.
 * Deploy is a separate human decision: a server-owned orchestration approval
   carrying the verified deploy snapshot. The first decision wins.
 * Anything ambiguous ends in ``lost_requires_inspection``; nothing is retried
@@ -171,12 +169,9 @@ class ReleaseCoordinator:
             parent_job_id=job_id,
             release_task=args["release_task"],
             bump=args.get("bump", "patch"),
-            llm_bawt_mode=args.get("llm_bawt_mode", "auto"),
             github_repository=spec["github_repository"],
             workflow_path=spec["workflow_path"],
             canonical_branch=spec["canonical_branch"],
-            llm_bawt_repository=spec["llm_bawt_repository"],
-            llm_bawt_branch=spec["llm_bawt_branch"],
         )
 
     def pump(self, job_id: str, snapshot: dict) -> ReconcileResult:
@@ -244,42 +239,24 @@ class ReleaseCoordinator:
         if expected_sha != approved.get("expected_sha"):
             return self._end(row, token, RELEASE_BUILD_FAILED_SAFE, "approved_source_moved",
                              "BawtHub remote branch moved after build approval; request a fresh approval")
-        mode, llm_sha, warnings = row.llm_bawt_mode, None, []
-        if mode != "off":
-            try:
-                llm_sha = self.gateway.resolve_branch_head(row.llm_bawt_repository, row.llm_bawt_branch)
-            except GitHubWorkflowError as exc:
-                if exc.retryable and within:
-                    self._record_error(row, token, exc.code, str(exc))
-                    return BACKOFF_TRANSIENT
-                return self._end(row, token, RELEASE_BUILD_FAILED_SAFE,
-                                 f"preflight_llm_bawt_{exc.code}"[:64], str(exc))
-            if llm_sha != approved.get("llm_bawt_expected_sha"):
-                return self._end(row, token, RELEASE_BUILD_FAILED_SAFE, "approved_llm_bawt_source_moved",
-                                 "llm-bawt remote branch moved after build approval; request a fresh approval")
         inputs = {
             "expected_sha": expected_sha,
             "bump": row.bump,
             "release_task": row.release_task,
-            "llm_bawt_mode": mode,
-            "llm_bawt_expected_sha": llm_sha or "",
             "release_request_id": row.release_request_id,
         }
         spec = snapshot["spec"]
         plan = {
             "expected_sha": expected_sha,
-            "llm_bawt_expected_sha": llm_sha,
             "inputs": inputs,
-            "warnings": warnings,
             "image_repository": spec["image_repository"],
             "deploy_operation": spec["deploy_operation"],
             "workflow_file": workflow_file(row.workflow_path),
         }
         # Intent first: from here on a crash correlates, it never redispatches.
         row = self._move(row, token, RELEASE_DISPATCHING_BUILD, "release.dispatch_intent",
-                         detail={"expected_sha": expected_sha, "llm_bawt_expected_sha": llm_sha,
-                                 "llm_bawt_mode": mode, "warnings": warnings},
-                         llm_bawt_sha=llm_sha, release_plan_json=plan, dispatch_started_at=now,
+                         detail={"expected_sha": expected_sha},
+                         release_plan_json=plan, dispatch_started_at=now,
                          phase_deadline_at=now + CORRELATION_WINDOW, error_code=None, error_text=None)
         try:
             self.gateway.dispatch_workflow(row.github_repository, plan["workflow_file"],
@@ -362,14 +339,11 @@ class ReleaseCoordinator:
             problem = self._receipt_structure_problem(receipt, plan)
             if problem:
                 return self._end(row, token, RELEASE_LOST, "receipt_invalid", problem)
-            warnings = [str(w) for w in [*(plan.get("warnings") or []), *(receipt.get("warnings") or [])] if w]
             self._move(row, token, RELEASE_BUILD_COMPLETE, "release.build_verified",
-                       detail={"status": status, "version": receipt["version"], "digest": receipt["digest"],
-                               "warnings": warnings[:10]},
+                       detail={"status": status, "version": receipt["version"], "digest": receipt["digest"]},
                        source_sha=receipt["source_sha"], version=receipt["version"], tag=receipt["tag"],
                        digest=receipt["digest"], image_repository=receipt["image_repository"],
                        receipt_json=receipt, receipt_verified_at=now, deployable=True,
-                       warning_text="; ".join(warnings[:10]) or None,
                        phase_deadline_at=now + DEPLOY_PREP_WINDOW, error_code=None, error_text=None)
             return 0
         if status == "partial":
@@ -456,9 +430,6 @@ class ReleaseCoordinator:
         ref = receipt.get("image_ref")
         if ref and ref != f"{plan.get('image_repository')}@{digest}":
             return "image_ref does not match repository@digest"
-        mode = (plan.get("inputs") or {}).get("llm_bawt_mode")
-        if mode and receipt.get("llm_bawt_mode") != mode:
-            return f"receipt llm_bawt_mode {receipt.get('llm_bawt_mode')!r}, dispatched {mode!r}"
         return None
 
     # ── deploy approval ──────────────────────────────────────────────────
@@ -545,8 +516,6 @@ class ReleaseCoordinator:
             f"Build: {row.github_run_url or row.github_run_id} (attempt {row.github_run_attempt})",
             f"Replaces running image: {release.get('expected_current_image_id', 'unknown')}",
         ]
-        if row.warning_text:
-            lines.append(f"Warnings: {row.warning_text}")
         lines.append("The previous container is restored automatically if health or release checks fail.")
         return "\n".join(lines)
 
@@ -763,12 +732,10 @@ class ReleaseCoordinator:
             "digest": row.digest,
             "image_repository": row.image_repository,
             "source_sha": row.source_sha,
-            "llm_bawt_sha": row.llm_bawt_sha,
             "github_run_id": row.github_run_id,
             "github_run_attempt": row.github_run_attempt,
             "github_run_url": row.github_run_url,
             "rerun_count": int(row.rerun_count or 0),
-            "warning": row.warning_text,
             "deploy_approval_request_id": row.deploy_approval_request_id,
             "deploy_job_id": row.deploy_job_id,
             "error_code": row.error_code,

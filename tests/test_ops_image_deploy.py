@@ -637,16 +637,13 @@ def test_github_verifier_rejects_mismatches(gh_kwargs, message):
         GitHubReleaseVerifier("tok", opener=FakeGitHub(**gh_kwargs)).verify(SPEC, VERIFY_ARGS)
 
 
-def test_github_verifier_reads_latest_attempt_receipt_and_accepts_warning():
-    # TASK-1030: re-run attempt 2 publishes release-receipt-2; an auto-mode
-    # llm-bawt skip is a deployable warning carried into the binding.
+def test_github_verifier_reads_latest_attempt_receipt():
+    # TASK-1030: re-run attempt 2 publishes release-receipt-2.
     gh = FakeGitHub(run={"run_attempt": 2}, artifact="release-receipt-2",
-                    receipt={"workflow_run_attempt": "2", "status": "complete_with_warning",
-                             "warnings": ["llm-bawt not tagged: origin master is X, authorized Y"]})
+                    receipt={"workflow_run_attempt": "2"})
     release = GitHubReleaseVerifier("tok", opener=gh).verify(SPEC, VERIFY_ARGS)
     assert release["workflow_run_attempt"] == "2"
-    assert release["receipt_status"] == "complete_with_warning"
-    assert release["warnings"] == ["llm-bawt not tagged: origin master is X, authorized Y"]
+    assert release["receipt_status"] == "complete"
     # The attempt-specific artifact was used; the legacy name never consulted.
     urls = [u for u, _ in gh.seen]
     assert any(u.endswith("artifacts?name=release-receipt-2") for u in urls)

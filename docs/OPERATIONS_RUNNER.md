@@ -189,14 +189,13 @@ durable parent ops job and one `ops_release_runs` row. The caller supplies only:
   "operation": "bawthub.release-prod",
   "args": {
     "release_task": "TASK-N",
-    "bump": "patch",
-    "llm_bawt_mode": "auto"
+    "bump": "patch"
   },
   "idempotency_key": "stable-logical-release-key"
 }
 ```
 
-`bump` defaults to `patch`; `llm_bawt_mode` defaults to `auto`. The agent does
+`bump` defaults to `patch`. The agent does
 not dispatch Actions, find a run, download a receipt, transcribe a digest, create
 a deploy job, poll either job, or recover a partial release. The parent job stays
 active while the server-owned coordinator advances this lifecycle:
@@ -211,8 +210,8 @@ any uncertain external side effect -> LOST_REQUIRES_INSPECTION
 
 The release run is the orchestration source of truth and has append-only events,
 a lease/claim for multi-process reconciliation, the parent ops job id, a unique
-`release_request_id`, exact remote source SHAs, GitHub workflow run/attempt,
-verified receipt, deployability/warnings, deployment approval id, and child deploy
+`release_request_id`, exact remote source SHA, GitHub workflow run/attempt,
+verified receipt, deployability, deployment approval id, and child deploy
 job id. Transitions are compare-and-swap updates. State is persisted before each
 external side effect. App or reconciler restarts resume from the row; agent polling
 is never the scheduler.
@@ -221,10 +220,10 @@ is never the scheduler.
 
 The ordinary fail-closed `ops_run` approval is the **build/release authorization**.
 Before that approval is shown, read-only preflight resolves the canonical remote
-BawtHub and llm-bawt branch heads through a dedicated `github-release-dispatch`
-credential. Echo working trees are not consulted: dirty, ahead, behind, divergent,
-or absent local clones cannot alter a remote release. The immutable approval
-snapshot includes those SHAs and the release plan.
+BawtHub branch head through a dedicated `github-release-dispatch` credential.
+Echo working trees are not consulted: dirty, ahead, behind, divergent, or absent
+local clones cannot alter a remote release. The immutable approval snapshot
+includes that SHA and the release plan. A release never reads or tags llm-bawt.
 
 GitHub `workflow_dispatch` does not return a run id. The coordinator therefore
 creates one unique `release_request_id`, passes it as a workflow input, requires it
@@ -239,15 +238,9 @@ run id, run attempt, source SHA, semantic version/tag and image digest. The
 coordinator verifies this identity before a release becomes deployable. A rerun
 uses GitHub's rerun-failed-jobs API only for a classified-safe failed job and stays
 on the same release row, run id, version and tag. It never dispatches a second
-workflow and never increments semver again.
-
-`llm_bawt_mode=auto` compares the remote canonical llm-bawt SHA with remote tags
-and tags only pushed remote commits when needed. Its outcome is one of `tagged`,
-`unchanged`, `skipped`, or `failed`. An auxiliary auto-tag failure may produce a
-verified `complete_with_warning` receipt with `deployable=true`; it must not strand
-a valid frontend image. A future explicit `required` mode may make that same
-failure non-deployable. Recovery never runs `make rebuild-prod`,
-`make snapshot-rebuild`, or `make -o version-release snapshot-rebuild`.
+workflow and never increments semver again. Only a `complete` receipt is
+deployable. Recovery never runs `make rebuild-prod`, `make snapshot-rebuild`, or
+`make -o version-release snapshot-rebuild`.
 
 ### Separate server-owned deployment approval
 

@@ -17,7 +17,7 @@ from llm_bawt.ops.seeds import SEEDS
 from llm_bawt.ops.service import OpsService
 from llm_bawt.ops.store import OpsStore
 
-BASE, SOURCE, LLM = "2" * 40, "1" * 40, "3" * 40
+BASE, SOURCE = "2" * 40, "1" * 40
 DIGEST = "sha256:" + "d" * 64
 OLD, NEW = "sha256:" + "a" * 64, "sha256:" + "b" * 64
 IMAGE_REPO = "ghcr.io/bawthub/frontend"
@@ -30,7 +30,8 @@ class FakeGitHub:
         self.run_visible = False
 
     def resolve_branch_head(self, repo, branch):
-        return BASE if repo == "bawthub/bawthub" else LLM
+        assert repo == "bawthub/bawthub", f"release must not consult {repo}"
+        return BASE
 
     def dispatch_workflow(self, repo, workflow, branch, inputs):
         self.dispatches.append(dict(inputs))
@@ -46,13 +47,12 @@ class FakeGitHub:
 
     def download_release_receipt(self, repo, run_id, attempt):
         row = self.releases.get_by_request_id(self.dispatches[0]["release_request_id"])
-        return {"schema": "bawthub.release-receipt/v1", "status": "complete_with_warning",
+        return {"schema": "bawthub.release-receipt/v1", "status": "complete",
                 "repository": repo, "workflow_run_id": str(run_id),
                 "workflow_run_attempt": str(attempt), "release_request_id": row.release_request_id,
                 "base_sha": BASE, "source_sha": SOURCE, "version": "0.1.63", "tag": "v0.1.63",
                 "digest": DIGEST, "image_repository": IMAGE_REPO,
-                "image_ref": f"{IMAGE_REPO}@{DIGEST}", "llm_bawt_mode": "auto",
-                "warnings": ["llm-bawt remote tag skipped"]}
+                "image_ref": f"{IMAGE_REPO}@{DIGEST}"}
 
     def rerun_failed_jobs(self, repo, run_id):
         raise AssertionError("successful release must never rerun")
@@ -118,7 +118,7 @@ def test_one_command_reconciles_build_approval_and_exactly_one_deploy_without_ex
     ops.register_executor(ReleaseExecutor(coordinator))
     # Mirrors trusted MCP approval preparation. No remote side effect yet.
     snapshot = ops.prepare_invocation("bawthub.release-prod", {"release_task": "TASK-1030"})
-    assert snapshot["release_source"] == {"expected_sha": BASE, "llm_bawt_expected_sha": LLM}
+    assert snapshot["release_source"] == {"expected_sha": BASE}
     assert github.dispatches == []
     parent = ops.dispatch_job(operation_slug="bawthub.release-prod", args={"release_task": "TASK-1030"},
                               approved_snapshot=snapshot, idempotency_key="TASK-1030:dry-run",

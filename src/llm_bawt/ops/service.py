@@ -142,13 +142,11 @@ class OpsService:
                 raise ValueError("snapshot release/rollback binding mismatch")
             if is_release_spec(detached["spec"]):
                 source = detached.get("release_source") or {}
-                if (not isinstance(source.get("expected_sha"), str)
+                if (set(source) != {"expected_sha"}
+                        or not isinstance(source["expected_sha"], str)
                         or len(source["expected_sha"]) != 40
-                        or any(char not in "0123456789abcdef" for char in source["expected_sha"])
-                        or source.get("llm_bawt_expected_sha") not in (None, "")
-                        and (len(source["llm_bawt_expected_sha"]) != 40
-                             or any(char not in "0123456789abcdef" for char in source["llm_bawt_expected_sha"]))):
-                    raise ValueError("snapshot approved release sources are invalid")
+                        or any(char not in "0123456789abcdef" for char in source["expected_sha"])):
+                    raise ValueError("snapshot approved release source is invalid")
             if detached["spec"].get("action") == DEPLOY_ACTION:
                 binding = self.releases.verified_binding(detached["resolved_args"]["release_run_id"])
                 release = detached.get("release") or {}
