@@ -241,3 +241,70 @@ def test_upstream_lookup_always_fetches_current_catalog(monkeypatch):
     assert model_routes._upstream_lookup("kimi")[0]["id"] == "k1"
     assert model_routes._upstream_lookup("kimi")[0]["id"] == "k2"
     assert calls == 2
+
+
+def _stub_anthropic(monkeypatch, rows):
+    monkeypatch.setattr(
+        "llm_bawt.service.providers.api_key.resolve_api_key",
+        lambda *_args, **_kwargs: "stored-key",
+    )
+    monkeypatch.setattr(
+        "llm_bawt.model_manager.fetch_anthropic_api_models",
+        lambda key: (True, rows),
+    )
+
+
+def test_anthropic_discovery_offers_claude_code_slugs_with_real_windows(monkeypatch):
+    _stub_anthropic(
+        monkeypatch,
+        [
+            {"id": "claude-opus-5-5", "description": "Claude Opus 5.5", "context_length": 1_000_000},
+            {"id": "claude-opus-4-5-20251101", "description": "Claude Opus 4.5", "context_length": 200_000},
+            {"id": "claude-mystery", "description": "Claude Mystery"},
+        ],
+    )
+
+    models = discover_models("anthropic", object())
+
+    assert models == [
+        {"id": "claude-opus-5-5", "description": "Claude Opus 5.5 · 200K context", "context_length": 200_000},
+        {"id": "claude-opus-5-5[1m]", "description": "Claude Opus 5.5 · 1M context", "context_length": 1_000_000},
+        {"id": "claude-opus-4-5-20251101", "description": "Claude Opus 4.5", "context_length": 200_000},
+        {"id": "claude-mystery", "description": "Claude Mystery"},
+    ]
+
+
+def test_claude_code_alias_uses_same_anthropic_shaping(monkeypatch):
+    _stub_anthropic(
+        monkeypatch,
+        [{"id": "claude-sonnet-5-5", "description": "Claude Sonnet 5.5", "context_length": 1_000_000}],
+    )
+
+    ids = [row["id"] for row in discover_models("claude-code", object())]
+
+    assert ids == ["claude-sonnet-5-5", "claude-sonnet-5-5[1m]"]
+
+
+def test_anthropic_fetcher_keeps_api_max_input_tokens(monkeypatch):
+    from types import SimpleNamespace
+
+    from llm_bawt import model_manager
+
+    page = SimpleNamespace(data=[
+        SimpleNamespace(id="claude-opus-5-5", display_name="Claude Opus 5.5", created_at=None, max_input_tokens=1_000_000),
+        SimpleNamespace(id="claude-old", display_name="Claude Old", created_at=None, max_input_tokens=None),
+    ])
+
+    class FakeAnthropic:
+        def __init__(self, api_key):
+            self.models = SimpleNamespace(list=lambda limit: page)
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+
+    ok, rows = model_manager.fetch_anthropic_api_models("key")
+
+    assert ok
+    assert rows[0]["context_length"] == 1_000_000
+    assert "context_length" not in rows[1]

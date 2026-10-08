@@ -841,11 +841,17 @@ def fetch_anthropic_api_models(
                 continue
             display = getattr(m, "display_name", "") or ""
             created_at = getattr(m, "created_at", None)
-            details.append({
+            entry: Dict[str, Any] = {
                 "id": mid,
                 "description": display,
                 "created": created_at,
-            })
+            }
+            # The API reports the real input window; keep it so the Add Model
+            # dialog never asks the user to type a number we already have.
+            max_input = getattr(m, "max_input_tokens", None)
+            if isinstance(max_input, int) and not isinstance(max_input, bool) and max_input > 0:
+                entry["context_length"] = max_input
+            details.append(entry)
         console.print(
             f"⏱️ Anthropic query took {(time.time()-start)*1000:.0f}ms, "
             f"found {len(details)} models"

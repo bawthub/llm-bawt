@@ -120,13 +120,64 @@ class ExistingFetcherProvider(ModelDiscoveryProvider):
             raise ModelDiscoveryError(
                 f"Failed to fetch {self.label} model catalog from upstream"
             )
-        normalized = _normalize(models)
-        if self._provider_id == "openai-api":
-            return [
-                {**row, **_OPENAI_DOCUMENTED_METADATA.get(row["id"], {})}
-                for row in normalized
-            ]
-        return normalized
+        return self._postprocess(_normalize(models))
+
+    def _postprocess(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Provider-specific shaping of the normalized rows (default: none)."""
+        return rows
+
+
+class OpenAIDiscoveryProvider(ExistingFetcherProvider):
+    """OpenAI API catalog, enriched with documented metadata it omits."""
+
+    def _postprocess(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {**row, **_OPENAI_DOCUMENTED_METADATA.get(row["id"], {})}
+            for row in rows
+        ]
+
+
+#: Window the Claude Code CLI assumes for a plain ``claude-*`` model name, and
+#: the window it switches to when the name carries the ``[1m]`` suffix. The CLI
+#: ignores ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` for canonical Claude names, so the
+#: suffix is the only way to get the large window (verified in CLI 2.1.283).
+CLAUDE_CODE_STANDARD_WINDOW = 200_000
+CLAUDE_CODE_1M_WINDOW = 1_000_000
+CLAUDE_CODE_1M_SUFFIX = "[1m]"
+
+
+class AnthropicDiscoveryProvider(ExistingFetcherProvider):
+    """Anthropic catalog expressed as the model ids the Claude Code CLI accepts.
+
+    Every Anthropic catalog endpoint runs through the Claude Code harness
+    (``model_catalog`` maps vendor ``anthropic`` to ``claude-code``), so the
+    upstream id must be the CLI's slug, not the bare API id. A model whose API
+    window exceeds the CLI's standard window is offered twice: the bare id at
+    the standard window and the ``[1m]`` id at the large window. Each choice
+    carries the window the CLI will actually enforce, so the catalog can't
+    claim a window the session never gets.
+    """
+
+    def _postprocess(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            api_window = row.get("context_length")
+            if not isinstance(api_window, int) or api_window <= CLAUDE_CODE_STANDARD_WINDOW:
+                out.append(row)
+                continue
+            label = row.get("description") or row["id"]
+            out.append({
+                **row,
+                "description": f"{label} · 200K context",
+                "context_length": CLAUDE_CODE_STANDARD_WINDOW,
+            })
+            out.append({
+                **row,
+                "id": f"{row['id']}{CLAUDE_CODE_1M_SUFFIX}",
+                "description": f"{label} · 1M context",
+                "context_length": min(api_window, CLAUDE_CODE_1M_WINDOW),
+            })
+        return out
 
 
 class CodexBridgeDiscoveryProvider(ModelDiscoveryProvider):
@@ -312,7 +363,7 @@ def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ..
 
     return (
         CodexBridgeDiscoveryProvider(),
-        ExistingFetcherProvider(
+        OpenAIDiscoveryProvider(
             aliases=("openai",),
             label="openai",
             fetcher=fetch_openai_api_models,
@@ -333,7 +384,7 @@ def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ..
             missing_key_message="Grok discovery requires a connected xAI API key",
             pass_key=True,
         ),
-        ExistingFetcherProvider(
+        AnthropicDiscoveryProvider(
             aliases=("anthropic", "claude-code"),
             label="Anthropic",
             fetcher=fetch_anthropic_api_models,
