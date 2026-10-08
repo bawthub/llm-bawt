@@ -282,7 +282,11 @@ def clone_create_body(old: dict, old_image: dict, new_image: dict, ref: str, job
     image_env = set(ic.get("Env") or [])
     body["Env"] = [e for e in oc.get("Env") or [] if e not in image_env]
     image_labels = ic.get("Labels") or {}
-    labels = {k: v for k, v in (oc.get("Labels") or {}).items() if image_labels.get(k) != v}
+    # Compose labels are container identity, never image-supplied: a locally
+    # compose-BUILT image also carries project/service/version, and dropping
+    # them makes the next deploy refuse the target (TASK-1035).
+    labels = {k: v for k, v in (oc.get("Labels") or {}).items()
+              if k.startswith("com.docker.compose.") or image_labels.get(k) != v}
     labels["com.docker.compose.image"] = new_image["Id"]
     labels["llm-bawt.ops.deployed-by"] = job_id
     body["Labels"] = labels

@@ -259,6 +259,18 @@ def test_clone_keeps_compose_overrides_that_differ_from_image():
     assert body["Cmd"] == ["node", "custom"] and "Healthcheck" not in body
 
 
+def test_clone_keeps_compose_identity_even_when_old_image_was_compose_built():
+    # `make rebuild-prod` images carry compose project/service labels too; they
+    # must survive or every later deploy refuses the target's identity.
+    api = FakeDocker()
+    old = api.by_name(NAME)
+    compose = {k: v for k, v in old["Config"]["Labels"].items() if k.startswith("com.docker.compose.")}
+    api.images[OLD_ID]["Config"]["Labels"].update(compose)
+    body = clone_create_body(old, api.images[OLD_ID], api._new, f"{REPO}@{DIGEST}", JOB_ID)
+    assert body["Labels"]["com.docker.compose.project"] == SPEC["compose_project"]
+    assert body["Labels"]["com.docker.compose.service"] == SPEC["compose_service"]
+
+
 # ── worker.run receipt semantics ───────────────────────────────────────────
 
 def _worker_request(tmp_path, snapshot):
