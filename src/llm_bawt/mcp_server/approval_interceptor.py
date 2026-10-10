@@ -320,6 +320,12 @@ class ApprovalAwareFastMCP(FastMCP):
                 source = operations_snapshot["release_source"]
                 spec = operations_snapshot["spec"]
                 approval_prompt = (
+                    f"{decision.prompt or 'Authorize BawtHub release and production deployment?'}\n"
+                    f"Source: {spec['github_repository']}@{source['expected_sha']}\n"
+                    f"Target: {spec['deploy_operation']} (currently {source.get('expected_current_image_id', 'unknown')})\n"
+                    "Deploys only if the build, release identity and production baseline verify. "
+                    "Unknown or changed outcomes stop for inspection; rollback remains separate."
+                ) if source.get("deploy_authorization") == "after_verified_build" else (
                     f"{decision.prompt or 'Authorize remote BawtHub release build?'}\n"
                     f"BawtHub {spec['github_repository']}@{source['expected_sha']}\n"
                     "Production deployment requires a separate approval."

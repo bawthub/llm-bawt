@@ -142,11 +142,27 @@ class OpsService:
                 raise ValueError("snapshot release/rollback binding mismatch")
             if is_release_spec(detached["spec"]):
                 source = detached.get("release_source") or {}
-                if (set(source) != {"expected_sha"}
+                legacy = set(source) == {"expected_sha"}
+                end_to_end = set(source) == {"expected_sha", "deploy_authorization", "expected_current_image_id",
+                                             "deploy_operation_id", "deploy_operation_version", "deploy_operation_script_hash"}
+                if (not (legacy or end_to_end)
                         or not isinstance(source["expected_sha"], str)
                         or len(source["expected_sha"]) != 40
                         or any(char not in "0123456789abcdef" for char in source["expected_sha"])):
                     raise ValueError("snapshot approved release source is invalid")
+                if end_to_end and (source["deploy_authorization"] != "after_verified_build"
+                                   or not isinstance(source["expected_current_image_id"], str)
+                                   or len(source["expected_current_image_id"]) != 71
+                                   or not source["expected_current_image_id"].startswith("sha256:")
+                                   or any(char not in "0123456789abcdef" for char in source["expected_current_image_id"][7:])
+                                   or not isinstance(source["deploy_operation_id"], str)
+                                   or not source["deploy_operation_id"]
+                                   or not isinstance(source["deploy_operation_version"], int)
+                                   or source["deploy_operation_version"] < 1
+                                   or not isinstance(source["deploy_operation_script_hash"], str)
+                                   or len(source["deploy_operation_script_hash"]) != 64
+                                   or any(char not in "0123456789abcdef" for char in source["deploy_operation_script_hash"])):
+                    raise ValueError("snapshot production baseline is invalid")
             if detached["spec"].get("action") == DEPLOY_ACTION:
                 binding = self.releases.verified_binding(detached["resolved_args"]["release_run_id"])
                 release = detached.get("release") or {}

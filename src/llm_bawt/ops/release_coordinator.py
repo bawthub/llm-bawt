@@ -16,8 +16,9 @@ Invariants (each has a regression test in tests/test_release_coordinator.py):
   workflow is dispatched at most once per release, a partial run is recovered
   with "Re-run failed jobs" on the SAME run (no second version bump), and the
   child deploy is keyed by a deterministic idempotency key.
-* Deploy is a separate human decision: a server-owned orchestration approval
-  carrying the verified deploy snapshot. The first decision wins.
+* A build-and-deploy approval delegates only a verified, baseline-matching
+  child deploy. Older build-only and direct HTTP runs still need a second card;
+  both paths persist the verified child snapshot before dispatch.
 * Anything ambiguous ends in ``lost_requires_inspection``; nothing is retried
   blindly past its phase deadline.
 """
@@ -31,7 +32,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..approval_models import REQ_APPROVED, REQ_EXPIRED, REQ_PENDING
+from ..approval_models import KIND_MCP, REQ_APPROVED, REQ_EXPIRED, REQ_PENDING
 from .executor import ExecutorError, ReconcileResult
 from .github_workflow import GitHubWorkflowError, GitHubWorkflowGateway
 from .image_deploy import parse_deployment
@@ -45,6 +46,7 @@ from .release_models import (RELEASE_AWAITING_DEPLOY_APPROVAL, RELEASE_BUILD_COM
                              RELEASE_PREFLIGHT, RELEASE_TERMINAL_STATES, ReleaseRun)
 from .release_spec import workflow_file
 from .release_store import ReleaseStore
+from .validation import canonical_json
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +85,7 @@ _STATE_MESSAGES = {
     RELEASE_DISPATCHING_BUILD: "release workflow dispatched; correlating the GitHub run",
     RELEASE_BUILDING: "GitHub release workflow running",
     RELEASE_BUILD_PARTIAL: "release run partial; re-running failed jobs on the same run",
-    RELEASE_BUILD_COMPLETE: "build verified; preparing the deploy approval",
+    RELEASE_BUILD_COMPLETE: "build verified; preparing the authorized deploy",
     RELEASE_AWAITING_DEPLOY_APPROVAL: "build verified; waiting for the deploy approval in BawtHub Approvals",
     RELEASE_DEPLOYING: "deploy approved; production image deploy running",
     RELEASE_DEPLOYED: "deployed and verified",
@@ -246,8 +248,12 @@ class ReleaseCoordinator:
             "release_request_id": row.release_request_id,
         }
         spec = snapshot["spec"]
+        parent = self.ops.store.get_job(row.parent_job_id) if self.ops is not None else None
         plan = {
             "expected_sha": expected_sha,
+            "deploy_authorization": (approved.get("deploy_authorization")
+                                     if parent is not None and parent.caller_backend != "http-operator" else None),
+            "expected_current_image_id": approved.get("expected_current_image_id"),
             "inputs": inputs,
             "image_repository": spec["image_repository"],
             "deploy_operation": spec["deploy_operation"],
@@ -444,7 +450,77 @@ class ReleaseCoordinator:
                 return f"deploy snapshot {key} {release.get(key)!r} != verified release {binding.get(key)!r}"
         return None
 
+    def _release_authority(self, row: ReleaseRun, snapshot: dict):
+        """Only the parent release's exact approved invocation can delegate a deploy."""
+        parent = self.ops.store.get_job(row.parent_job_id)
+        if parent is None or parent.operation_slug != "bawthub.release-prod":
+            raise ValueError("release parent job is missing or not a release")
+        if canonical_json(_loads(parent.invocation_snapshot_json)) != canonical_json(snapshot):
+            raise ValueError("parent release approval snapshot differs from the running job")
+        # Direct HTTP runs have no approval card showing the exact source/target.
+        # Keep their separate deploy approval until that surface has a bound preview.
+        request = self._approvals().get_request(parent.approval_request_id) if parent.approval_request_id else None
+        if (request is None or request.status != REQ_APPROVED or request.request_kind != KIND_MCP
+                or request.tool_name != "ops_run" or request.operations_snapshot_json is None
+                or canonical_json(_loads(request.operations_snapshot_json)) != canonical_json(snapshot)
+                or request.bot_id != parent.caller_bot_id or request.user_id != parent.caller_user_id
+                or request.turn_id != parent.caller_turn_id):
+            raise ValueError("parent release has no matching approved build-and-deploy authority")
+        args = _loads(request.tool_arguments_json)
+        if (args.get("operation") != parent.operation_slug
+                or canonical_json(args.get("args") or {}) != canonical_json(snapshot.get("input_args") or {})):
+            raise ValueError("release approval arguments differ from the parent job")
+        return parent
+
+    def _request_authorized_deploy(self, row: ReleaseRun, token: str, snapshot: dict) -> float:
+        from .service import OpsDispatchError
+
+        try:
+            parent = self._release_authority(row, snapshot)
+        except ValueError as exc:
+            return self._end(row, token, RELEASE_DEPLOY_DECLINED, "release_authority_invalid", str(exc))
+        plan = _loads(row.release_plan_json)
+        slug = plan.get("deploy_operation") or snapshot["spec"]["deploy_operation"]
+        try:
+            binding = self.releases.verified_binding(row.id)
+            prepared = self.ops.prepare_invocation(slug, self._deploy_args(row))
+        except (ValueError, OpsDispatchError) as exc:
+            if isinstance(exc, OpsDispatchError) and exc.code in ("operation_disabled", "operation_not_found"):
+                return self._end(row, token, RELEASE_DEPLOY_DECLINED, "deploy_interlocked", str(exc))
+            if self._clock() >= _aware(row.phase_deadline_at):
+                return self._end(row, token, RELEASE_DEPLOY_DECLINED, "deploy_unverifiable", str(exc))
+            self._record_error(row, token, "deploy_unverifiable", str(exc))
+            return BACKOFF_DEPLOY_PREP
+        problem = self._binding_problem(prepared, binding)
+        if problem or prepared.get("operation", {}).get("slug") != slug:
+            return self._end(row, token, RELEASE_LOST, "deploy_binding_mismatch",
+                             problem or "prepared deploy targets another operation")
+        source = snapshot["release_source"]
+        operation = prepared["operation"]
+        if (operation["id"] != source["deploy_operation_id"]
+                or operation["version"] != source["deploy_operation_version"]
+                or operation["script_hash"] != source["deploy_operation_script_hash"]):
+            return self._end(row, token, RELEASE_DEPLOY_DECLINED, "deploy_operation_changed",
+                             "deploy operation changed after release authorization")
+        current = (prepared.get("release") or {}).get("expected_current_image_id")
+        if current != source["expected_current_image_id"]:
+            return self._end(row, token, RELEASE_DEPLOY_DECLINED, "production_baseline_moved",
+                             "production image changed after release authorization")
+        # Persist the derived, verified child snapshot before any deploy dispatch.
+        plan["deploy_snapshot"] = prepared
+        self._move(row, token, RELEASE_DEPLOYING, "release.deploy_authorized",
+                   detail={"parent_approval_request_id": parent.approval_request_id,
+                           "digest": row.digest, "expected_current_image_id": current},
+                   release_plan_json=plan, phase_deadline_at=self._clock() + DEPLOY_PREP_WINDOW,
+                   error_code=None, error_text=None)
+        return 0
+
     def _request_deploy(self, row: ReleaseRun, token: str, snapshot: dict) -> float:
+        parent = self.ops.store.get_job(row.parent_job_id)
+        if ((snapshot.get("release_source") or {}).get("deploy_authorization") == "after_verified_build"
+                and parent is not None and parent.caller_backend != "http-operator"):
+            return self._request_authorized_deploy(row, token, snapshot)
+        # Older build-only approvals and direct HTTP runs keep the second card.
         from .service import OpsDispatchError
 
         plan = _loads(row.release_plan_json)
@@ -573,13 +649,32 @@ class ReleaseCoordinator:
     def _deploying(self, row: ReleaseRun, token: str, snapshot: dict) -> float:
         from .service import OpsDispatchError
 
-        request = self._approvals().get_request(row.deploy_approval_request_id)
-        if request is None or request.status != REQ_APPROVED:
-            return self._end(row, token, RELEASE_LOST, "approval_missing", "approved deploy request vanished")
-        approved = _loads(request.operations_snapshot_json)
+        plan = _loads(row.release_plan_json)
+        if row.deploy_approval_request_id is None and (snapshot.get("release_source") or {}).get("deploy_authorization") == "after_verified_build":
+            try:
+                parent = self._release_authority(row, snapshot)
+            except ValueError as exc:
+                return self._end(row, token, RELEASE_LOST, "release_authority_invalid", str(exc))
+            approved = plan.get("deploy_snapshot") or {}
+            approval_id = parent.approval_request_id
+            if (not approved or approved.get("input_args") != self._deploy_args(row)
+                    or approved.get("operation", {}).get("slug") != plan.get("deploy_operation")):
+                return self._end(row, token, RELEASE_LOST, "deploy_snapshot_missing",
+                                 "authorized deploy snapshot missing or targets another operation")
+        else:
+            request = self._approvals().get_request(row.deploy_approval_request_id)
+            if request is None or request.status != REQ_APPROVED:
+                return self._end(row, token, RELEASE_LOST, "approval_missing", "approved deploy request vanished")
+            approved = _loads(request.operations_snapshot_json)
+            approval_id = request.id
         key = f"release-deploy:{row.id}"
         store = self.ops.store
         job = store.get_job(row.deploy_job_id) if row.deploy_job_id else store.get_job_by_key(key)
+        if job is not None and (job.operation_slug != approved.get("operation", {}).get("slug")
+                               or job.approval_request_id != approval_id
+                               or canonical_json(_loads(job.invocation_snapshot_json)) != canonical_json(approved)):
+            return self._end(row, token, RELEASE_LOST, "deploy_job_mismatch",
+                             "existing child job differs from the authorized deployment")
         if job is None:
             parent = store.get_job(row.parent_job_id)
             try:
@@ -590,7 +685,7 @@ class ReleaseCoordinator:
                     caller_user_id=parent.caller_user_id if parent else None,
                     caller_turn_id=parent.caller_turn_id if parent else None,
                     caller_session_key=parent.caller_session_key if parent else None,
-                    caller_backend="ops-release", approval_request_id=request.id)
+                    caller_backend="ops-release", approval_request_id=approval_id)
             except OpsDispatchError as exc:
                 if store.get_job_by_key(key) is None:
                     if exc.code in _DEPLOY_REFUSALS:

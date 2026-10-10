@@ -354,17 +354,17 @@ _IMAGE_SEEDS: list[dict[str, Any]] = [
 
 # ---------------------------------------------------------------------------
 # One-command release: a durable coordinator, never a shell or local clone.
-# A separate human approval is required after the build before deploy.
+# A release approval delegates deploy only after build and target verification.
 # ---------------------------------------------------------------------------
 
 _RELEASE_SEEDS: list[dict[str, Any]] = [
     {
         "slug": "bawthub.release-prod",
-        "title": "Build and approve BawtHub production release",
+        "title": "Build and deploy BawtHub production release",
         "description": (
-            "Build a GitHub Actions release from remote branch heads, recover partial "
-            "attempts on the same run, then ask for a separate production deploy "
-            "approval. No local checkout, shell command, or automatic deploy."
+            "Build a GitHub Actions release from an approved remote commit, recover safe partial "
+            "attempts on the same run, and deploy its verified digest if the approved production "
+            "baseline is unchanged. Rollback requires its own approval."
         ),
         "enabled": False,
         "executor_kind": EXECUTOR_RELEASE,
@@ -389,7 +389,7 @@ _RELEASE_SEEDS: list[dict[str, Any]] = [
         "max_concurrent": 1,
         "risk_level": RISK_HIGH,
         "category": "deploy",
-        "approval_prompt_prefix": "Build BawtHub production release (deploy requires separate approval)",
+        "approval_prompt_prefix": "Build and deploy verified BawtHub production release",
     },
 ]
 

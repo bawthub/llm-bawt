@@ -36,14 +36,31 @@ class ReleaseExecutor(Executor):
             raise ExecutorError(f"deploy operation {slug} is unavailable or disabled")
 
     def approval_source(self, spec: dict, args: dict) -> dict:
-        """Freeze the remote head before the build approval is shown."""
+        """Freeze the source and production baseline for one end-to-end approval."""
+        from .executor import validate_spec
         from .github_workflow import GitHubWorkflowError
 
         try:
-            return {"expected_sha": self.coordinator.gateway.resolve_branch_head(
-                spec["github_repository"], spec["canonical_branch"])}
+            head = self.coordinator.gateway.resolve_branch_head(
+                spec["github_repository"], spec["canonical_branch"])
+            operation = self.coordinator.ops.store.get_operation_by_slug(spec["deploy_operation"])
+            if operation is None or not operation.enabled or operation.soft_deleted_at is not None:
+                raise ExecutorError("production deploy operation is unavailable")
+            target = validate_spec(operation.command_script)
+            if target.get("action") != "deploy_image":
+                raise ExecutorError("release deploy operation does not target an image deploy")
+            executor = self.coordinator.ops._resolve_executor(operation.executor_kind)
+            current = executor.inspect_target_image(target)
+            if not current or not current.startswith("sha256:") or len(current) != 71:
+                raise ExecutorError("production image identity is unavailable")
+            return {"expected_sha": head, "deploy_authorization": "after_verified_build",
+                    "expected_current_image_id": current, "deploy_operation_id": operation.id,
+                    "deploy_operation_version": operation.version,
+                    "deploy_operation_script_hash": operation.script_hash}
         except GitHubWorkflowError as exc:
             raise ExecutorError(f"remote release source unavailable: {exc}") from exc
+        except ValueError as exc:
+            raise ExecutorError(f"release deploy target invalid: {exc}") from exc
 
     def dispatch(self, **kwargs) -> DispatchResult:
         try:

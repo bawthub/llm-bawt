@@ -286,6 +286,9 @@ def test_complete_build_requires_separate_approval_and_dispatches_one_child(rig)
 
         def dispatch_job(self, **kwargs):
             self.dispatches.append(kwargs)
+            child.operation_slug = kwargs["operation_slug"]
+            child.approval_request_id = kwargs["approval_request_id"]
+            child.invocation_snapshot_json = json.dumps(kwargs["approved_snapshot"])
             self.keys[kwargs["idempotency_key"]] = child
             return {"id": child.id}
 

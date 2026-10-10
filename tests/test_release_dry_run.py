@@ -2,10 +2,11 @@
 from datetime import datetime, timedelta, timezone
 import json
 
+import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import create_engine
+from sqlmodel import Session, create_engine
 
-from llm_bawt.approval_models import REQ_APPROVED
+from llm_bawt.approval_models import REQ_APPROVED, ToolApprovalRequest
 from llm_bawt.approval_policies import ToolApprovalPolicyStore
 from llm_bawt.ops.executor import DispatchResult, Executor, ReconcileResult
 from llm_bawt.ops.image_deploy import DEPLOY_SCHEMA
@@ -100,7 +101,8 @@ class FakeDocker(Executor):
         return ReconcileResult("succeeded", 0, json.dumps(record))
 
 
-def test_one_command_reconciles_build_approval_and_exactly_one_deploy_without_external_io():
+@pytest.mark.parametrize("caller_backend", ["claude-code", "http-operator"])
+def test_one_approval_reconciles_build_and_exactly_one_deploy_without_external_io(caller_backend):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     store = OpsStore(None, engine=engine)
     releases = ReleaseStore(None, engine=engine)
@@ -118,45 +120,72 @@ def test_one_command_reconciles_build_approval_and_exactly_one_deploy_without_ex
     ops.register_executor(ReleaseExecutor(coordinator))
     # Mirrors trusted MCP approval preparation. No remote side effect yet.
     snapshot = ops.prepare_invocation("bawthub.release-prod", {"release_task": "TASK-1030"})
-    assert snapshot["release_source"] == {"expected_sha": BASE}
+    source = snapshot["release_source"]
+    assert source["expected_sha"] == BASE
+    assert source["expected_current_image_id"] == OLD
+    assert source["deploy_authorization"] == "after_verified_build"
     assert github.dispatches == []
+    approval_id = "approved-release" if caller_backend == "claude-code" else None
+    if approval_id:
+        with Session(engine) as session:
+            session.add(ToolApprovalRequest(
+                id=approval_id, bot_id="test-bot", user_id="test-user", turn_id="turn-1",
+                backend=caller_backend, tool_name="ops_run", request_kind="mcp", status=REQ_APPROVED,
+                subject="operation=bawthub.release-prod", grant_key="approval",
+                tool_arguments_json=json.dumps({"operation": "bawthub.release-prod", "args": {"release_task": "TASK-1030"}}),
+                operations_snapshot_json=json.dumps(snapshot),
+            ))
+            session.commit()
     parent = ops.dispatch_job(operation_slug="bawthub.release-prod", args={"release_task": "TASK-1030"},
                               approved_snapshot=snapshot, idempotency_key="TASK-1030:dry-run",
+                              caller_actor="test-operator" if caller_backend == "http-operator" else None,
                               caller_bot_id="test-bot", caller_user_id="test-user",
-                              caller_turn_id="turn-1", caller_backend="claude-code")
+                              caller_turn_id="turn-1", caller_backend=caller_backend,
+                              approval_request_id=approval_id)
     assert parent["release_id"] and parent["state"] == "accepted"
     assert ops.dispatch_job(operation_slug="bawthub.release-prod", args={"release_task": "TASK-1030"},
                             approved_snapshot=snapshot, idempotency_key="TASK-1030:dry-run")["release_id"] == parent["release_id"]
-    for _ in range(5):
-        time[0] += timedelta(seconds=30)
-        ops.get_job_status(parent["id"])
-        row = releases.get(parent["release_id"])
-        if row.deploy_approval_request_id:
-            break
-    assert row.state == "awaiting_deploy_approval"
-    assert len(github.dispatches) == 1
-    assert len([card for card in cards if card["_type"] == "tool_approval_required"]) == 1
-    assert any(card["_type"] == "ops_release_transition" for card in cards)
-    assert docker.dispatches == []
-    approved = approvals.get_request(row.deploy_approval_request_id)
-    assert json.loads(approved.tool_arguments_json)["args"] == {"release_run_id": row.id}
-    approvals.resolve_request(approved.id, status=REQ_APPROVED, resolved_by="test-operator",
-                              continuation_owner="none")
-    for _ in range(5):
+    for _ in range(10):
         time[0] += timedelta(seconds=30)
         result = ops.get_job_status(parent["id"])
-        if result["terminal"]:
+        if result["terminal"] or releases.get(parent["release_id"]).deploy_approval_request_id:
             break
+    row = releases.get(parent["release_id"])
+    assert len(github.dispatches) == 1
+    if caller_backend == "http-operator":
+        assert row.state == "awaiting_deploy_approval" and docker.dispatches == []
+        assert len([card for card in cards if card["_type"] == "tool_approval_required"]) == 1
+        request = approvals.get_request(row.deploy_approval_request_id)
+        approved = json.loads(request.operations_snapshot_json)
+        approvals.resolve_request(request.id, status=REQ_APPROVED, resolved_by="operator",
+                                  continuation_owner="none")
+        for _ in range(5):
+            time[0] += timedelta(seconds=30)
+            result = ops.get_job_status(parent["id"])
+            if result["terminal"]:
+                break
+        child_approval_id = request.id
+    else:
+        assert not [card for card in cards if card["_type"] == "tool_approval_required"]
+        assert row.deploy_approval_request_id is None
+        approved = json.loads(row.release_plan_json)["deploy_snapshot"]
+        child_approval_id = approval_id
+    row = releases.get(parent["release_id"])
+    assert row.state == "deployed"
+    assert any(card["_type"] == "ops_release_transition" for card in cards)
+    assert len(docker.dispatches) == 1
+    assert approved["input_args"] == {"release_run_id": row.id}
     assert result["state"] == "succeeded"
     assert releases.get(row.id).state == "deployed"
     assert len(github.dispatches) == len(docker.dispatches) == 1
     assert docker.current == NEW
     child = store.get_job(releases.get(row.id).deploy_job_id)
     assert json.loads(child.args_json) == {"release_run_id": row.id}
+    assert child.approval_request_id == child_approval_id
     without_health = json.loads(child.output_tail)
     without_health.pop("health")
     assert "worker did not attest healthy production" in coordinator._deployment_problem(
-        releases.get(row.id), without_health, json.loads(approved.operations_snapshot_json))
+        releases.get(row.id), without_health, approved)
     from llm_bawt.service.routes import ops as routes
     original = routes._service
     try:
@@ -166,3 +195,60 @@ def test_one_command_reconciles_build_approval_and_exactly_one_deploy_without_ex
                             "workflow_run_id": "123456", "verified_at": releases.get(row.id).to_api()["finished_at"]}
     finally:
         routes._service = original
+
+
+@pytest.mark.parametrize("change, expected", [
+    ("baseline", "production_baseline_moved"),
+    ("operation", "deploy_operation_changed"),
+    ("missing_approval", "release_authority_invalid"),
+    ("tampered_approval", "release_authority_invalid"),
+])
+def test_conditional_deploy_refuses_changed_or_unapproved_release(change, expected):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    store = OpsStore(None, engine=engine)
+    releases = ReleaseStore(None, engine=engine)
+    approvals = ToolApprovalPolicyStore(None, engine=engine)
+    for slug in ("bawthub.release-prod", "bawthub.deploy-prod-image"):
+        store.create_operation({**next(row for row in SEEDS if row["slug"] == slug), "enabled": True})
+    docker, github = FakeDocker(), FakeGitHub(releases)
+    ops = OpsService(store, executor=docker, release_verifier=FakeVerifier(), release_store=releases)
+    time = [datetime.now(timezone.utc)]
+    coordinator = ReleaseCoordinator(releases=releases, ops=ops, gateway=github,
+                                     approvals=lambda: approvals, clock=lambda: time[0])
+    ops.register_executor(ReleaseExecutor(coordinator))
+    snapshot = ops.prepare_invocation("bawthub.release-prod", {"release_task": "TASK-1030"})
+    approval_id = None if change == "missing_approval" else f"approved-{change}"
+    if approval_id:
+        with Session(engine) as session:
+            session.add(ToolApprovalRequest(
+                id=approval_id, bot_id="test-bot", user_id="test-user", turn_id="turn-1",
+                backend="claude-code", tool_name="ops_run", request_kind="mcp", status=REQ_APPROVED,
+                subject="operation=bawthub.release-prod", grant_key="approval",
+                tool_arguments_json=json.dumps({"operation": "bawthub.release-prod", "args": {"release_task": "TASK-1030"}}),
+                operations_snapshot_json=json.dumps(snapshot),
+            ))
+            session.commit()
+    parent = ops.dispatch_job(operation_slug="bawthub.release-prod", args={"release_task": "TASK-1030"},
+                              approved_snapshot=snapshot, idempotency_key=f"test-{change}",
+                              caller_backend="claude-code", caller_bot_id="test-bot",
+                              caller_user_id="test-user", caller_turn_id="turn-1",
+                              approval_request_id=approval_id)
+    if change == "baseline":
+        docker.current = "sha256:" + "c" * 64
+    elif change == "operation":
+        store.update_operation("bawthub.deploy-prod-image", {"title": "Changed deploy revision"})
+    elif change == "tampered_approval":
+        with Session(engine) as session:
+            request = session.get(ToolApprovalRequest, approval_id)
+            request.tool_arguments_json = json.dumps({"operation": "bawthub.deploy-prod-image", "args": {}})
+            session.add(request)
+            session.commit()
+    for _ in range(5):
+        time[0] += timedelta(seconds=30)
+        result = ops.get_job_status(parent["id"])
+        if result["terminal"]:
+            break
+    row = releases.get(parent["release_id"])
+    assert row.state == "deploy_declined" and row.error_code == expected
+    assert len(github.dispatches) == 1 and docker.dispatches == []
+    assert row.deploy_job_id is None and row.deploy_approval_request_id is None
