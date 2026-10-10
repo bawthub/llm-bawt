@@ -83,6 +83,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "self_tail": "Read your bot_id's last count raw conversation bubbles for context restoration. Absorb them; do not reprint the transcript unless asked.",
     "self_fwd": "Forward YOUR recent bubbles to target_bot_id; sender_bot_id must be your explicit slug. Async by default; force never authorizes concurrency.",
     "self_system_prompt": "Read your own durable persona (action=view) or fully replace it (edit, new_prompt). Use your bot_id; edits apply next turn, not to the harness wrapper.",
+    "self_model": "View or persistently switch bot_id's model endpoint; applies next turn, not this one. continue_prompt queues one when_idle follow-up turn on the new model.",
     "ops_list_operations": "Discover enabled ops and schemas before ops_run; include_disabled grants no execution permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",
     "ops_job_status": "Read/reconcile an ops job's terminal state and exit code; output_tail_bytes optionally includes bounded command output.",

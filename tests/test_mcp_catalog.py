@@ -95,13 +95,15 @@ async def test_catalog_token_budgets():
     descriptions = [len(encoder.encode(tool.description or "")) for tool in tools]
     assert max(descriptions) <= 100
     # x_counts + x_search relevancy/operator hints: measured 3,251 (was <=3,200).
-    assert sum(descriptions) <= 3260
+    # TASK-1047 self_model (+48 description tokens): measured 3,306.
+    assert sum(descriptions) <= 3310
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
     # Keep its paid-call warning and typed time/pagination fields intact.
     # x_counts tool + x_search sort_order/include_authors: measured 11,425.
-    assert total <= 11500, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1047 self_model (+146 tokens incl. typed action enum): measured 11,618.
+    assert total <= 11625, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
@@ -117,6 +119,7 @@ async def test_catalog_token_budgets():
     ("messages_remove_last_partial", ("does NOT verify partial",)),
     ("sessions_rotate", ("active thread",)),
     ("self_system_prompt", ("fully replace", "own")),
+    ("self_model", ("persistently", "next turn", "when_idle")),
     ("self_tail", ("do not reprint",)),
     ("bots_send_message", ("async", "when_idle", "force never")),
     ("bots_delivery_cancel", ("QUEUED", "cannot abort")),

@@ -824,6 +824,9 @@ from . import home_audio_tools as _home_audio_tools  # noqa: F401, E402
 
 from . import self_tools as _self_tools  # noqa: F401, E402
 
+# Self model switch + optional when_idle continuation (TASK-1047)
+from . import self_model_tools as _self_model_tools  # noqa: F401, E402
+
 # ---------------------------------------------------------------------------
 # Ops tools (TASK-639 — DB-configured operations catalog)
 # ---------------------------------------------------------------------------
