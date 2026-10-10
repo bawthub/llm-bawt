@@ -20,6 +20,7 @@ from .events import AgentEvent
 from .publisher import (
     COMMANDS_STREAM,
     EVENTS_STREAM_PREFIX,
+    GLOBAL_CONFIG_STREAM,
     HISTORY_STREAM,
     RUN_STREAM_PREFIX,
     UNIFIED_EVENTS_PREFIX,
@@ -444,6 +445,8 @@ class RedisSubscriber(CommandPublisherMixin):
         bot_id: str | list[str],
         user_id: str,
         consumer_id: str,
+        *,
+        include_global: bool = False,
     ) -> dict[str, str]:
         """Pre-create the unified-stream consumer group(s) for these bots.
 
@@ -461,6 +464,8 @@ class RedisSubscriber(CommandPublisherMixin):
         for bid in bot_ids:
             sk = f"{UNIFIED_EVENTS_PREFIX}{bid}:{user_id}"
             stream_keys[sk] = bid
+        if include_global:
+            stream_keys[GLOBAL_CONFIG_STREAM] = "system"
         for sk in stream_keys:
             await self.ensure_consumer_group(sk, group_name)
         return stream_keys
@@ -472,6 +477,7 @@ class RedisSubscriber(CommandPublisherMixin):
         consumer_id: str,
         *,
         timeout_s: float = 86400,
+        include_global: bool = False,
     ) -> AsyncIterator[dict | None]:
         """Subscribe to unified event stream(s) via consumer groups.
 
@@ -491,7 +497,9 @@ class RedisSubscriber(CommandPublisherMixin):
         # Ensure consumer groups exist for all streams (idempotent — the SSE
         # route may have pre-created them via ensure_groups before signaling
         # "hello"). Returns the {stream_key: bot_id} mapping used below.
-        stream_keys = await self.ensure_groups(bot_id, user_id, consumer_id)
+        stream_keys = await self.ensure_groups(
+            bot_id, user_id, consumer_id, include_global=include_global,
+        )
 
         # Phase 1: replay pending (unacked) messages from all streams
         try:
@@ -584,6 +592,10 @@ class RedisSubscriber(CommandPublisherMixin):
         except Exception:
             logger.exception("Failed to publish tool event to %s", stream_key)
             return None
+
+    async def publish_global_config_event(self, event: dict) -> str | None:
+        """Fan out non-user-specific configuration changes to every UI window."""
+        return await self.publish_tool_event("system", "__config__", event)
 
     async def latest_activity(
         self,

@@ -33,13 +33,16 @@ async def openclaw_ws_bridge(
     bot_id: List[str] = Query(None, description="Bot ID(s) for unified event stream (repeatable)"),
     user_id: str = Query(None, description="User ID for unified event stream"),
     consumer_id: str = Query(None, description="Consumer ID for durable consumer group"),
+    config_only: bool = Query(False, description="Subscribe only to global configuration changes"),
 ):
     """Expose events as SSE via Redis subscriber.
 
-    Two modes:
+    Modes:
     - Legacy: ``?session_key=main`` — streams OpenClaw session events (XREAD, no resume)
     - Unified: ``?bot_id=X&bot_id=Y&user_id=Z&consumer_id=UUID`` — durable consumer group
       subscribing to one or more bots. Falls back to legacy if consumer_id is absent.
+    - Configuration only: ``?config_only=true&consumer_id=UUID`` — global profile
+      updates without claiming a user identity or subscribing to any turns.
     """
     service = get_service()
 
@@ -53,16 +56,19 @@ async def openclaw_ws_bridge(
     # connections from every mobile reconnect.
     redis_url = redis_sub._redis_url
 
-    use_unified = bot_id and user_id and consumer_id
+    if config_only:
+        if not consumer_id or session_key or bot_id or user_id:
+            raise HTTPException(status_code=400, detail="config_only requires consumer_id and no user or bot scope")
+        bot_id, user_id = [], ""
 
+    use_unified = config_only or bool(bot_id and user_id and consumer_id)
     if not use_unified and not session_key:
         raise HTTPException(
             status_code=400,
-            detail="Provide either session_key (legacy) or bot_id+user_id+consumer_id (unified)",
+            detail="Provide session_key, bot_id+user_id+consumer_id, or config_only+consumer_id",
         )
 
     if use_unified:
-        # bot_id is a list — pass all of them to subscribe_group
         return StreamingResponse(
             _unified_event_stream(redis_url, bot_id, user_id, consumer_id),
             media_type="text/event-stream",
@@ -108,14 +114,14 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
     # therefore treat "hello" as a real "you are subscribed, safe to fire a
     # turn" signal — closing the race where a turn published between connect and
     # group-create produced no audio.
-    await sub.ensure_groups(bot_ids, user_id, consumer_id)
+    await sub.ensure_groups(bot_ids, user_id, consumer_id, include_global=True)
     yield _sse(
         "hello",
         {
             "bot_ids": bot_ids,
             "user_id": user_id,
             "consumer_id": consumer_id,
-            "mode": "unified",
+            "mode": "unified" if bot_ids else "config-only",
             "connected": True,
             "ts": datetime.now(timezone.utc).isoformat(),
         },
@@ -128,7 +134,7 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
     last_ping = asyncio.get_running_loop().time()
     try:
         async for event_data in sub.subscribe_group(
-            bot_ids, user_id, consumer_id, timeout_s=86400,
+            bot_ids, user_id, consumer_id, timeout_s=86400, include_global=True,
         ):
             if event_data is not None:
                 replayed = event_data.pop("_replayed", False)

@@ -149,6 +149,24 @@ def _effective_bot_settings(service, slug: str) -> dict[str, object]:
     return effective
 
 
+async def _publish_bot_profile_changed(service, slug: str) -> None:
+    """Notify open UI windows after the database write and cache reload succeed."""
+    subscriber = getattr(service, "_redis_subscriber", None)
+    if subscriber is None:
+        logger.warning("Bot profile changed for %s but the event stream is unavailable", slug)
+        return
+    try:
+        stream_id = await subscriber.publish_global_config_event({
+            "_type": "bot_profile_changed", "bot_id": slug,
+        })
+        if stream_id is None:
+            logger.warning("Bot profile changed for %s but the event was not published", slug)
+    except Exception:
+        # A transient Redis failure must not turn a committed profile write into
+        # an HTTP error that callers might retry. SSE hello reconciles on reconnect.
+        logger.exception("Bot profile changed for %s but event publication failed", slug)
+
+
 def _reload_bot_registry() -> None:
     """Reload in-memory bot registry from YAML + DB overrides."""
     from ...bots import invalidate_bots_cache, _check_reload
@@ -278,7 +296,9 @@ async def _persist_bot_profile(
                 agent_id = parts[1]
         await _push_soul_background(profile.slug, agent_id, effective_prompt)
 
-    return _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug))
+    response = _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug))
+    await _publish_bot_profile_changed(service, profile.slug)
+    return response
 
 
 @router.get("/v1/settings", response_model=RuntimeSettingsResponse, tags=["System"])
@@ -633,7 +653,7 @@ def reload_bots():
 
 
 @router.delete("/v1/bots/{slug}/profile", tags=["System"])
-def delete_bot_profile(
+async def delete_bot_profile(
     slug: str,
     purge: bool = Query(False, description="Also purge all bot data (messages, memories, settings, etc.)"),
 ):
@@ -656,6 +676,7 @@ def delete_bot_profile(
     response: dict = {"success": True, "slug": normalized_slug}
     if purge:
         response["purge"] = purge_bot_data(service.config, normalized_slug)
+    await _publish_bot_profile_changed(service, normalized_slug)
     return response
 
 

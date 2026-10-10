@@ -28,6 +28,8 @@ COMMANDS_STREAM = "agent:commands"
 RUN_STREAM_PREFIX = "agent:run:"
 # Unified event stream for all bots (native + OpenClaw): events:{bot_id}:{user_id}
 UNIFIED_EVENTS_PREFIX = "events:"
+# Shared bot-configuration notifications (no user-specific data in payloads).
+GLOBAL_CONFIG_STREAM = f"{UNIFIED_EVENTS_PREFIX}system:__config__"
 
 # Keep last 10k events per session stream (auto-trimmed)
 STREAM_MAXLEN = 10_000
