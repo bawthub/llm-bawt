@@ -457,6 +457,15 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "Default 4096 preserves prior behavior (old max_output_tokens double-duty)."
         ),
     ),
+    "question_answer_wait_seconds": SettingDefinition(
+        key="question_answer_wait_seconds",
+        type="int",
+        default=60,
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Question answer live wait (seconds)",
+        help="Seconds to hold a Claude Code AskUserQuestion in the current turn. 0 disables the live wait and uses a continuation turn.",
+    ),
     "summarization_job": SettingDefinition(
         key="summarization_job",
         type="json",

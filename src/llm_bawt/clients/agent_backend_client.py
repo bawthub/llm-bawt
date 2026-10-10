@@ -234,7 +234,7 @@ class AgentBackendClient(LLMClient):
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
         # pass it through in the Redis command.
-        config = dict(self._bot_config)
+        config = self._with_question_wait(dict(self._bot_config))
         system_parts = []
         for msg in messages:
             if msg.role == "system":
@@ -330,6 +330,19 @@ class AgentBackendClient(LLMClient):
     # Internal
     # ------------------------------------------------------------------
 
+    def _with_question_wait(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Apply the global setting to this Claude Code turn's private config."""
+        if getattr(self, "_backend_name", None) != "claude-code":
+            return config
+        from ..runtime_setting_resolution import resolve_global_runtime_setting
+
+        return {
+            **config,
+            "question_answer_wait_seconds": int(resolve_global_runtime_setting(
+                self.config, "question_answer_wait_seconds",
+            )),
+        }
+
     async def _chat_full(
         self,
         prompt: str,
@@ -366,6 +379,7 @@ class AgentBackendClient(LLMClient):
                 config["timeout_seconds"] = max(1, int(bridge_timeout_seconds))
             if bridge_event_callback is not None:
                 config["event_callback"] = bridge_event_callback
+        config = self._with_question_wait(config)
         if hasattr(self._backend, "chat_full"):
             return await self._backend.chat_full(prompt, config)
         # Fallback for backends that only implement chat()

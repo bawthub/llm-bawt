@@ -224,7 +224,7 @@ class TurnStreamPublishMixin:
         turn_log_id = ctx.turn_log_id
         user_id = ctx.user_id
         self = ctx.svc
-        """Durably record + surface one deferred AskUserQuestion (worker thread).
+        """Durably record + surface one AskUserQuestion (worker thread).
 
         Mirrors _persist_publish_approval: persists the pending question and
         publishes the live unified ``tool_await_result`` event from a thread
@@ -238,6 +238,9 @@ class TurnStreamPublishMixin:
         _await_handled.add(tool_use_id)
         tool_args = chunk.get("arguments") or {}
         origin_harness = (chunk.get("provider") or "claude") or "claude"
+        from datetime import datetime
+        deadline = chunk.get("live_deadline")
+        live_deadline = datetime.fromisoformat(deadline) if deadline and origin_harness == "claude-code" else None
         # Set BEFORE the persist so the turn ends as a question regardless of
         # a transient store failure (matches the prior inline semantics).
         question_id_holder[0] = tool_use_id
@@ -257,6 +260,7 @@ class TurnStreamPublishMixin:
                 trigger_message_id=trigger_message_id,
                 session_key=chunk.get("session_key") or None,
                 origin_harness=origin_harness,
+                live_deadline=live_deadline,
             )
         except Exception as _persist_err:
             log.warning(
@@ -274,5 +278,6 @@ class TurnStreamPublishMixin:
             "arguments": tool_args,
             "session_key": chunk.get("session_key", ""),
             "provider": chunk.get("provider", ""),
+            "live_deadline": deadline,
             "ts": time.time(),
         })

@@ -274,24 +274,14 @@ class ClaudeCommandMixin:
     async def _handle_tool_result(
         self, fields: dict, msg_id: str, async_redis,
     ) -> None:
-        """Deprecated no-op (TASK-269).
-
-        AskUserQuestion no longer blocks on an in-process Future, so there is
-        nothing to resolve here.  The answer now arrives as a brand-new
-        continuation turn (chat.send carrying the user's answer).  We keep this
-        handler only to drain/ACK any stray chat.tool_result commands a stale
-        client might still emit during a deploy window.
-        """
+        """Resolve a live AskUserQuestion without taking the session send lock."""
         tool_use_id = (fields.get("tool_use_id") or "").strip()
-        logger.info(
-            "chat.tool_result is deprecated and ignored (tool_use_id=%s) — "
-            "answers are delivered as continuation turns now",
-            tool_use_id,
-        )
-        try:
-            await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
-        except Exception:
-            pass
+        entry = self._pending_question_futures.get(tool_use_id)
+        if (fields.get("backend") or self._backend_name) == self._backend_name and entry:
+            session_key, future = entry
+            if fields.get("session_key") == session_key and not future.done():
+                future.set_result(fields.get("result", ""))
+        await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
 
     async def _handle_rpc(
         self, fields: dict, msg_id: str, async_redis,

@@ -40,6 +40,7 @@ class SendRequest:
     bot_context_window: int | None
     responses_transport: str | None
     mcp_tool_timeout_ms: int | None
+    question_answer_wait_seconds: int
     configured_disallowed_tools: object
     attachments: list[dict] = field(default_factory=list)
     # Per-thread SDK binding. The app resolves the durable thread (explicit
@@ -173,6 +174,14 @@ class SendRequest:
                     mcp_timeout_raw, bot_slug,
                 )
 
+        # Missing or invalid payload disables the wait; the bridge never chooses
+        # a setting default (that belongs to the app's SettingDefinition).
+        try:
+            question_answer_wait_seconds = max(0, int(fields.get("question_answer_wait_seconds", "0")))
+        except (TypeError, ValueError):
+            logger.warning("Invalid question_answer_wait_seconds in chat.send")
+            question_answer_wait_seconds = 0
+
         # TASK-593: app-resolved, DB-managed base SDK tool policy. Keep the raw
         # field until proxy routing is known; the pure resolver below decodes it,
         # falls back safely, and adds proxy-only exclusions.
@@ -217,6 +226,7 @@ class SendRequest:
             compact_threshold=compact_threshold,
             responses_transport=responses_transport,
             mcp_tool_timeout_ms=mcp_tool_timeout_ms,
+            question_answer_wait_seconds=question_answer_wait_seconds,
             configured_disallowed_tools=configured_disallowed_tools,
             attachments=attachments,
             thread_session_id=thread_session_id,

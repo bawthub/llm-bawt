@@ -134,11 +134,9 @@ class ClaudeCodeBridge(
         # Proxy status callbacks run in-process and resolve request_id back to
         # the active Redis run without exposing the session key in HTTP headers.
         self._proxy_request_sessions: dict[str, str] = {}
-        # TASK-269: AskUserQuestion no longer blocks the SDK turn.  can_use_tool
-        # emits an AWAIT_TOOL_RESULT event and returns a synthetic "deferred"
-        # ack immediately, so the turn ends cleanly and the user's answer comes
-        # back as a separate continuation turn (SDK resume + answer message) —
-        # no in-process Future to hold, no chat.tool_result round-trip.
+        # Tool-use id -> Future for a live AskUserQuestion on this process.
+        # Only the matching command may resolve it; cleaned up on timeout/abort.
+        self._pending_question_futures: dict[str, tuple[str, asyncio.Future[str]]] = {}
         # Load MCP servers from settings file
         self._mcp_servers = self._load_mcp_servers()
         # TASK-270: Anthropic-compat proxy URL set by __main__ after the

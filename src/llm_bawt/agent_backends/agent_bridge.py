@@ -279,6 +279,7 @@ class AgentBridgeBackend(AgentBackend):
                                 int(config.get("mcp_tool_timeout_ms"))
                                 if config.get("mcp_tool_timeout_ms") else None
                             ),
+                            question_answer_wait_seconds=config.get("question_answer_wait_seconds"),
                             thread_session_id=(
                                 str(config.get("thread_session_id") or "").strip()
                                 or None
@@ -532,6 +533,7 @@ class AgentBridgeBackend(AgentBackend):
                                     "session_key": event.session_key,
                                     "provider": event.provider,
                                     "trigger_message_id": event.trigger_message_id,
+                                    "live_deadline": (event.raw or {}).get("live_deadline"),
                                 })
 
                             elif event.kind == AgentEventKind.APPROVAL_DECISION:

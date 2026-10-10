@@ -34,6 +34,7 @@ class CommandPublisherMixin:
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
+        question_answer_wait_seconds: int | None = None,
         thread_session_id: str | None = None,
         thread_resume_id: str | None = None,
         explicit_thread: bool = False,
@@ -77,6 +78,8 @@ class CommandPublisherMixin:
             fields["responses_transport"] = responses_transport
         if mcp_tool_timeout_ms is not None and mcp_tool_timeout_ms > 0:
             fields["mcp_tool_timeout_ms"] = str(mcp_tool_timeout_ms)
+        if question_answer_wait_seconds is not None:
+            fields["question_answer_wait_seconds"] = str(question_answer_wait_seconds)
         if disallowed_tools is not None:
             fields["disallowed_tools"] = json.dumps(
                 disallowed_tools, ensure_ascii=False

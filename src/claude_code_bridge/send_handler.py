@@ -296,6 +296,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         request_id=request_id,
                         session_key=session_key,
                         seq_holder=seq_holder,
+                        question_answer_wait_seconds=req.question_answer_wait_seconds,
                     )
                     # TASK-292: the approval gate lives in a PreToolUse hook, NOT
                     # can_use_tool. Under permission_mode="bypassPermissions" (our

@@ -647,17 +647,13 @@ class ClaudeApprovalMixin:
         request_id: str,
         session_key: str,
         seq_holder: list[int],
+        question_answer_wait_seconds: int = 0,
     ):
         """Build the per-run can_use_tool callback bound to this turn.
 
-        TASK-269 — deferred/continuation model.  AskUserQuestion does NOT
-        block the SDK turn.  We emit an AWAIT_TOOL_RESULT event (the app
-        persists the question and marks the turn end_reason="question") and
-        immediately return a synthetic "deferred" ack via
-        PermissionResultDeny.message.  The model reads that as the tool's
-        output, acknowledges, and ends its turn cleanly — no Future, no
-        wait_for, no 30-minute ceiling, no session lock held open.  The user's
-        real answer arrives later as a brand-new continuation turn.
+        Emit the question and briefly hold the SDK tool result if the app
+        requested a live wait. On timeout, CAS the app's pending row back to
+        deferred before returning the existing acknowledgement.
 
         Why DENY and not ALLOW: an ALLOW makes the SDK actually execute the
         built-in AskUserQuestion, which crashes in this headless context
@@ -700,6 +696,17 @@ class ClaudeApprovalMixin:
                 )
                 return PermissionResultDeny(message=self._DEFERRED_ACK, interrupt=False)
 
+            # Without an app URL the timeout CAS cannot run safely. Preserve
+            # deferred behavior rather than claiming a live window we cannot end.
+            live_wait = max(0, question_answer_wait_seconds) if self._app_api_url else 0
+            future = None
+            deadline = None
+            if live_wait:
+                from datetime import timedelta
+                deadline = (datetime.now(timezone.utc) + timedelta(seconds=live_wait)).isoformat()
+                future = asyncio.get_running_loop().create_future()
+                self._pending_question_futures[tool_use_id] = (session_key, future)
+
             # Emit AWAIT_TOOL_RESULT so the app persists the question, records
             # it on the turn (end_reason="question", question_id), and fans it
             # out to the UI.  Ordered in the same seq as surrounding deltas.
@@ -711,19 +718,48 @@ class ClaudeApprovalMixin:
                     tool_name=tool_name,
                     tool_arguments=tool_input if isinstance(tool_input, dict) else {},
                     tool_use_id=tool_use_id,
+                    extra_raw={"live_deadline": deadline} if deadline else None,
                 )
             except Exception:
-                logger.exception(
-                    "Failed to publish AWAIT_TOOL_RESULT for tool_use_id=%s", tool_use_id,
-                )
+                self._pending_question_futures.pop(tool_use_id, None)
+                logger.exception("Failed to publish AWAIT_TOOL_RESULT for tool_use_id=%s", tool_use_id)
+                return PermissionResultDeny(message=self._DEFERRED_ACK, interrupt=False)
 
-            logger.info(
-                "AskUserQuestion deferred: tool_use_id=%s session=%s — turn ends, "
-                "answer arrives as a continuation turn",
-                tool_use_id, session_key,
-            )
+            if future is not None:
+                try:
+                    try:
+                        answer = await asyncio.wait_for(asyncio.shield(future), live_wait)
+                    except asyncio.TimeoutError:
+                        # The app's atomic transition arbitrates answers at the
+                        # boundary. If arbitration is unavailable, the deadline
+                        # itself prevents later answers from claiming this Future.
+                        try:
+                            async with httpx.AsyncClient(timeout=10) as client:
+                                response = await client.post(
+                                    f"{self._app_api_url}/v1/chat/questions/{tool_use_id}/timeout",
+                                    json={"session_key": session_key},
+                                )
+                                response.raise_for_status()
+                            outcome = response.json()
+                            if outcome.get("expired"):
+                                answer = self._DEFERRED_ACK
+                            elif outcome.get("answer") is not None:
+                                answer = outcome["answer"]
+                            else:
+                                # Unknown/unfinished status must not hold the turn.
+                                answer = self._DEFERRED_ACK
+                        except Exception:
+                            logger.warning(
+                                "Question timeout arbitration failed for tool_use_id=%s",
+                                tool_use_id, exc_info=True,
+                            )
+                            answer = future.result() if future.done() and not future.cancelled() else self._DEFERRED_ACK
+                    return PermissionResultDeny(message=answer, interrupt=False)
+                finally:
+                    self._pending_question_futures.pop(tool_use_id, None)
+                    if not future.done():
+                        future.cancel()
 
-            # Immediate synthetic ack — no await.  The model ends its turn.
             return PermissionResultDeny(message=self._DEFERRED_ACK, interrupt=False)
 
         return can_use_tool

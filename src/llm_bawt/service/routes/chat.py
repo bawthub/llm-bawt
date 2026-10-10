@@ -15,6 +15,7 @@ from ..schemas import ChatCompletionRequest
 
 router = APIRouter()
 log = get_service_logger(__name__)
+_DISMISSED_QUESTION_RESULT = "[Question dismissed by user.]"
 
 
 def _internal_inter_bot_sender(http_request: Request) -> str | None:
@@ -392,6 +393,29 @@ async def chat_tool_result(request: ToolResultRequest) -> ToolResultResponse:
     )
 
 
+class QuestionTimeoutRequest(BaseModel):
+    session_key: str
+
+
+@router.post("/v1/chat/questions/{question_id}/timeout", tags=["Agent Backends"])
+async def timeout_question(question_id: str, request: QuestionTimeoutRequest) -> dict:
+    """CAS the live hold into durable deferral; report the answer if it won."""
+    store = get_service()._pending_question_store
+    row = store.get(question_id)
+    if row is None or row.session_key != request.session_key:
+        raise HTTPException(status_code=404, detail="Question not found for session")
+    expired = store.expire_live(question_id)
+    current = store.get(question_id)
+    return {
+        "expired": expired or current.status == "awaiting",
+        "answer": (
+            current.answer if current.status == "answered"
+            else _DISMISSED_QUESTION_RESULT if current.status == "skipped" else None
+        ),
+        "dismissed": current.status == "skipped",
+    }
+
+
 # ---------------------------------------------------------------------------
 # TASK-269 — canonical question/answer + continuation
 # ---------------------------------------------------------------------------
@@ -428,9 +452,11 @@ class QuestionAnswerResponse(BaseModel):
     origin_harness: str = "claude"
     # The text the client should send as the continuation user message.
     continuation_prompt: str
+    answer: str | None = None
     # The awaiting turn this answers — pass as parent_turn_id on the continuation.
     parent_turn_id: str | None = None
     already_answered: bool = False
+    live: bool = False
 
 
 def _format_continuation_prompt(
@@ -468,15 +494,11 @@ def _format_continuation_prompt(
 
 @router.post("/v1/chat/questions/{question_id}/answer", tags=["Agent Backends"])
 async def answer_question(question_id: str, request: QuestionAnswerRequest) -> QuestionAnswerResponse:
-    """Record a user's answer to a deferred AskUserQuestion (TASK-269).
+    """Record the answer and atomically choose live delivery or continuation.
 
-    Persists the canonical answer, flips the question to ``answered``, and
-    fans out a ``question_answered`` unified event so every tab converges.
-    Returns the ``continuation_prompt`` + ``parent_turn_id`` the client uses to
-    dispatch the continuation turn (a normal streaming /v1/chat/completions
-    call carrying the answer back to the agent).  Idempotent — a re-POST of an
-    already-answered question returns the recorded answer with
-    ``already_answered=true`` and does not double-record.
+    A live CAS winner sends chat.tool_result to the held SDK turn. Once the
+    timeout CAS wins, return the continuation prompt as before. Repeated
+    answers are idempotent and never start a second continuation.
     """
     service = get_service()
     pq_store = getattr(service, "_pending_question_store", None)
@@ -487,6 +509,17 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
     if row is None:
         raise HTTPException(
             status_code=404, detail=f"No question recorded for id={question_id}",
+        )
+    if row.bot_id != request.bot_id or row.user_id != request.user_id:
+        raise HTTPException(status_code=404, detail="Question not found for bot/user")
+
+    async def _deliver_live(result: str) -> None:
+        from ...agent_backends.agent_bridge import get_agent_subscriber
+        sub = get_agent_subscriber()
+        if sub is None or not row.session_key:
+            raise HTTPException(status_code=503, detail="Question bridge unavailable")
+        await sub.send_tool_result(
+            row.session_key, question_id, result, backend="claude-code",
         )
 
     try:
@@ -520,13 +553,11 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
 
     already = row.status == "answered"
     if already:
-        prompt = row.answer or _format_continuation_prompt(
-            question_args, request.responses, request.free_text, request.result,
-        )
         return QuestionAnswerResponse(
             ok=True, detail="already_answered", question_id=question_id,
             bot_id=row.bot_id, origin_harness=getattr(row, "origin_harness", "claude"),
-            continuation_prompt=prompt, parent_turn_id=row.turn_id, already_answered=True,
+            continuation_prompt="", answer=row.answer,
+            parent_turn_id=row.turn_id, already_answered=True,
         )
 
     if request.dismiss:
@@ -534,7 +565,25 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
         # "skipped" (drops it from the awaiting set so it never reappears on
         # reload), clear every tab's picker, and return an empty continuation
         # so the client dispatches no turn.
-        pq_store.mark(tool_use_id=question_id, status="skipped")
+        live = row.status == "awaiting_live" and pq_store.dismiss_live(question_id)
+        if not live:
+            pq_store.expire_live(question_id)
+            if not pq_store.dismiss_deferred(question_id):
+                current = pq_store.get(question_id)
+                if current is not None and current.status == "answered":
+                    return QuestionAnswerResponse(
+                        ok=True, detail="already_answered", question_id=question_id,
+                        bot_id=row.bot_id, origin_harness=row.origin_harness,
+                        continuation_prompt="", answer=current.answer,
+                        parent_turn_id=row.turn_id, already_answered=True,
+                    )
+                if current is None or current.status != "skipped":
+                    raise HTTPException(status_code=409, detail="Question cannot be dismissed")
+        if live:
+            try:
+                await _deliver_live(_DISMISSED_QUESTION_RESULT)
+            except Exception:
+                log.exception("Live question dismissal delivery failed for %s", question_id)
         await _fanout_resolved("")
         log.info(
             "Question dismissed (skipped): id=%s bot=%s parent_turn=%s — no continuation",
@@ -543,20 +592,38 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
         return QuestionAnswerResponse(
             ok=True, detail="dismissed", question_id=question_id,
             bot_id=request.bot_id, origin_harness=getattr(row, "origin_harness", "claude"),
-            continuation_prompt="", parent_turn_id=row.turn_id,
+            continuation_prompt="", parent_turn_id=row.turn_id, live=live,
         )
 
     prompt = _format_continuation_prompt(
         question_args, request.responses, request.free_text, request.result,
     )
     responses_json = [r.model_dump() for r in (request.responses or [])]
-    updated = pq_store.record_answer(
-        tool_use_id=question_id,
-        answer=prompt,
-        answer_json=responses_json or None,
+    live = row.status == "awaiting_live" and pq_store.claim_live_answer(
+        question_id, prompt, responses_json or None,
     )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Question disappeared during answer")
+    if live:
+        # Persist first; if Redis is unavailable the bridge's timeout
+        # arbitration can still read the winning answer from the DB.
+        try:
+            await _deliver_live(prompt)
+        except Exception:
+            log.exception("Live question delivery failed for %s", question_id)
+    else:
+        pq_store.expire_live(question_id)
+        claimed = pq_store.claim_deferred_answer(question_id, prompt, responses_json or None)
+        if not claimed:
+            updated = pq_store.get(question_id)
+            if updated is None:
+                raise HTTPException(status_code=404, detail="Question disappeared during answer")
+            if updated.status != "answered":
+                raise HTTPException(status_code=409, detail=f"Question is {updated.status}")
+            return QuestionAnswerResponse(
+                ok=True, detail="already_answered", question_id=question_id,
+                bot_id=row.bot_id, origin_harness=row.origin_harness,
+                continuation_prompt="", answer=updated.answer,
+                parent_turn_id=row.turn_id, already_answered=True,
+            )
 
     # Fan out so other tabs flip the QuestionMessage to its answered state.
     await _fanout_resolved(prompt)
@@ -568,7 +635,8 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
     return QuestionAnswerResponse(
         ok=True, detail="recorded", question_id=question_id,
         bot_id=request.bot_id, origin_harness=getattr(row, "origin_harness", "claude"),
-        continuation_prompt=prompt, parent_turn_id=row.turn_id,
+        continuation_prompt="" if live else prompt, answer=prompt,
+        parent_turn_id=row.turn_id, live=live,
     )
 
 
@@ -584,6 +652,7 @@ class PendingQuestionItem(BaseModel):
     session_key: str | None = None
     arguments: dict
     status: str
+    live_deadline: str | None = None
     answer: str | None = None
     answer_json: list | dict | None = None
     answered_turn_id: str | None = None

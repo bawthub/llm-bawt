@@ -18,6 +18,11 @@ async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
     # BEFORE an RPC can close the SDK stream and deliver EOF/ResultMessage.
     if not coordinator.request(turn.id, source=source, peer=peer):
         return "already_completed"
+    # The bridge cancels its pending Future with this run. Convert the still-
+    # live row to normal deferral so a later answer dispatches a continuation.
+    question_store = getattr(service, "_pending_question_store", None)
+    if question_store is not None:
+        question_store.expire_live_for_turn(turn.id)
 
     from .turn_execution import turn_executions
     execution = turn_executions.get(turn.id)

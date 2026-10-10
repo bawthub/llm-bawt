@@ -872,6 +872,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                         "arguments": tool_args,
                         "session_key": chunk.get("session_key", ""),
                         "provider": chunk.get("provider", ""),
+                        "live_deadline": chunk.get("live_deadline"),
                         "trigger_message_id": chunk.get("trigger_message_id"),
                         "bot_id": bot_id,
                         "turn_id": turn_log_id,

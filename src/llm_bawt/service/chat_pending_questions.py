@@ -1,24 +1,13 @@
 """Canonical question/answer registry for interactive SDK tool calls.
 
-TASK-269 — deferred/continuation model.  When an agent calls the built-in
-``AskUserQuestion`` tool, the bridge does NOT block: ``can_use_tool`` returns
-immediately with a synthetic "deferred" ack and the turn ends cleanly.  The
-question is persisted here as the durable, recallable record of the ask.  The
-user answers anytime (any tab, even days later); the answer endpoint records
-it here and the frontend dispatches a *continuation turn* carrying the answer
-back to the agent (same-bot: SDK session resume; cross-bot: history rewrite).
+AskUserQuestion persists a durable row for both delivery modes. Claude Code
+holds a short ``awaiting_live`` window: the answer endpoint and bridge timeout
+atomically claim opposite transitions. A winning live answer resumes the same
+SDK turn; a timeout flips to ``awaiting`` and the answer arrives in a later
+continuation turn. Wait=0 and other harnesses start directly in ``awaiting``.
 
-Because the turn no longer stays open, a question is NOT abandoned when its
-turn ends — it stays ``awaiting`` (== pending) until explicitly answered or
-superseded.
-
-State machine:
-
-    awaiting   ─┬─→  answered     (user picked / typed an answer)
-                ├─→  superseded   (a newer question replaced this one)
-                └─→  abandoned    (explicit drop — session reset, etc.)
-
-Rows are kept indefinitely for audit/recall; callers filter by status.
+An unanswered question survives the originating turn until answered, skipped,
+or superseded. Rows are kept for audit/recall; callers filter by status.
 """
 
 from __future__ import annotations
@@ -26,8 +15,9 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import Column, DateTime, Text, text as sa_text
+from sqlalchemy import Column, DateTime, Text, update, text as sa_text
 from sqlmodel import Field, SQLModel, Session, select
 
 from ..utils.config import Config
@@ -60,11 +50,11 @@ class PendingQuestion(SQLModel, table=True):
     # Original tool input (the AskUserQuestion `{questions: [...]}` payload).
     # Stored as JSON text so we don't need a JSONB column for portability.
     arguments_json: str = Field(sa_column=Column(Text, nullable=False))
-    # State machine (TASK-269): awaiting → answered | abandoned | superseded.
-    # "awaiting" == pending; a question stays answerable indefinitely (the
-    # turn that asked it ends cleanly via the deferred ack — we no longer
-    # abandon on turn-end).  "superseded" = a newer question replaced it.
+    # awaiting_live → answered (same turn) | awaiting (timeout) | skipped.
+    # awaiting → answered (continuation) | skipped | abandoned | superseded.
+    # Both pending states stay visible until explicitly resolved.
     status: str = Field(default="awaiting", index=True, max_length=32)
+    live_deadline: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     # Human-readable answer text (what gets fed to the continuation turn).
     answer: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     # Canonical structured answer: [{question_id, selected: [...], other?}].
@@ -123,6 +113,10 @@ class PendingQuestionStore:
                 "ALTER TABLE chat_pending_questions ADD COLUMN IF NOT EXISTS"
                 " answered_turn_id VARCHAR(128)"
             ))
+            conn.execute(sa_text(
+                "ALTER TABLE chat_pending_questions ADD COLUMN IF NOT EXISTS"
+                " live_deadline TIMESTAMPTZ"
+            ))
 
         self._schema_guard.run(self.engine, "pending-question-store", bootstrap)
 
@@ -140,6 +134,7 @@ class PendingQuestionStore:
         trigger_message_id: str | None = None,
         session_key: str | None = None,
         origin_harness: str = "claude",
+        live_deadline: datetime | None = None,
     ) -> None:
         """Insert (or no-op-replay) a fresh awaiting question.
 
@@ -166,6 +161,8 @@ class PendingQuestionStore:
                     session_key=(session_key or None) or None,
                     tool_name=tool_name or "AskUserQuestion",
                     origin_harness=(origin_harness or "claude").strip() or "claude",
+                    status="awaiting_live" if live_deadline else "awaiting",
+                    live_deadline=live_deadline,
                     arguments_json=json.dumps(
                         arguments if isinstance(arguments, dict) else {"value": arguments},
                         ensure_ascii=False, default=str,
@@ -177,6 +174,74 @@ class PendingQuestionStore:
             logger.exception(
                 "Failed to upsert pending question tool_use_id=%s", tool_use_id,
             )
+
+    def _transition(self, where: Any, from_status: str, values: dict[str, Any]) -> int:
+        """Atomically change matching rows only while their status is unchanged."""
+        if self.engine is None:
+            return 0
+        with Session(self.engine) as session:
+            result = session.execute(
+                update(PendingQuestion)
+                .where(where, PendingQuestion.status == from_status)
+                .values(**values)
+            )
+            session.commit()
+            return result.rowcount
+
+    @staticmethod
+    def _answer_values(answer: str, answer_json: list | dict | None) -> dict[str, Any]:
+        return {
+            "status": "answered",
+            "answer": answer,
+            "answer_json": json.dumps(answer_json, ensure_ascii=False, default=str)
+                if answer_json is not None else None,
+            "answered_at": datetime.now(timezone.utc),
+        }
+
+    def expire_live(self, tool_use_id: str) -> bool:
+        """CAS: timeout owns deferral only if the live answer has not won."""
+        return self._transition(
+            PendingQuestion.tool_use_id == tool_use_id,
+            "awaiting_live", {"status": "awaiting", "live_deadline": None},
+        ) == 1
+
+    def expire_live_for_turn(self, turn_id: str) -> int:
+        """Abort moves any still-live question into ordinary deferred mode."""
+        return self._transition(
+            PendingQuestion.turn_id == turn_id,
+            "awaiting_live", {"status": "awaiting", "live_deadline": None},
+        )
+
+    def claim_live_answer(
+        self, tool_use_id: str, answer: str, answer_json: list | dict | None,
+    ) -> bool:
+        """CAS: answer owns the live Future only while its deadline is valid."""
+        return self._transition(
+            (PendingQuestion.tool_use_id == tool_use_id)
+            & (PendingQuestion.live_deadline > datetime.now(timezone.utc)),
+            "awaiting_live", self._answer_values(answer, answer_json),
+        ) == 1
+
+    def claim_deferred_answer(
+        self, tool_use_id: str, answer: str, answer_json: list | dict | None,
+    ) -> bool:
+        """CAS the deferred answer too; losing tabs must not send another turn."""
+        return self._transition(
+            PendingQuestion.tool_use_id == tool_use_id,
+            "awaiting", self._answer_values(answer, answer_json),
+        ) == 1
+
+    def dismiss_deferred(self, tool_use_id: str) -> bool:
+        return self._transition(
+            PendingQuestion.tool_use_id == tool_use_id,
+            "awaiting", {"status": "skipped", "answered_at": datetime.now(timezone.utc)},
+        ) == 1
+
+    def dismiss_live(self, tool_use_id: str) -> bool:
+        return self._transition(
+            PendingQuestion.tool_use_id == tool_use_id,
+            "awaiting_live", {"status": "skipped", "answered_at": datetime.now(timezone.utc)},
+        ) == 1
 
     def mark(
         self,
@@ -191,25 +256,14 @@ class PendingQuestionStore:
         Returns the updated row (or None if not found).  No-ops if the row
         is already in a terminal state — the first answer wins.
         """
-        if self.engine is None:
-            return None
         if status not in {"answered", "skipped", "abandoned"}:
             raise ValueError(f"invalid pending-question status: {status}")
         try:
-            with Session(self.engine) as session:
-                row = session.get(PendingQuestion, tool_use_id)
-                if row is None:
-                    return None
-                if row.status != "awaiting":
-                    return row
-                row.status = status
-                if answer is not None:
-                    row.answer = answer
-                row.answered_at = datetime.now(timezone.utc)
-                session.add(row)
-                session.commit()
-                session.refresh(row)
-                return row
+            values = {"status": status, "answered_at": datetime.now(timezone.utc)}
+            if answer is not None:
+                values["answer"] = answer
+            self._transition(PendingQuestion.tool_use_id == tool_use_id, "awaiting", values)
+            return self.get(tool_use_id)
         except Exception:
             logger.exception(
                 "Failed to mark pending question tool_use_id=%s status=%s",
@@ -233,33 +287,14 @@ class PendingQuestionStore:
         Idempotent — the first answer wins; a re-POST returns the existing row
         unchanged.  Returns the updated row, or None if the question is missing.
         """
-        if self.engine is None:
-            return None
         try:
-            with Session(self.engine) as session:
-                row = session.get(PendingQuestion, tool_use_id)
-                if row is None:
-                    return None
-                if row.status != "awaiting":
-                    # Already answered/abandoned/superseded — first write wins.
-                    return row
-                row.status = "answered"
-                row.answer = answer
-                if answer_json is not None:
-                    row.answer_json = json.dumps(
-                        answer_json, ensure_ascii=False, default=str,
-                    )
-                if answered_turn_id:
-                    row.answered_turn_id = answered_turn_id
-                row.answered_at = datetime.now(timezone.utc)
-                session.add(row)
-                session.commit()
-                session.refresh(row)
-                return row
+            values = self._answer_values(answer, answer_json)
+            if answered_turn_id:
+                values["answered_turn_id"] = answered_turn_id
+            self._transition(PendingQuestion.tool_use_id == tool_use_id, "awaiting", values)
+            return self.get(tool_use_id)
         except Exception:
-            logger.exception(
-                "Failed to record answer for tool_use_id=%s", tool_use_id,
-            )
+            logger.exception("Failed to record answer for tool_use_id=%s", tool_use_id)
             return None
 
     def supersede_awaiting_for_turn(self, turn_id: str, *, keep: str | None = None) -> int:
@@ -398,7 +433,7 @@ class PendingQuestionStore:
         try:
             with Session(self.engine) as session:
                 stmt = select(PendingQuestion).where(
-                    PendingQuestion.status == "awaiting"
+                    PendingQuestion.status.in_(("awaiting", "awaiting_live"))
                 )
                 if bot_id:
                     stmt = stmt.where(PendingQuestion.bot_id == bot_id.strip())
@@ -473,6 +508,9 @@ class PendingQuestionStore:
             "session_key": row.session_key,
             "arguments": arguments,
             "status": row.status,
+            "live_deadline": row.live_deadline.replace(
+                tzinfo=row.live_deadline.tzinfo or timezone.utc,
+            ).isoformat() if row.live_deadline and row.status == "awaiting_live" else None,
             "answer": row.answer,
             "answer_json": answer_json,
             "answered_turn_id": getattr(row, "answered_turn_id", None),

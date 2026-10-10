@@ -99,6 +99,15 @@ class TurnStreamFinalizer:
         if not externally_aborted:
             upstream_error, upstream_error_text = self._turn_has_upstream_error()
 
+        # A live answer continues this very turn; only an unanswered question
+        # should mark the terminal as a deferred question.
+        if ctx.question_id_holder[0]:
+            row = svc._pending_question_store.get(ctx.question_id_holder[0])
+            # Timeout clears live_deadline before any later continuation answer.
+            # Only a live result clears the question terminal marker.
+            if row is not None and row.live_deadline and row.status in ("answered", "skipped"):
+                ctx.question_id_holder[0] = None
+
         # Wrap finalization so the sentinel, turn_complete event, and generation
         # cleanup still fire when persistence raises (for example, DB failure).
         try:
