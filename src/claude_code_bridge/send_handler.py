@@ -24,7 +24,6 @@ from ._bridge_helpers import (
 from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
 from .send_boundaries import (
     publish_run_done_once,
-    separator_before_new_block,
     should_read_native_context_usage,
 )
 from .send_errors import (
@@ -36,6 +35,7 @@ from .send_errors import (
 from .send_preflight import prepare_send
 from .send_result import ClaudeResultMixin
 from .send_stream import ClaudeStreamMixin
+from .send_stream_events import StreamBlockState
 from .send_usage import ClaudeUsageMixin, LiveUsagePublisher
 from .subagent_usage import SubagentUsage
 from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
@@ -130,9 +130,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
 
             seq = 0
             text_parts: list[str] = []
-            reasoning_tail = ""
-            current_tool_name: str | None = None
-            current_tool_input: str = ""
+            stream_blocks = StreamBlockState(self, request_id, session_key, text_parts)
             actual_model: str = model  # updated from SystemMessage if available
             # Map tool_use_id -> tool name (the SDK's ToolResultBlock doesn't echo
             # the name, only the id) so we can recognise a Playwright screenshot
@@ -577,92 +575,14 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
 
                             if isinstance(msg, StreamEvent):
                                 event = msg.event
-                                event_type = event.get("type", "")
-                                if event_type == "message_delta":
+                                if event.get("type") == "message_delta":
                                     seq = live_usage.publish(
                                         seq,
                                         assistant_usage=latest_assistant_usage,
                                         stream_usage=event.get("usage"),
                                     )
-
-                                if event_type == "content_block_delta":
-                                    delta = event.get("delta", {})
-                                    if delta.get("type") == "text_delta":
-                                        text = delta.get("text", "")
-                                        if text:
-                                            model_side_effects = True
-                                            seq += 1
-                                            text_parts.append(text)
-                                            self._publish_event(
-                                                request_id, session_key, seq,
-                                                kind=AgentEventKind.ASSISTANT_DELTA,
-                                                text=text,
-                                            )
-                                    elif delta.get("type") == "thinking_delta":
-                                        # Model reasoning ("thinking"). Surface on
-                                        # the REASONING_DELTA channel for the UI's
-                                        # collapsible lane. Deliberately NOT
-                                        # appended to text_parts — reasoning must
-                                        # never enter the final assistant message
-                                        # body (TASK-301).
-                                        thinking = delta.get("thinking", "")
-                                        if thinking:
-                                            model_side_effects = True
-                                            seq += 1
-                                            reasoning_tail = thinking
-                                            self._publish_event(
-                                                request_id, session_key, seq,
-                                                kind=AgentEventKind.REASONING_DELTA,
-                                                text=thinking,
-                                            )
-                                    elif delta.get("type") == "signature_delta":
-                                        # Opaque reasoning signature — no display
-                                        # value; drop it.
-                                        pass
-                                    elif delta.get("type") == "input_json_delta":
-                                        current_tool_input += delta.get("partial_json", "")
-
-                                elif event_type == "content_block_start":
-                                    block = event.get("content_block", {})
-                                    if block.get("type") == "thinking":
-                                        separator = separator_before_new_block(reasoning_tail)
-                                        if separator:
-                                            seq += 1
-                                            reasoning_tail += separator
-                                            self._publish_event(
-                                                request_id, session_key, seq,
-                                                kind=AgentEventKind.REASONING_DELTA,
-                                                text=separator,
-                                            )
-                                    elif block.get("type") == "tool_use":
-                                        model_side_effects = True
-                                        current_tool_name = block.get("name", "unknown")
-                                        current_tool_input = ""
-                                    elif block.get("type") == "text":
-                                        # A NEW text block. Narrating agents emit one
-                                        # text block per iteration ("Looking up X." →
-                                        # tool → "Grabbing coords." → tool → answer).
-                                        # `text_parts` is joined with "", so without a
-                                        # boundary those blocks glue into
-                                        # "…Palworld.Grabbing exact coords…" — one run-on
-                                        # paragraph in the persisted message body.
-                                        # Emit the separator as a real ASSISTANT_DELTA so
-                                        # the live stream, the persisted content, and the
-                                        # tool `textOffset` char counts all stay in sync.
-                                        tail = text_parts[-1] if text_parts else ""
-                                        if tail and not tail.endswith("\n"):
-                                            seq += 1
-                                            text_parts.append("\n\n")
-                                            self._publish_event(
-                                                request_id, session_key, seq,
-                                                kind=AgentEventKind.ASSISTANT_DELTA,
-                                                text="\n\n",
-                                            )
-
-                                elif event_type == "content_block_stop":
-                                    if current_tool_name:
-                                        current_tool_name = None
-                                        current_tool_input = ""
+                                seq, side_effect = stream_blocks.on_event(event, seq)
+                                model_side_effects |= side_effect
 
                             elif isinstance(msg, AssistantMessage):
                                 subagent_usage.observe(msg)

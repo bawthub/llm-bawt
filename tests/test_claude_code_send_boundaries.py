@@ -10,11 +10,42 @@ from agent_bridge.session_queue import SessionQueue
 from claude_code_bridge.command_ops import ClaudeCommandMixin
 from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.send_handler import ClaudeSendMixin
+from claude_code_bridge.send_stream_events import StreamBlockState
 from claude_code_bridge.send_boundaries import (
     publish_run_done_once,
     separator_before_new_block,
     should_read_native_context_usage,
 )
+
+
+def test_stream_blocks_preserve_order_boundaries_and_side_effects() -> None:
+    bridge = SimpleNamespace(_publish_event=Mock())
+    text_parts: list[str] = []
+    blocks = StreamBlockState(bridge, "req", SESSION, text_parts)
+    frames = [
+        ({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "First."}}, True),
+        ({"type": "content_block_start", "content_block": {"type": "text"}}, False),
+        ({"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "Thought"}}, True),
+        ({"type": "content_block_start", "content_block": {"type": "thinking"}}, False),
+        ({"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": "{"}}, False),
+        ({"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}}, True),
+        ({"type": "content_block_stop"}, False),
+    ]
+    seq = 0
+    for frame, expected_side_effect in frames:
+        seq, side_effect = blocks.on_event(frame, seq)
+        assert side_effect is expected_side_effect
+
+    assert seq == 4
+    assert text_parts == ["First.", "\n\n"]
+    assert blocks.reasoning_tail == "Thought\n\n"
+    assert blocks.current_tool_name is None
+    assert blocks.current_tool_input == ""
+    assert [call.kwargs["kind"] for call in bridge._publish_event.call_args_list] == [
+        AgentEventKind.ASSISTANT_DELTA, AgentEventKind.ASSISTANT_DELTA,
+        AgentEventKind.REASONING_DELTA, AgentEventKind.REASONING_DELTA,
+    ]
+    assert [call.args[2] for call in bridge._publish_event.call_args_list] == [1, 2, 3, 4]
 
 
 def test_new_reasoning_block_gets_markdown_paragraph_boundary() -> None:
