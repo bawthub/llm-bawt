@@ -125,39 +125,26 @@ class BackgroundTasksMixin:
         deterministically when needed.
         """
         from ..memory.profile_maintenance import ProfileMaintenanceService
-        from ..profiles import ProfileManager
+        from ..runtime_settings import resolve_job_model
 
         entity_id = task.payload.get("entity_id", task.user_id)
         entity_type = task.payload.get("entity_type", "user")
         dry_run = task.payload.get("dry_run", False)
-
-        from ..runtime_settings import resolve_job_model
 
         requested_model = (
             task.payload.get("model")
             or resolve_job_model(self.config, "profile_maintenance_model")
             or resolve_job_model(self.config, "maintenance_model")
         )
-        try:
-            model_to_use, _ = self._resolve_request_model(
-                requested_model,
-                task.bot_id or self._default_bot,
-                local_mode=False,
-            )
-        except Exception as e:
-            log.error(f"Failed to resolve model for profile maintenance: {e}")
-            return {"error": f"Failed to resolve model: {e}"}
+        if not requested_model:
+            return {"error": "No model configured for profile maintenance"}
 
-        if not model_to_use:
-            err = "No model available for profile maintenance"
-            log.error(err)
-            return {"error": err}
-
-        if model_to_use not in self._available_models:
-            err = f"Model '{model_to_use}' unavailable for profile maintenance"
-            log.error(err)
-            return {"error": err}
-
+        # Job models are global, not bot models. Resolving through the task's
+        # agent bot overrides this setting with its chat endpoint; the background
+        # factory instead resolves the requested model with the chat harness.
+        llm_client, model_to_use = self._get_background_client(model_override=requested_model)
+        if not llm_client:
+            return {"error": f"Profile maintenance model '{requested_model}' is unavailable as a background client"}
         log.info(f"🔧 Profile maintenance: {entity_type}/{entity_id} (model={model_to_use})")
 
         # Reuse the process-wide ProfileManager singleton — see TASK-202.
@@ -165,11 +152,6 @@ class BackgroundTasksMixin:
         # one per task on the executor leaks connections.
         from .dependencies import get_profile_manager
         profile_manager = get_profile_manager(self.config)
-
-        # Use isolated background client — never interferes with main chat model
-        llm_client, _ = self._get_background_client(model_override=model_to_use)
-        if not llm_client:
-            return {"error": f"Failed to create background client for profile maintenance"}
 
         service = ProfileMaintenanceService(profile_manager, llm_client)
 
