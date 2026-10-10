@@ -406,13 +406,15 @@ async def timeout_question(question_id: str, request: QuestionTimeoutRequest) ->
         raise HTTPException(status_code=404, detail="Question not found for session")
     expired = store.expire_live(question_id)
     current = store.get(question_id)
+    answered = current is not None and current.status == "answered"
+    dismissed = current is not None and current.status == "skipped"
     return {
-        "expired": expired or current.status == "awaiting",
-        "answer": (
-            current.answer if current.status == "answered"
-            else _DISMISSED_QUESTION_RESULT if current.status == "skipped" else None
-        ),
-        "dismissed": current.status == "skipped",
+        "expired": expired or (current is not None and current.status == "awaiting"),
+        # Native AskUserQuestion input; the bridge allows the tool with it.
+        "answers": store.tool_answers(current) if answered else None,
+        # Deny text for a dismissal (never an answer).
+        "message": _DISMISSED_QUESTION_RESULT if dismissed else None,
+        "dismissed": dismissed,
     }
 
 
@@ -513,13 +515,14 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
     if row.bot_id != request.bot_id or row.user_id != request.user_id:
         raise HTTPException(status_code=404, detail="Question not found for bot/user")
 
-    async def _deliver_live(result: str) -> None:
+    async def _deliver_live(result: str, answers: dict[str, str] | None = None) -> None:
+        """``answers`` → bridge allows the tool natively; otherwise ``result`` is deny text."""
         from ...agent_backends.agent_bridge import get_agent_subscriber
         sub = get_agent_subscriber()
         if sub is None or not row.session_key:
             raise HTTPException(status_code=503, detail="Question bridge unavailable")
         await sub.send_tool_result(
-            row.session_key, question_id, result, backend="claude-code",
+            row.session_key, question_id, result, backend="claude-code", answers=answers,
         )
 
     try:
@@ -606,7 +609,10 @@ async def answer_question(question_id: str, request: QuestionAnswerRequest) -> Q
         # Persist first; if Redis is unavailable the bridge's timeout
         # arbitration can still read the winning answer from the DB.
         try:
-            await _deliver_live(prompt)
+            claimed_row = pq_store.get(question_id)
+            await _deliver_live(
+                prompt, answers=pq_store.tool_answers(claimed_row) if claimed_row else None,
+            )
         except Exception:
             log.exception("Live question delivery failed for %s", question_id)
     else:

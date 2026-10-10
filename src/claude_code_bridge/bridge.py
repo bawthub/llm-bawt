@@ -89,12 +89,11 @@ class ClaudeCodeBridge(
     # The CLI's internal API_TIMEOUT_MS is 600s; we cut shorter to fail fast.
     DEFAULT_REQUEST_TIMEOUT = 300
 
-    # TASK-269: synthetic tool_result fed back to the model when it calls
-    # AskUserQuestion.  Returned via PermissionResultDeny.message (an ALLOW
-    # would make the SDK actually run the built-in tool, which crashes headless
-    # with "undefined is not an object" — there's no interactive widget here).
-    # The model reads this as the tool's output, acknowledges, and ends its
-    # turn; the user's real answer arrives later as a continuation turn.
+    # TASK-269: tool_result fed back when an AskUserQuestion is NOT answered
+    # within the live window (TASK-1043). It's a deferral, not an answer, so it
+    # goes out via PermissionResultDeny.message; real answers ALLOW the tool
+    # with native ``answers`` instead. The model acknowledges and ends its
+    # turn; the user's answer arrives later as a continuation turn.
     _DEFERRED_ACK = (
         "[The question has been delivered to the user, who will answer it in a "
         "separate later message. Do not wait and do not guess an answer. Briefly "
@@ -136,7 +135,8 @@ class ClaudeCodeBridge(
         self._proxy_request_sessions: dict[str, str] = {}
         # Tool-use id -> Future for a live AskUserQuestion on this process.
         # Only the matching command may resolve it; cleaned up on timeout/abort.
-        self._pending_question_futures: dict[str, tuple[str, asyncio.Future[str]]] = {}
+        # Result: dict = native answers (allow), str = deny text (dismissal).
+        self._pending_question_futures: dict[str, tuple[str, asyncio.Future[str | dict]]] = {}
         # Load MCP servers from settings file
         self._mcp_servers = self._load_mcp_servers()
         # TASK-270: Anthropic-compat proxy URL set by __main__ after the

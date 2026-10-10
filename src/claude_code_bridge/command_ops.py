@@ -280,7 +280,17 @@ class ClaudeCommandMixin:
         if (fields.get("backend") or self._backend_name) == self._backend_name and entry:
             session_key, future = entry
             if fields.get("session_key") == session_key and not future.done():
-                future.set_result(fields.get("result", ""))
+                # dict = native answers (allow); str = deny text (dismissal).
+                answers = None
+                if fields.get("answers_json"):
+                    try:
+                        answers = json.loads(fields["answers_json"])
+                    except (TypeError, ValueError):
+                        logger.warning("Invalid answers_json for tool_use_id=%s", tool_use_id)
+                future.set_result(
+                    answers if isinstance(answers, dict) and answers
+                    else fields.get("result", "")
+                )
         await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
 
     async def _handle_rpc(

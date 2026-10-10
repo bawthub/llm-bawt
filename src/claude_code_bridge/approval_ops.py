@@ -655,12 +655,12 @@ class ClaudeApprovalMixin:
         requested a live wait. On timeout, CAS the app's pending row back to
         deferred before returning the existing acknowledgement.
 
-        Why DENY and not ALLOW: an ALLOW makes the SDK actually execute the
-        built-in AskUserQuestion, which crashes in this headless context
-        ("undefined is not an object (evaluating 'H.map')" — no interactive
-        widget renderer) and sends the model into a retry loop.  A DENY with a
-        message is the clean channel to feed text back as the tool result.
-        Everything else gets the SDK's default allow.
+        A real answer ALLOWs the built-in tool with the original input plus its
+        native ``answers`` field (question text -> answer); the CLI echoes them
+        as a normal, non-error tool result. (TASK-269's headless 'H.map' crash
+        came from an ALLOW without the input passed back.) Deferral and
+        dismissal are not answers, so they DENY with a message. Everything
+        else gets the SDK's default allow.
         """
 
         async def can_use_tool(
@@ -743,8 +743,10 @@ class ClaudeApprovalMixin:
                             outcome = response.json()
                             if outcome.get("expired"):
                                 answer = self._DEFERRED_ACK
-                            elif outcome.get("answer") is not None:
-                                answer = outcome["answer"]
+                            elif isinstance(outcome.get("answers"), dict) and outcome["answers"]:
+                                answer = outcome["answers"]
+                            elif outcome.get("message"):
+                                answer = outcome["message"]
                             else:
                                 # Unknown/unfinished status must not hold the turn.
                                 answer = self._DEFERRED_ACK
@@ -754,6 +756,15 @@ class ClaudeApprovalMixin:
                                 tool_use_id, exc_info=True,
                             )
                             answer = future.result() if future.done() and not future.cancelled() else self._DEFERRED_ACK
+                    if isinstance(answer, dict):
+                        # A real answer: allow the built-in tool with its native
+                        # ``answers`` input so the SDK records a normal (non-error)
+                        # tool result. Original input must be passed through —
+                        # the tool maps over ``questions``.
+                        return PermissionResultAllow(
+                            updated_input={**(tool_input or {}), "answers": answer},
+                        )
+                    # Not an answer (deferral/dismissal): deny with the message.
                     return PermissionResultDeny(message=answer, interrupt=False)
                 finally:
                     self._pending_question_futures.pop(tool_use_id, None)

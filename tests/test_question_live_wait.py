@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -77,10 +78,11 @@ def app(monkeypatch, store):
     async def send_tool_result(session_key, question_id, result, **kwargs):
         subscriber.sent.append((session_key, question_id, result))
         if subscriber.bridge:
-            await subscriber.bridge._handle_tool_result(
-                {"session_key": session_key, "tool_use_id": question_id,
-                 "result": result, "backend": "claude-code"}, "cmd", redis,
-            )
+            fields = {"session_key": session_key, "tool_use_id": question_id,
+                      "result": result, "backend": "claude-code"}
+            if kwargs.get("answers"):
+                fields["answers_json"] = json.dumps(kwargs["answers"])
+            await subscriber.bridge._handle_tool_result(fields, "cmd", redis)
 
     subscriber.sent = []
     subscriber.bridge = None
@@ -152,6 +154,60 @@ def test_wait_zero_is_original_deferral(store):
     assert bridge.events[0]["extra_raw"] is None
     assert store.get("t1").status == "awaiting"
     assert not bridge._pending_question_futures
+
+
+SHIP_INPUT = {"questions": [
+    {"question": "Ship it?", "header": "Ship", "multiSelect": False,
+     "options": [{"label": "Yes", "description": ""}, {"label": "No", "description": ""}]},
+    {"question": "Which envs?", "header": "Envs", "multiSelect": True,
+     "options": [{"label": "dev", "description": ""}, {"label": "prod", "description": ""}]},
+]}
+
+
+def test_live_answer_allows_tool_with_native_answers(store, app):
+    """A real answer is a normal tool result (allow + answers), never an error."""
+    from claude_agent_sdk.types import PermissionResultAllow
+    bridge = app.bridge = FakeBridge(store)
+
+    async def scenario():
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=5)
+        pending = asyncio.create_task(cb("AskUserQuestion", SHIP_INPUT, SimpleNamespace(tool_use_id="t1")))
+        await asyncio.sleep(0)
+        response = await chat.answer_question("t1", chat.QuestionAnswerRequest(
+            bot_id="loopy",
+            responses=[
+                chat.QuestionResponseItem(question_id="Ship", selected=["Yes"]),
+                chat.QuestionResponseItem(question_id="Envs", selected=["dev", "prod"], other="staging"),
+            ],
+        ))
+        assert response.live is True
+        result = await pending
+        assert isinstance(result, PermissionResultAllow)
+        assert result.updated_input["questions"] == SHIP_INPUT["questions"]
+        assert result.updated_input["answers"] == {
+            "Ship it?": "Yes", "Which envs?": "dev, prod, staging",
+        }
+        assert not bridge._pending_question_futures
+    asyncio.run(scenario())
+
+
+def test_tool_answers_mapping_fallbacks(store):
+    store.upsert_awaiting(
+        tool_use_id="m1", bot_id="loopy", user_id="nick", turn_id="turn",
+        session_key="loopy:nick", arguments=SHIP_INPUT, origin_harness="claude-code",
+    )
+    # Positional fallback when question_id matches neither header nor text.
+    assert store.claim_deferred_answer("m1", "x", [
+        {"question_id": "?", "selected": ["No"]}, {"question_id": "?", "selected": []},
+    ])
+    assert store.tool_answers(store.get("m1")) == {"Ship it?": "No"}
+    # Pre-formatted answer with no structure maps onto the first question.
+    store.upsert_awaiting(
+        tool_use_id="m2", bot_id="loopy", user_id="nick", turn_id="turn",
+        session_key="loopy:nick", arguments=SHIP_INPUT, origin_harness="claude-code",
+    )
+    assert store.claim_deferred_answer("m2", "just ship dev", None)
+    assert store.tool_answers(store.get("m2")) == {"Ship it?": "just ship dev"}
 
 
 def test_live_answer_is_same_tool_result(store, app):
@@ -297,7 +353,7 @@ def test_answer_claim_wins_bridge_timeout_without_redis_delivery(store, monkeypa
         def raise_for_status(self): pass
         def json(self):
             assert not store.expire_live("t1")
-            return {"expired": False, "answer": store.get("t1").answer}
+            return {"expired": False, "answers": store.tool_answers(store.get("t1"))}
 
     class Client:
         def __init__(self, **kwargs): pass
@@ -309,10 +365,10 @@ def test_answer_claim_wins_bridge_timeout_without_redis_delivery(store, monkeypa
 
     async def scenario():
         cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0.01)
-        pending = asyncio.create_task(cb("AskUserQuestion", {"questions": []}, SimpleNamespace(tool_use_id="t1")))
+        pending = asyncio.create_task(cb("AskUserQuestion", SHIP_INPUT, SimpleNamespace(tool_use_id="t1")))
         await asyncio.sleep(0)
-        assert store.claim_live_answer("t1", "won before timeout", None)
-        assert (await pending).message == "won before timeout"
+        assert store.claim_live_answer("t1", "Ship: Yes", [{"question_id": "Ship", "selected": ["Yes"]}])
+        assert (await pending).updated_input["answers"] == {"Ship it?": "Yes"}
         assert not bridge._pending_question_futures
 
     asyncio.run(scenario())
@@ -345,7 +401,7 @@ def test_timeout_endpoint_and_hydration_include_deadline(store, app):
     assert store.get("t1").status == "awaiting"
     second = asyncio.run(chat.timeout_question("t1", chat.QuestionTimeoutRequest(session_key="loopy:nick")))
     assert second["expired"] is True
-    assert not second["answer"]
+    assert not second["answers"] and not second["message"]
 
 
 def test_expired_deadline_cannot_claim_live(store, app):
@@ -397,7 +453,8 @@ def test_dismiss_delivery_failure_is_recovered_by_timeout(store, app):
         "t1", chat.QuestionTimeoutRequest(session_key="loopy:nick"),
     ))
     assert timeout["dismissed"]
-    assert timeout["answer"] == "[Question dismissed by user.]"
+    assert timeout["message"] == "[Question dismissed by user.]"
+    assert timeout["answers"] is None
 
 
 def test_live_dismiss_resolves_future(store, app):

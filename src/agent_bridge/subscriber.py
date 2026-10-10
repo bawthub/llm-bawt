@@ -226,8 +226,12 @@ class RedisSubscriber(CommandPublisherMixin):
         *,
         backend: str | None = None,
         request_id: str | None = None,
+        answers: dict[str, str] | None = None,
     ) -> None:
         """Publish a chat.tool_result command for a deferred SDK tool call.
+
+        ``answers`` (question text -> answer) is the tool's native input: the
+        bridge allows the call with it. Without it, ``result`` is deny text.
 
         Routed by bridges that have pending AWAIT_TOOL_RESULT futures keyed by
         ``tool_use_id`` (currently only claude-code-bridge for AskUserQuestion).
@@ -244,6 +248,8 @@ class RedisSubscriber(CommandPublisherMixin):
             fields["backend"] = backend
         if request_id:
             fields["request_id"] = request_id
+        if answers:
+            fields["answers_json"] = json.dumps(answers, ensure_ascii=False)
         await self._pub_redis.xadd(
             COMMANDS_STREAM,
             fields,

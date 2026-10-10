@@ -481,6 +481,50 @@ class PendingQuestionStore:
             return []
 
     @staticmethod
+    def tool_answers(row: PendingQuestion) -> dict[str, str]:
+        """Render an answered row as the SDK tool's native ``answers`` input.
+
+        Claude Code's AskUserQuestion takes ``answers`` keyed by question text
+        (multi-select comma-joined) and returns a normal, non-error tool result.
+        Single source for both live delivery and timeout arbitration.
+        """
+        try:
+            questions = (json.loads(row.arguments_json or "{}") or {}).get("questions") or []
+        except Exception:
+            questions = []
+        try:
+            responses = json.loads(row.answer_json) if row.answer_json else []
+        except Exception:
+            responses = []
+        if not isinstance(responses, list):
+            responses = []
+        by_id = {
+            str(r.get("question_id")): r
+            for r in responses if isinstance(r, dict) and r.get("question_id")
+        }
+        answers: dict[str, str] = {}
+        for index, question in enumerate(questions):
+            text = question.get("question") if isinstance(question, dict) else None
+            if not text:
+                continue
+            response = by_id.get(str(question.get("header") or "")) or by_id.get(text)
+            if response is None and index < len(responses) and isinstance(responses[index], dict):
+                response = responses[index]
+            if not response:
+                continue
+            parts = [s for s in (response.get("selected") or []) if s]
+            if response.get("other"):
+                parts.append(response["other"])
+            if parts:
+                answers[text] = ", ".join(parts)
+        # Pre-formatted/free-text answers carry no per-question structure.
+        if not answers and row.answer and questions and isinstance(questions[0], dict):
+            first = questions[0].get("question")
+            if first:
+                answers[first] = row.answer
+        return answers
+
+    @staticmethod
     def row_to_dict(row: PendingQuestion) -> dict:
         """Serialise a row to the wire shape the UI consumes.
 
