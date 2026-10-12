@@ -816,7 +816,11 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 trigger_message_id=trigger_message_id,
                                 bot_id=bot_id,
                                 user_id=user_id,
-                                model=item.get("model") or model_alias,
+                                # The turn's catalog ref (`model@access_path`), same
+                                # as turn_complete and the turn log — not the
+                                # bridge's upstream name, which neither the
+                                # provider lookup nor pricing can resolve.
+                                model=model_alias or item.get("model"),
                                 token_usage=item.get("token_usage"),
                             )
                             if usage_event is not None:

@@ -23,6 +23,7 @@ from .turn_log_schema import (  # noqa: F401 — re-exported for existing import
     backfill_trigger_message_ids,
     bootstrap_turn_log_schema,
 )
+from .turn_usage import encode_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class DeliveryTargetBusy(RuntimeError):
 class TurnLogStore:
     """DB access helper for persistent turn logs."""
 
+    config: Config | None = None
     _last_cleanup_at: float = 0.0
     _cleanup_interval_seconds: float = 300.0
     _backfill_done: bool = False
@@ -131,6 +133,7 @@ class TurnLogStore:
             trigger_message_id = _extract_trigger_id(request_payload)
 
         created_at = datetime.now(timezone.utc)
+        token_usage_json = self._encode_token_usage(token_usage, model)
 
         # Durable inter-bot callbacks reserve their deterministic turn under the
         # same per-target advisory lock used by the outbox claim. Normal turn
@@ -205,7 +208,7 @@ class TurnLogStore:
                             "agent_session_key": agent_session_key,
                             "agent_request_id": agent_request_id,
                             "animation": animation,
-                            "token_usage_json": json.dumps(token_usage, ensure_ascii=False, default=str) if isinstance(token_usage, dict) else None,
+                            "token_usage_json": token_usage_json,
                             "parent_turn_id": parent_turn_id,
                         },
                     )
@@ -234,7 +237,7 @@ class TurnLogStore:
                         agent_session_key=agent_session_key,
                         agent_request_id=agent_request_id,
                         animation=animation,
-                        token_usage_json=(json.dumps(token_usage, ensure_ascii=False, default=str) if isinstance(token_usage, dict) else None),
+                        token_usage_json=token_usage_json,
                         parent_turn_id=parent_turn_id,
                         ended_at=(_terminal_ended_at(created_at, latency_ms) if _is_terminal(status, None) else None),
                     )
@@ -262,10 +265,7 @@ class TurnLogStore:
             agent_session_key=agent_session_key,
             agent_request_id=agent_request_id,
             animation=animation,
-            token_usage_json=(
-                json.dumps(token_usage, ensure_ascii=False, default=str)
-                if isinstance(token_usage, dict) else None
-            ),
+            token_usage_json=token_usage_json,
             parent_turn_id=parent_turn_id,
             # Rare: a turn created already-terminal (e.g. errored before any
             # processing) should not look perpetually in-flight.
@@ -278,6 +278,10 @@ class TurnLogStore:
         with Session(self.engine) as session:
             session.add(row)
             session.commit()
+
+    def _encode_token_usage(self, token_usage: dict | None, model: str | None) -> str | None:
+        """Usage JSON with the serving access path frozen in (see turn_usage)."""
+        return encode_token_usage(token_usage, model_ref=model, catalog=getattr(self.config, "model_catalog", None))
 
     def update_turn(
         self,
@@ -355,10 +359,7 @@ class TurnLogStore:
             if animation is not None:
                 row.animation = animation
             if token_usage is not None:
-                row.token_usage_json = (
-                    json.dumps(token_usage, ensure_ascii=False, default=str)
-                    if isinstance(token_usage, dict) else None
-                )
+                row.token_usage_json = self._encode_token_usage(token_usage, row.model)
             if tts_scrubbed is not None:
                 row.tts_scrubbed = tts_scrubbed
             if end_reason is not None:

@@ -174,6 +174,10 @@ class ModelCatalog:
             if ProtocolCompatibility.is_compatible(harness, endpoint.access_path)
         )
 
+    def endpoint_by_ref(self, ref: str | None) -> ModelEndpoint | None:
+        """Exact ``model@access_path`` lookup — never guesses from a bare model key."""
+        return self._by_ref.get(str(ref or "").strip())
+
     def resolve_endpoint(
         self,
         ref: str | int | ModelEndpoint,
