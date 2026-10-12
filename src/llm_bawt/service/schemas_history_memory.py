@@ -53,6 +53,12 @@ class HistoryMessage(BaseModel):
     # Canonical reply edge for assistant rows. This is the originating user
     # message UUID from turn_logs, not an adjacency guess.
     reply_to_message_id: str | None = None
+    # Turn stats for assistant rows, from the same turn_logs join: the model
+    # that ran it, its token accounting, and real completion time (epoch
+    # seconds; ``timestamp`` may be an ordering key). None when unknown.
+    model: str | None = None
+    token_usage: dict | None = None
+    completed_at: float | None = None
     # Mid-turn steering anchor for user rows. Both fields are populated together.
     interrupt_source_message_id: str | None = None
     interrupt_content_offset: int | None = None

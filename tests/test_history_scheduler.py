@@ -129,7 +129,7 @@ def make_app(monkeypatch, service, rows):
     monkeypatch.setattr(history_pages, "get_service", lambda: service)
     monkeypatch.setattr(history_pages, "_load_sorted_visible_messages", lambda *a, **kw: rows)
     monkeypatch.setattr(history_pages, "_load_window_via_sql", lambda *a, **kw: (rows, False, False))
-    for name in ["_hydrate_attachments_for_page", "_hydrate_reasoning_for_page", "_hydrate_reply_links_for_page", "_hydrate_interrupt_anchors_for_page"]:
+    for name in ["_hydrate_attachments_for_page", "_hydrate_reasoning_for_page", "_hydrate_turn_meta_for_page", "_hydrate_interrupt_anchors_for_page"]:
         monkeypatch.setattr(history_pages, name, lambda *a: {})
     app = FastAPI()
     app.include_router(history_pages.read_router)

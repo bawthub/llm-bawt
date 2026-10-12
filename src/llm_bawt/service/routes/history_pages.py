@@ -139,12 +139,19 @@ def _fetch_reasoning_via_shared_engine(
     return result
 
 
-def _hydrate_reply_links_for_page(
+def _hydrate_turn_meta_for_page(
     service,
     bot_id: str,
     page_messages: list[dict],
-) -> dict[str, str]:
-    """Map assistant message UUIDs to their canonical triggering user UUIDs."""
+) -> dict[str, dict]:
+    """Per-assistant-row turn metadata from ``turn_logs`` for one history page.
+
+    Keyed by assistant message UUID: the canonical triggering user UUID (reply
+    edge) plus the turn's model, token usage and completion time — the stats a
+    reply renders. Exact ``assistant_message_id`` join, so every page (initial,
+    older, thread-scoped) carries its own stats instead of relying on a
+    recent-turns side fetch.
+    """
     assistant_ids = [
         str(message.get("id"))
         for message in page_messages
@@ -160,23 +167,34 @@ def _hydrate_reply_links_for_page(
 
     try:
         from sqlalchemy import text
+        from .turn_logs import _parse_token_usage
 
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT assistant_message_id, trigger_message_id FROM turn_logs "
-                    "WHERE bot_id=:bot_id AND assistant_message_id = ANY(:assistant_ids) "
-                    "AND trigger_message_id IS NOT NULL"
+                    "SELECT assistant_message_id, trigger_message_id, model, "
+                    "token_usage_json, ended_at FROM turn_logs "
+                    "WHERE bot_id=:bot_id AND assistant_message_id = ANY(:assistant_ids)"
                 ),
                 {"bot_id": bot_id, "assistant_ids": assistant_ids},
             ).mappings().all()
-        return {
-            str(row["assistant_message_id"]): str(row["trigger_message_id"])
-            for row in rows
-            if row.get("assistant_message_id") and row.get("trigger_message_id")
-        }
+        meta: dict[str, dict] = {}
+        for row in rows:
+            assistant_id = row.get("assistant_message_id")
+            if not assistant_id:
+                continue
+            ended_at = row.get("ended_at")
+            meta[str(assistant_id)] = {
+                "reply_to_message_id": (
+                    str(row["trigger_message_id"]) if row.get("trigger_message_id") else None
+                ),
+                "model": row.get("model") or None,
+                "token_usage": _parse_token_usage(row.get("token_usage_json")),
+                "completed_at": ended_at.timestamp() if ended_at is not None else None,
+            }
+        return meta
     except Exception as exc:
-        log.warning("Failed to load history reply links: %s", exc)
+        log.warning("Failed to load history turn metadata: %s", exc)
         return {}
 
 
@@ -490,7 +508,7 @@ def _build_history_response(
     reasoning_by_id = _hydrate_reasoning_for_page(
         service, effective_bot_id, page_messages
     )
-    reply_links_by_id = _hydrate_reply_links_for_page(
+    turn_meta_by_id = _hydrate_turn_meta_for_page(
         service, effective_bot_id, page_messages
     )
     interrupt_anchors_by_id = _hydrate_interrupt_anchors_for_page(
@@ -503,6 +521,7 @@ def _build_history_response(
     for msg in page_messages:
         message_id = str(msg.get("id") or "")
         interrupt_anchor = interrupt_anchors_by_id.get(message_id)
+        turn_meta = turn_meta_by_id.get(message_id) or {}
         history_messages.append(HistoryMessage(
             id=msg.get("id"),
             role=msg.get("role", ""),
@@ -510,7 +529,10 @@ def _build_history_response(
             timestamp=msg.get("timestamp", 0.0),
             attachments=attachments_by_id.get(message_id, []),
             reasoning=reasoning_by_id.get(message_id),
-            reply_to_message_id=reply_links_by_id.get(message_id),
+            reply_to_message_id=turn_meta.get("reply_to_message_id"),
+            model=turn_meta.get("model"),
+            token_usage=turn_meta.get("token_usage"),
+            completed_at=turn_meta.get("completed_at"),
             interrupt_source_message_id=(interrupt_anchor[0] if interrupt_anchor else None),
             interrupt_content_offset=(interrupt_anchor[1] if interrupt_anchor else None),
             author=_message_author_payload(msg),

@@ -117,7 +117,7 @@ def test_history_pages_keep_timeline_owner_after_jump(window_db, monkeypatch):
     monkeypatch.setattr(history_pages, "get_service", lambda: service)
     for name in [
         "_hydrate_attachments_for_page", "_hydrate_reasoning_for_page",
-        "_hydrate_reply_links_for_page", "_hydrate_interrupt_anchors_for_page",
+        "_hydrate_turn_meta_for_page", "_hydrate_interrupt_anchors_for_page",
     ]:
         monkeypatch.setattr(history_pages, name, lambda *a: {})
     monkeypatch.setattr(history_pages, "hydrate_scheduler_for_page", lambda *a: {})
@@ -144,7 +144,7 @@ def test_around_route_session_scope_and_404(window_db, monkeypatch):
     monkeypatch.setattr(history_pages, "get_service", lambda: service)
     for name in [
         "_hydrate_attachments_for_page", "_hydrate_reasoning_for_page",
-        "_hydrate_reply_links_for_page", "_hydrate_interrupt_anchors_for_page",
+        "_hydrate_turn_meta_for_page", "_hydrate_interrupt_anchors_for_page",
     ]:
         monkeypatch.setattr(history_pages, name, lambda *a: {})
     monkeypatch.setattr(history_pages, "hydrate_scheduler_for_page", lambda *a: {})

@@ -13,7 +13,7 @@ from ..schemas import (
 from .history_pages import (
     _hydrate_attachments_for_page,
     _hydrate_reasoning_for_page,
-    _hydrate_reply_links_for_page,
+    _hydrate_turn_meta_for_page,
     _load_sorted_visible_messages,
     _message_author_payload,
     _resolve_cursor,
@@ -74,7 +74,7 @@ def _build_history_search_response(
     reasoning_by_id = _hydrate_reasoning_for_page(
         service, effective_bot_id, page_messages
     )
-    reply_links_by_id = _hydrate_reply_links_for_page(
+    turn_meta_by_id = _hydrate_turn_meta_for_page(
         service, effective_bot_id, page_messages
     )
     history_messages = [
@@ -85,7 +85,7 @@ def _build_history_search_response(
             timestamp=msg.get("timestamp", 0.0),
             attachments=attachments_by_id.get(str(msg.get("id") or ""), []),
             reasoning=reasoning_by_id.get(str(msg.get("id") or "")),
-            reply_to_message_id=reply_links_by_id.get(str(msg.get("id") or "")),
+            reply_to_message_id=(turn_meta_by_id.get(str(msg.get("id") or "")) or {}).get("reply_to_message_id"),
             author=_message_author_payload(msg),
         )
         for msg in page_messages
