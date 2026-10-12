@@ -9,9 +9,19 @@
 #
 # Verify after build: WEBGL_debug_renderer_info UNMASKED_RENDERER must show
 # "RTX 5080", not "SwiftShader".
-FROM mcp/playwright
+# TASK-1062: preserve the current browser/MCP payload while upgrading Node.
+FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS node-runtime
+FROM mcp/playwright@sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52d7d995f8d1492
 
 USER root
+# Replace npm as a unit: merging its old dependency tree breaks the new CLI.
+RUN rm -rf /usr/local/lib/node_modules/npm
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN npm install --global corepack@0.36.0 && corepack enable \
+    && test "$(node --version)" = v24.21.0 \
+    && test "$(npm --version)" = 11.19.0 \
+    && node /app/cli.js --version
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 \
