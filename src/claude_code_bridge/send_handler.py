@@ -368,6 +368,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     live_usage = LiveUsagePublisher(
                         self, request_id, session_key, actual_model, model,
                         bot_context_window,
+                        compact_threshold=req.compact_threshold,
                     )
                     # /compact lifecycle tracking for this turn. The SDK reports
                     # compaction via SystemMessage(subtype="status") — never a
@@ -410,6 +411,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         interrupted_usage = interrupted_usage or self._compute_interrupted_usage(
                             actual_model=actual_model, model=model,
                             bot_context_window=bot_context_window,
+                            compact_threshold=req.compact_threshold,
                             latest_assistant_usage=latest_assistant_usage,
                             latest_stream_usage=live_usage.stream_usage,
                         )
@@ -630,6 +632,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 interrupted_usage, _, _ = self._compute_result_usage(
                                     msg, actual_model=actual_model, model=model,
                                     bot_context_window=bot_context_window,
+                                    compact_threshold=req.compact_threshold,
                                     latest_assistant_usage=latest_assistant_usage,
                                     latest_stream_usage=live_usage.stream_usage,
                                 )
@@ -700,6 +703,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     actual_model=actual_model,
                                     model=model,
                                     bot_context_window=bot_context_window,
+                                    compact_threshold=req.compact_threshold,
                                     latest_assistant_usage=latest_assistant_usage,
                                     latest_stream_usage=live_usage.stream_usage,
                                     native_context_usage=native_context_usage,
@@ -799,6 +803,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             actual_model=actual_model,
                             model=model,
                             bot_context_window=bot_context_window,
+                            compact_threshold=req.compact_threshold,
                             latest_assistant_usage=latest_assistant_usage,
                             latest_stream_usage=live_usage.stream_usage,
                         )

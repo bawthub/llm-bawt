@@ -23,6 +23,8 @@ from ._bridge_helpers import (
     _usage_input_total,
 )
 
+from .context_env import effective_context_window
+
 logger = logging.getLogger("claude_code_bridge.bridge")
 
 
@@ -38,6 +40,7 @@ class LiveUsagePublisher:
     context_window: int | None
     stream_usage: dict | None = None
     last_signature: tuple | None = None
+    compact_threshold: int | None = None
 
     def publish(
         self,
@@ -53,6 +56,7 @@ class LiveUsagePublisher:
             actual_model=self.actual_model,
             model=self.requested_model,
             bot_context_window=self.context_window,
+            compact_threshold=self.compact_threshold,
             latest_assistant_usage=assistant_usage,
             latest_stream_usage=self.stream_usage,
         )
@@ -97,12 +101,14 @@ class ClaudeUsageMixin:
         bot_context_window: int | None,
         latest_assistant_usage: dict | None,
         latest_stream_usage: dict | None,
+        compact_threshold: int | None = None,
     ) -> dict | None:
         """Build a provider-neutral usage snapshot for one live model iteration."""
         usage = self._compute_interrupted_usage(
             actual_model=actual_model,
             model=model,
             bot_context_window=bot_context_window,
+            compact_threshold=compact_threshold,
             latest_assistant_usage=latest_assistant_usage,
             latest_stream_usage=latest_stream_usage,
         )
@@ -122,6 +128,7 @@ class ClaudeUsageMixin:
         bot_context_window: int | None,
         latest_assistant_usage: dict | None,
         latest_stream_usage: dict | None,
+        compact_threshold: int | None = None,
     ) -> dict | None:
         """Build an honest usage-so-far payload from the latest model iteration.
 
@@ -174,7 +181,7 @@ class ClaudeUsageMixin:
             "output_tokens": output_tokens,
             "resident_tokens": resident_tokens,
             "resident_source": "interrupted_iteration_total_input",
-            "context_window": bot_context_window,
+            "context_window": effective_context_window(bot_context_window, compact_threshold),
             "total_cost_usd": cost,
             "usage_status": "partial",
         }
@@ -200,6 +207,7 @@ class ClaudeUsageMixin:
         bot_context_window: int | None,
         latest_assistant_usage: dict | None,
         latest_stream_usage: dict | None,
+        compact_threshold: int | None = None,
     ) -> tuple[dict | None, object, object]:
         """Return ``(token_usage_payload, ctx_window, max_output)``.
 
@@ -276,6 +284,9 @@ class ClaudeUsageMixin:
                 elif int(ctx_window) < bot_context_window:
                     # e.g. CLI said 200k for a 500k/1M model
                     ctx_window = bot_context_window
+            ctx_window = effective_context_window(
+                int(ctx_window) if ctx_window else None, compact_threshold,
+            )
             if iter_usage or ctx_window:
                 # z.ai reports input_tokens only in message_delta, so the
                 # per-iteration AssistantMessage.usage (iter_usage) carries

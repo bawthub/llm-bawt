@@ -25,12 +25,14 @@ class ClaudeResultMixin:
         latest_assistant_usage: dict | None,
         latest_stream_usage: dict | None,
         attachments: list[dict] | None = None,
+        compact_threshold: int | None = None,
     ) -> tuple[int, dict | None]:
         """Publish one partial terminal event and return its usage snapshot."""
         usage = self._compute_interrupted_usage(
             actual_model=actual_model,
             model=model,
             bot_context_window=bot_context_window,
+            compact_threshold=compact_threshold,
             latest_assistant_usage=latest_assistant_usage,
             latest_stream_usage=latest_stream_usage,
         )
@@ -69,6 +71,7 @@ class ClaudeResultMixin:
         compact_error_msg: str | None,
         turn_session_id: str | None,
         turn_screenshot_assets: list[dict],
+        compact_threshold: int | None = None,
     ) -> int:
         full_text = "".join(text_parts)
         if not full_text:
@@ -97,6 +100,7 @@ class ClaudeResultMixin:
             actual_model=actual_model,
             model=model,
             bot_context_window=bot_context_window,
+            compact_threshold=compact_threshold,
             latest_assistant_usage=latest_assistant_usage,
             latest_stream_usage=latest_stream_usage,
         )

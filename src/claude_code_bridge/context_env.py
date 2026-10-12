@@ -63,6 +63,21 @@ def proxy_context_window_env(context_window: int | None) -> dict[str, str]:
     }
 
 
+def effective_context_window(
+    context_window: int | None, compact_threshold: int | None,
+) -> int | None:
+    """Mirror the CLI's compact-window cap for usage without a native snapshot.
+
+    This is the percentage denominator, not the auto-compact trigger (which
+    additionally reserves output space). Unknown model windows stay unknown.
+    """
+    if context_window is None or context_window <= 0:
+        return None
+    if compact_threshold is None or compact_threshold <= 0:
+        return context_window
+    return min(context_window, max(100_000, compact_threshold))
+
+
 def compact_window_env(compact_threshold: int | None) -> dict[str, str]:
     """Auto-compact window hint for any Claude Code turn, or ``{}`` when unset.
 
