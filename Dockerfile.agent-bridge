@@ -12,7 +12,7 @@ FROM python:3.12-slim
 #   net debug:  dnsutils iputils-ping netcat-openbsd rsync
 #   archives:   unzip zip xz-utils
 #   binary/file: file xxd (file type ID + hex dump for image/binary inspect)
-#   build:      make shellcheck nodejs npm
+#   build:      make shellcheck (Node/npm installed from verified upstream below)
 #   editors:    vim
 #   viewers:    bat (installed as batcat on Debian; symlinked to bat below)
 #   package mgr: corepack (enabled below for pnpm)
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dnsutils iputils-ping netcat-openbsd rsync \
     unzip zip xz-utils \
     file xxd \
-    make shellcheck nodejs npm \
+    make shellcheck \
     vim \
     bat \
     && rm -rf /var/lib/apt/lists/* \
@@ -38,9 +38,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 ENV PATH="/usr/local/bin:$PATH"
 
-# Node tooling for frontend repos. `npx` ships with npm; `pnpm` is surfaced
-# through Corepack so agents can use the package manager declared by the repo.
-RUN corepack enable
+# TASK-1061: install one supported Node toolchain, not distro Node plus an
+# overlay. Version and per-architecture checksums must be updated together from
+# https://nodejs.org/dist/v24.21.0/SHASUMS256.txt. Fail closed on other arches.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64; node_sha=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;; \
+      arm64) node_arch=arm64; node_sha=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2 ;; \
+      *) echo "unsupported Node architecture" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz; \
+    printf '%s  /tmp/node.tar.xz\n' "$node_sha" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
+    rm /tmp/node.tar.xz; \
+    node --version; npm --version; npx --version
+
+# Explicitly pin Corepack instead of relying on Node's bundled version (or
+# presence). It supplies pnpm shims; the bridge user's cache is seeded below.
+RUN npm install --global corepack@0.36.0 && corepack enable
 
 # GitHub CLI via the official apt repo (always current; no pinned version to
 # rot). Agents are told to use `gh` for PRs/issues — make it present.
@@ -87,8 +102,10 @@ COPY pyproject.toml ./
 # whole src/ is only ~6 MB — not worth the granular COPY complexity.
 COPY src/ ./src/
 
-# Minimal venv with only what bridges need
-RUN uv venv && uv pip install \
+# Minimal venv with only what bridges need. Preserve the verified Python
+# environment during toolchain rebuilds; update constraints deliberately.
+COPY docker/agent-bridge-constraints.txt /app/agent-bridge-constraints.txt
+RUN uv venv && uv pip install --constraint /app/agent-bridge-constraints.txt \
     "redis[hiredis]>=5.0.0" \
     "sqlalchemy>=2.0" \
     "psycopg2-binary>=2.9" \
@@ -110,7 +127,7 @@ RUN uv venv && uv pip install \
 # prerelease openai-codex-cli-bin; kept out of the main install so it can't drag
 # the stable set toward prereleases. Import name openai_codex — coexists with the
 # openai-codex-sdk runtime above (import openai_codex_sdk).
-RUN uv pip install --prerelease=allow "openai-codex>=0.1.0b3"
+RUN uv pip install --constraint /app/agent-bridge-constraints.txt --prerelease=allow "openai-codex>=0.1.0b3"
 
 # Install project in editable mode so both bridge packages are importable
 RUN uv pip install -e . --no-deps
@@ -153,7 +170,9 @@ USER bridge
 # in an isolated env at ~/.local/share/uv/tools/llm-bawt while keeping
 # /app/.venv lean (bridge runtime deps only). Editable means changes to
 # /app/src (bind-mounted in dev) are picked up without reinstall.
-RUN uv tool install --force --editable /app
+# The CLI imports httpx directly; newer provider SDKs no longer supply it
+# transitively. Include it explicitly in this separate tool environment.
+RUN uv tool install --force --editable /app --with "httpx==0.28.1"
 
 # /home/bridge/.local/bin first so uv tool `llm` shadows the dep-less stub
 # in /app/.venv/bin. `python` still resolves to /app/.venv/bin/python,
@@ -171,6 +190,12 @@ ENV PATH="/home/bridge/.local/bin:/app/.venv/bin:$PATH:/opt/agent-skills/bin" \
 # pre-configured (override at runtime with `bw config server <url>`).
 ARG BW_SERVER_URL=https://vault.ferreri.us
 RUN bw config server "$BW_SERVER_URL"
+
+# Match BawtHub's packageManager; seed as bridge, not root, so first use needs
+# neither elevated permissions nor a download. Repos can still select a version.
+RUN corepack install --global pnpm@10.32.1
+COPY docker/test-agent-bridge-toolchain.sh /usr/local/libexec/test-agent-bridge-toolchain.sh
+RUN sh /usr/local/libexec/test-agent-bridge-toolchain.sh
 
 # Default command — overridden per service in docker-compose.yml
 CMD ["python", "-m", "openclaw_bridge"]
