@@ -153,7 +153,7 @@ def test_memory_schema_has_shared_and_per_sanitized_bot_scopes(monkeypatch) -> N
 
 
 def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> None:
-    from llm_bawt.service import changed_files_store, tool_call_store, turn_logs
+    from llm_bawt.service import changed_files_store, tool_call_store, turn_log_schema, turn_logs
 
     engine = FakeEngine()
     create_calls: list[tuple[str, ...]] = []
@@ -162,7 +162,7 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
         assert bind is engine.connection
         create_calls.append(tuple(table.name for table in tables))
 
-    monkeypatch.setattr(turn_logs.SQLModel.metadata, "create_all", fake_create_all)
+    monkeypatch.setattr(turn_log_schema.SQLModel.metadata, "create_all", fake_create_all)
     for store_type in (
         turn_logs.TurnLogStore,
         tool_call_store.ToolCallStore,
