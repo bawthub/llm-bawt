@@ -7,9 +7,14 @@ bridge also passively harvests equivalent ``x-codex-*`` headers from real
 ``/responses`` turns and publishes a canonical Redis snapshot; that snapshot
 is a fallback only when the dedicated endpoint is temporarily unavailable.
 
-Mapping:
-- ``primary``   window → ``session_5h``  (the rolling 5-hour limit)
-- ``secondary`` window → ``weekly_all``  (the weekly all-models limit)
+Mapping — window identity comes from its reported duration, never its slot.
+``primary``/``secondary`` are positions, not meanings: Plus sends a 5-hour
+primary plus a weekly secondary, while Pro-tier plans (e.g. Prolite) send a
+single weekly window in the primary slot.
+- 300-minute window   → ``session_5h``  (the rolling 5-hour limit)
+- 10080-minute window → ``weekly_all``  (the weekly all-models limit)
+- any other duration  → ``window_<dur>`` with a duration label
+- unknown duration    → slot fallback (primary = 5h, secondary = weekly)
 - ``plan_type`` → tiered display name, e.g. ``ChatGPT · codex · Plus``
 """
 
@@ -74,6 +79,22 @@ def _window_label(minutes) -> str | None:
     return f"{m}m"
 
 
+_SESSION = ("session_5h", "5-hour limit", "5h")
+_WEEKLY = ("weekly_all", "Weekly · all models", "7d")
+_SLOT_FALLBACK = {"primary": _SESSION, "secondary": _WEEKLY}
+
+
+def _window_identity(window: dict | None, slot: str) -> tuple[str, str, str]:
+    """(id, label, window) from the reported duration; slot only if unknown."""
+    dur = _window_label(window.get("window_minutes")) if isinstance(window, dict) else None
+    if dur is None:
+        return _SLOT_FALLBACK[slot]
+    for identity in (_SESSION, _WEEKLY):
+        if identity[2] == dur:
+            return identity
+    return f"window_{dur}", f"{dur} limit", dur
+
+
 
 def _snapshot_age(snap: dict | None) -> float | None:
     if not isinstance(snap, dict):
@@ -122,11 +143,10 @@ def _advance_reset(reset_at, window_minutes, now: int):
     return int(reset_at + missed * period)
 
 
-def _limit_from_window(
-    window: dict | None, cid: str, label: str, fallback_window: str, now: int
-) -> UsageLimit | None:
+def _limit_from_window(window: dict | None, slot: str, now: int) -> UsageLimit | None:
     if not isinstance(window, dict):
         return None
+    cid, label, fallback_window = _window_identity(window, slot)
     used = window.get("used_percent")
     if used is None:
         return None
@@ -314,17 +334,11 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
         stale = not live and _snapshot_is_stale(snap)
 
         now = int(time.time())
-        limits: list[UsageLimit] = []
-        primary = _limit_from_window(
-            snap.get("primary"), "session_5h", "5-hour limit", "5h", now
-        )
-        if primary is not None:
-            limits.append(primary)
-        secondary = _limit_from_window(
-            snap.get("secondary"), "weekly_all", "Weekly · all models", "7d", now
-        )
-        if secondary is not None:
-            limits.append(secondary)
+        limits = [
+            limit
+            for slot in ("primary", "secondary")
+            if (limit := _limit_from_window(snap.get(slot), slot, now)) is not None
+        ]
 
         display = _display_name(snap.get("plan_type"))
         if not limits:

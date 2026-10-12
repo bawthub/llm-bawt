@@ -433,19 +433,38 @@ def test_openai_chatgpt_usage_adapter_maps_snapshot_to_canonical() -> None:
     # rolled over — the stored used_percent passes through unchanged.
     now = 1782000000
 
-    p = _limit_from_window(primary, "session_5h", "5-hour limit", "5h", now)
-    s = _limit_from_window(secondary, "weekly_all", "Weekly · all models", "7d", now)
+    p = _limit_from_window(primary, "primary", now)
+    s = _limit_from_window(secondary, "secondary", now)
     assert (p.id, p.label, p.window, p.used_pct, p.resets_at, p.active) == (
         "session_5h", "5-hour limit", "5h", 10.0, 1782093029, True,
     )
-    assert (s.id, s.window, s.used_pct, s.resets_at) == (
-        "weekly_all", "7d", 80.0, 1782335997,
+    assert (s.id, s.label, s.window, s.used_pct, s.resets_at) == (
+        "weekly_all", "Weekly · all models", "7d", 80.0, 1782335997,
     )
     # A window with no used_percent yields no limit (not a zero).
-    assert _limit_from_window({"window_minutes": 300}, "session_5h", "x", "5h", now) is None
+    assert _limit_from_window({"window_minutes": 300}, "primary", now) is None
     assert _display_name("plus") == "ChatGPT · codex · Plus"
     assert _display_name(None) == "ChatGPT · codex"
     assert OpenAIChatGPTUsageAdapter.provider == "openai_chatgpt"
+
+
+def test_openai_chatgpt_window_identity_comes_from_duration_not_slot() -> None:
+    """Prolite sends ONE weekly window in the primary slot — never call it 5-hour."""
+    from llm_bawt.service.usage.adapters.openai_chatgpt import _limit_from_window
+
+    now = 1782000000
+    weekly_in_primary = {"used_percent": 16, "window_minutes": 10080, "reset_at": 1782335997}
+    p = _limit_from_window(weekly_in_primary, "primary", now)
+    assert (p.id, p.label, p.window) == ("weekly_all", "Weekly · all models", "7d")
+    # 5-hour reported in the secondary slot is still the session window.
+    s = _limit_from_window({"used_percent": 3, "window_minutes": 300}, "secondary", now)
+    assert (s.id, s.label, s.window) == ("session_5h", "5-hour limit", "5h")
+    # Unrecognized duration gets an honest generic identity.
+    o = _limit_from_window({"used_percent": 3, "window_minutes": 1440}, "primary", now)
+    assert (o.id, o.label, o.window) == ("window_1d", "1d limit", "1d")
+    # Unknown duration falls back to the slot meaning.
+    u = _limit_from_window({"used_percent": 3}, "secondary", now)
+    assert (u.id, u.window) == ("weekly_all", "7d")
 
 
 def test_claude_usage_percent_not_rescaled_to_fraction() -> None:
