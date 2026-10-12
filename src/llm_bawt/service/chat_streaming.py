@@ -28,6 +28,7 @@ from .schemas import ChatCompletionRequest
 from .stream_request_attachments import prepare_stream_request_attachments
 from .tool_event_coordinator import ToolEventCoordinator
 from .turn_stream_context import TurnStreamContext
+from .turn_stream_finalize import turn_failure_suffix
 from .turn_stream_worker import TurnStreamWorker
 
 log = get_service_logger(__name__)
@@ -702,6 +703,15 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                             }
                             yield (f"data: {json.dumps(data)}\n\n")
 
+                    # Stream the same failure marker finalize persists; the UI
+                    # drops the warning sidecar whenever partial text exists.
+                    marker = turn_failure_suffix(full_response_holder[0], str(chunk))
+                    data = {
+                        "id": response_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model_alias,
+                        "choices": [{"index": 0, "delta": {"content": marker}, "finish_reason": None}],
+                    }
+                    yield (f"data: {json.dumps(data)}\n\n")
                     data = {
                         "id": response_id,
                         "object": "chat.completion.chunk",

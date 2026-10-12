@@ -13,6 +13,23 @@ from .turn_stream_context import TurnStreamContext
 log = get_service_logger(__name__)
 
 
+def turn_failure_suffix(partial: str, error_text: str | None) -> str:
+    """Visible failure marker appended to a failed turn's partial reply.
+
+    Single source for both surfaces: the live HTTP stream emits this suffix as a
+    final content delta, and finalize persists ``partial.rstrip() + suffix`` —
+    so the live bubble and the reloaded history row carry the same marker.
+    """
+    note = (error_text or "").strip() or "upstream backend error"
+    marker = (
+        f"⚠️ **Turn failed** — {note}\n\n"
+        "_This response ended with an error. Work already performed "
+        "is not rolled back; a transport failure does not confirm "
+        "the worker stopped. Check active work before retrying._"
+    )
+    return f"\n\n{marker}" if (partial or "").strip() else marker
+
+
 class TurnStreamFinalizer:
     """Persist and publish the terminal state for a streaming turn."""
 
@@ -168,15 +185,8 @@ class TurnStreamFinalizer:
                 if "⚠️" in _partial[-600:]:
                     _final_text = _partial
                 else:
-                    _err_note = (upstream_error_text or "upstream backend error").strip()
-                    _marker = (
-                        f"⚠️ **Turn failed** — {_err_note}\n\n"
-                        "_This response ended with an error. Work already performed "
-                        "is not rolled back; a transport failure does not confirm "
-                        "the worker stopped. Check active work before retrying._"
-                    )
-                    _final_text = (
-                        f"{_partial.rstrip()}\n\n{_marker}" if _partial.strip() else _marker
+                    _final_text = _partial.rstrip() + turn_failure_suffix(
+                        _partial, upstream_error_text
                     )
                 ctx.full_response_holder[0] = _final_text
                 svc._finalize_turn(
