@@ -15,9 +15,9 @@ is TASK-1060 and is not included.
 | Codex and OpenClaw bridges | 20.19.2 | 24.21.0, healthy |
 | BawtHub dev frontend | 22.22.2 | 24.21.0, healthy, DB connected |
 | Running tenant-e2e frontend | 22.22.2 | 24.21.0, healthy, DB connected |
-| Playwright MCP | 22.23.1 | 24.21.0 candidate tested; activation blocked by host GPU driver mismatch |
-| BawtHub production | 22.23.3 | Managed release pending; use TASK-1062 for final receipt |
-| BawtHub CI / release gates | 20 / 22 | `.node-version` selects 24.21.0 after push |
+| Playwright MCP | 22.23.1 | 24.21.0 live; Chromium and RTX 5080 WebGL verified |
+| BawtHub production | 22.23.3 | 24.21.0, v0.1.68, healthy, DB connected |
+| BawtHub CI / release gates | 20 / 22 | 24.21.0; managed release gates passed |
 
 Python app/ops/model/voice services, Redis, Postgres and other non-Node services
 are not Node upgrade targets. Crawl4AI has no Node on PATH and its upstream-owned
@@ -86,17 +86,41 @@ not tracked Edit calls.
   experimental module-mock flag. This is not an all-green suite and no test gates
   were weakened for the upgrade.
 
-## Host GPU blocker — do not hide with CPU fallback
+## Host GPU incident — resolved, without CPU fallback
 
-At activation, the NVIDIA prestart hook failed before Playwright could start.
-`nvidia-smi` reproduces the mismatch on the host: loaded kernel module
-**595.91.07**, installed NVML **595.99.02**; `modinfo` also reports **595.99.02**.
-Existing GPU containers remain running; restarting them may reproduce the outage.
-Playwright is currently Created/stopped with the tested Node24 image. Replacing
-its image with the old one cannot repair the host driver/library mismatch.
+At activation, the NVIDIA prestart hook failed before Playwright could start:
+loaded kernel module **595.91.07**, installed NVML and on-disk module **595.99.02**.
+Nick separately authorized one echo reboot AFTER production verification. That
+reboot loaded **595.99.02**; host `nvidia-smi` now succeeds. Boot identity changed
+from `7940e1d4-9cd4-45c2-b123-7cf48c06893a` to
+`a443066f-68ed-4593-9e50-baef4489217e`. No driver package change, module unloading,
+or CPU downgrade was performed.
 
-The clean resolution is a separately authorized host reboot to load the installed
-matching module, followed by `nvidia-smi`, Playwright startup, MCP/browser/GPU
-renderer checks, and service health verification. Do not unload active GPU modules,
-downgrade packages, or silently switch Playwright to CPU. TASK-1062 remains open
-until production and this activation have terminal verification receipts.
+The never-started Playwright container remained Created after reboot. Approved
+`llm-bawt.restart-aux` job **f35b80aa83824daf8a80359ddc4b2373** then succeeded,
+exit 0. Live Node is 24.21.0. Chromium **149.0.7827.22**, launched inside the running
+container with its unchanged GPU configuration, passed DOM evaluation and dev
+navigation (HTTP 200, title BawtHub). WebGL2 reports:
+`ANGLE (NVIDIA, Vulkan 1.4.329 (NVIDIA NVIDIA GeForce RTX 5080 (0x00002C02)), NVIDIA)`.
+A read-only MCP protocol readiness test successfully initialized the service,
+listed **23 tools** (including browser navigation/evaluation), and closed its test
+session. A harness session established while the server was down may retain its
+failed connection until the next connection attempt/session.
+
+## Final production and recovery receipts
+
+- Managed release **8a3cddaf238241c5bfea458f164fd5e1** and child deploy
+  **3423d6f1d327465daf0700e3e177e27c** succeeded with exit 0.
+- Production **v0.1.68**, source **800c65630d82a3c55de807b24d6ba57be215442c**,
+  GitHub run **38322573189**, image digest
+  `sha256:3b07bdcf365ecbecfa487670de12b868cb487292ab97dcc3fd86a5f4a1f7687d`.
+- Post-reboot production, dev and tenant health APIs are healthy/DB connected;
+  app `/health` is OK. All three agent bridges and the model/voice/database/cache
+  containers recovered healthy. All first-party active Node targets in the table
+  were rechecked at **24.21.0**; the Ubuntu gateway remains active on its explicit
+  `/opt/node-v24.21.0/bin/node` executable.
+- The powered-off tenant VM stayed off. Rollback images remain available.
+- The queued self-verification delivery did not start after reboot; Nick's resume
+  message began verification instead. It was cancelled while still QUEUED to avoid
+  duplicate work. No claim of automatic callback completion is made.
+- TASK-1062 is submitted for review after recovery, not before it.
