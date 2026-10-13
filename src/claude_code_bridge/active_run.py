@@ -29,6 +29,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_bridge.maintenance import is_compact_command
+
 logger = logging.getLogger(__name__)
 
 STEER_PRIORITIES = frozenset({"now", "next"})
@@ -97,6 +99,7 @@ class ClaudeActiveRun:
     _deferred_result: Any = None
     _pending_user_result: Any = None
     lifecycle_supported: bool = False
+    maintenance: bool = False
 
     async def steer(
         self,
@@ -107,6 +110,12 @@ class ClaudeActiveRun:
         origin: str = "system",
     ) -> None:
         """Deliver ``message`` into the live run at ``priority``."""
+        # The app retains these as durable, separate turns. Never inject them
+        # into compaction or reinterpret a new command as ordinary steering.
+        if self.maintenance:
+            raise RuntimeError("maintenance_active")
+        if is_compact_command(message):
+            raise RuntimeError("maintenance_command_requires_turn")
         text = message.strip()
         if not text:
             raise ValueError("Steering message must not be empty")

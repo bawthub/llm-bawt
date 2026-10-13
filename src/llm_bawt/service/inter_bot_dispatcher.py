@@ -31,10 +31,14 @@ class InterBotDeliveryDispatcher:
     ``wake``); the timed sweep is only restart/missed-signal recovery.
     """
 
-    def __init__(self, service: Any, *, recovery_interval_seconds: float = 15.0):
+    def __init__(
+        self, service: Any, *, recovery_interval_seconds: float = 15.0,
+        leadership_retry_delay_seconds: float = 1.0,
+    ):
         self.service = service
         self.store = InterBotDeliveryStore(service.config)
         self.recovery_interval_seconds = max(1.0, recovery_interval_seconds)
+        self.leadership_retry_delay_seconds = max(0.0, leadership_retry_delay_seconds)
         self._wake_event = asyncio.Event()
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -86,7 +90,7 @@ class InterBotDeliveryDispatcher:
                 )
             if not self._stop_event.is_set():
                 logger.warning("inter-bot dispatcher loop exited; restarting under leadership")
-                await asyncio.sleep(1)
+                await asyncio.sleep(self.leadership_retry_delay_seconds)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -198,20 +202,25 @@ class InterBotDeliveryDispatcher:
             self._target_tasks.pop(target, None)
         if not task.cancelled() and task.exception():
             logger.error("inter-bot target drain failed for %s", target, exc_info=task.exception())
-        self._wake_event.set()
+        elif not task.cancelled() and task.result():
+            self._wake_event.set()
+        # No progress (busy/maintenance) or failed publication waits for a real
+        # wake/recovery sweep; immediately waking here would hot-loop the fence.
 
-    async def _drain_target(self, target_bot_id: str) -> None:
+    async def _drain_target(self, target_bot_id: str) -> bool:
         from ..bots import BotManager
 
         bot = BotManager(self.service.config).get_bot(target_bot_id)
         backend = (getattr(bot, "agent_backend", None) or "").strip()
+        from .maintenance_queue import MaintenanceQueue
+        await MaintenanceQueue(self.service, dispatcher=self).publish_ready(target_bot_id)
         record = self.store.claim_next(
             target_bot_id,
             claim_owner=self.claim_owner,
             steer_capable=(backend == "claude-code"),
         )
         if record is None:
-            return
+            return False
         await self._emit(record)
         if record.status == "STEERING":
             await self._steer(record)
@@ -225,6 +234,7 @@ class InterBotDeliveryDispatcher:
             )
             self._dispatch_tasks.add(task)
             task.add_done_callback(self._dispatch_done)
+        return True
 
     def _dispatch_done(self, task: asyncio.Task) -> None:
         self._dispatch_tasks.discard(task)
@@ -489,6 +499,8 @@ class InterBotDeliveryDispatcher:
         if error in {
             "no_active_run",
             "active_run_mismatch",
+            "maintenance_active",
+            "maintenance_command_requires_turn",
             "Turn is no longer active",
             "Turn not found",
         }:
@@ -545,8 +557,18 @@ class InterBotDeliveryDispatcher:
             event["bot_id"] = record.target_bot_id
             event["prompt_schedule"] = record.metadata["prompt_schedule"]
         subscriber = getattr(self.service, "_redis_subscriber", None)
+        if record.metadata.get("maintenance_user_queue"):
+            event.update(bot_id=record.target_bot_id, user_id=record.author_entity_id)
         if subscriber is not None:
             try:
+                if record.metadata.get("maintenance_user_queue"):
+                    state = {QUEUED: "queued", DISPATCHING: "started", DELIVERED: "completed",
+                             FAILED: "refused", "CANCELLED": "cancelled"}.get(record.status)
+                    if state:
+                        await subscriber.publish_tool_event(record.target_bot_id, record.author_entity_id, {
+                            "_type": "steer_lifecycle", "message_id": record.user_message_id,
+                            "bot_id": record.target_bot_id, "user_id": record.author_entity_id, "state": state,
+                        })
                 await subscriber.publish_tool_event(
                     event["bot_id"],
                     event["user_id"],

@@ -21,6 +21,7 @@ from sqlalchemy.engine import Connection
 
 from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference
+from .maintenance_delivery import MaintenanceBarrier
 from .inter_bot_delivery_record import DeliveryRecord
 from .utils.config import Config
 from .utils.db import get_shared_engine
@@ -303,6 +304,7 @@ class InterBotDeliveryStore:
         max_attempts: int = 5,
         session_policy: SessionPolicy | str = SessionPolicy.CONTINUE,
         reset_reason: str | None = None,
+        user_message_id: str | None = None,
     ) -> tuple[DeliveryRecord, bool]:
         if self.engine is None:
             raise RuntimeError("Inter-bot delivery database unavailable")
@@ -319,6 +321,8 @@ class InterBotDeliveryStore:
         idem = idempotency_key.strip() if idempotency_key and idempotency_key.strip() else None
         policy = SessionPolicy(str(session_policy))
         delivery_id, message_id, turn_id = self.stable_ids()
+        if user_message_id is not None:
+            message_id = str(uuid.UUID(user_message_id))
         payload = dict(payload)
         payload["user_message_id"] = message_id
         payload["assistant_message_id"] = str(
@@ -349,6 +353,8 @@ class InterBotDeliveryStore:
             "reset_reason": (reset_reason or "").strip() or None,
         }
         with self.engine.begin() as conn:
+            # Enqueue must not take the target lock: scheduler callers hold job locks.
+            # Arrival is a snapshot; claim rechecks the barrier under the target lock.
             if idem:
                 # Serialize same-key submissions so callers always receive one stable row.
                 digest = hashlib.sha256(
@@ -371,6 +377,7 @@ class InterBotDeliveryStore:
                             f"session_policy={record.session_policy!r}"
                         )
                     return record, True
+            values["metadata"] = MaintenanceBarrier(conn, target).stamp_enqueue(metadata)
             row = conn.execute(sa_text("""
                 INSERT INTO inter_bot_deliveries (
                     id, sender_bot_id, author_entity_type, author_entity_id,
@@ -592,6 +599,8 @@ class InterBotDeliveryStore:
                 status = STEERING
                 target_turn_id = head["target_turn_id"]
                 delivery_mode = "steer"
+            elif MaintenanceBarrier(conn, target).prepare(head) is not None:
+                return None
             elif active:
                 if rejected_same_turn:
                     # This exact active row definitively rejected the deterministic

@@ -113,6 +113,7 @@ async def test_leadership_loop_survives_run_crash(monkeypatch, caplog):
     """A crash escaping run() must be logged and the loop restarted."""
 
     dispatcher = _make_dispatcher()
+    dispatcher.leadership_retry_delay_seconds = 0  # exercise restart without a real pause
     call_count = 0
     crash_seen = asyncio.Event()
 
@@ -218,6 +219,8 @@ async def test_fallback_turn_does_not_hold_target_drain_open(monkeypatch):
     monkeypatch.setattr(bots, "BotManager", lambda _config: SimpleNamespace(
         get_bot=lambda _bot: SimpleNamespace(agent_backend="claude-code")
     ))
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr("llm_bawt.service.maintenance_queue.MaintenanceQueue.publish_ready", AsyncMock())
     dispatcher = _make_dispatcher()
     record = SimpleNamespace(id="delivery-1", status="DISPATCHING")
     dispatcher.store.claim_next = lambda *_a, **_k: record

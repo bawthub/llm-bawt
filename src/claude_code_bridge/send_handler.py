@@ -14,6 +14,7 @@ from claude_agent_sdk.types import (
 )
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.maintenance import is_compact_command
 from agent_bridge.publisher import COMMANDS_STREAM
 from claude_code_bridge.tool_policy import effective_disallowed_tools
 
@@ -438,6 +439,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         active_run = ClaudeActiveRun(
                             client=sdk_client,
                             request_id=request_id,
+                            maintenance=is_compact_command(message),
                             on_user_lifecycle=lambda mid, state: _publish_run_signal(
                                 AgentEventKind.STEER_LIFECYCLE, {"message_id": mid, "state": state},
                             ),

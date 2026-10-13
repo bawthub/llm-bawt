@@ -82,6 +82,8 @@ class ChatSteerResponse(BaseModel):
     persisted: bool = False
     can_escalate: bool = False
     can_cancel: bool = False
+    queued: bool = False
+    delivery_id: str | None = None
 
 
 def _persist_interrupt_anchor(
@@ -140,15 +142,20 @@ async def steer_active_turn(
     turn = service._turn_log_store.get_turn(request.turn_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="Turn not found")
-    if (
-        turn.ended_at is not None or turn.status not in ("streaming", "pending")
-    ) and not steer_request_id:
-        raise HTTPException(status_code=409, detail="Turn is no longer active")
-
     bot_id = request.bot_id.strip().lower()
     user_id = request.user_id.strip().lower() or "nick"
     if turn.bot_id != bot_id or (turn.user_id or "").lower() != user_id:
         raise HTTPException(status_code=409, detail="Turn ownership mismatch")
+    from agent_bridge.maintenance import is_compact_command
+    if not steer_request_id and (
+        is_compact_command(getattr(turn, "user_prompt", None)) or is_compact_command(request.message)
+    ):
+        from ..maintenance_queue import MaintenanceQueue
+        return ChatSteerResponse(**await MaintenanceQueue(service).enqueue_user(request, turn))
+    if (
+        turn.ended_at is not None or turn.status not in ("streaming", "pending")
+    ) and not steer_request_id:
+        raise HTTPException(status_code=409, detail="Turn is no longer active")
     if not turn.agent_session_key:
         # A deterministic delivery retry may inspect the original target after it
         # ended. If the run never registered a bridge session, no steer RPC could
