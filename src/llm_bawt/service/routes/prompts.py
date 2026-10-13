@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ...prompt_registry import PromptResolver, PromptTemplate, extract_placeholders
+from ...prompt_registry import COMPACT_SUMMARY_KEY, PromptResolver, PromptTemplate, extract_placeholders
 from ..dependencies import get_service
 from ..schemas import (
     PersonaCreateRequest,
@@ -269,6 +269,11 @@ def get_prompt(
     """Get one prompt template, optionally with code-default fallback resolution."""
     service = get_service()
     resolver = PromptResolver(service.config)
+    # This key guides live compaction. If DB access is unavailable, serving the
+    # code default would silently override a saved edit. Fail closed instead;
+    # the bridge can compact without additional guidance for this occurrence.
+    if key == COMPACT_SUMMARY_KEY and resolver.store.engine is None:
+        raise HTTPException(status_code=503, detail="Compaction prompt DB unavailable")
 
     if exact:
         if resolver.store.engine is None:

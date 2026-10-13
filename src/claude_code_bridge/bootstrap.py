@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -105,6 +107,37 @@ def _normalize_mcp_settings(settings: dict) -> dict:
     return normalized
 
 
+def _ensure_compact_hook(settings: dict) -> dict:
+    """Install our command hook without replacing user or other CLI hooks."""
+    normalized = dict(settings)
+    hooks = normalized.get("hooks")
+    if hooks is None:
+        hooks = {}
+    if not isinstance(hooks, dict):
+        logger.warning("Unexpected Claude hooks settings; leaving them unchanged")
+        return normalized
+    precompact = hooks.get("PreCompact", [])
+    if not isinstance(precompact, list):
+        logger.warning("Unexpected PreCompact hooks; leaving them unchanged")
+        return normalized
+    command = shlex.join([sys.executable, "-m", "claude_code_bridge.compact_hook"])
+    if any(
+        isinstance(group, dict) and any(
+            isinstance(hook, dict) and hook.get("command") == command
+            for hook in (group.get("hooks") or [])
+        )
+        for group in precompact
+    ):
+        return normalized
+    normalized["hooks"] = {
+        **hooks,
+        "PreCompact": [*precompact, {
+            "hooks": [{"type": "command", "command": command, "timeout": 10}],
+        }],
+    }
+    return normalized
+
+
 def bootstrap_claude_home() -> None:
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
@@ -124,7 +157,7 @@ def bootstrap_claude_home() -> None:
         except Exception as exc:
             logger.warning("Failed to parse %s, rebuilding it: %s", settings_path, exc)
 
-    normalized = _normalize_mcp_settings(settings)
+    normalized = _ensure_compact_hook(_normalize_mcp_settings(settings))
     # Suppress Claude Code's built-in Co-Authored-By/PR attribution. Bots sign
     # commits with their own per-bot trailer (agent-skills git-commits skill);
     # the harness default otherwise gets appended alongside it.

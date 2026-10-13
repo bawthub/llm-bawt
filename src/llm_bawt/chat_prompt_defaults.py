@@ -1,5 +1,16 @@
 """Built-in chat prompt bodies exposed through the prompt registry."""
 
+# Registry seed/reset body only. Runtime compaction always fetches the current
+# prompt from the app, never imports this fallback in the bridge (TASK-1071).
+COMPACT_SUMMARY_DEFAULT = (
+    "Write a concise continuity summary targeting about 2,000 tokens. "
+    "Preserve active goals, exact identifiers and paths, authorization constraints, "
+    "unfinished work and next steps, verification results and remaining gaps, "
+    "and pointers to durable task receipts. Prefer current state over chronological "
+    "retelling; omit repeated discussion and superseded details. Keep essential "
+    "continuity even if it needs extra space."
+)
+
 # Response-style bodies (TASK-490) — inline keyword-triggered answer shaping,
 # stamped onto the outbound user message (never the cached system prefix).
 RESPONSE_STYLE_TLDR = (

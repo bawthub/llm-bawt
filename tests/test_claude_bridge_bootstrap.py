@@ -95,8 +95,12 @@ def test_bootstrap_preserves_rea_stdio_and_is_idempotent(tmp_path, monkeypatch):
     actual = json.loads(path.read_text())
     assert actual["mcpServers"]["rea"] == rea
     assert set(actual["mcpServers"]) == set(settings["mcpServers"])
-    for key in ("permissions", "hooks", "env", "attribution"):
+    for key in ("permissions", "env", "attribution"):
         assert actual[key] == settings[key]
+    assert actual["hooks"]["Stop"] == settings["hooks"]["Stop"]
+    assert len(actual["hooks"]["PreCompact"]) == 1
+    assert actual["hooks"]["PreCompact"][0]["hooks"][0]["type"] == "command"
+    assert "claude_code_bridge.compact_hook" in actual["hooks"]["PreCompact"][0]["hooks"][0]["command"]
     for key in ("safari", "crawl4ai"):
         assert actual["mcpServers"][key] == settings["mcpServers"][key]
     bootstrap_claude_home()

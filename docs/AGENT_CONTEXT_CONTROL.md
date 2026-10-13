@@ -64,7 +64,10 @@ For Claude backends, `agent_context_compact(bot_id, idempotency_key,
 sender_bot_id?)` queues exactly one durable `/compact` maintenance turn with
 `when_idle` semantics. It never interrupts an active turn. Unsupported backends
 are rejected before enqueue; Codex and OpenClaw do not receive `/compact` as
-ordinary prose.
+ordinary prose. The bare-command summary policy, explicit-instruction precedence,
+automatic-compaction command-hook finding (distinct from the Python callback
+limitation), and activation status are documented in
+[COMPACTION_POLICY.md](COMPACTION_POLICY.md).
 
 ## Reset policies
 

@@ -8,14 +8,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from string import Formatter
 from typing import Any, Callable
-from urllib.parse import quote_plus
 
 from sqlalchemy import Column, DateTime, String, Text, UniqueConstraint
-from sqlmodel import Field, SQLModel, Session, create_engine, select
+from sqlmodel import Field, SQLModel, Session, select
 
 from .chat_prompt_defaults import (
     AGENT_GLOBAL_PROMPT,
     AGENT_USER_PREFIX,
+    COMPACT_SUMMARY_DEFAULT,
     AGENT_VOICE_PREFIX,
     MCP_TOOL_CONTEXT_TEMPLATE,
     RESPONSE_STYLE_DEEP_DIVE,
@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 #: Category used to group switchable persona prompts in the registry, keeping
 #: them separate from summarization/memory/agent/chat prompts. See TASK-477.
 PERSONA_CATEGORY = "persona"
+COMPACT_SUMMARY_KEY = "agents.compaction_summary"
 #: Key prefix for persona rows (e.g. ``persona.grumpy-editor``).
 PERSONA_KEY_PREFIX = "persona."
 
@@ -305,6 +306,19 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "disable even when the flag is on."
             ),
         },
+    ),
+    COMPACT_SUMMARY_KEY: PromptDefinition(
+        key=COMPACT_SUMMARY_KEY,
+        title="Agent Compaction Summary Guidance",
+        category="agent_execution",
+        required_vars=(),
+        loader=lambda: COMPACT_SUMMARY_DEFAULT,
+        metadata={"notes": (
+            "Default guidance for bare /compact and automatic Claude CLI compaction. "
+            "Explicit user instructions always bypass it. Changes take effect on the "
+            "next compaction without resetting the session; this is a soft target, "
+            "not a hard output cap. The bridge fetches this global prompt at each use."
+        )},
     ),
     "agents.mcp_tool_context_template": PromptDefinition(
         key="agents.mcp_tool_context_template",

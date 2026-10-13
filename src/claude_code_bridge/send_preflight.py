@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 from agent_bridge.events import AgentEventKind
 from agent_bridge.publisher import COMMANDS_STREAM
 
+from .compact_policy import apply_compact_default, is_bare_compact
+from .compact_prompt_lookup import fetch_compact_prompt
 from .send_request import SendRequest
 
 logger = logging.getLogger("claude_code_bridge.bridge")
@@ -75,8 +78,19 @@ async def prepare_send(
     )
     if message is None:
         return None
+    # Only a bare command needs a registry request. Custom instructions and
+    # ordinary messages remain byte-for-byte untouched, even during an outage.
+    guidance = None
+    if is_bare_compact(message):
+        try:
+            guidance = await asyncio.wait_for(
+                asyncio.to_thread(fetch_compact_prompt, getattr(bridge, "_app_api_url", "")),
+                timeout=2.0,
+            )
+        except TimeoutError:
+            logger.warning("Compaction prompt lookup exceeded 2s; using CLI defaults")
     return SendPreflight(
         request=request,
-        message=message,
+        message=apply_compact_default(message, guidance),
         reset_requested=reset_requested,
     )

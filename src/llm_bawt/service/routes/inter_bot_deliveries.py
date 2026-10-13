@@ -165,7 +165,20 @@ async def create_delivery(body: DeliveryCreate):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    formatted = _format_delivery_message(body.message, author)
+    # Maintenance is a harness command, not a conversational bot callback.
+    # Prefixing it with sender attribution prevents the CLI recognizing /compact.
+    # Keep author metadata on the durable row; never unwrap ordinary messages.
+    compact_maintenance = (
+        body.message_kind == "CONTEXT_MAINTENANCE"
+        and body.metadata.get("context_action") == "compact"
+    )
+    if compact_maintenance and (
+        backend != "claude-code"
+        or body.prefer_steer
+        or body.message.split(maxsplit=1)[0] != "/compact"
+    ):
+        raise HTTPException(status_code=422, detail="Compaction maintenance requires an idle Claude /compact command")
+    formatted = body.message if compact_maintenance else _format_delivery_message(body.message, author)
     payload = {
         "messages": [{"role": "user", "content": formatted}],
         "prefer_steer": body.prefer_steer,
