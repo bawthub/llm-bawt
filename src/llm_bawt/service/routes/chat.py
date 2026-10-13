@@ -214,6 +214,13 @@ async def steer_active_turn(
         session_id = trigger.get("session_id")
         if not session_id:
             raise RuntimeError("Active turn trigger message has no session id")
+        from ..steer_timeline import SteerTimeline
+
+        timeline = SteerTimeline(
+            service, bot_id=bot_id, user_id=user_id,
+            turn_id=turn.id, message_id=request.message_id,
+        )
+        content_offset = await timeline.content_offset(subscriber, request.content_offset)
         await asyncio.to_thread(
             memory_client.add_message,
             "user",
@@ -226,18 +233,19 @@ async def steer_active_turn(
             (author.entity_type if author else None),
             (author.entity_id if author else None),
         )
-        if turn.trigger_message_id is not None and request.content_offset is not None:
+        if content_offset is not None:
             anchored = await asyncio.to_thread(
                 _persist_interrupt_anchor,
                 service,
                 bot_id=bot_id,
                 message_id=request.message_id,
                 source_message_id=turn.trigger_message_id,
-                content_offset=request.content_offset,
+                content_offset=content_offset,
             )
             if not anchored:
                 raise RuntimeError("Persisted steer message was not found for anchor update")
         persisted = True
+        await timeline.publish(subscriber)
     except Exception:
         log.exception(
             "chat.steer accepted but persistence failed: turn=%s message=%s",
