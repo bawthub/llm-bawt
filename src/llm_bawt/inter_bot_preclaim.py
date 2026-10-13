@@ -14,11 +14,27 @@ from sqlmodel import Session, select
 
 
 def load_claim_head(conn, target: str, config):
-    """Return the locked FIFO head, or None if its producer vetoed dispatch."""
+    """Return the locked FIFO head, or None if its producer vetoed dispatch.
+
+    A DISPATCHING delivery whose fallback turn the target has accepted and not
+    yet ended is already delivered in order (it is that turn's trigger). It no
+    longer heads the queue, so the next delivery may steer into the very turn it
+    started instead of waiting for it to end (TASK-1067). Before acceptance, or
+    once the turn has ended, it still blocks until marked terminal.
+    """
     candidate = conn.execute(text("""
-        SELECT * FROM inter_bot_deliveries
-        WHERE target_bot_id=:target AND status IN ('QUEUED','STEERING','DISPATCHING')
-        ORDER BY ordinal ASC LIMIT 1
+        SELECT d.* FROM inter_bot_deliveries d
+        WHERE d.target_bot_id=:target
+          AND d.status IN ('QUEUED','STEERING','DISPATCHING')
+          AND NOT (
+              d.status='DISPATCHING'
+              AND d.transport_accepted_at IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM turn_logs t
+                  WHERE t.id=d.turn_id AND t.ended_at IS NULL
+              )
+          )
+        ORDER BY d.ordinal ASC LIMIT 1
     """), {"target": target}).mappings().first()
     if not candidate:
         return None

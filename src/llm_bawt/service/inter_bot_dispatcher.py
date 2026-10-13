@@ -41,6 +41,7 @@ class InterBotDeliveryDispatcher:
         self._leader_task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._target_tasks: dict[str, asyncio.Task] = {}
+        self._dispatch_tasks: set[asyncio.Task] = set()
         self.claim_owner = f"dispatcher-{uuid.uuid4().hex}"
         self._dispatcher_lock = None
         self._subscriber_gap_logged = False
@@ -90,7 +91,10 @@ class InterBotDeliveryDispatcher:
     async def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
-        tasks = [task for task in self._target_tasks.values() if not task.done()]
+        tasks = [
+            task for task in (*self._target_tasks.values(), *self._dispatch_tasks)
+            if not task.done()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -150,7 +154,9 @@ class InterBotDeliveryDispatcher:
                     pass
             else:
                 consecutive_failures = 0
-        await asyncio.gather(*self._target_tasks.values(), return_exceptions=True)
+        await asyncio.gather(
+            *self._target_tasks.values(), *self._dispatch_tasks, return_exceptions=True
+        )
 
     def _schedule_eligible_targets(self) -> None:
         subscriber = getattr(self.service, "_redis_subscriber", None)
@@ -210,7 +216,21 @@ class InterBotDeliveryDispatcher:
         if record.status == "STEERING":
             await self._steer(record)
         else:
-            await self._dispatch(record)
+            # A fallback turn runs for its whole duration. Holding the target's
+            # drain open for it would hide later deliveries until the turn ends,
+            # so they could never steer into it (TASK-1067). The claim already
+            # serializes the target; the stream runs as its own tracked task.
+            task = asyncio.create_task(
+                self._dispatch(record), name=f"inter-bot-dispatch:{record.id}"
+            )
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_done)
+
+    def _dispatch_done(self, task: asyncio.Task) -> None:
+        self._dispatch_tasks.discard(task)
+        if not task.cancelled() and task.exception():
+            logger.error("inter-bot fallback dispatch failed", exc_info=task.exception())
+        self._wake_event.set()
 
     async def _steer(self, record: DeliveryRecord) -> None:
         from .routes.chat import ChatSteerRequest, steer_active_turn

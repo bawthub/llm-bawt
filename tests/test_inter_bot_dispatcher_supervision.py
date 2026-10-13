@@ -69,6 +69,7 @@ def _make_dispatcher(subscriber_connected: bool = True) -> InterBotDeliveryDispa
     dispatcher._leader_task = None
     dispatcher._loop = None
     dispatcher._target_tasks = {}
+    dispatcher._dispatch_tasks = set()
     dispatcher.claim_owner = "test-dispatcher"
     dispatcher._dispatcher_lock = None
     dispatcher._subscriber_gap_logged = False
@@ -205,3 +206,40 @@ async def test_scheduler_recovery_logs_when_subscriber_reconnects(caplog):
     assert len(reconnect_messages) == 1, (
         f"expected one reconnect log; got {reconnect_messages}"
     )
+
+
+@pytest.mark.asyncio
+async def test_fallback_turn_does_not_hold_target_drain_open(monkeypatch):
+    """TASK-1067: while a delivery-started turn streams, the target must stay
+    drainable so the next delivery can steer into that turn."""
+
+    import llm_bawt.bots as bots
+
+    monkeypatch.setattr(bots, "BotManager", lambda _config: SimpleNamespace(
+        get_bot=lambda _bot: SimpleNamespace(agent_backend="claude-code")
+    ))
+    dispatcher = _make_dispatcher()
+    record = SimpleNamespace(id="delivery-1", status="DISPATCHING")
+    dispatcher.store.claim_next = lambda *_a, **_k: record
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def fake_emit(_record):
+        return None
+
+    async def fake_dispatch(_record):
+        started.set()
+        await release.wait()
+
+    dispatcher._emit = fake_emit
+    dispatcher._dispatch = fake_dispatch
+
+    await asyncio.wait_for(dispatcher._drain_target("byte"), timeout=1.0)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(dispatcher._dispatch_tasks) == 1
+
+    dispatcher._wake_event.clear()
+    release.set()
+    await asyncio.sleep(0.01)
+    assert not dispatcher._dispatch_tasks
+    assert dispatcher._wake_event.is_set()

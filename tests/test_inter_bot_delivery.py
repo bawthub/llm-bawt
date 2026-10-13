@@ -287,6 +287,40 @@ def test_active_claude_not_ready_still_claims_steering_for_retry(delivery_store)
     assert claimed.target_turn_id == active_id
 
 
+def test_next_delivery_steers_into_accepted_fallback_turn(delivery_store):
+    """TASK-1067: bot back-and-forth must steer, not queue behind its own turn."""
+    store, sender, target = delivery_store
+    first, _ = _enqueue(store, sender, target, "start work")
+    second, _ = _enqueue(store, sender, target, "mid-turn reply")
+
+    dispatching = store.claim_next(target, claim_owner="owner", steer_capable=True)
+    assert dispatching.status == DISPATCHING and dispatching.id == first.id
+    # Reserved but not yet accepted by the target: the head still blocks.
+    assert store.claim_next(target, claim_owner="owner", steer_capable=True) is None
+
+    assert store.mark_transport_accepted(first.id, dispatching.claim_token or "")
+    steering = store.claim_next(target, claim_owner="owner", steer_capable=True)
+    assert steering.id == second.id
+    assert steering.status == STEERING
+    assert steering.target_turn_id == first.turn_id
+    with store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT count(*) FROM turn_logs WHERE id=:id"
+        ), {"id": second.turn_id}).scalar_one() == 0
+
+
+def test_ended_unmarked_fallback_turn_still_heads_queue(delivery_store):
+    store, sender, target = delivery_store
+    first, _ = _enqueue(store, sender, target, "start work")
+    _enqueue(store, sender, target, "after the turn")
+
+    dispatching = store.claim_next(target, claim_owner="owner", steer_capable=True)
+    assert store.mark_transport_accepted(first.id, dispatching.claim_token or "")
+    _finish_reserved_turn(store, first.turn_id)
+    # The turn ended but its delivery is not terminal yet: no overlap, no steer.
+    assert store.claim_next(target, claim_owner="owner", steer_capable=True) is None
+
+
 def test_active_unsupported_backend_stays_queued_until_idle(delivery_store):
     store, sender, target = delivery_store
     original, _ = _enqueue(store, sender, target, "wait safely")
