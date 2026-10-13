@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_bridge.skill_export import export_personal
+from agent_bridge.skill_export import PUBLIC_PACKAGE_SKILLS, export_personal
 from agent_bridge.skill_packages import SkillPackageError, validate_package
 
 
@@ -17,6 +17,8 @@ def test_private_export_preserves_cross_skill_links_and_scripts(tmp_path):
     (source / 'scripts/helper').write_text('helper')
     (source / 'scripts/README.md').write_text(
         'See [llm-bawt](../llm-bawt/SKILL.md) for product architecture.\n'
+        'Also read `../llm-bawt/reference/ops-actions.md` and '
+        '`../bawthub/references/prod-release.md`.\n'
     )
     target = tmp_path / 'package'
     result = export_personal(source, target, version='1.0.0')
@@ -24,9 +26,11 @@ def test_private_export_preserves_cross_skill_links_and_scripts(tmp_path):
     text = (target / 'skills/one/SKILL.md').read_text()
     assert '../../scripts/helper' in text
     assert '../two/SKILL.md' in text
-    assert '`bawthub:llm-bawt` public skill' in (
-        target / 'scripts/README.md'
-    ).read_text()
+    exported_readme = (target / 'scripts/README.md').read_text()
+    assert '`bawthub:llm-bawt` public skill' in exported_readme
+    assert '`bawthub:llm-bawt public skill`' in exported_readme
+    assert '`bawthub:bawthub public skill`' in exported_readme
+    assert '../llm-bawt/reference/' not in exported_readme
     assert (source / 'one/SKILL.md').read_text() == original
     assert validate_package(target).skills == ('one',)
 
@@ -66,7 +70,12 @@ def test_real_private_export_is_additive_overlay(tmp_path):
         'agent-system', 'bawthub', 'frontend-design', 'git-commits',
         'llm-bawt', 'skill-creation', 'skill-maintenance', 'ui-ux-guidelines',
     })
-    assert len(result['skills']) == 19
+    expected_private_skills = {
+        path.name for path in source.iterdir()
+        if path.is_dir() and (path / 'SKILL.md').is_file()
+        and path.name not in PUBLIC_PACKAGE_SKILLS
+    }
+    assert set(result['skills']) == expected_private_skills
     for document in destination.rglob('*.md'):
         text = document.read_text()
         assert '../llm-bawt/reference/' not in text

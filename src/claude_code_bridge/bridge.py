@@ -11,7 +11,7 @@ import uuid
 from collections.abc import AsyncIterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, StreamEvent
@@ -133,6 +133,9 @@ class ClaudeCodeBridge(
         # Proxy status callbacks run in-process and resolve request_id back to
         # the active Redis run without exposing the session key in HTTP headers.
         self._proxy_request_sessions: dict[str, str] = {}
+        # request_id -> live TurnPhaseTracker (TASK-1074). Proxy statuses route
+        # through it so one owner decides the transient turn phase.
+        self._turn_phase_trackers: dict[str, Any] = {}
         # Tool-use id -> Future for a live AskUserQuestion on this process.
         # Only the matching command may resolve it; cleaned up on timeout/abort.
         # Result: dict = native answers (allow), str = deny text (dismissal).

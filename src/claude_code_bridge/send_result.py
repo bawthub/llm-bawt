@@ -7,6 +7,7 @@ import asyncio
 from agent_bridge.events import AgentEventKind
 
 from ._bridge_helpers import _fmt_tokens, _read_latest_compact_metadata
+from .send_errors import retry_exhausted_text
 
 
 class ClaudeResultMixin:
@@ -60,7 +61,6 @@ class ClaudeResultMixin:
         assistant_snapshot_text: str,
         api_retry_count: int,
         api_last_error: str | None,
-        api_retry_surfaced: bool,
         actual_model: str,
         model: str,
         bot_context_window: int | None,
@@ -84,16 +84,7 @@ class ClaudeResultMixin:
             if not full_text and assistant_snapshot_text:
                 full_text = assistant_snapshot_text
         if not full_text and api_retry_count > 0:
-            error_note = (
-                f"\n\n❌ Upstream error after {api_retry_count} "
-                f"retries: {api_last_error or 'unknown'}. "
-                f"Try again in a moment."
-            )
-            full_text = (
-                "".join(text_parts) + error_note
-                if api_retry_surfaced
-                else error_note.lstrip()
-            )
+            full_text = retry_exhausted_text(api_retry_count, api_last_error)
 
         token_usage_payload, ctx_window, max_output = self._compute_result_usage(
             msg,

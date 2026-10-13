@@ -301,6 +301,8 @@ def list_turn_logs(
             if qrow is not None:
                 questions_by_turn[row.id] = pq_store.row_to_dict(qrow)
 
+    # TASK-1074: mid-turn joiners get the current transient phase (never stored).
+    live_phases = getattr(service, "_live_turn_phases", None)
     items = []
     for row in rows:
         tool_call_count = live_tool_counts.get(row.id, 0)
@@ -337,6 +339,11 @@ def list_turn_logs(
                 ended_at=getattr(row, "ended_at", None),
                 question=questions_by_turn.get(row.id),
                 changed_files=changed_files_by_turn.get(row.id),
+                live_phase=(
+                    live_phases.get(row.id)
+                    if live_phases is not None and getattr(row, "ended_at", None) is None
+                    else None
+                ),
             )
         )
 

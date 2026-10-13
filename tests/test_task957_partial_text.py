@@ -6,6 +6,7 @@ import textwrap
 from types import SimpleNamespace
 
 from llm_bawt.service import api
+from llm_bawt.service.upstream_status import LiveTurnPhases
 
 
 def _live_sink():
@@ -18,7 +19,8 @@ def _live_sink():
     code = compile(ast.Module(body=[handler], type_ignores=[]), api.__file__, "exec")
     snapshots: list[str] = []
     store = SimpleNamespace(update_partial_response=lambda **kw: snapshots.append(kw["response_text"]))
-    scope = {"service": SimpleNamespace(_turn_log_store=store),
+    scope = {"service": SimpleNamespace(_turn_log_store=store,
+                                        _live_turn_phases=LiveTurnPhases()),
              "_partial_text": {}, "_partial_text_chunks": {},
              "_partial_reasoning": {}, "PartialText": api.PartialText}
     exec(code, scope)

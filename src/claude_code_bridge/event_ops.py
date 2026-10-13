@@ -348,6 +348,12 @@ class ClaudeEventMixin:
                 "Dropping proxy status for inactive request_id=%s", request_id
             )
             return
+        # TASK-1074: the request's phase tracker is the single owner of turn
+        # phase; it dedups and stamps phase/since on the same event kind.
+        tracker = getattr(self, "_turn_phase_trackers", {}).get(request_id)
+        if tracker is not None:
+            tracker.on_proxy_status(status)
+            return
         attempt = status.get("attempt")
         seq = int(attempt) if isinstance(attempt, int) else 0
         self._publish_event(

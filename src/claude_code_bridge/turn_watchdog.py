@@ -178,6 +178,7 @@ class TurnWatchdog:
                     session_key=session_key,
                     phase=phase,
                     remaining=max(0.0, deadline - self._clock()),
+                    wait_elapsed=self._clock() - wait_started_at,
                 )
         finally:
             if not receive_task.done():
@@ -215,6 +216,7 @@ class TurnWatchdog:
         session_key: str,
         phase: str,
         remaining: float,
+        wait_elapsed: float = 0.0,
     ) -> None:
         if phase == "tool_running":
             now = self._clock()
@@ -255,6 +257,7 @@ class TurnWatchdog:
                             for tool in self._active_tools.values()
                         ],
                         "deadline_in_seconds": round(remaining, 1),
+                        "wait_elapsed_seconds": round(wait_elapsed, 1),
                     }
                 )
             except Exception:

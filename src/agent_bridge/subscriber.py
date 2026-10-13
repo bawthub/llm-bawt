@@ -821,8 +821,12 @@ class RedisSubscriber(CommandPublisherMixin):
                         # (TASK-286). turn_complete lets the sink release its
                         # per-turn text buffer. reasoning_delta (TASK-360/P4) is
                         # persisted the same way so a cold reload mid-turn
-                        # recovers already-produced reasoning.
-                        if data.get("_type") in ("tool_event", "text_delta", "reasoning_delta", "turn_complete"):
+                        # recovers already-produced reasoning. upstream_status
+                        # feeds the in-memory live phase (TASK-1074), never storage.
+                        if data.get("_type") in (
+                            "tool_event", "text_delta", "reasoning_delta",
+                            "turn_complete", "upstream_status",
+                        ):
                             try:
                                 callback(data)
                             except Exception:

@@ -46,6 +46,14 @@ def is_auth_failure_text(text: str, *, status: int | None = None) -> bool:
     return any(marker in haystack for marker in _AUTH_MARKERS)
 
 
+def retry_exhausted_text(retry_count: int, last_error: str | None) -> str:
+    """Reply text for a turn that ended empty after SDK API retries."""
+    return (
+        f"❌ Upstream error after {retry_count} retries: "
+        f"{last_error or 'unknown'}. Try again in a moment."
+    )
+
+
 class TerminalSDKResultError(RuntimeError):
     """A Claude SDK ``ResultMessage`` that represents terminal API failure."""
 

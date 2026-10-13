@@ -423,6 +423,7 @@ class TurnLogListItem(BaseModel):
     # changed no files. Lets the chat UI hydrate file links on refresh via the
     # existing turn-log backfill graft.
     changed_files: dict[str, Any] | None = None
+    live_phase: dict[str, Any] | None = None  # TASK-1074: transient, in-flight rows only (upstream_status.LiveTurnPhases)
 
 
 class TurnLogListResponse(BaseModel):

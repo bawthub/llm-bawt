@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 from sqlmodel import create_engine
 
 from llm_bawt.ops.executor import ReconcileResult
@@ -62,6 +63,11 @@ class FakeGateway:
 @pytest.fixture
 def rig(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'release.sqlite'}")
+
+    @event.listens_for(engine, "connect")
+    def fast_fixture_writes(connection, _record):
+        connection.execute("PRAGMA synchronous = OFF")
+
     store = ReleaseStore(None, engine=engine)
     gateway = FakeGateway()
     current = [datetime.now(timezone.utc)]

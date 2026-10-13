@@ -10,6 +10,7 @@ from claude_code_bridge.send_errors import (
     result_message_error,
 )
 from claude_code_bridge.send_stream import ClaudeStreamMixin
+from claude_code_bridge.turn_phase import TurnPhaseTracker
 
 
 def _result(**overrides):
@@ -148,53 +149,54 @@ class _RetryStatusHarness(ClaudeStreamMixin):
         self.events.append(kwargs)
 
 
+def _tracker() -> tuple[TurnPhaseTracker, list[dict]]:
+    published: list[dict] = []
+    tracker = TurnPhaseTracker(lambda _text, status: published.append(status))
+    tracker.on_turn_start()
+    published.clear()
+    return tracker, published
+
+
 def test_auth_retry_status_is_silent_before_self_heal():
     harness = _RetryStatusHarness()
-    text_parts: list[str] = []
+    tracker, published = _tracker()
 
-    seq, attempt, error, surfaced = harness._on_api_retry_status(
+    attempt, error = harness._on_api_retry_status(
         {
             "attempt": 1,
             "max_retries": 10,
             "error_status": 401,
             "error": "authentication_failed",
         },
-        request_id="req",
         session_key="snark:nick",
-        seq=0,
-        text_parts=text_parts,
-        already_surfaced=False,
+        phase_tracker=tracker,
     )
 
-    assert (seq, attempt, error, surfaced) == (
-        0,
-        1,
-        "HTTP 401: authentication_failed",
-        False,
-    )
-    assert text_parts == []
+    assert (attempt, error) == (1, "HTTP 401: authentication_failed")
+    assert published == []
     assert harness.events == []
 
 
-def test_generic_retry_status_remains_visible():
+def test_generic_retry_status_is_transient_phase_not_reply_text():
     harness = _RetryStatusHarness()
-    text_parts: list[str] = []
+    tracker, published = _tracker()
 
-    seq, _attempt, _error, surfaced = harness._on_api_retry_status(
+    attempt, error = harness._on_api_retry_status(
         {
             "attempt": 1,
             "max_retries": 10,
             "error_status": 529,
             "error": "overloaded_error",
         },
-        request_id="req",
         session_key="snark:nick",
-        seq=0,
-        text_parts=text_parts,
-        already_surfaced=False,
+        phase_tracker=tracker,
     )
 
-    assert seq == 1
-    assert surfaced is True
-    assert text_parts == ["⏳ Upstream unavailable (overloaded_error), retrying…"]
-    assert len(harness.events) == 1
+    assert (attempt, error) == (1, "HTTP 529: overloaded_error")
+    # TASK-1074: no ASSISTANT_DELTA — retry status never enters history.
+    assert harness.events == []
+    assert len(published) == 1
+    assert published[0]["phase"] == "retrying"
+    assert published[0]["attempt"] == 1
+    assert published[0]["max_attempts"] == 10
+    assert published[0]["error_status"] == 529

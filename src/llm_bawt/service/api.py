@@ -181,6 +181,7 @@ async def lifespan(app):
             def _tool_event_sink(event_data: dict) -> None:
                 """Persist tool_start/tool_end + text_delta + reasoning_delta events to Postgres."""
                 store = service._turn_log_store
+                service._live_turn_phases.observe(event_data)
                 _type = event_data.get("_type")
                 if _type == "reasoning_delta":
                     turn_id = event_data.get("turn_id")

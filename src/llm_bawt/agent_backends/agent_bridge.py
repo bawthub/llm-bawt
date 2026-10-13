@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from .base import AgentBackend
+from ..service.upstream_status import upstream_status_queue_item
 from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -350,22 +351,7 @@ class AgentBridgeBackend(AgentBackend):
                                         logger.warning("Could not publish user steer lifecycle", exc_info=True)
 
                             elif event.kind == AgentEventKind.UPSTREAM_STATUS:
-                                meta = event.raw.get("upstream_status", {}) if isinstance(event.raw, dict) else {}
-                                result_queue.put({
-                                    "event": "upstream_status",
-                                    "text": event.text or "",
-                                    "state": meta.get("state"),
-                                    "attempt": meta.get("attempt"),
-                                    "next_attempt": meta.get("next_attempt"),
-                                    "max_attempts": meta.get("max_attempts"),
-                                    "transport": meta.get("transport"),
-                                    "fallback_transport": meta.get("fallback_transport"),
-                                    "stall_phase": meta.get("stall_phase"),
-                                    "productive_idle_seconds": meta.get("productive_idle_seconds"),
-                                    "elapsed_seconds": meta.get("elapsed_seconds"),
-                                    "provider": meta.get("provider") or event.provider,
-                                    "trigger_message_id": event.trigger_message_id,
-                                })
+                                result_queue.put(upstream_status_queue_item(event))
 
                             elif event.kind == AgentEventKind.ASSISTANT_DONE:
                                 if isinstance(event.raw, dict) and event.raw.get("end_reason") == "aborted":

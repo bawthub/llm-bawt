@@ -21,6 +21,7 @@ from .turn_stream_context import TurnStreamContext, _TEXT_DELTA_FLUSH_CHARS
 from .turn_stream_finalize import TurnStreamFinalizer
 from .turn_stream_publish import TurnStreamPublishMixin
 from .turn_usage import TurnUsageCoordinator
+from .upstream_status import upstream_status_sse_payload
 
 log = get_service_logger(__name__)
 
@@ -847,25 +848,13 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 )
                             continue
                         if evt == "upstream_status":
-                            _publish_event_direct({
-                                "_type": "upstream_status",
-                                "turn_id": turn_log_id,
-                                "trigger_message_id": item.get("trigger_message_id") or trigger_message_id,
-                                "bot_id": bot_id,
-                                "user_id": user_id,
-                                "text": item.get("text") or "",
-                                "state": item.get("state"),
-                                "attempt": item.get("attempt"),
-                                "next_attempt": item.get("next_attempt"),
-                                "max_attempts": item.get("max_attempts"),
-                                "transport": item.get("transport"),
-                                "fallback_transport": item.get("fallback_transport"),
-                                "stall_phase": item.get("stall_phase"),
-                                "productive_idle_seconds": item.get("productive_idle_seconds"),
-                                "elapsed_seconds": item.get("elapsed_seconds"),
-                                "provider": item.get("provider"),
-                                "ts": time.time(),
-                            })
+                            _publish_event_direct(upstream_status_sse_payload(
+                                item,
+                                turn_id=turn_log_id,
+                                trigger_message_id=trigger_message_id,
+                                bot_id=bot_id,
+                                user_id=user_id,
+                            ))
                             continue
                         if evt == "file_changed":
                             # TASK-664: one completed Edit/Write/NotebookEdit.

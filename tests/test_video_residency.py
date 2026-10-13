@@ -24,7 +24,7 @@ class FakeReader:
 
     async def readline(self):
         action = self.process.stdin.commands[-1]["action"]
-        if action == "unload":
+        if action in ("status", "unload"):
             return b'{"ok":true,"resident":false}\n'
         with open(self.process.stdin.commands[-1]["output"], "wb") as output:
             output.write(b"video")
@@ -108,15 +108,22 @@ def test_unexpected_idle_exit_is_not_restarted(tmp_path):
     asyncio.run(exercise())
 
 
-def test_real_child_status_and_unload_without_loading_gpu():
+def test_child_protocol_status_and_unload_without_loading_gpu():
+    processes = []
+
+    async def startup(*args, **kwargs):
+        processes.append(FakeProcess())
+        return processes[-1]
+
     async def exercise():
-        worker = ResidentVideoWorker(timeout=5)
-        # Status launches the child but does not import CUDA or load weights.
+        worker = ResidentVideoWorker(startup=startup, timeout=5)
         status = await worker._command("status")
         assert status == {"ok": True, "resident": False}
         assert worker.running and not worker.resident
         await worker.unload()
         assert not worker.running and not worker.uncertain
+        assert len(processes) == 1
+        assert [command["action"] for command in processes[0].stdin.commands] == ["status", "unload"]
 
     asyncio.run(exercise())
 

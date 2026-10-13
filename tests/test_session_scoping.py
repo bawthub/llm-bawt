@@ -234,7 +234,7 @@ class TestDispatchSetsOverrideFresh:
         )
 
     def test_override_defaults_to_none_on_instance(self):
-        text = (SRC / "llm_bawt/core/base.py").read_text(encoding="utf-8")
+        text = (SRC / "llm_bawt/core/initialization.py").read_text(encoding="utf-8")
         assert "self._session_id_override: str | None = None" in text
 
     def test_prepare_messages_honors_override(self):

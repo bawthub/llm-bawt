@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import event, update
 from sqlmodel import Session, create_engine
 
 from llm_bawt.ops.release_models import (
@@ -29,13 +29,22 @@ DIGEST = "sha256:" + "d" * 64
 SOURCE = "1" * 40
 
 
+def fixture_engine(path):
+    engine = create_engine(
+        f"sqlite:///{path}", connect_args={"check_same_thread": False, "timeout": 10},
+    )
+
+    @event.listens_for(engine, "connect")
+    def fast_fixture_writes(connection, _record):
+        # Migration/transaction semantics matter here; disk fsync does not.
+        connection.execute("PRAGMA synchronous = OFF")
+
+    return engine
+
+
 @pytest.fixture
 def store(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'release.sqlite'}",
-        connect_args={"check_same_thread": False, "timeout": 10},
-    )
-    return ReleaseStore(None, engine=engine)
+    return ReleaseStore(None, engine=fixture_engine(tmp_path / 'release.sqlite'))
 
 
 def test_create_is_idempotent_per_parent_and_rejects_plan_drift(store):
@@ -56,14 +65,14 @@ def test_bootstrap_drops_removed_llm_bawt_tagging_columns(tmp_path):
     from sqlalchemy import inspect, text
 
     path = tmp_path / "old.sqlite"
-    ReleaseStore(None, engine=create_engine(f"sqlite:///{path}"))
+    ReleaseStore(None, engine=fixture_engine(path))
     removed = {"llm_bawt_mode", "llm_bawt_repository", "llm_bawt_branch", "llm_bawt_sha", "warning_text"}
-    old = create_engine(f"sqlite:///{path}")
+    old = fixture_engine(path)
     with old.begin() as conn:
         conn.execute(text("ALTER TABLE ops_release_runs ADD COLUMN llm_bawt_mode VARCHAR(16) NOT NULL DEFAULT 'auto'"))
         for column in sorted(removed - {"llm_bawt_mode"}):
             conn.execute(text(f"ALTER TABLE ops_release_runs ADD COLUMN {column} TEXT"))
-    upgraded = ReleaseStore(None, engine=create_engine(f"sqlite:///{path}"))
+    upgraded = ReleaseStore(None, engine=fixture_engine(path))
     columns = {col["name"] for col in inspect(upgraded.engine).get_columns("ops_release_runs")}
     assert not columns & removed
     assert upgraded.create(parent_job_id="a" * 32, **PLAN).state == RELEASE_PREFLIGHT

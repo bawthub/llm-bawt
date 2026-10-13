@@ -10,6 +10,7 @@ import threading
 import time
 
 import pytest
+from sqlalchemy import event
 from sqlmodel import Session, create_engine
 
 from llm_bawt.ops.executor import DispatchResult, Executor, ReconcileResult
@@ -36,7 +37,14 @@ class FakeExecutor(Executor):
 
 @pytest.fixture
 def system(tmp_path):
-    store = OpsStore(None, engine=create_engine(f"sqlite:///{tmp_path / 'ops.sqlite'}", connect_args={"check_same_thread": False, "timeout": 10}))
+    engine = create_engine(f"sqlite:///{tmp_path / 'ops.sqlite'}", connect_args={"check_same_thread": False, "timeout": 10})
+
+    @event.listens_for(engine, "connect")
+    def fast_fixture_writes(connection, _record):
+        # The test exercises SQL-level locking/revisions, not disk fsync.
+        connection.execute("PRAGMA synchronous = OFF")
+
+    store = OpsStore(None, engine=engine)
     executor = FakeExecutor()
     service = OpsService(store, executor=executor)
     op = store.create_operation({"slug": "test", "enabled": True,

@@ -130,6 +130,7 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
         self._publisher = Mock()
         self._proxy_base_url = None
         self._proxy_request_sessions = {}
+        self._turn_phase_trackers = {}
         self._trigger_message_ids = {}
         self._backend_name = "claude-code"
         self._request_timeout = 5

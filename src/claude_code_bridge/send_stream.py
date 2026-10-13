@@ -48,6 +48,7 @@ from .proxy.request_context import (
 )
 from .send_errors import is_auth_failure_text
 from .subagent_usage import SubagentUsage
+from .turn_phase import TurnPhaseTracker
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
@@ -79,13 +80,14 @@ class ClaudeStreamMixin:
         self,
         data: dict,
         *,
-        request_id: str,
         session_key: str,
-        seq: int,
-        text_parts: list[str],
-        already_surfaced: bool,
-    ) -> tuple[int, int, str, bool]:
-        """Record one SDK API retry status and surface its first live notice."""
+        phase_tracker: TurnPhaseTracker | None,
+    ) -> tuple[int, str]:
+        """Record one SDK API retry; return ``(attempt, last_error)``.
+
+        TASK-1074: the retry is shown as a transient ``retrying`` phase, never
+        as text in the assistant reply (that leaked into persisted history).
+        """
         attempt = data.get("attempt", 0)
         max_retries = data.get("max_retries", 10)
         err_status = data.get("error_status", "?")
@@ -96,21 +98,15 @@ class ClaudeStreamMixin:
             attempt, max_retries, err_status, err_text, session_key,
         )
         status_int = err_status if isinstance(err_status, int) else None
-        # A direct credential 401 gets one silent force-fetch/retry. Streaming a
-        # scary auth notice before that self-heal succeeds leaves an indelible,
-        # false failure in the live bubble. Generic 429/5xx retries remain visible.
+        # A direct credential 401 gets one silent force-fetch/retry; showing a
+        # retry before that self-heal succeeds is a false alarm. Generic
+        # 429/5xx retries remain visible.
         is_auth_retry = is_auth_failure_text(str(err_text), status=status_int)
-        if not already_surfaced and not is_auth_retry:
-            already_surfaced = True
-            seq += 1
-            note = f"⏳ Upstream unavailable ({err_text}), retrying…"
-            text_parts.append(note)
-            self._publish_event(
-                request_id, session_key, seq,
-                kind=AgentEventKind.ASSISTANT_DELTA,
-                text=note,
+        if phase_tracker is not None and not is_auth_retry:
+            phase_tracker.on_api_retry(
+                attempt=attempt, max_attempts=max_retries, error_status=err_status,
             )
-        return seq, attempt, last_error, already_surfaced
+        return attempt, last_error
 
     def _uses_claude_oauth_gateway(self) -> bool:
         """Keep standalone env/file credentials on the legacy direct path."""

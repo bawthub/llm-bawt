@@ -32,6 +32,7 @@ from .send_errors import (
     TerminalSDKResultError,
     classify_terminal_error,
     result_message_error,
+    retry_exhausted_text,
 )
 from .send_preflight import prepare_send
 from .send_result import ClaudeResultMixin
@@ -39,6 +40,7 @@ from .send_stream import ClaudeStreamMixin
 from .send_stream_events import StreamBlockState
 from .send_usage import ClaudeUsageMixin, LiveUsagePublisher
 from .subagent_usage import SubagentUsage
+from .turn_phase import TurnPhaseTracker
 from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
 
 logger = logging.getLogger("claude_code_bridge.bridge")
@@ -132,6 +134,21 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
             seq = 0
             text_parts: list[str] = []
             stream_blocks = StreamBlockState(self, request_id, session_key, text_parts)
+
+            def _publish_phase(text: str, status: dict) -> None:
+                nonlocal seq
+                seq += 1
+                self._publish_event(
+                    request_id, session_key, seq,
+                    kind=AgentEventKind.UPSTREAM_STATUS,
+                    text=text,
+                    extra_raw={"upstream_status": status},
+                )
+
+            # TASK-1074: transient turn phase (waiting/reasoning/compacting/…);
+            # registered so in-process proxy statuses route through it too.
+            phase_tracker = TurnPhaseTracker(_publish_phase, model=model)
+            self._turn_phase_trackers[request_id] = phase_tracker
             actual_model: str = model  # updated from SystemMessage if available
             # Map tool_use_id -> tool name (the SDK's ToolResultBlock doesn't echo
             # the name, only the id) so we can recognise a Playwright screenshot
@@ -371,14 +388,15 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         bot_context_window,
                         compact_threshold=req.compact_threshold,
                     )
+                    phase_tracker.set_context_source(lambda: live_usage.resident_tokens)
                     # /compact lifecycle tracking for this turn. The SDK reports
                     # compaction via SystemMessage(subtype="status") — never a
                     # compact_boundary on the wire — so we watch the status
                     # payload to (a) give immediate feedback (a /compact can be
-                    # ~50s of otherwise-silent work the UI reads as "hung") and
-                    # (b) report the new resident size, since the /compact
-                    # ResultMessage.usage is all-zeros.
-                    compact_announced = False
+                    # ~50s of otherwise-silent work the UI reads as "hung") via
+                    # the transient "compacting" phase and (b) report the new
+                    # resident size, since the /compact ResultMessage.usage is
+                    # all-zeros.
                     compact_status: str | None = None  # None | "success" | "failed"
                     compact_error_msg: str | None = None
                     turn_session_id: str | None = resume_id
@@ -391,15 +409,12 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     # snapshot so we can publish a fallback DONE on clean EOF.
                     assistant_snapshot_text: str = ""
                     assistant_done_emitted = False
-                    # Track upstream API retries so we can (a) show live
-                    # status in the UI ("z.ai overloaded, retrying…") and
-                    # (b) include the error in the final DONE when all
-                    # retries are exhausted and the turn ends empty.
+                    # Track upstream API retries so the final DONE can carry the
+                    # error when all retries are exhausted and the turn ends
+                    # empty. Live retry status is the transient phase.
                     api_retry_count = 0
                     api_last_error: str | None = None
-                    api_retry_surfaced = False  # True once we've pushed a delta
-                    # Retry safety is based on model/tool side effects, not status
-                    # text emitted by the bridge itself (e.g. api_retry notices).
+                    # Retry safety is based on model/tool side effects only.
                     model_side_effects = False
 
                     def _publish_partial(text: str, *, attachments=None) -> None:
@@ -447,7 +462,10 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         msg_stream = active_run.messages()
 
                         def _publish_turn_health(health: dict) -> None:
+                            phase_tracker.on_health(health)
                             _publish_run_signal(AgentEventKind.SYSTEM_NOTE, {"turn_health": health})
+
+                        phase_tracker.on_turn_start()
 
                         watchdog = TurnWatchdog(
                             self._request_timeout,
@@ -479,6 +497,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 )
                             except StopAsyncIteration:
                                 break
+                            phase_tracker.on_sdk_message()
 
                             # Session-mirror write failure. MirrorErrorMessage is a
                             # SystemMessage subclass the SDK emits when its
@@ -504,6 +523,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     if data.get("model"):
                                         actual_model = data["model"]
                                         live_usage.actual_model = actual_model
+                                        phase_tracker.model = actual_model
                                         logger.info("Actual model: %s", actual_model)
                                     if not resume_id:
                                         sid = data.get("session_id")
@@ -524,19 +544,10 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 # status="compacting", then a payload carrying
                                 # compact_result ("success"/"failed") and, on
                                 # failure, compact_error. There is NO
-                                # compact_boundary on the wire. Surface the start
-                                # immediately so the turn doesn't read as "hung",
-                                # and record the outcome for the ResultMessage.
-                                if data.get("status") == "compacting" and not compact_announced:
-                                    compact_announced = True
-                                    seq += 1
-                                    note = "🗜️ Compacting conversation to free up context…"
-                                    text_parts.append(note)
-                                    self._publish_event(
-                                        request_id, session_key, seq,
-                                        kind=AgentEventKind.ASSISTANT_DELTA,
-                                        text=note,
-                                    )
+                                # compact_boundary on the wire. The start is a
+                                # transient phase (never response text); the
+                                # outcome is recorded for the ResultMessage.
+                                phase_tracker.on_system_status(data)
                                 cr = data.get("compact_result")
                                 if cr == "success":
                                     compact_status = "success"
@@ -546,22 +557,13 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                         data.get("compact_error") or "unknown error"
                                     )
                                 # API retry lifecycle. The SDK CLI retries on
-                                # upstream errors (429, 500, 529, etc.). Surface
-                                # the retry to the UI as a live status delta so
-                                # the user sees feedback instead of a dead bubble.
+                                # upstream errors (429, 500, 529, etc.). The retry
+                                # is a transient "retrying" phase, not a delta.
                                 if data.get("subtype") == "api_retry":
-                                    (
-                                        seq,
-                                        api_retry_count,
-                                        api_last_error,
-                                        api_retry_surfaced,
-                                    ) = self._on_api_retry_status(
+                                    api_retry_count, api_last_error = self._on_api_retry_status(
                                         data,
-                                        request_id=request_id,
                                         session_key=session_key,
-                                        seq=seq,
-                                        text_parts=text_parts,
-                                        already_surfaced=api_retry_surfaced,
+                                        phase_tracker=phase_tracker,
                                     )
                                 # TASK-623: sub-agent (Task*) lifecycle event
                                 # emission extracted into _emit_subagent_task_events.
@@ -580,6 +582,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
 
                             if isinstance(msg, StreamEvent):
                                 event = msg.event
+                                phase_tracker.on_stream_event(event)
                                 if event.get("type") == "message_delta":
                                     seq = live_usage.publish(
                                         seq,
@@ -629,6 +632,9 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                         screenshot_artifacts_by_tool_use_id
                                     ),
                                 )
+                                # The watchdog observed this message before
+                                # returning it, so active_tools is current.
+                                phase_tracker.on_tool_results(len(watchdog.active_tools))
 
                             elif isinstance(msg, ResultMessage):
                                 interrupted_usage, _, _ = self._compute_result_usage(
@@ -701,7 +707,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     assistant_snapshot_text=assistant_snapshot_text,
                                     api_retry_count=api_retry_count,
                                     api_last_error=api_last_error,
-                                    api_retry_surfaced=api_retry_surfaced,
                                     actual_model=actual_model,
                                     model=model,
                                     bot_context_window=bot_context_window,
@@ -741,15 +746,9 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     full_text = assistant_snapshot_text
                             # Surface retry errors when the turn ends empty
                             if not full_text and api_retry_count > 0:
-                                error_note = (
-                                    f"\n\n❌ Upstream error after {api_retry_count} "
-                                    f"retries: {api_last_error or 'unknown'}. "
-                                    f"Try again in a moment."
+                                full_text = retry_exhausted_text(
+                                    api_retry_count, api_last_error
                                 )
-                                if api_retry_surfaced:
-                                    full_text = "".join(text_parts) + error_note
-                                else:
-                                    full_text = error_note.lstrip()
                             # Always publish — even if full_text is empty.
                             # An empty ASSISTANT_DONE is far better than no
                             # DONE at all, which causes timeout + vanishing bubble.
@@ -924,5 +923,6 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                 self._clear_proxy_sampling_cancel(request_id)
                 self._discard_changed_file_request(request_id)
                 self._proxy_request_sessions.pop(request_id, None)
+                self._turn_phase_trackers.pop(request_id, None)
                 self._trigger_message_ids.pop(request_id, None)
                 await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

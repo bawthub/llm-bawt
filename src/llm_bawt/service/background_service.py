@@ -136,6 +136,9 @@ class BackgroundService(
         self._memory_clients_lock = threading.Lock()
         from .turn_logs import TurnLogStore
         self._turn_log_store = TurnLogStore(config)
+        # TASK-1074: last transient phase per in-flight turn (memory only).
+        from .upstream_status import LiveTurnPhases
+        self._live_turn_phases = LiveTurnPhases()
         self._inter_bot_dispatcher: Any | None = None
         self._mcp_continuation_task: asyncio.Task | None = None
         # Persistent registry of in-flight AskUserQuestion pauses.  Lets the

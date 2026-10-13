@@ -51,6 +51,17 @@ class TestSubagentModelSetting:
 # Subscriber: send_command forwards subagent_model
 # ---------------------------------------------------------------------------
 
+
+def fake_publish_eval(captured_fields: dict):
+    """Model the dedupe Lua success return and capture XADD's field pairs."""
+    async def evaluate(_script, numkeys, _dedupe_key, _stream, _maxlen, _request_id, *pairs):
+        assert numkeys == 2
+        captured_fields.update(zip(pairs[::2], pairs[1::2], strict=True))
+        return [1, b"1"]
+
+    return evaluate
+
+
 class TestSubscriberForwardsSubagentModel:
     @pytest.mark.asyncio
     async def test_send_command_includes_subagent_model(self):
@@ -60,11 +71,7 @@ class TestSubscriberForwardsSubagentModel:
 
         captured_fields: dict = {}
 
-        async def fake_xadd(stream, fields, **kwargs):
-            captured_fields.update(fields)
-            return b"1"
-
-        sub._pub_redis.xadd = fake_xadd  # type: ignore
+        sub._pub_redis.eval = fake_publish_eval(captured_fields)
 
         await sub.send_command(
             session_key="test-session",
@@ -84,11 +91,7 @@ class TestSubscriberForwardsSubagentModel:
 
         captured_fields: dict = {}
 
-        async def fake_xadd(stream, fields, **kwargs):
-            captured_fields.update(fields)
-            return b"1"
-
-        sub._pub_redis.xadd = fake_xadd  # type: ignore
+        sub._pub_redis.eval = fake_publish_eval(captured_fields)
 
         await sub.send_command(
             session_key="test-session",

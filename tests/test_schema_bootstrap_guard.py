@@ -163,6 +163,17 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
         create_calls.append(tuple(table.name for table in tables))
 
     monkeypatch.setattr(turn_log_schema.SQLModel.metadata, "create_all", fake_create_all)
+    # The fake connection records DDL but is not an inspectable SQLAlchemy
+    # connection. Report the current columns while testing bootstrap ordering.
+    monkeypatch.setattr(
+        changed_files_store,
+        "inspect",
+        lambda _conn: SimpleNamespace(get_columns=lambda _table: [
+            {"name": name} for name in (
+                "ignored_version", "in_repo", "commit_requested_at",
+            )
+        ]),
+    )
     for store_type in (
         turn_logs.TurnLogStore,
         tool_call_store.ToolCallStore,

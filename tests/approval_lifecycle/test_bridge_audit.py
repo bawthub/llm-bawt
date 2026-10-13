@@ -1,4 +1,5 @@
 """Offline TASK-861 audit transport/storage and policy admin contracts."""
+# ruff: noqa: F811 — imported fixtures intentionally share test argument names
 import asyncio
 import json
 from types import SimpleNamespace
@@ -6,8 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from test_task861 import store, client  # isolated SQLite/API fixtures
-from test_approval_bridge_gate import _bridge
+from test_task861 import store, client  # noqa: F401 — isolated SQLite/API fixtures
+from tests.test_approval_bridge_gate import _bridge
 from agent_bridge.events import AgentEvent, AgentEventKind
 from agent_bridge.subscriber import RedisSubscriber
 from llm_bawt.agent_backends import agent_bridge as backend_module
@@ -129,7 +130,7 @@ def test_missing_subscriber_and_status_coverage(client, store, monkeypatch):
 
 
 def test_grant_consumption_audit_and_transport_outage():
-    from test_approval_bridge_gate import _grant, _continuation
+    from tests.test_approval_bridge_gate import _grant, _continuation
     bridge = _bridge()
     arguments = {"command": "rm -rf /home/x"}
     decision = bridge._decide_approval("Bash", arguments)

@@ -273,38 +273,57 @@ def test_ensure_tools_registered_populates_bare_app_process_singleton():
     modules, so the singleton was bare and every approved call died with
     "Unknown tool: ops_run" *after* the user had already approved it.
 
-    Run in a subprocess so an unrelated test importing ``server`` first can't
-    mask the bug through ``sys.modules``.
+    Fork from the already-imported test process, then clear only the MCP
+    registration modules in the child. This retains a clean singleton and
+    import-side-effect check without a cold Python interpreter startup.
     """
-    import subprocess
+    import importlib
+    import multiprocessing
     import sys
+    import traceback
 
-    script = """
-import asyncio
-import os
-import psycopg2
-for key in list(os.environ):
-    if any(part in key.upper() for part in ("POSTGRES", "DATABASE", "DB_", "PGHOST", "PGPORT", "PGUSER", "PGPASS", "PGSERVICE")):
-        os.environ.pop(key, None)
-psycopg2.connect = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Live DB access forbidden in test subprocess"))
-from llm_bawt.mcp_server.registry import mcp, ensure_tools_registered
+    def check_fresh_registration(pipe):
+        try:
+            import psycopg2
+            psycopg2.connect = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("Live DB access forbidden in isolated child")
+            )
+            import llm_bawt.mcp_server as package
+            # An earlier test might have loaded the server and its decorators.
+            # Removing package attributes as well as sys.modules makes this a
+            # fresh registration pass, isolated from the parent's registry.
+            for name in list(sys.modules):
+                if name.startswith("llm_bawt.mcp_server.") and name != "llm_bawt.mcp_server.catalog":
+                    sys.modules.pop(name)
+                    attribute = name.removeprefix("llm_bawt.mcp_server.")
+                    if "." not in attribute and hasattr(package, attribute):
+                        delattr(package, attribute)
+            registry = importlib.import_module("llm_bawt.mcp_server.registry")
 
-async def names():
-    return {t.name for t in await mcp.list_tools()}
+            async def names():
+                return {tool.name for tool in await registry.mcp.list_tools()}
 
-before = asyncio.run(names())
-assert "ops_run" not in before, "expected a bare singleton before registration"
-ensure_tools_registered()
-after = asyncio.run(names())
-assert "ops_run" in after, "ops_run still missing after ensure_tools_registered()"
-assert "ops_job_status" in after
-print("OK")
-"""
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-3000:]}"
-    assert "OK" in proc.stdout
+            assert "ops_run" not in asyncio.run(names()), "expected bare singleton"
+            registry.ensure_tools_registered()
+            after = asyncio.run(names())
+            assert {"ops_run", "ops_job_status"} <= after, after
+            pipe.send(None)
+        except BaseException:
+            pipe.send(traceback.format_exc())
+        finally:
+            pipe.close()
+
+    parent, child = multiprocessing.get_context("fork").Pipe(duplex=False)
+    process = multiprocessing.get_context("fork").Process(target=check_fresh_registration, args=(child,))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10), "isolated MCP registration child timed out"
+        assert parent.recv() is None
+    finally:
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)
+        parent.close()
+    assert process.exitcode == 0

@@ -41,6 +41,8 @@ class LiveUsagePublisher:
     stream_usage: dict | None = None
     last_signature: tuple | None = None
     compact_threshold: int | None = None
+    # Latest live resident context, read by the turn phase status line.
+    resident_tokens: int | None = None
 
     def publish(
         self,
@@ -62,6 +64,9 @@ class LiveUsagePublisher:
         )
         if usage is None:
             return seq
+        resident = usage.get("resident_tokens")
+        if isinstance(resident, int):
+            self.resident_tokens = resident
         signature = tuple(
             usage.get(key)
             for key in (

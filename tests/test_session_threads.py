@@ -16,13 +16,11 @@ throwaway bot id, and clean up after themselves.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -126,7 +124,7 @@ class TestNewDetectionParity:
     DETECTION = re.compile(r"\.lstrip\(\)\.startswith\(\"/new\"\)")
     SITES = [
         "llm_bawt/service/chat_streaming_bridge.py",   # app-side rotation gate
-        "claude_code_bridge/send_handler.py",          # claude-code bridge reset
+        "claude_code_bridge/send_preflight.py",        # claude-code bridge reset
         "codex_bridge/command_ops.py",                 # codex bridge reset
         "openclaw_bridge/bridge.py",                   # openclaw bridge reset
     ]

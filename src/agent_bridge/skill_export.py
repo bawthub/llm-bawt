@@ -32,6 +32,10 @@ _PUBLIC_SKILL_LINK = re.compile(
     r"\[[^\]]*\]\((?:\.\./)+(?:" + "|".join(sorted(PUBLIC_PACKAGE_SKILLS))
     + r")/(?:[^/()]+\.md|(?:reference|references)/[^)]+\.md)(?:#[^)]+)?\)"
 )
+_PUBLIC_DOC_PATH = re.compile(
+    r"(?:\.\./)+(?P<skill>" + "|".join(sorted(PUBLIC_PACKAGE_SKILLS))
+    + r")/(?:[^/()\s`]+\.md|(?:reference|references)/[^\s`)]+\.md)(?:#[^\s`)]*)?"
+)
 
 
 def _replace_public_skill_links(text: str) -> str:
@@ -41,7 +45,12 @@ def _replace_public_skill_links(text: str) -> str:
         skill = next(name for name in PUBLIC_PACKAGE_SKILLS if f"/{name}/" in target)
         return f"`bawthub:{skill}` public skill"
 
-    return _PUBLIC_SKILL_LINK.sub(replacement, text)
+    linked = _PUBLIC_SKILL_LINK.sub(replacement, text)
+    # Private skills also cite public docs as inline code/plain paths. Those
+    # paths cannot resolve after the public skill trees are excluded.
+    return _PUBLIC_DOC_PATH.sub(
+        lambda match: f"bawthub:{match.group('skill')} public skill", linked
+    )
 
 
 def export_personal(source: Path, destination: Path, *, version: str) -> dict:
