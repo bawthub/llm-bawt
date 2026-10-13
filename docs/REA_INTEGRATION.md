@@ -2,10 +2,25 @@
 
 ## State (2026-10-13 UTC)
 
-**Package installed and standalone CLI/MCP verified; shared skill published and
-registration merged. Nick authorized one Claude bridge restart; activation and
-live harness verification are pending its execution.** No production frontend
-release, bot profile change, or session reset is part of this installation.
+**Installed, published, activated and verified through Snark's actual BawtHub
+turn.** One separately approved Claude bridge restart completed. No production
+frontend release, bot profile change, or session reset was performed.
+
+Activation job `9f468cf8d8dd47b9ae4b5763c41b00cf` succeeded, exit 0, at
+2026-10-13 00:23:13 UTC. Approval:
+`mcp-appr-622ede840902c121c4cbfb93603419d50ee2a114`.
+Post-restart bridge health returned `{"redis": true}`. REA deferred tools were
+discovered and `mcp__rea__analyze_javascript_application` called directly from
+Snark's resumed chat with the fixture path and `detail: "summary"`. It returned
+summary Evidence `ev_a61a0a90412a631dd7dfa79696478de0f17cc404bcce0d9c00790a10831a8d4c`
+and the same complete parent Evidence recorded below. Two JavaScript files
+parsed, zero parse failures; fixture bytes still match commit `becfb83`, and no
+execution sentinel exists. Installed release selection and registration survived
+the restart. The imported skill loaded through the actual Skill tool.
+
+The result reports complete application-graph coverage but **unknown semantic
+coverage with nine unknowns**. Static import recovery is verified, not arbitrary
+runtime execution or all 170 advertised capabilities.
 
 Skill commit `030306f` was pushed and synchronized to echo and the Ubuntu sibling.
 Only `mcpServers.rea` was added; all other settings compared equal before/after.
