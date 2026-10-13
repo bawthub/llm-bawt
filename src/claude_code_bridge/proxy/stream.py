@@ -63,6 +63,7 @@ from typing import Any, AsyncIterator, Callable
 
 from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
 from .reasoning import ReasoningCodec
+from .continuation import CommittedOutput
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +103,11 @@ class TranslatorState:
     # ── Yield markers (drive RetryPhase classification in retry.py) ─────────
     message_start_yielded: bool = False
     thinking_yielded: bool = False       # any thinking_delta emitted
-    reasoning_committed: bool = False    # replayable state forwarded; no splice retry
+    reasoning_committed: bool = False    # replayable state forwarded; checkpoint required
     text_delta_yielded: bool = False     # ANY text_delta emitted (partial visible output)
     tool_committed: bool = False         # content_block_start(tool_use) emitted — hard no-retry
     terminal_event_seen: bool = False    # response.completed / response.incomplete
+    committed_output: CommittedOutput = field(default_factory=CommittedOutput)
 
     # ── Block index bookkeeping (Al #1: monotone indexes across a retry splice) ─
     # ``next_block_index`` is the index that WILL be assigned to the next block
@@ -412,6 +414,8 @@ async def responses_to_anthropic_sse(
                     # this proxy with function tools only, so these are not
                     # reachable in practice — but keep the stream alive and log
                     # if a provider ever emits one so we notice.
+                    if state is not None:
+                        state.committed_output.blocked = True
                     logger.debug("Unhandled output item type=%r — keepalive", itype)
                     yield _ping()
                 continue
@@ -471,12 +475,13 @@ async def responses_to_anthropic_sse(
                     yield _open_start_frame("text", idx)
                 if etype == "response.refusal.delta":
                     saw_refusal = True
-                # TASK-714 HARD BARRIER for retry: any visible text_delta means
-                # partial visible content has been forwarded to the SDK. Retry
-                # policy defaults to honest fail-upward from this state to
-                # prevent duplicated visible text on a CLI-side retry.
+                # Preserve exactly the output forwarded to the SDK, not the
+                # upstream's completed message (which may contain unseen text).
                 if state is not None:
                     state.text_delta_yielded = True
+                    if saw_refusal:
+                        state.committed_output.blocked = True
+                    state.committed_output.add_text(delta)
                 yield _sse(
                     "content_block_delta",
                     {
@@ -534,9 +539,10 @@ async def responses_to_anthropic_sse(
                             if reasoning_codec is None else None
                         ) or f"reasoning:{getattr(item, 'id', '') or message_id}"
                         if signature and state is not None:
-                            # A retry splice cannot retract committed native
-                            # state; fail upward rather than mixing attempts.
+                            # Recovery must carry this exact native state in
+                            # order; a text-only synthetic checkpoint loses it.
                             state.reasoning_committed = True
+                            state.committed_output.add_reasoning(reasoning_codec.decode(signature))
                         yield _sse(
                             "content_block_delta",
                             {

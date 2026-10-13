@@ -86,8 +86,8 @@ def phase_from_state(state: "TranslatorState | None") -> RetryPhase:
         return RetryPhase.CONNECTING
     if state.tool_committed:
         return RetryPhase.TOOL_COMMITTED
-    # Native reasoning already persisted downstream cannot be retracted by a
-    # splice. Use the same fail-upward barrier as visible text.
+    # Native reasoning already persisted downstream cannot be retracted.
+    # TEXT remains a barrier unless the caller has a complete continuation checkpoint.
     if state.text_delta_yielded or getattr(state, "reasoning_committed", False):
         return RetryPhase.TEXT
     if state.thinking_yielded:
@@ -399,6 +399,7 @@ def decide(
     policy: RetryPolicy,
     retry_after_s: float | None = None,
     permanent_error_type: str | None = None,
+    allow_text_continuation: bool = False,
 ) -> RetryDecision:
     """Cross product of (failure bucket × translator phase × attempt count).
 
@@ -428,10 +429,26 @@ def decide(
             final_error_type="api_error",
         )
 
-    # Partial visible text — spec permits prefix-suppressed replay behind an
-    # env flag; default is honest fail-upward. Emit api_error so the CLI does
-    # NOT retry from scratch (which would produce duplicate visible text).
+    # TASK-1064: only an opted-in adapter with a complete ordered checkpoint
+    # can continue text. It must validate/suppress the exact visible prefix.
+    # Reasoning-only, refusal, overflow and unsupported providers still fail up.
     if phase is RetryPhase.TEXT:
+        eligible = allow_text_continuation and bucket in {
+            FailureBucket.A_TRANSIENT_NETWORK,
+            FailureBucket.B_UPSTREAM_5XX,
+            FailureBucket.G_PROGRESS_STALL,
+        }
+        budget = policy.attempts_remaining > 0 and (
+            bucket is not FailureBucket.G_PROGRESS_STALL
+            or policy.attempt < MAX_PROGRESS_STALL_ATTEMPTS
+        )
+        if eligible and budget:
+            return RetryDecision(
+                retry=True,
+                reason=f"text_continuation bucket={bucket.value}",
+                backoff_s=compute_backoff(policy.attempt + 1, base=policy.base_backoff_s,
+                                         cap=policy.backoff_cap_s, jitter=policy.jitter_s),
+            )
         return RetryDecision(
             retry=False,
             reason=f"text_partial_no_retry bucket={bucket.value}",
@@ -440,8 +457,8 @@ def decide(
 
     # TASK-950: partial thinking summaries are not committed native reasoning.
     # The existing splice closes their open block before starting a fresh sample.
-    # Completed replayable reasoning is already protected by the TEXT barrier
-    # above (phase_from_state), as are visible text and dispatched tools.
+    # Completed replayable reasoning is protected by the TEXT barrier above,
+    # except verified checkpoint continuation. Dispatched tools never retry.
     # Own the supervised budget here, not in a second adapter-level override.
     if bucket is FailureBucket.G_PROGRESS_STALL and (
         policy.attempt >= MAX_PROGRESS_STALL_ATTEMPTS or policy.attempts_remaining <= 0

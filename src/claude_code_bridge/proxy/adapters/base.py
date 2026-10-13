@@ -14,8 +14,9 @@ accounting).
 
 Request identity across retries is load-bearing for prompt-cache routing —
 the ``responses_body`` (including ``prompt_cache_key``), the ``session_id``
-header, and the ``chatgpt-account-id`` header are built ONCE outside the loop
-and reused verbatim on every attempt.
+header, and the ``chatgpt-account-id`` header are built ONCE outside the loop.
+Pre-output retries reuse that body verbatim. Opted-in text recovery builds from
+that immutable original plus the ordered committed output; routing stays stable.
 """
 
 from __future__ import annotations
@@ -166,6 +167,10 @@ class ProviderAdapter(ABC):
         """Return the per-call retry budget; provider adapters may narrow it."""
         return retry_mod.RetryPolicy()
 
+    def supports_text_continuation(self, context: ProxyRequestContext | None) -> bool:
+        """Opt in only where native checkpoint replay has been verified."""
+        return False
+
     async def call(
         self,
         anthropic_body: dict,
@@ -182,6 +187,7 @@ class ProviderAdapter(ABC):
         # subpackage imports adapters, which imports openai, which is heavy).
         from .. import stream as stream_mod
         from .. import translate
+        from ..continuation import validated_replay
 
         call_started = time.perf_counter()
         # authorize() runs once outside the loop — subsequent attempts reuse the
@@ -200,6 +206,8 @@ class ProviderAdapter(ABC):
             allowed_skill_names=context.skill_names if context else (),
         )
         responses_body = self.prepare_request(responses_body, context)
+        original_body = responses_body
+        continuation_prefix = None
         headers = self.extra_headers(responses_body, context) or None
         client = self._responses_client.with_options(
             api_key=bearer,
@@ -297,6 +305,8 @@ class ProviderAdapter(ABC):
                 phase = retry_mod.phase_from_state(state)
                 decision = retry_mod.decide(
                     bucket=bucket, phase=phase, policy=policy,
+                    allow_text_continuation=(self.supports_text_continuation(context)
+                                             and state.committed_output.can_continue),
                     retry_after_s=retry_after,
                     permanent_error_type=retry_mod.permanent_error_type_for_exception(
                         initial_exc
@@ -354,8 +364,12 @@ class ProviderAdapter(ABC):
             stream_exc: BaseException | None = None
             try:
                 state.terminal_event_seen = False
+                translated_stream = (
+                    validated_replay(upstream_stream, continuation_prefix)
+                    if continuation_prefix is not None else upstream_stream
+                )
                 async for chunk in stream_mod.responses_to_anthropic_sse(
-                    upstream_stream,
+                    translated_stream,
                     anthropic_model=anthropic_model_for_translator,
                     tool_schemas=tool_schemas,
                     on_usage=record_usage_fn,
@@ -399,6 +413,8 @@ class ProviderAdapter(ABC):
             phase = retry_mod.phase_from_state(state)
             decision = retry_mod.decide(
                 bucket=bucket, phase=phase, policy=policy,
+                allow_text_continuation=(self.supports_text_continuation(context)
+                                         and state.committed_output.can_continue),
                 retry_after_s=retry_after,
                 permanent_error_type=permanent_type,
             )
@@ -425,6 +441,19 @@ class ProviderAdapter(ABC):
             )
 
             if decision.retry:
+                if phase is retry_mod.RetryPhase.TEXT:
+                    responses_body = state.committed_output.request(original_body)
+                    continuation_prefix = state.committed_output.text
+                    if context is not None:
+                        context.report_status({
+                            "state": "reconnecting",
+                            "message": "Upstream interrupted; validating reply continuation…",
+                            "provider": context.provider,
+                            "transport": getattr(stream_exc, "transport", None)
+                            or context.responses_transport or "sse",
+                            "attempt": attempt, "next_attempt": attempt + 1,
+                            "max_attempts": policy.max_attempts,
+                        })
                 # Al #1 block-index hygiene: close any block that was open at
                 # failure time. The translator has already set state.open_block
                 # to None if it emitted the close naturally; if we exited via
@@ -439,7 +468,7 @@ class ProviderAdapter(ABC):
                 fallback_transport = getattr(
                     stream_exc, "fallback_transport", None
                 )
-                if context is not None and fallback_transport:
+                if context is not None and fallback_transport and phase is not retry_mod.RetryPhase.TEXT:
                     context.report_status({
                         "state": "reconnecting",
                         "message": "Upstream stalled; reconnecting over HTTPS…",

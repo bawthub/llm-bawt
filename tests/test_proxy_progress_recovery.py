@@ -203,8 +203,14 @@ def test_committed_output_still_prevents_stall_replay(monkeypatch, mode, barrier
         h = Harness(monkeypatch, mode, frames, success_frames())
         try:
             await h.collect()
-            assert h.attempts == 1
-            assert not h.statuses
+            # TASK-1064 permits standard SSE text recovery, but this fixture
+            # never reproduces the visible prefix: no new tool may escape.
+            continuation = barrier == "text" and mode == "sse"
+            assert h.attempts == (2 if continuation else 1)
+            if not continuation:
+                assert not h.statuses
+            else:
+                assert b'"type":"tool_use"' not in b"".join(h.frames)
             assert b'"type":"api_error"' in b"".join(h.frames)
             assert b"event: message_stop" not in b"".join(h.frames)
             h.check_closed()

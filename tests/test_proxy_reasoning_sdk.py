@@ -19,7 +19,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path):
+@pytest.mark.parametrize("continuation", [False, True])
+def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path, monkeypatch, continuation):
     from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
     codec = ReasoningCodec.for_account("openai_chatgpt", "test", "http://local", "fake")
@@ -40,6 +41,18 @@ def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path):
             upstream(), "openai_chatgpt/test", reasoning_codec=codec,
         )])
     wire = asyncio.run(frames())
+    if continuation:
+        from tests.test_proxy_continuation import FixtureAdapter, collect, native_events, text, DONE
+        from tests.test_proxy_reasoning import CODEC
+        codec = CODEC
+        second = {**item, "id": "rs_after_recovery", "encrypted_content": "opaque-second"}
+        adapter = FixtureAdapter([
+            native_events(item) + [text("Local fixture"), ConnectionError("injected")],
+            native_events(second) + [text("Local fixture answer."), DONE],
+        ])
+        monkeypatch.setattr("claude_code_bridge.proxy.usage_capture.schedule_capture", lambda _: None)
+        monkeypatch.setattr("claude_code_bridge.proxy.cache_diag.record", lambda _: None)
+        wire = b"".join(asyncio.run(collect(adapter)))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -102,3 +115,12 @@ def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path):
                   for block in message.get("content", []) if isinstance(block, dict)
                   and block.get("type") == "thinking"]
     assert any(codec.decode(signature) == item for signature in signatures)
+    if continuation:
+        assert any(codec.decode(signature) == second for signature in signatures)
+        assistant_text = "".join(
+            block.get("text", "") for message in requests[-1]["messages"]
+            if message.get("role") == "assistant"
+            for block in message.get("content", []) if isinstance(block, dict)
+            and block.get("type") == "text"
+        )
+        assert assistant_text == "Local fixture answer."

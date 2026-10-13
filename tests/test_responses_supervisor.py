@@ -95,7 +95,9 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
         try:
             output = b"".join([chunk async for chunk in adapter.call(
                 {"model": model, "max_tokens": 100, "messages": [{"role": "user", "content": "ping"}]}, model, context)])
-            should_retry = committed in (None, "thinking", "exhausted")
+            # Text may retry, but this fixture returns no matching prefix:
+            # it must still fail without forwarding a completion or tool.
+            should_retry = committed in (None, "thinking", "text", "exhausted")
             assert create.await_count == (2 if should_retry else 1)
             assert options and all(o["max_retries"] == 0 for o in options)
             # Retain ordinary Responses payload; no Lite developer item migration.
@@ -116,6 +118,29 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
         finally:
             await adapter.close()
     asyncio.run(run())
+
+
+def test_stall_log_reports_idle_event_types_without_payloads(caplog):
+    async def run():
+        async def chatter():
+            yield NS(type="response.output_text.delta", delta="secret-user-text")
+            while True:
+                yield NS(type="response.in_progress", payload="secret-opaque-content")
+                await asyncio.sleep(.001)
+        stream = ResponsesSSEStream(AsyncMock(return_value=HTTPStream(chatter())),
+                                    first_event_timeout=.02, productive_idle_timeout=.03)
+        try:
+            with pytest.raises(ChatGPTEventTimeout):
+                async for _ in stream:
+                    pass
+        finally:
+            await stream.close()
+    with caplog.at_level("WARNING"):
+        asyncio.run(run())
+    assert "last_event='response.in_progress'" in caplog.text
+    assert "idle_events={'response.in_progress':" in caplog.text
+    assert "secret-user-text" not in caplog.text
+    assert "secret-opaque-content" not in caplog.text
 
 
 def test_proxy_cancellation_is_not_logged_as_success(caplog):

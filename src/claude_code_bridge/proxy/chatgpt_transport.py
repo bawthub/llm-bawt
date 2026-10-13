@@ -277,6 +277,8 @@ class ChatGPTStream:
         self.last_transport_activity_at = self.started_at
         self.last_productive_activity_at = self.started_at
         self.recovery_reported = False
+        self.last_event_kind = "none"
+        self.idle_event_counts: dict[str, int] = {}
 
     @property
     def transport(self) -> str:
@@ -317,9 +319,10 @@ class ChatGPTStream:
         productive_idle = max(0.0, now - self.last_productive_activity_at)
         logger.warning(
             "chatgpt_transport stall phase=%s transport=%s attempt=%d "
-            "elapsed_s=%.1f productive_idle_s=%.1f fallback=%s",
+            "elapsed_s=%.1f productive_idle_s=%.1f fallback=%s "
+            "last_event=%r idle_events=%s",
             phase, self.transport, self.attempt, elapsed, productive_idle,
-            fallback or "none",
+            fallback or "none", self.last_event_kind, self.idle_event_counts,
         )
         return ChatGPTEventTimeout(
             phase,
@@ -372,6 +375,7 @@ class ChatGPTStream:
             self.event_seen = True
             self.last_transport_activity_at = now
             kind = getattr(event, "type", "")
+            self.last_event_kind = str(kind)[:80]
             if kind == "response.metadata" and not self.session.turn_state:
                 headers = getattr(event, "headers", None)
                 if isinstance(headers, SimpleNamespace):
@@ -384,7 +388,13 @@ class ChatGPTStream:
             if kind in TERMINALS:
                 self.complete = True
             productive = self._is_productive(event)
+            if not productive:
+                label = self.last_event_kind
+                if label not in self.idle_event_counts and len(self.idle_event_counts) >= 16:
+                    label = "other"
+                self.idle_event_counts[label] = self.idle_event_counts.get(label, 0) + 1
             if productive:
+                self.idle_event_counts.clear()
                 self.last_productive_activity_at = now
                 if (
                     self.attempt > 1

@@ -126,6 +126,11 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
             context=context, http_client=client,
         )
 
+    def supports_text_continuation(self, context: ProxyRequestContext | None) -> bool:
+        # TASK-1064: standard SSE acceptance + SDK replay verified. Lite/WS
+        # remains fail-upward until its sticky-turn recovery is separately proven.
+        return self._responses_transport(context) != RESPONSES_TRANSPORT_LITE_WS
+
     async def close(self):
         if self._chatgpt_transport is not None:
             await self._chatgpt_transport.close()
