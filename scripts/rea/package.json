@@ -1,0 +1,8 @@
+{
+  "name": "llm-bawt-rea-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned standalone REA installation; not an application dependency",
+  "engines": { "node": "^22.19.0 || ^24.11.0 || >=26.0.0" },
+  "dependencies": { "rea-agents": "6.4.0" }
+}

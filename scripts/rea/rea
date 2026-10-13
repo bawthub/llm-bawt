@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Resolve the immutable release once; stdout belongs exclusively to REA/MCP.
+set -euo pipefail
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if ! command -v node >/dev/null 2>&1; then
+    printf '%s\n' 'REA: Node is missing; install the supported platform runtime.' >&2
+    exit 1
+fi
+node "$here/check-node.mjs"
+root="${REA_INSTALL_ROOT:-$HOME/.claude/tools/rea}"
+release="$(readlink -e -- "$root/current")" || {
+    printf '%s\n' 'REA: no installed release; run scripts/rea/install.sh first.' >&2
+    exit 1
+}
+entry="$release/node_modules/rea-agents/scripts/rea.mjs"
+if [[ ! -f "$entry" || ! -f "$release/receipt.json" ]]; then
+    printf '%s\n' 'REA: incomplete installation; refusing to start.' >&2
+    exit 1
+fi
+exec node "$entry" "$@"
