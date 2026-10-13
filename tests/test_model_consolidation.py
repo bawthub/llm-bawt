@@ -19,6 +19,8 @@ from llm_bawt.model_catalog import (
     ModelCatalog,
     ModelEndpoint,
     ModelIdentity,
+    ModelNotFoundError,
+    IncompatibleModelError,
     bot_model_ref,
 )
 from llm_bawt.service.core import ServiceLLMBawt
@@ -606,3 +608,70 @@ def test_resolve_chat_bot_unchanged(monkeypatch):
     alias, warnings = mgr._resolve_request_model(None, "nova", local_mode=False)
     assert alias == "grok-4-fast"
     assert warnings == []
+
+
+def test_resolve_chat_bot_uses_pinned_endpoint_when_model_has_two_paths(monkeypatch):
+    model = ModelIdentity(21, "qwen-local", "local", "Qwen Local")
+    catalog = ModelCatalog([
+        ModelEndpoint(
+            2142, model,
+            AccessPath(31, "local-anthropic", "local", "anthropic-messages", "http://taurus:11434", "none"),
+            "qwen:27b",
+        ),
+        ModelEndpoint(
+            2159, model,
+            AccessPath(32, "ollama", "local", "chat-completions", "http://taurus:11434/v1", "none", "ollama"),
+            "qwen:27b",
+        ),
+    ])
+    bot = SimpleNamespace(
+        slug="nova", agent_backend=None, harness="chat",
+        default_model="qwen-local", endpoint_id=2159,
+    )
+    _patch_bot_manager(monkeypatch, bot)
+    mgr = _make_manager(
+        defined_models=catalog.compatibility_mapping(),
+        available=[*catalog.compatibility_mapping(), "grok-4.7"],
+        agent_backend_models={},
+        default_model="grok-4.7",
+    )
+    mgr.config.ensure_model_catalog = lambda: catalog
+    mgr.config.resolve_model = lambda ref, harness=None, default=None: catalog.resolve(
+        ref, harness=harness,
+    )
+
+    alias, warnings = mgr._resolve_request_model(None, "nova", local_mode=False)
+
+    assert alias == "qwen-local@ollama"
+    assert warnings == []
+    assert mgr._resolve_request_model("grok-4.7", "nova", local_mode=False)[0] == "grok-4.7"
+
+    bot.endpoint_id = 9999
+    with pytest.raises(ModelNotFoundError):
+        mgr._resolve_request_model(None, "nova", local_mode=False)
+    bot.endpoint_id = 2142
+    with pytest.raises(IncompatibleModelError):
+        mgr._resolve_request_model(None, "nova", local_mode=False)
+
+
+def test_resolve_chat_bot_pinned_single_endpoint_need_not_be_compatibility_key(monkeypatch):
+    catalog = _validation_catalog()
+    bot = SimpleNamespace(
+        slug="nova", agent_backend=None, harness="chat",
+        default_model="grok-4", endpoint_id=30,
+    )
+    _patch_bot_manager(monkeypatch, bot)
+    mgr = _make_manager(
+        defined_models=catalog.compatibility_mapping(),
+        available=["grok-4"], agent_backend_models={},
+    )
+    mgr.config.ensure_model_catalog = lambda: catalog
+
+    alias, warnings = mgr._resolve_request_model(None, "nova", local_mode=False)
+
+    assert alias == "grok-4@xai-chat"
+    assert warnings == []
+
+    mgr.config.ensure_model_catalog = lambda: None
+    with pytest.raises(ValueError, match="No model catalog available"):
+        mgr._resolve_request_model(None, "nova", local_mode=False)

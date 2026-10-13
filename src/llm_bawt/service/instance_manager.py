@@ -254,7 +254,19 @@ class InstanceManagerMixin:
             # Requested model not available — fall through with warning
             warnings.append(f"Model '{model}' not available on service")
 
-        # 3. Bot's default_model
+        # 3. Bot's pinned endpoint (or legacy default_model without a pin).
+        #    A multi-endpoint model's bare key is absent from the compatibility
+        #    map, so checking only default_model silently selects the service
+        #    default instead. Never fall back to a different provider for a
+        #    broken pin; catalog resolution must fail visibly.
+        if bot and getattr(bot, "endpoint_id", None) is not None:
+            ensure_catalog = getattr(self.config, "ensure_model_catalog", None)
+            if not callable(ensure_catalog) or ensure_catalog() is None:
+                raise ValueError(f"No model catalog available for bot '{bot_id}' endpoint pin")
+            bot_default = bot_model_ref(self.config, bot)
+            if warnings:
+                warnings[-1] += f", using bot default '{bot_default}'"
+            return bot_default, warnings
         if bot and bot.default_model and bot.default_model in self._available_models:
             if warnings:
                 warnings[-1] += f", using bot default '{bot.default_model}'"
