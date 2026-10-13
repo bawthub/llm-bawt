@@ -593,7 +593,11 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 model_side_effects |= side_effect
 
                             elif isinstance(msg, AssistantMessage):
-                                subagent_usage.observe(msg)
+                                seq = self._publish_subagent_live_usage(
+                                    msg, request_id=request_id,
+                                    session_key=session_key, seq=seq,
+                                    usage_ledger=subagent_usage,
+                                )
                                 # TASK-623: AssistantMessage tool_use / snapshot
                                 # handling extracted into _on_assistant_message.
                                 prior_seq = seq

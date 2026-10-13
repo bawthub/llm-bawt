@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 from claude_agent_sdk import AssistantMessage
-from claude_agent_sdk.types import TaskNotificationMessage, TaskProgressMessage
+from claude_agent_sdk.types import TaskNotificationMessage, TaskProgressMessage, TaskStartedMessage
 
 from claude_code_bridge.send_stream import ClaudeStreamMixin
 from claude_code_bridge.subagent_usage import SubagentUsage
@@ -65,6 +65,45 @@ def test_zero_reported_usage_is_distinct_from_unavailable():
     ledger = SubagentUsage()
     ledger.observe(response(input_tokens=0, output_tokens=0))
     assert ledger.for_event("agent1", None) == {"cumulative_tokens": 0}
+
+
+def test_live_usage_publishes_on_each_measured_response_without_waiting_for_progress():
+    ledger = SubagentUsage()
+    emitter = SimpleNamespace(_publish_event=Mock())
+    common = dict(data={}, uuid="event1", session_id="session1", tool_use_id="agent1")
+    for task_id in ("task1", "task2"):
+        started = TaskStartedMessage(
+            subtype="task_started", task_id=task_id, description="working", **common,
+        )
+        ClaudeStreamMixin._emit_subagent_task_events(
+            emitter, started, request_id="r", session_key="s", seq=0,
+            usage_ledger=ledger,
+        )
+    emitter._publish_event.reset_mock()
+    seq = ClaudeStreamMixin._publish_subagent_live_usage(
+        emitter, response(input_tokens=100, output_tokens=20),
+        request_id="r", session_key="s", seq=2, usage_ledger=ledger,
+    )
+    assert seq == 4
+    assert {c.kwargs["extra_raw"]["task_id"] for c in emitter._publish_event.call_args_list} == {"task1", "task2"}
+    assert all(c.kwargs["extra_raw"]["usage"] == {"cumulative_tokens": 120}
+               for c in emitter._publish_event.call_args_list)
+    emitter._publish_event.reset_mock()
+    assert ClaudeStreamMixin._publish_subagent_live_usage(
+        emitter, response(input_tokens=100, output_tokens=20),
+        request_id="r", session_key="s", seq=seq, usage_ledger=ledger,
+    ) == seq
+    emitter._publish_event.assert_not_called()
+    assert ClaudeStreamMixin._publish_subagent_live_usage(
+        emitter, response("m2", parent="agent2", input_tokens=300, output_tokens=30),
+        request_id="r", session_key="s", seq=seq, usage_ledger=ledger,
+    ) == seq
+    emitter._publish_event.assert_not_called()
+    assert ClaudeStreamMixin._publish_subagent_live_usage(
+        emitter, response("m2", input_tokens=30, output_tokens=5),
+        request_id="r", session_key="s", seq=seq, usage_ledger=ledger,
+    ) == seq + 2
+    assert emitter._publish_event.call_args.kwargs["extra_raw"]["usage"] == {"cumulative_tokens": 155}
 
 
 def test_lifecycle_publishes_measured_total_even_when_final_usage_is_missing():

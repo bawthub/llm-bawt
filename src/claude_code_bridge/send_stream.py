@@ -316,6 +316,7 @@ class ClaudeStreamMixin:
         # Detect them and publish structured events so the
         # app→frontend pipeline can show live progress.
         if isinstance(msg, TaskStartedMessage):
+            ledger.register_task(msg.tool_use_id, msg.task_id, msg.description or "")
             seq += 1
             logger.info(
                 "Sub-agent started: task_id=%s desc=%s tool_use_id=%s",
@@ -376,6 +377,25 @@ class ClaudeStreamMixin:
                     "status": msg.status,
                     "output_file": getattr(msg, "output_file", ""),
                     "usage": ledger.for_event(msg.tool_use_id, usage),
+                },
+            )
+        return seq
+
+    def _publish_subagent_live_usage(
+        self, msg, *, request_id: str, session_key: str, seq: int,
+        usage_ledger: SubagentUsage,
+    ) -> int:
+        """Publish changed provider usage on the response that reports it."""
+        for parent, task_id, description, usage in usage_ledger.live_updates(msg):
+            seq += 1
+            self._publish_event(
+                request_id, session_key, seq,
+                kind=AgentEventKind.SUBAGENT_PROGRESS,
+                tool_use_id=parent,
+                extra_raw={
+                    "task_id": task_id,
+                    "description": description,
+                    "usage": usage,
                 },
             )
         return seq
