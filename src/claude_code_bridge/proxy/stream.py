@@ -702,6 +702,10 @@ async def responses_to_anthropic_sse(
                     recovered = recover_trailing_json(raw)
                     cleaned = recovered if recovered is not None else raw
                 if block is not None and cleaned:
+                    # TASK-1079: the retry loop must not close a tool block
+                    # whose arguments never reached the SDK — a closed empty
+                    # block is a complete ``{}`` call that the CLI executes.
+                    block["args_flushed"] = True
                     yield _sse(
                         "content_block_delta",
                         {

@@ -53,6 +53,56 @@ def _final_error_frame(error_type: str, message: str) -> bytes:
     return f"event: error\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
 
 
+def _is_unflushed_tool(block: dict) -> bool:
+    """A tool block the SDK has seen start but never received arguments for."""
+    return block.get("kind") == "tool" and not block.get("args_flushed")
+
+
+def _retry_status(
+    context: ProxyRequestContext,
+    exc: BaseException | None,
+    *,
+    bucket: retry_mod.FailureBucket,
+    phase: retry_mod.RetryPhase,
+    attempt: int,
+    policy: retry_mod.RetryPolicy,
+) -> dict:
+    """The single live status for "this attempt failed; trying again".
+
+    TASK-1079: wording must match what is actually happening — only a
+    WebSocket attempt falls back to HTTPS; an HTTPS stall simply retries.
+    """
+    transport = getattr(exc, "transport", None) or context.responses_transport or "sse"
+    fallback = getattr(exc, "fallback_transport", None)
+    max_attempts = policy.max_attempts
+    if bucket is retry_mod.FailureBucket.G_PROGRESS_STALL:
+        max_attempts = min(max_attempts, retry_mod.MAX_PROGRESS_STALL_ATTEMPTS)
+    counter = f"attempt {attempt + 1}/{max_attempts}"
+    state = "retrying"
+    if phase is retry_mod.RetryPhase.TEXT:
+        message = f"Upstream interrupted; resuming reply ({counter})"
+    elif transport == "websocket" and fallback == "sse":
+        state = "reconnecting"
+        message = f"Upstream stalled; reconnecting over HTTPS ({counter})"
+    elif bucket is retry_mod.FailureBucket.G_PROGRESS_STALL:
+        message = f"Model stalled; retrying ({counter})"
+    else:
+        message = f"Model request failed; retrying ({counter})"
+    return {
+        "state": state,
+        "message": message,
+        "provider": context.provider,
+        "attempt": attempt,
+        "next_attempt": attempt + 1,
+        "max_attempts": max_attempts,
+        "transport": transport,
+        "fallback_transport": fallback,
+        "stall_phase": getattr(exc, "phase", None),
+        "productive_idle_seconds": getattr(exc, "productive_idle_seconds", None),
+        "elapsed_seconds": getattr(exc, "elapsed_seconds", None),
+    }
+
+
 class ProviderAdapter(ABC):
     """Abstract base for upstream-provider adapters.
 
@@ -245,6 +295,13 @@ class ProviderAdapter(ABC):
             attempt_started = time.perf_counter()
             if context is not None:
                 context.attempt = attempt
+                if attempt == 1:
+                    # TASK-1079: a fresh model request (including the CLI's
+                    # own non-streaming retry) ends any stale retry/stall
+                    # status left by an earlier request in this turn.
+                    context.report_status({
+                        "state": "waiting", "provider": context.provider,
+                    })
             # Only treat this as a resumed attempt if the PRIOR attempt actually
             # emitted the ``message_start`` envelope downstream. A retry after a
             # CONNECTING failure (initial request never returned; translator
@@ -444,16 +501,11 @@ class ProviderAdapter(ABC):
                 if phase is retry_mod.RetryPhase.TEXT:
                     responses_body = state.committed_output.request(original_body)
                     continuation_prefix = state.committed_output.text
-                    if context is not None:
-                        context.report_status({
-                            "state": "reconnecting",
-                            "message": "Upstream interrupted; validating reply continuation…",
-                            "provider": context.provider,
-                            "transport": getattr(stream_exc, "transport", None)
-                            or context.responses_transport or "sse",
-                            "attempt": attempt, "next_attempt": attempt + 1,
-                            "max_attempts": policy.max_attempts,
-                        })
+                if context is not None:
+                    context.report_status(_retry_status(
+                        context, stream_exc, bucket=bucket, phase=phase,
+                        attempt=attempt, policy=policy,
+                    ))
                 # Al #1 block-index hygiene: close any block that was open at
                 # failure time. The translator has already set state.open_block
                 # to None if it emitted the close naturally; if we exited via
@@ -465,29 +517,6 @@ class ProviderAdapter(ABC):
                     state.open_block = None
                 # Clear the in-band error so the next attempt starts clean.
                 state.inband_error = None
-                fallback_transport = getattr(
-                    stream_exc, "fallback_transport", None
-                )
-                if context is not None and fallback_transport and phase is not retry_mod.RetryPhase.TEXT:
-                    context.report_status({
-                        "state": "reconnecting",
-                        "message": "Upstream stalled; reconnecting over HTTPS…",
-                        "provider": context.provider,
-                        "attempt": attempt,
-                        "next_attempt": attempt + 1,
-                        "max_attempts": min(
-                            policy.max_attempts, retry_mod.MAX_PROGRESS_STALL_ATTEMPTS,
-                        ),
-                        "transport": getattr(stream_exc, "transport", "unknown"),
-                        "fallback_transport": fallback_transport,
-                        "stall_phase": getattr(stream_exc, "phase", "unknown"),
-                        "productive_idle_seconds": getattr(
-                            stream_exc, "productive_idle_seconds", None
-                        ),
-                        "elapsed_seconds": getattr(
-                            stream_exc, "elapsed_seconds", None
-                        ),
-                    })
                 await asyncio.sleep(decision.backoff_s)
                 continue
 
@@ -497,9 +526,15 @@ class ProviderAdapter(ABC):
             # is the invariant against duplicate visible text / duplicate tool
             # execution. On PRE_OUTPUT/THINKING, overloaded_error lets the CLI
             # take one more swing.
-            if state.open_block is not None:
+            #
+            # TASK-1079: a tool block whose arguments were never flushed stays
+            # OPEN. Closing it hands the CLI a complete ``{}`` call, which it
+            # executes (verified against the installed CLI). Left open, the
+            # CLI discards the unfinished block and makes its single
+            # non-streaming retry of the same request — nothing executes twice.
+            if state.open_block is not None and not _is_unflushed_tool(state.open_block):
                 yield _stop_block_frame(state.open_block["index"])
-                state.open_block = None
+            state.open_block = None
             discard_stream = getattr(upstream_stream, "discard", None)
             if discard_stream is not None:
                 await discard_stream()

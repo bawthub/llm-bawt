@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from claude_code_bridge.proxy import chatgpt_transport, responses_supervisor
+from claude_code_bridge.proxy import chatgpt_transport
 from claude_code_bridge.proxy.chatgpt_transport import (
     ChatGPTEventTimeout, ChatGPTResponsesTransport,
 )
@@ -21,12 +21,11 @@ from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
 ])
 @pytest.mark.parametrize("ending", ["completed", "stalled"])
 def test_long_productive_response(monkeypatch, transport, kind, ending):
-    # Replace only these modules' clock, not asyncio's clock. Ten minutes of
-    # upstream generation are exercised deterministically without wall-time waits.
+    # SSE inherits ChatGPTStream's clock; patch the shared owner, not asyncio.
+    # Ten minutes of generation are exercised without wall-time waits.
     now = 1000.0
     clock = NS(monotonic=lambda: now)
     monkeypatch.setattr(chatgpt_transport, "time", clock)
-    monkeypatch.setattr(responses_supervisor, "time", clock)
 
     async def run():
         nonlocal now

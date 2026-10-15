@@ -37,7 +37,22 @@ PRODUCTIVE_DELTAS = {
     "response.custom_tool_call_input.delta",
 }
 TOOL_ITEM_TYPES = {"function_call", "custom_tool_call"}
+ARGUMENT_DELTAS = {
+    "response.function_call_arguments.delta",
+    "response.custom_tool_call_input.delta",
+}
 DEFAULT_PRODUCTIVE_IDLE_TIMEOUT = 90.0
+# TASK-1079. A request that has produced no output item at all (only
+# response.created / in_progress / keepalives) is hung: healthy calls open
+# their first item within seconds, and hidden reasoning opens a reasoning
+# item before it goes quiet. Matches the transport first-event budget.
+DEFAULT_FIRST_OUTPUT_TIMEOUT = 60.0
+# Whitespace-only tool-argument deltas with no real content are a degenerate
+# generation loop (observed: 3.6k–7k chunks over 90s, several times a day).
+DEFAULT_WHITESPACE_RUNAWAY_TIMEOUT = 20.0
+# Report a live "stalled" status this long into a productive-idle stretch,
+# well before the retry decision, so the UI never sits silent.
+DEFAULT_STALL_NOTICE_AFTER = 30.0
 
 
 def lite_request(body: dict, scope: str) -> dict:
@@ -123,10 +138,16 @@ class ChatGPTResponsesTransport:
     def __init__(self, *, idle_timeout: float = 240,
                  first_event_timeout: float = 60, keepalive: float = 60,
                  productive_idle_timeout: float = DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
+                 first_output_timeout: float = DEFAULT_FIRST_OUTPUT_TIMEOUT,
+                 whitespace_runaway_timeout: float = DEFAULT_WHITESPACE_RUNAWAY_TIMEOUT,
+                 stall_notice_after: float = DEFAULT_STALL_NOTICE_AFTER,
                  max_connections: int = 32, connector=connect):
         self.idle_timeout = idle_timeout
         self.first_event_timeout = first_event_timeout
         self.productive_idle_timeout = productive_idle_timeout
+        self.first_output_timeout = first_output_timeout
+        self.whitespace_runaway_timeout = whitespace_runaway_timeout
+        self.stall_notice_after = stall_notice_after
         self.keepalive = keepalive
         self.max_connections = max_connections
         self.connector = connector
@@ -276,7 +297,13 @@ class ChatGPTStream:
         self.started_at = time.monotonic()
         self.last_transport_activity_at = self.started_at
         self.last_productive_activity_at = self.started_at
-        self.recovery_reported = False
+        # TASK-1079: a retry attempt starts "in trouble" (the adapter already
+        # reported ``retrying``); a stall notice puts a healthy attempt there.
+        # The next productive event reports ``recovered`` exactly once.
+        self.trouble_reported = self.attempt > 1
+        self.stall_noticed = False
+        self.output_seen = False
+        self.whitespace_since: float | None = None
         self.last_event_kind = "none"
         self.idle_event_counts: dict[str, int] = {}
 
@@ -333,7 +360,11 @@ class ChatGPTStream:
             fallback_transport=fallback,
         )
 
+    def _limit(self, name: str, default: float) -> float:
+        return float(getattr(self.owner, name, default))
+
     def _deadline(self, now: float) -> tuple[float, str]:
+        """Earliest pending deadline. ``notice`` reports; every other phase fails."""
         transport_deadline = (
             self.started_at + self.owner.first_event_timeout
             if not self.event_seen
@@ -349,7 +380,99 @@ class ChatGPTStream:
                 "productive",
             ),
         ]
+        if not self.output_seen:
+            candidates.append((
+                self.started_at
+                + self._limit("first_output_timeout", DEFAULT_FIRST_OUTPUT_TIMEOUT),
+                "first_output",
+            ))
+        if self.whitespace_since is not None:
+            candidates.append((
+                self.whitespace_since + self._limit(
+                    "whitespace_runaway_timeout", DEFAULT_WHITESPACE_RUNAWAY_TIMEOUT,
+                ),
+                "whitespace",
+            ))
+        if not self.stall_noticed and self.context is not None:
+            candidates.append((
+                self.last_productive_activity_at
+                + self._limit("stall_notice_after", DEFAULT_STALL_NOTICE_AFTER),
+                "notice",
+            ))
         return min(candidates, key=lambda candidate: candidate[0])
+
+    def _report_stall_notice(self, now: float) -> None:
+        """Tell the UI the upstream has gone quiet; keep waiting on it."""
+        self.stall_noticed = True
+        self.trouble_reported = True
+        idle = max(0.0, now - self.last_productive_activity_at)
+        self.context.report_status({
+            "state": "stalled",
+            "message": (
+                "Model is emitting only whitespace" if self.whitespace_since is not None
+                else "Model stopped responding" if self.output_seen
+                else "Waiting on model; no output yet"
+            ),
+            "provider": self.context.provider,
+            "attempt": self.attempt,
+            "transport": self.transport,
+            "productive_idle_seconds": round(idle, 1),
+            # Wall-clock start of the silence, so the UI timer shows its
+            # true length rather than time since the notice.
+            "since": time.time() - idle,
+        })
+
+    def _observe(self, event, now: float) -> bool:
+        """Update liveness bookkeeping for one event; return productivity."""
+        kind = str(getattr(event, "type", "") or "")
+        if kind == "response.output_item.added":
+            self.output_seen = True
+        productive = self._is_productive(event)
+        if productive:
+            self.output_seen = True
+            self.whitespace_since = None
+        elif kind in ARGUMENT_DELTAS and getattr(event, "delta", None):
+            if self.whitespace_since is None:
+                self.whitespace_since = now
+        return productive
+
+    async def _receive(self):
+        if self.http is not None:
+            return await anext(self.http_iterator)
+        raw = await self.session.socket.recv()
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise ValueError("Invalid Responses WebSocket event")
+        return _event_object(payload)
+
+    async def _supervised(self, awaitable):
+        """Await under the liveness deadlines; a stall notice never cancels.
+
+        The single wait primitive for headers and events. Cancelling a pending
+        ``anext`` would finalize the HTTP iterator, so a notice deadline only
+        reports and keeps waiting on the same receive; any other deadline
+        cancels it and raises ``ChatGPTEventTimeout``.
+        """
+        pending = asyncio.ensure_future(awaitable)
+        try:
+            while True:
+                now = time.monotonic()
+                deadline, phase = self._deadline(now)
+                done, _ = await asyncio.wait({pending}, timeout=max(0.0, deadline - now))
+                if done:
+                    return pending.result()
+                now = time.monotonic()
+                if phase == "notice":
+                    self._report_stall_notice(now)
+                    continue
+                raise self._timeout(phase, now)
+        finally:
+            if not pending.done():
+                pending.cancel()
+                try:
+                    await pending
+                except BaseException:  # noqa: BLE001 — drain the cancelled wait
+                    pass
 
     def __aiter__(self):
         return self
@@ -359,18 +482,10 @@ class ChatGPTStream:
             raise StopAsyncIteration
         now = time.monotonic()
         deadline, timeout_phase = self._deadline(now)
-        timeout = deadline - now
-        if timeout <= 0:
+        if deadline <= now and timeout_phase != "notice":
             raise self._timeout(timeout_phase, now)
         try:
-            if self.http is not None:
-                event = await asyncio.wait_for(anext(self.http_iterator), timeout)
-            else:
-                raw = await asyncio.wait_for(self.session.socket.recv(), timeout)
-                payload = json.loads(raw)
-                if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
-                    raise ValueError("Invalid Responses WebSocket event")
-                event = _event_object(payload)
+            event = await self._supervised(self._receive())
             now = time.monotonic()
             self.event_seen = True
             self.last_transport_activity_at = now
@@ -387,7 +502,7 @@ class ChatGPTStream:
                             break
             if kind in TERMINALS:
                 self.complete = True
-            productive = self._is_productive(event)
+            productive = self._observe(event, now)
             if not productive:
                 label = self.last_event_kind
                 if label not in self.idle_event_counts and len(self.idle_event_counts) >= 16:
@@ -397,12 +512,12 @@ class ChatGPTStream:
                 self.idle_event_counts.clear()
                 self.last_productive_activity_at = now
                 if (
-                    self.attempt > 1
-                    and not self.recovery_reported
+                    self.trouble_reported
                     and self.context is not None
                     and kind not in FAILURE_TERMINALS
                 ):
-                    self.recovery_reported = True
+                    self.trouble_reported = False
+                    self.stall_noticed = False
                     self.context.report_status({
                         "state": "recovered",
                         "message": "Upstream connection recovered.",
@@ -410,16 +525,13 @@ class ChatGPTStream:
                         "attempt": self.attempt,
                         "transport": self.transport,
                     })
-            elif now >= (
-                self.last_productive_activity_at
-                + self.owner.productive_idle_timeout
-            ):
-                raise self._timeout("productive", now)
+            else:
+                deadline, phase = self._deadline(now)
+                if deadline <= now and phase != "notice":
+                    raise self._timeout(phase, now)
             return event
         except (ConnectionClosed, StopAsyncIteration) as exc:
             raise ConnectionError("stream closed before response.completed") from exc
-        except asyncio.TimeoutError as exc:
-            raise self._timeout(timeout_phase, time.monotonic()) from exc
 
     async def close(self):
         if self.closed:

@@ -106,8 +106,11 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
             assert adapter._chatgpt_transport is None
             assert streams[0].close.await_count == 1
             if should_retry:
-                assert statuses[0]["state"] == "reconnecting"
-                assert statuses[0]["transport"] == "sse"
+                assert statuses[0]["state"] == "waiting"
+                assert statuses[1]["state"] == "retrying"
+                assert statuses[1]["transport"] == "sse"
+                # TASK-1079: an HTTPS stall is not "reconnecting over HTTPS".
+                assert "HTTPS" not in statuses[1]["message"]
                 assert streams[1].close.await_count == 1
             if committed in (None, "thinking"):
                 assert b"message_stop" in output

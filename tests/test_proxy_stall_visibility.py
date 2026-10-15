@@ -1,0 +1,235 @@
+"""TASK-1079: stalls are detected early, shown honestly, and never run ``{}``."""
+import asyncio
+import json
+import time
+from types import SimpleNamespace as NS
+
+import pytest
+
+from claude_code_bridge.proxy.chatgpt_transport import ChatGPTEventTimeout
+from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
+from tests.test_proxy_progress_recovery import THINKING, TOOL, Harness, success_frames
+from tests.test_turn_phase import _phases, _ProxyHarness, _tracker
+
+
+class HTTP:
+    response = NS(headers={})
+
+    def __init__(self, events):
+        self.events = events
+
+    def __aiter__(self):
+        return self.events
+
+    async def close(self):
+        pass
+
+
+def _stream(events, statuses=None, **limits):
+    async def opener():
+        return HTTP(events)
+    context = None
+    if statuses is not None:
+        context = NS(attempt=1, provider="openai_chatgpt", report_status=statuses.append)
+    stream = ResponsesSSEStream(opener, context=context, first_event_timeout=10,
+                                productive_idle_timeout=limits.pop("productive", 10))
+    for name, value in limits.items():
+        setattr(stream.owner, name, value)
+    return stream
+
+
+async def _drain(stream):
+    try:
+        return [event async for event in stream]
+    finally:
+        await stream.close()
+
+
+async def _chatter(*prefix, item=NS(type="response.in_progress")):
+    for event in prefix:
+        yield event
+    while True:
+        await asyncio.sleep(.002)
+        yield item
+
+
+def test_request_with_no_output_item_times_out_as_first_output():
+    async def run():
+        stream = _stream(_chatter(NS(type="response.created")), first_output_timeout=.05)
+        with pytest.raises(ChatGPTEventTimeout) as error:
+            await _drain(stream)
+        assert error.value.phase == "first_output"
+    asyncio.run(run())
+
+
+def test_hidden_reasoning_item_satisfies_first_output():
+    async def run():
+        reasoning = NS(type="response.output_item.added", item=NS(type="reasoning"))
+        stream = _stream(_chatter(reasoning), first_output_timeout=.02, productive=.1)
+        with pytest.raises(ChatGPTEventTimeout) as error:
+            await _drain(stream)
+        assert error.value.phase == "productive"
+    asyncio.run(run())
+
+
+def test_whitespace_argument_runaway_times_out_before_productive_idle():
+    async def run():
+        added = NS(type="response.output_item.added", item=NS(type="function_call"))
+        blank = NS(type="response.function_call_arguments.delta", delta="  \n")
+        started = time.monotonic()
+        stream = _stream(_chatter(added, item=blank), whitespace_runaway_timeout=.05)
+        with pytest.raises(ChatGPTEventTimeout) as error:
+            await _drain(stream)
+        assert error.value.phase == "whitespace"
+        assert time.monotonic() - started < 1
+    asyncio.run(run())
+
+
+def test_stall_notice_reports_once_then_recovers_on_the_same_stream():
+    async def run():
+        async def events():
+            yield NS(type="response.created")
+            await asyncio.sleep(.12)  # the notice must not cancel this wait
+            yield NS(type="response.output_text.delta", delta="back")
+            yield NS(type="response.completed", response=NS(usage=None, status="completed"))
+
+        statuses = []
+        before = time.time()
+        stream = _stream(events(), statuses, stall_notice_after=.03)
+        kinds = [event.type for event in await _drain(stream)]
+        assert kinds[-1] == "response.completed"
+        assert [s["state"] for s in statuses] == ["stalled", "recovered"]
+        stalled = statuses[0]
+        assert stalled["message"] == "Waiting on model; no output yet"
+        assert before - .01 <= stalled["since"] <= before + .05
+    asyncio.run(run())
+
+
+def test_stall_notice_waits_for_header_timeout_rather_than_failing():
+    async def run():
+        statuses = []
+
+        async def slow_opener():
+            await asyncio.sleep(.08)
+            return HTTP(_chatter(NS(type="response.output_text.delta", delta="ok"),
+                                 item=NS(type="response.completed",
+                                         response=NS(usage=None, status="completed"))))
+
+        stream = ResponsesSSEStream(
+            slow_opener, context=NS(attempt=1, provider="p", report_status=statuses.append),
+            first_event_timeout=10, productive_idle_timeout=10,
+        )
+        stream.owner.stall_notice_after = .02
+        events = await _drain(stream)
+        assert events[0].delta == "ok"
+        assert [s["state"] for s in statuses] == ["stalled", "recovered"]
+    asyncio.run(run())
+
+
+def _frames(raw: list[bytes]) -> list[dict]:
+    frames = []
+    for chunk in b"".join(raw).split(b"\n\n"):
+        for line in chunk.splitlines():
+            if line.startswith(b"data: "):
+                frames.append(json.loads(line[6:]))
+    return frames
+
+
+def _tool_frames(h):
+    frames = _frames(h.frames)
+    starts = [f["index"] for f in frames if f.get("type") == "content_block_start"
+              and f["content_block"]["type"] == "tool_use"]
+    stops = {f["index"] for f in frames if f.get("type") == "content_block_stop"}
+    return frames, starts, stops
+
+
+@pytest.mark.parametrize("mode", ["sse", "lite_ws"])
+def test_final_failure_leaves_argumentless_tool_block_open(monkeypatch, mode):
+    """A closed empty block is a complete ``{}`` call the CLI would execute."""
+    async def run():
+        blank = {"type": "response.function_call_arguments.delta",
+                 "item_id": "fc_new", "delta": "   "}
+        h = Harness(monkeypatch, mode, [THINKING, {"type": "response.output_item.added",
+                                                  "item": TOOL}, blank, blank],
+                    success_frames())
+        try:
+            await h.collect()
+            assert h.attempts == 1  # a forwarded tool is never replayed
+            frames, starts, stops = _tool_frames(h)
+            assert len(starts) == 1 and starts[0] not in stops
+            assert any(f.get("type") == "error" for f in frames)
+            assert not any(f.get("type") == "message_stop" for f in frames)
+        finally:
+            await h.adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["sse", "lite_ws"])
+def test_final_failure_still_closes_tool_block_with_flushed_arguments(monkeypatch, mode):
+    async def run():
+        h = Harness(monkeypatch, mode, [
+            THINKING, {"type": "response.output_item.added", "item": TOOL},
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_new",
+             "delta": '{"value":"x"}'},
+            {"type": "response.function_call_arguments.done", "item_id": "fc_new"},
+        ], success_frames())
+        try:
+            await h.collect()
+            frames, starts, stops = _tool_frames(h)
+            assert len(starts) == 1 and starts[0] in stops
+            assert any(f.get("type") == "error" for f in frames)
+        finally:
+            await h.adapter.close()
+    asyncio.run(run())
+
+
+# ── turn phase ──────────────────────────────────────────────────────────
+
+
+def test_proxy_stall_backdates_and_waiting_clears_stale_retry():
+    tracker, published, clock = _tracker()
+    tracker.on_turn_start()
+    tracker.on_proxy_status({"state": "stalled", "message": "Model stopped responding",
+                             "since": clock.now - 30})
+    assert published[-1][1]["since"] == clock.now - 30
+    tracker.on_proxy_status({"state": "retrying", "message": "Model stalled; retrying"})
+    # The CLI's non-streaming fallback is a fresh request: no stranded status.
+    tracker.on_proxy_status({"state": "waiting"})
+    tracker.on_proxy_status({"state": "waiting"})  # outside trouble: no-op
+
+    assert _phases(published) == ["waiting_model", "stalled", "retrying", "waiting_model"]
+
+
+def test_proxy_trouble_survives_sdk_pings_but_watchdog_stall_does_not():
+    tracker, published, _clock = _tracker(stall_after=90)
+    tracker.on_turn_start()
+    tracker.on_proxy_status({"state": "stalled", "message": "Model stopped responding"})
+    tracker.on_sdk_message()  # heartbeat pings keep reaching the SDK
+    assert tracker.phase.value == "stalled"
+    tracker.on_proxy_status({"state": "recovered"})
+    assert tracker.phase.value == "streaming"
+
+    tracker.on_health({"phase": "sdk_idle", "wait_elapsed_seconds": 120.0})
+    tracker.on_sdk_message()
+    assert _phases(published)[-2:] == ["stalled", "streaming"]
+
+
+def test_compaction_resumes_after_proxy_recovery():
+    tracker, published, _clock = _tracker()
+    tracker.on_turn_start()
+    tracker.on_system_status({"status": "compacting"})
+    tracker.on_proxy_status({"state": "stalled", "message": "Model stopped responding"})
+    tracker.on_proxy_status({"state": "retrying", "message": "Model stalled; retrying"})
+    tracker.on_proxy_status({"state": "recovered"})
+
+    assert _phases(published) == [
+        "waiting_model", "compacting", "stalled", "retrying", "compacting",
+    ]
+
+
+def test_legacy_proxy_path_drops_waiting():
+    harness = _ProxyHarness()
+    harness.publish_proxy_status("req_1", {"state": "waiting"})
+    harness.publish_proxy_status("req_1", {"state": "stalled", "message": "x"})
+
+    assert [e["extra_raw"]["upstream_status"]["state"] for e in harness.events] == ["stalled"]

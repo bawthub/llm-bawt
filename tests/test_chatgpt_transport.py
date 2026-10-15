@@ -508,10 +508,11 @@ def test_silent_websocket_recovers_over_http_without_outer_cli_retry(monkeypatch
             assert b"message_stop" in joined
             assert b'"type":"api_error"' not in joined
             assert [status[1]["state"] for status in statuses] == [
-                "reconnecting", "recovered",
+                "waiting", "reconnecting", "recovered",
             ]
-            assert statuses[0][1]["fallback_transport"] == "sse"
-            assert statuses[1][1]["transport"] == "sse"
+            assert statuses[1][1]["fallback_transport"] == "sse"
+            assert "over HTTPS" in statuses[1][1]["message"]
+            assert statuses[2][1]["transport"] == "sse"
         finally:
             await adapter.close()
     asyncio.run(run())
@@ -598,7 +599,7 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
             joined = b"".join(chunks)
             assert adapter._chatgpt_transport.connector.await_count == 1
             assert b'"type":"api_error"' in joined
-            assert not statuses
+            assert [status["state"] for status in statuses] == ["waiting"]
             assert socket.close.await_count == 1
             assert not adapter._chatgpt_transport._idle
         finally:
@@ -676,7 +677,7 @@ def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):
             )]
             assert asyncio.get_running_loop().time() - started < .15
             assert b'"type":"api_error"' in b"".join(chunks)
-            assert [status["state"] for status in statuses] == ["reconnecting"]
+            assert [status["state"] for status in statuses] == ["waiting", "reconnecting"]
             assert socket.close.await_count == 1
             assert sse_closed.await_count == 1
             assert not adapter._chatgpt_transport._idle

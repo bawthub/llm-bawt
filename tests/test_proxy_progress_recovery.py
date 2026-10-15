@@ -101,10 +101,20 @@ class Harness:
                 connector=self.connector, first_event_timeout=idle,
                 productive_idle_timeout=idle,
             )
+        # ``waiting`` marks each fresh request (TASK-1079); trouble statuses
+        # are what these recovery tests assert on.
         self.statuses = []
+        self.waiting = 0
+
+        def on_status(_, status):
+            if status.get("state") == "waiting":
+                self.waiting += 1
+            else:
+                self.statuses.append(status)
+
         self.context = ProxyRequestContext(
             request_id="fixture", provider="openai_chatgpt", conversation_id="fixture-thread",
-            responses_transport=mode, status_callback=lambda _, status: self.statuses.append(status),
+            responses_transport=mode, status_callback=on_status,
         )
         self.frames = []
         self.mode = mode
@@ -146,7 +156,9 @@ def test_thinking_stall_recovers_with_valid_wire_and_no_replayed_tools(monkeypat
         try:
             await h.collect()
             assert h.attempts == 2
-            assert [s["state"] for s in h.statuses] == ["reconnecting", "recovered"]
+            retry_state = "reconnecting" if mode == "lite_ws" else "retrying"
+            assert [s["state"] for s in h.statuses] == [retry_state, "recovered"]
+            assert h.waiting == 1
             assert h.statuses[0]["stall_phase"] == "productive"
             assert h.statuses[0]["max_attempts"] == 2
             assert all(o["max_retries"] == 0 for o in h.options)
@@ -226,7 +238,7 @@ def test_thinking_stall_exhaustion_is_bounded_and_terminal(monkeypatch, mode, ca
         try:
             await h.collect()
             assert h.attempts == 2
-            assert h.statuses[0]["state"] == "reconnecting"
+            assert h.statuses[0]["state"] == ("reconnecting" if mode == "lite_ws" else "retrying")
             failures = [r.message for r in caplog.records if "proxy_retry" in r.message]
             assert len(failures) == 2
             assert "boundary=stream" in failures[0]

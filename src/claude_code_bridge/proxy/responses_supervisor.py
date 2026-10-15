@@ -5,11 +5,10 @@ HTTP payload or selecting a different protocol. The outer adapter owns retries.
 """
 from __future__ import annotations
 
-import asyncio
-import time
 from types import SimpleNamespace
 
 from .chatgpt_transport import (
+    ChatGPTEventTimeout,
     ChatGPTStream,
     DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
 )
@@ -46,14 +45,11 @@ class ResponsesSSEStream(ChatGPTStream):
         Only liveness timeouts are deferred to iteration, where the shared
         progress-stall policy handles visibility and bounded recovery.
         """
-        deadline, phase = self._deadline(time.monotonic())
         self._opening_timeout = None
         try:
-            self.http = await asyncio.wait_for(
-                self._opener(), max(0, deadline - time.monotonic()),
-            )
-        except asyncio.TimeoutError:
-            self._opening_timeout = self._timeout(phase, time.monotonic())
+            self.http = await self._supervised(self._opener())
+        except ChatGPTEventTimeout as exc:
+            self._opening_timeout = exc
             return
         self.response = getattr(self.http, "response", None)
         self.http_iterator = self.http.__aiter__()

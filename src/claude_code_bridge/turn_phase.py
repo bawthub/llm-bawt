@@ -50,11 +50,22 @@ _SILENCE_EXPLAINED = frozenset(
     {TurnPhase.COMPACTING, TurnPhase.RETRYING, TurnPhase.RECONNECTING, TurnPhase.STALLED}
 )
 
-# Proxy ``state`` values (adapters/base.py, chatgpt_transport.py) → phase.
+# Phases that interrupt another phase; leaving one resumes what it interrupted.
+_TROUBLE = frozenset({TurnPhase.RETRYING, TurnPhase.RECONNECTING, TurnPhase.STALLED})
+
+# Proxy trouble ``state`` values (adapters/base.py, chatgpt_transport.py) →
+# phase. ``waiting`` (a fresh proxy request) and ``recovered`` (output flows
+# again) are exits, handled in :meth:`TurnPhaseTracker.on_proxy_status`.
 _PROXY_STATES: dict[str, TurnPhase] = {
+    "stalled": TurnPhase.STALLED,
+    "retrying": TurnPhase.RETRYING,
     "reconnecting": TurnPhase.RECONNECTING,
-    "recovered": TurnPhase.STREAMING,
 }
+_PROXY_DETAIL = (
+    "attempt", "next_attempt", "max_attempts", "transport",
+    "fallback_transport", "stall_phase", "productive_idle_seconds",
+    "elapsed_seconds", "provider",
+)
 
 # SDK stream content blocks → phase.
 _BLOCK_PHASES: dict[str, TurnPhase] = {
@@ -86,17 +97,34 @@ class TurnPhaseTracker:
         self.since: float | None = None
         self._detail: dict[str, Any] = {}
         self._resume_phase: TurnPhase | None = None
+        # The proxy entered the current trouble phase, so only a proxy signal
+        # ends it: heartbeat pings reach the SDK while the upstream is silent.
+        self._proxy_owned = False
 
     # ── core ────────────────────────────────────────────────────────────
 
-    def transition(self, phase: TurnPhase, *, text: str | None = None, **detail: Any) -> bool:
-        """Enter ``phase`` (or refresh its detail); publish only on change."""
+    def transition(
+        self,
+        phase: TurnPhase,
+        *,
+        text: str | None = None,
+        since: float | None = None,
+        **detail: Any,
+    ) -> bool:
+        """Enter ``phase`` (or refresh its detail); publish only on change.
+
+        ``since`` backdates entry when the condition began before it was
+        reported (a proxy stall notice fires partway into the silence).
+        """
         detail = {k: v for k, v in detail.items() if v is not None}
         if phase == self.phase and detail == self._detail:
             return False
         if phase != self.phase:
+            if phase in _TROUBLE and self.phase not in _TROUBLE:
+                self._resume_phase = self.phase
+            self._proxy_owned = False
             self.phase = phase
-            self.since = self._clock()
+            self.since = since if since is not None else self._clock()
         self._detail = detail
         self._publish(text or PHASE_TEXT[phase], self.snapshot())
         return True
@@ -155,19 +183,31 @@ class TurnPhaseTracker:
         self._context_tokens = source
 
     def on_proxy_status(self, status: dict) -> None:
-        """In-process proxy reconnect/recover signals."""
-        phase = _PROXY_STATES.get(str(status.get("state") or ""))
-        if phase is None:
-            return
-        detail = {
-            k: status.get(k)
-            for k in (
-                "attempt", "next_attempt", "max_attempts", "transport",
-                "fallback_transport", "stall_phase", "productive_idle_seconds",
-                "elapsed_seconds", "provider",
+        """In-process proxy stall / retry / waiting / recovered signals.
+
+        Trouble states enter their phase. ``waiting`` (a new proxy request,
+        e.g. the CLI's non-streaming fallback) and ``recovered`` leave a
+        trouble phase, so a finished retry can never strand the status.
+        """
+        state = str(status.get("state") or "")
+        phase = _PROXY_STATES.get(state)
+        if phase is not None:
+            since = status.get("since")
+            self.transition(
+                phase,
+                text=status.get("message") or None,
+                since=since if isinstance(since, (int, float)) else None,
+                **{k: status.get(k) for k in _PROXY_DETAIL},
             )
-        }
-        self.transition(phase, text=status.get("message") or None, **detail)
+            self._proxy_owned = True
+        elif self.phase in _TROUBLE and state in {"waiting", "recovered"}:
+            fallback = TurnPhase.WAITING_MODEL if state == "waiting" else TurnPhase.STREAMING
+            self._resume(fallback)
+
+    def _resume(self, fallback: TurnPhase) -> None:
+        """Leave a trouble phase; compaction outlives its model retries."""
+        resume = self._resume_phase
+        self.transition(TurnPhase.COMPACTING if resume == TurnPhase.COMPACTING else fallback)
 
     def on_health(self, health: dict) -> None:
         """Watchdog tick while waiting on the SDK: detect a model stall."""
@@ -177,7 +217,6 @@ class TurnPhaseTracker:
             return
         waited = health.get("wait_elapsed_seconds")
         if isinstance(waited, (int, float)) and waited >= self._stall_after:
-            self._resume_phase = self.phase
             self.transition(TurnPhase.STALLED)
 
     def on_sdk_message(self) -> None:
@@ -186,5 +225,5 @@ class TurnPhaseTracker:
         Call before the type-specific observers so a fresh block start can
         still move on from the resumed phase.
         """
-        if self.phase == TurnPhase.STALLED:
+        if self.phase == TurnPhase.STALLED and not self._proxy_owned:
             self.transition(self._resume_phase or TurnPhase.WAITING_MODEL)

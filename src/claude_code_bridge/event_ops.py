@@ -354,6 +354,10 @@ class ClaudeEventMixin:
         if tracker is not None:
             tracker.on_proxy_status(status)
             return
+        if status.get("state") == "waiting":
+            # TASK-1079: only a phase tracker can use "a new request began";
+            # alone it is a no-op signal and would overwrite real status.
+            return
         attempt = status.get("attempt")
         seq = int(attempt) if isinstance(attempt, int) else 0
         self._publish_event(
