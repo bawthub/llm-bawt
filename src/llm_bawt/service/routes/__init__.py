@@ -14,6 +14,7 @@ from .models import router as models_router
 from .model_catalog import router as model_catalog_router
 from .openclaw_ws import router as openclaw_ws_router
 from .nextcloud import router as nextcloud_router
+from .nextcloud_setup import router as nextcloud_setup_router
 from .prompts import router as prompts_router
 from .profiles import router as profiles_router
 from .providers import router as providers_router
@@ -58,6 +59,7 @@ all_routers = [
     memory_router,
     prompts_router,
     providers_router,
+    nextcloud_setup_router,  # Specific setup routes precede generic integration paths.
     integrations_router,
     settings_router,
     setup_router,

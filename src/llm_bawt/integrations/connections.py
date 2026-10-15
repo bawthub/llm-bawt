@@ -30,6 +30,15 @@ KEEP_SCOPE = "https://www.googleapis.com/auth/keep"
 CALLBACK_PATH = "/api/chat/proxy/v1/integrations/google-keep/callback"
 RETURN_PATHS = {"/tools/settings/integrations", "/setup"}
 REGISTRY = {
+    "nextcloud-talk": {
+        "id": "nextcloud-talk", "label": "Nextcloud Talk", "auth_method": "nextcloud_login_v2",
+        "description": "Authorize your Nextcloud account and discover existing Talk rooms and installed bots.",
+        "supported_account_types": ["nextcloud"], "scopes": [],
+        "capabilities": {"discover_rooms": True, "discover_bots": True, "create_rooms": False},
+        "requirements": "The instance must match the server's HTTPS NEXTCLOUD_URL. Bot discovery requires a Nextcloud administrator.",
+        "limitations": "Account authorization does not grant signing-secret recovery or webhook bot installation. Delivery is not verified by account login.",
+        "setup_url": "https://nextcloud-talk.readthedocs.io/en/latest/bots/",
+    },
     "google-keep": {
         "id": "google-keep", "label": "Google Keep · Workspace", "auth_method": "service_account_delegation",
         "supported_account_types": ["google_workspace"],

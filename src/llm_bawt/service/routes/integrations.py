@@ -13,7 +13,8 @@ COOKIE_PATH = "/api/chat/proxy/v1/integrations"
 
 
 def manager(integration_id: str) -> IntegrationConnections:
-    if integration_id not in REGISTRY:
+    # These handlers implement Google contracts, not the Nextcloud adapter.
+    if integration_id != "google-keep":
         raise HTTPException(404, "Unknown integration")
     return IntegrationConnections(get_service().config)
 
@@ -63,8 +64,11 @@ async def call(fn, *args):
 
 @router.get("")
 async def list_integrations():
+    from .nextcloud_setup import manager as nextcloud_manager
     service = IntegrationConnections(get_service().config)
-    return {"integrations": [await run_in_threadpool(service.descriptor, key) for key in REGISTRY]}
+    descriptors = [await run_in_threadpool(service.descriptor, key) for key in REGISTRY if key != "nextcloud-talk"]
+    descriptors.append(await run_in_threadpool(nextcloud_manager().descriptor))
+    return {"integrations": descriptors}
 
 
 @router.put("/{integration_id}/client")
