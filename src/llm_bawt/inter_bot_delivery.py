@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -305,9 +306,13 @@ class InterBotDeliveryStore:
         session_policy: SessionPolicy | str = SessionPolicy.CONTINUE,
         reset_reason: str | None = None,
         user_message_id: str | None = None,
+        assistant_message_id: str | None = None,
+        connection: Connection | None = None,
     ) -> tuple[DeliveryRecord, bool]:
         if self.engine is None:
             raise RuntimeError("Inter-bot delivery database unavailable")
+        if connection is not None and connection.engine is not self.engine:
+            raise ValueError("delivery enqueue requires the shared admission engine")
         sender = sender_bot_id.strip().lower() or "unknown"
         resolved_author = author or AuthorReference.bot(sender)
         if resolved_author.entity_type not in {"user", "bot"} or not resolved_author.entity_id:
@@ -325,8 +330,9 @@ class InterBotDeliveryStore:
             message_id = str(uuid.UUID(user_message_id))
         payload = dict(payload)
         payload["user_message_id"] = message_id
-        payload["assistant_message_id"] = str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"inter-bot-assistant:{message_id}")
+        payload["assistant_message_id"] = (
+            str(uuid.UUID(assistant_message_id)) if assistant_message_id else
+            str(uuid.uuid5(uuid.NAMESPACE_URL, f"inter-bot-assistant:{message_id}"))
         )
         payload["inter_bot_delivery_id"] = delivery_id
         payload["inter_bot_turn_id"] = turn_id
@@ -352,8 +358,9 @@ class InterBotDeliveryStore:
             "session_policy": policy.value,
             "reset_reason": (reset_reason or "").strip() or None,
         }
-        with self.engine.begin() as conn:
-            # Enqueue must not take the target lock: scheduler callers hold job locks.
+        with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
+            # Ordinary admission already holds the target lock; scheduler callers
+            # retain the separate, lock-free enqueue transaction.
             # Arrival is a snapshot; claim rechecks the barrier under the target lock.
             if idem:
                 # Serialize same-key submissions so callers always receive one stable row.
@@ -568,15 +575,28 @@ class InterBotDeliveryStore:
             delivery_user_id = str(
                 payload.get("user") or getattr(self.config, "DEFAULT_USER", "nick")
             )
-            active = conn.execute(sa_text("""
-                SELECT id, agent_session_key, agent_request_id, user_id
-                FROM turn_logs
-                WHERE bot_id=:target AND ended_at IS NULL AND id != :turn_id
-                ORDER BY created_at DESC LIMIT 1
-            """), {"target": target, "turn_id": head["turn_id"]}).mappings().first()
-            if active and str(active.get("user_id") or "") != delivery_user_id:
+            from .service.turn_admission import classify_target, write_reservation
+            # Same classified view save_turn admits against (TASK-1082). Only an
+            # unambiguous executing row is a steer target; a fenced reservation
+            # or several open rows fail closed (wait), never "newest row wins".
+            state = classify_target(conn, target, exclude_turn_id=head["turn_id"])
+            busy = not state.idle
+            active = state.executing
+            if active is None and state.kind == "reserved" and len(state.rows) == 1:
+                # TASK-1067: a fallback reservation whose own delivery the target
+                # already accepted is a committed start, not an idle fence. Later
+                # deliveries steer into it (the bridge answers "not ready" until
+                # the run registers) instead of queueing behind it.
+                committed = conn.execute(sa_text("""
+                    SELECT 1 FROM inter_bot_deliveries
+                    WHERE turn_id=:turn_id AND status='DISPATCHING'
+                      AND transport_accepted_at IS NOT NULL
+                """), {"turn_id": state.rows[0]["id"]}).first()
+                if committed:
+                    active = state.rows[0]
+            if any(str(row.get("user_id") or "") != delivery_user_id for row in state.rows):
                 return None
-            if active and policy != SessionPolicy.CONTINUE:
+            if busy and policy != SessionPolicy.CONTINUE:
                 # Reset is an ordered precondition, never an interrupt. Wait until
                 # the authoritative active turn ends; do not steer or rotate under it.
                 return None
@@ -601,7 +621,10 @@ class InterBotDeliveryStore:
                 delivery_mode = "steer"
             elif MaintenanceBarrier(conn, target).prepare(head) is not None:
                 return None
-            elif active:
+            elif busy:
+                if active is None:
+                    # Reserved by another producer, or ambiguous open rows.
+                    return None
                 if rejected_same_turn:
                     # This exact active row definitively rejected the deterministic
                     # steer RPC. Wait for it to end rather than hot-looping or
@@ -626,27 +649,15 @@ class InterBotDeliveryStore:
                     target_bot_id=target,
                     user_id=user_id,
                 )
-                conn.execute(sa_text("""
-                    INSERT INTO turn_logs (
-                        id, created_at, path, stream, bot_id, user_id, status,
-                        user_prompt, request_json, response_text,
-                        trigger_message_id, ended_at
-                    ) VALUES (
-                        :turn_id, now(), '/v1/chat/completions', false, :target,
-                        :user_id, 'reserved', :message, CAST(:request_json AS jsonb)::text,
-                        '', :message_id, NULL
-                    )
-                    ON CONFLICT (id) DO UPDATE SET
-                        status='reserved', ended_at=NULL, error_text=NULL,
-                        request_json=EXCLUDED.request_json, user_prompt=EXCLUDED.user_prompt
-                """), {
-                    "turn_id": head["turn_id"],
-                    "target": target,
-                    "user_id": user_id,
-                    "message": head["message"],
-                    "request_json": json.dumps(payload, ensure_ascii=False, default=str),
-                    "message_id": head["user_message_id"],
-                })
+                write_reservation(
+                    conn,
+                    turn_id=head["turn_id"],
+                    bot_id=target,
+                    user_id=user_id,
+                    user_prompt=head["message"],
+                    request_json=payload,
+                    trigger_message_id=head["user_message_id"],
+                )
             row = conn.execute(sa_text("""
                 UPDATE inter_bot_deliveries SET
                     status=:status, attempt_count=attempt_count+1,
@@ -912,25 +923,16 @@ class InterBotDeliveryStore:
         user_message_id: str,
         bridge_request_id: str,
     ) -> bool:
-        if self.engine is None or not claim_token:
+        if self.engine is None:
             return False
+        from .inter_bot_claim_validation import validate_delivery_claim
+
         with self.engine.connect() as conn:
-            row = conn.execute(sa_text("""
-                SELECT payload_json FROM inter_bot_deliveries
-                WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
-                  AND target_bot_id=:target AND turn_id=:turn_id
-                  AND user_message_id=:message_id
-            """), {
-                "id": delivery_id,
-                "claim_token": claim_token,
-                "target": target_bot_id,
-                "turn_id": turn_id,
-                "message_id": user_message_id,
-            }).scalar_one_or_none()
-        return bool(
-            isinstance(row, dict)
-            and row.get("inter_bot_bridge_request_id") == bridge_request_id
-        )
+            return validate_delivery_claim(
+                conn, delivery_id=delivery_id, claim_token=claim_token,
+                target_bot_id=target_bot_id, turn_id=turn_id,
+                user_message_id=user_message_id, bridge_request_id=bridge_request_id,
+            )
 
     def _transition(self, delivery_id: str, assignments: str, params: dict[str, Any], *, only: str | None) -> DeliveryRecord | None:
         if self.engine is None:

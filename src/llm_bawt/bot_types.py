@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+# Harnesses with a durable bridge session: they support queued/steered
+# delivery, so ordinary starts must go through the shared delivery outbox.
+DURABLE_AGENT_HARNESSES = frozenset({"claude-code", "codex", "openclaw"})
+
+
+def durable_agent_backend(bot: Any) -> str | None:
+    """The bot's durable harness slug, or None when it cannot queue/steer."""
+    for value in (getattr(bot, "agent_backend", None), getattr(bot, "harness", None)):
+        slug = str(value or "").strip().lower()
+        if slug in DURABLE_AGENT_HARNESSES:
+            return slug
+    return None
+
 
 def agent_backend_for_model_def(model_def: dict[str, Any] | None) -> str | None:
     """Map a model-catalog definition to the agent backend it belongs to.
@@ -27,7 +40,7 @@ def agent_backend_for_model_def(model_def: dict[str, Any] | None) -> str | None:
     harness = str(model_def.get("harness") or "").strip().lower()
     if harness == "claude-proxy":
         return "claude-code"
-    if harness in {"claude-code", "codex", "openclaw"}:
+    if harness in DURABLE_AGENT_HARNESSES:
         return harness
     model_type = str(model_def.get("type") or "").strip().lower()
     if model_type == "claude-code":

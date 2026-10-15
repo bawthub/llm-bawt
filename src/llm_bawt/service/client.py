@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .delivery_reply import is_accepted_receipt
 from .tasks import Task, TaskResult, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -331,6 +332,9 @@ class ServiceClient:
                             break
                         try:
                             chunk = json.loads(data)
+                            if is_accepted_receipt(chunk):
+                                yield chunk
+                                continue
                             # Service warning event (e.g. model fallback)
                             if chunk.get("object") == "service.warning":
                                 yield {"warnings": chunk.get("warnings", []), "model": chunk.get("model")}
@@ -376,6 +380,49 @@ class ServiceClient:
             logger.warning(f"Service streaming failed: {e}")
             return
     
+    def wait_for_queued_reply(
+        self, receipt: dict[str, Any], *, bot_id: str | None,
+        user_id: str | None, timeout_seconds: float = 120,
+    ) -> dict[str, Any] | None:
+        """Wait for one accepted delivery's exact reply, never resubmit its prompt."""
+        from urllib.parse import quote
+
+        delivery_id = receipt.get("delivery_id")
+        message_id = receipt.get("user_message_id")
+        if not isinstance(delivery_id, str) or not delivery_id or not isinstance(message_id, str) or not message_id:
+            raise ValueError("queued receipt lacks delivery or user-message identity")
+        base = f"/v1/inter-bot-deliveries/{quote(delivery_id, safe='')}"
+        resolved_bot = receipt.get("bot_id") or bot_id
+        resolved_user = receipt.get("user_id") or user_id
+        if bot_id and resolved_bot != bot_id or user_id and resolved_user != user_id:
+            raise ValueError("queued receipt changed the requested bot/user")
+        if not resolved_bot or not resolved_user:
+            delivery = self._request("GET", base)
+            author = delivery.get("author") or {}
+            if (delivery.get("delivery_id") != delivery_id
+                    or delivery.get("user_message_id") != message_id
+                    or author.get("entity_type") != "user"):
+                raise ValueError("queued delivery lookup changed identity")
+            if resolved_bot and resolved_bot != delivery.get("target_bot_id") or resolved_user and resolved_user != author.get("entity_id"):
+                raise ValueError("queued delivery lookup changed scope")
+            resolved_bot = delivery.get("target_bot_id")
+            resolved_user = author.get("entity_id")
+        if not isinstance(resolved_bot, str) or not resolved_bot or not isinstance(resolved_user, str) or not resolved_user:
+            raise ValueError("queued delivery lacks resolved bot/user identity")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            reply = self._request("GET", f"{base}/reply", params={
+                "bot_id": resolved_bot, "user_id": resolved_user,
+                "user_message_id": message_id,
+            })
+            if reply.get("delivery_id") != delivery_id:
+                raise ValueError("queued reply changed delivery identity")
+            if reply.get("status") in {"DELIVERED", "FAILED", "CANCELLED", "UNRESOLVED"}:
+                return reply
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+
     def chat_completion_full(
         self,
         messages: list[dict],

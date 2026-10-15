@@ -11,27 +11,40 @@ import json
 import threading
 import time
 import uuid
-from typing import Any, AsyncIterator
-
-from ..approval_policies import ApprovalPersistError
+from typing import AsyncIterator
 from ..bots import (
     StreamingEmoteFilter,
     StreamingTTSScrubber,
     should_scrub_for_tts,
 )
-from ..media.serializers import build_agent_image_manifest
-from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
 from .chat_streaming_bridge import ChatStreamingBridgeMixin
-from .inter_bot_claims import validate_inter_bot_claim
+from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
 from .stream_request_attachments import prepare_stream_request_attachments
+from .ordinary_turn_queue import admit_ordinary_agent_turn
 from .tool_event_coordinator import ToolEventCoordinator
+from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, turn_start_extensions
 from .turn_stream_context import TurnStreamContext
 from .turn_stream_finalize import turn_failure_suffix
 from .turn_stream_worker import TurnStreamWorker
 
 log = get_service_logger(__name__)
+
+
+def stream_stop_events(response_id: str, created: int, model: str) -> list[str]:
+    """OpenAI stream trailer: an empty stop chunk followed by [DONE]."""
+    stop = {
+        "id": response_id, "object": "chat.completion.chunk", "created": created, "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    return [f"data: {json.dumps(stop)}\n\n", "data: [DONE]\n\n"]
+
+
+def request_failed_events(response_id: str, created: int, model: str, error: Exception) -> list[str]:
+    """In-band failure for a stream whose 200 headers were already sent."""
+    warning = {"object": "service.warning", "model": model, "warnings": [f"request_failed: {error}"]}
+    return [f"data: {json.dumps(warning)}\n\n", *stream_stop_events(response_id, created, model)]
 
 # TASK-622: the streaming coalescing (_TEXT_DELTA_FLUSH_CHARS) and approval-
 # persist retry knobs (_APPROVAL_PERSIST_*) now live in turn_stream_context.py
@@ -117,21 +130,8 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             llm_bawt = prompt_instance or self._get_llm_bawt(model_alias, bot_id, user_id, local_mode)
         except Exception as e:
             log.api_error(ctx, str(e), 500)
-            warning_data = {
-                "object": "service.warning",
-                "model": model_alias,
-                "warnings": [f"request_failed: {e}"],
-            }
-            yield f"data: {json.dumps(warning_data)}\n\n"
-            data = {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_alias,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-            yield f"data: {json.dumps(data)}\n\n"
-            yield "data: [DONE]\n\n"
+            for event in request_failed_events(response_id, created, model_alias, e):
+                yield event
             return
 
         user_prompt, user_attachments, attachments_to_persist, media_store = (
@@ -255,17 +255,10 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                 yield "data: [DONE]\n\n"
                 return
 
-        if is_agent_backend:
-            # TASK-284 step 15: an agent /new also rotates the durable DB
-            # thread (non-destructive). Rotation is deferred until AFTER the
-            # session seed is assembled below — the seed must read the
-            # OUTGOING thread's raw messages (session-scoped load), not the
-            # fresh empty one. The bridge still owns the provider-side
-            # reset+seed — the message passes through unchanged.
-            cancel_event = threading.Event()
-            done_event = threading.Event()
-        else:
-            cancel_event, done_event = await self._start_generation(bot_id)
+        # Admission must succeed before _start_generation cancels the prior
+        # chat generation. Agent turns use independent execution handles.
+        cancel_event = threading.Event()
+        done_event = threading.Event()
         _reserved_turn_id = getattr(request, "inter_bot_turn_id", None)
         turn_log_id = (
             _reserved_turn_id.strip()
@@ -310,60 +303,9 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             thread_binding = self._bind_agent_thread(llm_bawt, request)
             if prompt_record and (not thread_binding or not thread_binding.get("explicit_thread")):
                 raise ValueError("Scheduled prompt could not bind its isolated thread")
-            if thread_binding is None:
-                thread_binding = self._resolve_active_thread_binding(llm_bawt)
-
-            # Summarize the OUTGOING thread on /new BEFORE the seed builds
-            # so the seed's summary bucket includes a fresh summary of the
-            # ending conversation (TASK-641).
-            self._maybe_summarize_on_new(
-                llm_bawt, bot_id, user_prompt, thread_binding=thread_binding
-            )
-            from .routes.history import maybe_build_session_seed
-            from .dependencies import get_service
-            if prompt_record:
-                from .prompt_execution import build_prompt_seed
-                inject_seed_messages = build_prompt_seed(self, llm_bawt, thread_binding)
-            else:
-                inject_seed_messages = maybe_build_session_seed(
-                    llm_bawt, bot_id, model_alias, user_prompt, get_service(),
-                    thread_binding=thread_binding,
-                )
-            # Rotate the durable DB thread on /new — AFTER the seed is built
-            # so the seed captured the outgoing thread's raw messages.
-            self._maybe_rotate_agent_session(
-                llm_bawt, bot_id, user_prompt, thread_binding=thread_binding
-            )
-
-            # A successful unscoped /new rotation invalidates the outgoing
-            # binding. Resolve the fresh active thread (no SDK key yet) so the
-            # bridge cold-starts and writes its minted key there.
-            if (
-                thread_binding
-                and not thread_binding.get("explicit_thread")
-                and (user_prompt or "").lstrip().startswith("/new")
-            ):
-                thread_binding = self._resolve_active_thread_binding(llm_bawt)
-
-        task_turn_capability: str | None = None
-        # Always bound: turn_start below publishes it for every backend, and
-        # non-agent turns must send null rather than blow up on an unbound name.
-        session_id: str = ""
-        if is_agent_backend:
-            session_id = (
-                str(thread_binding.get("thread_session_id") or "").strip()
-                if thread_binding else ""
-            )
-            from ..task_turn_context import mint_for_agent_turn
-
-            task_turn_capability = mint_for_agent_turn(
-                backend=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
-                session_id=session_id,
-                turn_id=turn_log_id,
-                trigger_message_id=trigger_message_id,
-                bot_id=bot_id,
-                user_id=user_id,
-            )
+            # Explicit selection is a read-only validation. Resolving an
+            # unscoped active thread can CREATE one, so defer it and every /new
+            # effect until the turn has passed admission below.
 
         # Persist turn log immediately so the user's prompt is recorded
         # even if the backend times out or errors before responding.
@@ -372,50 +314,103 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
         # cross-tab resolution via turn_start{parent_turn_id}).
         parent_turn_id = getattr(request, "parent_turn_id", None)
         answered_question_id = getattr(request, "answered_question_id", None)
+        admission_claim = turn_admission_claim(self, request)
+        try:
+            decision = admit_ordinary_agent_turn(
+                self, llm_bawt.bot, request, is_agent_backend=is_agent_backend,
+                admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
+                user_prompt=user_prompt, trigger_message_id=trigger_message_id,
+            )
+        except (ValueError, AdmissionUnavailable, AdmissionFenceLost) as exc:
+            # Headers are already sent; report the refusal in-band, never a
+            # silently truncated stream.
+            log.api_error(ctx, f"admission refused: {exc}", 409)
+            for event in request_failed_events(response_id, created, model_alias, exc):
+                yield event
+            return
+        if decision is not None:
+            yield f"data: {json.dumps(decision.receipt())}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         self._persist_turn_log(
-            turn_id=turn_log_id,
-            request_id=ctx.request_id,
-            path=ctx.path,
-            stream=True,
-            model=model_alias,
-            bot_id=bot_id,
-            user_id=user_id,
-            status="streaming",
-            latency_ms=None,
-            user_prompt=user_prompt,
-            prepared_messages=[],
-            response_text="",
-            agent_session_key=oc_session_key,
-            trigger_message_id=trigger_message_id,
-            assistant_message_id=assistant_message_id,
-            parent_turn_id=parent_turn_id,
-            request_extensions={
-                key: value
-                for key, value in {
-                    "inter_bot_delivery_id": getattr(
-                        request, "inter_bot_delivery_id", None
-                    ),
-                    "inter_bot_turn_id": getattr(request, "inter_bot_turn_id", None),
-                    "inter_bot_bridge_request_id": getattr(
-                        request, "inter_bot_bridge_request_id", None
-                    ),
-                    "inter_bot_timeout_seconds": getattr(
-                        request, "inter_bot_timeout_seconds", None
-                    ),
-                    "inter_bot_session_policy": getattr(
-                        request, "inter_bot_session_policy", None
-                    ),
-                    "inter_bot_seed_session_id": getattr(
-                        request, "inter_bot_seed_session_id", None
-                    ),
-                    "continuation_payload": (
-                        request.continuation_payload.model_dump()
-                        if getattr(request, "continuation_payload", None) else None
-                    ),
-                }.items()
-                if value
-            },
+            turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
+            stream=True, model=model_alias, bot_id=bot_id, user_id=user_id,
+            status="streaming", latency_ms=None, user_prompt=user_prompt,
+            prepared_messages=[], response_text="", agent_session_key=oc_session_key,
+            trigger_message_id=trigger_message_id, assistant_message_id=assistant_message_id,
+            parent_turn_id=parent_turn_id, admission_claim=admission_claim,
+            request_extensions=turn_start_extensions(
+                request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
+            ),
         )
+        if not is_agent_backend:
+            cancel_event, done_event = await self._start_generation(bot_id)
+
+        task_turn_capability: str | None = None
+        session_id: str = ""
+        if is_agent_backend:
+            try:
+                if thread_binding is None:
+                    thread_binding = self._resolve_active_thread_binding(llm_bawt)
+                from .agent_new_rotation import prepare_delivery_new_binding
+                thread_binding, delivery_new_id = prepare_delivery_new_binding(
+                    self, llm_bawt, request, bot_id=bot_id, user_id=user_id,
+                    user_prompt=user_prompt, thread_binding=thread_binding,
+                    backend_name=backend_name,
+                )
+                # The outgoing thread is summarized before building its seed;
+                # rotation then changes the durable thread only for /new.
+                self._maybe_summarize_on_new(
+                    llm_bawt, bot_id, user_prompt, thread_binding=thread_binding
+                )
+                from .routes.history import maybe_build_session_seed
+                from .dependencies import get_service
+                if prompt_record:
+                    from .prompt_execution import build_prompt_seed
+                    inject_seed_messages = build_prompt_seed(self, llm_bawt, thread_binding)
+                else:
+                    inject_seed_messages = maybe_build_session_seed(
+                        llm_bawt, bot_id, model_alias, user_prompt, get_service(),
+                        thread_binding=thread_binding,
+                    )
+                rotated_id = None
+                if not getattr(request, "inter_bot_session_policy", None):
+                    rotated_id = self._maybe_rotate_agent_session(
+                        llm_bawt, bot_id, user_prompt, thread_binding=thread_binding,
+                        **({"delivery_id": delivery_new_id} if delivery_new_id else {}),
+                    )
+                if (
+                    thread_binding
+                    and not thread_binding.get("explicit_thread")
+                    and (user_prompt or "").lstrip().startswith("/new")
+                ):
+                    # An archived successor remains this delivery's target even
+                    # if the user navigated away before an outbox retry.
+                    from .agent_new_rotation import bind_new_successor
+                    thread_binding = bind_new_successor(
+                        self, llm_bawt, rotated_id=rotated_id,
+                        delivery_id=delivery_new_id, backend_name=backend_name,
+                    )
+                session_id = (
+                    str(thread_binding.get("thread_session_id") or "").strip()
+                    if thread_binding else ""
+                )
+                from ..task_turn_context import mint_for_agent_turn
+
+                task_turn_capability = mint_for_agent_turn(
+                    backend=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
+                    session_id=session_id,
+                    turn_id=turn_log_id,
+                    trigger_message_id=trigger_message_id,
+                    bot_id=bot_id,
+                    user_id=user_id,
+                )
+            except Exception as exc:
+                self._update_turn_log(
+                    turn_id=turn_log_id, status="error",
+                    error_text=f"Agent turn setup failed: {exc}",
+                )
+                raise
         # Record which continuation turn carried the answer back to the agent.
         if answered_question_id:
             try:

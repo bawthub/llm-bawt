@@ -33,8 +33,9 @@ class TurnExecution:
     def bind_bridge(self, *, backend: str, session_key: str, request_id: str) -> None:
         # Persist the actual request-local identity before command publication,
         # never from the bot's shared _active_request_id or first model output.
-        self.store.update_turn(turn_id=self.turn_id, agent_request_id=request_id,
-                               agent_session_key=session_key)
+        self.store.bind_agent_bridge(
+            turn_id=self.turn_id, request_id=request_id, session_key=session_key,
+        )
         with self._lock:
             self.backend, self.session_key, self.request_id = backend, session_key, request_id
         self.check_cancelled()

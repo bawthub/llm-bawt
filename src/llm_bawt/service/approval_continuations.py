@@ -18,6 +18,8 @@ from typing import Any
 
 from .dependencies import get_service
 from .approval_continuation_session import approval_delivery_session, approval_origin_session
+from .inter_bot_claims import turn_admission_claim
+from .turn_admission import RESERVED, TargetBusy, turn_request_extensions
 
 
 MCP_RESULT_ENVELOPE_PREFIX = "[LLM_BAWT_MCP_TOOL_RESULT]"
@@ -125,9 +127,9 @@ def _continuation_identity(row):
             "assistant_message_id": message_id("assistant")}
 
 
-def validate_approval_continuation_claim(service, request, claim):
+def validate_approval_continuation_claim(service, request, claim, *, store=None):
     """Reuse existing deterministic transport fields, gated by a Python-only claim."""
-    store = service._tool_approval_policy_store
+    store = store if store is not None else service._tool_approval_policy_store
     row = store.get_request(claim[0])
     if (row is None or row.continuation_state != CONT_DISPATCHING
             or row.continuation_claim_token != claim[1]
@@ -141,7 +143,7 @@ def validate_approval_continuation_claim(service, request, claim):
         raise ValueError("Invalid or stale approval continuation claim")
 
 
-async def _send_harness_grant(service, store, row):
+async def _send_harness_grant(service, store, row, *, claim_token):
     if row.status != REQ_APPROVED or row.grant_state == "sent":
         return
     from .routes.approval_policies import _subscriber
@@ -149,7 +151,7 @@ async def _send_harness_grant(service, store, row):
     if subscriber is None:
         store.set_grant_state(row.id, "failed", "Approval bridge unavailable")
         raise RuntimeError("Approval bridge unavailable; grant not sent")
-    if not store.claim_client_grant(row.id):
+    if not store.claim_client_grant(row.id, continuation_claim_token=claim_token):
         raise RuntimeError("Approval grant dispatch uncertain; manual reconciliation required")
     try:
         await subscriber.send_approval_grant(
@@ -160,6 +162,41 @@ async def _send_harness_grant(service, store, row):
         raise
     store.set_grant_state(row.id, "sent")
     await asyncio.sleep(0.75)
+
+
+class ContinuationLeaseLost(RuntimeError):
+    """The outbox claim was lost mid-dispatch; another worker may own it."""
+
+
+# Waiting behind a running turn is normal; the poll interval backs off with
+# the wait so a long turn (or an unresolved zombie row) never hot-loops.
+ADMISSION_WAIT_WARN_S = 60.0
+
+
+def _admission_wait_delay(row) -> float:
+    since = getattr(row, "execution_finished_at", None) or getattr(row, "resolved_at", None)
+    waited = (_utcnow() - _as_aware_utc(since)).total_seconds() if since else 0.0
+    if waited < 300:
+        return 2.0
+    if waited < 3600:
+        return 10.0
+    return ADMISSION_WAIT_WARN_S
+
+
+def _release_unstarted(turn_store, turn_id: str, claim) -> None:
+    """Drop this claim's reservation if its turn never started.
+
+    Fenced in the DB transaction by the reservation's owner token AND by the
+    live outbox claim: a superseded worker cannot delete the reclaimer's
+    re-armed reservation of the same deterministic id.
+    """
+    release = getattr(turn_store, "release_reservation", None)
+    if release is None:
+        return
+    try:
+        release(turn_id, owner=claim.owner, fence=claim.fence)
+    except Exception:
+        log.exception("Could not release approval continuation reservation %s", turn_id)
 
 
 async def dispatch_mcp_result_continuation(
@@ -190,19 +227,24 @@ async def dispatch_mcp_result_continuation(
         while True:
             await asyncio.sleep(20)
             if not await asyncio.to_thread(store.renew_continuation_claim, row.id, token):
-                raise RuntimeError("Approval continuation lease lost")
+                raise ContinuationLeaseLost("Approval continuation lease lost")
+
+    turn_store = getattr(service, "_turn_log_store", None)
+    # One trusted claim fences reservation, consumption (save_turn) and release.
+    admission_claim = turn_admission_claim(service, request, store=store)
 
     async def drive():
         # A committed successful deterministic turn needs only its outbox ack.
-        turn_store = getattr(service, "_turn_log_store", None)
         prior = turn_store.get_turn(identity["inter_bot_turn_id"]) if turn_store is not None else None
         if prior is not None and prior.ended_at is not None:
             if prior.status in ("ok", "completed") and not prior.error_text:
                 return
             raise RuntimeError("Previous continuation turn failed; manual reconciliation required")
+        # A bare reservation wrote no messages; only a started turn pins identity.
+        started = prior is not None and prior.status != RESERVED
         target_session = await asyncio.to_thread(approval_delivery_session, service, row)
         if target_session != request.session_id:
-            if prior is not None:
+            if started:
                 # The deterministic turn has already written messages. Do not
                 # reuse their IDs in a different session or replay uncertain work.
                 raise RuntimeError("Cannot redirect an already-started approval continuation after reset")
@@ -212,8 +254,37 @@ async def dispatch_mcp_result_continuation(
                 "Continue in this fresh session using its message history; do not restore "
                 "the previous SDK context or re-execute the completed operation."
             )
+        # Fail fast on a superseded claim before ANY side effect; the DB fences
+        # on reserve/grant/release close the remaining check-then-act window.
+        await asyncio.to_thread(
+            validate_approval_continuation_claim, service, request,
+            request._internal_approval_claim, store=store,
+        )
+        if not started:
+            # TASK-1082: claim the idle target through the shared admission
+            # authority BEFORE any external side effect (the one-shot harness
+            # grant). Busy -> TargetBusy -> deferred, and no grant is sent.
+            # While reserved, ordinary starts and other producers lose.
+            # Fail closed: no admission authority means no unfenced dispatch.
+            reserve = getattr(turn_store, "reserve_idle_turn", None)
+            if reserve is None or not await asyncio.to_thread(
+                reserve,
+                turn_id=identity["inter_bot_turn_id"],
+                bot_id=row.bot_id,
+                user_id=row.user_id,
+                user_prompt=request.messages[0].content,
+                request_json={
+                    "messages": [{"role": "user", "content": request.messages[0].content}],
+                    "session_id": request.session_id,
+                    **turn_request_extensions(request),
+                },
+                trigger_message_id=identity["user_message_id"],
+                owner=admission_claim.owner,
+                fence=admission_claim.fence,
+            ):
+                raise RuntimeError("Turn admission unavailable; refusing unfenced continuation")
         if row.request_kind != KIND_MCP:
-            await _send_harness_grant(service, store, row)
+            await _send_harness_grant(service, store, row, claim_token=token)
         async for chunk in service.chat_completion_stream(request):
             # Some adapters yield an error envelope rather than raising.
             if isinstance(chunk, str):
@@ -242,7 +313,21 @@ async def dispatch_mcp_result_continuation(
         store.mark_continuation_delivered(row.id, claim_token=token)
     except asyncio.CancelledError:
         raise
+    except TargetBusy as busy:
+        # Not an attempt: the target is executing (or reserved/ambiguous).
+        # Nothing was started; save_turn already dropped its own reservation.
+        _release_unstarted(turn_store, identity["inter_bot_turn_id"], admission_claim)
+        delay = _admission_wait_delay(row)
+        if delay >= ADMISSION_WAIT_WARN_S:
+            log.warning("Approval continuation id=%s still waiting for idle target: %s", row.id, busy)
+        store.defer_continuation_claim(
+            row.id, claim_token=token, reason=f"waiting for idle target: {busy}",
+            delay_seconds=delay,
+        )
     except Exception as error:
+        if not isinstance(error, ContinuationLeaseLost):
+            # The heartbeat already proved this worker lost authority.
+            _release_unstarted(turn_store, identity["inter_bot_turn_id"], admission_claim)
         store.mark_continuation_failed(row.id, error=str(error), claim_token=token)
         raise
     finally:

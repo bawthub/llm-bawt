@@ -230,8 +230,16 @@ class TurnLifecycleMixin:
         assistant_message_id: str | None = None,
         parent_turn_id: str | None = None,
         request_extensions: dict | None = None,
+        admission_claim=None,
+        connection=None,
     ) -> None:
-        """Persist one turn record to short-lived DB storage."""
+        """Persist one turn record to short-lived DB storage.
+
+        This start-row write is the turn's mandatory admission, not optional
+        telemetry: every failure propagates and the caller must not proceed.
+        ``TargetBusy`` / ``AdmissionFenceLost`` / ``AdmissionUnavailable`` pass
+        through typed; any other store failure becomes ``AdmissionUnavailable``.
+        """
         try:
             request_payload = {
                 "messages": [_message_to_dict(msg) for msg in prepared_messages],
@@ -258,12 +266,15 @@ class TurnLifecycleMixin:
                 trigger_message_id=trigger_message_id,
                 assistant_message_id=assistant_message_id,
                 parent_turn_id=parent_turn_id,
+                admission_claim=admission_claim,
+                connection=connection,
             )
         except Exception as e:
-            from .turn_logs import DeliveryTargetBusy
-            if isinstance(e, DeliveryTargetBusy):
+            from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, TargetBusy
+            if isinstance(e, (TargetBusy, AdmissionFenceLost, AdmissionUnavailable)):
                 raise
-            log.debug("Failed to persist turn log: %s", e)
+            log.warning("Turn admission failed for %s: %s", turn_id, e)
+            raise AdmissionUnavailable(f"turn admission failed: {e}") from e
 
     def _update_turn_log(
         self,

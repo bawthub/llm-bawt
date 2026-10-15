@@ -15,6 +15,7 @@ from .approval_orchestration_store import OrchestrationApprovalStoreMixin
 from .approval_models import (
     ApprovalPersistError,
     ApprovalStoreUnavailable,
+    CONT_DISPATCHING,
     CONT_NOT_NEEDED,
     CONT_PENDING,
     KIND_HARNESS,
@@ -243,16 +244,28 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
             )
             session.commit()
 
-    def claim_client_grant(self, request_id):
-        """One publisher; an interrupted send is uncertain, never silently re-granted."""
+    def claim_client_grant(self, request_id, *, continuation_claim_token=None):
+        """One publisher; an interrupted send is uncertain, never silently re-granted.
+
+        Server-owned continuations pass their outbox claim token: the grant is
+        then claimed only while that exact claim still holds DISPATCHING, in
+        the same UPDATE, so a superseded worker can never publish a grant.
+        """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
+        fence = []
+        if continuation_claim_token is not None:
+            fence = [
+                ToolApprovalRequest.continuation_state == CONT_DISPATCHING,
+                ToolApprovalRequest.continuation_claim_token == continuation_claim_token,
+            ]
         with Session(self.engine) as session:
             result = session.exec(
                 update(ToolApprovalRequest)
                 .where(
                     ToolApprovalRequest.id == request_id,
                     ToolApprovalRequest.grant_state.in_(["pending", "failed"]),
+                    *fence,
                 )
                 .values(grant_state="dispatching", grant_error=None)
             )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -92,7 +93,55 @@ def test_stop_before_dispatch_prevents_command(store, monkeypatch):
     from llm_bawt.service.turn_execution import TurnExecutionCancelled
     with pytest.raises(TurnExecutionCancelled):
         list(backend.stream_raw("hello", {"session_key": "test:nick", "request_id": "req-A", "turn_execution": owner}))
-    assert store.get_turn("A").agent_request_id == "req-A"
+    assert store.get_turn("A").agent_request_id is None
+
+
+@pytest.mark.parametrize("terminal", ["error", "timeout", "aborted"])
+def test_terminal_turn_cannot_publish_bridge_command(store, monkeypatch, terminal):
+    from llm_bawt.service.turn_execution import TurnExecutionCancelled
+
+    owner = execution(store)
+    store.update_turn(turn_id="A", status=terminal, end_reason=terminal)
+    subscriber = Mock()
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
+    with pytest.raises(TurnExecutionCancelled, match="no longer permits"):
+        list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
+            "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+        }))
+    assert store.get_turn("A").agent_request_id is None
+    subscriber.send_command.assert_not_called()
+
+
+def test_unconsumed_reservation_cannot_bind_bridge_command(store):
+    from llm_bawt.service.turn_execution import TurnExecutionCancelled
+
+    with Session(store.engine) as session:
+        row = session.get(TurnLog, "A")
+        row.status = "reserved"
+        session.add(row)
+        session.commit()
+    owner = execution(store)
+    with pytest.raises(TurnExecutionCancelled, match="no longer permits"):
+        owner.bind_bridge(backend="claude-code", session_key="test:nick", request_id="req-A")
+    assert store.get_turn("A").agent_request_id is None
+
+
+def test_cross_process_stop_cannot_publish_bridge_command(store, monkeypatch):
+    from llm_bawt.service.turn_execution import TurnExecutionCancelled
+
+    owner = execution(store)
+    TurnAbortCoordinator(store).request("A", source="chat_stop", peer=None)
+    # Simulate a Stop issued from another process: it wrote the DB intent but
+    # did not have the in-process execution handle to signal its event.
+    assert not owner.cancel_event.is_set()
+    subscriber = Mock()
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
+    with pytest.raises(TurnExecutionCancelled, match="no longer permits"):
+        list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
+            "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+        }))
+    assert store.get_turn("A").agent_request_id is None
+    subscriber.send_command.assert_not_called()
 
 
 def test_pre_output_abort_and_overlapping_streams_keep_own_identity(store, monkeypatch):
@@ -323,6 +372,30 @@ def test_reaper_settles_unknown_tools(store):
     with Session(store.engine) as session:
         row = session.get(ToolCallRecord, 1)
         assert row.ended_at is not None and row.result_text is None and row.result_complete is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["pre-publication", "possibly-published"])
+@pytest.mark.parametrize("stopping", [False, True], ids=["running", "stopping"])
+def test_reaper_cannot_clear_ambiguous_ordinary_admission(store, monkeypatch, bound, stopping):
+    from llm_bawt.service import turn_termination
+
+    with Session(store.engine) as session:
+        row = session.get(TurnLog, "A")
+        row.request_json = json.dumps({"ordinary_request_digest": "exact-request"})
+        if bound:
+            row.agent_request_id = "req-A"
+        session.add(row)
+        session.commit()
+    if stopping:
+        TurnAbortCoordinator(store).request("A", source="chat_stop", peer=None)
+        monkeypatch.setattr(turn_termination, "UNCONFIRMED_ABORT_GRACE_SECONDS", -1.0)
+
+    assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == []
+    row = store.get_turn("A")
+    assert row.ended_at is None
+    assert row.status == ("cancelling" if stopping else "streaming")
+    with Session(store.engine) as session:
+        assert session.get(ToolCallRecord, 1).ended_at is None
 
 
 def test_terminal_approval_failure_keeps_diagnostic_enrichment(store):

@@ -76,7 +76,10 @@ tokens; measured combined working-tree catalog: 93 tools / 11,081 tokens,
 3,152 description tokens. This also includes the independently added initiative
 tool. Read/mutate boundaries and audible/asynchronous warnings remain intact.
 Increasing limits requires an explicit explanation with measurements; do not
-delete warnings to meet a budget.
+delete warnings to meet a budget. TASK-1082 adds the optional short `key` field
+to `sessions_rotate` for atomic queued `/new` retry identity: compact full-load
+catalog measured 11,626 tokens (+8 from 11,618); the test cap is now 11,626.
+The keyed rotation and its predecessor link commit in one session transaction.
 
 ## Provider loading caveat
 

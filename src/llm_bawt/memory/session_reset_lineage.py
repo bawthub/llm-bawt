@@ -3,14 +3,28 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from collections.abc import Callable
 from sqlalchemy import text
 
 
 class SessionResetLineage:
     @staticmethod
-    def rotate(engine, *, bot_id: str, user_id: str | None, new_id: str) -> None:
-        """Archive + successor link + fresh thread commit as one transaction."""
+    def delivery_successor_id(delivery_id: str) -> str:
+        """One deterministic id for rotation and claimed-delivery lookup."""
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"delivery-new:{delivery_id}"))
+
+    @staticmethod
+    def rotate(
+        engine, *, bot_id: str, user_id: str | None, new_id: str,
+        idempotency_key: str | None = None,
+    ) -> bool:
+        """Archive + successor link in one transaction; keyed retries reuse the successor.
+
+        The delivery key is stamped on the successor in the same transaction as
+        archiving the predecessor. A crash cannot leave a rotated thread without
+        its retry proof. An unkeyed /new retains its original unique-id behavior.
+        """
         reset_at = time.time()
         with engine.begin() as conn:
             postgres = conn.dialect.name == "postgresql"
@@ -18,6 +32,17 @@ class SessionResetLineage:
                 conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:bot), hashtext(:user))"),
                              {"bot": bot_id, "user": user_id or ""})
             params = {"bot": bot_id, "user": user_id}
+            if idempotency_key:
+                existing = conn.execute(text("""
+                    SELECT bot_id, user_id, status, session_metadata FROM sessions WHERE id=:id
+                """ + (" FOR UPDATE" if postgres else "")), {"id": new_id}).mappings().first()
+                if existing is not None:
+                    metadata = SessionResetLineage.metadata(existing["session_metadata"])
+                    if (existing["bot_id"] != bot_id or existing["user_id"] != user_id
+                            or existing["status"] == "deleted"
+                            or metadata.get("rotation_delivery_id") != idempotency_key):
+                        raise ValueError("Delivery rotation successor belongs to another owner")
+                    return False
             rows = conn.execute(text("""
                 SELECT id, session_metadata FROM sessions
                 WHERE bot_id=:bot AND status='active' AND ended_at IS NULL
@@ -37,10 +62,13 @@ class SessionResetLineage:
                         session_metadata={meta_expr} WHERE id=:id
                 """), {"id": row["id"], "meta": json.dumps(metadata)})
             metadata = {"reset_predecessor_ids": [row["id"] for row in rows]}
+            if idempotency_key:
+                metadata["rotation_delivery_id"] = idempotency_key
             conn.execute(text(f"""
                 INSERT INTO sessions (id, bot_id, user_id, started_at, status, session_metadata)
                 VALUES (:id, :bot, :user, CURRENT_TIMESTAMP, 'active', {meta_expr})
             """), {**params, "id": new_id, "meta": json.dumps(metadata)})
+            return True
 
     @staticmethod
     def metadata(value) -> dict:

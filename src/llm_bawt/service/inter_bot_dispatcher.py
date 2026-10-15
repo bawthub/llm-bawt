@@ -37,6 +37,8 @@ class InterBotDeliveryDispatcher:
     ):
         self.service = service
         self.store = InterBotDeliveryStore(service.config)
+        from .talk_reply_outbox import TalkReplyOutbox
+        self.talk_replies = TalkReplyOutbox(self.store.engine) if self.store.engine is not None else None
         self.recovery_interval_seconds = max(1.0, recovery_interval_seconds)
         self.leadership_retry_delay_seconds = max(0.0, leadership_retry_delay_seconds)
         self._wake_event = asyncio.Event()
@@ -46,6 +48,8 @@ class InterBotDeliveryDispatcher:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._target_tasks: dict[str, asyncio.Task] = {}
         self._dispatch_tasks: set[asyncio.Task] = set()
+        self._announce_tasks: set[asyncio.Task] = set()
+        self._talk_reply_task: asyncio.Task | None = None
         self.claim_owner = f"dispatcher-{uuid.uuid4().hex}"
         self._dispatcher_lock = None
         self._subscriber_gap_logged = False
@@ -96,8 +100,9 @@ class InterBotDeliveryDispatcher:
         self._stop_event.set()
         self._wake_event.set()
         tasks = [
-            task for task in (*self._target_tasks.values(), *self._dispatch_tasks)
-            if not task.done()
+            task for task in (*self._target_tasks.values(), *self._dispatch_tasks,
+                              getattr(self, "_talk_reply_task", None))
+            if task is not None and not task.done()
         ]
         for task in tasks:
             task.cancel()
@@ -118,6 +123,31 @@ class InterBotDeliveryDispatcher:
             loop.call_soon_threadsafe(self._wake_event.set)
         else:
             self._wake_event.set()
+
+    def announce_admitted(self, record: DeliveryRecord) -> None:
+        """Publish a just-admitted row's QUEUED lifecycle, then wake.
+
+        Sync-safe for admission code. Waking only after the publish keeps
+        QUEUED ahead of this process's DISPATCHING for the same row, so every
+        tab (not just the submitting one) shows the queued state and Cancel.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            self.wake(record.target_bot_id)
+            return
+
+        async def publish_then_wake() -> None:
+            try:
+                await self._emit(record)
+            finally:
+                self._wake_event.set()
+
+        def schedule() -> None:
+            task = loop.create_task(publish_then_wake(), name=f"inter-bot-announce:{record.id}")
+            self._announce_tasks.add(task)
+            task.add_done_callback(self._announce_tasks.discard)
+
+        loop.call_soon_threadsafe(schedule)
 
     async def run(self) -> None:
         # Belt-and-suspenders around the outer leadership guard: transient
@@ -143,6 +173,15 @@ class InterBotDeliveryDispatcher:
             try:
                 self.store.recover_expired()
                 self._schedule_eligible_targets()
+                talk_replies = getattr(self, "talk_replies", None)
+                running_reply = getattr(self, "_talk_reply_task", None)
+                if talk_replies is not None and (running_reply is None or running_reply.done()):
+                    reply_task = asyncio.create_task(
+                        talk_replies.drain(self.store, self.service._turn_log_store),
+                        name="talk-reply-drain",
+                    )
+                    reply_task.add_done_callback(self._talk_reply_done)
+                    self._talk_reply_task = reply_task
             except Exception:
                 consecutive_failures += 1
                 backoff = min(30.0, float(2 ** min(consecutive_failures - 1, 5)))
@@ -161,6 +200,11 @@ class InterBotDeliveryDispatcher:
         await asyncio.gather(
             *self._target_tasks.values(), *self._dispatch_tasks, return_exceptions=True
         )
+
+    @staticmethod
+    def _talk_reply_done(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception():
+            logger.error("Talk reply sweep failed", exc_info=task.exception())
 
     def _schedule_eligible_targets(self) -> None:
         subscriber = getattr(self.service, "_redis_subscriber", None)
@@ -556,6 +600,14 @@ class InterBotDeliveryDispatcher:
             event["user_id"] = record.author_entity_id
             event["bot_id"] = record.target_bot_id
             event["prompt_schedule"] = record.metadata["prompt_schedule"]
+        if record.metadata.get("ordinary_chat") and record.author_entity_type == "user":
+            # Ordinary queued sends belong to the selected user, not the
+            # service's default user or the inter-bot sender namespace.
+            event.update(
+                bot_id=record.target_bot_id, user_id=record.author_entity_id,
+                ordinary_chat=True, user_message_id=record.user_message_id,
+                session_id=record.metadata["ordinary_chat"].get("session_id"),
+            )
         subscriber = getattr(self.service, "_redis_subscriber", None)
         if record.metadata.get("maintenance_user_queue"):
             event.update(bot_id=record.target_bot_id, user_id=record.author_entity_id)

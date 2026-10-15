@@ -671,20 +671,18 @@ class MemoryClient:
             bot_id=self.bot_id, user_id=self.user_id,
         )))
 
-    def rotate_session(self) -> str | None:
-        """Non-destructively rotate this (bot, user)'s active thread.
-
-        TASK-284 step 14: closes the current active session and opens a fresh
-        one, returning the new session id. Backs the v2 chatbot ``/new``.
-        """
+    def rotate_session(self, idempotency_key: str | None = None) -> str | None:
+        """Rotate the thread; a durable delivery key reuses its first successor."""
         self._ensure_initialized()
+        key_args = {"idempotency_key": idempotency_key} if idempotency_key else {}
         if self.server_url:
             return self._call_server(
-                "sessions_rotate", {"bot_id": self.bot_id, "user_id": self.user_id}
+                "sessions_rotate", {"bot_id": self.bot_id, "user_id": self.user_id,
+                                    **({"key": idempotency_key} if idempotency_key else {})}
             )
         storage = self._get_storage()
         return _run_async(
-            storage.rotate_session(bot_id=self.bot_id, user_id=self.user_id)
+            storage.rotate_session(bot_id=self.bot_id, user_id=self.user_id, **key_args)
         )
 
     def clear_messages(self) -> int:
@@ -1267,7 +1265,10 @@ class MemoryClient:
                 # FastMCP returns JSON-RPC result of the form:
                 # {"result": {"content": [...], "structuredContent": {"result": <actual_data>}}}
                 rpc_result = result.get("result")
-                parsed_result = None
+                # An explicit JSON null is a decoded domain value (notably an
+                # absent sessions_get row), not a signal to return the MCP wrapper.
+                undecoded = object()
+                parsed_result = undecoded
                 if isinstance(rpc_result, dict):
                     if rpc_result.get("isError"):
                         # MCP tool failures are valid JSON-RPC responses, not
@@ -1302,7 +1303,7 @@ class MemoryClient:
                                         else:
                                             parsed_result = text
                 
-                if parsed_result is None:
+                if parsed_result is undecoded:
                     parsed_result = rpc_result
                 
                 # Human-friendly log via ServiceLogger (shows "Fetching history" instead of raw tool names)
@@ -1489,9 +1490,11 @@ class _MCPShortTermManager:
         """Return/create this adapter's active thread for SDK write-back."""
         return self._memory_client.get_or_create_active_session()
 
-    def rotate_session(self) -> str | None:
-        """TASK-284 step 14: rotate the active thread (backs v2 chatbot /new)."""
-        return self._memory_client.rotate_session()
+    def rotate_session(self, idempotency_key: str | None = None) -> str | None:
+        """TASK-284: rotate the active thread; durable retries reuse a successor."""
+        return self._memory_client.rotate_session(
+            **({"idempotency_key": idempotency_key} if idempotency_key else {})
+        )
 
     def clear(self) -> bool:
         deleted = self._memory_client.clear_messages()

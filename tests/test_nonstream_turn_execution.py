@@ -60,12 +60,36 @@ def _request() -> ChatCompletionRequest:
         bot_id="caid",
         user="nick",
         stream=False,
-        user_message_id="user-1",
+        user_message_id="00000000-0000-4000-8000-000000000001",
     )
+
+
+def _claimed(request: ChatCompletionRequest) -> ChatCompletionRequest:
+    """Run execution tests as dispatcher-owned turns, not HTTP direct starts."""
+    return request.model_copy(update={
+        "inter_bot_delivery_id": "delivery-test",
+        "inter_bot_turn_id": "turn-delivery-test",
+        "inter_bot_claim_token": "claim-test",
+        "inter_bot_bridge_request_id": "req_delivery_test",
+    })
 
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
+    from llm_bawt.service import chat_nonstream, chat_streaming
+    from llm_bawt.service.turn_admission import AdmissionClaim
+
+    for module in (chat_nonstream, chat_streaming):
+        validate, claim = module.validate_inter_bot_claim, module.turn_admission_claim
+        monkeypatch.setattr(module, "validate_inter_bot_claim", lambda svc, req, original=validate: (
+            None if getattr(req, "inter_bot_delivery_id", None) == "delivery-test"
+            else original(svc, req)
+        ))
+        monkeypatch.setattr(module, "turn_admission_claim", lambda svc, req, original=claim: (
+            AdmissionClaim(owner="claim-test", fence=lambda _conn: True)
+            if getattr(req, "inter_bot_delivery_id", None) == "delivery-test"
+            else original(svc, req)
+        ))
     monkeypatch.setattr("llm_bawt.service.chat_nonstream.get_bot", lambda _b: None)
     monkeypatch.setattr(
         "llm_bawt.service.routes.history.maybe_build_session_seed",
@@ -95,7 +119,7 @@ def test_agent_nonstream_turn_registers_execution_and_capability(_isolate) -> No
         return "done", "", []
 
     service = _service(execute_llm_query)
-    asyncio.run(service.chat_completion(_request()))
+    asyncio.run(service.chat_completion(_claimed(_request())))
 
     execution = seen["kwargs"]["turn_execution"]
     assert execution is not None and seen["registered"] is execution
@@ -117,7 +141,7 @@ def test_execution_is_released_when_the_query_raises(_isolate) -> None:
 
     service = _service(execute_llm_query)
     try:
-        asyncio.run(service.chat_completion(_request()))
+        asyncio.run(service.chat_completion(_claimed(_request())))
     except Exception:
         pass
     assert seen["live"] is True
@@ -136,6 +160,165 @@ def test_chat_backend_nonstream_turn_does_not_register(_isolate) -> None:
     assert seen["kwargs"]["turn_execution"] is None
     assert seen["kwargs"]["task_turn_capability"] is None
     assert _isolate == []
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
+def test_failed_admission_does_not_cancel_running_chat_generation(stream, monkeypatch):
+    from llm_bawt.service.turn_admission import AdmissionUnavailable
+
+    execute = Mock(side_effect=AssertionError("unadmitted request reached inference"))
+    service = _service(execute, model_type="openai")
+    service._persist_turn_log.side_effect = AdmissionUnavailable("DB unavailable")
+    service._maybe_handle_chat_new_command = Mock(return_value=(None, "do the task"))
+    if stream:
+        monkeypatch.setattr(
+            "llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
+            AsyncMock(return_value=("do the task", [], [], None)),
+        )
+        request = _request().model_copy(update={"stream": True})
+
+        async def run():
+            async for _ in service.chat_completion_stream(request):
+                pass
+    else:
+        async def run():
+            await service.chat_completion(_request())
+
+    with pytest.raises(AdmissionUnavailable):
+        asyncio.run(run())
+    service._start_generation.assert_not_awaited()
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["active", "explicit"])
+def test_rejected_agent_new_has_no_thread_side_effects(explicit, monkeypatch, _isolate):
+    from llm_bawt.service.turn_admission import AdmissionUnavailable
+
+    service = _service(Mock(side_effect=AssertionError("unadmitted bridge execution")))
+    service._persist_turn_log.side_effect = AdmissionUnavailable("DB unavailable")
+    if explicit:
+        service._bind_agent_thread.return_value = {
+            "thread_session_id": "selected-thread", "explicit_thread": True,
+        }
+    seed = Mock(return_value=[])
+    monkeypatch.setattr("llm_bawt.service.dependencies.get_service", lambda: service)
+    monkeypatch.setattr("llm_bawt.service.routes.history.maybe_build_session_seed", seed)
+    monkeypatch.setattr(
+        "llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
+        AsyncMock(return_value=("/new", [], [], None)),
+    )
+    request = ChatCompletionRequest(
+        model="test-model", messages=[ChatMessage(role="user", content="/new")],
+        bot_id="caid", user="nick", stream=True,
+    )
+    if explicit:
+        request.session_id = "selected-thread"
+
+    async def run():
+        async for _ in service.chat_completion_stream(_claimed(request)):
+            pass
+
+    with pytest.raises(AdmissionUnavailable):
+        asyncio.run(run())
+    # A prior /new rotated the durable thread, summarized, and seeded before
+    # save_turn rejected the request. Even a cold-start resolver can INSERT a
+    # fresh active session, so no unscoped binding is allowed before admission.
+    service._resolve_active_thread_binding.assert_not_called()
+    service._maybe_summarize_on_new.assert_not_called()
+    seed.assert_not_called()
+    service._maybe_rotate_agent_session.assert_not_called()
+    assert _isolate == []
+
+
+def test_accepted_agent_new_seeds_outgoing_then_routes_to_fresh_thread(monkeypatch, _isolate):
+    class StopAfterSetup(Exception):
+        pass
+
+    order = []
+    service = _service(Mock(side_effect=AssertionError("bridge execution started")))
+    service._persist_turn_log.side_effect = lambda **_kw: order.append("admit")
+    bindings = iter((
+        {"thread_session_id": "old-thread", "thread_resume_id": "old-sdk"},
+        {"thread_session_id": "fresh-thread"},
+    ))
+    service._resolve_active_thread_binding.side_effect = lambda *_a: (
+        order.append("bind") or next(bindings)
+    )
+    service._maybe_summarize_on_new.side_effect = lambda *_a, **_kw: order.append("summarize")
+    service._maybe_rotate_agent_session.side_effect = lambda *_a, **_kw: order.append("rotate")
+    def seed(*_args, **kwargs):
+        assert kwargs["thread_binding"]["thread_session_id"] == "old-thread"
+        order.append("seed")
+        return [{"role": "user", "content": "outgoing context"}]
+
+    monkeypatch.setattr("llm_bawt.service.dependencies.get_service", lambda: service)
+    monkeypatch.setattr("llm_bawt.service.routes.history.maybe_build_session_seed", seed)
+    monkeypatch.setattr("llm_bawt.service.chat_streaming.ToolEventCoordinator",
+                        Mock(side_effect=StopAfterSetup))
+    monkeypatch.setattr(
+        "llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
+        AsyncMock(return_value=("/new", [], [], None)),
+    )
+    request = ChatCompletionRequest(
+        model="test-model", messages=[ChatMessage(role="user", content="/new")],
+        bot_id="caid", user="nick", stream=True,
+    )
+
+    async def run():
+        async for _ in service.chat_completion_stream(_claimed(request)):
+            pass
+
+    with pytest.raises(StopAfterSetup):
+        asyncio.run(run())
+    assert order == ["admit", "bind", "summarize", "seed", "rotate", "bind"]
+    assert _isolate[0]["session_id"] == "fresh-thread"
+    service._update_turn_log.assert_not_called()
+
+
+def test_post_admission_agent_setup_failure_closes_turn(monkeypatch):
+    service = _service(Mock(side_effect=AssertionError("bridge execution started")))
+    service._maybe_rotate_agent_session.side_effect = RuntimeError("rotation failed")
+    monkeypatch.setattr("llm_bawt.service.dependencies.get_service", lambda: service)
+    monkeypatch.setattr(
+        "llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
+        AsyncMock(return_value=("/new", [], [], None)),
+    )
+    request = ChatCompletionRequest(
+        model="test-model", messages=[ChatMessage(role="user", content="/new")],
+        bot_id="caid", user="nick", stream=True,
+    )
+
+    async def run():
+        async for _ in service.chat_completion_stream(_claimed(request)):
+            pass
+
+    with pytest.raises(RuntimeError, match="rotation failed"):
+        asyncio.run(run())
+    service._persist_turn_log.assert_called_once()
+    service._update_turn_log.assert_called_once()
+    assert service._update_turn_log.call_args.kwargs["status"] == "error"
+    assert "rotation failed" in service._update_turn_log.call_args.kwargs["error_text"]
+
+
+def test_nonstream_route_returns_202_for_queued_ack(monkeypatch):
+    from starlette.requests import Request
+    from llm_bawt.service.routes import chat as chat_routes
+
+    receipt = {
+        "object": "chat.completion.queued", "delivery_id": "delivery-test",
+        "user_message_id": "00000000-0000-4000-8000-000000000001",
+        "turn_id": "turn-delivery-test", "assistant_message_id": "assistant-test",
+        "status": "QUEUED",
+    }
+    monkeypatch.setattr(chat_routes, "get_service", lambda: SimpleNamespace(
+        chat_completion=AsyncMock(return_value=receipt),
+    ))
+    http_request = Request({"type": "http", "headers": [], "method": "POST", "path": "/v1/chat/completions"})
+    response = asyncio.run(chat_routes.chat_completions(_request(), http_request))
+    assert response.status_code == 202
+    assert response.media_type == "application/json"
+    import json
+    assert json.loads(response.body) == receipt
 
 
 def test_agent_client_threads_request_local_identity_into_backend_config() -> None:

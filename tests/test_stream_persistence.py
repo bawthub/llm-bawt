@@ -44,6 +44,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="nick")
     service._inter_bot_dispatcher = SimpleNamespace(
         store=SimpleNamespace(
+            engine=object(),  # admission claim is constructed; persistence is mocked below
             validate_claim=Mock(return_value=True),
             get=Mock(return_value=SimpleNamespace(
                 sender_bot_id="snark",
@@ -194,6 +195,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
     service.config = SimpleNamespace(DEFAULT_BOT="nova", DEFAULT_USER="nick")
     service._inter_bot_dispatcher = SimpleNamespace(
         store=SimpleNamespace(
+            engine=object(),  # admission claim is constructed; persistence is mocked below
             validate_claim=Mock(return_value=True),
             get=Mock(return_value=SimpleNamespace(
                 sender_bot_id="snark",

@@ -71,7 +71,9 @@ class ChatStreamingBridgeMixin:
             return None, remainder
         return CHAT_NEW_CONFIRMATION, ""
 
-    def _rotate_chat_session(self, llm_bawt, bot_id: str) -> str | None:
+    def _rotate_chat_session(
+        self, llm_bawt, bot_id: str, *, idempotency_key: str | None = None,
+    ) -> str | None:
         """TASK-284: non-destructive DB session rotation for chatbot /new.
 
         Closes the active durable thread and opens a fresh one (old rows
@@ -93,7 +95,7 @@ class ChatStreamingBridgeMixin:
             rotate = getattr(backend, "rotate_session", None) if backend else None
             if not callable(rotate):
                 return None
-            new_id = rotate()
+            new_id = rotate(**({"idempotency_key": idempotency_key} if idempotency_key else {}))
             inv = getattr(llm_bawt, "invalidate_history_cache", None)
             if callable(inv):
                 inv()
@@ -115,6 +117,8 @@ class ChatStreamingBridgeMixin:
             return str(new_id) if new_id else None
         except Exception as e:
             log.error("Failed to rotate session for bot=%s: %s", slug, e)
+            if idempotency_key:
+                raise  # A claimed delivery must not execute in the wrong thread.
             return None
 
     def _publish_thread_switched(
@@ -480,6 +484,7 @@ class ChatStreamingBridgeMixin:
 
     def _maybe_rotate_agent_session(
         self, llm_bawt, bot_id: str, user_prompt: str, thread_binding: dict | None = None,
+        *, delivery_id: str | None = None,
     ) -> str | None | bool:
         """TASK-284 step 15: rotate the durable DB thread on an agent ``/new``.
 
@@ -508,7 +513,24 @@ class ChatStreamingBridgeMixin:
                 return False
         except Exception:
             return False
-        return self._rotate_chat_session(llm_bawt, bot_id)
+        if not delivery_id:
+            return self._rotate_chat_session(llm_bawt, bot_id)
+        # In-process fast path only. The backing session rotation is keyed and
+        # atomic in the DB, so a process restart gets the same successor too.
+        key = (bot_id, getattr(llm_bawt, "user_id", None), delivery_id)
+        cache = getattr(self, "_agent_new_delivery_rotations", None)
+        if cache is None:
+            cache = {}
+            self._agent_new_delivery_rotations = cache
+        if key in cache:
+            return cache[key]
+        successor = self._rotate_chat_session(llm_bawt, bot_id, idempotency_key=delivery_id)
+        if not successor:
+            raise RuntimeError("Durable /new session rotation did not return a successor")
+        cache[key] = successor
+        if len(cache) > 200:
+            cache.pop(next(iter(cache)))
+        return successor
 
     def _is_openclaw_bot(self, model_alias: str) -> bool:
         """Check if this model alias maps to an openclaw agent backend."""

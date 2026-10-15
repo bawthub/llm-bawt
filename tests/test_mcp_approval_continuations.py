@@ -30,6 +30,7 @@ def _store():
         poolclass=StaticPool,
     )
     store._ensure_tables_exist()
+    FakeTurnStore.default_engine = store.engine
     return store
 
 
@@ -79,6 +80,7 @@ class FakeService:
         self.requests = []
         self.error = error
         self.config = None
+        self._turn_log_store = FakeTurnStore()
 
     def get_memory_client(self, bot_id, user_id):
         from types import SimpleNamespace
@@ -91,7 +93,64 @@ class FakeService:
         self.requests.append(request)
         if self.error:
             raise self.error
+        self._turn_log_store.finish()
         yield "data: [DONE]\n\n"
+
+
+class FakeTurnStore:
+    """Turn store double for the shared admission authority (TASK-1082).
+
+    Honors the same fences as ``turn_admission``: claim fences run against the
+    approval store's real (SQLite) engine, so a superseded claim is refused
+    here exactly as in the database. ``reservations``/``released`` record only
+    effects the real store would have applied. Without ``engine=``, fences run
+    on ``default_engine`` (the approval store most recently built by the test).
+    """
+
+    default_engine = None
+
+    def __init__(self, turn=None, busy=None, *, engine=None):
+        self.turn = turn
+        self.busy = busy
+        self.engine = engine
+        self.reservations = []
+        self.released = []
+        self.owners = {}
+
+    def get_turn(self, turn_id):
+        return self.turn() if callable(self.turn) else self.turn
+
+    def finish(self, status="ok", error_text=None):
+        """What the real stream's save_turn does on completion."""
+        from types import SimpleNamespace
+
+        self.turn = SimpleNamespace(ended_at=1, status=status, error_text=error_text)
+
+    def _holds(self, fence):
+        if fence is None:
+            return True
+        engine = self.engine or self.default_engine
+        assert engine is not None, "wire engine= to evaluate claim fences"
+        with engine.connect() as conn:
+            return fence(conn)
+
+    def reserve_idle_turn(self, *, fence=None, **kwargs):
+        from llm_bawt.service.turn_admission import AdmissionFenceLost, TargetBusy
+
+        if not self._holds(fence):
+            raise AdmissionFenceLost(f"claim for turn '{kwargs['turn_id']}' is no longer held")
+        if self.busy:
+            raise TargetBusy(self.busy)
+        self.reservations.append(kwargs)
+        self.owners[kwargs["turn_id"]] = kwargs["owner"]
+        return True
+
+    def release_reservation(self, turn_id, *, owner, fence=None):
+        if self.owners.get(turn_id) != owner or not self._holds(fence):
+            return False
+        del self.owners[turn_id]
+        self.released.append(turn_id)
+        return True
 
 
 class FakeOps:
@@ -248,7 +307,7 @@ def test_dispatch_requires_persisted_success_before_ack():
         def __init__(self):
             super().__init__()
             self.turn = None
-            self._turn_log_store = SimpleNamespace(get_turn=lambda key: self.turn)
+            self._turn_log_store = FakeTurnStore(lambda: self.turn, engine=store.engine)
 
         async def chat_completion_stream(self, request):
             assert request.user_message_id == identity["user_message_id"]
@@ -268,8 +327,8 @@ def test_existing_failed_turn_is_never_replayed():
     store = _store()
     row = _ready_row(store)
     service = FakeService()
-    service._turn_log_store = SimpleNamespace(get_turn=lambda key: SimpleNamespace(
-        ended_at=1, status="error", error_text="prior persistence failure"))
+    service._turn_log_store = FakeTurnStore(SimpleNamespace(
+        ended_at=1, status="error", error_text="prior persistence failure"), engine=store.engine)
     with pytest.raises(RuntimeError, match="manual reconciliation"):
         asyncio.run(dispatch_mcp_result_continuation(service, store, row))
     assert not service.requests
@@ -357,7 +416,8 @@ def test_already_started_continuation_is_not_replayed_in_another_session():
     store = _store()
     row = _ready_row(store)
     service = ResetService(store)
-    service._turn_log_store = SimpleNamespace(get_turn=lambda id: SimpleNamespace(ended_at=None))
+    service._turn_log_store = FakeTurnStore(
+        SimpleNamespace(ended_at=None, status="streaming"), engine=store.engine)
     with pytest.raises(RuntimeError, match="already-started"):
         asyncio.run(dispatch_mcp_result_continuation(service, store, row))
     assert service.requests == []

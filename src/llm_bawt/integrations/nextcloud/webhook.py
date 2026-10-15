@@ -5,12 +5,15 @@ import hashlib
 import logging
 import secrets
 import json
+import uuid
 from datetime import datetime
 from typing import Optional
 
 import httpx
 from fastapi import Request, HTTPException
 
+from ...bot_types import durable_agent_backend
+from ...service.delivery_reply import QUEUED_RECEIPT, is_accepted_receipt
 from .manager import get_nextcloud_manager
 
 log = logging.getLogger(__name__)
@@ -168,42 +171,139 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
 
     # Process message with appropriate bot
     if message and msg_type == "Create":
+        accepted_reference: str | None = None
+        sending_reply = False
         try:
             # Import here to avoid circular imports
             from ...service.dependencies import get_service
             from ...service.schemas import ChatCompletionRequest, ChatMessage
 
             service = get_service()
+            # Talk may resend the same Create webhook after a timeout. Bind its
+            # message id to the ordinary admission key so retries cannot start
+            # a second agent turn. Older payloads without an id remain unkeyed.
+            talk_message_id = payload.get('object', {}).get('id')
+            if isinstance(talk_message_id, (str, int)) and str(talk_message_id).strip():
+                user_message_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"nextcloud-talk:{backend.rstrip('/')}:{conversation_token}:{user_id}:{talk_message_id}",
+                ))
+            else:
+                user_message_id = str(uuid.uuid4())
+            reply_to = int(str(talk_message_id)) if str(talk_message_id).isdigit() else None
 
-            # Build chat completion request with the specific bot
+            # Mint the original identity at ingress, before ordinary admission.
             request_obj = ChatCompletionRequest(
                 messages=[ChatMessage(role="user", content=message)],
                 user=user_id,
-                bot_id=bot_config.llm_bawt_bot,  # Use the bot from config!
+                bot_id=bot_config.llm_bawt_bot,
+                user_message_id=user_message_id,
                 stream=False,
             )
 
-            # Generate response using the service
             response = await service.chat_completion(request_obj)
+            receipt_kind = response.get("object") if isinstance(response, dict) else None
+            source_type = None
+            source_id = None
+            if is_accepted_receipt(response):
+                source_type = "delivery" if receipt_kind == QUEUED_RECEIPT else "turn"
+                source_id = response.get("delivery_id" if source_type == "delivery" else "turn_id")
+                accepted_reference = source_id if isinstance(source_id, str) and source_id else None
+                if not accepted_reference or response.get("user_message_id") != user_message_id:
+                    raise ValueError("Nextcloud receipt does not match the submitted message")
+            elif getattr(response, "choices", None) and getattr(service, "_turn_log_store", None) is not None:
+                # A completed ordinary agent turn has the same deterministic ID
+                # as its retry. Route its reply through the outbound claim too;
+                # otherwise a Talk webhook retry could POST the answer twice.
+                from ...service.ordinary_turn_queue import stable_ordinary_ids
+                import asyncio
 
-            # Extract the assistant's message
-            if response.choices and len(response.choices) > 0:
+                candidate, _, _ = stable_ordinary_ids(
+                    request_obj, bot_config.llm_bawt_bot, user_id,
+                )
+                accepted_reference = candidate  # failure here is uncertain, not a failed inference
+                persisted = await asyncio.to_thread(service._turn_log_store.get_turn, candidate)
+                if (persisted is not None and persisted.bot_id == bot_config.llm_bawt_bot
+                        and persisted.user_id == user_id
+                        and persisted.trigger_message_id == user_message_id):
+                    source_type, source_id = "turn", candidate
+                    accepted_reference = candidate
+                else:
+                    from ...bots import BotManager
+                    configured = BotManager(service.config).get_bot(bot_config.llm_bawt_bot)
+                    if configured and durable_agent_backend(configured):
+                        # Accepted agent work without its expected durable row
+                        # is uncertain; never fall back to an untracked POST.
+                        accepted_reference = candidate
+                        raise RuntimeError("Completed agent turn lacks its exact durable reply row")
+            if source_type is not None:
+                from ...service.talk_reply_outbox import TalkReplySubscription
+
+                dispatcher = service._inter_bot_dispatcher
+                if dispatcher is None or dispatcher.talk_replies is None:
+                    raise RuntimeError("Talk reply outbox unavailable")
+                # Register before returning an ACK. A finished turn is also
+                # picked up by the next sweep, including after process restart.
+                import asyncio
+                state, newly_registered = await asyncio.to_thread(
+                    dispatcher.talk_replies.register,
+                    TalkReplySubscription(
+                        message_id=user_message_id, bot_id=bot_config.llm_bawt_bot,
+                        user_id=user_id, source_type=source_type, source_id=source_id,
+                        backend=backend.rstrip('/'), conversation_token=conversation_token,
+                        reply_to=reply_to,
+                    ),
+                )
+                if newly_registered and receipt_kind is not None:
+                    # One visible pending notice per original Talk message; a
+                    # webhook redelivery cannot produce repeated notices.
+                    await send_nextcloud_message(
+                        nextcloud_url=backend.rstrip('/'),
+                        conversation_token=conversation_token,
+                        message=f"Your request was accepted (reference {source_id}); I'll reply here when it finishes.",
+                        secret=bot_config.secret, reply_to=reply_to,
+                    )
+                if state == "PENDING":
+                    dispatcher.wake(bot_config.llm_bawt_bot)
+                # Never send a second answer from this HTTP request: the outbox
+                # owns the only outbound attempt, even if the turn just finished.
+                return {"status": ("queued" if source_type == "delivery" else
+                                   "in_flight" if receipt_kind is not None else "reply_pending"),
+                        "reference": source_id, "reply_state": state,
+                        "bot": bot_config.llm_bawt_bot, "message": message, "from": actor_name}
+            elif getattr(response, "choices", None):
                 llm_response = response.choices[0].message.content
-                resp_preview = llm_response[:100] + "..." if llm_response and len(llm_response) > 100 else llm_response
-                log.info(f"🤖 Response ({len(llm_response) if llm_response else 0} chars): {resp_preview!r}")
-                # Send response back to Talk with this bot's secret
+            else:
+                raise RuntimeError("No assistant response or queued delivery receipt")
+
+            if llm_response:
+                resp_preview = llm_response[:100] + "..." if len(llm_response) > 100 else llm_response
+                log.info(f"🤖 Response ({len(llm_response)} chars): {resp_preview!r}")
+                sending_reply = True
                 await send_nextcloud_message(
                     nextcloud_url=backend.rstrip('/'),
                     conversation_token=conversation_token,
                     message=llm_response,
                     secret=bot_config.secret,
+                    reply_to=reply_to,
                 )
-            else:
-                log.error("No response choices returned from LLM")
 
         except Exception as e:
             log.error(f"Error processing message with bot {bot_config.llm_bawt_bot}: {e}", exc_info=True)
-            # Send error message back
+            if sending_reply:
+                # The outbound POST might have succeeded before its connection
+                # failed. A second message would make an ambiguous send worse.
+                return {"status": "outbound_uncertain", "bot": bot_config.llm_bawt_bot,
+                        "message": message, "from": actor_name}
+            if accepted_reference:
+                await send_nextcloud_message(
+                    nextcloud_url=backend.rstrip('/'),
+                    conversation_token=conversation_token,
+                    message=f"Your request was accepted (reference {accepted_reference}), but I can't verify its answer yet.",
+                    secret=bot_config.secret,
+                )
+                return {"status": "accepted_unverified", "reference": accepted_reference,
+                        "bot": bot_config.llm_bawt_bot, "message": message, "from": actor_name}
             await send_nextcloud_message(
                 nextcloud_url=backend.rstrip('/'),
                 conversation_token=conversation_token,

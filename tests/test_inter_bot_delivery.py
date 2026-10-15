@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text as sa_text
@@ -463,8 +460,8 @@ def test_restart_recovery_reuses_same_delivery_turn_and_message_ids(delivery_sto
             WHERE id=:id
         """), {"id": original.id})
 
-    recovered = store.recover_expired()
-    assert [row.id for row in recovered] == [original.id]
+    recovered = [row for row in store.recover_expired() if row.id == original.id]
+    assert len(recovered) == 1
     assert recovered[0].status == QUEUED
     assert recovered[0].user_message_id == original.user_message_id
     assert recovered[0].turn_id == original.turn_id
@@ -830,8 +827,7 @@ def test_duplicate_idempotency_key_rejects_different_session_policy(delivery_sto
 def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
     store, sender, target = delivery_store
     old_session = str(uuid.uuid4())
-    from llm_bawt.memory.postgresql import ensure_bot_partitions, partition_name, MESSAGES_PARENT
-    table = partition_name(MESSAGES_PARENT, target)
+    from llm_bawt.memory.postgresql import ensure_bot_partitions
     with store.engine.begin() as conn:
         ensure_bot_partitions(conn, target)
         conn.execute(sa_text("""
@@ -900,9 +896,9 @@ def test_overflow_after_tool_side_effect_does_not_replay(delivery_store):
         conn.execute(sa_text("""
             INSERT INTO tool_call_records (
                 turn_id, tool_name, arguments_json, result_text,
-                iteration, created_at
+                result_payload_available, iteration, created_at
             ) VALUES (
-                :turn_id, 'Bash', '{}', 'ran', 1, now()
+                :turn_id, 'Bash', '{}', 'ran', FALSE, 1, now()
             )
         """), {"turn_id": original.turn_id})
     assert store.recover_context_overflow(

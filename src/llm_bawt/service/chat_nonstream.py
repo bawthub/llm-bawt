@@ -14,7 +14,9 @@ import uuid
 from typing import Any, AsyncIterator
 
 from ..bots import get_bot, strip_emotes
-from .inter_bot_claims import validate_inter_bot_claim
+from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
+from .ordinary_turn_queue import admit_ordinary_agent_turn
+from .turn_admission import turn_start_extensions
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import (
     ChatCompletionChoice,
@@ -110,7 +112,12 @@ class ChatNonStreamMixin:
         user_prompt = ""
         for m in reversed(request.messages):
             if m.role == "user":
-                user_prompt = m.content or ""
+                user_prompt = (
+                    "".join(
+                        part.get("text", "") for part in m.content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    ) if isinstance(m.content, list) else m.content or ""
+                )
                 break
 
         if not user_prompt:
@@ -150,12 +157,10 @@ class ChatNonStreamMixin:
                     ),
                 )
 
-        if is_agent_backend:
-            cancel_event = threading.Event()
-            done_event = threading.Event()
-        else:
-            # Cancels previous generation for the SAME bot only.
-            cancel_event, done_event = await self._start_generation(bot_id)
+        # Do not cancel the previous chat generation until this turn has been
+        # admitted. Agent turns have independent execution handles.
+        cancel_event = threading.Event()
+        done_event = threading.Event()
         _reserved_turn_id = getattr(request, "inter_bot_turn_id", None)
         turn_log_id = (
             _reserved_turn_id.strip()
@@ -182,34 +187,26 @@ class ChatNonStreamMixin:
         publish_nonstream_lifecycle = inter_bot_author is not None
         # Persist turn log immediately so the user's prompt is recorded
         # even if the backend times out or errors before responding.
-        self._persist_turn_log(
-            turn_id=turn_log_id,
-            request_id=ctx.request_id,
-            path=ctx.path,
-            stream=False,
-            model=model_alias,
-            bot_id=bot_id,
-            user_id=user_id,
-            status="pending",
-            latency_ms=None,
-            user_prompt=user_prompt,
-            prepared_messages=[],
-            response_text="",
-            trigger_message_id=trigger_message_id,
-            assistant_message_id=assistant_message_id,
-            request_extensions={
-                key: value
-                for key, value in {
-                    "inter_bot_delivery_id": getattr(request, "inter_bot_delivery_id", None),
-                    "inter_bot_turn_id": getattr(request, "inter_bot_turn_id", None),
-                    "inter_bot_bridge_request_id": getattr(request, "inter_bot_bridge_request_id", None),
-                    "inter_bot_timeout_seconds": getattr(request, "inter_bot_timeout_seconds", None),
-                    "inter_bot_session_policy": getattr(request, "inter_bot_session_policy", None),
-                    "inter_bot_seed_session_id": getattr(request, "inter_bot_seed_session_id", None),
-                }.items()
-                if value
-            },
+        admission_claim = turn_admission_claim(self, request)
+        decision = admit_ordinary_agent_turn(
+            self, llm_bawt.bot, request, is_agent_backend=is_agent_backend,
+            admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
+            user_prompt=user_prompt, trigger_message_id=trigger_message_id,
         )
+        if decision is not None:
+            return decision.receipt()
+        self._persist_turn_log(
+            turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
+            stream=False, model=model_alias, bot_id=bot_id, user_id=user_id,
+            status="pending", latency_ms=None, user_prompt=user_prompt,
+            prepared_messages=[], response_text="", trigger_message_id=trigger_message_id,
+            assistant_message_id=assistant_message_id, admission_claim=admission_claim,
+            request_extensions=turn_start_extensions(
+                request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
+            ),
+        )
+        if not is_agent_backend:
+            cancel_event, done_event = await self._start_generation(bot_id)
 
         # TASK-709: resolve the durable session id BEFORE publishing turn_start
         # so external clients can route the lifecycle stream to the correct
@@ -401,10 +398,17 @@ class ChatNonStreamMixin:
                 # assembly. Explicit selection wins; otherwise bind the current
                 # ACTIVE thread so all resume decisions use canonical metadata.
                 thread_binding = None
+                delivery_new_id = None
                 if _is_agent:
                     thread_binding = self._bind_agent_thread(llm_bawt, request)
                     if thread_binding is None:
                         thread_binding = self._resolve_active_thread_binding(llm_bawt)
+                    from .agent_new_rotation import prepare_delivery_new_binding
+                    thread_binding, delivery_new_id = prepare_delivery_new_binding(
+                        self, llm_bawt, request, bot_id=bot_id, user_id=user_id,
+                        user_prompt=user_prompt, thread_binding=thread_binding,
+                        backend_name=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
+                    )
 
                 # Prepare messages with history and memory context
                 prepared_messages = llm_bawt.prepare_messages_for_query(
@@ -441,20 +445,27 @@ class ChatNonStreamMixin:
                         llm_bawt, bot_id, model_alias, user_prompt, self,
                         thread_binding=thread_binding,
                     )
+                rotated_id = None
                 if _is_agent and not reset_policy:
-                    self._maybe_rotate_agent_session(
-                        llm_bawt, bot_id, user_prompt, thread_binding=thread_binding
+                    rotated_id = self._maybe_rotate_agent_session(
+                        llm_bawt, bot_id, user_prompt, thread_binding=thread_binding,
+                        **({"delivery_id": delivery_new_id} if delivery_new_id else {}),
                     )
 
-                # An unscoped /new rotated away from the outgoing binding.
-                # Rebind to the fresh active thread for bridge write-back.
+                # A claimed retry must target its exact first successor, even
+                # when another thread became active after that rotation.
                 if (
                     _is_agent
                     and thread_binding
                     and not thread_binding.get("explicit_thread")
                     and (user_prompt or "").lstrip().startswith("/new")
                 ):
-                    thread_binding = self._resolve_active_thread_binding(llm_bawt)
+                    from .agent_new_rotation import bind_new_successor
+                    thread_binding = bind_new_successor(
+                        self, llm_bawt, rotated_id=rotated_id,
+                        delivery_id=delivery_new_id,
+                        backend_name=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
+                    )
 
                 # TASK-709 F4: refresh the outer ``resolved_session_id`` from
                 # the post-rotation binding so ``turn_complete`` emits point at

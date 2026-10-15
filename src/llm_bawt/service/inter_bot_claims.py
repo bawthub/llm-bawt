@@ -54,3 +54,54 @@ def validate_inter_bot_claim(service: Any, request: Any):
     if isinstance(internal_sender, str) and internal_sender.strip():
         return AuthorReference.bot(internal_sender)
     return None
+
+
+def turn_admission_claim(service: Any, request: Any, *, store: Any = None):
+    """The trusted producer claim checked inside the turn's admission transaction.
+
+    Approval claims retain the owner stamped on their reservation. Delivery
+    claims are validated again under the turn's target lock and a row lock, so
+    lease takeover cannot happen between entry validation and turn creation.
+    """
+    from .turn_admission import AdmissionClaim
+
+    approval_claim = getattr(request, "_internal_approval_claim", None)
+    if approval_claim is not None:
+        if store is None:
+            store = getattr(service, "_tool_approval_policy_store", None)
+        fence_for = getattr(store, "continuation_claim_fence", None)
+        if fence_for is None:
+            raise RuntimeError("Approval store unavailable; refusing unfenced continuation turn")
+        request_id, token = approval_claim
+        return AdmissionClaim(owner=token, fence=fence_for(request_id, token))
+
+    delivery_id = getattr(request, "inter_bot_delivery_id", None)
+    if not delivery_id:
+        return None
+    dispatcher = getattr(service, "_inter_bot_dispatcher", None)
+    delivery_store = getattr(dispatcher, "store", None)
+    if delivery_store is None or getattr(delivery_store, "engine", None) is None:
+        raise RuntimeError("Delivery store unavailable; refusing unfenced delivery turn")
+    token = getattr(request, "inter_bot_claim_token", None) or ""
+    target = getattr(request, "bot_id", None) or service._default_bot
+    turn_id = getattr(request, "inter_bot_turn_id", None) or ""
+    message_id = getattr(request, "user_message_id", None) or ""
+    bridge_id = getattr(request, "inter_bot_bridge_request_id", None) or ""
+    if not all((token, target, turn_id, message_id, bridge_id)):
+        raise RuntimeError("Incomplete delivery claim; refusing unfenced delivery turn")
+
+    from ..inter_bot_claim_validation import validate_delivery_claim
+
+    def fence(conn):
+        return validate_delivery_claim(
+            conn, delivery_id=delivery_id, claim_token=token,
+            target_bot_id=target, turn_id=turn_id,
+            user_message_id=message_id, bridge_request_id=bridge_id,
+            for_turn=True,
+        )
+
+    return AdmissionClaim(
+        owner=token, fence=fence,
+        allow_unowned_reservation=True, require_reservation=True,
+        reservation_delivery_id=delivery_id,
+    )

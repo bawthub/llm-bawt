@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from llm_bawt.memory.postgresql_short_term import PostgreSQLShortTermManager
 from llm_bawt.memory.session_reset_lineage import SessionResetLineage
 from llm_bawt.service.approval_continuation_session import approval_delivery_session
+from llm_bawt.service.agent_new_rotation import delivery_new_predecessor
 
 
 @pytest.fixture
@@ -73,6 +74,35 @@ def test_archived_task_thread_is_not_redirected_to_unrelated_active_session(sess
     insert(sessions, "chat")
     rotate(sessions)
     assert resolve(sessions, "task") == "task"
+
+
+def test_keyed_delivery_rotation_reuses_one_successor_across_manager_restart(sessions):
+    insert(sessions, "old")
+    first = object.__new__(PostgreSQLShortTermManager)
+    first._backend = SimpleNamespace(engine=sessions)
+    first.bot_id, first.user_id = "test-bot", "test-user"
+    successor = first.rotate_session(idempotency_key="delivery-one")
+    other = object.__new__(PostgreSQLShortTermManager)
+    other._backend = SimpleNamespace(engine=sessions)
+    other.bot_id, other.user_id = "test-bot", "test-user"
+    assert other.rotate_session(idempotency_key="delivery-one") == successor
+    assert read(sessions, successor)["status"] == "active"
+    assert json.loads(read(sessions, successor)["session_metadata"])["rotation_delivery_id"] == "delivery-one"
+    assert json.loads(read(sessions, successor)["session_metadata"])["reset_predecessor_ids"] == ["old"]
+    assert json.loads(read(sessions, "old")["session_metadata"])["reset_successor_id"] == successor
+    llm = SimpleNamespace(history_manager=SimpleNamespace(
+        _db_backend=SimpleNamespace(get_session=lambda sid: read(sessions, sid)),
+    ))
+    assert delivery_new_predecessor(llm, bot_id="test-bot", user_id="test-user",
+                                    delivery_id="delivery-one") == "old"
+    with pytest.raises(ValueError, match="another delivery"):
+        delivery_new_predecessor(llm, bot_id="other-bot", user_id="test-user",
+                                 delivery_id="delivery-one")
+    with sessions.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM sessions")).scalar_one() == 2
+    with pytest.raises(ValueError, match="another owner"):
+        SessionResetLineage.rotate(sessions, bot_id="test-bot", user_id="test-user",
+                                   new_id=successor, idempotency_key="delivery-other")
 
 
 def test_rotation_failure_rolls_back_archive_and_link(sessions):

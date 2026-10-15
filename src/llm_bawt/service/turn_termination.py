@@ -28,8 +28,10 @@ def interrupt_unresolved_tools(session: Session, turn_id: str, ended_at: datetim
 def request_payload_with_audit(previous: str | None, payload: dict) -> str:
     previous_payload = json.loads(previous) if previous else {}
     merged = dict(payload)
-    if isinstance(previous_payload, dict) and "abort_request" in previous_payload:
-        merged["abort_request"] = previous_payload["abort_request"]
+    if isinstance(previous_payload, dict):
+        for key in ("abort_request", "ordinary_request_digest"):
+            if key in previous_payload:
+                merged[key] = previous_payload[key]
     return json.dumps(merged, ensure_ascii=False, default=str)
 
 
@@ -69,6 +71,17 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
         now = datetime.now(timezone.utc)
         result = []
         for row in rows:
+            # An ordinary agent START has no durable execution owner yet. Its
+            # bridge command may have been accepted even when this process no
+            # longer has a TurnExecution handle. A newer turn's first output
+            # cannot prove that command stopped, so never clear this admission
+            # fence by guessing a timeout (including after a Stop request).
+            try:
+                payload = json.loads(row.request_json or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            if isinstance(payload, dict) and payload.get("ordinary_request_digest"):
+                continue
             if row.status == "cancelling":
                 requested = _abort_requested_at(row)
                 if requested is None or (now - requested).total_seconds() < UNCONFIRMED_ABORT_GRACE_SECONDS:

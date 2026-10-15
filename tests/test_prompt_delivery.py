@@ -417,6 +417,10 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
     _, run = reserve(rig)
     record = enqueue(rig, run)
     payload = rig.delivery.payload(record.id)
+    # The real dispatcher injects the claim token after claiming the row;
+    # model that trusted request instead of presenting an unfenced payload.
+    rig.delivery.update(record.id, status="DISPATCHING", claim_token="claim-test")
+    payload["inter_bot_claim_token"] = "claim-test"
     service = BackgroundService.__new__(BackgroundService)
     service.config = rig.service.config
     service._inter_bot_dispatcher = rig.dispatcher

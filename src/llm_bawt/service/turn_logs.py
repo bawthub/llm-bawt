@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus
-
 from sqlalchemy import exists as sa_exists, func, text as sa_text
 from sqlmodel import Session, delete, select
 
@@ -24,12 +23,24 @@ from .turn_log_schema import (  # noqa: F401 — re-exported for existing import
     bootstrap_turn_log_schema,
 )
 from .turn_usage import encode_token_usage
+from .turn_admission import (
+    RESERVED,
+    AdmissionClaim,
+    AdmissionUnavailable,
+    TargetBusy,
+    TurnAdmission,
+    classify_target,
+    fence_consumption,
+    lock_target,
+    release_reservation,
+    reserve_turn,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class DeliveryTargetBusy(RuntimeError):
-    """A durable inter-bot reservation won the target's idle race."""
+# Compat name for existing importers; the admission authority owns the type.
+DeliveryTargetBusy = TargetBusy
 
 
 class TurnLogStore:
@@ -40,6 +51,9 @@ class TurnLogStore:
     _cleanup_interval_seconds: float = 300.0
     _backfill_done: bool = False
     _schema_guard = SchemaBootstrapGuard()
+    # Admission fails closed unless the deployment genuinely has no database
+    # (unknown -> assume configured). See ``save_turn``.
+    database_configured: bool = True
 
     def __init__(self, config: Config, ttl_hours: int | None = None):
         self.config = config
@@ -47,12 +61,10 @@ class TurnLogStore:
         self.ttl_hours = max(1, int(ttl_hours)) if ttl_hours is not None else None
         self.engine = None
         try:
-            host = getattr(config, "POSTGRES_HOST", "localhost")
-            port = int(getattr(config, "POSTGRES_PORT", 5432))
-            user = getattr(config, "POSTGRES_USER", "llm_bawt")
-            password = getattr(config, "POSTGRES_PASSWORD", "")
-            database = getattr(config, "POSTGRES_DATABASE", "llm_bawt")
-            encoded_password = quote_plus(password)
+            self.database_configured = has_database_credentials(config)
+        except Exception:
+            self.database_configured = True  # unknown: fail closed
+        try:
             from ..utils.db import get_shared_engine
             self.engine = get_shared_engine(config)  # TASK-202: shared pool
             if self.engine is None:
@@ -121,9 +133,24 @@ class TurnLogStore:
         animation: str | None = None,
         token_usage: dict | None = None,
         parent_turn_id: str | None = None,
+        admission_claim: AdmissionClaim | None = None,
+        connection=None,
     ) -> None:
-        """Persist one turn entry (and run TTL cleanup if a TTL is configured)."""
+        """Persist one turn entry (and run TTL cleanup if a TTL is configured).
+
+        ``admission_claim`` is the producer's trusted claim over a fenced
+        reservation (approval continuations); see ``fence_consumption``.
+
+        This write IS the turn's admission: it raises ``AdmissionUnavailable``
+        rather than no-op when a configured database is unreachable, or when a
+        durable producer (claim / IDLE_ONLY) has no authority to admit it. Only
+        a database-less deployment (no shared targets, no durable producers)
+        starts ordinary turns without a row.
+        """
         if self.engine is None:
+            if (self.database_configured or admission_claim is not None
+                    or TurnAdmission.from_payload(request_payload) is TurnAdmission.IDLE_ONLY):
+                raise AdmissionUnavailable("turn admission database unavailable; turn not started")
             return
 
         self._cleanup_expired_if_due()
@@ -135,114 +162,113 @@ class TurnLogStore:
         created_at = datetime.now(timezone.utc)
         token_usage_json = self._encode_token_usage(token_usage, model)
 
-        # Durable inter-bot callbacks reserve their deterministic turn under the
-        # same per-target advisory lock used by the outbox claim. Normal turn
-        # creation also takes that lock: if any OTHER recent turn is open, the
-        # reservation lost its idle race and the dispatcher receives a typed
-        # busy signal instead of forcing concurrency. Reusing the reserved id is
+        # TASK-1082: the one admission decision for every producer (stream,
+        # nonstream, durable delivery, approval continuation). It runs under the
+        # same per-target advisory lock as the delivery outbox claim. IDLE_ONLY
+        # requests lose to ANY other open turn; every request loses to ANY
+        # fenced reservation (not merely the newest row). The loser receives
+        # typed ``TargetBusy`` and nothing is started. Reusing a reserved id is
         # an atomic upsert, so target acceptance cannot create two turn rows.
-        delivery_id = None
-        if request_payload:
-            raw_delivery = request_payload.get("inter_bot_delivery_id")
-            if isinstance(raw_delivery, str) and raw_delivery.strip():
-                delivery_id = raw_delivery.strip()
+        admission = TurnAdmission.from_payload(request_payload)
+        if connection is not None and (
+            connection.engine is not self.engine or bot_id is None
+            or admission is not TurnAdmission.START or admission_claim is not None
+        ):
+            raise ValueError("shared turn admission connection requires an ordinary start on this engine")
         if bot_id:
-            with self.engine.begin() as conn:
-                conn.execute(
-                    sa_text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
-                    {"target": bot_id},
+            busy: TargetBusy | None = None
+            with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
+                lock_target(conn, bot_id)
+                # Consumption is fenced in this same transaction as creation and
+                # release are: a superseded claim, or a caller that is not the
+                # reservation's owner, changes nothing (AdmissionFenceLost).
+                existing_status = fence_consumption(
+                    conn, turn_id=turn_id, claim=admission_claim,
                 )
-                other_open = conn.execute(
-                    sa_text(
-                        "SELECT id, status FROM turn_logs WHERE bot_id=:target"
-                        " AND ended_at IS NULL AND id != :turn_id"
-                        " ORDER BY created_at DESC LIMIT 1"
-                    ),
-                    {"target": bot_id, "turn_id": turn_id},
-                ).mappings().first()
-                if other_open and (delivery_id or other_open["status"] == "reserved"):
-                    if delivery_id:
+                state = classify_target(conn, bot_id, exclude_turn_id=turn_id)
+                if not state.admits(admission):
+                    if admission is TurnAdmission.IDLE_ONLY and existing_status == RESERVED:
+                        # Release this request's own reservation (ownership
+                        # proven above, under the same lock).
                         conn.execute(
                             sa_text("DELETE FROM turn_logs WHERE id=:id AND status='reserved'"),
                             {"id": turn_id},
                         )
-                    raise DeliveryTargetBusy(
-                        f"target '{bot_id}' became busy with turn {other_open['id']}"
+                    busy = TargetBusy(
+                        f"target '{bot_id}' is {state.describe()}"
                     )
-                existing_status = conn.execute(
-                    sa_text("SELECT status FROM turn_logs WHERE id=:id FOR UPDATE"),
-                    {"id": turn_id},
-                ).scalar_one_or_none()
-                if existing_status is not None:
-                    if existing_status != "reserved":
-                        raise RuntimeError(f"turn id already exists: {turn_id}")
+                else:
+                    if existing_status is not None:
+                        if existing_status != "reserved":
+                            raise RuntimeError(f"turn id already exists: {turn_id}")
+                        conn.execute(
+                            sa_text(
+                                "UPDATE turn_logs SET request_id=:request_id, path=:path,"
+                                " stream=:stream, model=:model, bot_id=:bot_id, user_id=:user_id,"
+                                " status=:status, latency_ms=:latency_ms, user_prompt=:user_prompt,"
+                                " request_json=:request_json, response_text=:response_text,"
+                                " error_text=:error_text, trigger_message_id=:trigger_message_id,"
+                                " assistant_message_id=:assistant_message_id,"
+                                " agent_session_key=:agent_session_key,"
+                                " agent_request_id=:agent_request_id, animation=:animation,"
+                                " token_usage_json=:token_usage_json, parent_turn_id=:parent_turn_id"
+                                " WHERE id=:turn_id"
+                            ),
+                            {
+                                "turn_id": turn_id,
+                                "request_id": request_id,
+                                "path": path,
+                                "stream": stream,
+                                "model": model,
+                                "bot_id": bot_id,
+                                "user_id": user_id,
+                                "status": status,
+                                "latency_ms": latency_ms,
+                                "user_prompt": user_prompt,
+                                "request_json": json.dumps(request_payload, ensure_ascii=False, default=str) if request_payload else None,
+                                "response_text": response_text,
+                                "error_text": error_text,
+                                "trigger_message_id": trigger_message_id,
+                                "assistant_message_id": assistant_message_id,
+                                "agent_session_key": agent_session_key,
+                                "agent_request_id": agent_request_id,
+                                "animation": animation,
+                                "token_usage_json": token_usage_json,
+                                "parent_turn_id": parent_turn_id,
+                            },
+                        )
+                        return
+
+                    # Ordinary turn insert stays inside the advisory-lock transaction
+                    # so it cannot cross a delivery claim between check and commit.
                     conn.execute(
-                        sa_text(
-                            "UPDATE turn_logs SET request_id=:request_id, path=:path,"
-                            " stream=:stream, model=:model, bot_id=:bot_id, user_id=:user_id,"
-                            " status=:status, latency_ms=:latency_ms, user_prompt=:user_prompt,"
-                            " request_json=:request_json, response_text=:response_text,"
-                            " error_text=:error_text, trigger_message_id=:trigger_message_id,"
-                            " assistant_message_id=:assistant_message_id,"
-                            " agent_session_key=:agent_session_key,"
-                            " agent_request_id=:agent_request_id, animation=:animation,"
-                            " token_usage_json=:token_usage_json, parent_turn_id=:parent_turn_id"
-                            " WHERE id=:turn_id"
-                        ),
-                        {
-                            "turn_id": turn_id,
-                            "request_id": request_id,
-                            "path": path,
-                            "stream": stream,
-                            "model": model,
-                            "bot_id": bot_id,
-                            "user_id": user_id,
-                            "status": status,
-                            "latency_ms": latency_ms,
-                            "user_prompt": user_prompt,
-                            "request_json": json.dumps(request_payload, ensure_ascii=False, default=str) if request_payload else None,
-                            "response_text": response_text,
-                            "error_text": error_text,
-                            "trigger_message_id": trigger_message_id,
-                            "assistant_message_id": assistant_message_id,
-                            "agent_session_key": agent_session_key,
-                            "agent_request_id": agent_request_id,
-                            "animation": animation,
-                            "token_usage_json": token_usage_json,
-                            "parent_turn_id": parent_turn_id,
-                        },
+                        TurnLog.__table__.insert().values(
+                            id=turn_id,
+                            created_at=created_at,
+                            request_id=request_id,
+                            path=path,
+                            stream=stream,
+                            model=model,
+                            bot_id=(bot_id or None),
+                            user_id=(user_id or None),
+                            status=status,
+                            latency_ms=latency_ms,
+                            user_prompt=user_prompt,
+                            request_json=json.dumps(request_payload, ensure_ascii=False, default=str) if request_payload else None,
+                            response_text=response_text,
+                            error_text=error_text,
+                            trigger_message_id=trigger_message_id,
+                            assistant_message_id=assistant_message_id,
+                            agent_session_key=agent_session_key,
+                            agent_request_id=agent_request_id,
+                            animation=animation,
+                            token_usage_json=token_usage_json,
+                            parent_turn_id=parent_turn_id,
+                            ended_at=(_terminal_ended_at(created_at, latency_ms) if _is_terminal(status, None) else None),
+                        )
                     )
                     return
-
-                # Ordinary turn insert stays inside the advisory-lock transaction
-                # so it cannot cross a delivery claim between check and commit.
-                conn.execute(
-                    TurnLog.__table__.insert().values(
-                        id=turn_id,
-                        created_at=created_at,
-                        request_id=request_id,
-                        path=path,
-                        stream=stream,
-                        model=model,
-                        bot_id=(bot_id or None),
-                        user_id=(user_id or None),
-                        status=status,
-                        latency_ms=latency_ms,
-                        user_prompt=user_prompt,
-                        request_json=json.dumps(request_payload, ensure_ascii=False, default=str) if request_payload else None,
-                        response_text=response_text,
-                        error_text=error_text,
-                        trigger_message_id=trigger_message_id,
-                        assistant_message_id=assistant_message_id,
-                        agent_session_key=agent_session_key,
-                        agent_request_id=agent_request_id,
-                        animation=animation,
-                        token_usage_json=token_usage_json,
-                        parent_turn_id=parent_turn_id,
-                        ended_at=(_terminal_ended_at(created_at, latency_ms) if _is_terminal(status, None) else None),
-                    )
-                )
-                return
+            raise busy  # after the commit: the own-reservation release must persist
 
         row = TurnLog(
             id=turn_id,
@@ -282,6 +308,29 @@ class TurnLogStore:
     def _encode_token_usage(self, token_usage: dict | None, model: str | None) -> str | None:
         """Usage JSON with the serving access path frozen in (see turn_usage)."""
         return encode_token_usage(token_usage, model_ref=model, catalog=getattr(self.config, "model_catalog", None))
+
+    def bind_agent_bridge(self, *, turn_id: str, session_key: str, request_id: str) -> None:
+        """Bind before publication, refusing a turn finalized by another owner.
+
+        A worker may outlive its HTTP request or lose a race to cancellation.
+        Updating a terminal row used to silently do nothing while the caller
+        still sent chat.send; the row lock makes the decision atomic with the
+        persisted bridge identity. This is not an orphan-replay authority.
+        """
+        from .turn_execution import TurnExecutionCancelled
+
+        if self.engine is None:
+            raise TurnExecutionCancelled("turn admission database is unavailable")
+        with Session(self.engine) as session:
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            if (row is None or row.ended_at is not None
+                    or row.status not in {"pending", "streaming"}
+                    or (row.agent_request_id is not None and row.agent_request_id != request_id)):
+                raise TurnExecutionCancelled(f"turn '{turn_id}' no longer permits bridge publication")
+            row.agent_session_key = session_key
+            row.agent_request_id = request_id
+            session.add(row)
+            session.commit()
 
     def update_turn(
         self,
@@ -446,9 +495,12 @@ class TurnLogStore:
         mid-turn). They are stamped ``status='timeout'``,
         ``end_reason='timeout'`` and ``ended_at=now`` atomically.
 
-        Registered live/queued workers and cancellation intent are excluded:
-        another turn's first output is not evidence that those workers stopped.
-        Unresolved tools of genuinely reaped turns settle in the same transaction.
+        Registered live/queued workers, fresh cancellation intent and ordinary
+        admitted agent starts are excluded: another turn's first output cannot
+        prove their bridge work stopped. Ordinary orphan recovery requires a
+        separate, fenced publication authority; until then the open row blocks
+        admission rather than being closed by a guessed timeout. Unresolved
+        tools of genuinely reaped legacy turns settle in the same transaction.
 
         Returns the reaped rows as ``[{"id": ..., "user_id": ...}]`` so the
         caller can emit a ``turn_complete`` per row to clear UI indicators on
@@ -475,15 +527,30 @@ class TurnLogStore:
         with Session(self.engine) as session:
             return session.exec(select(TurnLog).where(TurnLog.id == turn_id)).first()
 
+    def reserve_idle_turn(self, **kwargs) -> bool:
+        """Fenced idle reservation (see ``turn_admission.reserve_turn``).
+
+        Returns False when no database is configured; raises ``TargetBusy``
+        when the target is not idle. Taken BEFORE external side effects.
+        """
+        if self.engine is None:
+            return False
+        reserve_turn(self.engine, **kwargs)
+        return True
+
+    def release_reservation(self, turn_id: str, *, owner: str, fence=None) -> bool:
+        if self.engine is None or not turn_id or not owner:
+            return False
+        return release_reservation(self.engine, turn_id, owner=owner, fence=fence)
+
     def active_turn_for_bot(
         self, bot_id: str, *, within_seconds: int = 1800
     ) -> TurnLog | None:
         """Return the bot's most recent in-flight turn, or None if idle.
 
-        In-flight == ``ended_at IS NULL``.  ``within_seconds`` bounds the scan
-        so a crashed/zombie turn (never stamped) stops blocking after a sane
-        window — callers wanting to override that should pass force, not widen
-        the window.  Path-agnostic: matches streaming and non-streaming turns.
+        An open reservation is not an executing/steerable turn. ``within_seconds``
+        bounds the scan so a crashed/zombie turn stops blocking after a sane
+        window. Path-agnostic: matches streaming and non-streaming turns.
         """
         if self.engine is None or not bot_id:
             return None
@@ -493,6 +560,7 @@ class TurnLogStore:
                 select(TurnLog)
                 .where(TurnLog.bot_id == bot_id)
                 .where(TurnLog.ended_at.is_(None))
+                .where(TurnLog.status != RESERVED)
                 .where(TurnLog.created_at > cutoff)
                 .order_by(TurnLog.created_at.desc())
             ).first()
@@ -541,9 +609,10 @@ class TurnLogStore:
         if status:
             conditions.append(TurnLog.status == status.strip().lower())
         if active_only:
-            # In-progress, path-agnostic: streaming AND non-streaming in-flight
-            # turns. Supersedes the old status="streaming" proxy.
+            # Only accepted turns can be steered. Reservations are admission
+            # fences, not executing turns, even though they have no ended_at.
             conditions.append(TurnLog.ended_at.is_(None))
+            conditions.append(TurnLog.status != RESERVED)
         if stream is not None:
             conditions.append(TurnLog.stream.is_(stream))
         if has_tools is not None:

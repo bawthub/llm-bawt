@@ -109,6 +109,36 @@ async def test_run_absorbs_transient_sweep_error_and_backs_off_in_place():
 
 
 @pytest.mark.asyncio
+async def test_talk_outbound_wait_never_blocks_agent_delivery_sweep():
+    dispatcher = _make_dispatcher()
+    dispatcher.service._turn_log_store = object()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_reply(_deliveries, _turns):
+        entered.set()
+        await release.wait()
+
+    dispatcher.talk_replies = SimpleNamespace(drain=blocked_reply)
+    sweeps = []
+    dispatcher._schedule_eligible_targets = lambda: sweeps.append(True)
+    loop_task = asyncio.create_task(dispatcher.run())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        dispatcher._wake_event.set()
+        for _ in range(100):
+            if len(sweeps) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(sweeps) >= 2
+        assert dispatcher._talk_reply_task is not None
+    finally:
+        release.set()
+        dispatcher._stop_event.set()
+        dispatcher._wake_event.set()
+        await asyncio.wait_for(loop_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_leadership_loop_survives_run_crash(monkeypatch, caplog):
     """A crash escaping run() must be logged and the loop restarted."""
 
@@ -207,6 +237,39 @@ async def test_scheduler_recovery_logs_when_subscriber_reconnects(caplog):
     assert len(reconnect_messages) == 1, (
         f"expected one reconnect log; got {reconnect_messages}"
     )
+
+
+@pytest.mark.asyncio
+async def test_ordinary_queue_lifecycle_routes_to_requesting_user():
+    from unittest.mock import AsyncMock
+
+    dispatcher = _make_dispatcher()
+    publish = AsyncMock()
+    dispatcher.service._redis_subscriber.publish_tool_event = publish
+    record = SimpleNamespace(
+        id="delivery-1", status="DISPATCHING", sender_bot_id="target",
+        target_bot_id="target", author_entity_type="user", author_entity_id="alice",
+        user_message_id="user-1", turn_id="turn-1", target_turn_id="turn-1",
+        delivery_mode="turn", session_policy="continue", reset_status=None,
+        reset_reason=None, old_session_id=None, new_session_id=None, reset_at=None,
+        overflow_recovery_count=0, attempt_count=1, next_retry_at=None,
+        last_error=None, project_id=None, task_id=None, message_kind=None,
+        metadata={"ordinary_chat": {"session_id": "session-1"}},
+    )
+    await dispatcher._emit(record)
+    publish.assert_awaited_once()
+    args = publish.await_args.args
+    assert args[0:2] == ("target", "alice")
+    assert args[2]["user_message_id"] == "user-1"
+    assert args[2]["session_id"] == "session-1"
+    assert args[2]["ordinary_chat"] is True
+
+    publish.reset_mock()
+    record.metadata = {}
+    record.author_entity_type = "bot"
+    await dispatcher._emit(record)
+    assert "ordinary_chat" not in publish.await_args.args[2]
+    assert "session_id" not in publish.await_args.args[2]
 
 
 @pytest.mark.asyncio

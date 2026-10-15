@@ -6,12 +6,26 @@ so clients that can't pass extra params can use a base URL like:
 and point their OpenAI-compatible client at it.
 """
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+import json
+import time
+import uuid
 
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from ..chat_streaming import request_failed_events, stream_stop_events
+from ..delivery_reply import DeliveryReplyMismatch, is_accepted_receipt, wait_for_receipt_reply
 from ..dependencies import get_service
 from ..logging import get_service_logger
-from ..schemas import ChatCompletionRequest, ModelInfo, ModelsResponse
+from ..schemas import (
+    ChatCompletionChoice,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    ModelInfo,
+    ModelsResponse,
+    UsageInfo,
+)
 
 router = APIRouter()
 log = get_service_logger(__name__)
@@ -118,29 +132,107 @@ async def botchat_completions(bot_id: str, user_id: str, request: ChatCompletion
     )
 
     if request.stream:
-        try:
-            return StreamingResponse(
-                service.chat_completion_stream(request),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                },
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            log.exception("Streaming botchat completion failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return StreamingResponse(
+            _stream_with_reply(service, request),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
 
     try:
         response = await service.chat_completion(request)
-        return response
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         log.exception("botchat completion failed")
         raise HTTPException(status_code=500, detail=str(e))
+    if not is_accepted_receipt(response):
+        return response
+    reply = await _await_reply(service, request, response)
+    status = reply.get("status")
+    if status == "DELIVERED":
+        return ChatCompletionResponse(
+            model=_reply_model(request),
+            choices=[ChatCompletionChoice(
+                index=0, finish_reason="stop",
+                message=ChatMessage(role="assistant", content=reply.get("response_text") or ""),
+            )],
+            usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+    if status in _PENDING_REPLY:
+        # Still running at the deadline: hand back the exact receipt.
+        return JSONResponse(content={**response, "status": status}, status_code=202)
+    raise HTTPException(status_code=502, detail=reply.get("error") or str(status).lower())
+
+
+# OpenAI-compatible clients cannot follow a queued receipt, so botchat waits
+# for the exact admitted turn instead of bypassing the shared admission queue.
+BOTCHAT_REPLY_TIMEOUT_SECONDS = 300.0
+_PENDING_REPLY = frozenset({"QUEUED", "STEERING", "DISPATCHING", "IN_FLIGHT"})
+
+
+def _reply_model(request: ChatCompletionRequest) -> str:
+    return request.model or request.bot_id or "agent"
+
+
+async def _await_reply(service, request: ChatCompletionRequest, receipt: dict) -> dict:
+    """Bounded wait on the receipt's own delivery/turn; never a second submit."""
+    dispatcher = getattr(service, "_inter_bot_dispatcher", None)
+    deliveries = getattr(dispatcher, "store", None)
+    if deliveries is None and receipt.get("delivery_id"):
+        # Cannot observe the outbox from here; report it as still pending.
+        return {"status": str(receipt.get("status") or "QUEUED")}
+    try:
+        return await wait_for_receipt_reply(
+            deliveries, service._turn_log_store, receipt,
+            bot_id=receipt.get("bot_id") or request.bot_id,
+            user_id=receipt.get("user_id") or request.user,
+            timeout_seconds=BOTCHAT_REPLY_TIMEOUT_SECONDS,
+        )
+    except DeliveryReplyMismatch as exc:
+        log.warning("botchat receipt could not be resolved: %s", exc)
+        return {"status": "UNRESOLVED", "error": str(exc)}
+
+
+def _accepted_receipt_from_event(event: str) -> dict | None:
+    if not event.startswith("data: ") or "chat.completion." not in event:
+        return None
+    try:
+        payload = json.loads(event[6:])
+    except ValueError:
+        return None
+    return payload if is_accepted_receipt(payload) else None
+
+
+async def _stream_with_reply(service, request: ChatCompletionRequest):
+    """Pass the stream through; replace an admission receipt with its reply."""
+    async for event in service.chat_completion_stream(request):
+        receipt = _accepted_receipt_from_event(event)
+        if receipt is None:
+            yield event
+            continue
+        reply = await _await_reply(service, request, receipt)
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created, model = int(time.time()), _reply_model(request)
+        if reply.get("status") != "DELIVERED":
+            status = str(reply.get("status") or "unresolved")
+            error = RuntimeError(reply.get("error") or (
+                f"reply not ready ({status}); delivery {receipt.get('delivery_id') or receipt.get('turn_id')}"
+                if status in _PENDING_REPLY else status.lower()))
+            for failed in request_failed_events(response_id, created, model, error):
+                yield failed
+            return
+        chunk = {
+            "id": response_id, "object": "chat.completion.chunk", "created": created,
+            "model": model, "choices": [{"index": 0, "finish_reason": None, "delta": {
+                "role": "assistant", "content": reply.get("response_text") or ""}}],
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        for trailer in stream_stop_events(response_id, created, model):
+            yield trailer
+        return
 
 
 @router.get(

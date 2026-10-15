@@ -19,6 +19,7 @@ from rich.table import Table
 from llm_bawt.bot_types import format_bot_type
 from llm_bawt.bots import BotManager
 from llm_bawt.core import LLMBawt
+from llm_bawt.service.delivery_reply import is_accepted_receipt
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.streaming import render_complete_response, render_streaming_response
 
@@ -67,6 +68,28 @@ def query_via_service(
 
     title_style, border_style = panel_color, panel_color
 
+    def resolve_accepted_receipt(receipt: dict) -> str | None:
+        reference = receipt.get("delivery_id") or receipt.get("turn_id") or "unknown"
+        if receipt.get("object") == "chat.completion.in_flight":
+            console.print(f"[yellow]Turn {escape(str(reference))} was already accepted; check its result in chat.[/yellow]")
+            return None
+        try:
+            reply = client.wait_for_queued_reply(receipt, bot_id=bot_id, user_id=user_id)
+        except Exception as exc:
+            console.print(f"[yellow]Request {escape(str(reference))} was accepted; its reply could not be verified yet: {escape(str(exc))}[/yellow]")
+            return None
+        if reply is None:
+            console.print(f"[yellow]Request {escape(str(reference))} was accepted; its reply is still pending.[/yellow]")
+            return None
+        if reply.get("status") != "DELIVERED":
+            console.print(f"[yellow]Request {escape(str(reference))} ended with status {escape(str(reply.get('status')))}.[/yellow]")
+            return None
+        answer = reply.get("response_text")
+        if not isinstance(answer, str):
+            console.print(f"[yellow]Request {escape(str(reference))} finished without a verified text reply.[/yellow]")
+            return None
+        return answer
+
     def format_panel_title(actual_model: str | None) -> str:
         """Format panel title with actual model used."""
         # Use \[ to escape opening bracket so Rich doesn't interpret [model] as markup
@@ -92,11 +115,17 @@ def query_via_service(
             # Extract model from first metadata chunk, then yield content
             actual_model = model  # Default to requested model
             got_metadata = False  # Track if service responded with model info
+            accepted_receipt = False
 
             def content_iterator() -> Iterator[str]:
-                nonlocal actual_model, got_metadata
+                nonlocal actual_model, got_metadata, accepted_receipt
                 for item in raw_iterator:
-                    if isinstance(item, dict) and "warnings" in item:
+                    if is_accepted_receipt(item):
+                        accepted_receipt = True
+                        answer = resolve_accepted_receipt(item)
+                        if answer:
+                            yield answer
+                    elif isinstance(item, dict) and "warnings" in item:
                         # Service warnings (e.g. model fallback)
                         for warning in item["warnings"]:
                             console.print(f"[yellow]{warning}[/yellow]")
@@ -141,6 +170,8 @@ def query_via_service(
             try:
                 first_content = next(content_iter)
             except StopIteration:
+                if accepted_receipt:
+                    return True  # Accepted work is never an unavailable-service fallback.
                 if got_metadata:
                     # Service responded (we got the model) but produced no content.
                     # This typically means a server-side error (e.g. tool execution failed).
@@ -172,7 +203,7 @@ def query_via_service(
             )
             # If streaming returned no content (service error), fall back to local
             if not result:
-                return False
+                return accepted_receipt
             return True
         else:
             # Non-streaming: get full response to extract actual model
@@ -183,6 +214,18 @@ def query_via_service(
                 user_id=user_id,
                 stream=False,
             )
+            if is_accepted_receipt(response):
+                answer = resolve_accepted_receipt(response)
+                if answer:
+                    if plaintext_output:
+                        print(answer)
+                    else:
+                        render_complete_response(
+                            response=answer, console=console,
+                            panel_title=format_panel_title(model),
+                            panel_border_style=border_style,
+                        )
+                return True
             if response and "choices" in response:
                 content = response["choices"][0].get("message", {}).get("content")
                 actual_model = response.get("model", model)  # Use actual model from response

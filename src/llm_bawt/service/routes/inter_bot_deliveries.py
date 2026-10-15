@@ -13,11 +13,13 @@ from ...agent_context import (
     preventive_session_policy,
     validate_session_policy,
 )
+from ...bot_types import durable_agent_backend
 from ...bots import BotManager
 from ...inter_bot_delivery import submission_result
 from ...message_authorship import AuthorReference, normalize_author
 from ...model_catalog import bot_model_ref
 from ..dependencies import get_service
+from ..delivery_reply import DeliveryReplyMismatch, resolve_delivery_reply
 
 router = APIRouter()
 
@@ -97,13 +99,7 @@ async def create_delivery(body: DeliveryCreate):
         raise HTTPException(status_code=422, detail="message is required")
     target_bot = BotManager(get_service().config).get_bot(target)
     target_exists = target_bot is not None
-    durable_capable = bool(
-        target_bot
-        and (
-            target_bot.agent_backend in {"claude-code", "codex", "openclaw"}
-            or target_bot.harness in {"claude-code", "codex", "openclaw"}
-        )
-    )
+    durable_capable = bool(target_bot and durable_agent_backend(target_bot))
     try:
         policy = normalize_session_policy(
             body.session_policy,
@@ -245,6 +241,27 @@ def get_delivery(delivery_id: str):
     if record is None or "prompt_schedule" in (record.metadata or {}):
         raise HTTPException(status_code=404, detail="Delivery not found")
     return record.to_api()
+
+
+@router.get("/v1/inter-bot-deliveries/{delivery_id}/reply", tags=["Inter-Bot Deliveries"])
+def get_delivery_reply(
+    delivery_id: str,
+    bot_id: str = Query(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+    user_message_id: str = Query(..., min_length=1),
+):
+    """Read the exact queued turn's final text, never an unverified ACK."""
+    dispatcher = _dispatcher()
+    try:
+        reply = resolve_delivery_reply(
+            dispatcher.store, get_service()._turn_log_store, delivery_id,
+            bot_id=bot_id, user_id=user_id, user_message_id=user_message_id,
+        )
+    except DeliveryReplyMismatch as exc:
+        raise HTTPException(status_code=404, detail="Delivery not found") from exc
+    if reply is None:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    return reply
 
 
 @router.get("/v1/inter-bot-deliveries", tags=["Inter-Bot Deliveries"])

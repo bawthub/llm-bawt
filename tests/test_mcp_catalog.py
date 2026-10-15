@@ -103,7 +103,9 @@ async def test_catalog_token_budgets():
     # Keep its paid-call warning and typed time/pagination fields intact.
     # x_counts tool + x_search sort_order/include_authors: measured 11,425.
     # TASK-1047 self_model (+146 tokens incl. typed action enum): measured 11,618.
-    assert total <= 11625, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1082: optional one-word session rotation key adds eight schema tokens.
+    # Measured compact catalog: 11,626 (+8 over the previous 11,618).
+    assert total <= 11626, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

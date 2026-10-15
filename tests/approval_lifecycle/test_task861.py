@@ -20,12 +20,14 @@ from llm_bawt.approval_policies import (
 from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
 from llm_bawt.service import approval_continuations as continuations
 from llm_bawt.service.routes import approval_policies as routes
+from tests.test_mcp_approval_continuations import FakeTurnStore
 
 
 @pytest.fixture
 def store():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     value = ToolApprovalPolicyStore(None, engine=engine)
+    FakeTurnStore.default_engine = engine
     yield value
     engine.dispose()
 
@@ -299,6 +301,13 @@ def test_client_owner_gets_explicit_grant_failure_not_success(client, store):
 
 
 class SessionService:
+    def __getattr__(self, name):
+        # Per-instance fenced admission store unless a test class defines one.
+        if name == "_turn_log_store":
+            self._turn_log_store = FakeTurnStore()
+            return self._turn_log_store
+        raise AttributeError(name)
+
     def get_memory_client(self, bot_id, user_id):
         return SimpleNamespace(get_session=lambda session_id: {
             "id": session_id, "bot_id": bot_id, "user_id": user_id,
@@ -318,6 +327,7 @@ def test_dispatch_is_session_bound_and_retry_has_stable_identity(store):
             requests.append(request)
             if len(requests) == 1:
                 raise RuntimeError("offline")
+            self._turn_log_store.finish()
             yield "data: [DONE]\n\n"
 
     service = Service()
@@ -445,6 +455,12 @@ def test_continuation_turn_error_does_not_count_as_delivery(store):
     class TurnStore:
         def get_turn(self, turn_id):
             return SimpleNamespace(ended_at=datetime.now(timezone.utc), status="error", error_text="provider failed") if completed else None
+
+        def reserve_idle_turn(self, **kwargs):
+            return True
+
+        def release_reservation(self, turn_id, *, owner, fence=None):
+            return False
 
     class Service(SessionService):
         _turn_log_store = TurnStore()

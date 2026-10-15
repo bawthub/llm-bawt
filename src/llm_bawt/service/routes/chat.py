@@ -847,7 +847,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     - `include_summaries`: Whether to inject conversation summary records into context (default: true)
     - `tts_mode`: Whether to append TTS output formatting instructions to the system prompt (default: false)
     """
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     
     service = get_service()
 
@@ -892,6 +892,9 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     # Non-streaming
     try:
         response = await service.chat_completion(request)
+        from ..delivery_reply import is_accepted_receipt
+        if is_accepted_receipt(response):
+            return JSONResponse(content=response, status_code=202)
         return response
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

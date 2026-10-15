@@ -468,9 +468,8 @@ def bot_in_turn(
 ):
     """Report whether a bot is currently in a turn (path-agnostic).
 
-    ``in_turn`` is true iff the bot has a turn-log row with ``ended_at IS NULL``
-    inside the window — the same single source of truth for streaming and
-    non-streaming, local and agent-backend turns.
+    ``in_turn`` is true for an accepted, unfinished turn inside the window;
+    an open admission reservation is not yet an executing turn.
     """
     store = get_turn_log_store()
     if store.engine is None:

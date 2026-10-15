@@ -9,7 +9,7 @@ from datetime import timedelta
 from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import and_, or_, update
+from sqlalchemy import and_, case, or_, update
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -627,6 +627,66 @@ class McpApprovalStoreMixin:
             session.commit()
             session.expire_all()
             return session.get(ToolApprovalRequest, request_id)
+
+    def defer_continuation_claim(
+        self,
+        request_id: str,
+        *,
+        claim_token: str,
+        reason: str,
+        delay_seconds: float,
+    ) -> bool:
+        """Return a claim lost to target admission (TASK-1082) without failing it.
+
+        Waiting for the target's running turn is not a delivery attempt: the
+        attempt is refunded, the claim is fenced by its token, and the reason
+        stays visible on the row. Mirrors delivery ``requeue(refund_attempt)``.
+        """
+        if self.engine is None:
+            raise ApprovalStoreUnavailable("Approval database unavailable")
+        with Session(self.engine) as session:
+            result = session.exec(
+                update(ToolApprovalRequest)
+                .where(
+                    ToolApprovalRequest.id == request_id,
+                    ToolApprovalRequest.continuation_state == CONT_DISPATCHING,
+                    ToolApprovalRequest.continuation_claim_token == claim_token,
+                )
+                .values(
+                    continuation_state=CONT_PENDING,
+                    continuation_claim_token=None,
+                    continuation_last_error=str(reason)[:2000],
+                    continuation_next_attempt_at=_utcnow()
+                    + timedelta(seconds=max(0.0, delay_seconds)),
+                    continuation_attempts=case(
+                        (ToolApprovalRequest.continuation_attempts > 0,
+                         ToolApprovalRequest.continuation_attempts - 1),
+                        else_=0,
+                    ),
+                )
+            )
+            session.commit()
+            return int(result.rowcount or 0) == 1
+
+    def continuation_claim_fence(self, request_id: str, claim_token: str):
+        """Fence proving ``claim_token`` still owns the continuation (TASK-1082).
+
+        The returned callable runs inside the caller's transaction (turn
+        admission shares this database via the shared engine). On PostgreSQL
+        it locks the approval row FOR UPDATE, so a reclaim cannot interleave
+        between the ownership check and the caller's write before commit.
+        """
+        params = {"id": request_id, "state": CONT_DISPATCHING, "token": claim_token}
+
+        def holds(conn) -> bool:
+            lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+            return conn.execute(sa_text(
+                "SELECT 1 FROM tool_approval_requests WHERE id=:id"
+                " AND continuation_state=:state AND continuation_claim_token=:token"
+                + lock
+            ), params).first() is not None
+
+        return holds
 
     def renew_continuation_claim(self, request_id, claim_token):
         if self.engine is None:
