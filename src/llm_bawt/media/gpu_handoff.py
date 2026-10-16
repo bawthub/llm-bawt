@@ -16,7 +16,7 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 
-from .gpu_handoff_store import GpuHandoffStore, HandoffConflict
+from .gpu_handoff_store import OPS_ACTIONS, GpuHandoffStore, HandoffConflict
 from .gpu_profile import CALIBRATION_PROFILE
 
 STOP_OPERATIONS = ("bawthub.stop-moshi-stt", "bawthub.stop-moshi-tts")
@@ -55,13 +55,16 @@ class HandoffAdapter(ABC):
     @abstractmethod
     async def job_status(self, job_id: str) -> dict: ...
 
+    @abstractmethod
+    async def find_operation(self, *, generation: int, slug: str) -> dict | None: ...
+
 
 class GpuHandoff:
     def __init__(self, store: GpuHandoffStore, adapter: HandoffAdapter, *, poll_interval: float = 1,
-                 job_timeout: float = 150, health_timeout: float = 300):
+                 job_timeout: float = 150, health_timeout: float = 300, drain_timeout: float = 1800):
         self.store, self.adapter = store, adapter
         self.poll_interval, self.job_timeout = poll_interval, job_timeout
-        self.health_timeout = health_timeout
+        self.health_timeout, self.drain_timeout = health_timeout, drain_timeout
 
     @staticmethod
     def _check(observed: dict, *, stopped: tuple[str, ...] = (), lease: str | None = None,
@@ -202,9 +205,52 @@ class GpuHandoff:
                     return
                 await asyncio.sleep(self.poll_interval)
 
+    async def claim_resolution(self, *, job_id: str) -> dict:
+        record = await asyncio.to_thread(self.store.resolved_video_claim, job_id)
+        if record is None:
+            raise HandoffConflict("No archived resolution for that video claim")
+        return record
+
+    async def resolve_video_claim(self, *, user: str, job_id: str, expected_generation: int,
+                                  outcome: str, evidence: str, approved: bool,
+                                  media_observation: dict | None) -> dict:
+        """Operator-reviewed claim disposition; never infer a render's outcome."""
+        if approved is not True:
+            raise HandoffConflict("Claim resolution was not approved; no ledger change")
+        state = await asyncio.to_thread(self.store.status)
+        if state.owner != "voice" or state.phase != "idle" or state.generation != expected_generation:
+            raise HandoffConflict("Restore voice and refresh GPU state before reviewing uncertain renders")
+        observed = await self.adapter.observe()
+        self._check_restorable(observed)
+        if (observed["model"].get("resident") is not False
+                or observed["voice"].get("parked") is not False
+                or any(observed["services"][service].get("running") is not True
+                       or observed["services"][service].get("health") != "healthy" for service in SERVICES)):
+            raise HandoffConflict("Worker unload and healthy, open voice must be verified before resolving claims")
+        media = media_observation or None
+        if media and media.get("provider") != "local-video":
+            raise HandoffConflict("Claim media record does not belong to local video")
+        if outcome == "completed" and not (media and media.get("status") == "completed" and media.get("file_path")):
+            raise HandoffConflict("Completed outcome requires a persisted local-video artifact")
+        if outcome == "failed" and not (media and media.get("status") == "failed"):
+            raise HandoffConflict("Failed outcome requires a terminal failed local-video record")
+        if outcome == "unknown" and media and media.get("status") == "completed" and media.get("file_path"):
+            raise HandoffConflict("A completed media artifact exists; inspect and resolve it as completed")
+        record = {"gpu": {"uuid": observed["gpu"]["uuid"], "observed_at": observed["gpu"]["observed_at"]},
+                  "model": {key: observed["model"].get(key) for key in ("resident", "active", "queued", "worker_uncertain")},
+                  "services": {service: {key: observed["services"][service].get(key)
+                                          for key in ("id", "running", "health")} for service in SERVICES},
+                  "media": media}
+        return await asyncio.to_thread(self.store.resolve_video_claim, job_id=job_id, user=user,
+                                       expected_generation=expected_generation, outcome=outcome,
+                                       evidence=evidence, observations=record)
+
     async def resume_video(self, *, user: str, expected_generation: int) -> dict:
-        """Recovery toward video. Touches nothing: it re-verifies, with the same
-        live check the forward switch ends on, that the GPU is still video's."""
+        """Recovery toward video. Never clear an unresolved external operation."""
+        state = await asyncio.to_thread(self.store.status)
+        if state.phase != "recovery_required" or state.generation != expected_generation:
+            raise HandoffConflict("GPU state changed; refresh and try again")
+        await self._check_recovery_receipt(state)
         lease = await asyncio.to_thread(self.store.voice_lease)
         if not lease:
             raise HandoffConflict("No recorded voice pause to resume under; restore voice first")
@@ -218,32 +264,116 @@ class GpuHandoff:
         return {"owner": state.owner, "generation": state.generation}
 
     @staticmethod
-    def _check_restorable(observed: dict) -> None:
-        """Restore needs only an idle video worker and identifiable Moshi containers."""
+    def _check_restore_telemetry(observed: dict) -> None:
+        gpu = observed["gpu"]
+        try:
+            age = (datetime.now(UTC) - datetime.fromisoformat(gpu["observed_at"])).total_seconds()
+            total, free = gpu["total_mib"], gpu["free_mib"]
+            valid = (gpu.get("ready") is True and isinstance(gpu.get("uuid"), str)
+                     and gpu["uuid"].startswith("GPU-") and 0 <= age <= 15
+                     and type(total) is int and type(free) is int and 0 <= free <= total and total > 0)
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise HandoffConflict("GPU telemetry is stale or unavailable; do not transfer ownership")
+
+    @staticmethod
+    def _check_restorable(observed: dict, *, allow_busy: bool = False, recovery: bool = False) -> None:
+        """Never reset a busy/uncertain worker; a consented drain can await it."""
+        GpuHandoff._check_restore_telemetry(observed)
         model, voice, services = observed["model"], observed["voice"], observed["services"]
-        if model.get("active") is not False or model.get("queued") != 0:
+        if (not isinstance(model, dict) or type(model.get("active")) is not bool
+                or type(model.get("queued")) is not int or model["queued"] < 0
+                or type(model.get("worker_uncertain")) is not bool
+                or (model["worker_uncertain"] and not recovery)):
+            raise HandoffConflict("Video worker state is unavailable or uncertain; reconcile before switching")
+        if not allow_busy and (model["active"] or model["queued"]):
             raise HandoffConflict("A local video render is still running; wait for it to finish")
-        if type(voice.get("active_count")) is not int or voice["active_count"] != 0:
+        if (type(voice.get("active_count")) is not int or voice["active_count"] != 0
+                or type(voice.get("active_gpu_work")) is not int or voice["active_gpu_work"] != 0):
             raise HandoffConflict("Active voice work blocks the switch")
         if any(not services[service].get("id") for service in SERVICES):
             raise HandoffConflict("Moshi container identity is unavailable")
 
+    async def _check_restore_lease(self, observed: dict) -> str | None:
+        lease = await asyncio.to_thread(self.store.voice_lease)
+        voice = observed["voice"]
+        if voice.get("parked") is True:
+            if not lease or voice.get("park_id") != lease:
+                raise HandoffConflict("Voice park lease was lost; do not reset the video worker")
+        elif voice.get("parked") is not False:
+            raise HandoffConflict("Voice admission state is unavailable")
+        return lease
+
+    async def _check_restore_admission(self, state, observed: dict) -> None:
+        claims = await asyncio.to_thread(self.store.active_video_jobs)
+        # A busy worker with no durable claims is not one of our accepted jobs.
+        recovering = state.owner == "unknown" and state.phase in ("recovery_required", "offered")
+        if state.owner in ("video", "video_calibration") and claims:
+            self._check_restorable(observed, allow_busy=True)
+        else:
+            self._check_restorable(observed, recovery=recovering)
+        await self._check_restore_lease(observed)
+        if state.owner in ("video", "video_calibration") and observed["voice"].get("parked") is not True:
+            raise HandoffConflict("Voice park lease was lost; reconcile before unloading Wan")
+        if state.owner not in ("video", "video_calibration") and state.phase not in ("recovery_required", "offered"):
+            raise HandoffConflict("Video ownership requires reconciliation")
+        if state.owner in ("video", "video_calibration") and (observed["model"]["active"] or observed["model"]["queued"]) and not claims:
+            raise HandoffConflict("Busy video worker has no durable claims; reconcile before switching")
+        if state.phase == "recovery_required" and (observed["model"]["active"] or observed["model"]["queued"]):
+            raise HandoffConflict("A video render may still be running; do not reset its worker")
+
+
+    async def _check_recovery_receipt(self, state) -> dict | None:
+        """A missing dispatch response is not evidence that the op never ran."""
+        if state.phase != "recovery_required" or state.pending_action not in OPS_ACTIONS:
+            return None
+        actions = state.actions
+        index = state.next_action
+        if index >= len(actions) or actions[index] != state.pending_action:
+            raise HandoffConflict("Recovery cursor is inconsistent; inspect the stored transition")
+        slug = (START_OPERATIONS if state.target == "voice" else STOP_OPERATIONS)[
+            0 if state.pending_action.endswith("stt") else 1]
+        receipt = (await self.adapter.job_status(state.last_job_id) if state.last_job_id
+                   else await self.adapter.find_operation(generation=state.generation - 1, slug=slug))
+        if (not isinstance(receipt, dict) or receipt.get("operation") != slug
+                or (state.last_job_id and receipt.get("id") != state.last_job_id)
+                or receipt.get("terminal") is not True
+                or receipt.get("state") not in ("succeeded", "failed")
+                or (receipt.get("state") == "succeeded" and receipt.get("exit_code") != 0)):
+
+            raise HandoffConflict(f"Outcome of {slug} is unverified; inspect its ops receipt before restoring voice")
+        return {"action": state.pending_action, "job_id": receipt["id"], "state": receipt.get("state")}
+
     async def offer_restore(self, *, user: str, expected_generation: int) -> dict:
         state = await asyncio.to_thread(self.store.status)
-        if state.phase == "transitioning":
+        if state.phase in ("transitioning", "draining"):
             raise HandoffConflict("A GPU switch is already running")
         observed = await self.adapter.observe()
-        self._check_restorable(observed)
+        await self._check_restore_admission(state, observed)
+        receipt = await self._check_recovery_receipt(state)
+        if any(observed["services"][s].get("running") is not False
+               and observed["services"][s].get("health") == "unhealthy" for s in SERVICES):
+            raise HandoffConflict("A running Moshi service is unhealthy; inspect it before restoring voice")
         snapshots = await self.adapter.prepare_operations(START_OPERATIONS)
         await self.adapter.check_operations(snapshots, START_OPERATIONS)
-        plan = {"user": user, "target": "voice", "observed": observed, "operations": snapshots}
+        # A service already running must be verified, not started a second time.
+        # In particular, a lost ops response may describe a successful start.
+        starts = tuple(service for service in SERVICES if observed["services"][service].get("running") is False)
+        actions = ("reset_video_worker", *(f"start_moshi_{s}" for s in starts),
+                   "verify_voice", "unpark_voice")
+        plan = {"user": user, "target": "voice", "observed": observed, "operations": snapshots,
+                "recovery_receipt": receipt, "prior_error": state.last_error,
+                "start_services": starts}
         token, offered = await asyncio.to_thread(
-            self.store.offer, user=user, target="voice", actions=RESTORE_ACTIONS,
+            self.store.offer, user=user, target="voice", actions=actions,
             expected_generation=expected_generation, plan=plan,
         )
         return {"token": token, "generation": offered.generation, "expires_at": offered.expires_at,
-                "target": "voice", "actions": list(RESTORE_ACTIONS), "operations": list(START_OPERATIONS),
-                "warning": "Unloads Wan from the GPU and restarts Moshi speech. Moshi takes a minute or two to load."}
+                "target": "voice", "actions": list(actions),
+                "operations": [START_OPERATIONS[SERVICES.index(s)] for s in starts],
+                "warning": "Accepted videos finish first; Wan unloads before missing Moshi services start. "
+                           "Moshi may take a minute or two to load."}
 
     async def accept_restore(self, *, user: str, token: str, expected_generation: int, approved: bool) -> int:
         """Validate and consume consent synchronously; execution runs separately."""
@@ -253,10 +383,18 @@ class GpuHandoff:
         if plan.get("target") != "voice" or plan["user"] != user:
             raise HandoffConflict("Unexpected transition plan")
         await self.adapter.check_operations(plan["operations"], START_OPERATIONS)
-        self._check_restorable(await self.adapter.observe())
+        observed = await self.adapter.observe()
+        await self._check_restore_admission(await asyncio.to_thread(self.store.status), observed)
+        if (tuple(s for s in SERVICES if observed["services"][s].get("running") is False)
+                != tuple(plan["start_services"]) or
+                any(observed["services"][s].get("id") != plan["observed"]["services"][s].get("id")
+                    for s in SERVICES)):
+            raise HandoffConflict("Moshi state changed since the offer; request a fresh plan")
         state = await asyncio.to_thread(self.store.confirm, user=user, token=token,
                                         expected_generation=expected_generation)
-        if state.actions != RESTORE_ACTIONS or state.target != "voice":
+        expected_actions = ("reset_video_worker", *(f"start_moshi_{s}" for s in plan["start_services"]),
+                            "verify_voice", "unpark_voice")
+        if state.actions != expected_actions or state.target != "voice":
             await asyncio.to_thread(self.store.recover, generation=state.generation,
                                     reason="Unexpected restore plan")
             raise HandoffConflict("Unexpected transition plan")
@@ -265,10 +403,39 @@ class GpuHandoff:
     async def execute_restore(self, *, user: str, generation: int) -> None:
         plan = await asyncio.to_thread(self.store.plan, generation - 1)
         try:
+            state = await asyncio.to_thread(self.store.status)
+            if state.generation != generation or state.phase not in ("draining", "transitioning"):
+                raise HandoffConflict("Voice switch executor is no longer current")
+            if state.phase == "draining":
+                try:
+                    async with asyncio.timeout(self.drain_timeout):
+                        while True:
+                            current = await asyncio.to_thread(self.store.status)
+                            if current.phase != "draining" or current.generation != generation:
+                                raise HandoffConflict("Video drain was interrupted; inspect accepted renders")
+                            observed = await self.adapter.observe()
+                            self._check_restorable(observed, allow_busy=True)
+                            await self._check_restore_lease(observed)
+                            if observed["voice"].get("parked") is not True:
+                                raise HandoffConflict("Voice park lease was lost during video drain")
+                            claims = await asyncio.to_thread(self.store.active_video_jobs)
+                            if not claims and not observed["model"]["active"] and not observed["model"]["queued"]:
+                                break
+                            await asyncio.sleep(self.poll_interval)
+                except TimeoutError as exc:
+                    raise HandoffConflict("Video drain timed out; inspect accepted renders before restoring voice") from exc
+                await asyncio.to_thread(self.store.finish_drain, generation=generation)
+            else:
+                observed = await self.adapter.observe()
+                self._check_restorable(observed, recovery=state.owner == "unknown")
+                await self._check_restore_lease(observed)
+                if state.owner in ("video", "video_calibration") and observed["voice"].get("parked") is not True:
+                    raise HandoffConflict("Voice park lease was lost before unloading Wan")
             await asyncio.to_thread(self.store.begin_action, generation=generation, action="reset_video_worker")
             await self.adapter.reset_video()
             await asyncio.to_thread(self.store.finish_action, generation=generation, action="reset_video_worker")
-            for index, service in enumerate(SERVICES):
+            for service in plan["start_services"]:
+                index = SERVICES.index(service)
                 action = f"start_moshi_{service}"
                 await self._run_operation(generation=generation, action=action, user=user,
                                           snapshot=plan["operations"][index], slug=START_OPERATIONS[index])
@@ -277,8 +444,17 @@ class GpuHandoff:
             observed = await self._await_moshi_healthy(plan["observed"])
             await asyncio.to_thread(self.store.finish_action, generation=generation, action="verify_voice")
             await asyncio.to_thread(self.store.begin_action, generation=generation, action="unpark_voice")
+            observed = await self.adapter.observe()
+            self._check_restore_telemetry(observed)
+            if any(observed["services"][s].get("running") is not True
+                   or observed["services"][s].get("health") != "healthy" for s in SERVICES):
+                raise HandoffConflict("Moshi health changed before reopening voice")
+            lease = await self._check_restore_lease(observed)
+            if (observed["voice"].get("active_count") != 0
+                    or observed["voice"].get("active_gpu_work") != 0):
+                raise HandoffConflict("Voice work changed during restore; do not reopen admission")
             if observed["voice"].get("parked") is True:
-                await self.adapter.unpark(observed["voice"]["park_id"])
+                await self.adapter.unpark(lease)
             await asyncio.to_thread(self.store.finish_action, generation=generation, action="unpark_voice")
             await asyncio.to_thread(self.store.complete, generation=generation, target="voice")
         except BaseException as exc:
@@ -300,6 +476,7 @@ class GpuHandoff:
                         raise HandoffConflict("Moshi container changed during the switch")
                     if all(services[s].get("running") is True and services[s].get("health") == "healthy"
                            for s in SERVICES):
+                        self._check_restore_telemetry(observed)
                         return observed
                     if any(services[s].get("health") == "unhealthy" or services[s].get("status") == "exited"
                            for s in SERVICES):

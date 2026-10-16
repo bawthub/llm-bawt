@@ -79,6 +79,55 @@ def test_insufficient_margin_keeps_ordinary_video_blocked(reserved):
         ledger.claim_video("normal")
 
 
+def test_voice_offer_does_not_block_calibration_but_confirmation_drains_it(reserved):
+    ledger, state, _ = reserved
+    token, proposed = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+                                   expected_generation=state.generation)
+    ledger.claim_calibration("accepted", generation=state.generation,
+                             profile=video_profile(VideoRequest(prompt="test")))
+    draining = ledger.confirm(user="nick", token=token, expected_generation=proposed.generation)
+    assert draining.phase == "draining"
+    with pytest.raises(HandoffConflict):
+        ledger.claim_calibration("late", generation=state.generation,
+                                 profile=video_profile(VideoRequest(prompt="test")))
+    with pytest.raises(HandoffConflict, match="still draining"):
+        ledger.finish_drain(generation=draining.generation)
+    assert ledger.finish_calibration("accepted", MEASUREMENT)["supported"]
+    assert ledger.status().generation == draining.generation
+    assert ledger.finish_drain(generation=draining.generation).phase == "transitioning"
+
+
+@pytest.mark.parametrize("phase", ["offered", "draining", "recovery_required"])
+def test_reoffers_and_interrupted_drain_keep_original_calibration_reservation(reserved, phase):
+    ledger, state, _ = reserved
+    profile = video_profile(VideoRequest(prompt="test"))
+    # The first unconfirmed offer is replaced; neither may change admission.
+    _, first = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+                            expected_generation=state.generation)
+    token, second = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+                                 expected_generation=first.generation)
+    ledger.claim_calibration("accepted", generation=state.generation, profile=profile)
+    if phase != "offered":
+        started = ledger.confirm(user="nick", token=token, expected_generation=second.generation)
+        assert started.phase == "draining"
+    if phase == "recovery_required":
+        assert ledger.mark_interrupted().phase == "recovery_required"
+    evidence = ledger.finish_calibration("accepted", MEASUREMENT)
+    assert evidence["supported"] and ledger.calibration()["job_id"] == "accepted"
+    assert ledger.active_video_jobs() == 0
+    after = ledger.status()
+    if phase == "offered":
+        assert after.owner == "video" and after.phase == "idle"
+        with pytest.raises(HandoffConflict):
+            ledger.confirm(user="nick", token=token, expected_generation=second.generation)
+    elif phase == "draining":
+        assert (after.owner, after.phase) == ("video", "draining")
+        assert ledger.finish_drain(generation=after.generation).phase == "transitioning"
+    else:
+        assert after.owner == "unknown" and after.phase == "recovery_required"
+        assert "calibration evidence was saved" in after.last_error
+
+
 def test_private_calibration_queue_records_evidence_once(reserved, monkeypatch, tmp_path):
     ledger, state, engine = reserved
     monkeypatch.setattr(video_server, "get_shared_engine", lambda config: engine)

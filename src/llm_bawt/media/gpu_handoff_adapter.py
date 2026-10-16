@@ -122,3 +122,8 @@ class LocalHandoffAdapter(HandoffAdapter):
 
     async def job_status(self, job_id):
         return await asyncio.to_thread(self.ops.get_job_status, job_id)
+
+    async def find_operation(self, *, generation: int, slug: str):
+        key = f"gpu-handoff:{generation}:{slug}"
+        job = await asyncio.to_thread(self.ops.store.get_job_by_key, key)
+        return await self.job_status(job.id) if job is not None else None

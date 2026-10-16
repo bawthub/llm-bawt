@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -85,6 +86,39 @@ class RestoreOfferRequest(BaseModel):
 async def resume_video(body: RestoreOfferRequest):
     """Side-effect free: re-verify live state and, if it is still video's, clear the fence."""
     return await _run("resume_video", **body.model_dump())
+
+
+class ResolveVideoClaimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+    user: str = Field(min_length=1, max_length=128)
+    job_id: str = Field(min_length=1, max_length=32)
+    expected_generation: int = Field(ge=0)
+    outcome: Literal["completed", "failed", "unknown"]
+    evidence: str = Field(min_length=20, max_length=1000)
+    approved: bool
+
+
+@router.get("/claims/resolved/{job_id}")
+async def claim_resolution(job_id: str):
+    return await _run("claim_resolution", job_id=job_id)
+
+
+@router.post("/claims/resolve")
+async def resolve_video_claim(body: ResolveVideoClaimRequest):
+    """Manual, audited disposition after inspecting the named job and restoring voice.
+
+    This does not stop/start a service or delete a video/media record. The GPU
+    claim becomes an immutable resolution record only after live checks pass.
+    """
+    try:
+        from .media import _get_store
+        row = await asyncio.to_thread(_get_store().get_by_provider_job_id, body.job_id)
+    except Exception as exc:
+        logger.exception("GPU claim media evidence unavailable")
+        raise HTTPException(status_code=503, detail="Media evidence unavailable; leave the claim fenced") from exc
+    media = ({key: row.get(key) for key in ("id", "provider", "status", "file_path", "error")}
+             if row else None)
+    return await _run("resolve_video_claim", **body.model_dump(), media_observation=media)
 
 
 # Restore waits minutes for Moshi to load, longer than proxies should hold a

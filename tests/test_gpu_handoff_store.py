@@ -60,15 +60,21 @@ def test_video_claim_requires_owner_and_blocks_switch(store):
     assert store.active_video_jobs() == 1
     store.claim_video("render-2")
     assert store.active_video_jobs() == 2
-    with pytest.raises(HandoffConflict, match="Active video"):
-        store.offer(user="nick", target="voice", actions=("unload_wan",), expected_generation=store.status().generation)
-    store.release_video("render-1")
-    store.release_video("render-2")
-    assert store.active_video_jobs() == 0
     token, offer = store.offer(user="nick", target="voice", actions=("unload_wan",), expected_generation=store.status().generation)
     assert offer.target == "voice" and token
+    # Offering alone leaves video admission open; confirming closes it atomically.
+    store.claim_video("render-3")
+    assert store.confirm(user="nick", token=token, expected_generation=offer.generation).phase == "draining"
     with pytest.raises(HandoffConflict, match="does not belong"):
-        store.claim_video("render-2")
+        store.claim_video("render-4")
+    for job_id in ("render-1", "render-2", "render-3"):
+        store.validate_video_claim(job_id)
+    with pytest.raises(HandoffConflict, match="still draining"):
+        store.finish_drain(generation=store.status().generation)
+    for job_id in ("render-1", "render-2", "render-3"):
+        store.release_video(job_id)
+    assert store.active_video_jobs() == 0
+    assert store.finish_drain(generation=store.status().generation).phase == "transitioning"
 
 
 def test_orphaned_video_claim_needs_recovery_not_replay(store):
@@ -86,7 +92,7 @@ def test_orphaned_video_claim_needs_recovery_not_replay(store):
     with pytest.raises(HandoffConflict):
         store.offer(user="nick", target="video", actions=("stop_moshi_tts",),
                     expected_generation=recovered.generation)
-    # Restoring voice is the recovery path; its worker reset clears the claims.
+    # Recovery may restore voice, but the worker reset retains uncertain claims.
     token, offer = store.offer(user="nick", target="voice", actions=("reset_video_worker",),
                                expected_generation=recovered.generation)
     assert offer.target == "voice" and store.active_video_jobs() == 1

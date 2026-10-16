@@ -59,7 +59,8 @@ class GpuPreflight:
         if type(active_video_jobs) is not int or active_video_jobs < 0:
             issues.append("Durable video job claims are unavailable")
         elif active_video_jobs:
-            issues.append("Active video jobs must finish before handoff")
+            issues.append("Unresolved video render claims remain; inspect their outcomes before another video handoff"
+                          if state.owner == "voice" else "Active video jobs or uncertain claims still hold the GPU")
         if state.phase not in ("idle", "offered") or state.owner == "unknown":
             issues.append("GPU owner is unknown or needs reconciliation")
         if not isinstance(gpu, dict) or gpu.get("ready") is not True:

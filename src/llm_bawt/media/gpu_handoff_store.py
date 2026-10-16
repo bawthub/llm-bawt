@@ -28,6 +28,17 @@ _video_jobs = Table(
     Column("id", String(32), primary_key=True),
     Column("generation", Integer, nullable=False),
 )
+_resolved_jobs = Table(
+    "gpu_handoff_resolved_video_jobs", _metadata,
+    Column("id", String(32), primary_key=True),
+    Column("claim_generation", Integer, nullable=False),
+    Column("owner_generation", Integer, nullable=False),
+    Column("reviewed_by", String(128), nullable=False),
+    Column("outcome", String(32), nullable=False),
+    Column("evidence", Text, nullable=False),
+    Column("observations_json", Text, nullable=False),
+    Column("resolved_at", Float, nullable=False),
+)
 _calibrations = Table(
     "gpu_video_calibrations", _metadata,
     Column("generation", Integer, primary_key=True),
@@ -91,7 +102,7 @@ class GpuHandoffStore:
 
     def __init__(self, engine: Engine):
         self.engine = engine
-        self._guard.run(engine, "gpu-handoff-v4", _bootstrap_schema)
+        self._guard.run(engine, "gpu-handoff-v5", _bootstrap_schema)
         with engine.begin() as conn:
             # A deployment cannot infer ownership from running services. Reconcile
             # observations before offering a transition from unknown. Upsert so
@@ -132,6 +143,11 @@ class GpuHandoffStore:
         with self.engine.connect() as conn:
             return len(conn.execute(select(_video_jobs.c.id)).all())
 
+    def video_claims(self) -> list[str]:
+        """Expose identities for operator reconciliation; a reset never hides them."""
+        with self.engine.connect() as conn:
+            return list(conn.execute(select(_video_jobs.c.id).order_by(_video_jobs.c.id)).scalars())
+
     def recover_orphaned_video(self, *, worker_restarted: bool = False) -> HandoffState:
         """Fence orphaned render claims or an interrupted calibration after restart.
 
@@ -146,7 +162,7 @@ class GpuHandoffStore:
             row = self._locked(conn)
             has_claims = conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None
             lost_owner = worker_restarted and row["owner"] == "video_calibration"
-            if (has_claims or lost_owner) and row["phase"] != "recovery_required":
+            if (lost_owner or (has_claims and row["owner"] in ("video", "video_calibration"))) and row["phase"] != "recovery_required":
                 reason = ("Video worker restarted with unresolved render claims; verify GPU and jobs"
                           if has_claims else "Video worker restarted; verify model residency and GPU owner")
                 conn.execute(_state.update().where(_state.c.id == 1).values(
@@ -156,18 +172,48 @@ class GpuHandoffStore:
                 row = self._locked(conn)
             return self._view(row)
 
+    def validate_video_claim(self, job_id: str) -> None:
+        """Admit only an already-claimed render while a voice drain is pending."""
+        with self.engine.begin() as conn:
+            row = self._locked(conn)
+            claim = conn.execute(select(_video_jobs).where(_video_jobs.c.id == job_id)).mappings().one_or_none()
+            pending_drain = (row["phase"] == "recovery_required" and row["offer_target"] == "voice"
+                             and row["pending_action"] == "await_video_drain")
+            if (claim is None or
+                    not ((row["owner"] == "video" and row["phase"] in ("idle", "offered", "draining"))
+                         or pending_drain)
+                    or (row["phase"] == "draining" and row["offer_target"] != "voice")):
+                raise HandoffConflict("Video claim is no longer authorized; reconcile the render")
+
     def claim_video(self, job_id: str) -> int:
         """Authorize a render against the current owner, across processes."""
         if not job_id or len(job_id) > 32:
             raise ValueError("Invalid video job ID")
         with self.engine.begin() as conn:
             row = self._locked(conn)
-            if row["phase"] != "idle" or row["owner"] != "video":
+            if (row["owner"] != "video" or row["phase"] not in ("idle", "offered")
+                    or (row["phase"] == "offered" and row["offer_target"] != "voice")):
                 raise HandoffConflict("GPU does not belong to video; request a handoff")
             # Claims cover queued requests too: no handoff may begin until the
             # entire queue drains, even when the worker is between renders.
             conn.execute(_video_jobs.insert().values(id=job_id, generation=row["generation"]))
             return row["generation"]
+
+    @staticmethod
+    def _calibration_reservation(conn) -> int | None:
+        """The forward lease anchors calibration across any number of reverse offers."""
+        plan = conn.execute(select(_plans.c.generation).where(_plans.c.voice_lease.is_not(None))
+                            .order_by(_plans.c.generation.desc()).limit(1)).first()
+        return plan[0] + 2 if plan else None
+
+    def calibration_reservation(self) -> int | None:
+        """Return the original active calibration grant, never an offer generation."""
+        with self.engine.connect() as conn:
+            row = conn.execute(select(_state).where(_state.c.id == 1)).mappings().one()
+            if (row["owner"] != "video_calibration" or row["phase"] not in ("idle", "offered")
+                    or (row["phase"] == "offered" and row["offer_target"] != "voice")):
+                return None
+            return self._calibration_reservation(conn)
 
     def claim_calibration(self, job_id: str, *, generation: int, profile: dict) -> None:
         from .gpu_profile import CALIBRATION_PROFILE, require_calibration_profile
@@ -175,7 +221,11 @@ class GpuHandoffStore:
         require_calibration_profile(profile)
         with self.engine.begin() as conn:
             row = self._locked(conn)
-            if row["generation"] != generation or row["owner"] != "video_calibration" or row["phase"] != "idle":
+            offered = row["phase"] == "offered" and row["offer_target"] == "voice"
+            if (row["owner"] != "video_calibration" or
+                    row["phase"] not in ("idle", "offered") or
+                    (row["phase"] == "offered" and not offered) or
+                    self._calibration_reservation(conn) != generation):
                 raise HandoffConflict("Calibration reservation is no longer current")
             plan_row = conn.execute(select(_plans.c.plan_json).where(_plans.c.generation == generation - 2)).first()
             # Consent covered this envelope; the render must fall inside it (checked above).
@@ -213,8 +263,14 @@ class GpuHandoffStore:
             row = self._locked(conn)
             run = conn.execute(select(_calibrations).where(_calibrations.c.job_id == job_id)).mappings().one_or_none()
             claim = conn.execute(select(_video_jobs).where(_video_jobs.c.id == job_id)).mappings().one_or_none()
-            if (run is None or claim is None or row["owner"] != "video_calibration" or row["phase"] != "idle"
-                    or run["generation"] != row["generation"] or claim["generation"] != row["generation"]):
+            calibration_generation = self._calibration_reservation(conn)
+            interrupted_drain = (row["phase"] == "recovery_required" and row["offer_target"] == "voice"
+                                 and row["pending_action"] == "await_video_drain")
+            if (run is None or claim is None
+                    or not ((row["owner"] == "video_calibration" and row["phase"] in ("idle", "offered", "draining"))
+                            or (row["owner"] == "unknown" and interrupted_drain))
+                    or run["generation"] != calibration_generation
+                    or claim["generation"] != calibration_generation):
                 raise HandoffConflict("Calibration ownership changed; reconcile its result")
             plan_row = conn.execute(select(_plans.c.plan_json).where(_plans.c.generation == run["generation"] - 2)).first()
             original_gpu = json.loads(plan_row[0])["observed"]["gpu"] if plan_row else {}
@@ -223,10 +279,17 @@ class GpuHandoffStore:
                 raise HandoffConflict("Calibration ran on a different GPU than the consented reservation")
             conn.execute(_calibrations.update().where(_calibrations.c.job_id == job_id).values(measurement_json=json.dumps(evidence)))
             conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
+            draining = row["phase"] == "draining"
             conn.execute(_state.update().where(_state.c.id == 1).values(
-                owner="video" if supported else "unknown", phase="idle" if supported else "recovery_required",
-                generation=row["generation"] + 1,
-                last_error=None if supported else "Calibration produced a video but insufficient memory margin; keep ordinary rendering blocked",
+                owner="unknown" if interrupted_drain or not supported else "video",
+                phase=("recovery_required" if interrupted_drain or not supported else
+                       "draining" if draining else "idle"),
+                generation=(row["generation"] if (draining or interrupted_drain) and supported
+                            else row["generation"] + 1),
+                last_error=("Drain executor interrupted; calibration evidence was saved. "
+                            "Inspect GPU and resume video or consent to restore voice"
+                            if interrupted_drain and supported else None if supported else
+                            "Calibration produced a video but insufficient memory margin; keep ordinary rendering blocked"),
             ))
         return evidence
 
@@ -277,14 +340,42 @@ class GpuHandoffStore:
             ))
             return self._view(self._locked(conn))
 
-    def release_all_video_claims(self) -> int:
-        """Only after the worker process is gone: no claim can still be rendering."""
-        with self.engine.begin() as conn:
-            return conn.execute(_video_jobs.delete()).rowcount
-
     def release_video(self, job_id: str) -> None:
         with self.engine.begin() as conn:
             conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
+
+    def resolve_video_claim(self, *, job_id: str, user: str, expected_generation: int,
+                            outcome: str, evidence: str, observations: dict) -> dict:
+        """Archive a human-reviewed uncertain outcome, then release its GPU claim atomically.
+
+        Live worker/voice health checks belong to the controller immediately before
+        this transaction. The original claim and the review remain traceable by ID.
+        """
+        if (not job_id or len(job_id) > 32 or not user or len(user) > 128
+                or outcome not in ("completed", "failed", "unknown")
+                or not isinstance(evidence, str) or not 20 <= len(evidence.strip()) <= 1000):
+            raise HandoffConflict("A scoped job, reviewer, outcome and inspection evidence are required")
+        with self.engine.begin() as conn:
+            row = self._locked(conn)
+            if row["owner"] != "voice" or row["phase"] != "idle" or row["generation"] != expected_generation:
+                raise HandoffConflict("Voice must own an idle GPU; refresh before resolving this claim")
+            claim = conn.execute(select(_video_jobs).where(_video_jobs.c.id == job_id)).mappings().one_or_none()
+            if claim is None:
+                raise HandoffConflict("Video claim is already resolved or was never accepted")
+            record = dict(id=job_id, claim_generation=claim["generation"],
+                          owner_generation=row["generation"], reviewed_by=user,
+                          outcome=outcome, evidence=evidence.strip(),
+                          observations_json=json.dumps(observations, allow_nan=False),
+                          resolved_at=time.time())
+            conn.execute(_resolved_jobs.insert().values(**record))
+            conn.execute(_video_jobs.delete().where(_video_jobs.c.id == job_id))
+            return {"job_id": job_id, "outcome": outcome, "reviewed_by": user,
+                    "owner_generation": row["generation"], "resolved_at": record["resolved_at"]}
+
+    def resolved_video_claim(self, job_id: str) -> dict | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(_resolved_jobs).where(_resolved_jobs.c.id == job_id)).mappings().one_or_none()
+            return {**row, "observations": json.loads(row["observations_json"])} if row else None
 
     def offer(self, *, user: str, target: str, actions: tuple[str, ...],
               expected_generation: int, ttl: int = 120,
@@ -295,9 +386,8 @@ class GpuHandoffStore:
             raise ValueError("Invalid transition action")
         token = secrets.token_urlsafe(32)
         import hashlib
-        # Restoring voice is also the recovery path: it may start from a fenced
-        # state, where claims are stale by definition; its first action resets
-        # the worker and clears them. Outside recovery, claims are live renders.
+        # A recovery restore may start with uncertain claims, but never erases
+        # them: reset fences the worker and the claims stay visible for review.
         restore = target == "voice"
         phases = ("idle", "offered", "recovery_required") if restore else ("idle", "offered")
         with self.engine.begin() as conn:
@@ -306,8 +396,7 @@ class GpuHandoffStore:
                 raise HandoffConflict("GPU state changed; request a fresh preflight")
             if row["owner"] == target:
                 raise HandoffConflict("GPU already belongs to the requested mode")
-            if (not (restore and row["phase"] == "recovery_required")
-                    and conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None):
+            if (not restore and conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None):
                 raise HandoffConflict("Active video work must finish before offering a switch")
             # Replacing an offer invalidates its old token and bumps the generation.
             conn.execute(_state.update().where(_state.c.id == 1).values(
@@ -357,10 +446,23 @@ class GpuHandoffStore:
                     or row["offer_expires"] <= time.time()
                     or not secrets.compare_digest(row["offer_hash"] or "", hashlib.sha256(token.encode()).hexdigest())):
                 raise HandoffConflict("Consent is expired, used, or does not match this transition")
+            draining = row["offer_target"] == "voice" and row["owner"] in ("video", "video_calibration")
             conn.execute(_state.update().where(_state.c.id == 1).values(
-                phase="transitioning", generation=row["generation"] + 1,
+                phase="draining" if draining else "transitioning", generation=row["generation"] + 1,
                 offer_hash=None, offer_user=None, offer_expires=None,
             ))
+            return self._view(self._locked(conn))
+
+    def finish_drain(self, *, generation: int) -> HandoffState:
+        """Move to reset only after every accepted claim has released."""
+        with self.engine.begin() as conn:
+            row = self._locked(conn)
+            if (row["generation"] != generation or row["phase"] != "draining"
+                    or row["owner"] not in ("video", "video_calibration") or row["offer_target"] != "voice"):
+                raise HandoffConflict("Video drain is no longer current")
+            if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
+                raise HandoffConflict("Accepted video renders are still draining")
+            conn.execute(_state.update().where(_state.c.id == 1).values(phase="transitioning"))
             return self._view(self._locked(conn))
 
     def begin_action(self, *, generation: int, action: str) -> HandoffState:
@@ -417,10 +519,11 @@ class GpuHandoffStore:
     def recover(self, *, generation: int, reason: str) -> HandoffState:
         with self.engine.begin() as conn:
             row = self._locked(conn)
-            if row["phase"] != "transitioning" or row["generation"] != generation:
+            if row["phase"] not in ("transitioning", "draining") or row["generation"] != generation:
                 raise HandoffConflict("Transition has changed")
             conn.execute(_state.update().where(_state.c.id == 1).values(
                 owner="unknown", phase="recovery_required", generation=generation + 1,
+                pending_action="await_video_drain" if row["phase"] == "draining" else row["pending_action"],
                 last_error=reason[:1000],
             ))
             return self._view(self._locked(conn))
@@ -445,10 +548,13 @@ class GpuHandoffStore:
         """Startup reconciliation: never replay an in-flight side effect."""
         with self.engine.begin() as conn:
             row = self._locked(conn)
-            if row["phase"] == "transitioning":
+            if row["phase"] in ("transitioning", "draining"):
                 conn.execute(_state.update().where(_state.c.id == 1).values(
                     owner="unknown", phase="recovery_required", generation=row["generation"] + 1,
-                    last_error="Transition interrupted; reconcile external operations before retrying",
+                    pending_action="await_video_drain" if row["phase"] == "draining" else row["pending_action"],
+                    last_error=("Video drain executor interrupted; inspect accepted renders before restoring voice"
+                                if row["phase"] == "draining" else
+                                "Transition interrupted; reconcile external operations before retrying"),
                 ))
                 row = self._locked(conn)
             return self._view(row)

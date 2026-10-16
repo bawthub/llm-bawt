@@ -318,8 +318,9 @@ async def local_video_gpu_status():
     state = await asyncio.to_thread(ledger.status)
     try:
         active_video_jobs = await asyncio.to_thread(ledger.active_video_jobs)
+        video_claims = await asyncio.to_thread(ledger.video_claims)
     except Exception:
-        active_video_jobs = None
+        active_video_jobs, video_claims = None, None
     client = _get_video_client("local-video")
     try:
         gpu = await client.gpu_telemetry()
@@ -330,6 +331,7 @@ async def local_video_gpu_status():
     except Exception:
         model = None
     calibration = await asyncio.to_thread(ledger.calibration)
+    calibration_generation = await asyncio.to_thread(ledger.calibration_reservation)
     import httpx
     async with httpx.AsyncClient() as http:
         def operations():
@@ -343,10 +345,10 @@ async def local_video_gpu_status():
         "pending_target": state.target, "pending_actions": state.actions,
         "next_action": state.next_action, "pending_action": state.pending_action,
         "last_job_id": state.last_job_id, "last_error": state.last_error,
-        "gpu": gpu, "model": model, "active_video_jobs": active_video_jobs,
+        "gpu": gpu, "model": model, "active_video_jobs": active_video_jobs, "video_claims": video_claims,
         "preflight": preflight,
         "handoff_available": True,
-        "calibration": calibration,
+        "calibration": calibration, "calibration_generation": calibration_generation,
     }
 
 
@@ -435,8 +437,11 @@ async def create_generation(request: MediaGenerationRequest):
         handoff = await asyncio.to_thread(ledger.status)
         calibration = request.calibration_generation
         required_owner = "video_calibration" if calibration is not None else "video"
-        if (handoff.phase != "idle" or handoff.owner != required_owner
-                or (calibration is not None and handoff.generation != calibration)):
+        video_admission = handoff.phase == "idle" or (handoff.phase == "offered" and handoff.target == "voice")
+        reservation = (await asyncio.to_thread(ledger.calibration_reservation)
+                       if video_admission and handoff.owner == "video_calibration" and calibration is not None else None)
+        if (not video_admission or handoff.owner != required_owner
+                or (calibration is not None and reservation != calibration)):
             raise HTTPException(status_code=409, detail="GPU does not belong to video; a consented handoff is required")
         from ...media.gpu_profile import require_calibration_profile
         try:

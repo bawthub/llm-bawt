@@ -143,6 +143,8 @@ class VideoJobs:
             self.jobs[job_id] = {"status": "processing", "progress": 10}
             try:
                 await verify_voice_park(ledger)
+                if job_id not in self._calibrations:
+                    await asyncio.to_thread(ledger.validate_video_claim, job_id)
                 metadata = await self.worker.render(input_path, output_path)
                 # Keep the claim until the worker confirms an output and the
                 # ledger acknowledges release; a failed DB write is not a
@@ -207,7 +209,7 @@ class VideoJobs:
             return fallback
 
     async def reset(self) -> dict:
-        """Operator recovery: end the worker and clear claims it can no longer own.
+        """End an idle worker without erasing uncertain render claims.
 
         Caller holds ``self.lock``. Refuses while a render is running or queued;
         those outcomes are real and must finish or fail on their own.
@@ -219,14 +221,17 @@ class VideoJobs:
         except WorkerBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         ledger = await asyncio.to_thread(GpuHandoffStore, get_shared_engine(Config()))
-        released = await asyncio.to_thread(ledger.release_all_video_claims)
+        # An uncertain render may have produced an artifact before its response
+        # vanished. Reset fences the worker, not the durable evidence of that job.
+        unresolved = await asyncio.to_thread(ledger.active_video_jobs)
         for job_id, job in self.jobs.items():
             if job["status"] in ("pending", "processing"):
-                self.jobs[job_id] = {"status": "failed", "progress": 0, "error": "Video worker was reset during recovery"}
+                self.jobs[job_id] = {"status": "failed", "progress": 0,
+                                     "error": "Worker reset; render outcome requires reconciliation"}
         self._blocked = False
         self._calibrations.clear()
         self._worker_reserved_mib = 0
-        return {"reset": True, "released_claims": released}
+        return {"reset": True, "unresolved_claims": unresolved, "released_claims": 0}
 
     def file(self, job_id: str) -> Path:
         if self.status(job_id)["status"] != "completed":

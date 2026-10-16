@@ -89,6 +89,9 @@ class FakeAdapter(HandoffAdapter):
     async def job_status(self, job_id):
         return self.jobs[job_id]
 
+    async def find_operation(self, *, generation, slug):
+        return next((job for job in self.jobs.values() if job["operation"] == slug), None)
+
 
 @pytest.fixture
 def setup(tmp_path):
@@ -289,16 +292,14 @@ def test_restore_recovers_fenced_state_and_clears_stale_claims(setup):
                                          "num_outputs": 1, "image_conditioned": False})
         store.recover_orphaned_video(worker_restarted=True)
         assert store.status().phase == "recovery_required"
-        # Worker reset (the adapter's job) is what clears claims live.
-        adapter.reset_video = lambda: asyncio.to_thread(store.release_all_video_claims)
         await restore(controller, store)
 
     asyncio.run(run())
     state = store.status()
     assert (state.owner, state.phase) == ("voice", "idle")
-    assert store.active_video_jobs() == 0
-    # And the forward switch is available again.
-    asyncio.run(controller.offer(user="nick", expected_generation=state.generation, calibration=True))
+    assert store.active_video_jobs() == 1  # Reset cannot erase an uncertain render's evidence.
+    with pytest.raises(HandoffConflict, match="Active video"):
+        asyncio.run(controller.offer(user="nick", expected_generation=state.generation, calibration=True))
 
 
 def test_restore_refuses_while_rendering(setup):

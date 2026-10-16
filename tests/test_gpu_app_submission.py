@@ -18,7 +18,7 @@ def test_local_video_without_stable_owner_creates_no_job(monkeypatch, owner, pha
     monkeypatch.setattr(media, "get_service", lambda: SimpleNamespace(config=object()))
     monkeypatch.setattr(media, "get_shared_engine", lambda config: object())
     monkeypatch.setattr(media, "GpuHandoffStore", lambda engine: SimpleNamespace(
-        status=lambda: SimpleNamespace(owner=owner, phase=phase)))
+        status=lambda: SimpleNamespace(owner=owner, phase=phase, target="video" if phase == "offered" else None)))
     with pytest.raises(HTTPException) as exc:
         asyncio.run(media.create_generation(MediaGenerationRequest(
             prompt="running dog", provider="local-video", media_type="video")))

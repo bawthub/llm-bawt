@@ -172,6 +172,14 @@ def test_queued_video_jobs_share_worker_and_release_claims(monkeypatch, tmp_path
         second = await jobs.submit(VideoRequest(prompt="second"))
         assert ledger.active_video_jobs() == 2
         assert jobs.status(second["id"])["status"] == "pending"
+        token, proposed = ledger.offer(user="nick", target="voice", actions=("reset_video_worker",),
+                                       expected_generation=ledger.status().generation)
+        assert ledger.confirm(user="nick", token=token, expected_generation=proposed.generation).phase == "draining"
+        # App restart loses the executor, not the worker's accepted queue.
+        assert ledger.mark_interrupted().phase == "recovery_required"
+        with pytest.raises(HTTPException) as exc:
+            await jobs.submit(VideoRequest(prompt="late"))
+        assert exc.value.status_code == 409 and ledger.active_video_jobs() == 2
         proceed.set()
         await jobs._drain_task
         assert jobs.status(first["id"])["status"] == "completed"
@@ -471,8 +479,9 @@ def test_worker_failure_reports_real_reason_and_reset_recovers(monkeypatch, tmp_
         assert "CUDA out of memory" in jobs.status(job["id"])["error"]
         assert ledger.active_video_jobs() == 1 and jobs._blocked
         result = await jobs.reset()
-        assert result == {"reset": True, "released_claims": 1}
-        assert resets and not jobs._blocked and ledger.active_video_jobs() == 0
+        assert result == {"reset": True, "unresolved_claims": 1, "released_claims": 0}
+        assert resets and not jobs._blocked and ledger.active_video_jobs() == 1
+        assert ledger.status().phase == "recovery_required"
 
     asyncio.run(exercise())
     engine.dispose()
