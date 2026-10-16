@@ -97,7 +97,9 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
                 {"model": model, "max_tokens": 100, "messages": [{"role": "user", "content": "ping"}]}, model, context)])
             # Text may retry, but this fixture returns no matching prefix:
             # it must still fail without forwarding a completion or tool.
-            should_retry = committed in (None, "thinking", "text", "exhausted")
+            # TASK-1095: a reasoning-only checkpoint (no visible output, no
+            # tool) is continuable and needs no prefix, so it recovers.
+            should_retry = committed in (None, "thinking", "reasoning", "text", "exhausted")
             assert create.await_count == (2 if should_retry else 1)
             assert options and all(o["max_retries"] == 0 for o in options)
             # Retain ordinary Responses payload; no Lite developer item migration.
@@ -112,7 +114,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
                 # TASK-1079: an HTTPS stall is not "reconnecting over HTTPS".
                 assert "HTTPS" not in statuses[1]["message"]
                 assert streams[1].close.await_count == 1
-            if committed in (None, "thinking"):
+            if committed in (None, "thinking", "reasoning"):
                 assert b"message_stop" in output
                 assert statuses[-1]["state"] == "recovered"
             else:

@@ -17,6 +17,7 @@ from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
 from .logging import get_service_logger
 from .pending_tool_calls import PendingToolCallCorrelator
+from .tool_execution_stamps import ToolExecutionStamps
 from .turn_stream_context import TurnStreamContext, _TEXT_DELTA_FLUSH_CHARS
 from .turn_stream_finalize import TurnStreamFinalizer
 from .turn_stream_publish import TurnStreamPublishMixin
@@ -570,6 +571,10 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # tool_use_id is authoritative; name/LIFO fallback covers providers
             # that do not expose one.
             _oc_tool_calls = PendingToolCallCorrelator()
+            _exec_stamps = ToolExecutionStamps(_oc_tool_calls, _publish_event_direct, {
+                "turn_id": turn_log_id, "trigger_message_id": trigger_message_id,
+                "bot_id": bot_id, "user_id": user_id,
+            })
 
             # Fires once, on the SDK/bridge-CONFIRMED first output of this
             # turn, to reap any other still-open turns for this bot.
@@ -908,6 +913,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 "ts": time.time(),
                             })
                             continue
+                        if evt == "tool_executing":
+                            _exec_stamps.on_executing(item)  # TASK-1095 timing only
+                            continue
                         if evt in ("tool_call", "tool_result"):
                             _saw_tool = True
                             # Flush buffered text BEFORE the tool event so
@@ -980,9 +988,11 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 "parent_tool_use_id": item.get("parent_tool_use_id"),
                                 "iteration": 1,
                                 "provider": item.get("provider"),
+                                "exec_tracked": bool(item.get("exec_tracked")),
                                 "ts": time.time(),
                                 "text_offset": _text_chars[0],
                             })
+                            _exec_stamps.on_tool_started(item.get("tool_use_id"), cid)
                         elif evt == "tool_result":
                             # Pair by the bridge's stable tool_use_id first.
                             # Name/LIFO fallback remains for providers that omit it.

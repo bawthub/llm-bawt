@@ -505,6 +505,11 @@ class InterBotDeliveryDispatcher:
             elif (
                 self._is_terminal(exc)
                 or current.attempt_count >= current.max_attempts
+                # TASK-1095: reattaching to a deterministic run only helps while
+                # it may still be live. Once the turn has ended unsuccessfully,
+                # every retry re-reads the same finished Redis stream from the
+                # start (re-broadcasting its whole history) and fails again.
+                or turn_ended_at is not None
                 or not (turn_status in (None, "reserved") or deterministic_agent_run)
             ):
                 failed = self.store.fail_claim(record.id, claim_token, error)

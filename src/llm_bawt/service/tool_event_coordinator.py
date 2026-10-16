@@ -36,6 +36,17 @@ class ToolEventCoordinator:
         public["_tool_persisted"] = True
         return public
 
+    def executing(self, event: dict[str, Any]) -> dict[str, Any]:
+        self.store.mark_executing(
+            turn_id=event.get("turn_id"),
+            call_id=event.get("call_id"),
+            tool_use_id=event.get("tool_use_id"),
+            exec_started_at=event.get("ts"),
+        )
+        public = dict(event)
+        public["_tool_persisted"] = True
+        return public
+
     def end(self, event: dict[str, Any]) -> dict[str, Any]:
         payload = payload_from_event(event.get("tool_result_payload"), event.get("result"))
         record_id, available = self.store.save_result(

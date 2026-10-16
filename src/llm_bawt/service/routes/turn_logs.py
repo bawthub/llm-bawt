@@ -88,6 +88,7 @@ def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> l
             "status": "interrupted" if interrupted else ("completed" if is_finished else "pending"),
             "call_id": row.call_id,
             "started_at": row.started_at,
+            "exec_started_at": row.exec_started_at,
             "ended_at": row.ended_at,
             "duration_ms": row.duration_ms,
             "text_offset": row.text_offset,

@@ -148,7 +148,7 @@ def test_mismatch_never_forwards_new_reasoning_text_or_tools(suffix):
 
 
 @pytest.mark.parametrize("events", [
-    native_events(NATIVE), [text("hello"), tool()],
+    [text("hello"), tool()],
     [{"type": "response.refusal.delta", "delta": "No"}],
     [text("x" * (MAX_CAPTURE_CHARS + 1))],
 ])
@@ -157,6 +157,50 @@ def test_nonrecoverable_committed_output_keeps_original_barrier(events):
     frames = asyncio.run(collect(adapter))
     assert len(adapter.bodies) == 1
     assert b'"type":"api_error"' in b"".join(frames)
+
+
+@pytest.mark.parametrize("failure", [ConnectionError("cut"), stall()])
+def test_reasoning_only_checkpoint_continues_instead_of_killing_the_turn(failure):
+    """TASK-1095 incident: Snark's reasoning item completed (signature forwarded,
+    no text) and then the upstream went silent for 90s. That is phase TEXT with
+    an empty text checkpoint, which used to fail upward as text_partial_no_retry
+    and terminated the whole SDK turn."""
+    async def run():
+        second = {**NATIVE, "id": "rs_second", "encrypted_content": "opaque-second"}
+        adapter = FixtureAdapter([
+            native_events(NATIVE) + [failure],
+            native_events(second) + [text("done"), tool(), DONE],
+        ])
+        frames = await collect(adapter)
+        wire = b"".join(frames)
+        assert b"event: error" not in wire
+        assert wire.count(b"event: message_start") == 1
+        assert wire.count(b'"type":"tool_use"') == 1
+        assert visible(frames) == "done"
+        recovery = adapter.bodies[1]["input"]
+        assert recovery[:2] == adapter.bodies[0]["input"] + [NATIVE]
+        assert recovery[2]["role"] == "developer"
+        assert "before any visible output or tool call" in recovery[2]["content"]
+        assert "EXACTLY" not in recovery[2]["content"]  # no prefix to reproduce
+        assert len(recovery) == 3
+        # The SDK message the CLI persists replays both native items in order.
+        blocks = await parse_sdk_message(frames)
+        replay = anthropic_to_responses({"messages": BODY["messages"] + [
+            {"role": "assistant", "content": blocks}, {"role": "user", "content": "Next"},
+        ]}, "test", reasoning_codec=CODEC)["input"]
+        assert replay[1:4] == [NATIVE, second, {"role": "assistant", "content": "done"}]
+    asyncio.run(run())
+
+
+def test_reasoning_only_checkpoint_is_still_barred_after_overflow_or_refusal():
+    checkpoint = CommittedOutput()
+    checkpoint.add_reasoning(NATIVE)
+    assert checkpoint.can_continue and checkpoint.text == ""
+    checkpoint.blocked = True
+    assert not checkpoint.can_continue
+    with pytest.raises(ContinuationMismatchError):
+        checkpoint.request({"input": []})
+    assert not CommittedOutput().can_continue
 
 
 def test_new_tool_after_validated_prefix_is_forwarded_once_and_never_retried():

@@ -22,15 +22,36 @@ class SubagentUsage:
         self._responses: dict[str, dict[str, dict[str, int]]] = {}
         self._tasks: dict[str, dict[str, str]] = {}
         self._last_live_total: dict[str, int] = {}
+        # TASK-1095: the SDK stamps a resumed sub-agent's messages with the
+        # tool_use_id of its ORIGINAL spawn (Agent call), even when a later
+        # SendMessage call is what is now running it. Track spawn → current
+        # host so every consumer attributes child activity to the live call.
+        self._spawn_of_task: dict[str, str] = {}
+        self._host_of_spawn: dict[str, str] = {}
 
     def register_task(self, parent: str | None, task_id: str, description: str) -> None:
-        if parent and task_id:
-            self._tasks.setdefault(parent, {})[task_id] = description
+        if not (parent and task_id):
+            return
+        self._tasks.setdefault(parent, {})[task_id] = description
+        spawn = self._spawn_of_task.setdefault(task_id, parent)
+        if spawn == parent:
+            return
+        # A Workflow spawn hosts several tasks under ONE parent id; children of
+        # different siblings are indistinguishable by parent, so re-homing the
+        # whole spawn would mis-file the siblings. Only remap unambiguous spawns.
+        if len(self._tasks.get(spawn, {})) == 1:
+            self._host_of_spawn[spawn] = parent
+
+    def host_parent(self, parent: str | None) -> str | None:
+        """The live host tool call for an SDK ``parent_tool_use_id``."""
+        if not parent:
+            return parent
+        return self._host_of_spawn.get(parent, parent)
 
     def live_updates(self, message: Any) -> list[tuple[str, str, str, dict]]:
         """Report a measured change immediately, without waiting for TaskProgress."""
         changed = self.observe(message)
-        parent = getattr(message, "parent_tool_use_id", None)
+        parent = self.host_parent(getattr(message, "parent_tool_use_id", None))
         if not changed or not parent or parent not in self._tasks:
             return []
         usage = self.for_event(parent, None)
@@ -48,7 +69,7 @@ class SubagentUsage:
         return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
     def observe(self, message: Any) -> bool:
-        parent = getattr(message, "parent_tool_use_id", None)
+        parent = self.host_parent(getattr(message, "parent_tool_use_id", None))
         response_id = getattr(message, "message_id", None)
         usage = getattr(message, "usage", None)
         if not parent or not response_id or not isinstance(usage, dict):

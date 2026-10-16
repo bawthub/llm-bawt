@@ -52,13 +52,25 @@ class CommittedOutput:
 
     @property
     def can_continue(self) -> bool:
-        return bool(self.text) and not self.blocked
+        # TASK-1095: a checkpoint holding only committed native reasoning (no
+        # visible text yet) is continuable too — the stall that killed Snark
+        # landed exactly there. Items are what gets replayed; text is only the
+        # prefix the candidate must reproduce (empty = nothing to validate).
+        return bool(self.items) and not self.blocked
 
     def request(self, original: dict) -> dict:
         if not self.can_continue:
-            raise ContinuationMismatchError("No complete replayable text checkpoint")
+            raise ContinuationMismatchError("No complete replayable checkpoint")
         body = copy.deepcopy(original)
         body["input"] += copy.deepcopy(self.items)
+        if not self.text:
+            body["input"].append({"role": "developer", "content": (
+                "Transport recovery: your previous response was interrupted after "
+                "the reasoning above and before any visible output or tool call. "
+                "Nothing from it was displayed or executed. Continue the original "
+                "task from that reasoning."
+            )})
+            return body
         body["input"].append({"role": "developer", "content": (
             "Transport recovery: the preceding assistant output was interrupted. "
             "Resume the original task. Begin your visible output by reproducing "

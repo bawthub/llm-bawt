@@ -453,6 +453,8 @@ class AgentBridgeBackend(AgentBackend):
                                     # is a sub-agent's inner activity — lets the UI nest
                                     # it under the parent card (TASK-344). None otherwise.
                                     "parent_tool_use_id": event.parent_tool_use_id,
+                                    # TASK-1095: backend will report execution start.
+                                    "exec_tracked": bool((event.raw or {}).get("exec_tracked")),
                                 }
                                 _notify_event(tool_item)
                                 result_queue.put(tool_item)
@@ -501,6 +503,18 @@ class AgentBridgeBackend(AgentBackend):
                                     }
                                     _notify_event(tool_item)
                                     result_queue.put(tool_item)
+
+                            elif event.kind == AgentEventKind.TOOL_EXECUTING:
+                                # TASK-1095: execution start (after queueing and
+                                # any approval wait). Timing-only; never a tool row
+                                # of its own.
+                                if event.tool_use_id:
+                                    result_queue.put({
+                                        "event": "tool_executing",
+                                        "tool_use_id": event.tool_use_id,
+                                        "name": event.tool_name,
+                                        "ts": event.timestamp.timestamp(),
+                                    })
 
                             elif event.kind == AgentEventKind.AWAIT_TOOL_RESULT:
                                 # Claude-code bridge has paused the SDK on an

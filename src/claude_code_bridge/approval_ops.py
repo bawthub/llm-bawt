@@ -456,6 +456,11 @@ class ClaudeApprovalMixin:
             }
         }
 
+    @staticmethod
+    def _hook_denies(decision: dict | None) -> bool:
+        output = (decision or {}).get("hookSpecificOutput") or {}
+        return output.get("permissionDecision") == "deny"
+
     async def _evaluate_tool_gate_hook(
         self,
         tool_name: str,
@@ -794,6 +799,27 @@ class ClaudeApprovalMixin:
         """
 
         async def pre_tool_use(input_data, tool_use_id, context):
+            decision = await decide(input_data, tool_use_id, context)
+            if not self._hook_denies(decision):
+                # TASK-1095: the CLI fires PreToolUse immediately before running
+                # each tool (serially for unsafe tools), after any approval
+                # wait resolved. That is the execution start, not emit time.
+                tuid = tool_use_id or (input_data or {}).get("tool_use_id")
+                if tuid:
+                    try:
+                        seq_holder[0] += 1
+                        self._publish_event(
+                            request_id, session_key, seq_holder[0],
+                            kind=AgentEventKind.TOOL_EXECUTING,
+                            tool_name=(input_data or {}).get("tool_name") or None,
+                            tool_use_id=tuid,
+                        )
+                    except Exception:
+                        # Timing telemetry must never change whether a tool runs.
+                        logger.debug("tool_executing publish failed tool_use_id=%s", tuid, exc_info=True)
+            return decision
+
+        async def decide(input_data, tool_use_id, context):
             tool_name = ""
             try:
                 tool_name = input_data.get("tool_name") or ""

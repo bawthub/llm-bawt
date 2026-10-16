@@ -381,6 +381,12 @@ class ClaudeStreamMixin:
             )
         return seq
 
+    @staticmethod
+    def _host_parent(msg, usage_ledger: SubagentUsage | None) -> str | None:
+        """One resolution path for TOOL_START and TOOL_END parents."""
+        parent = getattr(msg, "parent_tool_use_id", None)
+        return usage_ledger.host_parent(parent) if usage_ledger is not None else parent
+
     def _publish_subagent_live_usage(
         self, msg, *, request_id: str, session_key: str, seq: int,
         usage_ledger: SubagentUsage,
@@ -411,6 +417,7 @@ class ClaudeStreamMixin:
         tool_arguments_by_id: dict,
         latest_assistant_usage: dict | None,
         assistant_snapshot_text: str,
+        usage_ledger: SubagentUsage | None = None,
     ) -> tuple[int, dict | None, str]:
         """Handle an AssistantMessage; return
         ``(seq, latest_assistant_usage, assistant_snapshot_text)``."""
@@ -426,7 +433,9 @@ class ClaudeStreamMixin:
         # spawning Agent/Workflow tool's id. Thread it onto the
         # TOOL_START so the UI can nest this tool card under the
         # parent Agent card. None for top-level calls (TASK-344).
-        parent_tuid = getattr(msg, "parent_tool_use_id", None)
+        # TASK-1095: resolved through the ledger so a SendMessage-resumed
+        # agent nests under the live resume call, not its closed spawn card.
+        parent_tuid = self._host_parent(msg, usage_ledger)
         snapshot_parts: list[str] = []
         for block in getattr(msg, "content", []):
             if isinstance(block, ToolUseBlock):
@@ -471,6 +480,10 @@ class ClaudeStreamMixin:
                     tool_arguments=block.input if isinstance(block.input, dict) else {},
                     tool_use_id=tu_id,
                     parent_tool_use_id=parent_tuid,
+                    # TASK-1095: this bridge's PreToolUse hook reports the real
+                    # execution start, so the UI may show the call as queued
+                    # until TOOL_EXECUTING arrives.
+                    extra_raw={"exec_tracked": True},
                 )
                 continue
             btype = getattr(block, "type", None)
@@ -500,13 +513,14 @@ class ClaudeStreamMixin:
         turn_screenshot_assets: list[dict],
         screenshot_artifacts_by_tool_use_id: dict[str, list[dict]],
         tool_arguments_by_id: dict | None = None,
+        usage_ledger: SubagentUsage | None = None,
     ) -> int:
         """Handle a UserMessage's tool_result blocks (TOOL_END); return ``seq``."""
         # Mirror of the AssistantMessage path: a sub-agent's
         # tool *result* arrives on a UserMessage carrying the
         # same parent_tool_use_id, so the TOOL_END nests under
         # the same parent Agent card as its TOOL_START.
-        parent_tuid = getattr(msg, "parent_tool_use_id", None)
+        parent_tuid = self._host_parent(msg, usage_ledger)
         for block in getattr(msg, "content", []):
             if isinstance(block, ToolResultBlock):
                 seq += 1

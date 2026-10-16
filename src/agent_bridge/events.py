@@ -15,6 +15,11 @@ class AgentEventKind(str, Enum):
     USAGE_UPDATE = "usage_update"
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
+    # TASK-1095: the tool actually began executing (PreToolUse allowed it).
+    # TOOL_START is the model EMITTING the call; the CLI runs unsafe tools
+    # serially, so a call can sit queued long after TOOL_START. Duration and
+    # the UI "running" state are measured from this event when present.
+    TOOL_EXECUTING = "tool_executing"
     USER_MESSAGE = "user_message"
     # CLI command_lifecycle state for a user-origin mid-turn message.
     # raw: {"message_id": <user message UUID>, "state": <CLI state>}.

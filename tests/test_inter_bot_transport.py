@@ -460,6 +460,65 @@ def test_durable_dispatch_rejects_ok_turn_with_persisted_error():
     assert "upstream exploded" in failed[0][2]
 
 
+@pytest.mark.parametrize("ended", [True, False])
+def test_deterministic_run_requeues_only_while_turn_may_still_be_live(ended):
+    """TASK-1095: Snark's errored turn was requeued 4x; each retry re-read the
+    finished `agent:run:req_delivery_*` stream from 0, re-broadcast ~300 tool
+    events to the browser, and failed on the same error frame."""
+    from datetime import datetime, timezone
+
+    record = SimpleNamespace(
+        id="delivery-dead", turn_id="turn-delivery-dead", claim_token="claim",
+        target_bot_id="snark", attempt_count=1, max_attempts=5,
+        overflow_recovery_count=0,
+    )
+    payload = {
+        "messages": [{"role": "user", "content": "work"}],
+        "bot_id": "snark",
+        "user_message_id": "00000000-0000-4000-8000-000000000005",
+        "assistant_message_id": "00000000-0000-4000-8000-000000000006",
+        "inter_bot_delivery_id": "delivery-dead",
+        "inter_bot_turn_id": "turn-delivery-dead",
+        "inter_bot_bridge_request_id": "req_delivery_dead",
+    }
+    ended_at = datetime.now(timezone.utc) if ended else None
+    turn = SimpleNamespace(
+        ended_at=ended_at, status="error" if ended else "streaming",
+        error_text="Proxy stream failed: ChatGPTEventTimeout" if ended else None,
+        response_text="", model="m",
+    )
+    failed, requeued = [], []
+    store = SimpleNamespace(
+        payload=lambda _id: payload,
+        mark_transport_accepted=lambda *_args: True,
+        get=lambda _id: record,
+        turn_state=lambda _id: (turn.status, ended_at),
+        fail_claim=lambda *args: failed.append(args) or SimpleNamespace(status="FAILED"),
+        requeue=lambda *args, **kw: requeued.append(args) or SimpleNamespace(status="QUEUED"),
+        renew_lease=lambda *_args: False,
+    )
+
+    async def stream(_request):
+        yield "data: [DONE]\n\n"
+
+    dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
+    dispatcher.store = store
+    dispatcher.service = SimpleNamespace(
+        config=SimpleNamespace(),
+        chat_completion_stream=stream,
+        _turn_log_store=SimpleNamespace(get_turn=lambda _id: turn),
+    )
+    dispatcher._heartbeat = lambda *_args: asyncio.sleep(3600)
+    dispatcher._emit = lambda _value: asyncio.sleep(0)
+    _run(dispatcher._dispatch(record))
+
+    if ended:
+        assert len(failed) == 1 and not requeued
+        assert "ChatGPTEventTimeout" in failed[0][2]
+    else:
+        assert len(requeued) == 1 and not failed
+
+
 def test_passive_dispatcher_retries_and_acquires_leadership(monkeypatch):
     attempts = iter([None, object()])
     stop_event = asyncio.Event()

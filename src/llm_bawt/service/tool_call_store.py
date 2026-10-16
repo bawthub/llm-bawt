@@ -89,6 +89,9 @@ class ToolCallRecord(SQLModel, table=True):
     iteration: int = Field(default=1)
     started_at: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
     ended_at: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
+    # TASK-1095: when the tool actually began executing (PreToolUse). started_at
+    # is when the model emitted it; the gap is queue/approval wait.
+    exec_started_at: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
     duration_ms: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
     text_offset: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     is_error: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
@@ -187,6 +190,8 @@ class ToolCallStore:
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_blob_key VARCHAR(128)",
                 # TASK-977: per-call media refs for tool-card previews.
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS attachments_json TEXT",
+                # TASK-1095: execution start, separate from model emit time.
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS exec_started_at DOUBLE PRECISION",
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_turn_call ON tool_call_records (turn_id, call_id)",
                 # TASK-594: content-addressed lookup for the TTL prune keep-set.
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_blob_key ON tool_call_records (result_blob_key)",
@@ -195,6 +200,34 @@ class ToolCallStore:
                 conn.execute(sa_text(statement))
 
         self._schema_guard.run(self.engine, "tool-call-store", bootstrap)
+
+    def mark_executing(
+        self,
+        *,
+        turn_id: str | None,
+        call_id: str | None,
+        tool_use_id: str | None,
+        exec_started_at: float | None,
+    ) -> None:
+        """Stamp execution start on an existing row (TASK-1095). Never creates."""
+        if self.engine is None or not turn_id or not exec_started_at or not (call_id or tool_use_id):
+            return
+        with Session(self.engine) as session:
+            row = None
+            if call_id:
+                row = session.exec(select(ToolCallRecord).where(
+                    ToolCallRecord.turn_id == turn_id, ToolCallRecord.call_id == call_id,
+                )).first()
+            if row is None and tool_use_id:
+                row = session.exec(select(ToolCallRecord).where(
+                    ToolCallRecord.turn_id == turn_id, ToolCallRecord.tool_use_id == tool_use_id,
+                )).first()
+            # First stamp wins; a finished call's duration is never rewritten.
+            if row is None or row.exec_started_at is not None or row.ended_at is not None:
+                return
+            row.exec_started_at = exec_started_at
+            session.add(row)
+            session.commit()
 
     def save_start(
         self,
@@ -374,8 +407,9 @@ class ToolCallStore:
                 row.is_error = is_error
                 if attachments:
                     row.attachments_json = json.dumps(attachments)
-                if ended_at and row.started_at:
-                    row.duration_ms = (ended_at - row.started_at) * 1000
+                run_started_at = row.exec_started_at or row.started_at
+                if ended_at and run_started_at:
+                    row.duration_ms = (ended_at - run_started_at) * 1000
                 session.add(row)
                 session.flush()
                 assert row.id is not None

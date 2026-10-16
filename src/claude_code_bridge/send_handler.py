@@ -470,6 +470,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         watchdog = TurnWatchdog(
                             self._request_timeout,
                             on_health=_publish_turn_health,
+                            resolve_parent=subagent_usage.host_parent,
                         )
                         # Register one live run controller for both control paths:
                         # chat.abort calls disconnect(), while chat.steer performs
@@ -612,6 +613,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                         tool_arguments_by_id=tool_arguments_by_id,
                                         latest_assistant_usage=latest_assistant_usage,
                                         assistant_snapshot_text=assistant_snapshot_text,
+                                        usage_ledger=subagent_usage,
                                     )
                                 )
                                 if seq != prior_seq or assistant_snapshot_text != prior_snapshot:
@@ -635,6 +637,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     screenshot_artifacts_by_tool_use_id=(
                                         screenshot_artifacts_by_tool_use_id
                                     ),
+                                    usage_ledger=subagent_usage,
                                 )
                                 # The watchdog observed this message before
                                 # returning it, so active_tools is current.

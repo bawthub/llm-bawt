@@ -25,6 +25,14 @@ class PendingToolCallCorrelator:
     ) -> None:
         self._calls.append(PendingToolCall(call_id, tool_name, tool_use_id))
 
+    def call_id_for(self, tool_use_id: str | None) -> str:
+        """Pending call's call_id by SDK id without consuming it (TASK-1095)."""
+        if tool_use_id:
+            for call in reversed(self._calls):
+                if call.tool_use_id == tool_use_id:
+                    return call.call_id
+        return ""
+
     def finish(self, *, tool_name: str, tool_use_id: str | None) -> str:
         if tool_use_id:
             for index in range(len(self._calls) - 1, -1, -1):

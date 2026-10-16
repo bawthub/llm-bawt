@@ -431,7 +431,9 @@ def test_live_hook_exact_reissue_and_hard_deny_wins():
         assert b._pending_approvals[("s", "tuid-1")].state == "granted"
         b._policy_bundle.policies.pop(0)
         assert gate(original, request=_continuation())
-        assert events[-1]["kind"] == AgentEventKind.TOOL_PREAPPROVED
+        # TASK-1095: the hook path then stamps the real execution start.
+        tail = [AgentEventKind.TOOL_PREAPPROVED] + ([AgentEventKind.TOOL_EXECUTING] if hook_gate else [])
+        assert [e["kind"] for e in events[-len(tail):]] == tail
         assert not gate(original, request=_continuation())
 
 
@@ -565,3 +567,28 @@ if __name__ == "__main__":
             traceback.print_exc()
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+def test_pre_tool_use_hook_stamps_execution_only_when_tool_will_run():
+    """TASK-1095 #3: PreToolUse = execution start, never for a denied call."""
+    _skip_if_no_sdk()
+    b = _bridge()
+    published = []
+    b._publish_event = lambda *a, **k: published.append(k)  # type: ignore[assignment]
+    seq = [0]
+    hook = b._make_pre_tool_use_hook(request_id="r", session_key="s", seq_holder=seq)
+
+    def executing():
+        return [k for k in published if k.get("kind") == AgentEventKind.TOOL_EXECUTING]
+
+    async def run(cmd, tuid):
+        return await hook(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}, "tool_use_id": tuid}, tuid, {},
+        )
+
+    assert asyncio.run(run("ls", "t-allow")) == {}
+    assert [(k["tool_use_id"], k["tool_name"]) for k in executing()] == [("t-allow", "Bash")]
+    assert seq[0] >= 1
+    asyncio.run(run("dd of=/dev/sda", "t-deny"))        # deny
+    asyncio.run(run("rm -rf /home/x", "t-require"))     # require → deny pending approval
+    assert [k["tool_use_id"] for k in executing()] == ["t-allow"]

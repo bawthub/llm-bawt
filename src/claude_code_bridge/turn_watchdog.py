@@ -55,11 +55,14 @@ class ActiveTool:
     started_at: float
     timeout_seconds: float
     last_activity_at: float
+    # TASK-1095: any tool that hosts a sub-agent run (Agent, Workflow, or a
+    # SendMessage resuming a stopped agent) is judged on inactivity.
+    hosts_subagent: bool = False
 
     @property
     def progress_aware(self) -> bool:
         """Long-running orchestrators expose nested SDK activity."""
-        return self.name in {"Agent", "Workflow"}
+        return self.hosts_subagent or self.name in {"Agent", "Workflow"}
 
     @property
     def deadline_base(self) -> float:
@@ -79,6 +82,7 @@ class TurnWatchdog:
         max_tool_timeout: float = MAX_TOOL_TIMEOUT_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         on_health: HealthCallback | None = None,
+        resolve_parent: Callable[[str], str | None] | None = None,
     ) -> None:
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be positive")
@@ -94,6 +98,9 @@ class TurnWatchdog:
         self._max_tool_timeout = float(max_tool_timeout)
         self._clock = clock
         self._on_health = on_health
+        # Shared spawn → live-host resolution (SubagentUsage.host_parent), so
+        # resumed-agent activity keeps the RUNNING host alive, not its old spawn.
+        self._resolve_parent = resolve_parent
         self._active_tools: dict[str, ActiveTool] = {}
 
     @property
@@ -108,8 +115,13 @@ class TurnWatchdog:
             message, (TaskStartedMessage, TaskProgressMessage)
         ):
             parent_tool_use_id = message.tool_use_id
+        if parent_tool_use_id and self._resolve_parent is not None:
+            parent_tool_use_id = self._resolve_parent(parent_tool_use_id)
         if parent_tool_use_id:
             parent = self._active_tools.get(parent_tool_use_id)
+            if parent is not None and isinstance(message, TaskStartedMessage):
+                parent = replace(parent, hosts_subagent=True)
+                self._active_tools[parent_tool_use_id] = parent
             if parent is not None and parent.progress_aware:
                 self._active_tools[parent_tool_use_id] = replace(
                     parent, last_activity_at=now

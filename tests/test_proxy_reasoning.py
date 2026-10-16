@@ -253,8 +253,12 @@ def test_malformed_encrypted_upstream_item_is_not_silently_lost():
         CODEC.encode({"type": "reasoning", "encrypted_content": "opaque"})
 
 
-def test_committed_reasoning_failure_does_not_splice_another_attempt(monkeypatch):
+def test_committed_reasoning_failure_continues_from_native_checkpoint(monkeypatch):
+    """TASK-1095: reasoning-only commitment continues from the native checkpoint
+    (replayed in order, no splice of a fresh sample), bounded by the normal
+    budget, and still fails upward as api_error once the budget is spent."""
     monkeypatch.setattr("claude_code_bridge.proxy.usage_capture.schedule_capture", lambda _: None)
+    monkeypatch.setattr("claude_code_bridge.proxy.retry.compute_backoff", lambda *a, **k: 0)
     async def run():
         adapter = OpenAIChatGPTAdapter()
         adapter._cached_account_id = "account-a"
@@ -267,7 +271,9 @@ def test_committed_reasoning_failure_does_not_splice_another_attempt(monkeypatch
             raise ConnectionError("fixture disconnected after native state")
         adapter.open_stream = AsyncMock(side_effect=lambda **_: upstream())
         frames = [frame async for frame in adapter.call({"messages": []}, MODEL)]
-        assert adapter.open_stream.await_count == 1
+        assert adapter.open_stream.await_count == 3
+        retried = adapter.open_stream.await_args_list[1].kwargs["body"]["input"]
+        assert retried[0] == NATIVE and retried[1]["role"] == "developer"
         assert b'"type":"api_error"' in b"".join(frames)
     asyncio.run(run())
 

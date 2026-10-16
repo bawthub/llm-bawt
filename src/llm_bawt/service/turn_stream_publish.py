@@ -69,6 +69,8 @@ class TurnStreamPublishMixin:
                 event_dict = _tool_event_coordinator.start(event_dict)
             elif event_dict.get("event") == "tool_end":
                 event_dict = _tool_event_coordinator.end(event_dict)
+            elif event_dict.get("event") == "tool_executing":
+                event_dict = _tool_event_coordinator.executing(event_dict)
         if not _redis_sub:
             return None
         try:

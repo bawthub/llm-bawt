@@ -217,14 +217,23 @@ def test_committed_output_still_prevents_stall_replay(monkeypatch, mode, barrier
             await h.collect()
             # TASK-1064 permits standard SSE text recovery, but this fixture
             # never reproduces the visible prefix: no new tool may escape.
-            continuation = barrier == "text" and mode == "sse"
+            # TASK-1095: SSE also continues a reasoning-only checkpoint. Nothing
+            # visible was committed, so no prefix is demanded and the retry
+            # completes normally (its tool call is the first one forwarded).
+            continuation = mode == "sse" and barrier != "tool"
+            recovers = continuation and barrier != "text"
+            wire = b"".join(h.frames)
             assert h.attempts == (2 if continuation else 1)
             if not continuation:
                 assert not h.statuses
+            elif not recovers:
+                assert b'"type":"tool_use"' not in wire
+            if recovers:
+                assert b'"type":"api_error"' not in wire
+                assert wire.count(b"event: message_stop") == 1
             else:
-                assert b'"type":"tool_use"' not in b"".join(h.frames)
-            assert b'"type":"api_error"' in b"".join(h.frames)
-            assert b"event: message_stop" not in b"".join(h.frames)
+                assert b'"type":"api_error"' in wire
+                assert b"event: message_stop" not in wire
             h.check_closed()
         finally:
             await h.adapter.close()

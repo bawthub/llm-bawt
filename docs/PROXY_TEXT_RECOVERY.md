@@ -28,8 +28,14 @@ The implementation therefore requires **exact-prefix validation**, not a hopeful
   as `api_error`. No candidate tool_use can escape before validation.
 - **Any tool_use already forwarded forbids retry**, including a tool emitted by
   a successful continuation that later stalls. Cancellation propagates, no retry.
-- Reasoning-only commitment, refusal, unhandled output items, missing checkpoint,
-  permanent errors, auth failures and rate limits retain conservative barriers.
+- **Reasoning-only commitment continues (TASK-1095).** When committed native
+  reasoning exists but no visible text or tool was forwarded, the checkpoint
+  replays that reasoning in order with a developer note marking transport
+  recovery before any visible output. No prefix is demanded, so the candidate's
+  output (including its first tool call) is forwarded normally. Previously this
+  failed up as `api_error` and killed sub-agents mid-thought on a single stall.
+- Refusal, unhandled output items, missing checkpoint, permanent errors, auth
+  failures and rate limits retain conservative barriers.
 - Existing budgets apply: maximum 3 attempts for transient failures, 2 for
   supervised progress stalls. SDK message_start occurs once; block indexes remain
   monotonic. The failed upstream stream is closed before the next request.

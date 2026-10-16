@@ -73,8 +73,10 @@ policy. A replayable native reasoning signature cannot be retracted. TASK-1064
 adds a narrow exception for standard ChatGPT SSE with visible text: preserve all
 committed native items in order, request exact text-prefix replay, then validate
 and suppress that prefix before forwarding any new content. A mismatch fails
-upward without forwarding the candidate's reasoning or tools. Reasoning-only
-commitment, other providers and Lite/WS retain the prior no-retry barrier.
+upward without forwarding the candidate's reasoning or tools. TASK-1095 extends
+the same SSE path to reasoning-only commitment: committed items are replayed with
+no prefix demand (nothing visible was forwarded). Other providers and Lite/WS
+retain the prior no-retry barrier.
 Tool-call no-replay protection remains unchanged. See `PROXY_TEXT_RECOVERY.md`.
 
 Replayed items are deterministic and opaque bytes are preserved. New tool hops

@@ -87,7 +87,8 @@ def phase_from_state(state: "TranslatorState | None") -> RetryPhase:
     if state.tool_committed:
         return RetryPhase.TOOL_COMMITTED
     # Native reasoning already persisted downstream cannot be retracted.
-    # TEXT remains a barrier unless the caller has a complete continuation checkpoint.
+    # TEXT remains a barrier unless the caller has a complete continuation
+    # checkpoint; reasoning-only checkpoints qualify too (TASK-1095).
     if state.text_delta_yielded or getattr(state, "reasoning_committed", False):
         return RetryPhase.TEXT
     if state.thinking_yielded:
@@ -431,7 +432,8 @@ def decide(
 
     # TASK-1064: only an opted-in adapter with a complete ordered checkpoint
     # can continue text. It must validate/suppress the exact visible prefix.
-    # Reasoning-only, refusal, overflow and unsupported providers still fail up.
+    # TASK-1095: a reasoning-only checkpoint continues with no prefix demand.
+    # Refusal, overflow and unsupported providers still fail up.
     if phase is RetryPhase.TEXT:
         eligible = allow_text_continuation and bucket in {
             FailureBucket.A_TRANSIENT_NETWORK,
