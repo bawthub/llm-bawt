@@ -10,6 +10,13 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
+from ..runtime_switch_rotation import (
+    RUNTIME_SWITCH_SOURCE,
+    rotate_active_threads,
+    runtime_family,
+    runtime_family_changed,
+    thread_switched_event,
+)
 from ..dependencies import (
     get_bot_profile_store,
     get_prompt_template_store,
@@ -246,7 +253,8 @@ async def _persist_bot_profile(
     slug = str(payload.get("slug") or "").strip().lower()
     if not slug:
         raise HTTPException(status_code=400, detail="Bot slug is required")
-    if create_only and store.get(slug) is not None:
+    previous = store.get(slug)
+    if create_only and previous is not None:
         raise HTTPException(status_code=409, detail=f"Bot '{slug}' already exists")
 
     _validate_profile_payload(payload)
@@ -261,11 +269,10 @@ async def _persist_bot_profile(
         from ...media.avatar import resolve_avatar_render
 
         new_avatar = payload.get("avatar")
-        existing = store.get(slug)
         needs_render = (
-            existing is None
-            or existing.avatar != new_avatar
-            or not getattr(existing, "avatar_render", None)
+            previous is None
+            or previous.avatar != new_avatar
+            or not getattr(previous, "avatar_render", None)
         )
         if needs_render:
             payload["avatar_render"] = await asyncio.to_thread(
@@ -284,6 +291,7 @@ async def _persist_bot_profile(
     _reload_service_model_catalog(service)
     _invalidate_bot_instance_cache(service, profile.slug)
     _clear_session_model_overrides(service, bot_id=profile.slug)
+    rotated_threads = _rotate_threads_on_runtime_switch(store.engine, previous, profile)
 
     effective_prompt = _resolve_effective_bot_prompt(service.config, profile)
     if profile.agent_backend == "openclaw" and effective_prompt.strip():
@@ -298,7 +306,46 @@ async def _persist_bot_profile(
 
     response = _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug))
     await _publish_bot_profile_changed(service, profile.slug)
+    await _publish_runtime_switch_threads(service, profile.slug, rotated_threads)
     return response
+
+
+def _rotate_threads_on_runtime_switch(engine, previous, profile) -> list[tuple[str | None, str]]:
+    """Start fresh threads when a save crosses runtime families (chat <-> agent).
+
+    The profile write is already committed, so a rotation failure is logged,
+    not raised: a 500 here would invite retries of a write that succeeded.
+    """
+    if not runtime_family_changed(previous, profile):
+        return []
+    try:
+        return rotate_active_threads(engine, profile.slug)
+    except Exception:
+        logger.exception(
+            "Bot %s changed runtime %s -> %s but thread rotation failed; "
+            "the old thread stays active",
+            profile.slug, runtime_family(previous), runtime_family(profile),
+        )
+        return []
+
+
+async def _publish_runtime_switch_threads(
+    service, slug: str, rotated: list[tuple[str | None, str]],
+) -> None:
+    """Tell each affected user's UI about its fresh thread (best-effort)."""
+    subscriber = getattr(service, "_redis_subscriber", None)
+    if subscriber is None or not rotated:
+        return
+    for user_id, new_session_id in rotated:
+        if not user_id:
+            continue
+        try:
+            await subscriber.publish_tool_event(
+                slug, user_id,
+                thread_switched_event(slug, user_id, new_session_id, RUNTIME_SWITCH_SOURCE),
+            )
+        except Exception:
+            logger.exception("thread_switched publish failed for %s/%s", slug, user_id)
 
 
 @router.get("/v1/settings", response_model=RuntimeSettingsResponse, tags=["System"])

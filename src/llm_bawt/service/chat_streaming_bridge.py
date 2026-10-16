@@ -178,14 +178,12 @@ class ChatStreamingBridgeMixin:
                 UNIFIED_STREAM_MAXLEN,
             )
 
-            payload = json.dumps({
-                "_type": "thread_switched",
-                "bot_id": bot_id,
-                "user_id": uid,
-                "new_session_id": new_session_id,
-                "source": source,
-                "ts": time.time(),
-            }, ensure_ascii=False)
+            from .runtime_switch_rotation import thread_switched_event
+
+            payload = json.dumps(
+                thread_switched_event(bot_id, uid, new_session_id, source),
+                ensure_ascii=False,
+            )
             client.xadd(
                 f"{UNIFIED_EVENTS_PREFIX}{bot_id}:{uid}",
                 {"payload": payload},
