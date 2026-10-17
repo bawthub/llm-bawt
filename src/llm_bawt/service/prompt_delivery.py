@@ -85,7 +85,7 @@ class PromptDeliveryWorker:
         sender = "scheduler:" + hashlib.sha256(snapshot["owner_user_id"].encode()).hexdigest()
         idem = f"schedule:{job_id}:occurrence:{key}"
         # Serialize each outbox attempt with pause/cancel and other workers.
-        # Enqueue's independent transaction acquires only its idempotency lock;
+        # Enqueue's independent transaction acquires only identity locks;
         # dispatch acquires target -> job -> delivery, so there is no inversion.
         with Session(self.engine) as session, session.begin():
             rows = self._rows(session, run_id)
@@ -127,6 +127,7 @@ class PromptDeliveryWorker:
                         "schedule_id": job_id, "occurrence_id": run_id,
                         "scheduled_for": snapshot["scheduled_for"],
                     }},
+                    producer="schedule",
                 )
             rows[2].delivery_id = record.id
             transition(session, *rows, "queued", now, evidence=self._evidence(record))

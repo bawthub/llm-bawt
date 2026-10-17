@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 from llm_bawt.inter_bot_delivery_retry import DeliveryRetryConflict, retry_failed_delivery
-from llm_bawt.utils.config import Config
+from tests.pg_isolation import isolated_pg_store
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 def delivery():
-    store = InterBotDeliveryStore(Config())
+    store = isolated_pg_store(InterBotDeliveryStore)
     if store.engine is None:
         pytest.skip("PostgreSQL unavailable")
     slug = f"retry-test-{uuid.uuid4().hex}"
@@ -34,6 +36,81 @@ def submit(store, slug, *, metadata=None, session_policy="continue", key="origin
         idempotency_key=key, task_id="TASK-1111", message_kind="PROGRESS",
         metadata=metadata, session_policy=session_policy,
     )[0]
+
+
+def test_manual_retry_and_cancel_failed_original_do_not_deadlock(delivery, monkeypatch):
+    store, slug = delivery
+    original = submit(store, slug)
+    store.mark_failed(original.id, "transient error")
+    retry_has_row = threading.Event()
+    resume_retry = threading.Event()
+    retry_result, cancel_result = [], []
+    retry_pid = []
+    enqueue = store.enqueue
+
+    def paused_enqueue(**kwargs):
+        conn = kwargs["connection"]
+        conn.execute(text("SET LOCAL lock_timeout = '4s'"))
+        retry_pid.append(conn.execute(text("SELECT pg_backend_pid()")).scalar_one())
+        retry_has_row.set()  # retry holds original FOR UPDATE, before identity admission
+        if not resume_retry.wait(timeout=3):
+            raise TimeoutError("cancel never reached the original row")
+        return enqueue(**kwargs)
+
+    def set_lock_timeout(conn):
+        conn.exec_driver_sql("SET LOCAL lock_timeout = '4s'")
+
+    monkeypatch.setattr(store, "enqueue", paused_enqueue)
+    event.listen(store.engine, "begin", set_lock_timeout)
+
+    def retry():
+        try:
+            retry_result.append(retry_failed_delivery(store, original.id))
+        except Exception as exc:
+            retry_result.append(exc)
+
+    def cancel():
+        try:
+            cancel_result.append(store.cancel(original.id))
+        except Exception as exc:
+            cancel_result.append(exc)
+
+    retrier = threading.Thread(target=retry)
+    canceller = threading.Thread(target=cancel)
+    try:
+        retrier.start()
+        assert retry_has_row.wait(timeout=2)
+        canceller.start()
+        deadline = time.monotonic() + 2
+        blocked = False
+        with store.engine.connect() as observer:
+            while time.monotonic() < deadline:
+                blocked = observer.execute(text("""
+                    SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                    WHERE datname=current_database() AND wait_event_type='Lock'
+                      AND :pid = ANY(pg_blocking_pids(pid)))
+                """), {"pid": retry_pid[0]}).scalar_one()
+                if blocked or not canceller.is_alive():
+                    break
+                time.sleep(0.02)
+        assert blocked and canceller.is_alive(), "cancel never waited on FAILED original"
+    finally:
+        resume_retry.set()
+        retrier.join(timeout=5)
+        if canceller.ident is not None:
+            canceller.join(timeout=5)
+        event.remove(store.engine, "begin", set_lock_timeout)
+    assert not retrier.is_alive() and not canceller.is_alive()
+    assert len(retry_result) == 1 and isinstance(retry_result[0], tuple), retry_result
+    child, duplicate = retry_result[0]
+    assert not duplicate and child.id != original.id
+    assert cancel_result == [None]  # FAILED original cannot be cancelled
+    with store.engine.begin() as conn:
+        conn.execute(text("UPDATE inter_bot_deliveries SET status='FAILED' WHERE id=:id"),
+                     {"id": child.id})
+        assert conn.execute(text(
+            "SELECT count(*) FROM inter_bot_deliveries WHERE sender_bot_id=:sender"
+        ), {"sender": slug}).scalar_one() == 2
 
 
 def test_failed_retry_is_new_idempotent_delivery_with_original_provenance(delivery):

@@ -68,4 +68,5 @@ def retry_failed_delivery(
             max_attempts=original.max_attempts,
             session_policy=original.session_policy,
             connection=conn,
+            producer="retry",
         )

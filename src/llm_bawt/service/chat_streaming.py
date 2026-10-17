@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from typing import AsyncIterator
+from ..request_identity import AdmissionUnavailable as IdentityAdmissionUnavailable
 from ..bots import (
     StreamingEmoteFilter,
     StreamingTTSScrubber,
@@ -321,10 +322,10 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                 admission_claim=admission_claim, bot_id=bot_id, user_id=user_id,
                 user_prompt=user_prompt, trigger_message_id=trigger_message_id,
             )
-        except (ValueError, AdmissionUnavailable, AdmissionFenceLost) as exc:
+        except (ValueError, AdmissionUnavailable, AdmissionFenceLost, IdentityAdmissionUnavailable) as exc:
             # Headers are already sent; report the refusal in-band, never a
             # silently truncated stream.
-            log.api_error(ctx, f"admission refused: {exc}", 409)
+            log.api_error(ctx, f"admission refused: {exc}", getattr(exc, "status_code", 409))
             for event in request_failed_events(response_id, created, model_alias, exc):
                 yield event
             return

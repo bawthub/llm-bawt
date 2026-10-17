@@ -15,33 +15,23 @@ from sqlalchemy import text as sa_text
 
 from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.turn_admission import AdmissionClaim, AdmissionFenceLost, TargetBusy
+from tests.pg_isolation import isolated_pg_store
 from tests.test_turn_admission import _mcp_claim
 
 
 # ---------------------------------------------------------------------------
 # PostgreSQL: the real lock, classification and reservation fence
 #
-# These write real rows, so they refuse to run unless the configured database
-# is a dedicated throwaway (name ends in ``_test``) — never the shared askllm
-# database. Example private cluster: see TASK-1082 receipt
-# (LLM_BAWT_POSTGRES_HOST=127.0.0.1 ... LLM_BAWT_POSTGRES_DATABASE=llm_bawt_test).
+# The shared guard refuses a non-*_test database BEFORE any store construction.
+# A skipped integration test is not evidence of passing PostgreSQL behavior.
 # ---------------------------------------------------------------------------
-
-
-def _isolated_config():
-    from llm_bawt.utils.config import Config
-
-    config = Config()
-    if not str(getattr(config, "POSTGRES_DATABASE", "")).endswith("_test"):
-        pytest.skip("admission integration tests need an isolated *_test database")
-    return config
 
 
 @pytest.fixture
 def pg_turns():
     from llm_bawt.service.turn_logs import TurnLogStore
 
-    store = TurnLogStore(_isolated_config())
+    store = isolated_pg_store(TurnLogStore)
     if store.engine is None:
         pytest.skip("PostgreSQL unavailable")
     bot = f"test-admission-{uuid.uuid4().hex}"
@@ -111,10 +101,10 @@ def _assert_waiting_on_holder(engine, holding_conn, worker, *, timeout=5.0):
 @pytest.mark.integration
 def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
-    from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue, stable_ordinary_ids
+    from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue
 
     turns, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     queue = OrdinaryTurnQueue(turns, deliveries)
 
     def send(message, *, message_id=None, assistant_id=None):
@@ -125,10 +115,8 @@ def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
             assistant_message_id=assistant_id or str(uuid.uuid4()),
             augment_memory=False, extract_memory=False,
         )
-        turn_id, mid, aid = stable_ordinary_ids(request, bot, "nick")
         result = queue.decide(
             request=request, bot_id=bot, user_id="nick", user_prompt=message,
-            turn_id=turn_id, user_message_id=mid, assistant_message_id=aid,
         )
         return request, result
 
@@ -151,7 +139,8 @@ def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
         _, duplicate = send("second", message_id=second_req.user_message_id,
                             assistant_id=second_assistant)
         assert duplicate.delivery_id == second.delivery_id
-        with pytest.raises(AdmissionFenceLost):
+        from llm_bawt.request_identity import IdentityConflict
+        with pytest.raises(IdentityConflict):
             send("changed", message_id=second_req.user_message_id,
                  assistant_id=second_assistant)
         claimed_first = deliveries.claim_next(bot, claim_owner="worker", steer_capable=True)
@@ -181,20 +170,19 @@ def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
 @pytest.mark.integration
 def test_idle_http_ack_survives_dispatcher_crash_before_bridge_send(pg_turns):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
-    from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue, stable_ordinary_ids
+    from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue
 
     turns, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     request = ChatCompletionRequest(
         bot_id=bot, user="nick", model="test-model", stream=True,
         messages=[ChatMessage(role="user", content="recover my exact reply")],
         user_message_id=str(uuid.uuid4()), assistant_message_id=str(uuid.uuid4()),
     )
-    turn_id, message_id, assistant_id = stable_ordinary_ids(request, bot, "nick")
+    message_id = request.user_message_id
     try:
         decision = OrdinaryTurnQueue(turns, deliveries).decide(
             request=request, bot_id=bot, user_id="nick", user_prompt="recover my exact reply",
-            turn_id=turn_id, user_message_id=message_id, assistant_message_id=assistant_id,
         )
         assert decision.receipt()["object"] == "chat.completion.queued"
         assert turns.get_turn(decision.turn_id) is None
@@ -274,7 +262,7 @@ def test_ordinary_agent_new_enqueues_without_http_execution(pg_turns, monkeypatc
     from tests.test_nonstream_turn_execution import _service
 
     turns, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     running = _open(turns, bot) if busy else None
     service = _service(Mock(side_effect=AssertionError("queued request reached inference")))
     service._turn_log_store = turns
@@ -406,7 +394,7 @@ def test_delivery_claim_waits_instead_of_steering_ambiguous_or_reserved_targets(
     from llm_bawt.inter_bot_delivery import STEERING, InterBotDeliveryStore
 
     store, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     sender = f"test-admission-sender-{uuid.uuid4().hex}"
     try:
         record, _ = deliveries.enqueue(
@@ -441,7 +429,7 @@ def test_delivery_consumption_fence_rejects_reclaimed_claim_on_postgres(pg_turns
     from llm_bawt.service.inter_bot_claims import turn_admission_claim
 
     turns, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     sender = f"test-admission-sender-{uuid.uuid4().hex}"
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",
@@ -483,7 +471,7 @@ def test_delivery_enqueue_can_share_the_admission_transaction(pg_turns):
     from llm_bawt.service.turn_admission import lock_target
 
     turns, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     sender = f"test-admission-sender-{uuid.uuid4().hex}"
     assistant_id = str(uuid.uuid4())
     delivery_id = None
@@ -518,7 +506,7 @@ def test_delivery_claim_fence_locks_out_concurrent_requeue(pg_turns):
     from llm_bawt.service.turn_admission import lock_target
 
     turns, bot = pg_turns
-    deliveries = InterBotDeliveryStore(_isolated_config())
+    deliveries = InterBotDeliveryStore(pg_turns[0].config)
     sender = f"test-admission-sender-{uuid.uuid4().hex}"
     record, _ = deliveries.enqueue(
         sender_bot_id=sender, target_bot_id=bot, message="callback",

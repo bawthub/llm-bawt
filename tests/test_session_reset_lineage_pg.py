@@ -11,12 +11,12 @@ from sqlalchemy import text
 from llm_bawt.memory.postgresql_short_term import PostgreSQLShortTermManager
 from llm_bawt.service.agent_new_rotation import delivery_new_predecessor
 from llm_bawt.service.turn_logs import TurnLogStore
-from tests.test_turn_admission_pg import _isolated_config
+from tests.pg_isolation import isolated_pg_store
 
 
 @pytest.mark.integration
 def test_concurrent_claims_reuse_one_delivery_new_thread():
-    engine = TurnLogStore(_isolated_config()).engine
+    engine = isolated_pg_store(TurnLogStore).engine
     if engine is None:
         pytest.skip("private PostgreSQL unavailable")
     bot = f"test-new-{uuid.uuid4().hex}"

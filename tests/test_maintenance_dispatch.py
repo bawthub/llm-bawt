@@ -83,8 +83,14 @@ async def test_lifecycle_failure_does_not_reject_durable_acceptance():
 
 def test_enqueue_snapshot_does_not_invert_scheduler_target_job_lock_order(monkeypatch):
     conn = MagicMock()
-    conn.execute.return_value.mappings.return_value.first.return_value = None
-    conn.execute.return_value.mappings.return_value.one.return_value = {"id": "delivery"}
+    def execute(sql, params):
+        result = MagicMock()
+        result.mappings.return_value.first.return_value = (
+            {"id": "delivery"} if "INSERT INTO inter_bot_deliveries" in str(sql) else None
+        )
+        return result
+
+    conn.execute.side_effect = execute
     engine = MagicMock()
     engine.begin.return_value.__enter__.return_value = conn
     store = InterBotDeliveryStore.__new__(InterBotDeliveryStore)
@@ -96,11 +102,14 @@ def test_enqueue_snapshot_does_not_invert_scheduler_target_job_lock_order(monkey
                          user_message_id=frontend_id) == ("record", False)
     statements = [str(call.args[0]) for call in conn.execute.call_args_list]
     locks = [sql for sql in statements if "pg_advisory" in sql]
-    assert locks == ["SELECT pg_advisory_xact_lock(hashtext(:key))"]
+    assert locks == ["SELECT pg_advisory_xact_lock(:namespace, :hashed)"] * 2
+    pairs = [call.args[1] for call in conn.execute.call_args_list
+             if "pg_advisory" in str(call.args[0])]
+    assert pairs == sorted(pairs, key=lambda pair: (pair["namespace"], pair["hashed"]))
     assert any("SELECT id, user_prompt FROM turn_logs" in sql for sql in statements)
     inserted = next(call.args[1] for call in conn.execute.call_args_list
                     if "INSERT INTO inter_bot_deliveries" in str(call.args[0]))
-    assert json.loads(inserted["metadata"]) == {}
+    assert json.loads(inserted["metadata"])["_request_identity_producer"] == "bot"
     assert inserted["message_id"] == frontend_id
     assert json.loads(inserted["payload"])["user_message_id"] == frontend_id
 

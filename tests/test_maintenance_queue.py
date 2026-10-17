@@ -210,7 +210,7 @@ def test_existing_accepted_or_ambiguous_work_keeps_recovery_path(rig, mode, acce
 
 @pytest.mark.parametrize("case,status", [
     ("queue_unavailable", 503), ("unsupported_backend", 409),
-    ("missing_source_session", 503), ("invalid_uuid", 422), ("empty_text", 422),
+    ("missing_source_session", 503), ("invalid_uuid", 400), ("empty_text", 422),
 ])
 def test_unsupported_user_submission_fails_visibly_before_acceptance(monkeypatch, case, status):
     from fastapi import HTTPException

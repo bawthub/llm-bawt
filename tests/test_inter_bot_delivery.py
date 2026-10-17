@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
+import time
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import text as sa_text
@@ -17,15 +23,18 @@ from llm_bawt.inter_bot_delivery import (
     InterBotDeliveryStore,
 )
 from llm_bawt.message_authorship import AuthorReference
+from llm_bawt.request_identity import IdentityConflict
+from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue
+from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.turn_logs import DeliveryTargetBusy, TurnLogStore
-from llm_bawt.utils.config import Config
+from tests.pg_isolation import isolated_pg_store
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 def delivery_store():
-    store = InterBotDeliveryStore(Config())
+    store = isolated_pg_store(InterBotDeliveryStore)
     if store.engine is None:
         pytest.skip("PostgreSQL unavailable")
     token = uuid.uuid4().hex
@@ -80,6 +89,119 @@ def _enqueue(
         metadata={"source": "test"},
         max_attempts=max_attempts,
     )
+
+
+def test_stream_without_user_uuid_never_reattaches_to_provisional_trigger(delivery_store, monkeypatch):
+    from llm_bawt.service import chat_streaming
+    from tests.test_nonstream_turn_execution import _service
+
+    store, _sender, target = delivery_store
+    turns = TurnLogStore(store.config)
+    service = _service(Mock(side_effect=AssertionError("queued request reached inference")))
+    service._turn_log_store = turns
+    service._ordinary_turn_queue = OrdinaryTurnQueue(turns, store)
+    service._inter_bot_dispatcher = SimpleNamespace(
+        store=store, announce_admitted=Mock(), wake=Mock(),
+    )
+    monkeypatch.setattr(chat_streaming, "prepare_stream_request_attachments",
+                        AsyncMock(return_value=("same prompt", [], [], None)))
+    original = chat_streaming.admit_ordinary_agent_turn
+    provisional = []
+
+    def capture_trigger(*args, **kwargs):
+        provisional.append(kwargs["trigger_message_id"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chat_streaming, "admit_ordinary_agent_turn", capture_trigger)
+
+    async def submit():
+        request = ChatCompletionRequest(
+            bot_id=target, user="nick", model="test-model", stream=True,
+            messages=[ChatMessage(role="user", content="same prompt")],
+        )
+        chunks = [chunk async for chunk in service.chat_completion_stream(request)]
+        return next(json.loads(chunk[6:]) for chunk in chunks if chunk.startswith("data: {")
+                    and '"object": "chat.completion.queued"' in chunk)
+
+    try:
+        first = asyncio.run(submit())
+        with store.engine.begin() as conn:
+            conn.execute(sa_text("UPDATE inter_bot_deliveries SET status='FAILED' WHERE id=:id"),
+                         {"id": first["delivery_id"]})
+        second = asyncio.run(submit())
+        assert provisional[0] != provisional[1]
+        assert first["delivery_id"] != second["delivery_id"]
+        for receipt, minted in zip((first, second), provisional, strict=True):
+            assert receipt["user_message_id"] != minted
+            with store.engine.connect() as conn:
+                assert conn.execute(sa_text(
+                    "SELECT idempotency_key FROM inter_bot_deliveries WHERE id=:id"
+                ), {"id": receipt["delivery_id"]}).scalar_one_or_none() is None
+    finally:
+        with store.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM inter_bot_deliveries WHERE target_bot_id=:target"),
+                         {"target": target})
+
+
+@pytest.mark.parametrize("difference", ["target", "user"])
+def test_concurrent_same_uuid_conflicts_across_scope(delivery_store, difference):
+    store, sender, target = delivery_store
+    user = str(uuid.uuid4())
+    competing_target = f"test-target-{uuid.uuid4().hex}" if difference == "target" else target
+    author = AuthorReference.user(f"test-user-{uuid.uuid4().hex}")
+    competing_author = (AuthorReference.user(f"test-user-{uuid.uuid4().hex}")
+                        if difference == "user" else author)
+    outcomes = []
+
+    def admit(conn, destination, owner):
+        return store.enqueue(
+            sender_bot_id=sender, target_bot_id=destination, author=owner,
+            message="conflicting identity", user_message_id=user,
+            payload={"messages": [{"role": "user", "content": "conflicting identity"}],
+                     "bot_id": destination}, connection=conn,
+        )[0]
+
+    def contender():
+        try:
+            with store.engine.begin() as conn:
+                conn.execute(sa_text("SET LOCAL lock_timeout = '4s'"))
+                admit(conn, competing_target, competing_author)
+            outcomes.append("unexpected insert")
+        except IdentityConflict:
+            outcomes.append("conflict")
+        except Exception as exc:
+            outcomes.append(exc)
+
+    with store.engine.begin() as holder:
+        holder.execute(sa_text("SET LOCAL lock_timeout = '4s'"))
+        winner = admit(holder, target, author)
+        worker = threading.Thread(target=contender)
+        worker.start()
+        # Confirm the contender is actually blocked on the holder's UUID lock.
+        holder_pid = holder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+        deadline = time.monotonic() + 2
+        with store.engine.connect() as observer:
+            while time.monotonic() < deadline:
+                blocked = observer.execute(sa_text("""
+                    SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                    WHERE datname=current_database() AND wait_event_type='Lock'
+                      AND :pid = ANY(pg_blocking_pids(pid)))
+                """), {"pid": holder_pid}).scalar_one()
+                if blocked:
+                    break
+                if not worker.is_alive():
+                    break
+                time.sleep(0.02)
+        assert blocked and worker.is_alive(), f"contender never waited on UUID lock: {outcomes}"
+        # Commit a terminal row so the live dispatcher cannot claim the fixture.
+        holder.execute(sa_text("UPDATE inter_bot_deliveries SET status='FAILED' WHERE id=:id"),
+                       {"id": winner.id})
+    worker.join(timeout=5)
+    assert not worker.is_alive() and outcomes == ["conflict"]
+    with store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT count(*) FROM inter_bot_deliveries WHERE sender_bot_id=:sender"
+        ), {"sender": sender}).scalar_one() == 1
 
 
 def test_delivery_persists_explicit_user_author(delivery_store):
@@ -191,7 +313,7 @@ def test_busy_target_and_dispatch_race_requeue_safely(delivery_store):
 
     # A normal target turn trying to start after the reservation must lose the
     # race instead of overlapping the queued callback.
-    turn_store = TurnLogStore(Config())
+    turn_store = TurnLogStore(store.config)
     with pytest.raises(DeliveryTargetBusy):
         turn_store.save_turn(
             turn_id=f"turn-user-{uuid.uuid4().hex}",
@@ -606,7 +728,7 @@ def test_recovered_queued_cancel_removes_reservation(delivery_store):
 def _request_stop_for_delivery(store, turn_id):
     from llm_bawt.service.turn_termination import TurnAbortCoordinator
 
-    turn_store = TurnLogStore(Config())
+    turn_store = TurnLogStore(store.config)
     with store.engine.begin() as conn:
         conn.execute(sa_text("UPDATE turn_logs SET status='streaming' WHERE id=:id"), {"id": turn_id})
     assert TurnAbortCoordinator(turn_store).request(turn_id, source="chat_stop", peer=None)
@@ -758,6 +880,7 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
         reset_reason="critical headroom",
     )
 
+    assistant_before = store.payload(record.id)["assistant_message_id"]
     claimed = store.claim_next(target, claim_owner="owner-one", steer_capable=True)
     assert claimed.status == DISPATCHING
     assert claimed.reset_status == "COMPLETED"
@@ -766,6 +889,7 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
     assert claimed.new_session_id != old_session
     payload = store.payload(record.id)
     assert payload["session_id"] == claimed.new_session_id
+    assert payload["assistant_message_id"] == assistant_before
     assert payload["inter_bot_session_policy"] == "reset_without_history"
     assert payload["inter_bot_seed_session_id"] == old_session
 
@@ -861,6 +985,7 @@ def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
             "id": original.user_message_id,
             "session": old_session,
         })
+    assistant_before = store.payload(original.id)["assistant_message_id"]
     claimed = store.claim_next(target, claim_owner="owner-one", steer_capable=False)
     recovered = store.recover_context_overflow(
         original.id,
@@ -879,6 +1004,7 @@ def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
     assert recovered.new_session_id
     payload = store.payload(original.id)
     assert payload["inter_bot_bridge_request_id"].endswith("_recovery_1")
+    assert payload["assistant_message_id"] == assistant_before
     assert payload["inter_bot_seed_session_id"] == old_session
     with store.engine.connect() as conn:
         rows = conn.execute(sa_text("""

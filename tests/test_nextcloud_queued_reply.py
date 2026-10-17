@@ -35,6 +35,10 @@ def talk(monkeypatch):
         return True
 
     monkeypatch.setattr(webhook, "send_nextcloud_message", send)
+    import llm_bawt.bots as bots
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot: SimpleNamespace(agent_backend=None, harness=None)
+    ))
     return calls
 
 
@@ -94,44 +98,68 @@ async def test_webhook_retry_reuses_original_message_identity(monkeypatch, talk)
 
 
 @pytest.mark.asyncio
-async def test_completed_turn_and_retried_webhook_share_one_outbound_answer(monkeypatch, talk):
-    from datetime import datetime, timezone
+@pytest.mark.parametrize("lookup_result", ["raises", "missing"])
+async def test_inline_choices_bot_lookup_failure_keeps_uncertain_reference(monkeypatch, talk, lookup_result):
+    import llm_bawt.bots as bots
 
-    subscriptions = []
-    wakes = []
+    submitted = []
 
     async def complete(request):
-        if not subscriptions:
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
-        return {"object": "chat.completion.in_flight", "turn_id": subscriptions[0].source_id,
-                "user_message_id": request.user_message_id}
+        submitted.append(request.user_message_id)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
 
-    def get_turn(turn_id):
-        import uuid
-        return SimpleNamespace(
-            bot_id="nova", user_id="nick",
-            trigger_message_id=str(uuid.UUID(hex=turn_id.removeprefix("turn-"))),
-            ended_at=datetime.now(timezone.utc), response_text="answer",
-        )
+    def lookup(_bot):
+        if lookup_result == "raises":
+            raise RuntimeError("bot catalog unavailable")
+        return None
 
-    def register(subscription):
-        subscriptions.append(subscription)
-        return "PENDING", len(subscriptions) == 1
-
-    # A response choice must bind to the persisted exact turn before it can
-    # become an outbound reply subscription.
-    dispatcher = SimpleNamespace(talk_replies=SimpleNamespace(register=register), wake=wakes.append)
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(get_bot=lookup))
     monkeypatch.setattr(dependencies, "get_service", lambda: SimpleNamespace(
-        chat_completion=complete, _turn_log_store=SimpleNamespace(get_turn=get_turn),
-        _inter_bot_dispatcher=dispatcher,
+        config=object(), chat_completion=complete,
+    ))
+    result = await webhook.handle_nextcloud_webhook(FakeRequest())
+    assert result["status"] == "accepted_unverified"
+    assert result["reference"] == submitted[0]
+    assert len(talk) == 1
+    assert f"accepted (reference {submitted[0]})" in talk[0]["message"]
+    assert "can't verify" in talk[0]["message"]
+    assert talk[0]["message"] != "answer"
+    assert "Sorry" not in talk[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_non_durable_inline_choices_post_answer_exactly_once(monkeypatch, talk):
+    import llm_bawt.bots as bots
+
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot: SimpleNamespace(agent_backend=None, harness=None)
+    ))
+
+    async def complete(request):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
+
+    monkeypatch.setattr(dependencies, "get_service", lambda: SimpleNamespace(
+        config=object(), chat_completion=complete,
+    ))
+    result = await webhook.handle_nextcloud_webhook(FakeRequest())
+    assert result["status"] == "received"
+    assert [call["message"] for call in talk] == ["answer"]
+
+
+@pytest.mark.asyncio
+async def test_direct_inline_choices_stay_direct_without_computed_probe(monkeypatch, talk):
+    async def complete(request):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
+
+    # Direct/non-durable Talk replies still post inline; the computed turn-id
+    # probe is no longer an outbound subscription source.
+    monkeypatch.setattr(dependencies, "get_service", lambda: SimpleNamespace(
+        config=object(), chat_completion=complete,
     ))
     first = await webhook.handle_nextcloud_webhook(FakeRequest())
     second = await webhook.handle_nextcloud_webhook(FakeRequest())
-    assert first["status"] == "reply_pending" and second["status"] == "in_flight"
-    assert first["reference"] == second["reference"] == subscriptions[0].source_id
-    assert subscriptions[0] == subscriptions[1]
-    assert talk == []  # only the worker may post the actual answer
-    assert wakes == ["nova", "nova"]
+    assert first["status"] == second["status"] == "received"
+    assert [call["message"] for call in talk] == ["answer", "answer"]
 
 
 @pytest.mark.asyncio
@@ -156,15 +184,17 @@ async def test_agent_completion_without_exact_persisted_turn_never_posts_unguard
 
 
 @pytest.mark.asyncio
-async def test_completed_answer_with_reply_store_failure_does_not_send_false_error(monkeypatch, talk):
+async def test_completed_answer_without_durable_reference_does_not_send_false_answer(monkeypatch, talk):
+    import llm_bawt.bots as bots
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot: SimpleNamespace(agent_backend="claude-code", harness=None)
+    ))
+
     async def complete(request):
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
 
-    def unavailable(turn_id):
-        raise ConnectionError("turn database unavailable")
-
     monkeypatch.setattr(dependencies, "get_service", lambda: SimpleNamespace(
-        chat_completion=complete, _turn_log_store=SimpleNamespace(get_turn=unavailable),
+        config=object(), chat_completion=complete,
     ))
     result = await webhook.handle_nextcloud_webhook(FakeRequest())
     assert result["status"] == "accepted_unverified"

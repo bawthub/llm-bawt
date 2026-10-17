@@ -18,6 +18,7 @@ from ...bots import BotManager
 from ...inter_bot_delivery import submission_result
 from ...inter_bot_delivery_retry import DeliveryRetryConflict, retry_failed_delivery
 from ...message_authorship import AuthorReference, normalize_author
+from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ...model_catalog import bot_model_ref
 from ..dependencies import get_service
 from ..delivery_reply import DeliveryReplyMismatch, resolve_delivery_reply
@@ -213,21 +214,17 @@ async def create_delivery(body: DeliveryCreate):
         "inter_bot_timeout_seconds": body.timeout_seconds,
     }
     dispatcher = _dispatcher()
-    record, duplicate = dispatcher.store.enqueue(
-        sender_bot_id=sender,
-        target_bot_id=target,
-        message=body.message,
-        payload=payload,
-        author=author,
-        idempotency_key=body.idempotency_key,
-        project_id=body.project_id,
-        task_id=body.task_id,
-        message_kind=body.message_kind,
-        metadata=body.metadata,
-        max_attempts=body.max_attempts,
-        session_policy=policy,
-        reset_reason=body.reset_reason or automatic_reason,
-    )
+    try:
+        record, duplicate = dispatcher.store.enqueue(
+            sender_bot_id=sender, target_bot_id=target, message=body.message,
+            payload=payload, author=author, idempotency_key=body.idempotency_key,
+            project_id=body.project_id, task_id=body.task_id,
+            message_kind=body.message_kind, metadata=body.metadata,
+            max_attempts=body.max_attempts, session_policy=policy,
+            reset_reason=body.reset_reason or automatic_reason, producer="bot",
+        )
+    except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if not duplicate and not target_exists:
         record = dispatcher.store.mark_failed(record.id, f"Unknown target bot '{target}'") or record
     elif not duplicate and not durable_capable:
@@ -362,6 +359,8 @@ async def retry_delivery(delivery_id: str):
         retried = retry_failed_delivery(dispatcher.store, delivery_id)
     except DeliveryRetryConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if retried is None:
         raise HTTPException(status_code=404, detail="Delivery not found")
     record, duplicate = retried

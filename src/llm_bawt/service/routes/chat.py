@@ -9,6 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ..dependencies import get_service
 from ..logging import get_service_logger
 from ..schemas import ChatCompletionRequest
@@ -896,8 +897,10 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         if is_accepted_receipt(response):
             return JSONResponse(content=response, status_code=202)
         return response
+    except (IdentityConflict, AdmissionUnavailable, InvalidIdentity) as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         log.exception("Chat completion failed")
         raise HTTPException(status_code=500, detail=str(e))

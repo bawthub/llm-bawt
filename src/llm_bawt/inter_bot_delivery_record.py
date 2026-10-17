@@ -49,6 +49,7 @@ class DeliveryRecord:
     new_session_id: str | None
     reset_at: datetime | None
     overflow_recovery_count: int
+    assistant_message_id: str | None = None
 
     @classmethod
     def from_mapping(cls, row: Any) -> "DeliveryRecord":
@@ -103,6 +104,7 @@ class DeliveryRecord:
             new_session_id=row.get("new_session_id"),
             reset_at=row.get("reset_at"),
             overflow_recovery_count=int(row.get("overflow_recovery_count") or 0),
+            assistant_message_id=payload.get("assistant_message_id") if isinstance(payload, dict) else None,
         )
 
     @property
@@ -147,7 +149,8 @@ class DeliveryRecord:
             "project_id": self.project_id,
             "task_id": self.task_id,
             "message_kind": self.message_kind,
-            "metadata": self.metadata,
+            "metadata": {k: v for k, v in self.metadata.items()
+                         if k != "_request_identity_producer"},
             "created_at": iso(self.created_at),
             "updated_at": iso(self.updated_at),
             "available_at": iso(self.available_at),

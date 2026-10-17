@@ -9,7 +9,6 @@ Redis is used only for best-effort lifecycle fanout.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import uuid
@@ -279,15 +278,9 @@ class InterBotDeliveryStore:
 
     @staticmethod
     def stable_ids() -> tuple[str, str, str]:
-        token = uuid.uuid4()
-        # Message partitions store ids in VARCHAR(36) and every ordinary caller
-        # supplies a canonical UUID. Keep the durable callback on that same
-        # contract; delivery/turn ids use the hex token in their own wider fields.
-        return (
-            f"delivery-{token.hex}",
-            str(token),
-            f"turn-delivery-{token.hex}",
-        )
+        # Compatibility for test fixtures; production admission mints in the resolver.
+        from .request_identity import stable_ids
+        return stable_ids(uuid.uuid4())
 
     def enqueue(
         self,
@@ -308,6 +301,7 @@ class InterBotDeliveryStore:
         user_message_id: str | None = None,
         assistant_message_id: str | None = None,
         connection: Connection | None = None,
+        producer: str = "bot",
     ) -> tuple[DeliveryRecord, bool]:
         if self.engine is None:
             raise RuntimeError("Inter-bot delivery database unavailable")
@@ -325,84 +319,25 @@ class InterBotDeliveryStore:
             raise ValueError("message is required")
         idem = idempotency_key.strip() if idempotency_key and idempotency_key.strip() else None
         policy = SessionPolicy(str(session_policy))
-        delivery_id, message_id, turn_id = self.stable_ids()
-        if user_message_id is not None:
-            message_id = str(uuid.UUID(user_message_id))
-        payload = dict(payload)
-        payload["user_message_id"] = message_id
-        payload["assistant_message_id"] = (
-            str(uuid.UUID(assistant_message_id)) if assistant_message_id else
-            str(uuid.uuid5(uuid.NAMESPACE_URL, f"inter-bot-assistant:{message_id}"))
-        )
-        payload["inter_bot_delivery_id"] = delivery_id
-        payload["inter_bot_turn_id"] = turn_id
-        payload["inter_bot_bridge_request_id"] = (
-            f"req_delivery_{delivery_id.removeprefix('delivery-')}"
-        )
+        from .request_identity import RequestIdentityResolver
+
         values = {
-            "id": delivery_id,
-            "sender": sender,
-            "author_type": resolved_author.entity_type,
-            "author_id": resolved_author.entity_id,
-            "target": target,
-            "message": body,
-            "payload": json.dumps(payload, ensure_ascii=False, default=str),
-            "metadata": json.dumps(metadata or {}, ensure_ascii=False, default=str),
-            "message_id": message_id,
-            "turn_id": turn_id,
-            "idem": idem,
-            "project": project_id,
-            "task": task_id,
-            "kind": message_kind.upper() if message_kind else None,
+            "sender": sender, "author_type": resolved_author.entity_type,
+            "author_id": resolved_author.entity_id, "target": target,
+            "message": body, "idem": idem, "project": project_id,
+            "task": task_id, "kind": message_kind.upper() if message_kind else None,
             "max_attempts": max(1, min(int(max_attempts), 20)),
             "session_policy": policy.value,
             "reset_reason": (reset_reason or "").strip() or None,
         }
         with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
-            # Ordinary admission already holds the target lock; scheduler callers
-            # retain the separate, lock-free enqueue transaction.
-            # Arrival is a snapshot; claim rechecks the barrier under the target lock.
-            if idem:
-                # Serialize same-key submissions so callers always receive one stable row.
-                digest = hashlib.sha256(
-                    f"{resolved_author.entity_type}\0{resolved_author.entity_id}\0"
-                    f"{sender}\0{target}\0{idem}".encode()
-                ).hexdigest()[:16]
-                conn.execute(sa_text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": digest})
-                existing = conn.execute(sa_text("""
-                    SELECT * FROM inter_bot_deliveries
-                    WHERE author_entity_type=:author_type
-                      AND author_entity_id=:author_id
-                      AND sender_bot_id=:sender AND target_bot_id=:target
-                      AND idempotency_key=:idem
-                """), values).mappings().first()
-                if existing:
-                    record = DeliveryRecord.from_mapping(existing)
-                    if record.session_policy != policy.value:
-                        raise ValueError(
-                            "idempotency key already exists with "
-                            f"session_policy={record.session_policy!r}"
-                        )
-                    return record, True
-            values["metadata"] = MaintenanceBarrier(conn, target).stamp_enqueue(metadata)
-            row = conn.execute(sa_text("""
-                INSERT INTO inter_bot_deliveries (
-                    id, sender_bot_id, author_entity_type, author_entity_id,
-                    target_bot_id, message, payload_json,
-                    metadata_json, user_message_id, turn_id, idempotency_key,
-                    project_id, task_id, message_kind, status, max_attempts,
-                    session_policy, reset_status, reset_reason
-                ) VALUES (
-                    :id, :sender, :author_type, :author_id,
-                    :target, :message, CAST(:payload AS jsonb),
-                    CAST(:metadata AS jsonb), :message_id, :turn_id, :idem,
-                    :project, :task, :kind, 'QUEUED', :max_attempts,
-                    :session_policy,
-                    CASE WHEN :session_policy='continue' THEN NULL ELSE 'PENDING' END,
-                    :reset_reason
-                ) RETURNING *
-            """), values).mappings().one()
-        return DeliveryRecord.from_mapping(row), False
+            # Arrival is a read-only snapshot; claim rechecks it under target lock.
+            stamped = MaintenanceBarrier(conn, target).stamp_enqueue(metadata)
+            return RequestIdentityResolver(conn).admit(
+                values=values, payload=payload, metadata=json.loads(stamped),
+                producer=producer, explicit_user=user_message_id,
+                explicit_assistant=assistant_message_id,
+            )
 
     def get(self, delivery_id: str) -> DeliveryRecord | None:
         if self.engine is None:

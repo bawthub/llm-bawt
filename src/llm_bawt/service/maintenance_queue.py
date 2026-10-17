@@ -14,6 +14,7 @@ from agent_bridge.maintenance import is_compact_command
 from ..inter_bot_preclaim import load_claim_head
 from ..maintenance_delivery import MaintenanceBarrier, as_dict
 from ..message_authorship import AuthorReference
+from ..request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 
 
 class MaintenanceQueue:
@@ -35,7 +36,7 @@ class MaintenanceQueue:
         try:
             message_id = str(uuid.UUID(request.message_id))
         except ValueError as exc:
-            raise HTTPException(422, "Maintenance message requires a UUID") from exc
+            raise HTTPException(400, "Maintenance message requires a UUID") from exc
         client = self.service.get_memory_client(turn.bot_id, turn.user_id)
         trigger = await asyncio.to_thread(client.get_message_by_id, turn.trigger_message_id) if client else None
         if not isinstance(trigger, dict) or not trigger.get("session_id"):
@@ -43,19 +44,22 @@ class MaintenanceQueue:
         metadata = {"maintenance_user_queue": True}
         if is_compact_command(turn.user_prompt):
             metadata["maintenance_barrier"] = {"turn_id": turn.id, "published": False}
-        record, duplicate = self.store.enqueue(
-            sender_bot_id="unknown", target_bot_id=turn.bot_id,
-            author=AuthorReference.user(turn.user_id),
-            message=request.message, user_message_id=message_id,
-            idempotency_key=f"maintenance-user:{turn.id}:{message_id}",
-            payload={
-                "bot_id": turn.bot_id, "user": turn.user_id,
-                "session_id": str(trigger["session_id"]),
-                "messages": [{"role": "user", "content": request.message}],
-                "prefer_steer": False, "stream": True,
-            },
-            metadata=metadata, session_policy="continue",
-        )
+        try:
+            record, duplicate = self.store.enqueue(
+                sender_bot_id="unknown", target_bot_id=turn.bot_id,
+                author=AuthorReference.user(turn.user_id),
+                message=request.message, user_message_id=message_id,
+                idempotency_key=f"maintenance-user:{turn.id}:{message_id}",
+                payload={
+                    "bot_id": turn.bot_id, "user": turn.user_id,
+                    "session_id": str(trigger["session_id"]),
+                    "messages": [{"role": "user", "content": request.message}],
+                    "prefer_steer": False, "stream": True,
+                },
+                metadata=metadata, session_policy="continue", producer="maintenance",
+            )
+        except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
         # Durable outbox is the acceptance boundary. Normal dispatch persists
         # this SAME UUID; eager history persistence makes reload safe while queued.
         persisted = False

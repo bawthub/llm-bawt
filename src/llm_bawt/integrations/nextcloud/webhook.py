@@ -211,31 +211,20 @@ async def handle_nextcloud_webhook(request: Request) -> dict:
                 accepted_reference = source_id if isinstance(source_id, str) and source_id else None
                 if not accepted_reference or response.get("user_message_id") != user_message_id:
                     raise ValueError("Nextcloud receipt does not match the submitted message")
-            elif getattr(response, "choices", None) and getattr(service, "_turn_log_store", None) is not None:
-                # A completed ordinary agent turn has the same deterministic ID
-                # as its retry. Route its reply through the outbound claim too;
-                # otherwise a Talk webhook retry could POST the answer twice.
-                from ...service.ordinary_turn_queue import stable_ordinary_ids
-                import asyncio
-
-                candidate, _, _ = stable_ordinary_ids(
-                    request_obj, bot_config.llm_bawt_bot, user_id,
-                )
-                accepted_reference = candidate  # failure here is uncertain, not a failed inference
-                persisted = await asyncio.to_thread(service._turn_log_store.get_turn, candidate)
-                if (persisted is not None and persisted.bot_id == bot_config.llm_bawt_bot
-                        and persisted.user_id == user_id
-                        and persisted.trigger_message_id == user_message_id):
-                    source_type, source_id = "turn", candidate
-                    accepted_reference = candidate
-                else:
-                    from ...bots import BotManager
-                    configured = BotManager(service.config).get_bot(bot_config.llm_bawt_bot)
-                    if configured and durable_agent_backend(configured):
-                        # Accepted agent work without its expected durable row
-                        # is uncertain; never fall back to an untracked POST.
-                        accepted_reference = candidate
-                        raise RuntimeError("Completed agent turn lacks its exact durable reply row")
+            elif getattr(response, "choices", None):
+                # The backend may have finished durable work before bot lookup.
+                # Keep that uncertainty even if lookup or classification fails.
+                accepted_reference = user_message_id
+                from ...bots import BotManager
+                configured = BotManager(getattr(service, "config", None)).get_bot(bot_config.llm_bawt_bot)
+                if configured is None:
+                    raise RuntimeError("Talk bot could not be classified after completion")
+                if durable_agent_backend(configured):
+                    # An inline result carries no exact accepted delivery reference.
+                    # Without one, durable work is uncertain: NEVER post its answer
+                    # outside the outbox. Direct/non-durable replies remain inline.
+                    raise RuntimeError("Completed agent turn lacks its exact durable reply row")
+                accepted_reference = None  # confirmed non-durable; inline reply is safe
             if source_type is not None:
                 from ...service.talk_reply_outbox import TalkReplySubscription
 
