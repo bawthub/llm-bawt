@@ -586,6 +586,7 @@ class InterBotDeliveryDispatcher:
             "turn_id": record.turn_id,
             "target_turn_id": record.target_turn_id,
             "delivery_mode": record.delivery_mode,
+            "reply_mode": record.reply_mode,
             "session_policy": record.session_policy,
             "reset_status": record.reset_status,
             "reset_reason": record.reset_reason,

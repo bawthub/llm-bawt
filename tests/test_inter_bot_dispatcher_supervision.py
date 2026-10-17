@@ -250,7 +250,7 @@ async def test_ordinary_queue_lifecycle_routes_to_requesting_user():
         id="delivery-1", status="DISPATCHING", sender_bot_id="target",
         target_bot_id="target", author_entity_type="user", author_entity_id="alice",
         user_message_id="user-1", turn_id="turn-1", target_turn_id="turn-1",
-        delivery_mode="turn", session_policy="continue", reset_status=None,
+        delivery_mode="turn", reply_mode="async", session_policy="continue", reset_status=None,
         reset_reason=None, old_session_id=None, new_session_id=None, reset_at=None,
         overflow_recovery_count=0, attempt_count=1, next_retry_at=None,
         last_error=None, project_id=None, task_id=None, message_kind=None,
@@ -263,6 +263,7 @@ async def test_ordinary_queue_lifecycle_routes_to_requesting_user():
     assert args[2]["user_message_id"] == "user-1"
     assert args[2]["session_id"] == "session-1"
     assert args[2]["ordinary_chat"] is True
+    assert args[2]["reply_mode"] == "async"
 
     publish.reset_mock()
     record.metadata = {}
@@ -270,6 +271,10 @@ async def test_ordinary_queue_lifecycle_routes_to_requesting_user():
     await dispatcher._emit(record)
     assert "ordinary_chat" not in publish.await_args.args[2]
     assert "session_id" not in publish.await_args.args[2]
+    record.reply_mode = "waited"
+    publish.reset_mock()
+    await dispatcher._emit(record)
+    assert publish.await_args.args[2]["reply_mode"] == "waited"
 
 
 @pytest.mark.asyncio
