@@ -105,7 +105,9 @@ async def test_catalog_token_budgets():
     # TASK-1047 self_model (+146 tokens incl. typed action enum): measured 11,618.
     # TASK-1082: optional one-word session rotation key adds eight schema tokens.
     # Measured compact catalog: 11,626 (+8 over the previous 11,618).
-    assert total <= 11626, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1126: task/step/project id args say "ID (cuid)" instead of the wrong
+    # "UUID" and accept TASK-N refs. Measured compact catalog: 11,645 (+19).
+    assert total <= 11645, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

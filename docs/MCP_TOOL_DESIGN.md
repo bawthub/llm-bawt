@@ -80,6 +80,10 @@ delete warnings to meet a budget. TASK-1082 adds the optional short `key` field
 to `sessions_rotate` for atomic queued `/new` retry identity: compact full-load
 catalog measured 11,626 tokens (+8 from 11,618); the test cap is now 11,626.
 The keyed rotation and its predecessor link commit in one session transaction.
+TASK-1126 corrects task/step/project identifier wording from "UUID" (wrong:
+BawtHub ids are cuids) to "ID (cuid)" and documents short `TASK-N` dependency
+refs: compact full-load catalog measured 11,645 tokens (+19 from 11,626); the
+test cap is now 11,645. Description tokens remain under the 3,310 cap.
 
 ## Provider loading caveat
 
