@@ -349,6 +349,22 @@ class ClaudeSessionMixin:
             "newest_timestamp": max(ts) if ts else None,
         }
 
+    async def _record_continuity_receipt(self, thread_id, bot_id, messages, *, restored):
+        """Confirm the app's reference manifest only after the transcript write."""
+        if not thread_id or not self._app_api_url:
+            return
+        from agent_bridge.continuity import continuity_digest
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.post(
+                    f"{self._app_api_url}/v1/sessions/{thread_id}/continuity-receipt",
+                    params={"bot_id": bot_id},
+                    json={"payload_digest": continuity_digest(messages), "restored": restored},
+                )
+                response.raise_for_status()
+        except Exception:
+            logger.warning("Continuity receipt unavailable for %s/%s", bot_id, thread_id, exc_info=True)
+
     async def _seed_new_session(
         self,
         bot_id: str,
@@ -393,7 +409,9 @@ class ClaudeSessionMixin:
                 )
         except Exception as e:
             logger.warning("Seed write/persist failed for %s: %s", bot_id, e)
+            await self._record_continuity_receipt(thread_session_id, bot_id, messages, restored=False)
             return {"seeded": False, "reason": f"seed write failed: {e}"}
+        await self._record_continuity_receipt(thread_session_id, bot_id, messages, restored=True)
         stats = dict(stats)
         stats["seeded"] = True
         stats["clean_start"] = False
@@ -404,7 +422,7 @@ class ClaudeSessionMixin:
     def _format_seed_ack(stats: dict | None) -> str:
         """Human-facing /new acknowledgement, reporting seed stats when present."""
         base = "Session reset."
-        if stats is None:
+        if stats is None or stats.get("clean_start"):
             return f"{base} Ready for a new conversation."
         if not stats.get("seeded"):
             reason = stats.get("reason", "nothing to seed")

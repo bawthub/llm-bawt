@@ -433,7 +433,7 @@ class ChatNonStreamMixin:
                 if reset_policy == "reset_retain_history":
                     from .routes.history import build_context_seed
                     seed = build_context_seed(
-                        bot_id, model_alias, self, session_id=seed_source
+                        bot_id, model_alias, self, session_id=seed_source, llm_bawt=llm_bawt
                     ) if seed_source else {"messages": []}
                     inject_seed_messages = seed.get("messages", [])
                 elif reset_policy == "reset_without_history":
@@ -484,6 +484,10 @@ class ChatNonStreamMixin:
                     if _final_sid:
                         resolved_session_id = _final_sid
 
+                from .session_continuity import record_session_continuity
+                if _is_agent:
+                    record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
+                                              bot_id=bot_id, user_id=user_id)
                 task_turn_capability = None
                 if _is_agent:
                     from ..task_turn_context import mint_for_agent_turn

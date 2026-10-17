@@ -395,6 +395,9 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                     str(thread_binding.get("thread_session_id") or "").strip()
                     if thread_binding else ""
                 )
+                from .session_continuity import record_session_continuity
+                record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
+                                          bot_id=bot_id, user_id=user_id)
                 from ..task_turn_context import mint_for_agent_turn
 
                 task_turn_capability = mint_for_agent_turn(

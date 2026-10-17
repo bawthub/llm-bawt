@@ -467,17 +467,20 @@ class TestScopedSeedDecision:
 
         captured = {}
 
-        def _fake_seed(bot_id, model, service, session_id=None):
+        def _fake_seed(bot_id, model, service, session_id=None, *, llm_bawt=None):
             captured["session_id"] = session_id
+            captured["owner"] = llm_bawt
             return {"messages": [{"role": "user", "content": "x"}]}
 
         monkeypatch.setattr(history_seed, "build_context_seed", _fake_seed)
+        owner = self._llm_bawt()
         out = history_seed.maybe_build_session_seed(
-            self._llm_bawt(), "byte", "m", "hello", None,
+            owner, "byte", "m", "hello", None,
             thread_binding={"thread_session_id": "t-1", "explicit_thread": True},
         )
         assert out == [{"role": "user", "content": "x"}]
         assert captured["session_id"] == "t-1"
+        assert captured["owner"] is owner
 
     @pytest.mark.parametrize("prompt", ["hello", "/new"])
     def test_cold_active_thread_uses_preview_history_pool(self, monkeypatch, prompt):
@@ -491,17 +494,20 @@ class TestScopedSeedDecision:
 
         captured = {}
 
-        def _fake_seed(bot_id, model, service, session_id=None):
+        def _fake_seed(bot_id, model, service, session_id=None, *, llm_bawt=None):
             captured["session_id"] = session_id
+            captured["owner"] = llm_bawt
             return {"messages": [{"role": "summary", "content": "prior"}]}
 
         monkeypatch.setattr(history_seed, "build_context_seed", _fake_seed)
+        owner = self._llm_bawt()
         out = history_seed.maybe_build_session_seed(
-            self._llm_bawt(), "byte", "m", prompt, None,
+            owner, "byte", "m", prompt, None,
             thread_binding={"thread_session_id": "active-1"},
         )
         assert out == [{"role": "summary", "content": "prior"}]
         assert captured["session_id"] is None
+        assert captured["owner"] is owner
 
     def test_warm_active_thread_does_not_double_seed(self):
         from llm_bawt.service.routes.history import maybe_build_session_seed

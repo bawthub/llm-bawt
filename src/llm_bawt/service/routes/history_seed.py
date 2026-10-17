@@ -180,6 +180,8 @@ def build_context_seed(
                 "role": m.role,
                 "content": content,
                 "timestamp": float(getattr(m, "timestamp", 0.0) or 0.0),
+                "source_id": str(m.db_id) if getattr(m, "db_id", None) else None,
+                "shortened": content != (m.content or ""),
             }
             for m, content in zip(seed_msgs, seed_contents)
         ],
@@ -230,7 +232,7 @@ def maybe_build_session_seed(
             return []
         if not _resume_id and _reset_policy == "reset_retain_history":
             seed = build_context_seed(
-                bot_id, model, service, session_id=_seed_session_id or None,
+                bot_id, model, service, session_id=_seed_session_id or None, llm_bawt=llm_bawt,
             )
             return seed.get("messages", [])
 
@@ -243,7 +245,7 @@ def maybe_build_session_seed(
                 return None
             if not _thread_id:
                 return None
-            seed = build_context_seed(bot_id, model, service, session_id=_thread_id)
+            seed = build_context_seed(bot_id, model, service, session_id=_thread_id, llm_bawt=llm_bawt)
             return seed.get("messages") or None
 
         # Derive continuity from history_scope directly — NOT from the
@@ -263,7 +265,7 @@ def maybe_build_session_seed(
         except Exception:
             continuity_on = False
         if not continuity_on:
-            return None
+            return [] if _thread_id and (_is_new or not _resume_id) else None
 
         # Warm active thread: the bridge resumes its canonical per-thread SDK
         # transcript, so injecting history again would duplicate context.
@@ -277,8 +279,8 @@ def maybe_build_session_seed(
         # exchange and makes live delivery disagree with the preview. Explicit
         # historical-thread hydration and reset_retain_history remain scoped in
         # their dedicated branches above.
-        seed = build_context_seed(bot_id, model, service)
-        return seed.get("messages") or None
+        seed = build_context_seed(bot_id, model, service, llm_bawt=llm_bawt)
+        return seed.get("messages", [])
     except Exception:
         return None
 

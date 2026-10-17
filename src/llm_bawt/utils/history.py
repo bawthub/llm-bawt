@@ -430,7 +430,8 @@ class HistoryManager:
                 summary_messages.append(Message(
                     role="summary",
                     content=enhanced_content,
-                    timestamp=msg.timestamp
+                    timestamp=msg.timestamp,
+                    db_id=msg.db_id,
                 ))
             else:
                 raw_stream.append(msg)

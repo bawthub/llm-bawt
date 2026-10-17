@@ -22,6 +22,7 @@ from .integrations import router as integrations_router
 from .settings import router as settings_router
 from .setup import router as setup_router
 from .sessions import router as sessions_router
+from .session_continuity import router as session_continuity_router
 from .approval_policies import router as approval_policies_router
 from .ops import router as ops_router
 from .tasks import router as tasks_router
@@ -64,6 +65,7 @@ all_routers = [
     settings_router,
     setup_router,
     sessions_router,
+    session_continuity_router,
     config_router,
     approval_policies_router,
     ops_router,
