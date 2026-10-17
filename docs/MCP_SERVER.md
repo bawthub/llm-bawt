@@ -37,7 +37,7 @@ uv run python -m llm_bawt.mcp_server --transport http --host 0.0.0.0 --port 8001
 | `system_*` | `system_stats`, `system_run_maintenance` |
 | `bots_*` | `bots_list_available`, `bots_send_message`, `bots_delivery_get`, `bots_deliveries_list`, `bots_delivery_cancel` |
 | `agent_context_*` | `agent_context_health`, `agent_context_compact`, `agent_context_reset` |
-| `tasks_*` | `tasks_list`, `tasks_get`, `tasks_create`, `tasks_update`, `tasks_get_context` |
+| `tasks_*` | `tasks_list`, `tasks_get`, `tasks_create`, `tasks_update`, `tasks_get_context`, `tasks_reviews_list`, `tasks_reviews_add` |
 | `steps_*` | `steps_add`, `steps_update`, `steps_delete` |
 | `projects_*` | `projects_list`, `projects_get`, `projects_create`, `projects_update`, `projects_delete`, `projects_get_context` |
 | `activity_*` | `activity_get` |
@@ -66,6 +66,19 @@ accounting, capability, and overflow recovery contract:
 `tasks_*`, `steps_*`, `projects_*`, and `activity_*` are thin MCP wrappers over
 the BawtHub task API. They call `LLM_BAWT_TASK_API_URL` plus `/api/tasks/...`
 internally.
+
+`tasks_reviews_list(task_id, limit=20, cursor=None)` reads a bounded, newest-first
+page of task-owned reviews from `GET /api/tasks/tasks/{id}/reviews`; pass the
+returned opaque cursor to fetch the next page. `tasks_reviews_add(task_id,
+stage, verdict, body, bot_id, target_revision=None, idempotency_key=None)`
+appends a review via `POST /api/tasks/tasks/{id}/reviews`. Stage is `DESIGN` or
+`IMPLEMENTATION`; verdict is `APPROVE`, `APPROVE_WITH_CHANGES`,
+`REQUEST_CHANGES`, or `COMMENT`. The POST body contains `stage`, `verdict`,
+`body`, and optional `targetRevision` and `idempotencyKey`; **never an author**.
+Pass your own `bot_id` as the actor in `X-Agent-Bot-Id`; BawtHub derives the
+stored author. Use a stable `idempotency_key` when retrying an uncertain write.
+Reviews do not change task status or overwrite `response` (the executor's
+summary); a design review may occur before the task enters REVIEW.
 
 ## Important environment variables
 
