@@ -338,13 +338,15 @@ services:
     command: ["python", "-m", "local_model_bridge"]
     # GPU lives here, not on the app: TASK-278 removed the GPU reservation +
     # ipc:host from the app service; this bridge owns all local inference.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # TASK-915: native CDI puts GPU devices in the OCI config so systemd
+    # daemon-reload preserves their cgroup permissions. Legacy NVIDIA GPU
+    # reservations inject them via a prestart hook invisible to runc/systemd.
+    # Requires CDI-enabled Docker and an up-to-date NVIDIA CDI spec (see
+    # docs/GPU_RESOURCE_HANDOFF_CONTRACT.md). Do not combine with --gpus or
+    # the legacy NVIDIA runtime hook; no Docker-wide runtime change is needed.
+    runtime: runc
+    devices:
+      - nvidia.com/gpu=all
     ipc: host  # Required for vLLM multiprocess engine shared memory
     security_opt:
       - apparmor:unconfined  # AppArmor not available on this kernel; nvidia-ctk owns daemon.json

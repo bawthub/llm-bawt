@@ -1,5 +1,77 @@
 # TASK-915 GPU handoff: measured baseline and safety contract
 
+## TASK-915 recurrent GPU access loss (2026-10-16; activated and verified)
+
+The completed handoff/drain/recovery implementation and 2026-10-15 live acceptance
+remain valid. A separate container-device problem recurred after that acceptance:
+
+- Host NVML succeeds; loaded and on-disk NVIDIA drivers both report 595.99.02.
+- The local-model container has the NVIDIA device nodes, but opening
+  `/dev/nvidiactl` returns `EPERM`. Its systemd scope has `DevicePolicy=strict`
+  and **no NVIDIA DeviceAllow entries**. The container used a legacy NVIDIA
+  GPU reservation/prestart hook, not native CDI devices.
+- The journal records snapd requesting systemd daemon reloads at 22:57:34 and
+  22:57:36 UTC on 2026-10-15, between successful acceptance and the failed
+  23:17 UTC readiness check. This matches NVIDIA's documented legacy-hook
+  cgroup failure: systemd reapplies device policy without the hook-only grants.
+  Device symlinks already exist, so creating those again is not the remedy.
+
+The local-model service now requests `nvidia.com/gpu=all` through Docker's native
+CDI support with the `runc` runtime, replacing (not supplementing) the legacy
+reservation. CDI places the device grants in the OCI configuration so runtime
+updates preserve them. No privileged mode, global Docker cgroup/runtime change,
+CPU fallback, voice-service change, or automatic restart is introduced.
+
+Prerequisites: CDI-enabled Docker (native support enabled by default on Docker
+28.3+), NVIDIA Container Toolkit with a current CDI spec, and matching loaded /
+on-disk drivers. Echo has Docker 29.1.3, Toolkit 1.19.1, a generated
+`/var/run/cdi/nvidia.yaml`, and an active `nvidia-cdi-refresh.path`. On another
+host verify `nvidia-ctk cdi list` before activation; do not silently fall back to
+legacy hook-only injection if the spec is missing.
+
+Activation is **not** a restart: recreate only `local-model-bridge`, retaining its
+existing image, mounts, and model cache. First verify voice/idle ownership, zero
+active/queued render jobs and claims, and host GPU health. The current ops catalog
+supports restart but not compose recreate, so manual host activation needs
+Nick's explicit authorization for that path. Do not restart Docker, app, agent
+bridges, Redis, or Moshi as a shortcut. Validate merged Compose configuration
+without printing its environment secrets. After activation verify NVIDIA grants
+in the container systemd scope, NVML plus CUDA allocation, embedding health, and
+public handoff readiness. Any deliberate systemd daemon-reload resilience probe
+is a separate host action requiring authorization; otherwise record that live
+replay remains untested. Unit configuration guards are not live GPU proof.
+
+Reference: [NVIDIA Container Toolkit troubleshooting — containers losing GPU access](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/troubleshooting.html#containers-losing-access-to-gpus-with-error-failed-to-initialize-nvml-unknown-error).
+
+### Activation receipt (2026-10-16 16:33 UTC)
+
+Nick explicitly approved the worker-only SSH/Compose recreate using its existing
+image. Dry-run targeted only `local-model-bridge`; actual recreate completed with
+`--no-deps --no-build --pull never --force-recreate`. New container
+`97d9adb070ba` retains image
+`sha256:8a431341a772fbf0bafa9bac60fdf7e0caf7ccd0c1112860e06827245dfe3f07`.
+Docker reports driver `cdi` with device ID `nvidia.com/gpu=all`. Its strict
+systemd scope now explicitly includes NVIDIA GPU, control and UVM device grants.
+
+Verified: container NVML succeeds; a real CUDA allocation and reduction returns
+523776; embedding inference returns one finite 384-dimensional vector; both
+worker health endpoints and Docker health are healthy. Public GPU status reports
+`gpu.ready=true`, no preflight issues, voice/idle generation 52, zero video
+jobs/claims and voice unparked. `preflight.switch_ready` is always false by the
+read-only assessor's design (observations are not consent); it is not a remaining
+telemetry failure. App, agent bridge, Redis and Moshi identities/start times were
+unchanged; installed weights/calibration remain intact. No GPU handoff/render,
+global daemon reload, Docker restart, build, pull, commit or push was performed.
+
+Source gate: 3284 passed, 17 skipped, 191 marker-deselected in the default backend
+suite; merged Compose validation and diff checks passed. The native CDI grants
+address the documented reload-loss mechanism, but no disruptive live reload was
+injected and long-term recurrence has not yet been observed. The two-video/
+voice acceptance receipt remains the earlier 2026-10-15 run, not a new run here.
+
+The sections below preserve the original development history; pending statements
+there refer to their dated checkpoints, not the completed 2026-10-15 acceptance.
+
 ## Observed on Echo (2026-09-25, read-only)
 
 - One NVIDIA GeForce RTX 5080: 16,303 MiB total, 3,819 MiB free, 12,021 MiB used (`nvidia-smi` on the host). GPU processes: two `moshi-server` processes reporting 8,204 and 2,758 MiB. Both `bawthub-stt-1` and `bawthub-tts-1` were healthy. These readings are a snapshot, **not** a calibrated Wan peak or a durable VRAM reservation.
