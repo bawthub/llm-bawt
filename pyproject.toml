@@ -31,7 +31,8 @@ dependencies = [
     "websockets>=13.0",
     # Redis (shared agent-bridge transport: events, commands, fanout)
     "redis[hiredis]>=5.0.0",
-    "anthropic>=0.84.0",
+    # anthropic 1.x requires an httpx2 client; our clients pass httpx.AsyncClient.
+    "anthropic>=0.84.0,<1",
     "claude-agent-sdk>=0.2.158",
     "openai-codex-sdk>=0.1.11",
     # Image normalization for MediaStore (TASK-223): EXIF/ICC strip, downscale,
@@ -95,7 +96,8 @@ service = [
 ]
 
 mcp = [
-    "mcp[cli]>=1.0.0",
+    # mcp 2.x removed mcp.server.fastmcp, which the MCP server imports.
+    "mcp[cli]>=1.0.0,<2",
 ]
 
 search = [
