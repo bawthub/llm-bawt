@@ -95,8 +95,8 @@ async def test_catalog_token_budgets():
     descriptions = [len(encoder.encode(tool.description or "")) for tool in tools]
     assert max(descriptions) <= 100
     # x_counts + x_search relevancy/operator hints: measured 3,251 (was <=3,200).
-    # TASK-1047 self_model (+48 description tokens): measured 3,306.
-    assert sum(descriptions) <= 3310
+    # TASK-1147 adds two review tools: measured 3,380 description tokens.
+    assert sum(descriptions) <= 3380
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -107,7 +107,8 @@ async def test_catalog_token_budgets():
     # Measured compact catalog: 11,626 (+8 over the previous 11,618).
     # TASK-1126: task/step/project id args say "ID (cuid)" instead of the wrong
     # "UUID" and accept TASK-N refs. Measured compact catalog: 11,645 (+19).
-    assert total <= 11645, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1147: review list/add typed schemas and attribution guidance: 11,945.
+    assert total <= 11945, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

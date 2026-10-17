@@ -51,6 +51,8 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_search_semantic": "Find related tasks by meaning; mode reports semantic or keyword fallback. Use tasks_list for exact filters.",
     "tasks_get": "Read full task, steps, dependencies, and response by cuid or TASK-N.",
     "tasks_get_context": "Read task/project briefing by cuid or TASK-N before work.",
+    "tasks_reviews_list": "Read paginated, task-owned review history by cuid or TASK-N; cursor continues newest-first pages. Separate from response.",
+    "tasks_reviews_add": "Append a review, not a task response/status change. Pass your own bot_id for author attribution and a stable idempotency_key on retries.",
     "tasks_associate_current": "Link trusted turn when actually working a task, never from a mention. Supply cuid or TASK-N; unsupported context fails closed.",
     "tasks_create": "Create a task with optional steps. Pass your bot_id; associate_current_turn=true links work started now using trusted server context.",
     "tasks_update": "Patch provided task fields. Submit your own work to REVIEW; if Nick directly requests task review and closure, close verified, complete REVIEW tasks as COMPLETED. Agents cannot leave BUG. Pass own bot_id (owner if none); associate_current_turn links actual work.",

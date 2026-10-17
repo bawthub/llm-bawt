@@ -6,7 +6,7 @@ Imported by server.py to register the task tool group.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -136,6 +136,72 @@ async def get_task(
         return await _api_get(f"/tasks/{task_id}")
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+
+
+@mcp.tool(name="tasks_reviews_list")
+async def list_task_reviews(
+    task_id: str,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> dict:
+    """Read a task's append-only review history, newest first.
+
+    Args:
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
+        limit: Page size (default 20, capped at 50).
+        cursor: Opaque next-page cursor from the previous response.
+
+    Returns:
+        The task-scoped review page and continuation cursor as returned by
+        BawtHub, or an error dict. Reviews are separate from task response.
+    """
+    params = {"limit": str(max(1, min(limit, 50)))}
+    if cursor is not None:
+        params["cursor"] = cursor
+    try:
+        return await _api_get(f"/tasks/{task_id}/reviews", params=params)
+    except httpx.HTTPStatusError as error:
+        return _http_error(error)
+
+
+@mcp.tool(name="tasks_reviews_add")
+async def add_task_review(
+    task_id: str,
+    stage: Literal["DESIGN", "IMPLEMENTATION"],
+    verdict: Literal["APPROVE", "APPROVE_WITH_CHANGES", "REQUEST_CHANGES", "COMMENT"],
+    body: str,
+    bot_id: str,
+    target_revision: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict:
+    """Append a review decision or comment without overwriting the executor response.
+
+    Args:
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
+        stage: DESIGN or IMPLEMENTATION; design reviews can happen before REVIEW.
+        verdict: APPROVE, APPROVE_WITH_CHANGES, REQUEST_CHANGES, or COMMENT.
+        body: Non-empty review text; for an approval without notes use a short rationale.
+        bot_id: Your own bot ID, sent as actor context, not as a review author field.
+        target_revision: Optional description digest or commit/revision reference.
+        idempotency_key: Stable key to safely retry the same submission.
+
+    Returns:
+        The review receipt as returned by BawtHub, or an error dict. This does
+        not change the task's status, description, response, or assignee.
+    """
+    if not bot_id.strip():
+        return {"error": "bot_id is required for review attribution"}
+    payload = {"stage": stage, "verdict": verdict, "body": body}
+    if target_revision is not None:
+        payload["targetRevision"] = target_revision
+    if idempotency_key is not None:
+        payload["idempotencyKey"] = idempotency_key
+    try:
+        return await _api_post(
+            f"/tasks/{task_id}/reviews", json=payload, headers=_headers(bot_id)
+        )
+    except httpx.HTTPStatusError as error:
+        return _http_error(error)
 
 
 @mcp.tool(name="tasks_associate_current")
