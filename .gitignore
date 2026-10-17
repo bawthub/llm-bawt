@@ -61,7 +61,7 @@ profile_default/
 ipython_config.py
 .python-version
 Pipfile.lock
-uv.lock
+# The CPU tenant image copies uv.lock; keep it versioned with Dockerfile.app.
 poetry.lock
 pdm.lock
 .pdm.toml
