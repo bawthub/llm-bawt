@@ -24,8 +24,11 @@ from ..dependencies import get_effective_bot_id, get_service
 from ..logging import get_service_logger
 from ..schemas_history_memory import MessageAuthor, ScheduledMessageOrigin
 from .history_scheduler import hydrate_scheduler_for_page
+from .session_search import router as session_search_router
 
 router = APIRouter()
+# Static /search must precede /{session_id}.
+router.include_router(session_search_router)
 log = get_service_logger(__name__)
 
 
