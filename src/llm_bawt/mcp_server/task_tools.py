@@ -52,7 +52,7 @@ async def list_tasks(
     Args:
         status: Filter by status. One of: QUEUED, PLANNING, REFINED,
                 IN_PROGRESS, REVIEW, COMPLETED, FAILED, CANCELLED.
-        project_id: Filter to tasks in a specific project (UUID).
+        project_id: Filter to tasks in a specific project (cuid).
                     Use "none" for unassigned tasks.
         q: Search query - matches title, description, and shortId.
         limit: Maximum tasks to return (default 20, max 50).
@@ -124,7 +124,7 @@ async def get_task(
     """Get full details of a single task by ID or shortId.
 
     Args:
-        task_id: Task UUID or shortId (e.g. "TASK-42").
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
 
     Returns:
         Full task object with title, description, status, priority,
@@ -143,7 +143,7 @@ async def associate_task_to_current_turn(task_id: str) -> dict:
     """Associate the trusted current chat session and exact turn to a task.
 
     Call this when you actually begin or resume work on an existing task during
-    ordinary chat. Supply only the task UUID or shortId; the server obtains the
+    ordinary chat. Supply only the task ID (cuid) or shortId; the server obtains the
     session, turn, trigger-message, bot, and user identifiers from a signed
     current-turn capability. Never infer association merely because TASK-N text
     appears in a prompt, quote, or negative reference.
@@ -209,7 +209,7 @@ async def update_task(
     transitions from agents. Only a human can clear BUG status.
 
     Args:
-        task_id: Task UUID or shortId (e.g. "TASK-42").
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         status: New status (QUEUED, PLANNING, REFINED, IN_PROGRESS,
                 REVIEW, COMPLETED, FAILED, BUG, CANCELLED). You may set BUG
                 but cannot transition a task out of BUG (human-only).
@@ -222,7 +222,7 @@ async def update_task(
                  overwrite with what actually shipped at REVIEW.
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE.
         planned: True after writing spec + steps.
-        project_id: Move task to a different project (UUID).
+        project_id: Move task to a different project (cuid).
         agent_bot_id: Assign task to a specific bot. Defaults to bot_id when
                       moving an UNOWNED task to REVIEW; pass explicitly only to
                       hand the task to a different bot.
@@ -315,7 +315,7 @@ async def delete_task(
     cleaning up scratch / duplicate / clearly-bogus entries.
 
     Args:
-        task_id: Task UUID or shortId (e.g. "TASK-42").
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -331,6 +331,17 @@ async def delete_task(
         return _http_error(e)
 
 
+async def _dependency_task_id(task_ref: str) -> str:
+    """Resolve only short refs; the dependency API requires an actual task ID."""
+    if not task_ref.startswith("TASK-"):
+        return task_ref
+    task = await _api_get(f"/tasks/{task_ref}")
+    task_id = task.get("id") if isinstance(task, dict) else None
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError(f"Task lookup for {task_ref} returned no task ID")
+    return task_id
+
+
 @mcp.tool(name="tasks_add_dependency")
 async def add_task_dependency(
     task_id: str,
@@ -342,9 +353,9 @@ async def add_task_dependency(
     Cycles are rejected by the server. A task cannot depend on itself.
 
     Args:
-        task_id: The dependent task (UUID or shortId). This is the task
+        task_id: The dependent task (cuid or TASK-N). This is the task
                  that should NOT start until the dependency is done.
-        depends_on_id: The prerequisite task (UUID or shortId).
+        depends_on_id: The prerequisite task (cuid or TASK-N).
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -357,13 +368,17 @@ async def add_task_dependency(
         depends_on_id,
     )
     try:
+        resolved_task_id = await _dependency_task_id(task_id)
+        resolved_dep_id = await _dependency_task_id(depends_on_id)
         return await _api_post(
-            f"/tasks/{task_id}/dependencies",
-            json={"depId": depends_on_id},
+            f"/tasks/{resolved_task_id}/dependencies",
+            json={"depId": resolved_dep_id},
             headers=_headers(bot_id),
         )
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @mcp.tool(name="tasks_remove_dependency")
@@ -375,8 +390,8 @@ async def remove_task_dependency(
     """Remove a dependency from a task.
 
     Args:
-        task_id: The dependent task (UUID or shortId).
-        depends_on_id: The prerequisite task to disconnect (UUID or shortId).
+        task_id: The dependent task (cuid or TASK-N).
+        depends_on_id: The prerequisite task to disconnect (cuid or TASK-N).
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -387,22 +402,26 @@ async def remove_task_dependency(
         task_id,
         depends_on_id,
     )
-    client = _get_client()
-    url = f"{_API_PREFIX}/tasks/{task_id}/dependencies"
     try:
+        resolved_task_id = await _dependency_task_id(task_id)
+        resolved_dep_id = await _dependency_task_id(depends_on_id)
+        client = _get_client()
+        url = f"{_API_PREFIX}/tasks/{resolved_task_id}/dependencies"
         # Some httpx versions disallow DELETE bodies via the helper, so build
         # the request explicitly and pass depId as both body and query string.
         resp = await client.request(
             "DELETE",
             url,
-            params={"depId": depends_on_id},
-            json={"depId": depends_on_id},
+            params={"depId": resolved_dep_id},
+            json={"depId": resolved_dep_id},
             headers=_headers(bot_id),
         )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @mcp.tool(name="tasks_promote")
@@ -418,7 +437,7 @@ async def promote_task(
     into a long-running effort with subtasks.
 
     Args:
-        task_id: Task UUID or shortId.
+        task_id: Task ID (cuid) or shortId.
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -449,7 +468,7 @@ async def regenerate_task(
     tool exists for parity with the human UI's "regenerate" button.
 
     Args:
-        task_id: Task UUID or shortId.
+        task_id: Task ID (cuid) or shortId.
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -487,7 +506,7 @@ async def create_task(
         description: Detailed description or spec.
         outcome: Intended plain-language behavior change for a non-engineer
                  (1-3 sentences). Optional; can be filled in later.
-        project_id: Assign to a project (UUID). Omit for unassigned.
+        project_id: Assign to a project (cuid). Omit for unassigned.
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE (default MEDIUM).
         status: Initial status (default QUEUED).
         steps: Optional initial steps. Each dict needs "title" (str)

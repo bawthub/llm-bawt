@@ -47,8 +47,8 @@ async def update_step(
     ``file_path``. Steps not belonging to ``task_id`` are ignored.
 
     Args:
-        task_id: Parent task UUID or shortId (e.g. "TASK-42").
-        step_id: Step UUID (single-update mode).
+        task_id: Parent task ID (cuid) or shortId (e.g. "TASK-42").
+        step_id: Step ID (cuid) (single-update mode).
         status: PENDING, RUNNING, COMPLETED, FAILED, or SKIPPED (single mode).
         output: Summary of what was done or error details (single mode).
         updates: List of dicts for batch mode, each {"step_id": ..., "status"?:
@@ -125,9 +125,9 @@ async def delete_step(
     replace a task's entire checklist, prefer ``steps_set``.)
 
     Args:
-        task_id: Parent task UUID or shortId.
-        step_id: Step UUID to delete (single mode).
-        step_ids: List of step UUIDs to delete (batch mode). Overrides step_id.
+        task_id: Parent task ID (cuid) or shortId.
+        step_id: Step ID (cuid) to delete (single mode).
+        step_ids: List of step IDs (cuids) to delete (batch mode). Overrides step_id.
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -173,7 +173,7 @@ async def add_steps(
     or when you discover additional steps mid-execution.
 
     Args:
-        task_id: Task UUID or shortId (e.g. "TASK-42").
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         steps: List of step dicts. Each needs "title" (str).
                Optional: "type" (default "PLAN") and "status"
                (default "PENDING").
@@ -212,7 +212,7 @@ async def set_steps(
     plan in a single transaction. The task title/description are untouched.
 
     Args:
-        task_id: Task UUID or shortId (e.g. "TASK-42").
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         steps: The full ordered list of step dicts. Each needs "title" (str);
                optional "type" (default "PLAN"), "status" (default "PENDING"),
                "output", "filePath". Pass [] to clear all steps.
