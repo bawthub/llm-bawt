@@ -88,6 +88,8 @@ start_llm_service() {
 
   echo "[llm] Starting on ${SERVICE_HOST}:${SERVICE_PORT}..."
 
+  # Embeddings are served by local-model-bridge; the CPU app image does not
+  # include the memory extra (sentence-transformers/torch).
   if [[ "$DEV_MODE" == true ]]; then
     echo "[llm] Dev mode enabled - auto-reload on code changes"
   fi
@@ -95,12 +97,12 @@ start_llm_service() {
   if [[ "$LOG_MODE" == "stdout" ]]; then
     LLM_BAWT_LOG_PREFIX="" \
     LLM_BAWT_MCP_SERVER_URL="$MCP_URL" \
-    uv run $UV_FLAGS --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $RELOAD_FLAG $VERBOSE_FLAG $DEBUG_FLAG &
+    uv run $UV_FLAGS --extra service --extra search llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $RELOAD_FLAG $VERBOSE_FLAG $DEBUG_FLAG &
     echo $! > "$SERVICE_PID_FILE"
   else
     LLM_BAWT_LOG_PREFIX="" \
     LLM_BAWT_MCP_SERVER_URL="$MCP_URL" \
-    nohup uv run $UV_FLAGS --extra service --extra search --extra memory llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $RELOAD_FLAG $VERBOSE_FLAG $DEBUG_FLAG \
+    nohup uv run $UV_FLAGS --extra service --extra search llm-service --host "$SERVICE_HOST" --port "$SERVICE_PORT" $RELOAD_FLAG $VERBOSE_FLAG $DEBUG_FLAG \
       > "$LOG_DIR/llm-service.log" 2>&1 &
     echo $! > "$SERVICE_PID_FILE"
   fi
