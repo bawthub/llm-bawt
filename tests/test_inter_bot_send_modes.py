@@ -8,6 +8,7 @@ durable table entirely and the retry started a second target turn.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -87,7 +88,7 @@ class FakeDurable:
             return {**self.rows[key], "duplicate": True}
         n = len(self.rows) + 1
         row = {"delivery_id": f"delivery-{n}", "turn_id": f"turn-delivery-{n}",
-               "status": "QUEUED", "duplicate": False}
+               "status": "QUEUED", "duplicate": False, "reply_mode": kwargs["reply_mode"]}
         self.rows[key] = row
         return row
 
@@ -130,6 +131,8 @@ def test_interrupted_wait_then_same_key_async_retry_reuses_one_delivery(monkeypa
     assert retry["duplicate"] is True
     assert retry["delivery_id"] == "delivery-1"
     assert retry["dispatched"] is True and retry["mode"] == "async"
+    assert retry["reply_mode"] == "waited"  # The original target instruction is immutable.
+    assert durable.enqueue_calls[0]["reply_mode"] == "waited"
     assert len(durable.rows) == 1
 
 
@@ -189,8 +192,86 @@ def test_waited_enqueue_is_when_idle_with_target_budget(monkeypatch) -> None:
     ))
     call = durable.enqueue_calls[0]
     assert call["prefer_steer"] is False
+    assert call["reply_mode"] == "waited"
     assert call["timeout_seconds"] == 1800.0  # target turn is not killed by caller budget
     assert result["wait"] == 60 and result["mode"] == "waited"
+
+
+def test_waited_inbound_turn_blocks_duplicate_callback_but_allows_distinct_followup(monkeypatch) -> None:
+    from llm_bawt.mcp_server import task_association
+
+    durable = FakeDurable()
+    _install(monkeypatch, durable)
+    token = "a" * 32
+    origin = f"delivery-{token}"
+    turn = f"turn-delivery-{token}"
+    message_id = "a0000000-0000-0000-0000-000000000001"
+    monkeypatch.setattr(task_association, "current_task_turn_context", lambda: SimpleNamespace(
+        bot_id="gavel", turn_id=turn, trigger_message_id=message_id,
+    ))
+
+    async def get_json(_path):
+        return {"turn_id": turn, "user_message_id": message_id,
+                "target_bot_id": "gavel", "sender_bot_id": "nova",
+                "reply_mode": "waited"}
+
+    monkeypatch.setattr(server, "_get_json", get_json)
+    duplicate = asyncio.run(server.send_message_to_bot(
+        target_bot_id="nova", message="SPLIT", sender_bot_id="gavel",
+    ))
+    assert duplicate["dispatched"] is False
+    assert duplicate["in_reply_to_delivery_id"] == origin
+    assert durable.enqueue_calls == []
+    distinct = asyncio.run(server.send_message_to_bot(
+        target_bot_id="nova", message="Unrelated update", sender_bot_id="gavel",
+        separate_message_reason="New information not part of the decision",
+    ))
+    assert distinct["dispatched"] is True
+    assert len(durable.enqueue_calls) == 1
+    # An async or misattributed origin never blocks a reverse callback.
+    async def async_origin(_path):
+        return {**await get_json(_path), "reply_mode": "async"}
+    monkeypatch.setattr(server, "_get_json", async_origin)
+    separate = asyncio.run(server.send_message_to_bot(
+        target_bot_id="nova", message="READY", sender_bot_id="gavel",
+    ))
+    assert separate["dispatched"] is True
+    assert len(durable.enqueue_calls) == 2
+
+
+def test_waited_inbound_guard_requires_exact_signed_origin(monkeypatch) -> None:
+    from llm_bawt.mcp_server import task_association
+
+    durable = FakeDurable()
+    _install(monkeypatch, durable)
+    token = "b" * 32
+    turn = f"turn-delivery-{token}"
+    monkeypatch.setattr(task_association, "current_task_turn_context", lambda: SimpleNamespace(
+        bot_id="gavel", turn_id=turn, trigger_message_id="original",
+    ))
+
+    async def wrong(_path):
+        return {"turn_id": turn, "user_message_id": "different",
+                "target_bot_id": "gavel", "sender_bot_id": "nova",
+                "reply_mode": "waited"}
+
+    monkeypatch.setattr(server, "_get_json", wrong)
+    result = asyncio.run(server.send_message_to_bot(
+        target_bot_id="nova", message="Separate", sender_bot_id="gavel",
+    ))
+    assert result["dispatched"] is True
+
+
+def test_async_when_idle_does_not_claim_sender_waits(monkeypatch) -> None:
+    durable = FakeDurable()
+    _install(monkeypatch, durable)
+    result = asyncio.run(server.send_message_to_bot(
+        target_bot_id="caid", message="x", sender_bot_id="al",
+        delivery="when_idle", idempotency_key="K",
+    ))
+    assert result["reply_mode"] == "async"
+    assert durable.enqueue_calls[0]["prefer_steer"] is False
+    assert durable.enqueue_calls[0]["reply_mode"] == "async"
 
 
 # ---- bounded wait ----------------------------------------------------------

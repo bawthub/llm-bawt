@@ -16,10 +16,12 @@ from ...agent_context import (
 from ...bot_types import durable_agent_backend
 from ...bots import BotManager
 from ...inter_bot_delivery import submission_result
+from ...inter_bot_delivery_retry import DeliveryRetryConflict, retry_failed_delivery
 from ...message_authorship import AuthorReference, normalize_author
 from ...model_catalog import bot_model_ref
 from ..dependencies import get_service
 from ..delivery_reply import DeliveryReplyMismatch, resolve_delivery_reply
+from ..inter_bot_reply_view import ReplyViewMismatch, inter_bot_reply_view
 
 router = APIRouter()
 
@@ -38,6 +40,7 @@ class DeliveryCreate(BaseModel):
     task_id: str | None = Field(default=None, max_length=128)
     message_kind: Literal["READY", "BLOCKED", "PROGRESS"] | str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    reply_mode: Literal["async", "waited"] = "async"
     max_attempts: int = Field(default=5, ge=1, le=20)
     prefer_steer: bool = Field(
         default=True,
@@ -68,9 +71,21 @@ def _dispatcher():
     return dispatcher
 
 
-def _format_delivery_message(message: str, author: AuthorReference) -> str:
+def _format_delivery_message(
+    message: str, author: AuthorReference, reply_mode: str = "async",
+) -> str:
     if author.entity_type == "bot" and author.entity_id != "unknown":
-        return f"Message from bot '{author.entity_id}': {message}"
+        formatted = f"Message from bot '{author.entity_id}': {message}"
+        if reply_mode == "waited":
+            formatted += (
+                "\n\n[Reply channel: awaited delivery. Your final response on this turn "
+                "is the answer to the sending bot's tool call (or its durable receipt "
+                "if the wait times out). Give the answer in your final response. "
+                "Do not send a separate message back merely to repeat that answer; "
+                "an intentional, distinct follow-up is still allowed by setting "
+                "separate_message_reason on bots_send_message.]"
+            )
+        return formatted
     return message
 
 
@@ -93,6 +108,8 @@ async def create_delivery(body: DeliveryCreate):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     author = explicit_author or AuthorReference.bot(sender)
+    if body.reply_mode == "waited" and (body.prefer_steer or author.entity_type != "bot" or sender == "unknown"):
+        raise HTTPException(status_code=422, detail="Waited replies require a bot-authored when-idle delivery")
     if not target:
         raise HTTPException(status_code=422, detail="target_bot_id is required")
     if not body.message.strip():
@@ -171,12 +188,16 @@ async def create_delivery(body: DeliveryCreate):
     if compact_maintenance and (
         backend != "claude-code"
         or body.prefer_steer
+        or body.reply_mode == "waited"
         or body.message.split(maxsplit=1)[0] != "/compact"
     ):
         raise HTTPException(status_code=422, detail="Compaction maintenance requires an idle Claude /compact command")
-    formatted = body.message if compact_maintenance else _format_delivery_message(body.message, author)
+    formatted = body.message if compact_maintenance else _format_delivery_message(
+        body.message, author, body.reply_mode,
+    )
     payload = {
         "messages": [{"role": "user", "content": formatted}],
+        "reply_mode": body.reply_mode,
         "prefer_steer": body.prefer_steer,
         "bot_id": target,
         "user": (
@@ -264,6 +285,48 @@ def get_delivery_reply(
     return reply
 
 
+@router.get("/v1/inter-bot-deliveries/{delivery_id}/answer", tags=["Inter-Bot Deliveries"])
+def get_inter_bot_answer(
+    delivery_id: str,
+    sender_bot_id: str = Query(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+):
+    """Show a sender the exact, persisted reply to its own dedicated turn."""
+    dispatcher = _dispatcher()
+    record = dispatcher.store.get(delivery_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    payload = dispatcher.store.payload(delivery_id) or {}
+    service = get_service()
+    if payload.get("user") != user_id or record.sender_bot_id != sender_bot_id:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    answer_record = record
+    if record.status == "FAILED":
+        # Manual Retry (TASK-1111) creates a distinct, idempotent delivery
+        # without another send tool call in the origin thread. Keep the original
+        # card as its single anchor and follow only the verified retry child.
+        retries = dispatcher.store.list(
+            sender_bot_id=sender_bot_id, target_bot_id=record.target_bot_id,
+            idempotency_key=f"manual-retry:{record.id}", limit=1,
+        )
+        if retries and retries[0].metadata.get("manual_retry_of") == record.id:
+            child = retries[0]
+            if (dispatcher.store.payload(child.id) or {}).get("user") == user_id:
+                answer_record = child
+    try:
+        view = inter_bot_reply_view(
+            answer_record, sender_bot_id=sender_bot_id, user_id=user_id,
+            turns=service._turn_log_store,
+            memory_client=service.get_memory_client(answer_record.target_bot_id, user_id),
+        )
+        if answer_record is not record:
+            view["retry_delivery_id"] = answer_record.id
+            view["delivery_id"] = record.id  # preserve the origin tool-call identity
+        return view
+    except ReplyViewMismatch as exc:
+        raise HTTPException(status_code=404, detail="Delivery not found") from exc
+
+
 @router.get("/v1/inter-bot-deliveries", tags=["Inter-Bot Deliveries"])
 def list_deliveries(
     sender_bot_id: str | None = None,
@@ -281,6 +344,31 @@ def list_deliveries(
         exclude_prompt_origin=True,
     )
     return {"deliveries": [row.to_api() for row in rows], "total": len(rows)}
+
+
+@router.post("/v1/inter-bot-deliveries/{delivery_id}/retry", tags=["Inter-Bot Deliveries"], status_code=202)
+async def retry_delivery(delivery_id: str):
+    """Explicitly resend one failed callback through the durable dispatcher."""
+    dispatcher = _dispatcher()
+    original = dispatcher.store.get(delivery_id)
+    if original is None or any(key in original.metadata for key in (
+        "prompt_schedule", "ordinary_chat", "maintenance_user_queue",
+    )) or original.message_kind == "CONTEXT_MAINTENANCE":
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    target = BotManager(get_service().config).get_bot(original.target_bot_id)
+    if target is None or not durable_agent_backend(target):
+        raise HTTPException(status_code=409, detail="Target bot cannot accept durable delivery")
+    try:
+        retried = retry_failed_delivery(dispatcher.store, delivery_id)
+    except DeliveryRetryConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if retried is None:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    record, duplicate = retried
+    if not duplicate:
+        await dispatcher._emit(record)
+    dispatcher.wake(record.target_bot_id)
+    return {**record.to_api(duplicate=duplicate), "retry_of_delivery_id": delivery_id}
 
 
 @router.post("/v1/inter-bot-deliveries/{delivery_id}/cancel", tags=["Inter-Bot Deliveries"])

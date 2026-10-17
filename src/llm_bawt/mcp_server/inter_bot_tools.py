@@ -11,6 +11,7 @@ import httpx
 
 from .inter_bot_send_mode import SendModeError, resolve_send_mode
 from .server import _get_storage, mcp
+from ..task_turn_context import TaskTurnContextError, is_delivery_turn_id
 
 logger = logging.getLogger(__name__)
 _APP_BASE_URL = "http://localhost:8642"
@@ -78,6 +79,33 @@ async def _get_json(path: str) -> dict | None:
 
 _TERMINAL_DELIVERY = {"DELIVERED", "FAILED", "CANCELLED"}
 _now = time.monotonic  # patch point; never patch time.monotonic (event loop)
+
+
+async def _waited_reply_origin(sender_bot_id: str, target_bot_id: str) -> str | None:
+    """Identify an awaited inbound turn from signed, request-local context only."""
+    from .task_association import current_task_turn_context
+
+    try:
+        context = current_task_turn_context()
+    except TaskTurnContextError:
+        return None  # Other backends and external MCP callers have no signed turn.
+    if context.bot_id != sender_bot_id.strip().lower() or not is_delivery_turn_id(context.turn_id):
+        return None
+    delivery_id = context.turn_id.replace("turn-delivery-", "delivery-", 1)
+    try:
+        record = await _compat_hook("_get_json", _get_json)(
+            f"/v1/inter-bot-deliveries/{delivery_id}"
+        )
+    except Exception as exc:
+        logger.warning("Cannot check waited callback origin %s: %s", delivery_id, exc)
+        return None
+    if (record and record.get("turn_id") == context.turn_id
+            and record.get("user_message_id") == context.trigger_message_id
+            and record.get("target_bot_id") == context.bot_id
+            and record.get("sender_bot_id") == target_bot_id.strip().lower()
+            and record.get("reply_mode") == "waited"):
+        return delivery_id
+    return None
 
 
 async def _await_delivery(receipt: dict, wait_seconds: float) -> dict:
@@ -166,8 +194,10 @@ async def _enqueue_durable(
     reset_session_before_delivery: bool | None,
     retain_history: bool | None,
     reset_reason: str | None,
+    reply_mode: str = "async",
 ) -> dict:
     body = {
+        "reply_mode": reply_mode,
         "target_bot_id": target_bot_id,
         "message": message,
         "sender_bot_id": sender_bot_id,
@@ -244,6 +274,7 @@ async def send_message_to_bot(
     reset_session_before_delivery: bool | None = None,
     retain_history: bool | None = None,
     reset_reason: str | None = None,
+    separate_message_reason: str | None = None,
 ) -> dict:
     """Send a message to another bot without creating concurrent agent turns.
 
@@ -264,6 +295,9 @@ async def send_message_to_bot(
       ``delivery="steer_or_idle"``; task handoffs (``task_id``) require a key.
 
     ``force=True`` is accepted for compatibility but never permits concurrency.
+    In a signed inbound waited turn, a callback to that sender is redundant:
+    answer in this turn's final response instead. Pass ``separate_message_reason``
+    only for an intentional, distinct follow-up to the waiting sender.
     Results carry ``mode`` and ``dispatched`` so a caller can tell whether the
     target received anything.
     """
@@ -285,6 +319,25 @@ async def send_message_to_bot(
             "sender": sender_bot_id,
         }
 
+    if separate_message_reason is not None and len(separate_message_reason.strip()) > 500:
+        return {"success": False, "dispatched": False,
+                "error": "separate_message_reason must be at most 500 characters"}
+    if not (separate_message_reason or "").strip():
+        origin_id = await _waited_reply_origin(sender_bot_id, target_bot_id)
+        if origin_id:
+            return {
+                "success": False,
+                "dispatched": False,
+                "mode": mode.label,
+                "in_reply_to_delivery_id": origin_id,
+                "error": (
+                    "The sender receives this awaited turn's final answer through its "
+                    "original tool call or durable receipt. Put the answer in your final "
+                    "response instead of sending a duplicate callback. For an intentional "
+                    "distinct follow-up, set separate_message_reason."
+                ),
+            }
+
     durable_kwargs = dict(
         target_bot_id=target_bot_id,
         message=message,
@@ -298,6 +351,7 @@ async def send_message_to_bot(
         task_id=task_id,
         message_kind=message_kind,
         metadata=metadata,
+        reply_mode=mode.label,
         session_policy=session_policy,
         reset_session_before_delivery=reset_session_before_delivery,
         retain_history=retain_history,

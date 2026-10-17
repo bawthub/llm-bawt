@@ -21,6 +21,23 @@ Every send is durable. Async sends return a stable delivery ID immediately; a
 waited send enqueues the same durable `when_idle` row first, then polls it
 (bounded) and returns the exact target turn's reply.
 
+`reply_mode` is a separate, durable contract (`async` or `waited`) stored in the
+original delivery payload and exposed on receipts and `/answer`. It is **not**
+inferred from `prefer_steer=false`: an asynchronous `when_idle` delivery also
+has that flag. For waited bot-authored deliveries, the target's incoming message
+explains that its final answer is returned to the caller's tool (or retained in
+the receipt after a timeout), so it should not send a redundant callback. The
+original payload and reply mode survive same-key reattachment, transport retries,
+and explicit failed-delivery manual Retry. Older deliveries without this field
+read as `async`; old waited tool results still carry their `mode` for UI display.
+
+A reverse `bots_send_message` from an awaited target turn back to its sender is
+rejected before enqueue when a signed current-turn capability matches that exact
+delivery and message. An intentional, distinct follow-up can supply
+`separate_message_reason`. Bots without signed context degrade to the recipient
+instruction rather than incorrectly blocking other sends. A separate reverse
+message remains a separate conversation event; no automatic callback is created.
+
 ### Mode resolution and idempotency (TASK-1015)
 
 `mcp_server/inter_bot_send_mode.resolve_send_mode` is the single resolver.
@@ -206,6 +223,7 @@ REST API:
 - `GET /v1/inter-bot-deliveries/{delivery_id}`
 - `GET /v1/inter-bot-deliveries?sender_bot_id=&target_bot_id=&status=`
 - `POST /v1/inter-bot-deliveries/{delivery_id}/cancel`
+- `POST /v1/inter-bot-deliveries/{delivery_id}/retry` — explicit manual resend of a FAILED ordinary bot callback. Creates a new durable delivery and new bridge request IDs; repeated calls for the same failed row return the same retry (`duplicate=true`). Does not retry active, delivered, ordinary-user-chat, prompt/maintenance or session-reset deliveries (409 or 404). The new lifecycle event carries `retry_of_delivery_id`, and the old failure remains inspectable. This is an app-owned outbox operation, **not** a Redis bridge command replay; partially executed tools in the old failed turn may run again, so the UI warns before a user clicks Retry.
 
 MCP inspection/control tools:
 

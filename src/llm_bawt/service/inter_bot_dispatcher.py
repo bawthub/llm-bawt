@@ -599,6 +599,7 @@ class InterBotDeliveryDispatcher:
             "project_id": record.project_id,
             "task_id": record.task_id,
             "message_kind": record.message_kind,
+            "retry_of_delivery_id": record.metadata.get("manual_retry_of"),
             "ts": time.time(),
         }
         if record.metadata.get("prompt_schedule"):

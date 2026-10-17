@@ -59,7 +59,8 @@ def delivery_store():
 
 
 def _enqueue(
-    store, sender, target, message, *, key=None, max_attempts=5, author=None
+    store, sender, target, message, *, key=None, max_attempts=5, author=None,
+    reply_mode="async",
 ):
     return store.enqueue(
         sender_bot_id=sender,
@@ -69,6 +70,7 @@ def _enqueue(
             "messages": [{"role": "user", "content": message}],
             "bot_id": target,
             "stream": False,
+            "reply_mode": reply_mode,
         },
         author=author,
         idempotency_key=key,
@@ -133,6 +135,19 @@ def test_duplicate_idempotency_key_returns_one_stable_delivery(delivery_store):
     assert len(first.user_message_id) == 36
     rows = store.list(sender_bot_id=sender)
     assert [row.id for row in rows] == [first.id]
+
+
+def test_reply_mode_persists_on_idempotent_reattachment_and_recovery(delivery_store):
+    store, sender, target = delivery_store
+    first, _ = _enqueue(store, sender, target, "waited answer", key="reply-contract", reply_mode="waited")
+    duplicate, same = _enqueue(store, sender, target, "async retry", key="reply-contract")
+    assert same and duplicate.id == first.id
+    assert duplicate.reply_mode == "waited"
+    assert store.get(first.id).to_api()["reply_mode"] == "waited"
+    assert store.payload(first.id)["reply_mode"] == "waited"
+    claimed = store.claim_next(target, claim_owner="reply-contract-test", steer_capable=False)
+    assert claimed.reply_mode == "waited"
+    assert store.requeue(claimed.id, claimed.claim_token or "", "transient", delay_seconds=0).reply_mode == "waited"
 
 
 def test_fifo_claims_one_target_delivery_without_overlap(delivery_store):

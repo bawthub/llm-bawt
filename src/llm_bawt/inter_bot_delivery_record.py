@@ -41,6 +41,7 @@ class DeliveryRecord:
     transport_accepted_at: datetime | None
     target_turn_id: str | None
     delivery_mode: str | None
+    reply_mode: str
     session_policy: str
     reset_status: str | None
     reset_reason: str | None
@@ -57,6 +58,13 @@ class DeliveryRecord:
                 metadata = json.loads(metadata)
             except Exception:
                 metadata = {}
+        payload = row.get("payload_json")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (ValueError, TypeError):
+                payload = {}
+        reply_mode = payload.get("reply_mode") if isinstance(payload, dict) else None
         return cls(
             id=row["id"],
             sender_bot_id=row["sender_bot_id"],
@@ -87,6 +95,7 @@ class DeliveryRecord:
             transport_accepted_at=row.get("transport_accepted_at"),
             target_turn_id=row.get("target_turn_id"),
             delivery_mode=row.get("delivery_mode"),
+            reply_mode=reply_mode if reply_mode in {"async", "waited"} else "async",
             session_policy=row.get("session_policy") or SessionPolicy.CONTINUE.value,
             reset_status=row.get("reset_status"),
             reset_reason=row.get("reset_reason"),
@@ -117,6 +126,7 @@ class DeliveryRecord:
             "turn_id": self.turn_id,
             "target_turn_id": self.target_turn_id,
             "delivery_mode": self.delivery_mode,
+            "reply_mode": self.reply_mode,
             "session_policy": self.session_policy,
             "reset_status": self.reset_status,
             "reset_reason": self.reset_reason,
