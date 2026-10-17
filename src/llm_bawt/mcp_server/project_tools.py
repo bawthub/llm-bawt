@@ -53,7 +53,7 @@ async def get_project(
     conventions. Read this before working on tasks in the project.
 
     Args:
-        project_id: Project UUID.
+        project_id: Project ID (cuid).
 
     Returns:
         Project with name, description, contextPrompt, tasks
@@ -129,7 +129,7 @@ async def update_project(
     """Update an existing project. Only provided fields are changed.
 
     Args:
-        project_id: Project UUID (required).
+        project_id: Project ID (cuid) (required).
         name: Updated project name.
         description: Updated description.
         color: Updated hex color (e.g. "#ef4444").
@@ -181,7 +181,7 @@ async def get_project_context(
     when you don't need the full task list (which projects_get returns).
 
     Args:
-        project_id: Project UUID.
+        project_id: Project ID (cuid).
 
     Returns:
         Markdown text with the project name as an H1 heading and the
@@ -210,7 +210,7 @@ async def delete_project(
     are NOT deleted — they become unassigned.
 
     Args:
-        project_id: Project UUID (required).
+        project_id: Project ID (cuid) (required).
         bot_id: Your bot ID for activity attribution.
 
     Returns:
@@ -243,8 +243,8 @@ async def get_activity(
     dispatches, assignments, step updates, etc.
 
     Args:
-        task_id: Filter to a specific task (UUID).
-        project_id: Filter to a specific project (UUID).
+        task_id: Filter to a specific task ID (cuid; not shortId).
+        project_id: Filter to a specific project ID (cuid).
         limit: Maximum entries to return (default 20, max 100).
 
     Returns:
@@ -280,7 +280,7 @@ async def get_task_context(
     Load this before starting work on a task.
 
     Args:
-        task_id: Task UUID or shortId (e.g. "TASK-42").
+        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
 
     Returns:
         Formatted markdown text with everything you need to work
