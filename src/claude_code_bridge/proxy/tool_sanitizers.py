@@ -180,7 +180,7 @@ def _scan_js_balanced_end(code: str) -> int | None:
 # Tool name suffix -> parameter names that carry JS code.
 _JS_CODE_PARAMS: dict[str, list[str]] = {
     "browser_run_code_unsafe": ["code"],
-    "browser_evaluate": ["expression"],
+    "browser_evaluate": ["function"],
 }
 
 
@@ -204,13 +204,24 @@ def strip_js_trailing_tokens(
     if not params_to_clean:
         return args
 
-    modified = False
     result = dict(args)
 
     for param in params_to_clean:
         value = result.get(param)
         if not isinstance(value, str):
             continue
+
+        # The brace scanner cannot parse regex literals or destructured/default
+        # parameters. Now that browser_evaluate's real `function` field is
+        # covered, avoid destructive guesses on those valid function shapes.
+        # The PreToolUse syntax check gives malformed ones back to the model.
+        if tool_name == "browser_evaluate" or tool_name.endswith("__browser_evaluate"):
+            simple_body = re.match(
+                r"^\s*(?:async\s+)?(?:\([^{}]*\)|[$A-Za-z_][$\w]*)\s*=>\s*\{",
+                value,
+            )
+            if not simple_body or "/" in value:
+                continue
 
         end_pos = _scan_js_balanced_end(value)
         if end_pos is None:
@@ -228,6 +239,11 @@ def strip_js_trailing_tokens(
         # wrapper paren/bracket), this is likely valid code.  Leave it alone.
         if trailing_stripped[0] in ".([])":
             continue
+        if (tool_name == "browser_evaluate" or tool_name.endswith("__browser_evaluate")) and (
+            not trailing_stripped[0].isalpha()
+            or trailing_stripped.split(maxsplit=1)[0] in {"in", "instanceof"}
+        ):
+            continue
 
         cleaned = value[:end_pos]
         logger.warning(
@@ -240,7 +256,6 @@ def strip_js_trailing_tokens(
             len(trailing),
         )
         result[param] = cleaned
-        modified = True
 
     return result
 

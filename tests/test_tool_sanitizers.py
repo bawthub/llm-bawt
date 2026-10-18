@@ -205,22 +205,37 @@ class TestStripJsTrailingTokens:
         )
         assert result["code"] == "async (page) => { return 1; }"
 
-    def test_browser_evaluate_expression_param(self):
+    def test_browser_evaluate_preserves_wrapped_function(self):
         code = "(() => { return document.title; }) this should work"
         result = strip_js_trailing_tokens(
-            {"expression": code}, "browser_evaluate"
+            {"function": code}, "browser_evaluate"
         )
-        # ) after } is a safe continuation char (closing wrapper paren),
-        # so the sanitizer correctly leaves this alone.
-        assert result["expression"] == code
+        # ) after } may close a wrapper; uncertain tails go to syntax preflight.
+        assert result["function"] == code
 
     def test_browser_evaluate_strips_after_brace(self):
-        """Leaked reasoning after a non-wrapped function expression."""
+        """Leaked reasoning after an actual Playwright function argument."""
         code = "() => { return document.title; } I think this returns the title"
         result = strip_js_trailing_tokens(
-            {"expression": code}, "browser_evaluate"
+            {"function": code}, "mcp__playwright__browser_evaluate"
         )
-        assert result["expression"] == "() => { return document.title; }"
+        assert result["function"] == "() => { return document.title; }"
+
+    def test_browser_evaluate_does_not_touch_unrelated_argument(self):
+        args = {"expression": "() => { return 1; } extra", "function": "() => 1"}
+        assert strip_js_trailing_tokens(args, "browser_evaluate") == args
+
+    def test_browser_evaluate_preserves_regex_brace(self):
+        code = "() => { return /} stray/.test(document.title); } leaked reasoning"
+        assert strip_js_trailing_tokens({"function": code}, "browser_evaluate")["function"] == code
+
+    def test_browser_evaluate_preserves_destructured_default_parameter(self):
+        code = "({ id } = { id: 1 }) => { return id; } leaked reasoning"
+        assert strip_js_trailing_tokens({"function": code}, "browser_evaluate")["function"] == code
+
+    def test_browser_evaluate_preserves_trailing_comment(self):
+        code = "() => { return 1; } // note: [sic]"
+        assert strip_js_trailing_tokens({"function": code}, "browser_evaluate")["function"] == code
 
     def test_ignores_non_code_tools(self):
         args = {"command": "echo hello } extra"}
@@ -660,6 +675,24 @@ class TestResponsesStreamIntegration:
         assert len(deltas) == 1
         parsed = json.loads(deltas[0]["delta"]["partial_json"])
         assert parsed["code"] == "async (page) => { return 1; }"
+
+    def test_browser_evaluate_function_sanitized_in_stream(self):
+        corrupted = json.dumps({
+            "function": "() => { return document.title; } leaked reasoning",
+            "element": "page",
+            "target": "body",
+        })
+        events = self._make_events("mcp__playwright__browser_evaluate", corrupted)
+        payloads = self._run_stream(events)
+        deltas = [
+            p for p in payloads
+            if p.get("type") == "content_block_delta"
+            and p.get("delta", {}).get("type") == "input_json_delta"
+        ]
+        assert len(deltas) == 1
+        parsed = json.loads(deltas[0]["delta"]["partial_json"])
+        assert parsed["function"] == "() => { return document.title; }"
+        assert parsed["target"] == "body"
 
     def test_trailing_json_recovered_in_stream(self):
         """Malformed JSON (trailing text) is recovered in the stream."""

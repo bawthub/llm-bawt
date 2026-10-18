@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import math
+import shutil
 import time
 import types
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from agent_bridge.approval import (
     evaluate as evaluate_policies, grant_key,
 )
 from agent_bridge.events import AgentEventKind
+from claude_code_bridge.playwright_preflight import playwright_syntax_error  # noqa: F401 (AST test namespace)
 
 
 # Extract the actual mixin without importing bridge.py's SDK/app/DB graph.
@@ -290,6 +292,40 @@ def test_pre_tool_use_hook_gates_dangerous_bash():
     assert asyncio.run(run("ls")) == {}                                  # allow
     assert _hook_decision(asyncio.run(run("dd of=/dev/sda"))) == "deny"  # deny
     assert _hook_decision(asyncio.run(run("rm -rf /home/x"))) == "deny"  # require→deny
+
+
+def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_execute():
+    if not shutil.which("node"):
+        return  # Other CI environments may delegate validation to Playwright.
+    b = _bridge()
+    published = []
+    b._publish_event = lambda *a, **k: published.append(k)  # type: ignore[assignment]
+    hook = b._make_pre_tool_use_hook(request_id="r", session_key="s", seq_holder=[0])
+
+    async def run(name, args):
+        return await hook({"tool_name": name, "tool_input": args, "tool_use_id": "x"}, "x", {})
+
+    tool = "mcp__playwright__browser_evaluate"
+    denied = asyncio.run(run(tool, {"function": "() => { return 1; } [sic]"}))
+    assert _hook_decision(denied) == "deny"
+    reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "`function`" in reason and "not executed" in reason and "NEW tool call" in reason
+    assert not any(e["kind"] == AgentEventKind.TOOL_EXECUTING for e in published)
+    syntax = asyncio.run(run(tool, {"function": "() => { return 1; } stray_text"}))
+    assert _hook_decision(syntax) == "deny"
+    assert "Unexpected identifier 'stray_text'" in syntax["hookSpecificOutput"]["permissionDecisionReason"]
+    assert asyncio.run(run(tool, {"function": "() => { return 1; }"})) == {}
+    assert any(e["kind"] == AgentEventKind.TOOL_EXECUTING for e in published)
+    # Approval policy still gates a syntactically valid call; preflight must
+    # never turn a denial into an allow.
+    b._policy_bundle.policies.insert(0, ApprovalPolicy(
+        id="deny-browser", order=0, tool_name=tool,
+        matcher_type=MatcherType.ALWAYS, action=PolicyAction.DENY,
+    ))
+    assert _hook_decision(asyncio.run(run(tool, {"function": "() => 1"}))) == "deny"
+    surrogate = asyncio.run(run(tool, {"function": "() => 1\ud800"}))
+    assert _hook_decision(surrogate) == "deny"
+    assert "Playwright JavaScript" not in surrogate["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_pre_tool_use_hook_stamps_bawthub_mcp_without_bridge_gating():

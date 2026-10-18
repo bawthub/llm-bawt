@@ -69,6 +69,35 @@ class TestClaudeActiveRun:
         assert run.consume_replaced_result(interrupted) is False
 
     @pytest.mark.anyio
+    async def test_steer_now_does_not_wait_for_blocked_sdk_message_reader(self):
+        """Bridge control can advance while its model-message reader is silent.
+
+        This does not establish whether the live CLI acknowledges interrupt
+        while its *own* upstream HTTP read is blocked; that requires a live probe.
+        """
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def silent_reader():
+            entered.set()
+            await release.wait()
+            yield MagicMock()
+
+        client = AsyncMock()
+        client.receive_messages = silent_reader
+        run = ClaudeActiveRun(client=client, request_id="req-1", _steer_timeout_s=0.2)
+        reader = asyncio.create_task(anext(run.messages()))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=0.2)
+            await asyncio.wait_for(run.steer("resume unfinished work"), timeout=0.2)
+            client.interrupt.assert_awaited_once_with()
+            client.query.assert_awaited_once()
+            assert not reader.done()
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+    @pytest.mark.anyio
     async def test_steer_failure_does_not_hide_next_error_result(self):
         client = AsyncMock()
         client.query.side_effect = RuntimeError("closed")

@@ -47,6 +47,7 @@ from agent_bridge.mcp_call_context import (
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
+from claude_code_bridge.playwright_preflight import playwright_syntax_error
 from claude_code_bridge.tool_events import normalize_tool_result
 from claude_code_bridge.tool_policy import effective_disallowed_tools
 
@@ -858,6 +859,11 @@ class ClaudeApprovalMixin:
                 cwd = input_data.get("cwd")
                 if "cwd" in input_data and (not isinstance(cwd, str) or not cwd):
                     return self._hook_deny("[Invalid execution cwd; tool blocked.]")
+                # A confirmed parser error cannot run; tell the model what to
+                # repair before any approval request or MCP side effect occurs.
+                syntax_error = await playwright_syntax_error(tool_name, tool_input)
+                if syntax_error:
+                    return self._hook_deny(syntax_error)
                 return await self._evaluate_tool_gate_hook(
                     tool_name, tool_input, tuid,
                     request_id, session_key, seq_holder, cwd=cwd,
