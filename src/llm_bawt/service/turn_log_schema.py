@@ -137,6 +137,10 @@ def bootstrap_turn_log_schema(conn) -> None:
     Also patches tool_call_records columns that predate ToolCallStore owning
     its own bootstrap. Run under SchemaBootstrapGuard by TurnLogStore.
     """
+    turns_were_new = (
+        getattr(getattr(conn, "dialect", None), "name", None) == "postgresql"
+        and conn.execute(sa_text("SELECT to_regclass('public.turn_logs') IS NULL")).scalar_one()
+    )
     SQLModel.metadata.create_all(bind=conn, tables=[TurnLog.__table__])
     # Add columns that may not exist on older tables.
     try:
@@ -217,10 +221,10 @@ def bootstrap_turn_log_schema(conn) -> None:
         # TASK-344: SDK tool_use ids so sub-agent nesting survives reload
         # (see ToolCallRecord.tool_use_id / parent_tool_use_id).
         conn.execute(sa_text(
-            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS tool_use_id VARCHAR(128)"
+            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS tool_use_id VARCHAR"
         ))
         conn.execute(sa_text(
-            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS parent_tool_use_id VARCHAR(128)"
+            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS parent_tool_use_id VARCHAR"
         ))
         conn.execute(sa_text(
             "CREATE INDEX IF NOT EXISTS ix_tool_call_records_parent_tool_use_id"
@@ -229,14 +233,14 @@ def bootstrap_turn_log_schema(conn) -> None:
         # TASK-305: approval gate persistence — link tool calls to
         # their approval request so the approval card survives reload.
         conn.execute(sa_text(
-            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS approval_request_id VARCHAR(128)"
+            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS approval_request_id VARCHAR"
         ))
         conn.execute(sa_text(
             "CREATE INDEX IF NOT EXISTS ix_tool_call_records_approval_request_id"
             " ON tool_call_records (approval_request_id)"
         ))
         conn.execute(sa_text(
-            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS approval_status VARCHAR(24)"
+            "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS approval_status VARCHAR"
         ))
         conn.execute(sa_text(
             "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS preapproved BOOLEAN"
@@ -265,6 +269,16 @@ def bootstrap_turn_log_schema(conn) -> None:
             " AND (status IN ('ok','completed','error','timeout','cancelled','aborted')"
             "      OR end_reason IS NOT NULL)"
         ))
+        # ToolCallStore creates its table before this parent. Attach the
+        # existing live SET NULL contract only on a freshly created parent;
+        # an old missing FK needs an explicit reviewed migration, not startup
+        # repair of potentially orphaned tool rows.
+        if turns_were_new:
+            conn.execute(sa_text("""
+                ALTER TABLE public.tool_call_records ADD CONSTRAINT fk_toolcalls_turn
+                FOREIGN KEY (turn_id) REFERENCES public.turn_logs(id)
+                ON DELETE SET NULL NOT DEFERRABLE
+            """))
     except Exception:
         logger.exception("Turn-log additive schema migration failed")
         raise

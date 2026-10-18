@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from typing import Any
 from urllib.parse import quote_plus
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -70,15 +70,21 @@ class BotProfile(SQLModel, table=True):
     )
     requires_memory: bool = Field(default=True)
     voice_optimized: bool = Field(default=False)
-    tts_mode: bool = Field(default=False)
-    include_summaries: bool = Field(default=True)
-    include_in_global_search: bool = Field(default=True)
+    tts_mode: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false"))
+    )
+    include_summaries: bool = Field(
+        default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true"))
+    )
+    include_in_global_search: bool = Field(
+        default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true"))
+    )
     uses_tools: bool = Field(default=False)
     uses_search: bool = Field(default=False)
     uses_home_assistant: bool = Field(default=False)
     default_model: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
     harness: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
-    endpoint_id: int | None = Field(default=None, sa_column=Column(Integer, nullable=True, index=True))
+    endpoint_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True, index=True))
     color: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     avatar: str | None = Field(default=None, sa_column=Column(String(512), nullable=True))
     # Self-hosted, ready-to-embed render of ``avatar`` as a ``data:`` URL
@@ -139,9 +145,9 @@ class BotProfileStore:
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS bot_type VARCHAR(32)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS agent_backend VARCHAR(128)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS agent_backend_config JSONB",
-            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS tts_mode BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS include_summaries BOOLEAN DEFAULT TRUE",
-            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS include_in_global_search BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS tts_mode BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS include_summaries BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS include_in_global_search BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS default_voice VARCHAR(128)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS avatar VARCHAR(512)",
             "ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS avatar_render TEXT",

@@ -88,7 +88,7 @@ class EntityProfile(SQLModel, table=True):
     )
     
     # Pre-computed summary for system prompt injection (set by maintenance job)
-    summary: str | None = Field(default=None)
+    summary: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     summary_updated_at: datetime | None = Field(default=None)  # stamped each time summary is regenerated
     
     # Timestamps

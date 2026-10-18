@@ -343,6 +343,7 @@ test-pg-acceptance: ## REQUIRED private PostgreSQL gate: zero skips, zero missin
 		tests/test_session_scoping.py::TestScopedContextProofs \
 		tests/test_session_threads.py::TestRegistryInvariantsLiveDB \
 		tests/test_session_unique_index_pg.py tests/test_orphan_partitions_pg.py \
+		tests/test_schema_convergence_pg.py tests/test_schema_full_store_pg.py \
 		tests/test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB
 
 test-all: ## Run EVERY test (hermetic + integration + service + llm_call). Use before merging inter-bot / dispatcher / capability / bridge changes — a bare `pytest` silently skips those (TASK-780).

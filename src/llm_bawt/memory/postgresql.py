@@ -481,6 +481,10 @@ class PostgreSQLMemoryBackend(
         def bootstrap_shared(conn) -> None:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            messages_was_new = (
+                conn.dialect.name == "postgresql" and
+                conn.execute(text("SELECT to_regclass('public.messages') IS NULL")).scalar_one()
+            )
             ensure_parent_tables(conn, self.embedding_dim)
             sessions_was_new = (
                 conn.dialect.name == "postgresql" and
@@ -549,6 +553,15 @@ class PostgreSQLMemoryBackend(
             # never build a potentially blocking index during app startup.
             if conn.dialect.name == "postgresql":
                 ensure_fresh_sessions_index(conn, table_was_new=sessions_was_new)
+                # The parent exists before sessions, so its outgoing FK can
+                # only be installed after sessions. Never retrofit an existing
+                # messages parent at startup; that belongs to an explicit plan.
+                if messages_was_new:
+                    conn.execute(text("""
+                        ALTER TABLE public.messages ADD CONSTRAINT fk_messages_session
+                        FOREIGN KEY (session_id) REFERENCES public.sessions(id)
+                        ON DELETE NO ACTION NOT DEFERRABLE
+                    """))
 
         self._schema_guard.run(
             self.engine,

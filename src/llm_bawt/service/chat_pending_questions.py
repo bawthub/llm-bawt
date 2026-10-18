@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, DateTime, Text, update, text as sa_text
+from sqlalchemy import Column, DateTime, String, Text, update, text as sa_text
 from sqlmodel import Field, SQLModel, Session, select
 
 from ..utils.config import Config
@@ -46,7 +46,10 @@ class PendingQuestion(SQLModel, table=True):
     tool_name: str = Field(default="AskUserQuestion", max_length=128)
     # Harness that asked it — "claude", "codex", … .  Drives per-harness answer
     # serialization on the continuation turn (TASK-269).
-    origin_harness: str = Field(default="claude", max_length=32)
+    origin_harness: str = Field(
+        default="claude",
+        sa_column=Column(String(32), nullable=False, server_default=sa_text("'claude'")),
+    )
     # Original tool input (the AskUserQuestion `{questions: [...]}` payload).
     # Stored as JSON text so we don't need a JSONB column for portability.
     arguments_json: str = Field(sa_column=Column(Text, nullable=False))
@@ -104,7 +107,7 @@ class PendingQuestionStore:
             ))
             conn.execute(sa_text(
                 "ALTER TABLE chat_pending_questions ADD COLUMN IF NOT EXISTS"
-                " origin_harness VARCHAR(32) DEFAULT 'claude'"
+                " origin_harness VARCHAR(32) NOT NULL DEFAULT 'claude'"
             ))
             conn.execute(sa_text(
                 "ALTER TABLE chat_pending_questions ADD COLUMN IF NOT EXISTS answer_json TEXT"

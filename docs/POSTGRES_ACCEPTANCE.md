@@ -6,6 +6,10 @@ ports, and a pytest-owned Unix socket. The suite-wide DBAPI guard prevents
 connection to operational PostgreSQL; the app-owned schema bootstrap runs
 only after selecting and verifying a `*_test` database. Missing Docker/DB,
 missing selected suites, zero passes, skips, and xfails fail this gate.
+The 21-entry full-store manifest builds a pristine 49-table reference; a second
+private database recreates observed shared legacy signatures, runs the bounded
+rehearsal-only upgrade, and asserts zero catalog differences. No operational
+DDL is performed by either proof.
 Do not run integration tests against an inherited DB URL or mistake the
 marker-deselected unit suite for SQL acceptance.
 
@@ -20,8 +24,9 @@ active-row failure. These tests never upgrade the operational database.
 ## Cases still outside the gate
 
 Collection-only inventory (`pytest -o addopts='' --collect-only -q -m
-integration`): 221 integration cases in 16 files. The required gate executes
-129; the remaining **92** are:
+integration`): 253 integration cases. The required gate executes 161,
+including five focused schema-convergence cases and two full-store pristine/
+synthetic-upgrade proofs; the remaining **92** are:
 
 | File | Cases | Reason for exclusion / required route |
 | --- | ---: | --- |

@@ -106,7 +106,9 @@ class ToolCallRecord(SQLModel, table=True):
     result_sha256: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     result_content_type: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     result_complete: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
-    result_payload_available: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    result_payload_available: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=sa_text("false"))
+    )
     # TASK-594: object-store key for overflow results (content-addressed sha256,
     # relative to the tool_results backend's toolblobs/ prefix). NULL => result
     # fits in result_text preview, or overflow lives in the legacy payload table.
