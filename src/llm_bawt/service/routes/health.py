@@ -32,8 +32,9 @@ def get_health_checks():
     from ..dependencies import get_ops_service, get_ops_store
     from ..health_checks import collect
 
-    config = get_service().config
-    return collect(config, get_ops_store(config), get_ops_service(config))
+    service = get_service()
+    config = service.config
+    return collect(config, get_ops_store(config), get_ops_service(config), service=service)
 
 
 @router.get("/v1/status", response_model=SystemStatusResponse, tags=["System"])

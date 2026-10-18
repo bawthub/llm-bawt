@@ -112,6 +112,7 @@ async def lifespan(app):
             prompt_sweep=prompt_worker.sweep,
         )
         # Start below, after the shared transport and durable dispatcher exist.
+    service._scheduler = scheduler
 
     # Start the shared Redis agent transport for every bridge harness. OpenClaw,
     # Claude Code, and Codex all depend on this subscriber; OpenClaw-specific

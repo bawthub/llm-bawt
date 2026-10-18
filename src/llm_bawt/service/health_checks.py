@@ -111,11 +111,26 @@ def check_ops_queue(store, now: datetime | None = None) -> dict:
     return _check("ops.queue", status, "; ".join(problems) or None)
 
 
-def collect(config: Any, ops_store, ops_service) -> dict:
+def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
+    from .runtime_health import RuntimeHealthChecks
+
     checks = [
         check_database(ops_store.engine),
         check_redis(getattr(config, "REDIS_URL", "") or ""),
-        *check_ops_executors(ops_service),
-        check_ops_queue(ops_store),
     ]
+    probes = [
+        ("ops.executors", lambda: check_ops_executors(ops_service)),
+        ("ops.queue", lambda: [check_ops_queue(ops_store)]),
+    ]
+    if service is not None:
+        runtime = RuntimeHealthChecks(service)
+        probes.extend([
+            ("deliveries.queue", lambda: [runtime.deliveries()]),
+            ("scheduler", runtime.scheduler),
+        ])
+    for name, probe in probes:
+        try:
+            checks.extend(probe())
+        except Exception as exc:  # A broken capability must not hide the others.
+            checks.append(_check(name, DOWN, f"{type(exc).__name__}: {exc}"))
     return {"status": overall(checks), "checks": checks}

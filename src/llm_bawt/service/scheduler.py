@@ -135,6 +135,9 @@ class JobScheduler:
         # Do not consume billable occurrences into an unconsumed outbox on upgrade.
         self._prompt_sweep = prompt_sweep
         self._prompt_task: Optional[asyncio.Task] = None
+        from .runtime_health import LoopHealth
+        self.maintenance_health = LoopHealth()
+        self.prompt_health = LoopHealth()
     
     async def start(self) -> None:
         """Start the scheduler loop."""
@@ -162,7 +165,9 @@ class JobScheduler:
         while self._running:
             try:
                 await self._prompt_sweep()
-            except Exception:
+                self.prompt_health.succeeded()
+            except Exception as exc:
+                self.prompt_health.failed(exc)
                 logger.exception("Prompt scheduler sweep failed; will retry")
             await asyncio.sleep(5)
     
@@ -171,7 +176,9 @@ class JobScheduler:
         while self._running:
             try:
                 await self._check_and_run_due_jobs()
+                self.maintenance_health.succeeded()
             except Exception as e:
+                self.maintenance_health.failed(e)
                 logger.exception(f"Scheduler loop error: {e}")
             
             await asyncio.sleep(self.check_interval)

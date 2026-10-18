@@ -231,6 +231,92 @@ def test_ops_continuation_waits_for_terminal_job_receipt():
     )]
 
 
+def test_blocked_ops_warning_is_deduped_without_consuming_terminal_receipt(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    store = _store()
+    row = _ready_row(store, result={"job_id": "job-1", "state": "queued"})
+    store.mark_continuation_failed(row.id, error="fixture reset", backoff_seconds=0,
+                                   claim_token=row.continuation_claim_token)
+    blocked = {"job_id": "job-1", "operation": "app.restart", "state": "queued",
+               "terminal": False, "error_text": "receipt volume missing"}
+    service = OpsServiceHost(blocked)
+    admitted = {}
+    calls = []
+
+    def enqueue(**kwargs):
+        calls.append(kwargs)
+        key = kwargs["idempotency_key"]
+        duplicate = key in admitted
+        if duplicate:
+            assert admitted[key] == kwargs  # identity payload remains stable
+        admitted[key] = kwargs
+        return SimpleNamespace(id=key), duplicate
+
+    dispatcher = SimpleNamespace(store=SimpleNamespace(enqueue=enqueue),
+                                 announce_admitted=Mock(), wake=Mock())
+    service._inter_bot_dispatcher = dispatcher
+    monkeypatch.setattr("llm_bawt.service.approval_continuations.recover_approval_requests",
+                        lambda _store: asyncio.sleep(0))
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    assert len(calls) == 2 and len(admitted) == 1
+    assert dispatcher.announce_admitted.call_count == 1
+    assert store.get_request(row.id).continuation_state == CONT_PENDING
+    assert service.requests == []
+    warning = calls[0]
+    assert warning["target_bot_id"] == "snark"
+    assert warning["payload"]["session_id"] == "session-1"
+    assert warning["payload"]["prefer_steer"] is False
+    assert "receipt volume missing" in warning["message"]
+    assert "Do not submit another job" in warning["message"]
+
+    # A different blocker is new evidence, not an endless repeat of one alert.
+    blocked["error_text"] = "worker image missing"
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    assert len(admitted) == 2
+    service._ops_service.result = {"job_id": "job-1", "state": "succeeded", "terminal": True}
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    assert len(service.requests) == 1
+    assert store.get_request(row.id).continuation_state == CONT_DELIVERED
+
+
+def test_blocked_ops_warning_failure_leaves_receipt_pending_for_retry(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    store = _store()
+    row = _ready_row(store, result={"job_id": "job-1", "state": "queued"})
+    store.mark_continuation_failed(row.id, error="fixture reset", backoff_seconds=0,
+                                   claim_token=row.continuation_claim_token)
+    service = OpsServiceHost({"job_id": "job-1", "state": "queued", "terminal": False,
+                              "error_text": "missing mount"})
+    enqueue = Mock(side_effect=RuntimeError("outbox temporarily unavailable"))
+    service._inter_bot_dispatcher = SimpleNamespace(store=SimpleNamespace(enqueue=enqueue))
+    monkeypatch.setattr("llm_bawt.service.approval_continuations.recover_approval_requests",
+                        lambda _store: asyncio.sleep(0))
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    asyncio.run(dispatch_due_continuations_once(service, store))
+    assert enqueue.call_count == 2
+    assert store.get_request(row.id).continuation_state == CONT_PENDING
+    assert service.requests == []
+
+
+@pytest.mark.parametrize("state,error", [("queued", None), ("running", "transport ambiguous"),
+                                          ("accepted", "transport ambiguous")])
+def test_nonblocked_ops_never_enqueue_preflight_warning(state, error):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from llm_bawt.service.ops_blocked_notification import OpsBlockedNotifier
+
+    enqueue = Mock()
+    service = SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=SimpleNamespace(enqueue=enqueue)))
+    OpsBlockedNotifier(service).notify(SimpleNamespace(), {"state": state, "error_text": error})
+    enqueue.assert_not_called()
+
+
 def test_terminal_ops_receipt_replaces_initial_accepted_result():
     store = _store()
     row = _ready_row(store, result={"job_id": "job-1", "state": "accepted"})

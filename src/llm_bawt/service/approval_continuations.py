@@ -87,6 +87,10 @@ def _terminal_ops_result(service, row) -> dict[str, Any] | None:
         str(current["job_id"]), output_tail_bytes=4096, reconcile_if_active=True,
     )
     if not result or not result.get("terminal"):
+        if result:
+            from .ops_blocked_notification import OpsBlockedNotifier
+
+            OpsBlockedNotifier(service).notify(row, result)
         return None
     return result
 
@@ -365,9 +369,15 @@ async def dispatch_due_continuations_once(service, store, *, limit: int = 20) ->
         # that the restart can kill. Wait for the durable terminal job receipt,
         # then start a fresh continuation from the recovered app/bridge process
         # with that final receipt as its result.
-        terminal_ops_result = await asyncio.to_thread(
-            _terminal_ops_result, service, pending,
-        )
+        try:
+            terminal_ops_result = await asyncio.to_thread(
+                _terminal_ops_result, service, pending,
+            )
+        except Exception:
+            # Keep this receipt pending for retry; one failed warning/status
+            # lookup must not starve unrelated terminal continuations.
+            log.exception("Ops continuation status/notification failed id=%s", pending.id)
+            continue
         if terminal_ops_result is None:
             continue
         if terminal_ops_result:
