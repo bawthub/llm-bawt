@@ -438,8 +438,8 @@ class InstanceManagerMixin:
             )
             self._llm_bawt_cache[cache_key] = llm_bawt
 
-            # Also cache the client for future reuse by extraction tasks.
-            # Skip agent_backend clients — they hold per-bot state.
+            # Cache reusable chat clients. Botless background jobs use their
+            # separate pool and never borrow a bot's client or identity.
             if model_alias not in self._client_cache and model_type not in ("agent_backend", "claude-code"):
                 self._client_cache[model_alias] = llm_bawt.client
             # Note: BaseLLMBawt.__init__ already registers with lifecycle manager
@@ -451,31 +451,11 @@ class InstanceManagerMixin:
         return self._llm_bawt_cache[cache_key]
 
     def get_client(self, model_alias: str):
-        """Get LLM client for a given model (for extraction tasks).
-
-        Uses a dedicated client cache to avoid reloading models.
-        GGUF models especially are expensive to load into VRAM,
-        so we cache the client independently from LLMBawt instances.
-        """
-        if model_alias in self._client_cache:
-            log.cache_hit("llm_client", model_alias)
-            return self._client_cache[model_alias]
-
-        log.cache_miss("llm_client", model_alias)
-
-        # Check if we already have an LLMBawt instance with this model
-        # and can reuse its client
-        for (cached_model, _, _), llm_bawt in self._llm_bawt_cache.items():
-            if cached_model == model_alias:
-                log.debug(f"Reusing client from existing LLMBawt instance for '{model_alias}'")
-                self._client_cache[model_alias] = llm_bawt.client
-                return llm_bawt.client
-
-        # Need to create a new client - use spark bot (no memory overhead)
-        log.debug(f"Creating new client for model '{model_alias}' (extraction context)")
-        llm_bawt = self._get_llm_bawt(model_alias, "spark", "system", local_mode=True)
-        self._client_cache[model_alias] = llm_bawt.client
-        return llm_bawt.client
+        """Get a botless extraction client, never a bot's cached chat client."""
+        client, resolved_alias = self._get_background_client(model_override=model_alias)
+        if client is None or resolved_alias is None:
+            raise ValueError(f"Model '{model_alias}' has no botless background client")
+        return client
 
     def _get_background_client(self, model_override: str | None = None) -> tuple[Any | None, str | None]:
         """Get or create an API client for background tasks (summarization, extraction).

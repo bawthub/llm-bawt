@@ -7,9 +7,11 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
+from ...orphan_partitions import PartitionExecutionHalted
 from ..runtime_switch_rotation import (
     RUNTIME_SWITCH_SOURCE,
     rotate_active_threads,
@@ -742,15 +744,25 @@ def purge_bot_data_endpoint(slug: str):
 
 @router.post("/v1/bots/cleanup-orphans", tags=["System"])
 def cleanup_orphans(
-    dry_run: bool = Query(True, description="Report orphans without deleting (default true)"),
+    dry_run: bool = Query(True, description="Preview a bounds-based partition manifest"),
+    manifest_digest: str | None = Query(None, description="Digest from an exact preview; required to execute"),
 ):
-    """Find and remove data for bot IDs that no longer exist in bot_profiles.
+    """Preview orphan partitions, or confirm that exact manifest to execute.
 
-    Run with ?dry_run=false to actually delete. Defaults to dry-run so you can
-    preview what would be cleaned up first.
+    This route never deletes shared rows. A changed manifest fails before any
+    mutation; each child is revalidated under short, bounded locks.
     """
     service = get_service()
-    result = cleanup_orphaned_bot_data(service.config, dry_run=dry_run)
+    try:
+        result = cleanup_orphaned_bot_data(service.config, dry_run=dry_run,
+                                           manifest_digest=manifest_digest)
+    except PartitionExecutionHalted as exc:
+        receipt = exc.receipt()
+        # Even completed-with-warning uses 207: do not let a successful DB
+        # result hide a journal-finalization failure. The body carries both.
+        return JSONResponse(status_code=207, content=receipt)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if "error" in result:
         raise HTTPException(status_code=503, detail=result["error"])
     return result

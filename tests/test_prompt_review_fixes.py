@@ -353,6 +353,8 @@ def purge_runtime(engine, monkeypatch):
     monkeypatch.setattr(sqlalchemy, "create_engine", lambda *a, **kw: SimpleNamespace(
         connect=engine.connect, dispose=lambda: None))
     monkeypatch.setattr(runtime_settings, "has_database_credentials", lambda config: True)
+    from llm_bawt.utils import db
+    monkeypatch.setattr(db, "get_shared_engine", lambda config: engine)
     return runtime_settings, SimpleNamespace(), engine
 
 
@@ -363,7 +365,7 @@ def test_runtime_purge_entrypoints_guard_before_any_mutation(purge_runtime, clea
     event.listen(engine, "before_cursor_execute", lambda conn, cursor, sql, *args: statements.append(sql))
     with pytest.raises(ValueError, match="active or unknown"):
         if cleanup:
-            runtime.cleanup_orphaned_bot_data(config)
+            runtime.purge_orphaned_shared_rows(config)
         else:
             runtime.purge_bot_data(config, "test")
     assert not any(sql.lstrip().upper().startswith(("DELETE", "DROP")) for sql in statements)
@@ -377,7 +379,7 @@ def test_runtime_purge_entrypoints_honor_prompt_fk_order(purge_runtime, cleanup)
     runtime, config, engine = purge_runtime
     with engine.begin() as conn:
         conn.execute(text("UPDATE prompt_occurrences SET state='cancelled'"))
-    result = (runtime.cleanup_orphaned_bot_data(config) if cleanup else
+    result = (runtime.purge_orphaned_shared_rows(config) if cleanup else
               runtime.purge_bot_data(config, "test"))
     assert result["deleted_rows"]["prompt_occurrences"] == 1
     assert result["deleted_rows"]["prompt_schedules"] == 1
@@ -387,7 +389,7 @@ def test_runtime_purge_entrypoints_honor_prompt_fk_order(purge_runtime, cleanup)
 
 def test_orphan_cleanup_dry_run_does_not_mutate_active_prompts(purge_runtime):
     runtime, config, engine = purge_runtime
-    result = runtime.cleanup_orphaned_bot_data(config, dry_run=True)
+    result = runtime.purge_orphaned_shared_rows(config, dry_run=True)
     assert result["orphaned_bot_ids"] == ["test"]
     with engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM prompt_occurrences")).scalar_one() == 1

@@ -1042,12 +1042,18 @@ class ServiceClient:
             logger.warning(f"Purge bot data via service failed: {e}")
             return None
 
-    def cleanup_orphaned_bot_data(self, dry_run: bool = True) -> dict | None:
-        """Find/remove data for bot IDs not in bot_profiles. dry_run=True just reports."""
+    def cleanup_orphaned_bot_data(self, dry_run: bool = True,
+                                 manifest_digest: str | None = None) -> dict | None:
+        """Preview orphan partitions or confirm the digest returned by preview."""
         if not self.is_available():
             return None
+        if not dry_run and not manifest_digest:
+            raise ValueError("A preview manifest digest is required to execute cleanup")
         try:
             params = f"?dry_run={'true' if dry_run else 'false'}"
+            if manifest_digest:
+                from urllib.parse import quote
+                params += f"&manifest_digest={quote(manifest_digest, safe='')}"
             return self._request("POST", f"/v1/bots/cleanup-orphans{params}")
         except Exception as e:
             logger.warning(f"Cleanup orphaned bot data via service failed: {e}")

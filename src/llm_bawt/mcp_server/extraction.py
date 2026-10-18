@@ -188,10 +188,13 @@ def extract_profile_attributes_from_fact(
                 # confuses the bot's name with the user's name from conversation context
                 from llm_bawt.bots import load_bots
                 try:
-                    bot_names = {b.get("name", "").lower() for b in load_bots().values()}
-                    bot_names |= set(load_bots().keys())  # also slug names
+                    loaded_bots = load_bots()
+                    bot_names = {b.get("name", "").lower() for b in loaded_bots.values()}
+                    bot_names |= set(loaded_bots.keys())  # also slug names
                 except Exception:
-                    bot_names = {"nova", "mira", "spark"}  # fallback known names
+                    # No hard-coded identities: an unavailable registry is not
+                    # evidence that an unregistered fallback bot exists.
+                    bot_names = set()
                 
                 if name.lower() in bot_names:
                     logger.warning(

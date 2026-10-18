@@ -474,27 +474,21 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
     return result
 
 
-def cleanup_orphaned_bot_data(config: Config, dry_run: bool = False) -> dict[str, Any]:
-    """Find and remove data for bot IDs that no longer exist in bot_profiles.
+def purge_orphaned_shared_rows(config: Config, dry_run: bool = False) -> dict[str, Any]:
+    """Separate shared-row purge; never called by the partition cleanup route.
 
-    Checks dynamic tables (*_messages, *_memories, *_forgotten_messages) and rows
-    in shared tables.  Pass dry_run=True to report without deleting anything.
+    Shared-row deletion requires its own review and authorization.
     """
-    import re as _re
-
-    from sqlalchemy import create_engine as _create_engine, text as _text
+    from sqlalchemy import text as _text
+    from .bot_identities import RESERVED_JOB_BOT_IDS
+    from .orphan_partitions import PROTECTED_STORAGE_IDS
+    from .utils.db import get_shared_engine
 
     if not has_database_credentials(config):
         return {"error": "No database credentials configured"}
 
-    host = getattr(config, "POSTGRES_HOST", "localhost")
-    port = int(getattr(config, "POSTGRES_PORT", 5432))
-    user = getattr(config, "POSTGRES_USER", "llm_bawt")
-    password = getattr(config, "POSTGRES_PASSWORD", "")
-    database = getattr(config, "POSTGRES_DATABASE", "llm_bawt")
-    from urllib.parse import quote_plus as _qp
-    url = f"postgresql+psycopg2://{user}:{_qp(password)}@{host}:{port}/{database}"
-    engine = _create_engine(url, echo=False)
+    engine = get_shared_engine(config)
+    protected = RESERVED_JOB_BOT_IDS | PROTECTED_STORAGE_IDS
 
     result: dict[str, Any] = {
         "dry_run": dry_run,
@@ -503,158 +497,142 @@ def cleanup_orphaned_bot_data(config: Config, dry_run: bool = False) -> dict[str
         "deleted_rows": {},
     }
 
-    try:
-        with engine.connect() as conn:
-            # Known slugs from bot_profiles
-            rows = conn.execute(_text("SELECT slug FROM bot_profiles")).fetchall()
-            known_slugs: set[str] = {r[0].strip().lower() for r in rows}
-            known_sanitized: set[str] = {
-                _re.sub(r"[^a-z0-9_]", "", s) or "default" for s in known_slugs
-            }
+    with engine.connect() as conn:
+        # Known slugs from bot_profiles
+        rows = conn.execute(_text("SELECT slug FROM bot_profiles")).fetchall()
+        known_slugs: set[str] = {r[0].strip().lower() for r in rows}
+        known_slugs |= protected
 
-            # --- Dynamic tables ---
-            table_rows = conn.execute(
-                _text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema='public' AND table_type='BASE TABLE'"
+        # --- Shared tables only ---
+        table_rows = conn.execute(
+            _text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_type='BASE TABLE'"
+            )
+        ).fetchall()
+        all_tables = {r[0] for r in table_rows}
+        from .prompt_purge import PromptPurgeGuard
+        prompt_purge = PromptPurgeGuard(conn, all_tables)
+        if not dry_run:
+            # Guard shared-row deletion and stabilize affected producers before
+            # discovering orphan identities.
+            prompt_purge.guard(set())
+            candidates = set()
+            for table, column in (("scheduled_jobs", "bot_id"),
+                                  ("inter_bot_deliveries", "target_bot_id")):
+                if table in all_tables:
+                    candidates.update(row[0] for row in conn.execute(
+                        _text(f"SELECT DISTINCT {column} FROM {table}")
+                    ) if row[0] and row[0] != "*" and row[0].strip().lower() not in known_slugs)
+            prompt_purge.guard(candidates)
+
+        # No partition or legacy-shard DDL belongs in shared-row purge.
+        # Partition cleanup has its own bounds-based planner and executor.
+        # --- Shared tables ---
+        # bot_id column tables
+        bot_id_tables = [
+            "runtime_settings",  # scope_type='bot', scope_id
+            "turn_logs",
+            "tool_call_records",
+            "scheduled_jobs",
+            "entity_profiles",
+            "entity_profile_attributes",
+            "prompt_templates",
+            "prompt_template_versions",
+        ]
+
+        def _find_orphan_ids(table: str, id_col: str, extra_where: str = "") -> set[str]:
+            where = f"WHERE {extra_where}" if extra_where else ""
+            q = f"SELECT DISTINCT {id_col} FROM {table} {where}"
+            rs = conn.execute(_text(q)).fetchall()
+            return {r[0] for r in rs if r[0] and r[0].strip().lower() not in known_slugs}
+
+        def _delete_orphans(table: str, id_col: str, ids: set[str], extra_where: str = "") -> int:
+            if not ids:
+                return 0
+            and_clause = f" AND {extra_where}" if extra_where else ""
+            total = 0
+            for oid in ids:
+                r = conn.execute(
+                    _text(f"DELETE FROM {table} WHERE {id_col}=:v{and_clause}"),
+                    {"v": oid},
                 )
+                total += r.rowcount
+            return total
+
+        # Accumulate all orphaned bot IDs across shared tables
+        orphan_ids: set[str] = set()
+
+        for table, id_col, extra in [
+            ("turn_logs", "bot_id", ""),
+            ("tool_call_records", "bot_id", ""),
+            ("scheduled_jobs", "bot_id", "bot_id != '*'"),
+            ("entity_profiles", "entity_id", "entity_type::text = 'bot'"),
+            ("entity_profile_attributes", "entity_id", "entity_type::text = 'bot'"),
+            ("prompt_templates", "scope_id", "scope_type='bot'"),
+            ("prompt_template_versions", "scope_id", "scope_type='bot'"),
+        ]:
+            if table not in all_tables:
+                continue
+            orphans = _find_orphan_ids(table, id_col, extra)
+            orphan_ids |= orphans
+            if not dry_run and orphans:
+                if table == "scheduled_jobs":
+                    for oid in orphans:
+                        for child, count in prompt_purge.delete_jobs(oid).items():
+                            result["deleted_rows"][child] = result["deleted_rows"].get(child, 0) + count
+                    continue
+                cnt = _delete_orphans(table, id_col, orphans, extra)
+                result["deleted_rows"][table] = result["deleted_rows"].get(table, 0) + cnt
+            elif dry_run:
+                result["deleted_rows"][table] = len(orphans)
+
+        # runtime_settings uses scope_id not bot_id
+        if "runtime_settings" in all_tables:
+            rs = conn.execute(
+                _text("SELECT DISTINCT scope_id FROM runtime_settings WHERE scope_type='bot'")
             ).fetchall()
-            all_tables = {r[0] for r in table_rows}
-            from .prompt_purge import PromptPurgeGuard
-            prompt_purge = PromptPurgeGuard(conn, all_tables)
-            if not dry_run:
-                # Check before dropping history partitions or deleting turn evidence.
-                # Stabilize writers before discovering the orphan targets too.
-                prompt_purge.guard(set())
-                candidates = set()
-                for table, column in (("scheduled_jobs", "bot_id"),
-                                      ("inter_bot_deliveries", "target_bot_id")):
-                    if table in all_tables:
-                        candidates.update(row[0] for row in conn.execute(
-                            _text(f"SELECT DISTINCT {column} FROM {table}")
-                        ) if row[0] and row[0] != "*" and row[0].strip().lower() not in known_slugs)
-                prompt_purge.guard(candidates)
+            orphan_rs = {r[0] for r in rs if r[0] and r[0].strip().lower() not in known_slugs}
+            orphan_ids |= orphan_rs
+            if not dry_run and orphan_rs:
+                cnt = _delete_orphans("runtime_settings", "scope_id", orphan_rs, "scope_type='bot'")
+                result["deleted_rows"]["runtime_settings"] = cnt
+            elif dry_run:
+                result["deleted_rows"]["runtime_settings"] = len(orphan_rs)
 
-            # TASK-571: per-bot data lives in LIST partitions named
-            # ``<parent>_p_<bot>`` — dropping the partition drops the bot's
-            # rows (implicit detach). The legacy ``<bot>_messages`` shard
-            # handling stays for any straggler shard tables, but skips the
-            # ``zz_old_*`` rename-kept tables from the partition cutover —
-            # those are the migration's rollback safety net and are dropped
-            # only by ``migrations_partition.py --finalize``.
-            partition_prefixes = ("messages_p_", "memories_p_", "forgotten_messages_p_")
-            # Check the longest suffix first so bot_forgotten_messages
-            # does not get misclassified as prefix=bot_forgotten + _messages.
-            dynamic_suffixes = ("_forgotten_messages", "_memories", "_messages")
-            # NEVER touch the partitioned parents themselves — note
-            # ``forgotten_messages`` ends with ``_messages``, so without this
-            # guard the legacy suffix scan would CASCADE-drop every bot's
-            # forgotten rows at once.
-            parent_tables = {"messages", "memories", "forgotten_messages"}
-            for tbl in sorted(all_tables):
-                if tbl.startswith("zz_old_") or tbl in parent_tables:
-                    continue
-                matched_partition = False
-                for pprefix in partition_prefixes:
-                    if tbl.startswith(pprefix):
-                        matched_partition = True
-                        bot_suffix = tbl[len(pprefix):]
-                        if bot_suffix and bot_suffix not in known_sanitized:
-                            result["dropped_tables"].append(tbl)
-                            if not dry_run:
-                                conn.execute(_text(f'DROP TABLE IF EXISTS "{tbl}" CASCADE'))
-                        break
-                if matched_partition:
-                    continue
-                for suffix in dynamic_suffixes:
-                    if tbl.endswith(suffix):
-                        prefix = tbl[: -len(suffix)]
-                        if prefix not in known_sanitized:
-                            result["dropped_tables"].append(tbl)
-                            if not dry_run:
-                                conn.execute(_text(f'DROP TABLE IF EXISTS "{tbl}" CASCADE'))
-                        break
+        result["orphaned_bot_ids"] = sorted(orphan_ids)
 
-            # --- Shared tables ---
-            # bot_id column tables
-            bot_id_tables = [
-                "runtime_settings",  # scope_type='bot', scope_id
-                "turn_logs",
-                "tool_call_records",
-                "scheduled_jobs",
-                "entity_profiles",
-                "entity_profile_attributes",
-                "prompt_templates",
-                "prompt_template_versions",
-            ]
-
-            def _find_orphan_ids(table: str, id_col: str, extra_where: str = "") -> set[str]:
-                where = f"WHERE {extra_where}" if extra_where else ""
-                q = f"SELECT DISTINCT {id_col} FROM {table} {where}"
-                rs = conn.execute(_text(q)).fetchall()
-                return {r[0] for r in rs if r[0] and r[0].strip().lower() not in known_slugs}
-
-            def _delete_orphans(table: str, id_col: str, ids: set[str], extra_where: str = "") -> int:
-                if not ids:
-                    return 0
-                and_clause = f" AND {extra_where}" if extra_where else ""
-                total = 0
-                for oid in ids:
-                    r = conn.execute(
-                        _text(f"DELETE FROM {table} WHERE {id_col}=:v{and_clause}"),
-                        {"v": oid},
-                    )
-                    total += r.rowcount
-                return total
-
-            # Accumulate all orphaned bot IDs across shared tables
-            orphan_ids: set[str] = set()
-
-            for table, id_col, extra in [
-                ("turn_logs", "bot_id", ""),
-                ("tool_call_records", "bot_id", ""),
-                ("scheduled_jobs", "bot_id", "bot_id != '*'"),
-                ("entity_profiles", "entity_id", "entity_type::text = 'bot'"),
-                ("entity_profile_attributes", "entity_id", "entity_type::text = 'bot'"),
-                ("prompt_templates", "scope_id", "scope_type='bot'"),
-                ("prompt_template_versions", "scope_id", "scope_type='bot'"),
-            ]:
-                if table not in all_tables:
-                    continue
-                orphans = _find_orphan_ids(table, id_col, extra)
-                orphan_ids |= orphans
-                if not dry_run and orphans:
-                    if table == "scheduled_jobs":
-                        for oid in orphans:
-                            for child, count in prompt_purge.delete_jobs(oid).items():
-                                result["deleted_rows"][child] = result["deleted_rows"].get(child, 0) + count
-                        continue
-                    cnt = _delete_orphans(table, id_col, orphans, extra)
-                    result["deleted_rows"][table] = result["deleted_rows"].get(table, 0) + cnt
-                elif dry_run:
-                    result["deleted_rows"][table] = len(orphans)
-
-            # runtime_settings uses scope_id not bot_id
-            if "runtime_settings" in all_tables:
-                rs = conn.execute(
-                    _text("SELECT DISTINCT scope_id FROM runtime_settings WHERE scope_type='bot'")
-                ).fetchall()
-                orphan_rs = {r[0] for r in rs if r[0] and r[0].strip().lower() not in known_slugs}
-                orphan_ids |= orphan_rs
-                if not dry_run and orphan_rs:
-                    cnt = _delete_orphans("runtime_settings", "scope_id", orphan_rs, "scope_type='bot'")
-                    result["deleted_rows"]["runtime_settings"] = cnt
-                elif dry_run:
-                    result["deleted_rows"]["runtime_settings"] = len(orphan_rs)
-
-            result["orphaned_bot_ids"] = sorted(orphan_ids)
-
-            if not dry_run:
-                conn.commit()
-    finally:
-        engine.dispose()
+        if not dry_run:
+            conn.commit()
 
     return result
+
+
+def cleanup_orphaned_bot_data(config: Config, dry_run: bool = True,
+                              manifest_digest: str | None = None) -> dict[str, Any]:
+    """Preview or execute only orphan partitions; never purge shared rows."""
+    from .orphan_partitions import OrphanPartitionPlanner, PartitionManifestExecutor
+    from .utils.db import get_shared_engine
+    from .utils.paths import resolve_log_dir
+
+    if not has_database_credentials(config):
+        return {"error": "No database credentials configured"}
+    engine = get_shared_engine(config)
+    plan = OrphanPartitionPlanner(engine).plan()
+    manifest = plan.manifest()
+    if dry_run:
+        return {"dry_run": True, "manifest": manifest}
+    if not manifest_digest or manifest_digest != plan.content_digest:
+        raise ValueError("Manifest digest mismatch; preview again")
+    # One exclusive journal per digest. Never automatically replay a partial run.
+    journal = resolve_log_dir() / "orphan-partitions" / f"{plan.content_digest}.jsonl"
+    outcomes = PartitionManifestExecutor(engine).execute(
+        plan, manifest_digest, journal_path=journal,
+    )
+    return {"dry_run": False, "manifest": manifest, "outcomes": outcomes,
+            "status": "completed", "committed_count": len(outcomes),
+            "journal_incomplete": False, "journal_error": None,
+            "journal": str(journal) if outcomes else None}
 
 
 class RuntimeSettingsStore:

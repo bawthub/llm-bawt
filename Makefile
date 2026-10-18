@@ -322,7 +322,7 @@ test-integration: ## Optional integration tests; tests targeting an unverified s
 	uv run pytest -m integration
 
 test-pg-acceptance: ## REQUIRED private PostgreSQL gate: zero skips, zero missing suites
-	uv run pytest -o addopts='' --require-pg-acceptance \
+	uv run --extra dev --extra service python -m pytest -o addopts='' --require-pg-acceptance \
 		tests/test_session_search_pg.py tests/test_session_continuity_pg.py \
 		tests/test_agent_bridge.py::TestEventStore tests/test_agent_context.py \
 		tests/test_inter_bot_delivery.py tests/test_inter_bot_delivery_retry.py \
@@ -332,7 +332,7 @@ test-pg-acceptance: ## REQUIRED private PostgreSQL gate: zero skips, zero missin
 		tests/test_session_scoping.py::TestScopedPersistenceProofs \
 		tests/test_session_scoping.py::TestScopedContextProofs \
 		tests/test_session_threads.py::TestRegistryInvariantsLiveDB \
-		tests/test_session_unique_index_pg.py \
+		tests/test_session_unique_index_pg.py tests/test_orphan_partitions_pg.py \
 		tests/test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB
 
 test-all: ## Run EVERY test (hermetic + integration + service + llm_call). Use before merging inter-bot / dispatcher / capability / bridge changes — a bare `pytest` silently skips those (TASK-780).

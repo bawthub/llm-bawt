@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlmodel import Field, SQLModel, Session, select
 from sqlalchemy import Column, DateTime, Text, text
+from ..bot_identities import SYSTEM_BOT_ID, WILDCARD_BOT_ID
 from ..runtime_settings import RuntimeSettingsResolver
 
 logger = logging.getLogger(__name__)
@@ -202,7 +203,7 @@ class JobScheduler:
         needing a restart or per-bot job rows.
         """
         # Expand wildcard jobs into per-bot runs
-        if job.bot_id == "*" and job.job_type in (
+        if job.bot_id == WILDCARD_BOT_ID and job.job_type in (
             JobType.HISTORY_SUMMARIZATION,
             JobType.MEMORY_EXTRACTION,
             JobType.MEMORY_CONSOLIDATION,
@@ -735,7 +736,7 @@ def init_default_jobs(engine, config) -> None:
             default_user = config.DEFAULT_USER or "user"
             job = ScheduledJob(
                 job_type=JobType.PROFILE_MAINTENANCE,
-                bot_id="*",  # All bots
+                bot_id=WILDCARD_BOT_ID,  # All bots
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=int(
                     global_settings.resolve(
@@ -775,7 +776,7 @@ def init_default_jobs(engine, config) -> None:
         if not existing_history:
             history_job = ScheduledJob(
                 job_type=JobType.HISTORY_SUMMARIZATION,
-                bot_id="*",
+                bot_id=WILDCARD_BOT_ID,
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=int(
                     global_settings.resolve(
@@ -819,7 +820,7 @@ def init_default_jobs(engine, config) -> None:
             default_user = config.DEFAULT_USER or "user"
             extraction_job = ScheduledJob(
                 job_type=JobType.MEMORY_EXTRACTION,
-                bot_id="*",
+                bot_id=WILDCARD_BOT_ID,
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=int(
                     getattr(config, "MEMORY_EXTRACTION_INTERVAL_MINUTES", 30),
@@ -852,7 +853,7 @@ def init_default_jobs(engine, config) -> None:
 
             media_gc_job = ScheduledJob(
                 job_type=JobType.MEDIA_GC,
-                bot_id="system",
+                bot_id=SYSTEM_BOT_ID,
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=int(
                     getattr(config, "MEDIA_GC_INTERVAL_MINUTES", 1440),
@@ -890,7 +891,7 @@ def init_default_jobs(engine, config) -> None:
 
             tool_result_gc_job = ScheduledJob(
                 job_type=JobType.TOOL_RESULT_GC,
-                bot_id="system",
+                bot_id=SYSTEM_BOT_ID,
                 enabled=config.SCHEDULER_ENABLED,
                 interval_minutes=int(
                     getattr(config, "TOOL_RESULT_GC_INTERVAL_MINUTES", 1440),
