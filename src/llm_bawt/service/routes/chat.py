@@ -854,8 +854,14 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     - `tts_mode`: Whether to append TTS output formatting instructions to the system prompt (default: false)
     """
     from fastapi.responses import JSONResponse, StreamingResponse
-    
+    from ..chat_response_adapter import completion_response, completion_stream
+    from ..delivery_reply import is_accepted_receipt
+
     service = get_service()
+    # Keep old durable admission receipts for every unmigrated caller. In
+    # particular task/cron tracking requires its 202 before the turn completes.
+    # Only an explicitly migrated client opts into the public observer contract.
+    openai_response = http_request.headers.get("X-LLM-Bawt-Response-Mode") == "openai"
 
     internal_sender = _internal_inter_bot_sender(http_request)
     if internal_sender:
@@ -882,7 +888,10 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         # Streaming response
         try:
             return StreamingResponse(
-                service.chat_completion_stream(request),
+                (completion_stream(
+                    service, request,
+                    admission_comment=http_request.headers.get("X-LLM-Bawt-Admission-Events") == "comment",
+                ) if openai_response else service.chat_completion_stream(request)),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -897,11 +906,14 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     
     # Non-streaming
     try:
+        if openai_response:
+            return await completion_response(service, request)
         response = await service.chat_completion(request)
-        from ..delivery_reply import is_accepted_receipt
         if is_accepted_receipt(response):
             return JSONResponse(content=response, status_code=202)
         return response
+    except HTTPException:
+        raise
     except (IdentityConflict, AdmissionUnavailable, InvalidIdentity) as e:
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     except ValueError as e:

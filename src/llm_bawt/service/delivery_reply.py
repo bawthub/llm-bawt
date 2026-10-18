@@ -141,7 +141,7 @@ async def wait_for_delivery_reply(
         resolve_delivery_reply, (deliveries, turns, delivery_id),
         bot_id=bot_id, user_id=user_id, user_message_id=user_message_id,
         timeout_seconds=timeout_seconds,
-        pending=frozenset({"QUEUED", "STEERING", "DISPATCHING"}),
+        pending=frozenset({"QUEUED", "STEERING", "DISPATCHING", "IN_FLIGHT"}),
     )
 
 
