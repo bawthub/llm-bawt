@@ -24,6 +24,42 @@ from __future__ import annotations
 import pytest
 
 from collections import defaultdict
+from tests import pg_connection_guard
+
+# Root conftest is imported before nested conftests and test modules; a
+# pytest_configure hook would be too late for their import-time side effects.
+# Plugins loaded before this root conftest remain outside this boundary.
+pg_connection_guard.install()
+
+pytest_plugins = ("tests.private_postgres",)
+
+
+_PG_ACCEPTANCE_SUITES = (
+    "test_session_search_pg.py::",
+    "test_session_continuity_pg.py::",
+    "test_agent_bridge.py::TestEventStore::",
+    "test_agent_context.py::",
+    "test_inter_bot_delivery.py::",
+    "test_inter_bot_delivery_retry.py::",
+    "test_turn_admission_pg.py::",
+    "test_session_reset_lineage_pg.py::",
+    "test_session_summaries.py::TestSummarizeThreadLive::",
+    "test_session_summaries.py::TestResummarizeHeuristicSummaries::",
+    "test_session_scoping.py::TestScopedPersistenceProofs::",
+    "test_session_scoping.py::TestScopedContextProofs::",
+    "test_session_threads.py::TestRegistryInvariantsLiveDB::",
+    "test_session_unique_index_pg.py::",
+    "test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB::",
+)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--require-pg-acceptance", action="store_true", default=False,
+                     help="fail if any private-cluster acceptance suite is absent or skipped")
+
+
+def _require_pg_acceptance(config):
+    return config.getoption("--require-pg-acceptance")
 
 
 def pytest_configure(config):
@@ -54,6 +90,22 @@ def pytest_collection_finish(session):
     # and make the diff useless. Use this hook instead.)
     for item in session.items:
         session.config._task780_surviving_by_file[str(item.path)] += 1
+    if _require_pg_acceptance(session.config):
+        selected = [item.nodeid for item in session.items]
+        missing = [suite for suite in _PG_ACCEPTANCE_SUITES
+                   if not any(suite in nodeid for nodeid in selected)]
+        if missing:
+            pytest.exit(f"PostgreSQL acceptance gate missing selected suites: {missing}", returncode=1)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _require_pg_acceptance(session.config) and exitstatus == 0:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        stats = reporter.stats if reporter is not None else {}
+        if not stats.get("passed") or stats.get("skipped") or stats.get("xfailed"):
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+            print("PostgreSQL acceptance gate requires executed passes and zero skips/xfails")
+    pg_connection_guard.uninstall()
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -80,9 +132,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         tr.write_line(f"  - {path}  ({count} test{'s' if count != 1 else ''})", yellow=True)
     tr.write_line("", yellow=True)
     tr.write_line("To run them:", yellow=True, bold=True)
-    tr.write_line("  make test-integration   # only -m integration", yellow=True)
+    tr.write_line("  make test-integration   # optional; CLI service tests remain blocked", yellow=True)
     tr.write_line(
-        "  make test-all           # everything (hermetic + integration + service + llm_call)",
+        "  make test-pg-acceptance # required private PostgreSQL SQL tests",
         yellow=True,
     )
 

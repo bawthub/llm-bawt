@@ -572,24 +572,25 @@ class TestKwargChannelRequestLocal:
 # Live-DB: endpoint merge semantics + resolver round-trip
 # ──────────────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="class")
-def live_thread():
+def live_thread(private_app_pg):
     """Throwaway bot + one real thread row for endpoint tests."""
     from sqlalchemy import text
-    from llm_bawt.utils.config import Config
     from llm_bawt.memory.postgresql import PostgreSQLShortTermManager
 
     bot = f"_t252_pytest_{uuid.uuid4().hex[:8]}"
     user = "nick"
-    config = Config()
+    from tests.pg_isolation import require_test_db_config
+    config = require_test_db_config()
     manager = PostgreSQLShortTermManager(config, bot_id=bot, user_id=user)
     thread_id = manager.get_or_create_active_session(bot_id=bot, user_id=user)
 
     yield SimpleNamespace(bot=bot, user=user, manager=manager, thread_id=thread_id)
 
+    from llm_bawt.memory.postgresql import PARENT_TABLES, partition_name
     with manager._backend.engine.begin() as conn:
-        conn.execute(
-            text("DELETE FROM sessions WHERE bot_id = :b"), {"b": bot}
-        )
+        for parent in PARENT_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(parent, bot)}"))
+        conn.execute(text("DELETE FROM sessions WHERE bot_id = :b"), {"b": bot})
 
 
 @pytest.mark.integration

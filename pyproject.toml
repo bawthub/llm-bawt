@@ -59,6 +59,9 @@ dev = [
     "pytest>=8.3.5",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
+    "pytest-asyncio>=0.24.0",
+    # CPU-only video unit modules import the hub client at collection time.
+    "huggingface-hub>=0.25.0",
     "flask>=3.0.0",
     # In-memory S3 for TASK-266 object_store unit tests — exercises the
     # boto3 path without a live Garage. moto 5+ uses the unified
@@ -146,8 +149,9 @@ where = ["src"]
 # touches the live service or real bots. Opt in explicitly to run the gated ones:
 #
 #   make test              # hermetic only (this default)
-#   make test-integration  # -m integration     (needs live Postgres/Redis)
-#   make test-all          # -m ""              (everything — inter-bot + service + llm_call)
+#   make test-pg-acceptance # REQUIRED private socket-cluster SQL acceptance gate
+#   make test-integration   # opt-in integration tests (CLI service cases fail closed)
+#   make test-all           # -m "" (CLI service cases require an isolated target)
 #   uv run pytest -m service        # CLI/integration tests vs a running :8642
 #   uv run pytest -m llm_call       # tests that spend real LLM credits
 #
@@ -156,7 +160,9 @@ where = ["src"]
 # to be a false-green trap for anyone verifying inter-bot changes with plain
 # `pytest`. `tests/conftest.py` now prints a session-end WARNING that names
 # every file fully deselected by the default filter (see TASK-780). If you touch
-# inter-bot / dispatcher / delivery / capability code, run `make test-all`.
+# inter-bot / dispatcher / delivery / capability code, run the relevant guarded
+# tests and `make test-pg-acceptance`; `make test-all` remains blocked by CLI
+# tests until an independently verified isolated service target exists.
 #
 # Intentional live smoke tools live OUTSIDE tests/ (e.g. scripts/smoke/) so they
 # are never auto-collected — run them by explicit path only.
@@ -165,5 +171,5 @@ addopts = "-m 'not service and not llm_call and not integration'"
 markers = [
     "service: requires the llm-bawt service running at :8642",
     "llm_call: makes real LLM API calls (slow, uses API credits)",
-    "integration: shells out to real CLI entrypoints / live DB — not hermetic",
+    "integration: opt-in PostgreSQL or CLI tests; only private or explicitly verified test targets",
 ]

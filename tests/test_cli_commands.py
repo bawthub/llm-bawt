@@ -27,6 +27,18 @@ import pytest
 # `llm_call` marks still apply for finer slicing.
 pytestmark = pytest.mark.integration
 
+
+def assert_private_cli_target():
+    # The installed CLI and hardcoded localhost:8642 may address the running
+    # operational service, even when this pytest process has DBAPI guards.
+    # Keep these tests blocked until an isolated CLI/service target is wired.
+    pytest.fail("CLI integration needs a separately verified isolated service; localhost:8642 is not a test target")
+
+
+@pytest.fixture(autouse=True)
+def require_isolated_cli_service():
+    assert_private_cli_target()
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -35,7 +47,7 @@ LLM = "llm"
 LLM_MEMORY = "llm-memory"
 BOT = "nova"
 MODEL = "grok-4-fast"          # valid alias available in all environments
-SAFE_BOT = "spark"             # no persistent memory — safe to wipe in tests
+SAFE_BOT = "spark"             # historical fixture only; never wipe outside an isolated service
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,7 +55,8 @@ SAFE_BOT = "spark"             # no persistent memory — safe to wipe in tests
 
 
 def run(cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a shell command and capture stdout + stderr separately."""
+    """Only launch CLIs after proving their service/DB target is private."""
+    assert_private_cli_target()
     return subprocess.run(
         cmd, shell=True, capture_output=True, text=True, timeout=timeout
     )
@@ -94,7 +107,8 @@ def find_uuid(text: str) -> str | None:
 
 @pytest.fixture(scope="session")
 def service_up() -> bool:
-    """True if the llm-bawt service is reachable at :8642."""
+    """Only probe a separately verified private service; never the live :8642."""
+    assert_private_cli_target()  # Session fixtures run before function autouse fixtures.
     try:
         with urllib.request.urlopen("http://127.0.0.1:8642/health", timeout=3) as resp:
             return resp.status == 200

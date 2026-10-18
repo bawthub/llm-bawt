@@ -36,6 +36,7 @@ from sqlalchemy import Column, DateTime, Float, Integer, JSON, MetaData, String,
 from .base import MemoryBackend
 from .postgresql_memories import PostgreSQLSemanticMemoryMixin
 from .postgresql_messages import PostgreSQLMessageMixin
+from .session_unique_index import ensure_fresh_sessions_index
 from .message_store import (
     FORGOTTEN_PARENT,
     MESSAGES_PARENT,
@@ -482,6 +483,10 @@ class PostgreSQLMemoryBackend(
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             ensure_parent_tables(conn, self.embedding_dim)
+            sessions_was_new = (
+                conn.dialect.name == "postgresql" and
+                conn.execute(text("SELECT to_regclass('public.sessions') IS NULL")).scalar_one()
+            )
 
             # Shared sessions table (TASK-183). One row per session across
             # all bots; promotes session_id from a bare UUID to a first-class
@@ -540,6 +545,11 @@ class PostgreSQLMemoryBackend(
                 CREATE INDEX IF NOT EXISTS idx_sessions_bot_user_active
                 ON sessions(bot_id, user_id, status, started_at)
             """))
+            # Enforce the cold-start race invariant on NEW databases. Existing
+            # tables without it require the explicit concurrent upgrade path;
+            # never build a potentially blocking index during app startup.
+            if conn.dialect.name == "postgresql":
+                ensure_fresh_sessions_index(conn, table_was_new=sessions_was_new)
 
         self._schema_guard.run(
             self.engine,

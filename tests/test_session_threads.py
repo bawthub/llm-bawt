@@ -146,14 +146,14 @@ class TestNewDetectionParity:
 # ──────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="class")
-def live_managers():
+def live_managers(private_app_pg):
     """Real PostgreSQLShortTermManager pair on a throwaway bot; full cleanup."""
     from sqlalchemy import text
-    from llm_bawt.utils.config import Config
     from llm_bawt.memory.postgresql import PostgreSQLShortTermManager
 
     bot = f"_t284_pytest_{uuid.uuid4().hex[:8]}"
-    config = Config()
+    from tests.pg_isolation import require_test_db_config
+    config = require_test_db_config()
 
     def make(user_id):
         return PostgreSQLShortTermManager(config, bot_id=bot, user_id=user_id)
@@ -161,9 +161,12 @@ def live_managers():
     managers = {"bot": bot, "make": make, "created": []}
     yield managers
 
-    # Cleanup: remove every session row this test bot created.
+    # Cleanup: remove all three test-owned partitions before their sessions.
+    from llm_bawt.memory.postgresql import PARENT_TABLES, partition_name
     m = make("nick")
     with m._backend.engine.begin() as conn:
+        for parent in PARENT_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(parent, bot)}"))
         conn.execute(text("DELETE FROM sessions WHERE bot_id = :b"), {"b": bot})
 
 

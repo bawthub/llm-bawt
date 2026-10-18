@@ -301,7 +301,7 @@ endif  # not Windows
 # DEV TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: lint format typecheck test test-cov test-integration test-all
+.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all
 
 lint: ## Lint with ruff
 	uv run ruff check src/
@@ -318,8 +318,22 @@ test: ## Run hermetic tests only (fast, no DB/Redis/live service needed)
 test-cov: ## Run hermetic tests with coverage
 	uv run pytest --cov=src --cov-report=term-missing
 
-test-integration: ## Run tests marked `integration` (need live Postgres/Redis) — pair with plain `test`
+test-integration: ## Optional integration tests; tests targeting an unverified service fail closed
 	uv run pytest -m integration
+
+test-pg-acceptance: ## REQUIRED private PostgreSQL gate: zero skips, zero missing suites
+	uv run pytest -o addopts='' --require-pg-acceptance \
+		tests/test_session_search_pg.py tests/test_session_continuity_pg.py \
+		tests/test_agent_bridge.py::TestEventStore tests/test_agent_context.py \
+		tests/test_inter_bot_delivery.py tests/test_inter_bot_delivery_retry.py \
+		tests/test_turn_admission_pg.py tests/test_session_reset_lineage_pg.py \
+		tests/test_session_summaries.py::TestSummarizeThreadLive \
+		tests/test_session_summaries.py::TestResummarizeHeuristicSummaries \
+		tests/test_session_scoping.py::TestScopedPersistenceProofs \
+		tests/test_session_scoping.py::TestScopedContextProofs \
+		tests/test_session_threads.py::TestRegistryInvariantsLiveDB \
+		tests/test_session_unique_index_pg.py \
+		tests/test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB
 
 test-all: ## Run EVERY test (hermetic + integration + service + llm_call). Use before merging inter-bot / dispatcher / capability / bridge changes — a bare `pytest` silently skips those (TASK-780).
 	uv run pytest -m ""

@@ -440,16 +440,17 @@ class TestCallSiteGuards:
 # ──────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("private_app_pg")
 class TestSummarizeThreadLive:
     @pytest.fixture()
     def env(self):
-        from llm_bawt.utils.config import Config
         from llm_bawt.memory.summarization import HistorySummarizer
-        from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
+        from llm_bawt.memory.postgresql import PARENT_TABLES, partition_name, PostgreSQLMemoryBackend
         from sqlalchemy import text as sql_text
 
-        config = Config()
-        bot_id = "byte"  # partition must exist; rows are cleaned up below
+        from tests.pg_isolation import require_test_db_config
+        config = require_test_db_config()
+        bot_id = f"_t641_{uuid.uuid4().hex[:12]}"  # test-owned partitions only
         thread_id = str(uuid.uuid4())
         backend = PostgreSQLMemoryBackend(config, bot_id)
         table = backend._messages_table_name
@@ -478,18 +479,18 @@ class TestSummarizeThreadLive:
             config, bot_id=bot_id,
             summarize_fn=lambda s: None,  # force heuristic — no LLM in tests
         )
-        yield SimpleNamespace(
-            summarizer=summarizer, backend=backend, table=table,
-            thread_id=thread_id, msg_ids=msg_ids, sql_text=sql_text,
-        )
-        with backend.engine.connect() as conn:
-            conn.execute(sql_text(
-                f"DELETE FROM {table} WHERE session_id = :sid"
-            ), {"sid": thread_id})
-            conn.execute(sql_text(
-                "DELETE FROM sessions WHERE id = :sid"
-            ), {"sid": thread_id})
-            conn.commit()
+        try:
+            yield SimpleNamespace(
+                summarizer=summarizer, backend=backend, table=table,
+                thread_id=thread_id, msg_ids=msg_ids, sql_text=sql_text,
+            )
+        finally:
+            with backend.engine.begin() as conn:
+                for parent in PARENT_TABLES:
+                    conn.execute(sql_text(f"DROP TABLE IF EXISTS {partition_name(parent, bot_id)}"))
+                conn.execute(sql_text(
+                    "DELETE FROM sessions WHERE id = :sid"
+                ), {"sid": thread_id})
 
     def test_summary_row_stamped_with_thread_id(self, env):
         result = env.summarizer.summarize_thread(env.thread_id)

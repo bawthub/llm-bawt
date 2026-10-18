@@ -4,35 +4,37 @@ from __future__ import annotations
 
 import json
 import uuid
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text as sa_text
 
 from llm_bawt.agent_context import AgentContextStore, SessionPolicy
-from llm_bawt.memory.postgresql import MESSAGES_PARENT, partition_name
-from llm_bawt.utils.config import Config
+from llm_bawt.memory.postgresql import MESSAGES_PARENT, PARENT_TABLES, partition_name
+from tests.pg_isolation import require_test_db_config
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
 @pytest.fixture
 def context_store():
-    store = AgentContextStore(Config())
-    if store.engine is None:
-        pytest.skip("PostgreSQL unavailable")
+    config = require_test_db_config()  # Validated before the store acquires its engine.
+    store = AgentContextStore(config)
+    assert store.engine is not None
     bot = f"testcontext{uuid.uuid4().hex}"
     user = f"user-{uuid.uuid4().hex}"
     table = partition_name(MESSAGES_PARENT, bot)
     from llm_bawt.memory.postgresql import ensure_bot_partitions
     with store.engine.begin() as conn:
         ensure_bot_partitions(conn, bot)
-    yield store, bot, user, table
-    with store.engine.begin() as conn:
-        conn.execute(sa_text("DELETE FROM turn_logs WHERE bot_id=:bot"), {"bot": bot})
-        conn.execute(sa_text(f"DELETE FROM {table}"))
-        conn.execute(sa_text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
-        conn.execute(sa_text(f"DROP TABLE IF EXISTS {table}"))
+    try:
+        yield store, bot, user, table
+    finally:
+        with store.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM turn_logs WHERE bot_id=:bot"), {"bot": bot})
+            # All three children belong to this UUID-scoped bot in the verified test DB.
+            for parent in PARENT_TABLES:
+                conn.execute(sa_text(f"DROP TABLE IF EXISTS {partition_name(parent, bot)}"))
+            conn.execute(sa_text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
 
 
 def test_health_prefers_native_resident_usage_and_scopes_active_thread(context_store):

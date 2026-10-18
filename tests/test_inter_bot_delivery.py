@@ -29,7 +29,7 @@ from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.turn_logs import DeliveryTargetBusy, TurnLogStore
 from tests.pg_isolation import isolated_pg_store
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
 @pytest.fixture

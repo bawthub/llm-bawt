@@ -13,7 +13,7 @@ from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 from llm_bawt.inter_bot_delivery_retry import DeliveryRetryConflict, retry_failed_delivery
 from tests.pg_isolation import isolated_pg_store
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
 @pytest.fixture

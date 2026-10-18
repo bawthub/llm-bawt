@@ -13,6 +13,8 @@ from llm_bawt.service.agent_new_rotation import delivery_new_predecessor
 from llm_bawt.service.turn_logs import TurnLogStore
 from tests.pg_isolation import isolated_pg_store
 
+pytestmark = pytest.mark.usefixtures("private_app_pg")
+
 
 @pytest.mark.integration
 def test_concurrent_claims_reuse_one_delivery_new_thread():
@@ -24,13 +26,7 @@ def test_concurrent_claims_reuse_one_delivery_new_thread():
     old_id = str(uuid.uuid4())
     key = f"delivery-{uuid.uuid4().hex}"
     with engine.begin() as conn:
-        created = conn.execute(text("SELECT to_regclass('public.sessions')")).scalar_one() is None
-        if created:
-            conn.execute(text("""CREATE TABLE sessions (
-                id TEXT PRIMARY KEY, bot_id TEXT, user_id TEXT,
-                started_at TIMESTAMP, ended_at TIMESTAMP, archived_at TIMESTAMP,
-                status TEXT, session_metadata JSONB
-            )"""))
+        # private_app_pg bootstraps sessions through the app-owned schema path.
         conn.execute(text("""INSERT INTO sessions
             (id, bot_id, user_id, status, started_at, session_metadata)
             VALUES (:id, :bot, :user, 'active', now(), '{}'::jsonb)
@@ -59,6 +55,10 @@ def test_concurrent_claims_reuse_one_delivery_new_thread():
         # or seed source when a claimed delivery is replayed after a delay.
         later_id = str(uuid.uuid4())
         with engine.begin() as conn:
+            conn.execute(text("""UPDATE sessions
+                SET status='archived', ended_at=now(), archived_at=now()
+                WHERE id=:id AND bot_id=:bot AND user_id=:user
+            """), {"id": first, "bot": bot, "user": user})
             conn.execute(text("""INSERT INTO sessions
                 (id, bot_id, user_id, status, started_at, session_metadata)
                 VALUES (:id, :bot, :user, 'active', now(), '{}'::jsonb)
@@ -79,5 +79,3 @@ def test_concurrent_claims_reuse_one_delivery_new_thread():
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM sessions WHERE bot_id=:bot AND user_id=:user"),
                          {"bot": bot, "user": user})
-            if created:
-                conn.execute(text("DROP TABLE sessions"))

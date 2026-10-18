@@ -18,6 +18,8 @@ from llm_bawt.service.turn_admission import AdmissionClaim, AdmissionFenceLost, 
 from tests.pg_isolation import isolated_pg_store
 from tests.test_turn_admission import _mcp_claim
 
+pytestmark = pytest.mark.usefixtures("private_app_pg")
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL: the real lock, classification and reservation fence

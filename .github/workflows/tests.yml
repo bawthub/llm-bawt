@@ -1,0 +1,31 @@
+name: llm-bawt tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: uv sync --locked --extra dev --extra service --extra mcp --extra search
+      - run: uv run pytest
+
+  postgres-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: uv sync --locked --extra dev --extra service --extra mcp --extra search
+      - run: docker pull pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+      # Private networkless containers expose only a pytest-owned Unix socket;
+      # no operational credentials, remote DB, or app service are contacted.
+      - run: make test-pg-acceptance

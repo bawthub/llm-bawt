@@ -33,7 +33,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 # ──────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="class")
-def scoped_env():
+def scoped_env(private_app_pg):
     """Throwaway bot with TWO threads of real messages + a summary row.
 
     Layout built once per class:
@@ -42,12 +42,12 @@ def scoped_env():
       one summary row (continuous, bot-wide)
     """
     from sqlalchemy import text
-    from llm_bawt.utils.config import Config
+    from tests.pg_isolation import require_test_db_config
     from llm_bawt.mcp_server.client import get_memory_client
 
     bot = f"_t251_pytest_{uuid.uuid4().hex[:8]}"
     user = "nick"
-    config = Config()
+    config = require_test_db_config()
     client = get_memory_client(config=config, bot_id=bot, user_id=user)
     manager = client.get_short_term_manager()  # _MCPShortTermManager adapter
     pg = client  # MemoryClient (embedded mode) — the raw write/read surface
@@ -81,10 +81,10 @@ def scoped_env():
     }
     yield env
 
+    from llm_bawt.memory.postgresql import PARENT_TABLES, partition_name
     with direct._backend.engine.begin() as conn:
-        conn.execute(
-            text("DELETE FROM messages WHERE bot_id = :b"), {"b": bot}
-        )
+        for parent in PARENT_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {partition_name(parent, bot)}"))
         conn.execute(text("DELETE FROM sessions WHERE bot_id = :b"), {"b": bot})
 
 

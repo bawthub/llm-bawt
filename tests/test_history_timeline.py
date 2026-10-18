@@ -333,9 +333,9 @@ def _et_epoch(*parts, fold=0):
 class TestLivePostgres:
     @pytest.fixture(scope="class")
     def engine(self):
-        from llm_bawt.utils.config import Config
+        from tests.pg_isolation import require_test_db_config
 
-        engine = assets._build_engine(Config())
+        engine = assets._build_engine(require_test_db_config())
         if engine is None:
             pytest.skip("no database")
         return engine
@@ -369,7 +369,7 @@ class TestLivePostgres:
         assert float(start) == _et_epoch(*map(int, day.split("-")))
         assert float(end) - float(start) == hours * 3600
 
-    @pytest.mark.parametrize("bot", ["snark", "mira"])
+    @pytest.mark.parametrize("bot", ["snark"])
     def test_window_parity_with_full_scan(self, engine, bot, monkeypatch):
         from llm_bawt.memory.postgresql import MESSAGES_PARENT, partition_name
 

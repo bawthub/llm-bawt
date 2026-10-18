@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,6 +21,7 @@ from llm_bawt.integrations.agent_bridge_events import (
     synthesize_event_id,
 )
 from llm_bawt.integrations.openclaw_ingest import EventIngestPipeline
+from tests.test_session_search_pg import repository as pg_repository  # noqa: F401 (pytest fixture registration)
 
 
 # ---------------------------------------------------------------------------
@@ -424,48 +424,22 @@ class TestEventIngestPipeline:
 # EventStore tests (require PostgreSQL)
 # ---------------------------------------------------------------------------
 
-def _get_test_engine():
-    """Create a test DB engine. Skip if no PG credentials."""
-    pg_pass = os.environ.get("LLM_BAWT_POSTGRES_PASSWORD", "")
-    if not pg_pass:
-        pytest.skip("No PostgreSQL credentials (LLM_BAWT_POSTGRES_PASSWORD)")
-
-    from sqlalchemy import create_engine
-
-    pg_host = os.environ.get("LLM_BAWT_POSTGRES_HOST", "localhost")
-    pg_port = os.environ.get("LLM_BAWT_POSTGRES_PORT", "5432")
-    pg_user = os.environ.get("LLM_BAWT_POSTGRES_USER", "llm_bawt")
-    pg_db = os.environ.get("LLM_BAWT_POSTGRES_DATABASE", "llm_bawt_test")
-
-    url = f"postgresql://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}"
-    return create_engine(url)
-
-
 @pytest.fixture
-def event_store():
-    """Create EventStore with fresh tables. Clean up after test."""
-    engine = _get_test_engine()
+def event_store(pg_repository):  # noqa: F811 (pytest injects imported fixture)
+    """Give each test its own schema in the private, networkless PG cluster."""
+    from sqlalchemy import create_engine, text
     from llm_bawt.integrations.agent_bridge_store import EventStore, create_agent_event_tables
-    from sqlalchemy import text
 
-    create_agent_event_tables(engine)
-
-    # Clean tables before test
-    with engine.connect() as conn:
-        conn.execute(text("DELETE FROM agent_events"))
-        conn.execute(text("DELETE FROM agent_session_state"))
-        conn.execute(text("DELETE FROM agent_runs"))
-        conn.commit()
-
-    store = EventStore(engine)
-    yield store
-
-    # Clean up after test
-    with engine.connect() as conn:
-        conn.execute(text("DELETE FROM agent_events"))
-        conn.execute(text("DELETE FROM agent_session_state"))
-        conn.execute(text("DELETE FROM agent_runs"))
-        conn.commit()
+    schema = f"event_test_{uuid.uuid4().hex}"
+    with pg_repository.engine.begin() as conn:
+        conn.execute(text(f"CREATE SCHEMA {schema}"))
+    url = pg_repository.engine.url.update_query_dict({"options": f"-csearch_path={schema}"})
+    engine = create_engine(url)
+    try:
+        create_agent_event_tables(engine)
+        yield EventStore(engine)
+    finally:
+        engine.dispose()
 
 
 def _make_event(
@@ -488,6 +462,7 @@ def _make_event(
     )
 
 
+@pytest.mark.integration
 class TestEventStore:
     def test_event_store_idempotent(self, event_store):
         """Storing same event_dedupe_key twice returns False second time."""
