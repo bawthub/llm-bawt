@@ -18,6 +18,7 @@ from ..inter_bot_delivery import (
     DeliveryRecord,
     InterBotDeliveryStore,
 )
+from ..inter_bot_delivery_user import resolve_delivery_user
 from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
 
@@ -292,7 +293,7 @@ class InterBotDeliveryDispatcher:
         claim_token = record.claim_token or ""
         payload = self.store.payload(record.id) or {}
         message = str((payload.get("messages") or [{}])[-1].get("content") or record.message)
-        user_id = str(payload.get("user") or getattr(self.service.config, "DEFAULT_USER", "nick"))
+        user_id = resolve_delivery_user(self.service.config, payload.get("user"))
         heartbeat = asyncio.create_task(
             self._heartbeat(record.id, claim_token),
             name=f"inter-bot-steer-heartbeat:{record.id}",
@@ -582,7 +583,7 @@ class InterBotDeliveryDispatcher:
             "sender_bot_id": record.sender_bot_id,
             "target_bot_id": record.target_bot_id,
             "bot_id": record.sender_bot_id,
-            "user_id": getattr(self.service.config, "DEFAULT_USER", "nick"),
+            "user_id": self.service.config.DEFAULT_USER,
             "turn_id": record.turn_id,
             "target_turn_id": record.target_turn_id,
             "delivery_mode": record.delivery_mode,

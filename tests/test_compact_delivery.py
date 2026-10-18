@@ -92,6 +92,52 @@ def test_invalid_maintenance_rejected_before_enqueue(delivery_route, message, ba
     dispatcher.store.enqueue.assert_not_called()
 
 
+@pytest.mark.parametrize("default_user", [None, "", "   "])
+def test_bot_delivery_without_owner_rejected_before_enqueue(delivery_route, monkeypatch, default_user):
+    dispatcher, _bot = delivery_route
+    route.get_service().config.DEFAULT_USER = default_user
+    with pytest.raises(HTTPException, match="Delivery user is required") as error:
+        asyncio.run(route.create_delivery(_body("hello")))
+    assert error.value.status_code == 422
+    dispatcher.store.enqueue.assert_not_called()
+
+
+def test_user_authored_delivery_uses_explicit_owner_without_default(delivery_route):
+    dispatcher, _bot = delivery_route
+    route.get_service().config.DEFAULT_USER = None
+    asyncio.run(route.create_delivery(_body(
+        "hello", author_entity_type="user", author_entity_id="  Casey  ",
+    )))
+    assert dispatcher.store.enqueue.call_args.kwargs["payload"]["user"] == "casey"
+
+
+def test_bot_authored_delivery_uses_configured_default(delivery_route):
+    dispatcher, _bot = delivery_route
+    route.get_service().config.DEFAULT_USER = "casey"
+    asyncio.run(route.create_delivery(_body("hello")))
+    assert dispatcher.store.enqueue.call_args.kwargs["payload"]["user"] == "casey"
+
+
+def test_preventive_health_uses_explicit_owner_not_empty_default(delivery_route, monkeypatch):
+    from llm_bawt import runtime_settings
+
+    dispatcher, _bot = delivery_route
+    route.get_service().config.DEFAULT_USER = None
+    health = Mock(return_value={"state": "healthy"})
+    monkeypatch.setattr(route, "AgentContextStore", lambda config: SimpleNamespace(health=health))
+    monkeypatch.setattr(route, "_target_context_window", lambda config, bot: None)
+    monkeypatch.setattr(runtime_settings, "RuntimeSettingsResolver", lambda *a, **kw: SimpleNamespace(
+        resolve=lambda key, fallback: fallback,
+    ))
+
+    asyncio.run(route.create_delivery(route.DeliveryCreate(
+        target_bot_id="fixture-target", message="hello", sender_bot_id="fixture-sender",
+        author_entity_type="user", author_entity_id="  Casey  ",
+    )))
+    assert health.call_args.kwargs["user_id"] == "casey"
+    assert dispatcher.store.enqueue.call_args.kwargs["payload"]["user"] == "casey"
+
+
 def test_mcp_through_real_route_and_preflight(delivery_route, monkeypatch):
     from llm_bawt.mcp_server import server  # noqa: F401 — initialize registration first
     from llm_bawt.mcp_server import inter_bot_tools

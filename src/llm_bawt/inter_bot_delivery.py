@@ -23,6 +23,7 @@ from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference
 from .maintenance_delivery import MaintenanceBarrier
 from .inter_bot_delivery_record import DeliveryRecord
+from .inter_bot_delivery_user import resolve_delivery_user
 from .utils.config import Config
 from .utils.db import get_shared_engine
 from .utils.schema import SchemaBootstrapGuard
@@ -507,9 +508,25 @@ class InterBotDeliveryStore:
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
             prefer_steer = bool(payload.get("prefer_steer", True))
-            delivery_user_id = str(
-                payload.get("user") or getattr(self.config, "DEFAULT_USER", "nick")
-            )
+            try:
+                delivery_user_id = resolve_delivery_user(self.config, payload.get("user"))
+            except ValueError as exc:
+                # A recovered legacy claim may still own an open reservation.
+                # Release it under this target lock only when the delivery and
+                # turn evidence prove it was never accepted or started.
+                if head.get("delivery_mode") == "turn" and head.get("transport_accepted_at") is None:
+                    from .service.turn_admission import release_reservation
+                    release_reservation(
+                        self.engine, head["turn_id"], connection=conn,
+                        delivery_id=head["id"], bot_id=target,
+                        trigger_message_id=head["user_message_id"],
+                    )
+                conn.execute(sa_text("""
+                    UPDATE inter_bot_deliveries SET status='FAILED',
+                        last_error=:error, next_retry_at=NULL, updated_at=now()
+                    WHERE id=:id AND status='QUEUED'
+                """), {"id": head["id"], "error": str(exc)})
+                return None
             from .service.turn_admission import classify_target, write_reservation
             # Same classified view save_turn admits against (TASK-1082). Only an
             # unambiguous executing row is a steer target; a fenced reservation
@@ -739,7 +756,7 @@ class InterBotDeliveryStore:
             if (head.get("metadata_json") or {}).get("prompt_schedule"):
                 return None
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
-            user_id = str(payload.get("user") or getattr(self.config, "DEFAULT_USER", "nick"))
+            user_id = resolve_delivery_user(self.config, payload.get("user"))
             row = recover_delivery_after_overflow(
                 conn,
                 head=head,

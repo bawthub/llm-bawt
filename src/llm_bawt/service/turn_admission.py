@@ -24,6 +24,7 @@ pass through here.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
@@ -315,24 +316,66 @@ def reserve_turn(
 
 
 def release_reservation(
-    engine, turn_id: str, *, owner: str, fence: Callable[[Any], bool] | None = None,
+    engine, turn_id: str, *, owner: str | None = None,
+    fence: Callable[[Any], bool] | None = None,
+    delivery_id: str | None = None, bot_id: str | None = None,
+    trigger_message_id: str | None = None, connection=None,
 ) -> bool:
-    """Drop this owner's reservation if it never became a running turn.
+    """Release a provably unstarted reservation, fenced to its producer.
 
-    Fenced twice in one transaction: the row must carry ``owner`` and, when
-    given, ``fence(conn)`` must prove the producer still holds its claim.
+    Approval reservations carry ``owner``. Delivery reservations are unowned;
+    their persisted delivery and trigger IDs must match, and any acceptance,
+    execution, side-effect or ambiguous open-turn evidence prevents release.
+    The delivery caller holds the target lock and supplies its transaction.
     """
-    with engine.begin() as conn:
+    if bool(owner) == bool(delivery_id):
+        raise ValueError("exactly one reservation owner or delivery_id is required")
+    with (nullcontext(connection) if connection is not None else engine.begin()) as conn:
         if fence is not None and not fence(conn):
             return False
-        result = conn.execute(
-            sa_text(
-                "DELETE FROM turn_logs WHERE id=:id AND status='reserved'"
-                " AND ended_at IS NULL"
-                " AND CAST(request_json AS jsonb)->>:key = :owner"
-            ),
-            {"id": turn_id, "key": RESERVATION_OWNER_KEY, "owner": owner},
-        )
+        if delivery_id is None:
+            result = conn.execute(
+                sa_text(
+                    "DELETE FROM turn_logs WHERE id=:id AND status='reserved'"
+                    " AND ended_at IS NULL"
+                    " AND CAST(request_json AS jsonb)->>:key = :owner"
+                ),
+                {"id": turn_id, "key": RESERVATION_OWNER_KEY, "owner": owner},
+            )
+        else:
+            if not bot_id or not trigger_message_id:
+                return False
+            lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+            row = conn.execute(sa_text(
+                "SELECT status, ended_at, bot_id, trigger_message_id, request_json,"
+                " stream, agent_session_key, agent_request_id, response_text"
+                " FROM turn_logs WHERE id=:id" + lock
+            ), {"id": turn_id}).mappings().first()
+            if row is None:
+                return False
+            payload = _reservation_payload(row["request_json"])
+            if (row["status"] != RESERVED or row["ended_at"] is not None
+                    or row["bot_id"] != bot_id or row["stream"] is not False
+                    or row["trigger_message_id"] != trigger_message_id
+                    or payload.get("inter_bot_delivery_id") != delivery_id
+                    or payload.get(RESERVATION_OWNER_KEY)
+                    or "inter_bot_claim_token" in payload
+                    or row["agent_session_key"] is not None
+                    or row["agent_request_id"] is not None
+                    or row["response_text"]
+                    or not classify_target(conn, bot_id, exclude_turn_id=turn_id).idle
+                    or conn.execute(sa_text(
+                        "SELECT 1 FROM tool_call_records WHERE turn_id=:id LIMIT 1"
+                    ), {"id": turn_id}).first()):
+                return False
+            result = conn.execute(sa_text(
+                "DELETE FROM turn_logs WHERE id=:id AND bot_id=:bot"
+                " AND trigger_message_id=:message AND status='reserved'"
+                " AND ended_at IS NULL AND stream IS FALSE AND request_json=:request_json"
+                " AND agent_session_key IS NULL AND agent_request_id IS NULL"
+                " AND COALESCE(response_text, '') = ''"
+            ), {"id": turn_id, "bot": bot_id, "message": trigger_message_id,
+                "request_json": row["request_json"]})
     return bool(result.rowcount)
 
 

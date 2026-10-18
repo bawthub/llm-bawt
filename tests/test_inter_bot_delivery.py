@@ -276,6 +276,165 @@ def test_reply_mode_persists_on_idempotent_reattachment_and_recovery(delivery_st
     assert store.requeue(claimed.id, claimed.claim_token or "", "transient", delay_seconds=0).reply_mode == "waited"
 
 
+@pytest.mark.parametrize("default_user", [None, "", "   "])
+def test_legacy_delivery_without_owner_dead_letters_before_claim(delivery_store, default_user):
+    store, sender, target = delivery_store
+    record, _ = _enqueue(store, sender, target, "no owner")
+    store.config.DEFAULT_USER = default_user
+
+    assert store.claim_next(target, claim_owner="owner", steer_capable=True) is None
+    failed = store.get(record.id)
+    assert failed.status == FAILED
+    assert failed.attempt_count == 0
+    assert "Delivery user is required" in failed.last_error
+    with store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT count(*) FROM turn_logs WHERE id=:id"
+        ), {"id": record.turn_id}).scalar_one() == 0
+
+
+def test_explicit_owner_claims_without_configured_default(delivery_store):
+    store, sender, target = delivery_store
+    store.config.DEFAULT_USER = None
+    record, _ = store.enqueue(
+        sender_bot_id=sender, target_bot_id=target, message="explicit owner",
+        payload={"messages": [{"role": "user", "content": "explicit owner"}],
+                 "bot_id": target, "user": "casey"},
+    )
+
+    claimed = store.claim_next(target, claim_owner="owner", steer_capable=False)
+    assert claimed.id == record.id and claimed.status == DISPATCHING
+    with store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT user_id FROM turn_logs WHERE id=:id"
+        ), {"id": record.turn_id}).scalar_one() == "casey"
+
+
+def _recover_legacy_ownerless_head(store, sender, target):
+    record, _ = _enqueue(store, sender, target, "old ownerless head")
+    claim = store.claim_next(target, claim_owner="old-owner", steer_capable=False)
+    assert claim and claim.status == DISPATCHING
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second'
+            WHERE id=:id
+        """), {"id": record.id})
+    assert any(row.id == record.id and row.status == QUEUED for row in store.recover_expired())
+    return record
+
+
+def test_recovered_ownerless_head_releases_unaccepted_reservation_for_both_admissions(delivery_store):
+    from llm_bawt.service.turn_admission import TurnAdmission, classify_target
+
+    store, sender, target = delivery_store
+    original = _recover_legacy_ownerless_head(store, sender, target)
+    with store.engine.connect() as conn:
+        assert classify_target(conn, target, exclude_turn_id=None).kind == "reserved"
+    store.config.DEFAULT_USER = None
+    assert store.claim_next(target, claim_owner="new-owner", steer_capable=False) is None
+    assert store.get(original.id).status == FAILED
+    with store.engine.connect() as conn:
+        state = classify_target(conn, target, exclude_turn_id=None)
+        assert state.idle
+        assert state.admits(TurnAdmission.START)
+        assert state.admits(TurnAdmission.IDLE_ONLY)
+        assert conn.execute(sa_text(
+            "SELECT count(*) FROM turn_logs WHERE id=:id"
+        ), {"id": original.turn_id}).scalar_one() == 0
+
+    turns = TurnLogStore(store.config)
+    normal_id = f"turn-normal-{uuid.uuid4().hex}"
+    turns.save_turn(
+        turn_id=normal_id, request_id="req-normal", path="/v1/chat/completions",
+        stream=True, model="test", bot_id=target, user_id="casey", status="streaming",
+        latency_ms=None, user_prompt="ordinary turn", request_payload={"messages": []},
+        response_text="", tool_calls=None,
+    )
+    with store.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE turn_logs SET status='ok', ended_at=now() WHERE id=:id"
+        ), {"id": normal_id})
+    successor, _ = store.enqueue(
+        sender_bot_id=sender, target_bot_id=target, message="explicit successor",
+        payload={"messages": [{"role": "user", "content": "explicit successor"}],
+                 "bot_id": target, "user": "casey"},
+    )
+    claimed = store.claim_next(target, claim_owner="successor-owner", steer_capable=False)
+    assert claimed and claimed.id == successor.id and claimed.status == DISPATCHING
+    with store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT user_id FROM turn_logs WHERE id=:id"
+        ), {"id": successor.turn_id}).scalar_one() == "casey"
+
+
+@pytest.mark.parametrize("evidence", [
+    "accepted", "started", "rearmed_started", "ambiguous", "unrelated",
+    "trigger", "tool", "response", "agent",
+])
+def test_ownerless_head_preserves_nonreleasable_reservations(delivery_store, evidence):
+    store, sender, target = delivery_store
+    original = _recover_legacy_ownerless_head(store, sender, target)
+    other_id = f"turn-unrelated-{uuid.uuid4().hex}"
+    with store.engine.begin() as conn:
+        if evidence == "accepted":
+            conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries SET transport_accepted_at=now() WHERE id=:id
+            """), {"id": original.id})
+        elif evidence == "started":
+            conn.execute(sa_text("""
+                UPDATE turn_logs SET status='streaming' WHERE id=:id
+            """), {"id": original.turn_id})
+        elif evidence == "rearmed_started":
+            payload = store.payload(original.id) or {}
+            payload["inter_bot_claim_token"] = "old-claim"
+            conn.execute(sa_text("""
+                UPDATE turn_logs SET stream=true, request_json=:payload WHERE id=:id
+            """), {"id": original.turn_id, "payload": json.dumps(payload)})
+        elif evidence == "ambiguous":
+            conn.execute(sa_text("""
+                INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id,
+                    status, user_prompt, response_text, ended_at)
+                VALUES (:id, now(), '/test', true, :bot, 'casey', 'streaming', '', '', NULL)
+            """), {"id": other_id, "bot": target})
+        elif evidence == "unrelated":
+            conn.execute(sa_text("""
+                UPDATE turn_logs SET request_json=:payload WHERE id=:id
+            """), {"id": original.turn_id, "payload": json.dumps({
+                "inter_bot_delivery_id": "some-other-delivery",
+            })})
+        elif evidence == "trigger":
+            conn.execute(sa_text("""
+                UPDATE turn_logs SET trigger_message_id='another-message' WHERE id=:id
+            """), {"id": original.turn_id})
+        elif evidence == "tool":
+            conn.execute(sa_text("""
+                INSERT INTO tool_call_records (turn_id, tool_name, arguments_json,
+                    result_text, result_payload_available, iteration, created_at)
+                VALUES (:id, 'Bash', '{}', 'ran', FALSE, 1, now())
+            """), {"id": original.turn_id})
+        elif evidence == "response":
+            conn.execute(sa_text(
+                "UPDATE turn_logs SET response_text='partial' WHERE id=:id"
+            ), {"id": original.turn_id})
+        else:
+            conn.execute(sa_text(
+                "UPDATE turn_logs SET agent_request_id='req-started' WHERE id=:id"
+            ), {"id": original.turn_id})
+    store.config.DEFAULT_USER = "  "
+    assert store.claim_next(target, claim_owner="owner", steer_capable=False) is None
+    assert store.get(original.id).status == FAILED
+    with store.engine.connect() as conn:
+        turn = conn.execute(sa_text(
+            "SELECT status, ended_at FROM turn_logs WHERE id=:id"
+        ), {"id": original.turn_id}).one()
+        assert turn.ended_at is None
+        assert turn.status == ("streaming" if evidence == "started" else "reserved")
+        if evidence == "ambiguous":
+            assert conn.execute(sa_text(
+                "SELECT count(*) FROM turn_logs WHERE id=:id"
+            ), {"id": other_id}).scalar_one() == 1
+
+
 def test_fifo_claims_one_target_delivery_without_overlap(delivery_store):
     store, sender, target = delivery_store
     first, _ = _enqueue(store, sender, target, "first")

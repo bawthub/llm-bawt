@@ -16,6 +16,7 @@ from ...agent_context import (
 from ...bot_types import durable_agent_backend
 from ...bots import BotManager
 from ...inter_bot_delivery import submission_result
+from ...inter_bot_delivery_user import resolve_delivery_user
 from ...inter_bot_delivery_retry import DeliveryRetryConflict, retry_failed_delivery
 from ...message_authorship import AuthorReference, normalize_author
 from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
@@ -119,6 +120,10 @@ async def create_delivery(body: DeliveryCreate):
     target_exists = target_bot is not None
     durable_capable = bool(target_bot and durable_agent_backend(target_bot))
     try:
+        delivery_user = resolve_delivery_user(
+            get_service().config,
+            author.entity_id if author.entity_type == "user" else None,
+        )
         policy = normalize_session_policy(
             body.session_policy,
             reset_session_before_delivery=body.reset_session_before_delivery,
@@ -155,7 +160,7 @@ async def create_delivery(body: DeliveryCreate):
             ceiling = _target_context_window(get_service().config, target_bot)
             health = AgentContextStore(get_service().config).health(
                 bot_id=target,
-                user_id=getattr(get_service().config, "DEFAULT_USER", "nick"),
+                user_id=delivery_user,
                 backend=backend,
                 configured_ceiling=ceiling,
                 warning_ratio=warning_percent / 100,
@@ -201,11 +206,7 @@ async def create_delivery(body: DeliveryCreate):
         "reply_mode": body.reply_mode,
         "prefer_steer": body.prefer_steer,
         "bot_id": target,
-        "user": (
-            author.entity_id
-            if author.entity_type == "user"
-            else getattr(get_service().config, "DEFAULT_USER", "nick")
-        ),
+        "user": delivery_user,
         "max_tokens": body.max_tokens,
         "temperature": body.temperature,
         "extract_memory": False,
