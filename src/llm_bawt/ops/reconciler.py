@@ -7,13 +7,13 @@ are safe (conditional claims), though a single configured replica is sufficient.
 from __future__ import annotations
 
 import logging
+import math
 import os
-import time
+import signal
+from threading import Event
 
-from .release_executor import build_ops_service
+from .health_state import HealthSample
 from .service import OpsService
-from .store import OpsStore
-from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -32,24 +32,36 @@ class OpsReconciler:
         self.offset = self.offset + count if count == self.batch_size else 0
         return count
 
-    def run(self):
-        while True:
+    def run(self, stop=None, health=None):
+        stop = stop or Event()
+        while not stop.is_set():
+            sampled = health.sample_time() if health else None
             try:
                 self.tick()
+                if health:
+                    health.publish("reconciler.loop", HealthSample(sampled, "ok"))
             except Exception:
                 logger.exception("ops reconciliation cycle failed; durable jobs remain pending")
-            time.sleep(self.interval)
+                if health:
+                    health.publish("reconciler.loop", HealthSample(sampled, "degraded", "reconciliation cycle failed"))
+            stop.wait(self.interval)
 
 
 def main():
+    from .health_runtime import OpsHealthRuntime
+
     logging.basicConfig(level=logging.INFO)
-    store = OpsStore(Config())
-    if store.engine is None:
-        raise RuntimeError("ops reconciler requires a configured canonical database")
     interval = float(os.getenv("LLM_BAWT_OPS_RECONCILE_INTERVAL", "5"))
-    if interval < 1:
-        raise ValueError("LLM_BAWT_OPS_RECONCILE_INTERVAL must be at least 1 second")
-    OpsReconciler(build_ops_service(Config(), store), interval=interval).run()
+    if not math.isfinite(interval) or interval < 1:
+        raise ValueError("LLM_BAWT_OPS_RECONCILE_INTERVAL must be finite and at least 1 second")
+    runtime = OpsHealthRuntime(interval=interval)
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_args: runtime.stop.set())
+    try:
+        runtime.start()
+        runtime.stop.wait()
+    finally:
+        runtime.close()
 
 
 if __name__ == "__main__":

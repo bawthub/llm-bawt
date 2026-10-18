@@ -1,0 +1,25 @@
+{
+  "now": "2026-10-18T20:00:05+00:00",
+  "ready": {
+    "status": "ok",
+    "checkedAt": "2026-10-18T20:00:00+00:00",
+    "checks": [
+      {"name": "database", "status": "ok", "reason": null},
+      {"name": "docker", "status": "ok", "reason": null},
+      {"name": "ops.executor", "status": "ok", "reason": null},
+      {"name": "reconciler.loop", "status": "ok", "reason": null}
+    ]
+  },
+  "inventory": {
+    "schemaVersion": 1,
+    "checkedAt": "2026-10-18T20:00:00+00:00",
+    "status": "ok",
+    "reason": null,
+    "containers": [
+      {"name": "llm-bawt-app-1", "state": "running", "health": "healthy", "startedAt": "2026-10-18T19:49:59.133878+00:00"},
+      {"name": "llm-bawt-ops-reconciler-1", "state": "running", "health": "starting", "startedAt": "2026-10-18T19:59:55+00:00"},
+      {"name": "ops-worker-example", "state": "exited", "health": null, "startedAt": "2026-10-18T19:55:00+00:00"},
+      {"name": "pending-example", "state": "created", "health": null, "startedAt": null}
+    ]
+  }
+}

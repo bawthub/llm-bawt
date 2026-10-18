@@ -16,9 +16,15 @@ services:
     image: ${LLM_BAWT_OPS_RECONCILER_IMAGE:?Set existing app image ID or digest}
     entrypoint: ["python", "-m", "llm_bawt.ops.reconciler"]
     command: []
-    # The reused app image probes HTTP :8642; this worker has no HTTP server.
+    # Internal network only: no host port, proxy route or generic Docker API.
+    expose: ["8650"]
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8650/health/ready', timeout=2).read()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 5s
     env_file: [./.env]
     environment:
       LLM_BAWT_OPS_WORKER_IMAGE: ${LLM_BAWT_OPS_WORKER_IMAGE:?Set immutable worker image ID or digest}

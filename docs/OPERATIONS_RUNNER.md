@@ -108,6 +108,80 @@ claim. Receipts contain resolved arguments (possibly secrets); restrict volume
 access and backups. Public job JSON uses schema-sensitive argument redaction;
 operator revision endpoints intentionally expose operator configuration.
 
+## Internal ops health API (TASK-1157)
+
+The **ops-reconciler process** owns Docker health inspection. The frontend health
+aggregator consumes `http://ops-reconciler:8650`; it does not need Docker socket
+permissions for monitoring. Port 8650 is exposed only on the Compose network:
+no host publish, public proxy route, arbitrary target selector or Docker proxy.
+This migration does **not** remove the app executor or existing Docker-page
+controls/socket mounts; those are separate work.
+
+The fixed GET-only contract (`ops/health_http.py`):
+
+* `GET /health/live` → HTTP 200, `{"status":"ok"}` while HTTP is listening,
+  independently of DB, Docker, collector or reconciler progress.
+* `GET /health/ready` → `{status,checkedAt,checks:[{name,status,reason}]}`.
+  Status is `ok|degraded|down`; only `ok` gets HTTP 200, otherwise 503. Checks:
+  `database`, `docker`, `ops.executor`, `reconciler.loop`. Reasons are fixed
+  sanitized messages or null, never exception text/DSNs/Docker response bodies.
+* `GET /v1/health/containers` → `{schemaVersion:1,checkedAt,status,reason,containers}`.
+  Each container is **only** `{name,state,health,startedAt}`. Exact Docker names
+  lose their leading slash. State is `created|running|paused|restarting|removing|exited|dead`;
+  health is `healthy|unhealthy|starting|null`; startedAt is timezone-bearing ISO
+  or null for never-started containers. No IDs, env, mount details, logs, labels,
+  image/config metadata or ports are returned. Healthy inventory gets 200/`ok`;
+  unavailable/malformed/over-budget/stale inventory gets 503/`down`, a fixed
+  reason, and an empty list. An unsuccessful empty list is **not** evidence a
+  configured target is absent. No partial inventory is advertised as complete.
+
+`checkedAt` is the collection **start**, not HTTP request time or completion.
+Readiness uses the oldest contributing sample. The first startup snapshot is
+`down`/`not yet collected`. Samples older than 30 seconds (monotonic or wall
+clock) or more than 5 seconds in the future fail closed on **every GET**, even
+if collection hangs after previously publishing success. Container observations
+remain independently usable when DB/reconciler readiness is down. Consumers
+should also enforce timestamp freshness; a critical ops-health row describes
+collector failures, while affected target rows should say observation unavailable
+rather than falsely report containers down.
+
+A fixed HTTP worker reads immutable cached samples and never performs DB/Docker
+I/O, schema work, job-status reads, preflight, dispatch, or reconciliation.
+Separate fixed workers collect DB and Docker data on a 5-second cadence and run
+the actual reconciler loop. Successful/failed **real ticks**, not synthetic timer
+heartbeats, update loop health. A successful tick taking over 30 seconds is stale
+from its start, not newly healthy. Reconcile cadence remains controlled by
+`LLM_BAWT_OPS_RECONCILE_INTERVAL` (default 5s); intervals at/above the 30s freshness
+window intentionally cannot sustain continuously-ready observations.
+
+Docker RPC timeout is 2s; inventory has a 15s overall acceptance budget and a
+1000-container cap. One list plus one inspect per observed container supplies
+accurate start/health fields. Oversize/duplicate/malformed inventories, including
+containers disappearing before inspection, fail closed and retry on the next
+sample. This is not an atomic Docker snapshot; changes after collection are
+observed on a later sample. Readiness reuses the executor's
+read-only prerequisite checks, **not** `preflight()` (which can pull images for
+some actions). The shared DB pool is reused with a read-only `SELECT 1` transaction
+and 2s statement/lock timeout. Pool/connect/driver stalls are contained to one
+collector: no retry-thread fan-out; stale detection is the backstop, not a claim
+that Python can forcibly cancel a blocked driver call.
+
+SIGTERM/SIGINT mark readiness down, stop polling and close HTTP. The HTTP worker
+join is bounded to 2s; collector/reconciler joins share another 2s bound. Stuck
+workers are daemon threads and cannot prevent process exit. Docker inventory
+and executor prerequisites share one collector: a stuck prerequisite eventually
+expires inventory too, without blocking HTTP or the DB collector. The Compose
+readiness healthcheck replaces the inherited app-port probe.
+Adding this listener/healthcheck is a reviewed source/Compose change, **not**
+authorization to restart or recreate any service. Verify it with fake adapters
+and local loopback HTTP tests first; activation requires its own authorization.
+
+Frozen producer contract: `tests/fixtures/ops_health_v1.json` contains synthetic
+`ready` and `inventory` payloads plus a fixed `now` for consumer tests (not live
+container evidence). `test_frozen_cross_stack_fixture_is_real_producer_output`
+asserts exact equality against collector/state output. Run
+`.venv/bin/python -m pytest tests/test_ops_*.py -q` for the ops regressions.
+
 ## Digest-bound image deploy/rollback (TASK-997)
 
 Two fixed actions extend the same worker; they are **not** a generic image
