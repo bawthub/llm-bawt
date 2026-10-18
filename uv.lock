@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1953,6 +1953,7 @@ service = [
     { name = "docker" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "huggingface-hub" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 vllm = [
@@ -1976,6 +1977,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'service'", specifier = ">=0.26.0" },
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = ">=0.25.0" },
     { name = "huggingface-hub", marker = "extra == 'huggingface'" },
+    { name = "huggingface-hub", marker = "extra == 'service'", specifier = ">=0.25.0,<1" },
     { name = "ipython", specifier = ">=8.0.0" },
     { name = "llama-cpp-python", marker = "extra == 'llamacpp'" },
     { name = "mcp", extras = ["cli"], marker = "extra == 'mcp'", specifier = ">=1.0.0,<2" },
@@ -2316,7 +2318,7 @@ name = "mlx"
 version = "0.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "mlx-metal", marker = "sys_platform == 'darwin'" },
+    { name = "mlx-metal" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1a/7d/87fb0daa006dbbbd8894c3d496c7d9dfc52e4ade260482276d3eca137a15/mlx-0.31.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:de6c0a3e8aa0e7d1365d46634fdbb3f835c164fbdb6ba8a239e039a4efa07fe2", size = 575834, upload-time = "2026-02-27T23:49:26.61Z" },
@@ -2336,7 +2338,7 @@ version = "0.29.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
-    { name = "mlx", marker = "sys_platform == 'darwin'" },
+    { name = "mlx" },
     { name = "numpy" },
     { name = "protobuf" },
     { name = "pyyaml" },

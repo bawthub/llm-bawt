@@ -93,6 +93,8 @@ service = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "httpx>=0.26.0",
+    # CPU-only catalog handlers import hub metadata without the GPU extras.
+    "huggingface-hub>=0.25.0,<1",
     # TASK-639: ops catalog talks to the Docker socket via the SDK. Mounted
     # by docker-compose.yml so no daemon config change is needed.
     "docker>=7.0",

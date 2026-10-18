@@ -14,6 +14,8 @@
 # guard on `find_spec("huggingface_hub")` for read-only model-catalog metadata
 # and GGUF downloads, and we want those to keep working rather than no-op.
 FROM python:3.12-slim
+ARG SOURCE_SHA=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -38,9 +40,8 @@ WORKDIR /app
 # Resolve + install deps for the CPU extras WITHOUT the project so this layer
 # stays cached when only src/ changes.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --inexact --no-install-project \
-        --extra mcp --extra service --extra search \
-    && uv pip install "huggingface-hub"
+RUN uv sync --locked --no-dev --no-install-project \
+        --extra mcp --extra service --extra search
 
 # --- Project layer ---
 # Now copy source and install the project itself (editable). Fast because the
@@ -48,7 +49,7 @@ RUN uv sync --inexact --no-install-project \
 COPY src/ ./src/
 COPY server.sh ./
 RUN chmod +x server.sh
-RUN uv sync --inexact --extra mcp --extra service --extra search
+RUN uv sync --locked --no-dev --extra mcp --extra service --extra search
 
 # Runtime dirs
 RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt
