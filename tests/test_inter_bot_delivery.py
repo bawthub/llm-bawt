@@ -33,8 +33,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 
 
 @pytest.fixture
-def delivery_store():
+def delivery_store(monkeypatch):
+    # Claim and overflow cases use 'nick' as the synthetic owner. Do not
+    # inherit a runner's DEFAULT_USER (unset in CI, set to nick on echo).
+    monkeypatch.setenv("LLM_BAWT_DEFAULT_USER", "nick")
     store = isolated_pg_store(InterBotDeliveryStore)
+    assert store.config.DEFAULT_USER == "nick"
     if store.engine is None:
         pytest.skip("PostgreSQL unavailable")
     token = uuid.uuid4().hex
