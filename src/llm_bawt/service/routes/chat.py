@@ -70,6 +70,7 @@ class ChatSteerRequest(BaseModel):
     content_offset: int | None = Field(None, ge=0, description="Assistant characters visible when steering")
     bot_id: str = Field(..., description="Bot slug owning the active turn")
     user_id: str = Field("nick", description="User namespace owning the turn")
+    allow_queue: bool = Field(True, description="Allow maintenance to queue a separate turn; false for same-turn recovery")
     priority: Literal["now", "next"] = Field(
         "next", description="Queue until the next model call without interrupting running tools"
     )
@@ -151,6 +152,10 @@ async def steer_active_turn(
     if not steer_request_id and (
         is_compact_command(getattr(turn, "user_prompt", None)) or is_compact_command(request.message)
     ):
+        if not request.allow_queue:
+            # Exact recovery must never become a separately queued turn.
+            # Ordinary composer messages retain maintenance queue behavior.
+            raise HTTPException(status_code=409, detail="maintenance_requires_separate_turn")
         from ..maintenance_queue import MaintenanceQueue
         return ChatSteerResponse(**await MaintenanceQueue(service).enqueue_user(request, turn))
     if (

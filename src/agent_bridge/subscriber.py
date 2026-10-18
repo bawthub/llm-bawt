@@ -160,6 +160,12 @@ class RedisSubscriber(CommandPublisherMixin):
         ``priority="now"`` interrupts running tools; ``"next"`` delivers at the
         next tool boundary (claude-code-bridge only).
         """
+        if not request_id and origin == "user" and priority == "now" and not (escalate or cancel):
+            # NOW has no CLI command-UUID lifecycle. Reuse the existing durable
+            # RPC dedupe so a repeated HTTP request cannot interrupt twice,
+            # including when the original caller lost its acknowledgement.
+            identity = json.dumps([backend, session_key, target_request_id, message_id])
+            request_id = f"steer_now_{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
         request_id = request_id or f"steer_{uuid.uuid4().hex}"
         fields: dict[str, str] = {
             "action": "chat.steer",

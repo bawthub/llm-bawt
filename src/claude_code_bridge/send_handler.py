@@ -816,6 +816,10 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             latest_stream_usage=live_usage.stream_usage,
                         )
 
+                        # Acknowledged OR uncertain steering is progress too:
+                        # a fresh original-prompt replay would discard that input.
+                        model_side_effects |= active_run is not None and active_run.steering_attempted
+
                         # 1) Legacy direct path only: the OAuth gateway already
                         #    owns request-level recovery; never replay its turn.
                         auth_failure = (
@@ -838,8 +842,8 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             text_parts.clear()
                             continue
 
-                        # 2) CLI crash or timeout before any text streamed →
-                        #    clear stale session and retry once fresh
+                        # 2) Retry fresh only before any model output or tools.
+                        #    Tool-only turns have progress even without text.
                         retryable_timeout = (
                             isinstance(e, TimeoutError)
                             and not isinstance(e, TurnWatchdogTimeout)
@@ -850,6 +854,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         if (
                             not fresh_session_retry
                             and not text_parts
+                            and not model_side_effects
                             and (_is_cli_crash(e) or retryable_timeout)
                         ):
                             fresh_session_retry = True

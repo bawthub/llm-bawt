@@ -100,6 +100,9 @@ class ClaudeActiveRun:
     _pending_user_result: Any = None
     lifecycle_supported: bool = False
     maintenance: bool = False
+    # Once steering may have reached the CLI, replaying the original prompt
+    # loses user input even if no model text/tool block ever arrived.
+    steering_attempted: bool = False
 
     async def steer(
         self,
@@ -166,6 +169,7 @@ class ClaudeActiveRun:
                         "priority": "next",
                     }
 
+                self.steering_attempted = True
                 await asyncio.wait_for(
                     self.client.query(_frames()), timeout=self._steer_timeout_s
                 )
@@ -264,6 +268,7 @@ class ClaudeActiveRun:
             # interrupt is in flight. This is a one-shot attempt: a timeout may
             # mean the CLI processed the request without delivering its receipt.
             self._escalations[message_id] = "escalation_uncertain"
+            self.steering_attempted = True
             self._expected_interrupt_results += 1
             interrupted = False
             try:
@@ -419,6 +424,7 @@ class ClaudeActiveRun:
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
 
+            self.steering_attempted = True
             self._expected_interrupt_results += 1
             interrupted = False
             loop = asyncio.get_running_loop()
