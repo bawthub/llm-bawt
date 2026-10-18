@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_bridge.tool_results import ToolResultPayload, payload_from_event
+from agent_bridge.tool_results import payload_from_event
 
 from ..media.serializers import attachment_refs
 from .tool_call_store import ToolCallStore
@@ -48,7 +48,16 @@ class ToolEventCoordinator:
         return public
 
     def end(self, event: dict[str, Any]) -> dict[str, Any]:
-        payload = payload_from_event(event.get("tool_result_payload"), event.get("result"))
+        raw_payload = event.get("tool_result_payload")
+        payload = payload_from_event(raw_payload, event.get("result"))
+        skill_tokens = (
+            raw_payload.get("skill_context_tokens")
+            if event.get("tool_name") == "Skill" and not event.get("is_error")
+            and isinstance(raw_payload, dict)
+            else None
+        )
+        if not isinstance(skill_tokens, int) or isinstance(skill_tokens, bool) or skill_tokens <= 0:
+            skill_tokens = None
         record_id, available = self.store.save_result(
             turn_id=event.get("turn_id"),
             call_id=event.get("call_id"),
@@ -64,10 +73,13 @@ class ToolEventCoordinator:
             # TASK-977: the live event carries enriched envelopes; persist
             # only the refs so /v1/tool-calls can re-enrich on reload.
             attachments=attachment_refs(event.get("attachments")) or None,
+            skill_context_tokens=skill_tokens,
         )
         public = dict(event)
         public.pop("tool_result_payload", None)
         public["result"] = payload.preview
         public["result_meta"] = payload.result_meta(record_id=record_id, available=available)
+        if skill_tokens is not None:
+            public["result_meta"]["skill_context_tokens"] = skill_tokens
         public["_tool_persisted"] = True
         return public

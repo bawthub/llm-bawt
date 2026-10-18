@@ -7,6 +7,14 @@ from pathlib import Path
 from .skill_registry import SkillRegistry, _name
 
 
+def legacy_claude_skill_roots() -> tuple[Path, ...]:
+    """Legacy CLI discovery roots (the bootstrap default links ~/.claude/skills)."""
+    configured = os.environ.get("CLAUDE_CODE_SKILLS_PATH")
+    return tuple(
+        Path(value) for value in configured.split(os.pathsep) if value
+    ) if configured else (Path.home() / ".claude" / "skills",)
+
+
 def claude_skill_names(bundle: str | None) -> tuple[str, ...]:
     """Return the exact Skill selectors available to one Claude CLI run.
 
@@ -17,14 +25,8 @@ def claude_skill_names(bundle: str | None) -> tuple[str, ...]:
     if bundle is not None:
         return tuple(claude_skill_options(bundle).get("skills") or ())
 
-    configured = os.environ.get("CLAUDE_CODE_SKILLS_PATH")
-    roots = (
-        [Path(value) for value in configured.split(os.pathsep) if value]
-        if configured
-        else [Path.home() / ".claude" / "skills"]
-    )
     names: set[str] = set()
-    for root in roots:
+    for root in legacy_claude_skill_roots():
         try:
             for child in root.iterdir():
                 if child.is_dir() and (child / "SKILL.md").is_file():

@@ -103,6 +103,7 @@ class ToolCallRecord(SQLModel, table=True):
     result_total_chars: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     result_total_bytes: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     result_total_tokens: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    skill_context_tokens: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     result_sha256: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     result_content_type: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     result_complete: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
@@ -184,6 +185,7 @@ class ToolCallStore:
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_total_chars INTEGER",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_total_bytes BIGINT",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_total_tokens INTEGER",
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS skill_context_tokens INTEGER",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_sha256 VARCHAR(64)",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_content_type VARCHAR(128)",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_complete BOOLEAN",
@@ -356,6 +358,7 @@ class ToolCallStore:
         iteration: int = 1,
         parent_tool_use_id: str | None = None,
         attachments: list[dict] | None = None,
+        skill_context_tokens: int | None = None,
     ) -> tuple[int | None, bool]:
         """Persist payload and metadata atomically. Returns (record id, available).
 
@@ -402,6 +405,10 @@ class ToolCallStore:
                 row.result_total_chars = payload.total_chars
                 row.result_total_bytes = payload.total_bytes
                 row.result_total_tokens = payload.total_tokens
+                row.skill_context_tokens = (
+                    (skill_context_tokens or row.skill_context_tokens)
+                    if row.tool_name == "Skill" and not is_error else None
+                )
                 row.result_sha256 = payload.sha256
                 row.result_content_type = payload.content_type
                 row.result_complete = payload.complete

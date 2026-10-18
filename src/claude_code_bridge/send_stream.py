@@ -47,6 +47,7 @@ from .proxy.request_context import (
     durable_conversation_identity,
 )
 from .send_errors import is_auth_failure_text
+from .skill_context import skill_context_tokens
 from .subagent_usage import SubagentUsage
 from .turn_phase import TurnPhaseTracker
 
@@ -514,6 +515,7 @@ class ClaudeStreamMixin:
         screenshot_artifacts_by_tool_use_id: dict[str, list[dict]],
         tool_arguments_by_id: dict | None = None,
         usage_ledger: SubagentUsage | None = None,
+        skill_bundle: str | None = None,
     ) -> int:
         """Handle a UserMessage's tool_result blocks (TOOL_END); return ``seq``."""
         # Mirror of the AssistantMessage path: a sub-agent's
@@ -577,6 +579,17 @@ class ClaudeStreamMixin:
                 # the token badge reflect real model-facing cost — not
                 # the untruncated result the model never saw.
                 result_payload = normalize_tool_result(result_content)
+                result_data = result_payload.to_dict()
+                if (
+                    tool_names_by_id.get(block.tool_use_id or "") == "Skill"
+                    and not getattr(block, "is_error", False)
+                ):
+                    tokens = skill_context_tokens(
+                        (tool_arguments_by_id or {}).get(block.tool_use_id or ""),
+                        skill_bundle=skill_bundle,
+                    )
+                    if tokens is not None:
+                        result_data["skill_context_tokens"] = tokens
                 # TOOLMAP (TASK-414): log the id the bridge
                 # stamps on TOOL_END. The frontend heals a
                 # running card by call_id; the bridge only
@@ -613,7 +626,7 @@ class ClaudeStreamMixin:
                     tool_use_id=block.tool_use_id,
                     parent_tool_use_id=parent_tuid,
                     tool_result=result_payload.preview,
-                    tool_result_payload=result_payload.to_dict(),
+                    tool_result_payload=result_data,
                     # The SDK marks failed tool runs with
                     # is_error on the ToolResultBlock — the
                     # single authoritative failure signal.

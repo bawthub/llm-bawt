@@ -638,6 +638,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                         screenshot_artifacts_by_tool_use_id
                                     ),
                                     usage_ledger=subagent_usage,
+                                    skill_bundle=req.skill_bundle,
                                 )
                                 # The watchdog observed this message before
                                 # returning it, so active_tools is current.
