@@ -475,9 +475,8 @@ class PostgreSQLMemoryBackend(
         dimension. Bot partitions are guarded separately by sanitized storage
         identity so distinct bots still provision independently.
 
-        The legacy column-migration ALTERs are gone: the parents are created
-        with the full current schema, and pre-existing data was carried over
-        by the one-shot copy in ``migrations_partition.py``.
+        The parents are created with the full current schema; runtime
+        bootstrap does not migrate legacy shard tables.
         """
         def bootstrap_shared(conn) -> None:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))

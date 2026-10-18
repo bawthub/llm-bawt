@@ -12,11 +12,10 @@ import logging
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
-from urllib.parse import quote_plus
 
 from pydantic import ConfigDict
 from sqlalchemy import Column, JSON, String, Text, text
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Field, Session, SQLModel, select
 from .utils.schema import SchemaBootstrapGuard
 
 logger = logging.getLogger(__name__)
@@ -898,99 +897,3 @@ def load_user_profile_summary(config: Any, user_id: str) -> str:
     except Exception as e:
         logger.warning(f"Could not load user profile from DB: {e}")
         return ""
-
-
-def migrate_from_old_user_profiles(config: Any) -> int:
-    """Migrate data from old user_profiles table to new entity_profiles/profile_attributes.
-    
-    Returns:
-        Number of users migrated.
-    """
-    from urllib.parse import quote_plus
-    
-    host = getattr(config, 'POSTGRES_HOST', 'localhost')
-    port = int(getattr(config, 'POSTGRES_PORT', 5432))
-    user = getattr(config, 'POSTGRES_USER', 'llm_bawt')
-    password = getattr(config, 'POSTGRES_PASSWORD', '')
-    database = getattr(config, 'POSTGRES_DATABASE', 'llm_bawt')
-    
-    encoded_password = quote_plus(password)
-    connection_url = f"postgresql+psycopg2://{user}:{encoded_password}@{host}:{port}/{database}"
-    
-    from sqlalchemy import create_engine, text
-    engine = create_engine(connection_url, echo=False)
-    from .utils.db import set_utc_on_connect
-    set_utc_on_connect(engine)
-
-    manager = ProfileManager(config)
-    migrated = 0
-    
-    with engine.connect() as conn:
-        # Check if old table exists
-        result = conn.execute(text("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'user_profiles'
-            )
-        """))
-        if not result.scalar():
-            logger.info("No old user_profiles table found - nothing to migrate")
-            return 0
-        
-        # Fetch old profiles
-        result = conn.execute(text("""
-            SELECT user_id, name, preferred_name, preferences, context
-            FROM user_profiles
-        """))
-        
-        for row in result:
-            user_id = row[0]
-            name = row[1]
-            preferred_name = row[2]
-            preferences = row[3] or {}
-            context = row[4] or {}
-            
-            # Create new profile
-            profile, _ = manager.get_or_create_profile(EntityType.USER, user_id)
-            
-            # Set display name
-            display_name = preferred_name or name
-            if display_name:
-                manager.update_profile(EntityType.USER, user_id, display_name=display_name)
-            
-            # Migrate preferences
-            for key, value in preferences.items():
-                if value is not None:
-                    manager.set_attribute(
-                        EntityType.USER,
-                        user_id,
-                        AttributeCategory.PREFERENCE,
-                        key,
-                        value,
-                        source="migrated",
-                    )
-            
-            # Migrate context items
-            for key, value in context.items():
-                if value is not None:
-                    # Map to appropriate category
-                    if key in ("occupation", "location", "age", "language"):
-                        category = AttributeCategory.FACT
-                    elif key in ("projects", "interests", "expertise"):
-                        category = AttributeCategory.INTEREST
-                    else:
-                        category = AttributeCategory.CONTEXT
-                    
-                    manager.set_attribute(
-                        EntityType.USER,
-                        user_id,
-                        category,
-                        key,
-                        value,
-                        source="migrated",
-                    )
-            
-            migrated += 1
-            logger.info(f"Migrated user profile: {user_id}")
-    
-    return migrated
