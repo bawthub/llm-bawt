@@ -57,6 +57,10 @@ class OpsService:
     def register_executor(self, executor):
         self._executors[executor.kind()] = executor
 
+    def executors(self):
+        """Registered executors by kind (read-only copy, for health reporting)."""
+        return dict(self._executors)
+
     def _resolve_executor(self, kind):
         executor = self._executors.get(kind)
         if executor is None:

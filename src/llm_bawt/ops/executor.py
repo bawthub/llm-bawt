@@ -59,6 +59,14 @@ class Executor(ABC):
     def execution_settings(self, spec: dict | None = None) -> dict:
         return {}
 
+    def readiness(self) -> str | None:
+        """None when ready to dispatch, else the operator-facing reason.
+
+        Health reporting reads this, so executors with a specific failure
+        reason override it and derive ``available()`` from it.
+        """
+        return None if self.available() else "executor not available"
+
     def preflight(self, snapshot: dict) -> None:
         """Read-only prerequisite validation; no worker may be created here."""
         if not self.available():
@@ -208,23 +216,19 @@ class DockerExecutor(Executor):
                 "executor's Docker host, expected one")
 
     def available(self):
+        return self.readiness() is None
+
+    def readiness(self):
         try:
-            self._check_settings(self.execution_settings())
-            self.client.ping()
-            return True
-        except Exception:
-            return False
+            self._check_prerequisites(self.execution_settings())
+            return None
+        except ExecutorError as exc:
+            return str(exc)
 
     def preflight(self, snapshot):
         if is_release_spec(snapshot.get("spec")):
             raise ExecutorError("release orchestration specs run only on the release executor")
-        try:
-            self._check_settings(snapshot["execution"])
-            self.client.ping()
-        except ExecutorError:
-            raise
-        except Exception as exc:
-            raise ExecutorError(f"Docker worker prerequisites unavailable: {exc}") from exc
+        self._check_prerequisites(snapshot["execution"])
         if snapshot["spec"].get("action") == DEPLOY_ACTION:
             self.ensure_release_image(snapshot["release"]["image_ref"])
 
@@ -249,6 +253,16 @@ class DockerExecutor(Executor):
         except Exception as exc:
             # Docker errors carry the registry message, never the credential.
             raise ExecutorError(f"release image pull failed: {exc}") from exc
+
+    def _check_prerequisites(self, settings):
+        """Settings + daemon reachability; every failure is an ExecutorError."""
+        try:
+            self._check_settings(settings)
+            self.client.ping()
+        except ExecutorError:
+            raise
+        except Exception as exc:
+            raise ExecutorError(f"Docker worker prerequisites unavailable: {exc}") from exc
 
     def _check_settings(self, settings):
         image = settings.get("worker_image", "")

@@ -22,6 +22,20 @@ def get_status():
     return get_service().get_status()
 
 
+@router.get("/v1/health/checks", tags=["System"])
+def get_health_checks():
+    """Internal capability checks (DB, Redis, ops executors, ops queue).
+
+    Always 200 when the service answers: per-check status is the payload, and
+    the BawtHub aggregator treats an unreachable service as its own failure.
+    """
+    from ..dependencies import get_ops_service, get_ops_store
+    from ..health_checks import collect
+
+    config = get_service().config
+    return collect(config, get_ops_store(config), get_ops_service(config))
+
+
 @router.get("/v1/status", response_model=SystemStatusResponse, tags=["System"])
 def get_system_status():
     """Get full system status (config, service, memory, dependencies)."""
