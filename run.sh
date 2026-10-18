@@ -4,6 +4,18 @@ set -euo pipefail
 COMPOSE_BASE="docker-compose.yml"
 COMPOSE_DEV="docker-compose.dev.yml"
 
+# Dev compose. COMPOSE_FILE (shell or .env) is the single source of truth for
+# the deployed file set, including overlays like docker-compose.ops.yml; -f
+# flags would override it and drop them (TASK-1145). Name base+dev only when
+# COMPOSE_FILE is defined nowhere.
+dev_compose() {
+  if [[ -n "${COMPOSE_FILE:-}" ]] || grep -qE '^COMPOSE_FILE=' .env 2>/dev/null; then
+    docker compose "$@"
+  else
+    docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" "$@"
+  fi
+}
+
 usage() {
   cat <<EOF
 Docker management script for llm-bawt
@@ -69,7 +81,7 @@ case "${1:-help}" in
 
   dev)
     echo "Starting containers (dev mode with live mounting)..."
-    docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" up -d
+    dev_compose up -d
     echo "✓ Dev mode started - source code mounted from ./src"
     echo "✓ After code changes: ./start.sh restart"
     echo "Run './start.sh logs' to view output"
@@ -86,7 +98,7 @@ case "${1:-help}" in
     if docker compose ps | grep -q llm-bawt-app; then
       # Check if dev mode (has source mount)
       if docker inspect llm-bawt-app 2>/dev/null | grep -q "/app/src"; then
-        docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" restart
+        dev_compose restart
         echo "✓ Dev containers restarted"
       else
         docker compose restart

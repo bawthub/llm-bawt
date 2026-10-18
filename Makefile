@@ -55,6 +55,16 @@ WITH_CUDA      ?= true                # used by dev-llama
 # Docker
 COMPOSE_BASE   := docker-compose.yml
 COMPOSE_DEV    := docker-compose.dev.yml
+# The deployed compose file set has ONE source of truth: COMPOSE_FILE (shell or
+# .env). It carries overlays such as docker-compose.ops.yml. Explicit -f flags
+# override it and silently drop them; with --remove-orphans that deleted
+# ops-reconciler and unmounted the ops receipt volume (TASK-1145). Name the
+# base+dev files explicitly only when COMPOSE_FILE is defined nowhere.
+ifeq ($(origin COMPOSE_FILE)$(filter COMPOSE_FILE=%,$(file <.env)),undefined)
+DEV_COMPOSE    := docker compose -f $(COMPOSE_BASE) -f $(COMPOSE_DEV)
+else
+DEV_COMPOSE    := docker compose
+endif
 
 # Local servers
 MCP_HOST    ?= 0.0.0.0
@@ -165,8 +175,8 @@ dev-run: ## [uv] Run llm from .venv (e.g. make dev-run ARGS="--status")
 .PHONY: run up docker-dev down restart restart-app rebuild logs docker-status docker-shell docker-exec
 
 run: ## Stop app + bridges, rebuild dev, tail logs
-	docker compose -f $(COMPOSE_BASE) -f $(COMPOSE_DEV) down --remove-orphans --timeout 5 app openclaw-bridge claude-code-bridge
-	docker compose -f $(COMPOSE_BASE) -f $(COMPOSE_DEV) up -d app openclaw-bridge claude-code-bridge
+	$(DEV_COMPOSE) down --remove-orphans --timeout 5 app openclaw-bridge claude-code-bridge
+	$(DEV_COMPOSE) up -d app openclaw-bridge claude-code-bridge
 	docker compose logs -f --tail=50 app openclaw-bridge claude-code-bridge
 
 up: ## Docker compose up (production)
@@ -176,7 +186,7 @@ up: ## Docker compose up (production)
 
 docker-dev: ## Docker compose up (dev mode — mounts ./src)
 	@echo "Starting containers (dev mode)..."
-	docker compose -f $(COMPOSE_BASE) -f $(COMPOSE_DEV) up -d
+	$(DEV_COMPOSE) up -d
 	@echo "$(GREEN)✓ Dev mode started — src/ mounted live$(NC)"
 
 down: ## Docker compose down
@@ -188,7 +198,7 @@ restart: ## Restart containers
 	@echo "$(GREEN)✓ Containers restarted$(NC)"
 
 restart-app: ## Restart ONLY the app (leaves bridges/agents alive)
-	docker compose -f $(COMPOSE_BASE) -f $(COMPOSE_DEV) restart app
+	$(DEV_COMPOSE) restart app
 	@echo "$(GREEN)✓ app restarted (bridges untouched)$(NC)"
 
 rebuild: ## Rebuild and restart containers
