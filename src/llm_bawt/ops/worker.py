@@ -24,11 +24,13 @@ from urllib.parse import quote, urlencode
 # (see __main__). Single source of truth for IMAGE_ACTIONS is image_deploy.
 if __package__:
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
+    from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
 else:  # pragma: no cover - standalone worker image
     # `python3 -I` drops the script directory from sys.path; re-add ONLY this
     # file's own image-owned, read-only directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
+    from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
 
 
 OPS_JOB_LABEL = "llm-bawt.ops.job"
@@ -194,7 +196,10 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         old_handler = signal.signal(signal.SIGALRM, deadline)
         signal.setitimer(signal.ITIMER_REAL, execution["timeout_seconds"])
         try:
-            if snapshot["spec"]["action"] in IMAGE_ACTIONS:
+            if snapshot["spec"]["action"] == ROUTING_ACTION:
+                output = RoutingReconciler(api, snapshot, job_id,
+                                           lock_root=request_path.parent.parent / ".target-locks").run()
+            elif snapshot["spec"]["action"] in IMAGE_ACTIONS:
                 output = ImageDeployer(api, snapshot, job_id,
                                            lock_root=request_path.parent.parent / ".target-locks").run()
             else:

@@ -330,6 +330,19 @@ class ApprovalAwareFastMCP(FastMCP):
                     f"BawtHub {spec['github_repository']}@{source['expected_sha']}\n"
                     "Production deployment requires a separate approval."
                 )
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("routing"):
+                routing = operations_snapshot["routing"]
+                spec = operations_snapshot["spec"]
+                approval_prompt = (
+                    f"{decision.prompt or 'Authorize same-image routing repair?'}\n"
+                    f"Target: {spec['container_name']} ({routing['container_id']})\n"
+                    f"Unchanged image: {routing['image_ref']}\n"
+                    f"Configuration fingerprint: {routing['config_hash']}\n"
+                    f"Before: {routing['before_rule']}\nAfter: {routing['after_rule']}\n"
+                    "No build, pull, environment, mount or permission changes. "
+                    "Verifies the hostname-routed health report; restores the previous container "
+                    "if verification fails. Changed target/configuration cancels execution."
+                )
             row, created = store.record_mcp_request(
                 request_id=request_id,
                 tool_use_id=call_context.tool_use_id,

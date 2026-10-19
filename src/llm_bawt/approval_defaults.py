@@ -79,6 +79,18 @@ _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
         "order": 9,
     },
     {
+        "id": "seed-ops-run-bawthub-reconcile-prod-routing",
+        "backend_scope": "*",
+        "tool_name": "ops_run",
+        "matcher_type": "prefix",
+        "pattern": "operation=bawthub.reconcile-prod-routing ",
+        "action": "require_approval",
+        "severity": "high",
+        "category": "configuration",
+        "approval_prompt": "Repair production health routing using the same pinned image (brief frontend interruption)?",
+        "order": 10,
+    },
+    {
         "id": "seed-ops-run-require-approval",
         "backend_scope": "*",
         "tool_name": "ops_run",

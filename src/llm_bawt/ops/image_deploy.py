@@ -100,12 +100,18 @@ class ImageDeployer:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 self._fail("another deploy/rollback holds this target", known=True)
-            if self.spec["action"] == DEPLOY_ACTION:
-                self._deploy()
-            else:
-                self._rollback()
+            self._perform()
         self.detail["phase"] = "done"
         return json.dumps(self.detail, sort_keys=True)
+
+    def _perform(self):
+        if self.spec["action"] == DEPLOY_ACTION:
+            self._deploy()
+        else:
+            self._rollback()
+
+    def _create_body(self, old, old_image, new_image, ref):
+        return clone_create_body(old, old_image, new_image, ref, self.job_id)
 
     def _fail(self, message: str, *, known: bool):
         raise DeployFailed(message, self.detail, outcome_known=known)
@@ -171,7 +177,7 @@ class ImageDeployer:
         job8 = self.job_id[:8]
         temp, prev = f"{self.name}-next-{job8}", f"{self.name}-prev-{job8}"
         self._phase("create")
-        body = clone_create_body(old, old_image, new_image, ref, self.job_id)
+        body = self._create_body(old, old_image, new_image, ref)
         new_id = self.api.request("POST", "/containers/create?" + urlencode({"name": temp}), body=body)["Id"]
         self.detail["deployed"] = {"container_id": new_id, "image_id": new_image["Id"], "image_ref": ref,
                                    "release": release_from_labels(new_image["Config"].get("Labels"))}

@@ -52,6 +52,15 @@ the configured image cannot rewrite queued jobs: historical image IDs and volume
 mounts must remain available for their lifetime. `max_concurrent` counts claimed,
 accepted, and running jobs; the smallest limit among overlapping snapshots wins.
 
+## Same-image routing repair (TASK-1179; activated on echo 2026-10-19)
+
+See [OPS_ROUTING_REPAIR.md](OPS_ROUTING_REPAIR.md) for the disabled-by-default
+`bawthub.reconcile-prod-routing` action, approval binding, routed verification,
+and worker/bootstrap activation gates. Echo has the tested worker and enabled,
+approval-gated operation. Approved job `389fd3f7eb2742a8944f82158b51154b`
+completed the repair and both hostname-routed health endpoints returned HTTP 200.
+A catalog row alone does not upgrade an immutable worker on other installations.
+
 ## Deployment setup checklist (original TASK-861 setup; installed on echo)
 
 The base compose app mounts Docker's socket and `./.logs:/app/.logs`; the dev

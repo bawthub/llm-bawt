@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec, validate_release_spec
+from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
+                                routing_binding, validate_routing_spec)
 from .validation import canonical_json
 from .worker import OPS_JOB_LABEL, atomic_json, is_ops_worker, target_selector
 
@@ -80,6 +82,10 @@ class Executor(ABC):
         """Live health of the fixed target after a worker's verified swap."""
         raise ExecutorError(f"{self.kind()} executor cannot inspect deploy target health")
 
+    def routing_approval(self, spec: dict) -> dict:
+        """Public routing delta plus a private-config fingerprint; read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot reconcile frontend routing")
+
     def check_target(self, spec: dict, args: dict) -> None:
         """Approval-time, read-only: the spec's target exists where this executor
         acts. Raise ExecutorError so nobody approves a guaranteed failure."""
@@ -119,6 +125,8 @@ def validate_spec(command_script: str) -> dict:
         spec = json.loads(command_script)
     except (ValueError, TypeError) as exc:
         raise ValueError("command_script must be a Docker JSON spec") from exc
+    if isinstance(spec, dict) and spec.get("action") == ROUTING_ACTION:
+        return validate_routing_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
     if is_release_spec(spec):
@@ -194,6 +202,30 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError(f"cannot inspect deploy target health {spec['container_name']}: {exc}") from exc
 
+    def _check_routing_worker(self, settings):
+        try:
+            worker = self.client.images.get(settings["worker_image"])
+            labels = worker.attrs.get("Config", {}).get("Labels") or {}
+            if labels.get(WORKER_CAPABILITY_LABEL) != "1":
+                raise ExecutorError("configured immutable ops worker lacks routing-reconcile v1; deploy the tested worker first")
+        except ExecutorError:
+            raise
+        except Exception as exc:
+            raise ExecutorError("cannot verify routing worker capability") from exc
+
+    def routing_approval(self, spec):
+        self._check_prerequisites(self.execution_settings(spec))
+        self._check_routing_worker(self.execution_settings(spec))
+        try:
+            target = self.client.containers.get(spec["container_name"])
+            target.reload()
+            image = self.client.images.get(target.attrs["Image"])
+            return routing_binding(spec, target.attrs, image.attrs)
+        except (ValueError, KeyError) as exc:
+            raise ExecutorError(f"routing target cannot be bound: {exc}") from exc
+        except Exception as exc:
+            raise ExecutorError("cannot inspect routing target") from exc
+
     def check_target(self, spec, args):
         # TASK-1002: this executor only reaches its own Docker daemon. A target
         # that lives on another host (e.g. Unraid) must fail HERE, before an
@@ -229,6 +261,8 @@ class DockerExecutor(Executor):
         if is_release_spec(snapshot.get("spec")):
             raise ExecutorError("release orchestration specs run only on the release executor")
         self._check_prerequisites(snapshot["execution"])
+        if snapshot["spec"].get("action") == ROUTING_ACTION:
+            self._check_routing_worker(snapshot["execution"])
         if snapshot["spec"].get("action") == DEPLOY_ACTION:
             self.ensure_release_image(snapshot["release"]["image_ref"])
 

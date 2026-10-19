@@ -140,7 +140,7 @@ def test_postgres_migration_terminalizes_orphans_before_enforcing_constraint():
 
 def test_seed_defaults_adds_ops_rules_and_is_idempotent():
     store = _store()
-    assert store.seed_defaults() == 14  # six legacy Bash rules + eight stable ops/agent rules
+    assert store.seed_defaults() == 15  # six legacy Bash rules + nine stable ops/agent rules
     assert store.seed_defaults() == 0
     rows = store.list_all()
     ops_rows = [row for row in rows if row.tool_name == "ops_run"]
@@ -150,6 +150,7 @@ def test_seed_defaults_adds_ops_rules_and_is_idempotent():
         "seed-ops-run-bawthub-deploy-prod-image",
         "seed-ops-run-bawthub-rollback-prod-image",
         "seed-ops-run-bawthub-release-prod",
+        "seed-ops-run-bawthub-reconcile-prod-routing",
         "seed-ops-run-require-approval",
     ]
     deploy_rules = {row.id: row for row in ops_rows if "prod-image" in row.id}
@@ -180,9 +181,10 @@ def test_seed_defaults_preserves_operator_edited_ops_rule():
 def test_seed_defaults_adds_missing_ops_rule_to_existing_policy_table():
     store = _store()
     store.create({"tool_name": "Bash", "matcher_type": "always"}, actor="nick")
-    assert store.seed_defaults() == 8
+    assert store.seed_defaults() == 9
     assert store.get("seed-ops-run-require-approval") is not None
-    assert len(store.list_all()) == 9
+    assert store.get("seed-ops-run-bawthub-reconcile-prod-routing") is not None
+    assert len(store.list_all()) == 10
 
 
 # ---- record_mcp_request ----------------------------------------------------

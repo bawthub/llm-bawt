@@ -11,6 +11,7 @@ from typing import Any
 from .executor import DockerExecutor, Executor, ExecutorError, validate_spec
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
+from .routing_reconcile import ACTION as ROUTING_ACTION, valid_routing_binding
 from .release_store import ReleaseStore
 from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                       bind_image_invocation, binding_matches_args)
@@ -101,7 +102,14 @@ class OpsService:
         snapshot = {"snapshot_version": 1, "operation": op.to_api(), "spec": spec,
                     "schema": json.loads(op.args_schema_json), "defaults": json.loads(op.args_defaults_json),
                     "input_args": {} if args is None else args, "resolved_args": merged, "execution": execution}
-        if spec["action"] in IMAGE_ACTIONS:
+        if spec["action"] == ROUTING_ACTION:
+            if merged:
+                raise OpsDispatchError("args_invalid", "routing reconciliation accepts no arguments")
+            try:
+                snapshot["routing"] = executor.routing_approval(spec)
+            except (ValueError, ExecutorError) as exc:
+                raise OpsDispatchError("target_unavailable", str(exc)) from exc
+        elif spec["action"] in IMAGE_ACTIONS:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.
             try:
@@ -142,6 +150,8 @@ class OpsService:
                         "start_delay_seconds", "max_output_bytes", "max_concurrent"):
                 if detached["execution"][key] != op[key]:
                     raise ValueError(f"snapshot execution {key} mismatch")
+            if not valid_routing_binding(detached):
+                raise ValueError("snapshot routing binding mismatch")
             if not binding_matches_args(detached):
                 raise ValueError("snapshot release/rollback binding mismatch")
             if is_release_spec(detached["spec"]):

@@ -352,6 +352,39 @@ _IMAGE_SEEDS: list[dict[str, Any]] = [
 ]
 
 
+# TASK-1179: configuration-only repair; never rebuild/pull or change privileges.
+_ROUTING_SEEDS: list[dict[str, Any]] = [{
+    "slug": "bawthub.reconcile-prod-routing",
+    "title": "Repair production frontend health routing",
+    "description": (
+        "Add /api/system to the existing production API router using the SAME pinned image. "
+        "Approval binds the current container/configuration. No build, pull, environment, mount "
+        "or permission changes. Verifies the hostname-routed detailed report and restores the "
+        "previous container on verification failure. Brief frontend interruption."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_frontend_routing", container_name="bawthub-frontend-prod-1",
+        compose_project=_BAWTHUB_PROJECT, compose_service="frontend-prod",
+        image_repository="ghcr.io/bawthub/frontend", router_name="frontprod-api",
+        route_service="frontend-prod", hostname="app.bawthub.com",
+        add_prefixes=["/api/system"], stop_grace_seconds=20, health_timeout_seconds=180,
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_HIGH,
+    "category": "configuration",
+    "approval_prompt_prefix": "Repair production health routing with the same image (brief interruption)",
+}]
+
+
 # ---------------------------------------------------------------------------
 # One-command release: a durable coordinator, never a shell or local clone.
 # A release approval delegates deploy only after build and target verification.
@@ -450,6 +483,7 @@ SEEDS: list[dict[str, Any]] = [
     *_BAWTHUB_SEEDS,
     *_STANDALONE_CONTAINER_SEEDS,
     *_IMAGE_SEEDS,
+    *_ROUTING_SEEDS,
     *_RELEASE_SEEDS,
 ]
 

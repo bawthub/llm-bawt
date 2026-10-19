@@ -193,6 +193,28 @@ def test_require_commits_before_publish_and_returns_pending(capability):
     assert row.bot_id == "snark"
 
 
+def test_routing_approval_displays_exact_target_image_and_delta(capability):
+    from tests.test_ops_routing_reconcile import RoutingDocker, snapshot
+
+    order, executed = [], []
+    store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
+    mcp = _server(store, order, executed)
+    approved = snapshot(RoutingDocker())
+    mcp._operations_preparer = lambda operation, args: approved
+    clean = {"operation": "bawthub.reconcile-prod-routing", "args": {}}
+    stamp = mint_mcp_call_context(
+        capability=capability, tool_name="ops_run", tool_input=clean,
+        tool_use_id="toolu_routing", agent_request_id="req_routing",
+        session_key="snark:nick", backend="claude-code",
+    )
+    result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
+    assert result["status"] == "approval_required" and not executed
+    prompt = store.rows[0][0].prompt
+    for key in ("container_id", "image_ref", "config_hash", "before_rule", "after_rule"):
+        assert approved["routing"][key] in prompt
+    assert "No build, pull, environment, mount or permission changes" in prompt
+
+
 def test_tampered_args_fail_before_policy_or_execution(capability):
     order, executed = [], []
     store = FakeStore(_policy(PolicyAction.ALLOW), order)
