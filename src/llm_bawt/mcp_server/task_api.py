@@ -12,9 +12,11 @@ from typing import Any
 
 import httpx
 
+from llm_bawt.utils.config import DEFAULT_TASK_API_URL
+
 logger = logging.getLogger(__name__)
 
-BASE_URL = os.getenv("LLM_BAWT_TASK_API_URL", "http://echo.lan.zenoran.com")
+BASE_URL = os.getenv("LLM_BAWT_TASK_API_URL", DEFAULT_TASK_API_URL)
 API_PREFIX = "/api/tasks"
 TIMEOUT = 30.0
 

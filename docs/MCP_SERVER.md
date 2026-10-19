@@ -87,7 +87,7 @@ summary); a design review may occur before the task enters REVIEW.
 | `LLM_BAWT_MCP_ALLOWED_HOSTS` | `127.0.0.1:*,localhost:*` | Host allowlist for HTTP clients |
 | `LLM_BAWT_MCP_SERVER_VERBOSE` | `1` | Verbose logging |
 | `LLM_BAWT_MCP_SERVER_DEBUG` | `0` | Debug logging |
-| `LLM_BAWT_TASK_API_URL` | `http://echo.lan.zenoran.com` | Task API base URL for task-related tools |
+| `LLM_BAWT_TASK_API_URL` | `http://frontend-prod:3000` | Task API base URL for task-related tools (BawtHub prod frontend's service name on the shared `llm-bawt_default` network; no Traefik hostname alias) |
 | `LLM_BAWT_APP_BASE_URL` | `http://localhost:8642` | Used by some self tools |
 
 ## Task association middleware (TASK-701)

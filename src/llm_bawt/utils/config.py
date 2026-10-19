@@ -23,6 +23,11 @@ PROVIDER_GROK = "grok"
 PROVIDER_AGENT_BACKEND = "agent_backend"
 PROVIDER_UNKNOWN = "Unknown"
 
+# BawtHub production frontend's stable service name on the shared llm-bawt
+# network. Internal callers use it directly instead of routing through a
+# Traefik hostname alias (legacy echo.* aliases were retired in TASK-1180).
+DEFAULT_TASK_API_URL = "http://frontend-prod:3000"
+
 logger = logging.getLogger(__name__)
 console = Console()
 
@@ -282,7 +287,7 @@ class Config(RuntimeTunables, BaseSettings):
 
     # --- Agent Task API Settings --- #
     TASK_API_URL: str = Field(
-        default="http://echo.lan.zenoran.com",
+        default=DEFAULT_TASK_API_URL,
         description="Base URL for the BawtHub agent task API (Set via LLM_BAWT_TASK_API_URL)",
     )
 
