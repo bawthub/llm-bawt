@@ -1,5 +1,11 @@
 # Durable operations runner (TASK-861)
 
+> **Architecture transition:** [Ops service: current and intended architecture](OPS_SERVICE_ARCHITECTURE.md)
+> is the working design for TASK-1169–TASK-1173, including the intended FastAPI
+> service boundary. Those tasks are not yet implemented or activated. This runner
+> document describes the existing execution contracts; do not treat the proposed
+> architecture as a live runbook. Keep both references reconciled during migration.
+
 ## Execution and recovery contract
 
 Operations remain DB-configured Docker JSON action specs, not arbitrary shell.
