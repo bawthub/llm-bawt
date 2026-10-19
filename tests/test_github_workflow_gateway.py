@@ -77,13 +77,14 @@ def test_correlation_matches_exact_title_branch_repo_and_window():
     assert fake.seen[0].headers["Authorization"] == "Bearer tok"
 
 
-def test_dispatch_requires_204_and_rerun_requires_201():
+def test_dispatch_requires_204_and_full_rerun_requires_201():
     dispatch = f"{API}/repos/{REPO}/actions/workflows/{WF}/dispatches"
-    rerun = f"{API}/repos/{REPO}/actions/runs/99/rerun-failed-jobs"
+    rerun = f"{API}/repos/{REPO}/actions/runs/99/rerun"
     gateway, fake = _gateway({("POST", dispatch): httpx.Response(204), ("POST", rerun): httpx.Response(201)})
     gateway.dispatch_workflow(REPO, WF, "main", {"release_request_id": REQ})
     assert json.loads(fake.seen[0].content) == {"ref": "main", "inputs": {"release_request_id": REQ}}
-    gateway.rerun_failed_jobs(REPO, "99")
+    gateway.rerun_all_jobs(REPO, "99")
+    assert str(fake.seen[-1].url) == rerun
     gateway, _ = _gateway({("POST", dispatch): httpx.Response(200)})
     with pytest.raises(GitHubWorkflowError) as exc:
         gateway.dispatch_workflow(REPO, WF, "main", {})

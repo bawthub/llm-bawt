@@ -14,7 +14,7 @@ Invariants (each has a regression test in tests/test_release_coordinator.py):
 * Intent is recorded before every external side effect (dispatch, re-run,
   approval request, child deploy). A crash replays reads, never mutations: a
   workflow is dispatched at most once per release, a partial run is recovered
-  with "Re-run failed jobs" on the SAME run (no second version bump), and the
+  with "Re-run all jobs" on the SAME run (no second version bump), and the
   child deploy is keyed by a deterministic idempotency key.
 * A build-and-deploy approval delegates only a verified, baseline-matching
   child deploy. Older build-only and direct HTTP runs still need a second card;
@@ -84,7 +84,7 @@ _STATE_MESSAGES = {
     RELEASE_PREFLIGHT: "resolving remote branch heads",
     RELEASE_DISPATCHING_BUILD: "release workflow dispatched; correlating the GitHub run",
     RELEASE_BUILDING: "GitHub release workflow running",
-    RELEASE_BUILD_PARTIAL: "release run partial; re-running failed jobs on the same run",
+    RELEASE_BUILD_PARTIAL: "release run partial; re-running all jobs on the same run",
     RELEASE_BUILD_COMPLETE: "build verified; preparing the authorized deploy",
     RELEASE_AWAITING_DEPLOY_APPROVAL: "build verified; waiting for the deploy approval in BawtHub Approvals",
     RELEASE_DEPLOYING: "deploy approved; production image deploy running",
@@ -390,7 +390,7 @@ class ReleaseCoordinator:
 
     def _request_rerun(self, row: ReleaseRun, token: str) -> float:
         try:
-            self.gateway.rerun_failed_jobs(row.github_repository, row.github_run_id)
+            self.gateway.rerun_all_jobs(row.github_repository, row.github_run_id)
         except GitHubWorkflowError as exc:
             if not exc.retryable:
                 return self._end(row, token, RELEASE_LOST, "rerun_refused", str(exc))

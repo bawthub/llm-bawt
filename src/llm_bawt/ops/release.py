@@ -136,7 +136,7 @@ class GitHubReleaseVerifier(ReleaseVerifier):
     def latest_receipt(self, repo: str, run_id: str, run_attempt) -> dict:
         """Receipt of the run's latest attempt; legacy single artifact fallback.
 
-        A re-run ("Re-run failed jobs") uploads ``release-receipt-<attempt>``,
+        A same-run retry uploads ``release-receipt-<attempt>``,
         so an earlier attempt's partial receipt can never be mistaken for the
         current one.
         """

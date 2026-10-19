@@ -63,7 +63,7 @@ class GitHubWorkflowGateway(ABC):
     def get_run(self, repository: str, run_id: str) -> dict[str, Any]: ...
 
     @abstractmethod
-    def rerun_failed_jobs(self, repository: str, run_id: str) -> None: ...
+    def rerun_all_jobs(self, repository: str, run_id: str) -> None: ...
 
     @abstractmethod
     def download_release_receipt(
@@ -257,9 +257,12 @@ class HttpGitHubWorkflowGateway(GitHubWorkflowGateway):
     def get_run(self, repository: str, run_id: str) -> dict[str, Any]:
         return self._json(f"/repos/{repository}/actions/runs/{run_id}")
 
-    def rerun_failed_jobs(self, repository: str, run_id: str) -> None:
-        response = self._request("POST", f"/repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs")
-        self._expect(response, {201}, "GitHub rerun failed jobs")
+    def rerun_all_jobs(self, repository: str, run_id: str) -> None:
+        # A partial multiarch build must rebuild BOTH children for one attempt.
+        # GitHub's failed-jobs rerun leaves the successful child's baked attempt
+        # and artifact untouched, producing a mixed-provenance index.
+        response = self._request("POST", f"/repos/{repository}/actions/runs/{run_id}/rerun")
+        self._expect(response, {201}, "GitHub rerun all jobs")
 
     def download_release_receipt(
         self,

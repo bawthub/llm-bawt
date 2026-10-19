@@ -53,7 +53,7 @@ class FakeGateway:
     def get_run(self, repo, run_id):
         return self.runs[0]
 
-    def rerun_failed_jobs(self, repo, run_id):
+    def rerun_all_jobs(self, repo, run_id):
         self.reruns.append(run_id)
 
     def download_release_receipt(self, repo, run_id, attempt):
@@ -130,7 +130,7 @@ def test_remote_branch_moved_since_approval_never_dispatches(rig):
     assert gateway.dispatches == []
 
 
-def test_partial_receipt_reruns_failed_jobs_on_same_run(rig):
+def test_partial_receipt_reruns_all_jobs_on_same_run(rig):
     coordinator, store, gateway, advance = rig
     row = _start(coordinator, store, gateway, advance)
     gateway.runs = [_run()]
@@ -155,7 +155,7 @@ def test_uncertain_rerun_is_never_reissued_when_attempt_registration_lags(rig):
     def timed_out_rerun(repo, run_id):
         attempts.append(run_id)
         raise GitHubWorkflowError("github_unreachable", "timeout", retryable=True)
-    gateway.rerun_failed_jobs = timed_out_rerun
+    gateway.rerun_all_jobs = timed_out_rerun
     advance()
     coordinator.pump(row.parent_job_id, SNAPSHOT)
     assert attempts == ["123456"]

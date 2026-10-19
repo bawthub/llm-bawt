@@ -55,7 +55,7 @@ class FakeGitHub:
                 "digest": DIGEST, "image_repository": IMAGE_REPO,
                 "image_ref": f"{IMAGE_REPO}@{DIGEST}"}
 
-    def rerun_failed_jobs(self, repo, run_id):
+    def rerun_all_jobs(self, repo, run_id):
         raise AssertionError("successful release must never rerun")
 
 
