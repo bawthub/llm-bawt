@@ -202,6 +202,14 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         bot_slug, model, injected=inject_messages,
                         thread_session_id=thread_session_id,
                     )
+                    # A reset followed by a task promises the selected
+                    # continuity. A failed retained seed must stop before the
+                    # SDK executes that task in an accidentally clean context.
+                    if (req.bridge_reset_action == "reset_follow_up"
+                            and isinstance(cold_seed, dict)
+                            and cold_seed.get("reason")
+                            and not cold_seed.get("clean_start")):
+                        raise RuntimeError(f"new-session seed failed: {cold_seed['reason']}")
                     if cold_seed and cold_seed.get("seeded"):
                         resume_id = cold_seed["session_id"]
                         logger.info(
@@ -726,6 +734,13 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     compact_error_msg=compact_error_msg,
                                     turn_session_id=turn_session_id,
                                     turn_screenshot_assets=turn_screenshot_assets,
+                                    reset_ack=(
+                                        {"thread_session_id": thread_session_id,
+                                         "provider_session_id": turn_session_id,
+                                         "clean_start": False}
+                                        if req.bridge_reset_action == "reset_follow_up"
+                                        and thread_session_id and turn_session_id else None
+                                    ),
                                 )
                                 assistant_done_emitted = True
                                 # Publish the terminal sentinel before SDK cleanup;

@@ -347,6 +347,7 @@ def test_durable_dispatch_drains_stream_and_uses_persisted_outcome():
         turn_id="turn-delivery-1",
         claim_token="claim-1",
         target_bot_id="loopy",
+        metadata={}, session_policy="continue", transport_accepted_at=None,
     )
     marked = []
     emitted = []
@@ -370,7 +371,9 @@ def test_durable_dispatch_drains_stream_and_uses_persisted_outcome():
         payload=lambda _id: payload,
         mark_transport_accepted=lambda *_args: True,
         mark_delivered=lambda *args, **kwargs: (
-            marked.append((args, kwargs)) or SimpleNamespace(status="DELIVERED")
+            marked.append((args, kwargs)) or SimpleNamespace(
+                status="DELIVERED", metadata={}, session_policy="continue",
+            )
         ),
         renew_lease=lambda *_args: False,
     )
@@ -413,6 +416,7 @@ def test_durable_dispatch_rejects_ok_turn_with_persisted_error():
         attempt_count=1,
         max_attempts=1,
         overflow_recovery_count=0,
+        metadata={}, session_policy="continue", transport_accepted_at=None,
     )
     payload = {
         "messages": [{"role": "user", "content": "work"}],
@@ -471,6 +475,7 @@ def test_deterministic_run_requeues_only_while_turn_may_still_be_live(ended):
         id="delivery-dead", turn_id="turn-delivery-dead", claim_token="claim",
         target_bot_id="snark", attempt_count=1, max_attempts=5,
         overflow_recovery_count=0,
+        metadata={}, session_policy="continue", transport_accepted_at=None,
     )
     payload = {
         "messages": [{"role": "user", "content": "work"}],

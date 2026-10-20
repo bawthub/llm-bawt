@@ -37,6 +37,26 @@ def test_plain_text_survives_unavailable_media_store(monkeypatch):
     log.error.assert_called_once()
 
 
+def test_last_user_text_parts_ignore_trailing_assistant(monkeypatch):
+    monkeypatch.setattr(
+        "llm_bawt.service.stream_request_attachments.get_media_store",
+        Mock(return_value=None),
+    )
+    log = SimpleNamespace(error=Mock(), warning=Mock())
+    request = ChatCompletionRequest(messages=[
+        ChatMessage(role="user", content=[
+            {"type": "text", "text": " /new\n"},
+            {"type": "image_url", "image_url": {"url": "not-an-inline-image"}},
+            {"type": "text", "text": "keep bytes  "},
+        ]),
+        ChatMessage(role="assistant", content="not the command"),
+    ])
+
+    prompt, images, refs, _ = _run(request, log)
+    assert prompt == " /new\nkeep bytes  "
+    assert images == [] and refs == []
+
+
 def test_legacy_inline_image_is_forwarded_and_uploaded(monkeypatch):
     asset = SimpleNamespace(id="ma_uploaded")
     store = SimpleNamespace(upload=Mock(return_value=asset))

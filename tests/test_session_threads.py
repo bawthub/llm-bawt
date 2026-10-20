@@ -16,7 +16,6 @@ throwaway bot id, and clean up after themselves.
 
 from __future__ import annotations
 
-import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -81,6 +80,33 @@ class TestAgentNewRotationGate:
         assert b._maybe_rotate_agent_session(_llm(), "byte", None) is False
         assert b.rotate_calls == []
 
+    def test_unkeyed_rotation_failure_does_not_reach_provider(self):
+        b = _Bridge(rotate_result=False)
+        with pytest.raises(RuntimeError, match="did not return a successor"):
+            b._maybe_rotate_agent_session(_llm(), "byte", "/new")
+        assert b.rotate_calls == ["byte"]
+
+
+@pytest.mark.parametrize("command", ["/new", "/new follow up"])
+def test_chat_new_refuses_false_confirmation_and_follow_up(monkeypatch, command):
+    from llm_bawt.service.session_lifecycle.execution import NewSessionExecution
+
+    b = _Bridge(rotate_result=False)
+    calls = []
+    monkeypatch.setattr(b, "_maybe_summarize_on_new", lambda *_a, **_kw: True)
+    monkeypatch.setattr(b, "_rotate_chat_session",
+                        lambda *_a, **kw: calls.append(kw) or None)
+    monkeypatch.setattr("llm_bawt.service.agent_new_rotation.delivery_new_predecessor",
+                        lambda *_a, **_kw: "predecessor")
+    backend = SimpleNamespace(get_session=lambda _sid: None)
+    request = SimpleNamespace(session_id=None, inter_bot_delivery_id="failed-reset",
+                              inter_bot_claim_token="claimed")
+    with pytest.raises(RuntimeError, match="did not bind its keyed successor"):
+        NewSessionExecution.prepare_chat(
+            b, _llm(backend), request, bot_id="byte", user_id="owner", user_prompt=command,
+        )
+    assert calls == [{"idempotency_key": "failed-reset"}]
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Chatbot rotation semantics (_rotate_chat_session)
@@ -92,12 +118,13 @@ class TestChatRotation:
         assert b._rotate_chat_session(_llm(backend=None), "nova") is None  # TASK-257: falsy, not False
 
     def test_rotate_failure_returns_false(self):
-        backend = SimpleNamespace(rotate_session=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        backend = SimpleNamespace(rotate_session=lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom")))
         b = ChatStreamingBridgeMixin()
         assert b._rotate_chat_session(_llm(backend=backend), "nova") is None  # TASK-257: falsy, not False
 
     def test_success_rotates_invalidates_and_keeps_only_summaries(self):
-        backend = SimpleNamespace(rotate_session=lambda: "new-session-id")
+        options = []
+        backend = SimpleNamespace(rotate_session=lambda **kw: options.append(kw) or "new-session-id")
         invalidated = []
         llm = _llm(backend=backend)
         llm.invalidate_history_cache = lambda: invalidated.append(True)
@@ -108,8 +135,22 @@ class TestChatRotation:
         ]
         b = ChatStreamingBridgeMixin()
         assert b._rotate_chat_session(llm, "nova") == "new-session-id"  # TASK-257: returns the new id
+        assert options == [{"accept_pointer": True}]
         assert invalidated == [True]
         assert [m.role for m in llm.history_manager.messages] == ["summary"]
+
+    @pytest.mark.parametrize("key", [None, "durable-delivery"])
+    def test_keyed_rotation_defers_switch_event_to_receipt_outbox(self, monkeypatch, key):
+        events = []
+        backend = SimpleNamespace(user_id="owner", rotate_session=lambda **_kw: "successor")
+        bridge = ChatStreamingBridgeMixin()
+        monkeypatch.setattr(bridge, "_publish_thread_switched",
+                            lambda *args, **kwargs: events.append((args, kwargs)))
+        for _ in range(2):
+            assert bridge._rotate_chat_session(
+                _llm(backend), "fixture", idempotency_key=key,
+            ) == "successor"
+        assert len(events) == (0 if key else 2)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -117,28 +158,55 @@ class TestChatRotation:
 # ──────────────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────────
-# /new detection parity — app-side gate must byte-match all bridges
+# /new detection parity — all legacy command gates use the shared predicate
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestNewDetectionParity:
-    DETECTION = re.compile(r"\.lstrip\(\)\.startswith\(\"/new\"\)")
     SITES = [
-        "llm_bawt/service/chat_streaming_bridge.py",   # app-side rotation gate
-        "claude_code_bridge/send_preflight.py",        # claude-code bridge reset
-        "codex_bridge/command_ops.py",                 # codex bridge reset
-        "openclaw_bridge/bridge.py",                   # openclaw bridge reset
+        "llm_bawt/service/session_lifecycle/bridge_reset.py",
+        "llm_bawt/service/session_lifecycle/execution.py",
+        "llm_bawt/service/session_lifecycle/recovery.py",
+        "claude_code_bridge/send_preflight.py",
+        "claude_code_bridge/session_ops.py",
+        "codex_bridge/command_ops.py",
+        "openclaw_bridge/bridge.py",
     ]
 
     @pytest.mark.parametrize("rel", SITES)
-    def test_detection_expression_present(self, rel):
-        # The app rotates the durable thread iff the bridge will reset its
-        # provider session. If someone changes detection on either side, this
-        # fails and forces them to change both (or update this list).
+    def test_legacy_gate_uses_shared_predicate(self, rel):
         text = (SRC / rel).read_text(encoding="utf-8")
-        assert self.DETECTION.search(text), (
-            f"{rel}: /new detection expression changed — app rotation gate and "
-            "bridge reset detection must stay byte-identical (TASK-284 step 15)"
-        )
+        assert "from agent_bridge.maintenance import is_new_command" in text, rel
+        assert "is_new_command(" in text, rel
+        assert '.lstrip().startswith("/new")' not in text, rel
+
+    @pytest.mark.parametrize("command, expected", [
+        ("/new", True),
+        (" \t/new\nfollow up", True),
+        ("/new follow up", True),
+        ("/newspaper", False),
+        ("/new-work", False),
+        ("tell me /new", False),
+        ("", False),
+        (None, False),
+    ])
+    def test_shared_command_boundary(self, command, expected):
+        from agent_bridge.maintenance import is_new_command
+
+        assert is_new_command(command) is expected
+
+    @pytest.mark.parametrize("command, expected", [
+        ("/new task", True),
+        ("/new\ttask", True),
+        ("/newspaper task", False),
+        ("/NEW task", False),
+        ([{"type": "text", "text": "/new"}], False),
+    ])
+    def test_recovery_replay_gate_matches_command_boundary(self, command, expected):
+        from llm_bawt.service.session_lifecycle.recovery import NewSessionRecovery
+
+        row = {"session_policy": "continue", "metadata_json": {},
+               "payload_json": {"messages": [{"content": command}]}}
+        assert NewSessionRecovery.is_reset(row) is expected
 
 
 # ──────────────────────────────────────────────────────────────────────────

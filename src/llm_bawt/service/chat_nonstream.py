@@ -13,7 +13,10 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
+from agent_bridge.maintenance import is_new_command
+
 from ..bots import get_bot, strip_emotes
+from .chat_message_text import last_user_text, message_content_text
 from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
 from .ordinary_turn_queue import admit_ordinary_agent_turn
 from .turn_admission import turn_start_extensions
@@ -108,17 +111,8 @@ class ChatNonStreamMixin:
         # Get cached LLMBawt instance
         llm_bawt = self._get_llm_bawt(model_alias, bot_id, user_id, local_mode)
 
-        # Get the user's prompt (last user message)
-        user_prompt = ""
-        for m in reversed(request.messages):
-            if m.role == "user":
-                user_prompt = (
-                    "".join(
-                        part.get("text", "") for part in m.content
-                        if isinstance(part, dict) and part.get("type") == "text"
-                    ) if isinstance(m.content, list) else m.content or ""
-                )
-                break
+        # Use the same last-user/text-part extraction as reset receipts.
+        user_prompt = last_user_text(request.messages) or ""
 
         if not user_prompt:
             raise ValueError("No user message found in request")
@@ -129,33 +123,6 @@ class ChatNonStreamMixin:
         # single-model execution.
         model_type = llm_bawt.client.model_definition.get("type", "")
         is_agent_backend = model_type in ("agent_backend", "claude-code")
-
-        # TASK-646: intercept chat-bot /new HERE too — SAME shared helper as
-        # the streaming path (summarize → rotate → confirm). Without this a
-        # stream:false /new fell through to the LLM as plain text with full
-        # history and the model hallucinated a fake "session reset"
-        # confirmation. Bare /new short-circuits with the shared confirmation
-        # and no LLM round-trip (mirrors streaming, which also skips the turn
-        # log for the bare command).
-        if not is_agent_backend:
-            _confirm, user_prompt = self._maybe_handle_chat_new_command(
-                llm_bawt, bot_id, user_prompt
-            )
-            if _confirm is not None:
-                log.api_response(ctx, status=200, tokens=0)
-                return ChatCompletionResponse(
-                    model=model_alias,
-                    choices=[
-                        ChatCompletionChoice(
-                            index=0,
-                            message=ChatMessage(role="assistant", content=_confirm),
-                            finish_reason="stop",
-                        )
-                    ],
-                    usage=UsageInfo(
-                        prompt_tokens=0, completion_tokens=0, total_tokens=0
-                    ),
-                )
 
         # Do not cancel the previous chat generation until this turn has been
         # admitted. Agent turns have independent execution handles.
@@ -205,7 +172,23 @@ class ChatNonStreamMixin:
                 request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
             ),
         )
+        chat_reset = None
         if not is_agent_backend:
+            try:
+                from .session_lifecycle.execution import NewSessionExecution
+
+                chat_reset = NewSessionExecution.prepare_chat(
+                    self, llm_bawt, request, bot_id=bot_id,
+                    user_id=user_id, user_prompt=user_prompt,
+                )
+                if chat_reset is not None:
+                    request = request.model_copy(update={"session_id": chat_reset.session_id})
+            except Exception as exc:
+                self._update_turn_log(
+                    turn_id=turn_log_id, status="error",
+                    error_text=f"Chat reset setup failed: {exc}",
+                )
+                raise
             cancel_event, done_event = await self._start_generation(bot_id)
 
         # TASK-709: resolve the durable session id BEFORE publishing turn_start
@@ -231,7 +214,7 @@ class ChatNonStreamMixin:
         # backward-compat.
         # NB: nonlocal-mutable so post-rotation refresh inside ``_do_query``
         # can update it for the ``turn_complete`` emits (see F4 note there).
-        resolved_session_id: str | None = None
+        resolved_session_id: str | None = chat_reset.session_id if chat_reset else None
         if is_agent_backend:
             _sid_req = getattr(request, "session_id", None)
             if isinstance(_sid_req, str) and _sid_req.strip():
@@ -420,52 +403,19 @@ class ChatNonStreamMixin:
                 # Log what we're sending to the LLM (verbose mode)
                 log.llm_context(prepared_messages)
 
-                # Summarize outgoing thread on /new, build seed, rotate. Durable
-                # inter-bot resets already rotated atomically during claim; they
-                # provide a server-resolved archived seed source and must never
-                # rotate a second time here.
-                reset_policy = getattr(request, "inter_bot_session_policy", None)
-                seed_source = getattr(request, "inter_bot_seed_session_id", None)
-                self._maybe_summarize_on_new(
-                    llm_bawt, bot_id, user_prompt, thread_binding=thread_binding
-                )
-                from .routes.history import maybe_build_session_seed
-                if reset_policy == "reset_retain_history":
-                    from .routes.history import build_context_seed
-                    seed = build_context_seed(
-                        bot_id, model_alias, self, session_id=seed_source, llm_bawt=llm_bawt
-                    ) if seed_source else {"messages": []}
-                    inject_seed_messages = seed.get("messages", [])
-                elif reset_policy == "reset_without_history":
-                    # An explicit empty list means "cold-start with no history";
-                    # None means no seed decision. Preserve that distinction.
-                    inject_seed_messages = []
-                else:
-                    inject_seed_messages = maybe_build_session_seed(
-                        llm_bawt, bot_id, model_alias, user_prompt, self,
-                        thread_binding=thread_binding,
-                    )
-                rotated_id = None
-                if _is_agent and not reset_policy:
-                    rotated_id = self._maybe_rotate_agent_session(
-                        llm_bawt, bot_id, user_prompt, thread_binding=thread_binding,
-                        **({"delivery_id": delivery_new_id} if delivery_new_id else {}),
-                    )
+                from .session_lifecycle.execution import NewSessionExecution, PreparedNewSession
 
-                # A claimed retry must target its exact first successor, even
-                # when another thread became active after that rotation.
-                if (
-                    _is_agent
-                    and thread_binding
-                    and not thread_binding.get("explicit_thread")
-                    and (user_prompt or "").lstrip().startswith("/new")
-                ):
-                    from .agent_new_rotation import bind_new_successor
-                    thread_binding = bind_new_successor(
-                        self, llm_bawt, rotated_id=rotated_id,
-                        delivery_id=delivery_new_id,
+                reset_policy = getattr(request, "inter_bot_session_policy", None)
+                prepared_reset = (
+                    NewSessionExecution.prepare_agent(
+                        self, llm_bawt, request, bot_id=bot_id,
+                        user_prompt=user_prompt, model_alias=model_alias,
+                        thread_binding=thread_binding, delivery_id=delivery_new_id,
                         backend_name=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
-                    )
+                    ) if _is_agent else PreparedNewSession(None, None, None)
+                )
+                inject_seed_messages = prepared_reset.seed_messages
+                thread_binding = prepared_reset.thread_binding
 
                 # TASK-709 F4: refresh the outer ``resolved_session_id`` from
                 # the post-rotation binding so ``turn_complete`` emits point at
@@ -483,6 +433,15 @@ class ChatNonStreamMixin:
                     ).strip()
                     if _final_sid:
                         resolved_session_id = _final_sid
+                        if (
+                            not reset_policy
+                            and (_final_binding.get("explicit_thread")
+                                 or not is_new_command(user_prompt))
+                        ):
+                            self._turn_log_store.accept_session_binding(
+                                turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
+                                session_id=_final_sid, admission_claim=admission_claim,
+                            )
 
                 from .session_continuity import record_session_continuity
                 if _is_agent:
@@ -501,27 +460,41 @@ class ChatNonStreamMixin:
                         user_id=user_id,
                     )
 
-                # Execute the query with prepared messages
-                response, tool_context, tool_call_details = llm_bawt.execute_llm_query(
-                    prepared_messages,
-                    plaintext_output=True,
-                    stream=False,
-                    inject_messages=inject_seed_messages,
-                    thread_binding=thread_binding,
-                    bridge_request_id=getattr(request, "inter_bot_bridge_request_id", None),
-                    bridge_timeout_seconds=getattr(request, "inter_bot_timeout_seconds", None),
-                    bridge_event_callback=bridge_event_callback,
-                    turn_execution=turn_execution,
-                    task_turn_capability=task_turn_capability,
+                # Persist the original /new command; send only its parsed task
+                # to the bridge, without mutating cached history or model text.
+                outbound_task = (
+                    prepared_reset.bridge_prompt if _is_agent else
+                    chat_reset.follow_up if chat_reset else None
                 )
+                outbound_messages = NewSessionExecution.bridge_messages(
+                    prepared_messages, outbound_task, user_prompt,
+                )
+                if chat_reset is not None and chat_reset.follow_up is None:
+                    from .session_lifecycle.receipt import RESET_CONFIRMATION
+
+                    response, tool_context, tool_call_details = RESET_CONFIRMATION, "", []
+                else:
+                    response, tool_context, tool_call_details = llm_bawt.execute_llm_query(
+                        outbound_messages,
+                        plaintext_output=True,
+                        stream=False,
+                        inject_messages=inject_seed_messages,
+                        thread_binding=thread_binding,
+                        bridge_reset_action=prepared_reset.bridge_reset_action,
+                        bridge_request_id=getattr(request, "inter_bot_bridge_request_id", None),
+                        bridge_timeout_seconds=getattr(request, "inter_bot_timeout_seconds", None),
+                        bridge_event_callback=bridge_event_callback,
+                        turn_execution=turn_execution,
+                        task_turn_capability=task_turn_capability,
+                    )
 
                 # Splice the injected seed into the logged prompt so the turn
                 # log reflects what the harness session received: [system,
                 # ...seed history..., user]. Additive — nothing dropped.
-                _logged_messages = prepared_messages
+                _logged_messages = outbound_messages
                 if inject_seed_messages:
-                    _sys = [m for m in prepared_messages if getattr(m, "role", None) == "system"]
-                    _rest = [m for m in prepared_messages if getattr(m, "role", None) != "system"]
+                    _sys = [m for m in outbound_messages if getattr(m, "role", None) == "system"]
+                    _rest = [m for m in outbound_messages if getattr(m, "role", None) != "system"]
                     _logged_messages = [*_sys, *inject_seed_messages, *_rest]
 
                 # Check if cancelled during generation
@@ -687,7 +660,7 @@ class ChatNonStreamMixin:
                 log.debug(f"Stripped emotes for TTS: {original_len} -> {len(response_text)} chars")
 
         # Estimate token counts (rough approximation: 1 token ≈ 4 characters)
-        prompt_text = " ".join(m.content or "" for m in request.messages)
+        prompt_text = " ".join(message_content_text(m.content) or "" for m in request.messages)
         prompt_tokens = len(prompt_text) // 4
         completion_tokens = len(response_text) // 4
         total_tokens = prompt_tokens + completion_tokens

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
 from agent_bridge.events import AgentEvent, AgentEventKind
+from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 from agent_bridge.store import EventStore
@@ -193,7 +194,7 @@ class SessionBridge(ChangedFileLifecycleMixin):
         # is also pushed on the run stream so the originating
         # /v1/chat/completions request finishes with assistant content,
         # mirroring the claude-code / codex bridges.
-        if message.lstrip().startswith("/new"):
+        if is_new_command(message):
             bot_id_for_reset = self._resolve_bot_id(session_key) or session_key
             cleared = await self._reset_openclaw_session(session_key)
             logger.info(

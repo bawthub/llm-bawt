@@ -57,6 +57,8 @@ def engine():
             id TEXT PRIMARY KEY, bot_id TEXT, user_id TEXT, status TEXT,
             started_at TIMESTAMP, ended_at TIMESTAMP, archived_at TIMESTAMP, session_metadata TEXT
         )"""))
+        conn.execute(text("CREATE TABLE bot_profiles (slug TEXT PRIMARY KEY, last_session_id TEXT)"))
+        conn.execute(text("INSERT INTO bot_profiles (slug) VALUES ('nova'), ('caid')"))
     yield eng
     eng.dispose()
 
@@ -96,6 +98,58 @@ def test_rotation_drops_stale_sdk_key_for_every_user_of_that_bot_only(engine):
     assert old["status"] == "archived"
     assert json.loads(old["session_metadata"])["reset_successor_id"] == rotated["nick"]
     assert rows(engine, id="other-bot")[0]["status"] == "active"
+
+
+def point_to(engine, session_id):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE bot_profiles SET last_session_id=:id WHERE slug='nova'"),
+                     {"id": session_id})
+
+
+def pointer(engine):
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT last_session_id FROM bot_profiles WHERE slug='nova'")).scalar_one()
+
+
+def test_runtime_switch_moves_only_pointed_owner_not_last_user(engine):
+    insert(engine, "selected", user="a-owner")
+    insert(engine, "other", user="z-owner")
+    point_to(engine, "selected")
+    successors = dict(rotate_active_threads(engine, "nova"))
+    assert pointer(engine) == successors["a-owner"]
+    assert pointer(engine) != successors["z-owner"]
+    fresh = rows(engine, id=pointer(engine))[0]
+    metadata = json.loads(fresh["session_metadata"])
+    assert metadata["context_lifecycle"]["action"] == RUNTIME_SWITCH_SOURCE
+    assert "agent_session_keys" not in metadata
+
+
+@pytest.mark.parametrize("selected", [None, "archived"])
+def test_runtime_switch_never_guesses_null_or_archived_pointer(engine, selected):
+    insert(engine, "active")
+    insert(engine, "archived", status="archived")
+    point_to(engine, selected)
+    assert rotate_active_threads(engine, "nova")
+    assert pointer(engine) == selected
+
+
+def test_runtime_switch_pointer_and_all_rotations_rollback_together(engine, monkeypatch):
+    from llm_bawt.memory.session_reset_lineage import SessionResetLineage
+    insert(engine, "selected", user="a-owner")
+    insert(engine, "other", user="z-owner")
+    point_to(engine, "selected")
+    rotate = SessionResetLineage.rotate
+    def fail_second(engine, **kwargs):
+        if kwargs["user_id"] == "z-owner":
+            raise RuntimeError("second scope failed")
+        return rotate(engine, **kwargs)
+    monkeypatch.setattr(SessionResetLineage, "rotate", fail_second)
+    with pytest.raises(RuntimeError, match="second scope failed"):
+        rotate_active_threads(engine, "nova")
+    assert pointer(engine) == "selected"
+    assert {row["id"] for row in rows(engine, bot_id="nova", status="active")} == {"selected", "other"}
+    assert all("reset_successor_id" not in json.loads(row["session_metadata"])
+               for row in rows(engine, bot_id="nova"))
 
 
 def _persist(monkeypatch, previous, profile, *, rotate=None):

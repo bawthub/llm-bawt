@@ -55,10 +55,10 @@ async def get_or_create_active_session(
 @mcp.tool(name="sessions_rotate")
 async def rotate_session(
     bot_id: str = "default", user_id: str | None = None,
-    key: str = "",
+    key: str = "", accept_pointer: bool = False,
 ) -> str:
-    """Archive the active session; keyed retries reuse the first successor."""
+    """Archive the active session; accepted /new stamps the bot pointer."""
     return await _get_storage().rotate_session(
-        bot_id=bot_id, user_id=user_id,
+        bot_id=bot_id, user_id=user_id, accept_pointer=accept_pointer,
         **({"idempotency_key": key} if key else {}),
     )

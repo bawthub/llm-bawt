@@ -44,8 +44,15 @@ things that were previously conflated:
 - the last reset/compaction lifecycle receipt stored on the active session.
 
 Health is scoped to the **active durable thread** by joining its trigger messages
-to turn logs. A reset therefore starts at `unknown`; the prior thread's critical
-usage cannot leak into the new one.
+to turn logs. On terminal turn persistence, the owning `(bot_id, user_id)`
+session also records `context_stats` (latest turn ID, completed time, provider
+session key and usage) in its metadata in the same transaction. An admitted
+turn invalidates the old gauge only when its trigger is already linked to that
+session; if the message is not yet persisted, projection waits for completion
+rather than guessing which active or archived thread owns it. Bot profiles are
+shared across users and do not hold a single global context gauge. A reset
+therefore starts at `unknown`; the prior thread's critical usage cannot leak
+into the new one. Turn logs remain the authoritative audit/recheck source.
 
 Defaults are runtime settings and can be overridden per bot:
 
@@ -104,6 +111,103 @@ Resets are non-destructive: prior `sessions` and partitioned `messages` rows sta
 readable. The new session's metadata records the action, reason, predecessor,
 and time. A reset requested while the bot has an open turn returns 409.
 
+## Shared new-session lifecycle (TASK-1188)
+
+`service/session_lifecycle` owns typed reset intent, execution, completion and
+recovery. Callers use the existing durable delivery queue, not a reset-specific
+queue. A database rotation alone is not a completed reset.
+
+| Caller | Continuity | Admission | Completion evidence |
+|---|---|---|---|
+| Continuous agent `/new` or `/new <task>` | configured | wait for idle | exact provider acknowledgement, keyed lineage, completed persisted transcript |
+| Continuous chat-model `/new` or `/new <task>` | configured | wait for idle | keyed lineage and completed persisted transcript; no fabricated provider acknowledgement |
+| Bot-send reset policy plus task | retained or clean | wait for idle | exact provider acknowledgement, unchanged persisted task answer, separate app receipt |
+| Context-reset API | requested retained or clean | skip if busy/stale | same provider-backed receipt |
+| Session-reset API | clean (compatibility) | skip if busy/stale | same provider-backed receipt |
+| Scheduled System `/new` | configured | skip if busy/stale | same provider-backed receipt |
+
+Only the exact `/new` token followed by whitespace or end-of-input is a command;
+`/newspaper` and `/new/task` are ordinary text. Text-part messages use the same
+parser as admission and receipt verification. The original command remains in
+history; only its parsed task is sent to inference. Bot-policy task text stays
+literal, including a task that happens to start with `/new`.
+
+The target session and message author are independent. Scheduled commands are
+ordinary visible user-role `/new` messages authored by **bot `system`**, displayed
+as **System** through its entity profile. System is not a runnable bot or a new
+role, and does not change the conversation owner.
+
+For bare commands the app owns the confirmation and canonical assistant ID.
+For reset-plus-task the task answer is never rewritten; one separate app-authored
+confirmation is persisted. Receipt and `thread_switched` outbox commit together.
+Fresh history HTTP reads return the same author, command, answer and receipt IDs;
+Redis publication is retryable, and duplicate event delivery is an invalidation,
+not permission to move the bot's pointer backward.
+
+`bot_profiles.last_session_id` selects the latest accepted bot session. Updates
+occur under admission fencing or in the first rotation transaction, never on a
+late completion or keyed replay. Claim-time predecessor capture permits queued
+`/new` commands to rotate sequentially. Accepted reset deliveries with uncertain
+provider/task execution are terminally ambiguous rather than automatically
+replayed; crash recovery may finish a receipt only from persisted evidence.
+
+### Explicit-thread compatibility
+
+An explicitly selected thread remains selected: `/new` is literal text there,
+not authority to replace the selection or reset another active conversation.
+This preserves the agent explicit-thread guard and corrects a chat-only bug:
+the old chat interceptor reset the unrelated active session before honoring the
+explicit thread for persistence. No reset receipt is emitted for literal text.
+Runtime model switches retain lazy provider binding and have no command receipt;
+their pointer moves only when it still names the replaced session.
+
+Native Codex retains clean reset support, including standalone reset with a
+verified empty successor provider binding. It rejects retained/configured
+history it cannot seed instead of silently discarding it. OpenClaw keeps its
+legacy typed `/new` command and explicit-thread guard; its support for typed
+commands does not imply support for app-managed bot-policy resets.
+
+## Idle oversized-context job (TASK-1185 / TASK-1188)
+
+**Integration in progress; automation stays disabled pending parity verification
+and explicit operator activation.** The app registers one disabled
+`IDLE_CONTEXT_RESET` job with a five-minute interval; source reload never enables
+it. Eligibility remains **strictly above 100,000 resident tokens** and
+**strictly more than 15 minutes since completion**, not turn creation time.
+
+`IdleContextCandidates` selects at most one session per bot through
+`bot_profiles.last_session_id`. It never enumerates per-user active sessions or
+guesses a missing pointer. Explicitly resumed archived sessions are valid.
+Canonical session-linked turn usage supplies the measurement; newer bot activity
+invalidates an older gauge. Protected bots are excluded before their sessions or
+turns are read. Unknown measurements and invalid/missing pointers are skipped.
+
+The job is a thin caller of `NewSessionLifecycle.submit`: a literal visible
+`/new`, authored by **BOT:system**, targeting the existing session's owner.
+System is not a new protocol role or conversation owner. The intent requests
+`CONFIGURED` continuity (the same policy as typed `/new`), standalone reset,
+`SKIP` admission, exact expected session/usage-turn fences, and job/run provenance.
+The lifecycle rechecks eligibility, queued/active/reserved work and both fences
+under the target lock at submission and claim. It owns execution, history,
+provider acknowledgment, confirmation and thread-change events; the scheduler
+performs no session writes or event publication.
+
+The normal scheduler owns **one JobRun for the entire sweep**, including start,
+finish, duration and a per-bot result dictionary. A transactional due-slot claim
+prevents duplicate workers executing the same occurrence. Only a shared-handler
+`COMPLETED` result with a persisted receipt counts as a reset; queueing or a
+successful transport alone does not. Failed and ambiguous/unconfirmed outcomes
+remain visible and make the run fail rather than falsely report success. A
+stable job/session/measurement key reattaches to the same delivery across later
+sweeps; the run ID is provenance, not a fresh reset key. No per-candidate JobRun
+or job-owned event outbox remains.
+
+Verification includes `test_idle_context_reset.py`,
+`test_idle_context_reset_pg.py` (test-owned PostgreSQL only), and preserved
+projection regressions in `test_turn_context_snapshot_pg.py`. Full cross-caller
+parity and disposable-provider/browser proof are separate completion gates;
+passing candidate/queue tests alone does not authorize activation.
+
 ## Durable inter-bot ordering and idempotency
 
 `bots_send_message` and `POST /v1/inter-bot-deliveries` accept `session_policy`.
@@ -113,7 +217,7 @@ transaction, the dispatcher:
 
 1. archives the current durable thread;
 2. creates a deterministic fresh thread for the delivery;
-3. stores old/new thread IDs and reset receipt on the delivery;
+3. stores old/new thread IDs with `reset_status=ROTATED` (not completion);
 4. rewrites the server-owned payload with the fresh thread and seed source;
 5. reserves the deterministic fallback turn.
 

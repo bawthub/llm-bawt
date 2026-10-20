@@ -51,6 +51,7 @@ class InterBotDeliveryDispatcher:
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._announce_tasks: set[asyncio.Task] = set()
         self._talk_reply_task: asyncio.Task | None = None
+        self._new_session_outbox = None
         self.claim_owner = f"dispatcher-{uuid.uuid4().hex}"
         self._dispatcher_lock = None
         self._subscriber_gap_logged = False
@@ -174,6 +175,27 @@ class InterBotDeliveryDispatcher:
             try:
                 self.store.recover_expired()
                 self._schedule_eligible_targets()
+                if getattr(self.store, "engine", None) is not None:
+                    from .session_lifecycle.outbox import NewSessionOutbox
+                    from .session_lifecycle.receipt import NewSessionReceipt
+
+                    settled = await asyncio.to_thread(
+                        NewSessionReceipt.reconcile_typed, self.store.engine,
+                    )
+                    for delivery in settled:
+                        await self._emit(delivery)
+                    from .session_lifecycle.policy_receipt import BotPolicyReceipt
+
+                    settled_policy = await asyncio.to_thread(
+                        BotPolicyReceipt.reconcile, self.store.engine,
+                    )
+                    for delivery in settled_policy:
+                        await self._emit(delivery)
+                    if self._new_session_outbox is None:
+                        self._new_session_outbox = NewSessionOutbox(self.store.engine)
+                    await self._new_session_outbox.drain(
+                        getattr(self.service, "_redis_subscriber", None),
+                    )
                 talk_replies = getattr(self, "talk_replies", None)
                 running_reply = getattr(self, "_talk_reply_task", None)
                 if talk_replies is not None and (running_reply is None or running_reply.done()):
@@ -434,7 +456,7 @@ class InterBotDeliveryDispatcher:
                 response_chars=len(content),
             )
             if delivered:
-                await self._emit(delivered)
+                await self._finish_delivered(delivered)
         except DeliveryTargetBusy as exc:
             queued = self.store.requeue(record.id, claim_token, str(exc), delay_seconds=0)
             if queued:
@@ -455,6 +477,20 @@ class InterBotDeliveryDispatcher:
                     if failed:
                         await self._emit(failed)
                     return
+            from .session_lifecycle.recovery import NewSessionRecovery
+
+            if current.transport_accepted_at is not None and NewSessionRecovery.is_reset({
+                "session_policy": current.session_policy, "metadata_json": current.metadata,
+                "payload_json": payload,
+            }) and not (turn_ended_at is not None and turn_status in {"ok", "completed"} and not turn_error):
+                with self.store.engine.begin() as conn:
+                    ambiguous = NewSessionRecovery.mark_ambiguous(
+                        conn, delivery_id=record.id, claim_token=claim_token,
+                        reason=f"accepted reset outcome is ambiguous: {error}",
+                    )
+                if ambiguous:
+                    await self._emit(ambiguous)
+                return
             if self._is_context_overflow(error):
                 from ..bots import BotManager
 
@@ -502,7 +538,7 @@ class InterBotDeliveryDispatcher:
                     response_chars=0,
                 )
                 if delivered:
-                    await self._emit(delivered)
+                    await self._finish_delivered(delivered)
             elif (
                 self._is_terminal(exc)
                 or current.attempt_count >= current.max_attempts
@@ -526,6 +562,71 @@ class InterBotDeliveryDispatcher:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _finish_delivered(self, record: DeliveryRecord) -> None:
+        """A delivered reset still needs an exact app-authored receipt."""
+        from .session_lifecycle.receipt import NewSessionReceipt
+        from .session_lifecycle.recovery import NewSessionRecovery
+
+        if record.session_policy in {"reset_retain_history", "reset_without_history"}:
+            from .session_lifecycle.policy_receipt import BotPolicyReceipt
+
+            try:
+                receipt = await asyncio.to_thread(
+                    BotPolicyReceipt.ensure, self.store.engine, record,
+                )
+            except Exception:
+                logger.exception("bot-policy reset receipt verification failed: %s", record.id)
+                receipt = None
+            if receipt is not None:
+                await self._emit(self.store.get(record.id) or record)
+                return
+            ambiguous = await asyncio.to_thread(
+                NewSessionRecovery.fail_missing_policy_receipt,
+                self.store.engine, record.id,
+                "reset follow-up finished without exact provider binding and persisted receipt",
+            )
+            if ambiguous is None:
+                current = self.store.get(record.id)
+                if current is None or not current.metadata.get("new_session_receipt"):
+                    raise RuntimeError(f"bot-policy reset receipt could not be settled: {record.id}")
+                ambiguous = current
+            await self._emit(ambiguous)
+            return
+        try:
+            intent = NewSessionReceipt.typed_intent(record)
+        except (TypeError, ValueError) as exc:
+            intent = None
+            reason = f"typed reset provenance is invalid: {exc}"
+        else:
+            reason = "typed reset finished without provider binding and persisted receipt"
+        if intent is not None:
+            try:
+                receipt = await asyncio.to_thread(
+                    NewSessionReceipt.ensure, self.store.engine, record, intent,
+                )
+            except Exception:
+                logger.exception("typed reset receipt verification failed: %s", record.id)
+                receipt = None
+            if receipt is not None:
+                await self._emit(self.store.get(record.id) or record)
+                return
+        elif (not isinstance(record.metadata.get("new_session_intent"), dict)
+              or record.metadata["new_session_intent"].get("origin") != "chat_command"):
+            await self._emit(record)
+            return
+        ambiguous = await asyncio.to_thread(
+            NewSessionRecovery.fail_missing_typed_receipt,
+            self.store.engine, record.id, reason,
+        )
+        if ambiguous is None:
+            # A concurrent receipt may have won the row lock; otherwise a DB
+            # outage leaves this state unresolved for the next recovery sweep.
+            current = self.store.get(record.id)
+            if current is None or not current.metadata.get("new_session_receipt"):
+                raise RuntimeError(f"typed reset receipt could not be settled: {record.id}")
+            ambiguous = current
+        await self._emit(ambiguous)
 
     async def _heartbeat(self, delivery_id: str, claim_token: str) -> None:
         while True:

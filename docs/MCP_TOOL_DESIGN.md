@@ -87,6 +87,11 @@ test cap is now 11,645. TASK-1147 adds typed task review list/add tools with
 separate read/write contracts, author attribution and retry guidance: measured
 98 tools, 3,380 description tokens and 11,945 total tokens (+300 over 11,645).
 The updated test caps are 3,380 description and 11,945 total tokens.
+TASK-1188 adds `accept_pointer: bool = False` to `sessions_rotate` so accepted
+new-session transitions can atomically stamp the bot pointer through the MCP
+storage adapter. Measured full-load catalog: 11,957 total tokens (+12 schema
+tokens); the total cap is 11,957, with the description cap unchanged. Keyed
+replays do not re-stamp the pointer. No warnings were removed to meet the cap.
 
 ## Provider loading caveat
 

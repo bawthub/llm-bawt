@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
+from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 
@@ -165,12 +166,28 @@ class CodexCommandMixin:
             thread_resume_id = None
         explicit_thread = (fields.get("explicit_thread") or "").strip() in ("1", "true")
 
-        # /new resets the session — strip and start fresh. Explicit-thread
-        # turns never process /new (message passes through as literal text).
-        reset_requested = (
-            not explicit_thread and message.lstrip().startswith("/new")
+        from .reset_evidence import CodexResetEvidence
+
+        try:
+            reset_evidence = CodexResetEvidence.from_fields(
+                fields, thread_session_id=thread_session_id,
+                explicit_thread=explicit_thread, thread_resume_id=thread_resume_id,
+            )
+        except ValueError as exc:
+            self._publish_event(request_id, session_key, 1,
+                                kind=AgentEventKind.ERROR, text=str(exc), model=model)
+            self._publisher.publish_run_done(request_id)
+            self._trigger_message_ids.pop(request_id, None)
+            await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
+            return
+
+        # Structured reset-follow-up preserves the supplied task byte-for-byte.
+        # Its app-owned receipt is published only after verified completion.
+        # Legacy /new parsing remains unchanged for non-structured commands.
+        reset_requested = bool(reset_evidence) or (
+            not explicit_thread and is_new_command(message)
         )
-        if reset_requested:
+        if reset_requested and reset_evidence is None:
             self._publish_session_reset_unified(
                 bot_slug or session_key, session_key, had_session=True,
             )
@@ -218,6 +235,22 @@ class CodexCommandMixin:
             tmp_image_paths: list[str] = []
 
             try:
+                if reset_evidence is not None and reset_evidence.reset_only:
+                    # Codex has no process-global conversation: continuity is
+                    # solely the app-supplied resume ID. A clean standalone reset
+                    # acknowledges explicit no-resume under the session queue;
+                    # the app verifies its empty successor before committing the
+                    # receipt. Do not invent a task merely to mint a provider ID.
+                    self._publish_event(
+                        request_id, session_key, 1,
+                        kind=AgentEventKind.ASSISTANT_DONE,
+                        text="Session reset. Ready for a new conversation.",
+                        model=model,
+                        extra_raw={"new_session_ack": reset_evidence.acknowledgment()},
+                    )
+                    self._publisher.publish_run_done(request_id)
+                    return
+
                 # MCP context injection (matches claude bridge). Body from the
                 # registry (TASK-490) with a byte-identical local fallback.
                 if system_prompt and bot_slug:
@@ -386,6 +419,7 @@ class CodexCommandMixin:
                                 item_buffers=item_buffers,
                                 thread=thread,
                                 thread_session_id=thread_session_id,
+                                reset_evidence=reset_evidence,
                             )
                             if persisted_now:
                                 session_persisted = True
@@ -395,7 +429,8 @@ class CodexCommandMixin:
                         # On a fresh thread, capture the id once the stream is
                         # done in case we never saw a typed thread.started event.
                         if (
-                            not session_persisted
+                            reset_evidence is None
+                            and not session_persisted
                             and not resume_id
                             and bot_slug
                             and thread_session_id
@@ -408,6 +443,8 @@ class CodexCommandMixin:
                             session_persisted = True
 
                         if not aborted and not self._already_sent_done(seq, item_buffers):
+                            if reset_evidence is not None:
+                                raise RuntimeError("Codex reset has no verified turn.completed event")
                             token_usage = self._extract_token_usage(
                                 final_usage,
                                 actual_model_or_default=actual_model,
@@ -475,7 +512,8 @@ class CodexCommandMixin:
 
                         # Recoverable session error → retry once with fresh thread.
                         if (
-                            not fresh_session_retry
+                            reset_evidence is None
+                            and not fresh_session_retry
                             and not text_parts
                             and _is_codex_session_error(e)
                         ):

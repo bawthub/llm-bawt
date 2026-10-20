@@ -264,6 +264,7 @@ class AgentBridgeBackend(AgentBackend):
                                 else None
                             ),
                             inject_messages=config.get("inject_messages"),
+                            bridge_reset_action=config.get("bridge_reset_action"),
                             context_window=(
                                 int(config.get("context_window"))
                                 if config.get("context_window") else None
@@ -356,6 +357,18 @@ class AgentBridgeBackend(AgentBackend):
                             elif event.kind == AgentEventKind.ASSISTANT_DONE:
                                 if isinstance(event.raw, dict) and event.raw.get("end_reason") == "aborted":
                                     result_queue.put({"event": "turn_cancelled"})
+                                if isinstance(event.raw, dict) and event.raw.get("new_session_ack"):
+                                    from ..service.session_lifecycle.receipt import NewSessionReceipt
+                                    from ..utils.db import get_shared_engine
+
+                                    engine = get_shared_engine(self._config)
+                                    if engine is None:
+                                        raise RuntimeError("reset acknowledgement has no durable database")
+                                    await asyncio.to_thread(
+                                        NewSessionReceipt.record_provider_ack, engine,
+                                        request_id=request_id,
+                                        bot_id=str(config.get("bot_id") or ""), event=event,
+                                    )
                                 # Capture actual upstream model if provided
                                 if event.model:
                                     nonlocal upstream_model

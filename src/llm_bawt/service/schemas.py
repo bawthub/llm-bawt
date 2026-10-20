@@ -116,6 +116,14 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description="Dispatcher-resolved archived thread used only for retained-history reset seeding.",
     )
+    inter_bot_reset_only: bool = Field(
+        default=False,
+        description="Server-stamped standalone reset: no model-visible follow-up task.",
+    )
+    inter_bot_typed_follow_up: bool = Field(
+        default=False,
+        description="Server-stamped typed /new with a separate model-visible task.",
+    )
     # TASK-269: continuation-turn linkage.  Set when this turn is answering a
     # prior deferred AskUserQuestion.  parent_turn_id threads the chain (and
     # drives cross-tab resolution via turn_start{parent_turn_id}); when

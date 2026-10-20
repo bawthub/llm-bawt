@@ -221,7 +221,9 @@ def maybe_build_session_seed(
         _thread_id = str(_binding.get("thread_session_id") or "").strip()
         _resume_id = str(_binding.get("thread_resume_id") or "").strip()
         _explicit = bool(_binding.get("explicit_thread"))
-        _is_new = (user_prompt or "").lstrip().startswith("/new")
+        from agent_bridge.maintenance import is_new_command
+
+        _is_new = is_new_command(user_prompt)
         _reset_policy = str(_binding.get("session_policy") or "")
         _seed_session_id = str(_binding.get("seed_session_id") or "").strip()
 

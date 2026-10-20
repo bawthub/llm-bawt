@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM
 
 from .compact_policy import apply_compact_default, is_bare_compact
@@ -59,12 +60,16 @@ async def prepare_send(
     if request.trigger_message_id:
         bridge._trigger_message_ids[request.request_id] = request.trigger_message_id
 
+    if request.bridge_reset_action and (request.bridge_reset_action not in {"reset_only", "reset_follow_up"}
+                                         or request.explicit_thread or not request.thread_session_id):
+        raise ValueError("Invalid structured reset command")
     reset_requested = (
         not request.explicit_thread
-        and request.message.lstrip().startswith("/new")
+        and (bool(request.bridge_reset_action) or is_new_command(request.message))
     )
     message = await bridge._preprocess_new_command(
         request.message,
+        reset_action=request.bridge_reset_action,
         explicit_thread=request.explicit_thread,
         bot_slug=request.bot_slug,
         session_key=request.session_key,

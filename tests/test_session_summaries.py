@@ -396,26 +396,25 @@ class TestMaybeSummarizeOnNew:
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestCallSiteGuards:
-    @pytest.mark.parametrize("path", [
-        "llm_bawt/service/chat_streaming.py",
-        "llm_bawt/service/chat_nonstream.py",
-    ])
-    def test_summarize_before_seed_in_both_dispatch_paths(self, path):
-        """TASK-641 ordering: _maybe_summarize_on_new must run BEFORE
-        maybe_build_session_seed in each dispatch path."""
-        text = (SRC / path).read_text()
-        summarize_idx = text.index("_maybe_summarize_on_new(")
-        seed_idx = text.index("inject_seed_messages = maybe_build_session_seed(")
-        assert summarize_idx < seed_idx, f"{path}: summarize must precede seed"
+    def test_summarize_before_seed_in_shared_reset_execution(self):
+        """Both dispatch paths invoke one summarize-before-seed executor."""
+        executor = (SRC / "llm_bawt/service/session_lifecycle/execution.py").read_text()
+        assert executor.index("service._maybe_summarize_on_new(") < executor.index(
+            "seed = maybe_build_session_seed("
+        )
+        for path in ("chat_streaming.py", "chat_nonstream.py"):
+            text = (SRC / "llm_bawt/service" / path).read_text()
+            assert "NewSessionExecution.prepare_agent(" in text
 
     def test_chat_new_summarizes_before_rotation(self):
-        text = (SRC / "llm_bawt/service/chat_streaming_bridge.py").read_text()
-        # The shared chat-bot /new helper owns summarize-before-rotation ordering.
-        branch = text[text.index("def _maybe_handle_chat_new_command"):]
-        branch = branch[:branch.index("\n    def ", 10)]
+        text = (SRC / "llm_bawt/service/session_lifecycle/execution.py").read_text()
+        branch = text[text.index("def prepare_chat("):text.index("def typed_follow_up(")]
         assert branch.index("_maybe_summarize_on_new") < branch.index(
             "_rotate_chat_session"
         )
+        for path in ("chat_streaming.py", "chat_nonstream.py"):
+            caller = (SRC / "llm_bawt/service" / path).read_text()
+            assert "NewSessionExecution.prepare_chat(" in caller
 
     def test_job_routes_thread_windows_through_common_unit(self):
         """summarize_eligible_sessions must call summarize_thread for

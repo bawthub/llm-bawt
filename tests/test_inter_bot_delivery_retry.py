@@ -52,7 +52,7 @@ def test_manual_retry_and_cancel_failed_original_do_not_deadlock(delivery, monke
         conn = kwargs["connection"]
         conn.execute(text("SET LOCAL lock_timeout = '4s'"))
         retry_pid.append(conn.execute(text("SELECT pg_backend_pid()")).scalar_one())
-        retry_has_row.set()  # retry holds original FOR UPDATE, before identity admission
+        retry_has_row.set()  # retry holds target then original row before admission
         if not resume_retry.wait(timeout=3):
             raise TimeoutError("cancel never reached the original row")
         return enqueue(**kwargs)
@@ -93,7 +93,7 @@ def test_manual_retry_and_cancel_failed_original_do_not_deadlock(delivery, monke
                 if blocked or not canceller.is_alive():
                     break
                 time.sleep(0.02)
-        assert blocked and canceller.is_alive(), "cancel never waited on FAILED original"
+        assert blocked and canceller.is_alive(), "cancel never waited on target lock"
     finally:
         resume_retry.set()
         retrier.join(timeout=5)

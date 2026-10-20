@@ -18,7 +18,9 @@ def prepare_delivery_new_binding(
     user_prompt: str, thread_binding: dict | None, backend_name: str,
 ) -> tuple[dict | None, str | None]:
     """Use the archived outgoing thread as retry seed source, never the new one."""
-    if (not (user_prompt or "").lstrip().startswith("/new")
+    from agent_bridge.maintenance import is_new_command
+
+    if (not is_new_command(user_prompt)
             or (thread_binding or {}).get("explicit_thread")
             or getattr(request, "inter_bot_session_policy", None)):
         return thread_binding, None

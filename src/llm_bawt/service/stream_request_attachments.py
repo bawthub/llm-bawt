@@ -11,6 +11,7 @@ import base64
 from typing import Any
 
 from ..media import MediaAssetNotFound, get_media_store
+from .chat_message_text import message_content_text
 
 
 async def prepare_stream_request_attachments(
@@ -41,13 +42,12 @@ async def prepare_stream_request_attachments(
         if message.role != "user":
             continue
 
+        user_prompt = message_content_text(message.content) or ""
         if isinstance(message.content, list):
             for part in message.content:
                 if not isinstance(part, dict):
                     continue
-                if part.get("type") == "text":
-                    user_prompt += part.get("text", "")
-                elif part.get("type") == "image_url":
+                if part.get("type") == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     if not url.startswith("data:"):
                         continue
@@ -74,8 +74,6 @@ async def prepare_stream_request_attachments(
                             "TASK-225: failed to auto-upload legacy inline image: %s",
                             exc,
                         )
-        else:
-            user_prompt = message.content or ""
 
         requested_ids = list(getattr(message, "attachment_ids", None) or [])
         for asset_id in requested_ids:

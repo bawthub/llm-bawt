@@ -18,6 +18,7 @@ from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 
 from .transport import CodexTransport, validate_auth_json
+from .reset_evidence import CodexResetEvidence
 from ._bridge_helpers import (
     CONSUMER_GROUP,
     CONSUMER_NAME,
@@ -236,6 +237,7 @@ class CodexEventMixin:
         item_buffers: dict[str, dict[str, Any]],
         thread: Any,
         thread_session_id: str | None = None,
+        reset_evidence: CodexResetEvidence | None = None,
     ) -> tuple[int, bool, Any]:
         """Translate a single ``ThreadEvent`` into OpenClawEvents.
 
@@ -243,10 +245,14 @@ class CodexEventMixin:
         ``usage`` is non-None only on ``turn.completed``.
         """
         et = getattr(event, "type", None) or self._dig(event, "type") or ""
+        # Structured reset proof is terminal exactly once. Drain trailing SDK
+        # events, but never turn an error into success or duplicate its receipt.
+        if reset_evidence is not None and item_buffers.get("__done_emitted__"):
+            return seq, False, None
 
         # ---- thread.started: capture thread_id, persist on first turn ----
         if et == "thread.started":
-            if not session_persisted and not resume_id and bot_slug:
+            if reset_evidence is not None or (not session_persisted and not resume_id and bot_slug):
                 thread_id = (
                     getattr(event, "thread_id", None)
                     or self._dig(event, "thread_id")
@@ -254,10 +260,14 @@ class CodexEventMixin:
                     or getattr(thread, "id", None)
                 )
                 if thread_id and thread_session_id:
-                    await self._set_thread_session(
-                        thread_session_id, bot_slug,
-                        str(thread_id), model,
-                    )
+                    if reset_evidence is not None:
+                        await reset_evidence.bind(self, bot_id=bot_slug,
+                                                  provider_id=thread_id, model=model)
+                    else:
+                        await self._set_thread_session(
+                            thread_session_id, bot_slug,
+                            str(thread_id), model,
+                        )
                     return seq, True, None
             return seq, False, None
 
@@ -267,6 +277,14 @@ class CodexEventMixin:
 
         # ---- turn.completed: ASSISTANT_DONE with usage ----
         if et == "turn.completed":
+            reset_ack = None
+            if reset_evidence is not None:
+                await reset_evidence.bind(
+                    self, bot_id=bot_slug,
+                    provider_id=getattr(thread, "id", None) or reset_evidence.provider_session_id,
+                    model=model,
+                )
+                reset_ack = reset_evidence.acknowledgment()
             usage = getattr(event, "usage", None) or self._dig(event, "usage")
             full_text = "".join(text_parts)
             token_usage = None
@@ -286,6 +304,7 @@ class CodexEventMixin:
                 text=full_text,
                 model=actual_model_ref[0],
                 token_usage=token_usage,
+                extra_raw={"new_session_ack": reset_ack} if reset_ack else None,
             )
             item_buffers["__done_emitted__"] = True
             return seq, False, usage
@@ -416,6 +435,8 @@ class CodexEventMixin:
                 text=str(err_msg),
                 model=actual_model_ref[0],
             )
+            if reset_evidence is not None:
+                item_buffers["__done_emitted__"] = True
             return seq, False, None
 
         logger.debug("Unhandled Codex event: type=%s", et)

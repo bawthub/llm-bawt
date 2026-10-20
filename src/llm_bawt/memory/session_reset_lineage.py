@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from sqlalchemy import text
 
 
@@ -17,7 +18,8 @@ class SessionResetLineage:
     @staticmethod
     def rotate(
         engine, *, bot_id: str, user_id: str | None, new_id: str,
-        idempotency_key: str | None = None,
+        idempotency_key: str | None = None, connection=None,
+        context_lifecycle: dict | None = None, accept_pointer: bool = False,
     ) -> bool:
         """Archive + successor link in one transaction; keyed retries reuse the successor.
 
@@ -26,9 +28,12 @@ class SessionResetLineage:
         its retry proof. An unkeyed /new retains its original unique-id behavior.
         """
         reset_at = time.time()
-        with engine.begin() as conn:
+        with (nullcontext(connection) if connection is not None else engine.begin()) as conn:
             postgres = conn.dialect.name == "postgresql"
             if postgres:
+                from ..service.turn_admission import lock_target
+
+                lock_target(conn, bot_id)
                 conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:bot), hashtext(:user))"),
                              {"bot": bot_id, "user": user_id or ""})
             params = {"bot": bot_id, "user": user_id}
@@ -64,10 +69,16 @@ class SessionResetLineage:
             metadata = {"reset_predecessor_ids": [row["id"] for row in rows]}
             if idempotency_key:
                 metadata["rotation_delivery_id"] = idempotency_key
+            if context_lifecycle is not None:
+                metadata["context_lifecycle"] = context_lifecycle
             conn.execute(text(f"""
                 INSERT INTO sessions (id, bot_id, user_id, started_at, status, session_metadata)
                 VALUES (:id, :bot, :user, CURRENT_TIMESTAMP, 'active', {meta_expr})
             """), {**params, "id": new_id, "meta": json.dumps(metadata)})
+            if accept_pointer:
+                from ..bot_session_state import BotSessionState
+
+                BotSessionState.accept(conn, bot_id=bot_id, session_id=new_id)
             return True
 
     @staticmethod

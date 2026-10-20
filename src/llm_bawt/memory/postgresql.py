@@ -563,6 +563,9 @@ class PostgreSQLMemoryBackend(
                         ON DELETE NO ACTION NOT DEFERRABLE
                     """))
 
+            from ..bot_session_state import BotSessionState
+            BotSessionState.ensure_schema(conn)
+
         self._schema_guard.run(
             self.engine,
             ("memory-shared", self.embedding_dim),

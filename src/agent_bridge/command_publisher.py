@@ -30,6 +30,7 @@ class CommandPublisherMixin:
         subagent_model: str | None = None,
         disallowed_tools: list[str] | None = None,
         inject_messages: list | None = None,
+        bridge_reset_action: str | None = None,
         context_window: int | None = None,
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
@@ -88,6 +89,13 @@ class CommandPublisherMixin:
             fields["inject_messages"] = json.dumps(
                 inject_messages, ensure_ascii=False
             )
+        if bridge_reset_action:
+            supported = (
+                backend == "claude-code" and bridge_reset_action in {"reset_only", "reset_follow_up"}
+            ) or (backend == "codex" and bridge_reset_action == "reset_follow_up")
+            if not supported:
+                raise ValueError("Unsupported agent bridge reset action")
+            fields["bridge_reset_action"] = bridge_reset_action
         if thread_session_id:
             fields["thread_session_id"] = thread_session_id
             if thread_resume_id:

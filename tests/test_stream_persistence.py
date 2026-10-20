@@ -65,7 +65,7 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     service._maybe_summarize_on_new = Mock()
     service._maybe_rotate_agent_session = Mock()
     service._finalize_turn = Mock()
-    service._turn_log_store = SimpleNamespace(engine=object())
+    service._turn_log_store = SimpleNamespace(engine=object(), accept_session_binding=Mock())
 
     coordinated: list[dict] = []
 
@@ -180,8 +180,9 @@ def test_inter_bot_nonstream_turn_publishes_visible_lifecycle(
     assert events[4]["session_id"] == "sess-visible-abc"
 
 
+@pytest.mark.parametrize("reset_policy", ["reset_retain_history", "reset_without_history"])
 def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_seed(
-    monkeypatch,
+    monkeypatch, reset_policy: str,
 ) -> None:
     """TASK-709 F1: for durable inter-bot deliveries with a reset session
     policy, the dispatcher writes the NEW (target) session id to
@@ -218,7 +219,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
     service._maybe_summarize_on_new = Mock()
     service._maybe_rotate_agent_session = Mock()
     service._finalize_turn = Mock()
-    service._turn_log_store = SimpleNamespace(engine=object())
+    service._turn_log_store = SimpleNamespace(engine=object(), accept_session_binding=Mock())
 
     class FakeCoordinator:
         def __init__(self, _engine):
@@ -253,6 +254,8 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
         "llm_bawt.service.routes.history.maybe_build_session_seed",
         lambda *_args, **_kwargs: None,
     )
+    seed_source = Mock(return_value={"messages": [{"role": "user", "content": "prior context"}]})
+    monkeypatch.setattr("llm_bawt.service.routes.history.build_context_seed", seed_source)
 
     request = ChatCompletionRequest(
         model="test-model",
@@ -273,9 +276,24 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
         # ``build_context_seed`` reads history. MUST NOT be emitted as the
         # lifecycle session id — that would route events to the dead thread.
         inter_bot_seed_session_id="sess-archived-source",
+        inter_bot_session_policy=reset_policy,
     )
 
     asyncio.run(service.chat_completion(request))
+    service._maybe_rotate_agent_session.assert_not_called()
+    if reset_policy == "reset_retain_history":
+        service._maybe_summarize_on_new.assert_called_once()
+        assert service._maybe_summarize_on_new.call_args.kwargs["thread_binding"] == {
+            "thread_session_id": "sess-archived-source",
+        }
+        assert seed_source.call_args.kwargs["session_id"] == "sess-archived-source"
+        assert llm_bawt.execute_llm_query.call_args.kwargs["inject_messages"] == [
+            {"role": "user", "content": "prior context"},
+        ]
+    else:
+        service._maybe_summarize_on_new.assert_not_called()
+        seed_source.assert_not_called()
+        assert llm_bawt.execute_llm_query.call_args.kwargs["inject_messages"] == []
 
     events = [call.args[2] for call in subscriber.publish_tool_event.await_args_list]
     turn_start = next(e for e in events if e["_type"] == "turn_start")

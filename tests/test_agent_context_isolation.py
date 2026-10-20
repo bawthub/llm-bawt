@@ -26,6 +26,8 @@ def test_context_teardown_drops_all_three_test_owned_children(monkeypatch):
     monkeypatch.setattr(context_tests, "require_test_db_config", lambda: object())
     monkeypatch.setattr(context_tests, "AgentContextStore", lambda config: store)
     monkeypatch.setattr(postgresql, "ensure_bot_partitions", Mock())
+    profiles = SimpleNamespace(engine=engine, upsert=Mock())
+    monkeypatch.setattr("llm_bawt.runtime_settings.BotProfileStore", lambda config: profiles)
     fixture = context_tests.context_store.__wrapped__()
     next(fixture)
     with pytest.raises(StopIteration):

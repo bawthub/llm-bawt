@@ -36,6 +36,7 @@ class JobType(str, Enum):
     MEDIA_GC = "media_gc"
     TOOL_RESULT_GC = "tool_result_gc"
     SEND_PROMPT = "send_prompt"
+    IDLE_CONTEXT_RESET = "idle_context_reset"
 
 
 class ScheduledJob(SQLModel, table=True):
@@ -272,6 +273,20 @@ class JobScheduler:
         # Create job run record
         def create_run():
             with Session(self.engine) as session:
+                if job.job_type == JobType.IDLE_CONTEXT_RESET:
+                    # Claim the occurrence and its ONE run atomically. A stale
+                    # due-list or another worker must not duplicate the sweep.
+                    db_job = session.exec(select(ScheduledJob).where(
+                        ScheduledJob.id == job.id,
+                    ).with_for_update()).first()
+                    now = datetime.now(timezone.utc)
+                    if (not db_job or not db_job.enabled
+                            or (db_job.next_run_at and db_job.next_run_at > now)):
+                        return None
+                    job.bot_id, job.config_json = db_job.bot_id, db_job.config_json
+                    db_job.last_run_at = now
+                    db_job.next_run_at = now + timedelta(minutes=db_job.interval_minutes)
+                    session.add(db_job)
                 run = JobRun(
                     job_id=job.id,
                     bot_id=job.bot_id,
@@ -283,6 +298,8 @@ class JobScheduler:
                 return run.id
 
         run_id = await loop.run_in_executor(None, create_run)
+        if run_id is None:
+            return
         start_time = datetime.now(timezone.utc)
         status = JobStatus.RUNNING
         result_json: str | None = None
@@ -307,6 +324,22 @@ class JobScheduler:
                     job.bot_id,
                     skip_reason or "no new activity",
                 )
+            elif job.job_type == JobType.IDLE_CONTEXT_RESET:
+                from .jobs.idle_context_reset import IdleContextResetJob
+
+                settings = self._parse_config_json(job.config_json)
+                protected = settings.get("protected_bot_ids", [])
+                if not isinstance(protected, list):
+                    raise ValueError("protected_bot_ids must be a list")
+                maintenance = IdleContextResetJob(
+                    self.engine, self.task_processor, protected_bot_ids=protected,
+                )
+                result = await maintenance.run(job_id=job.id, run_id=run_id, target_bot=job.bot_id)
+                result_json = json.dumps(result)
+                status = (JobStatus.FAILED if result["failed"] or result["ambiguous"]
+                          else JobStatus.SUCCESS if result["reset"] else JobStatus.SKIPPED)
+                if status == JobStatus.FAILED:
+                    error_message = "One or more reset operations failed or remain unconfirmed"
             else:
                 # Create and execute task based on job type
                 task = self._create_task_for_job(job)
@@ -350,7 +383,7 @@ class JobScheduler:
                 
                 # Update job's next_run_at
                 db_job = session.get(ScheduledJob, job.id)
-                if db_job:
+                if db_job and job.job_type != JobType.IDLE_CONTEXT_RESET:
                     db_job.last_run_at = start_time
                     db_job.next_run_at = start_time + timedelta(minutes=db_job.interval_minutes)
                     session.add(db_job)
@@ -734,6 +767,20 @@ def init_default_jobs(engine, config) -> None:
     """Initialize default scheduled jobs if they don't exist."""
     global_settings = RuntimeSettingsResolver(config=config)
     with Session(engine) as session:
+        # Bootstrap at most one disabled automation job, even with two app workers.
+        # Activation is an explicit operator decision, never a source reload side effect.
+        if engine.dialect.name == "postgresql":
+            session.execute(text("SELECT pg_advisory_xact_lock(hashtext('idle-context-job-bootstrap'))"))
+        existing_idle = session.exec(select(ScheduledJob).where(
+            ScheduledJob.job_type == JobType.IDLE_CONTEXT_RESET,
+        )).first()
+        if not existing_idle:
+            session.add(ScheduledJob(
+                job_type=JobType.IDLE_CONTEXT_RESET, bot_id=WILDCARD_BOT_ID,
+                enabled=False, interval_minutes=5,
+                config_json=json.dumps({"resident_tokens_gt": 100000, "idle_minutes_gt": 15}),
+            ))
+            session.commit()
         # Check if profile maintenance job exists
         existing = session.exec(
             select(ScheduledJob).where(ScheduledJob.job_type == JobType.PROFILE_MAINTENANCE)

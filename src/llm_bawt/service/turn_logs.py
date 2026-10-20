@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from contextlib import nullcontext
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import exists as sa_exists, func, text as sa_text
 from sqlmodel import Session, delete, select
@@ -201,9 +202,12 @@ class TurnLogStore:
                     if existing_status is not None:
                         if existing_status != "reserved":
                             raise RuntimeError(f"turn id already exists: {turn_id}")
+                        # A reservation is not a started turn. Stamp admission
+                        # time so the new unknown gauge supersedes turns that
+                        # finished while this request was queued.
                         conn.execute(
                             sa_text(
-                                "UPDATE turn_logs SET request_id=:request_id, path=:path,"
+                                "UPDATE turn_logs SET created_at=:created_at, request_id=:request_id, path=:path,"
                                 " stream=:stream, model=:model, bot_id=:bot_id, user_id=:user_id,"
                                 " status=:status, latency_ms=:latency_ms, user_prompt=:user_prompt,"
                                 " request_json=:request_json, response_text=:response_text,"
@@ -216,6 +220,7 @@ class TurnLogStore:
                             ),
                             {
                                 "turn_id": turn_id,
+                                "created_at": created_at,
                                 "request_id": request_id,
                                 "path": path,
                                 "stream": stream,
@@ -237,10 +242,19 @@ class TurnLogStore:
                                 "parent_turn_id": parent_turn_id,
                             },
                         )
+                        from .turn_context_snapshot import record_turn_context
+                        record_turn_context(conn, SimpleNamespace(
+                            id=turn_id, bot_id=bot_id, user_id=user_id,
+                            trigger_message_id=trigger_message_id,
+                            created_at=created_at, ended_at=None,
+                            token_usage_json=None, agent_session_key=agent_session_key,
+                        ))
                         return
 
                     # Ordinary turn insert stays inside the advisory-lock transaction
                     # so it cannot cross a delivery claim between check and commit.
+                    finished_at = (_terminal_ended_at(created_at, latency_ms)
+                                   if _is_terminal(status, None) else None)
                     conn.execute(
                         TurnLog.__table__.insert().values(
                             id=turn_id,
@@ -264,9 +278,17 @@ class TurnLogStore:
                             animation=animation,
                             token_usage_json=token_usage_json,
                             parent_turn_id=parent_turn_id,
-                            ended_at=(_terminal_ended_at(created_at, latency_ms) if _is_terminal(status, None) else None),
+                            ended_at=finished_at,
                         )
                     )
+                    from .turn_context_snapshot import record_turn_context
+                    record_turn_context(conn, SimpleNamespace(
+                        id=turn_id, bot_id=bot_id, user_id=user_id,
+                        trigger_message_id=trigger_message_id,
+                        created_at=created_at, ended_at=finished_at,
+                        token_usage_json=token_usage_json,
+                        agent_session_key=agent_session_key,
+                    ))
                     return
             raise busy  # after the commit: the own-reservation release must persist
 
@@ -308,6 +330,18 @@ class TurnLogStore:
     def _encode_token_usage(self, token_usage: dict | None, model: str | None) -> str | None:
         """Usage JSON with the serving access path frozen in (see turn_usage)."""
         return encode_token_usage(token_usage, model_ref=model, catalog=getattr(self.config, "model_catalog", None))
+
+    def accept_session_binding(
+        self, *, turn_id: str, bot_id: str, user_id: str, session_id: str,
+        admission_claim: AdmissionClaim | None = None,
+    ) -> None:
+        """Fenced bot-wide pointer update after resolving the accepted thread."""
+        from .session_lifecycle.admission import accept_session_binding
+
+        accept_session_binding(
+            self.engine, turn_id=turn_id, bot_id=bot_id, user_id=user_id,
+            session_id=session_id, claim=admission_claim,
+        )
 
     def bind_agent_bridge(self, *, turn_id: str, session_key: str, request_id: str) -> None:
         """Bind before publication, refusing a turn finalized by another owner.
@@ -437,6 +471,10 @@ class TurnLogStore:
                 from .turn_termination import interrupt_unresolved_tools
                 interrupt_unresolved_tools(session, row.id, row.ended_at)
             session.add(row)
+            if row.ended_at is not None:
+                session.flush()
+                from .turn_context_snapshot import record_turn_context
+                record_turn_context(session, row)
             session.commit()
 
     def update_partial_response(

@@ -78,6 +78,7 @@ class CodexSessionMixin:
 
     async def _set_thread_session(
         self, thread_session_id: str, bot_id: str, sdk_session_id: str, model: str,
+        *, required: bool = False,
     ) -> None:
         """Persist an SDK session id onto its bawthub thread.
 
@@ -87,6 +88,8 @@ class CodexSessionMixin:
         ``agent_backend_config.session_key`` is retired.
         """
         if not self._app_api_url:
+            if required:
+                raise RuntimeError("Codex reset provider binding requires the app API")
             logger.warning(
                 "No API URL — thread session not persisted for %s/%s",
                 bot_id, thread_session_id,
@@ -109,6 +112,8 @@ class CodexSessionMixin:
                 bot_id, thread_session_id, sdk_session_id,
             )
         except Exception as e:
+            if required:
+                raise RuntimeError("Codex reset provider binding failed") from e
             logger.warning(
                 "Failed to persist thread session for %s/%s: %s",
                 bot_id, thread_session_id, e,

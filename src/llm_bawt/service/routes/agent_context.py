@@ -19,6 +19,7 @@ class ContextResetRequest(BaseModel):
         description="reset_retain_history or reset_without_history"
     )
     reason: str = Field(default="agent-requested context maintenance", max_length=1000)
+    idempotency_key: str | None = Field(default=None, max_length=256)
 
 
 def _resolve(bot_id: str, user: str | None):
@@ -51,21 +52,23 @@ def get_agent_context_health(
 
 
 @router.post("/v1/agent-context/reset", tags=["Agent Context"])
-def reset_agent_context(body: ContextResetRequest):
-    service, bot, user_id, backend, _ = _resolve(body.bot_id, body.user)
+async def reset_agent_context(body: ContextResetRequest):
+    service, bot, user_id, _backend, _ = _resolve(body.bot_id, body.user)
+    from ..session_lifecycle.api import NewSessionAPI
+    from ..session_lifecycle.intent import Continuity, Origin
+
     try:
         policy = normalize_session_policy(body.session_policy)
-        result = AgentContextStore(service.config).reset_idle_session(
-            bot_id=bot.slug,
-            user_id=user_id,
-            backend=backend,
-            policy=policy,
-            reason=body.reason.strip() or "agent-requested context maintenance",
-        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        if "active in turn" in str(exc):
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return result
+    continuity = {
+        "reset_retain_history": Continuity.RETAIN,
+        "reset_without_history": Continuity.CLEAN,
+    }.get(policy.value)
+    if continuity is None:
+        raise HTTPException(status_code=422, detail="continue does not reset a session")
+    return await NewSessionAPI.submit(
+        service, bot_id=bot.slug, user_id=user_id, continuity=continuity,
+        origin=Origin.CONTEXT_API, idempotency_key=body.idempotency_key,
+        reason=body.reason.strip() or "agent-requested context maintenance",
+    )

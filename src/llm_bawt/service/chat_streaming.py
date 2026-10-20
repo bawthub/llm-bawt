@@ -12,6 +12,9 @@ import threading
 import time
 import uuid
 from typing import AsyncIterator
+
+from agent_bridge.maintenance import is_new_command
+
 from ..request_identity import AdmissionUnavailable as IdentityAdmissionUnavailable
 from ..bots import (
     StreamingEmoteFilter,
@@ -235,27 +238,6 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
         # previous generation so only the latest request runs.
         is_agent_backend = llm_bawt.client.model_definition.get("type") in ("agent_backend", "claude-code")
 
-        # ---- /new command for CHAT bots --------------------------------
-        # Agent bots already handle /new at the bridge (clears the SDK
-        # session). Chat bots have no such concept, so /new here moves a
-        # per-bot "conversation offset" marker to now: prior raw messages
-        # drop out of the live context, but summaries + long-term memory are
-        # kept (see HistoryManager/get_messages). Nothing is deleted — it's a
-        # pointer move, and the dropped transcript still gets summarized by
-        # the background job and reappears as a summary.
-        # TASK-646: summarize → rotate → confirm lives in the SHARED helper
-        # (chat_streaming_bridge.py) so this path and the non-streaming
-        # chat_completion cannot drift.
-        if not is_agent_backend:
-            _confirm, user_prompt = self._maybe_handle_chat_new_command(
-                llm_bawt, bot_id, user_prompt
-            )
-            if _confirm is not None:
-                yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model_alias, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': _confirm}, 'finish_reason': None}]})}\n\n"
-                yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model_alias, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
         # Admission must succeed before _start_generation cancels the prior
         # chat generation. Agent turns use independent execution handles.
         cancel_event = threading.Event()
@@ -344,10 +326,30 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                 request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
             ),
         )
+        chat_reset = None
         if not is_agent_backend:
+            try:
+                from .session_lifecycle.execution import NewSessionExecution
+
+                chat_reset = NewSessionExecution.prepare_chat(
+                    self, llm_bawt, request, bot_id=bot_id,
+                    user_id=user_id, user_prompt=user_prompt,
+                )
+                if chat_reset is not None:
+                    # Bind history AND the terminal UI event to the exact keyed
+                    # successor, not an active thread selected on a later turn.
+                    request = request.model_copy(update={"session_id": chat_reset.session_id})
+            except Exception as exc:
+                self._update_turn_log(
+                    turn_id=turn_log_id, status="error",
+                    error_text=f"Chat reset setup failed: {exc}",
+                )
+                raise
             cancel_event, done_event = await self._start_generation(bot_id)
 
         task_turn_capability: str | None = None
+        bridge_reset_action: str | None = None
+        bridge_prompt: str | None = None
         session_id: str = ""
         if is_agent_backend:
             try:
@@ -359,43 +361,35 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                     user_prompt=user_prompt, thread_binding=thread_binding,
                     backend_name=backend_name,
                 )
-                # The outgoing thread is summarized before building its seed;
-                # rotation then changes the durable thread only for /new.
-                self._maybe_summarize_on_new(
-                    llm_bawt, bot_id, user_prompt, thread_binding=thread_binding
+                from .session_lifecycle.execution import NewSessionExecution
+
+                prepared_reset = NewSessionExecution.prepare_agent(
+                    self, llm_bawt, request, bot_id=bot_id,
+                    user_prompt=user_prompt, model_alias=model_alias,
+                    thread_binding=thread_binding, delivery_id=delivery_new_id,
+                    backend_name=backend_name, prompt_record=prompt_record,
                 )
-                from .routes.history import maybe_build_session_seed
-                from .dependencies import get_service
-                if prompt_record:
-                    from .prompt_execution import build_prompt_seed
-                    inject_seed_messages = build_prompt_seed(self, llm_bawt, thread_binding)
-                else:
-                    inject_seed_messages = maybe_build_session_seed(
-                        llm_bawt, bot_id, model_alias, user_prompt, get_service(),
-                        thread_binding=thread_binding,
-                    )
-                rotated_id = None
-                if not getattr(request, "inter_bot_session_policy", None):
-                    rotated_id = self._maybe_rotate_agent_session(
-                        llm_bawt, bot_id, user_prompt, thread_binding=thread_binding,
-                        **({"delivery_id": delivery_new_id} if delivery_new_id else {}),
-                    )
-                if (
-                    thread_binding
-                    and not thread_binding.get("explicit_thread")
-                    and (user_prompt or "").lstrip().startswith("/new")
-                ):
-                    # An archived successor remains this delivery's target even
-                    # if the user navigated away before an outbox retry.
-                    from .agent_new_rotation import bind_new_successor
-                    thread_binding = bind_new_successor(
-                        self, llm_bawt, rotated_id=rotated_id,
-                        delivery_id=delivery_new_id, backend_name=backend_name,
-                    )
+                inject_seed_messages = prepared_reset.seed_messages
+                thread_binding = prepared_reset.thread_binding
+                bridge_reset_action = prepared_reset.bridge_reset_action
+                bridge_prompt = prepared_reset.bridge_prompt
                 session_id = (
                     str(thread_binding.get("thread_session_id") or "").strip()
                     if thread_binding else ""
                 )
+                # Ordinary accepted bindings, including explicitly reopened
+                # archives, advance the bot-wide pointer before inference.
+                # Reset commands need a first-transition stamp at the rotation
+                # boundary; never advance this pointer on a keyed replay.
+                if (
+                    session_id and not getattr(request, "inter_bot_session_policy", None)
+                    and ((thread_binding or {}).get("explicit_thread")
+                         or not is_new_command(user_prompt))
+                ):
+                    self._turn_log_store.accept_session_binding(
+                        turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
+                        session_id=session_id, admission_claim=admission_claim,
+                    )
                 from .session_continuity import record_session_continuity
                 record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
                                           bot_id=bot_id, user_id=user_id)
@@ -415,6 +409,9 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                     error_text=f"Agent turn setup failed: {exc}",
                 )
                 raise
+        elif chat_reset is not None:
+            session_id = chat_reset.session_id
+            thread_binding = {"thread_session_id": session_id}
         # Record which continuation turn carried the answer back to the agent.
         if answered_question_id:
             try:
@@ -452,6 +449,9 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             is_agent_backend=is_agent_backend,
             inject_seed_messages=inject_seed_messages,
             thread_binding=thread_binding,
+            bridge_reset_action=bridge_reset_action,
+            bridge_prompt=bridge_prompt,
+            chat_reset=chat_reset,
             task_turn_capability=task_turn_capability,
             cancel_event=cancel_event,
             done_event=done_event,

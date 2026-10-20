@@ -128,6 +128,7 @@ class AgentBackendClient(LLMClient):
             for key, value in {
                 "turn_execution": kwargs.pop("turn_execution", None),
                 "task_turn_capability": kwargs.pop("task_turn_capability", None),
+                "bridge_reset_action": kwargs.pop("bridge_reset_action", None),
             }.items()
             if value is not None
         }
@@ -230,6 +231,7 @@ class AgentBackendClient(LLMClient):
         # never persist it on shared bot config or expose its identifiers.
         task_turn_capability = kwargs.pop("task_turn_capability", None)
         bridge_request_id = kwargs.pop("bridge_request_id", None)
+        bridge_reset_action = kwargs.pop("bridge_reset_action", None)
 
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
@@ -249,6 +251,8 @@ class AgentBackendClient(LLMClient):
             config["task_turn_capability"] = task_turn_capability
         if bridge_request_id:
             config["request_id"] = bridge_request_id
+        if bridge_reset_action:
+            config["bridge_reset_action"] = bridge_reset_action
 
         execution = kwargs.pop("turn_execution", None)
         if execution is not None:

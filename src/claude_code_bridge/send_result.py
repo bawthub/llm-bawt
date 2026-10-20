@@ -71,6 +71,7 @@ class ClaudeResultMixin:
         compact_error_msg: str | None,
         turn_session_id: str | None,
         turn_screenshot_assets: list[dict],
+        reset_ack: dict | None = None,
         compact_threshold: int | None = None,
     ) -> int:
         full_text = "".join(text_parts)
@@ -181,5 +182,6 @@ class ClaudeResultMixin:
             model=actual_model,
             token_usage=token_usage_payload,
             attachments=turn_screenshot_assets or None,
+            **({"extra_raw": {"new_session_ack": reset_ack}} if reset_ack else {}),
         )
         return seq

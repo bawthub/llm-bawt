@@ -426,6 +426,7 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
     service._inter_bot_dispatcher = rig.dispatcher
     service._turn_log_store = rig.service._turn_log_store
     service._turn_log_store.engine = None
+    service._turn_log_store.accept_session_binding = Mock()
     service._resolve_request_model = Mock(side_effect=AssertionError("Personal model resolver used"))
     service._get_llm_bawt = Mock(side_effect=AssertionError("Personal cached instance used"))
     service._persist_turn_log = Mock()
@@ -471,6 +472,11 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
     assert contexts[0].model_alias == "second@test-native"
     assert contexts[0].thread_binding["thread_session_id"] == payload["session_id"]
     assert contexts[0].thread_binding["explicit_thread"] is True
+    service._turn_log_store.accept_session_binding.assert_called_once()
+    binding = service._turn_log_store.accept_session_binding.call_args.kwargs
+    assert binding["bot_id"] == BOT and binding["user_id"] == OWNER
+    assert binding["session_id"] == payload["session_id"]
+    assert binding["admission_claim"] is not None
     assert events[0]["session_id"] == payload["session_id"]
     assert events[0]["author"]["entity_type"] == "user"
     assert events[0]["author"]["entity_id"] == OWNER

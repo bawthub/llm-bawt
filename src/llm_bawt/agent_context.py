@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -142,72 +144,13 @@ def rotate_delivery_session(
     target_bot_id: str,
     user_id: str,
 ) -> tuple[dict[str, Any], str | None, str | None]:
-    """Rotate a delivery's durable thread once inside its claim transaction."""
-    policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
-    if policy == SessionPolicy.CONTINUE:
-        return payload, None, None
-    if head.get("reset_status") == "COMPLETED" and head.get("new_session_id"):
-        payload["session_id"] = head["new_session_id"]
-        payload["inter_bot_session_policy"] = policy.value
-        payload["inter_bot_seed_session_id"] = head.get("old_session_id")
-        return payload, head.get("old_session_id"), head.get("new_session_id")
+    """Compatibility shim: the shared lifecycle owns policy rotation."""
+    from .service.session_lifecycle.lifecycle import NewSessionLifecycle
 
-    old_session = conn.execute(sa_text("""
-        SELECT id FROM sessions
-        WHERE bot_id=:bot AND user_id=:user
-          AND status='active' AND ended_at IS NULL
-        ORDER BY started_at DESC LIMIT 1 FOR UPDATE
-    """), {"bot": target_bot_id, "user": user_id}).scalar_one_or_none()
-    new_session = str(uuid.uuid5(uuid.NAMESPACE_URL, f"inter-bot-session:{head['id']}"))
-    conn.execute(sa_text("""
-        UPDATE sessions SET ended_at=now(), archived_at=now(), status='archived'
-        WHERE bot_id=:bot AND user_id=:user
-          AND status='active' AND ended_at IS NULL
-    """), {"bot": target_bot_id, "user": user_id})
-    conn.execute(sa_text("""
-        INSERT INTO sessions (
-            id, bot_id, user_id, started_at, status, session_metadata
-        ) VALUES (
-            :id, :bot, :user, now(), 'active',
-            jsonb_build_object('context_lifecycle', jsonb_build_object(
-                'action', :policy,
-                'reason', COALESCE(:reason, 'inter-bot pre-delivery policy'),
-                'delivery_id', :delivery,
-                'old_session_id', :old_session,
-                'at', now()
-            ))
-        ) ON CONFLICT (id) DO NOTHING
-    """), {
-        "id": new_session,
-        "bot": target_bot_id,
-        "user": user_id,
-        "policy": policy.value,
-        "reason": head.get("reset_reason"),
-        "delivery": head["id"],
-        "old_session": old_session,
-    })
-    conn.execute(sa_text("""
-        UPDATE inter_bot_deliveries SET
-            reset_status='COMPLETED', old_session_id=:old_session,
-            new_session_id=:new_session, reset_at=now(), updated_at=now()
-        WHERE id=:id
-    """), {
-        "id": head["id"],
-        "old_session": old_session,
-        "new_session": new_session,
-    })
-    payload["session_id"] = new_session
-    payload["inter_bot_session_policy"] = policy.value
-    payload["inter_bot_seed_session_id"] = old_session
-    conn.execute(sa_text("""
-        UPDATE inter_bot_deliveries
-        SET payload_json=CAST(:payload AS jsonb), updated_at=now()
-        WHERE id=:id
-    """), {
-        "id": head["id"],
-        "payload": json.dumps(payload, ensure_ascii=False, default=str),
-    })
-    return payload, old_session, new_session
+    return NewSessionLifecycle.rotate_delivery_claim(
+        conn, head=head, payload=payload,
+        target_bot_id=target_bot_id, user_id=user_id,
+    )
 
 
 def recover_delivery_after_overflow(
@@ -261,30 +204,21 @@ def recover_delivery_after_overflow(
     new_session = str(uuid.uuid5(
         uuid.NAMESPACE_URL, f"inter-bot-overflow:{head['id']}:1"
     ))
-    conn.execute(sa_text("""
-        UPDATE sessions SET ended_at=now(), archived_at=now(), status='archived'
-        WHERE bot_id=:bot AND user_id=:user
-          AND status='active' AND ended_at IS NULL
-    """), {"bot": target, "user": user_id})
-    conn.execute(sa_text("""
-        INSERT INTO sessions (
-            id, bot_id, user_id, started_at, status, session_metadata
-        ) VALUES (
-            :id, :bot, :user, now(), 'active',
-            jsonb_build_object('context_lifecycle', jsonb_build_object(
-                'action', :policy, 'reason', 'confirmed context overflow',
-                'delivery_id', :delivery, 'old_session_id', :old_session,
-                'at', now()
-            ))
-        ) ON CONFLICT (id) DO NOTHING
-    """), {
-        "id": new_session,
-        "bot": target,
-        "user": user_id,
-        "policy": policy.value,
-        "delivery": head["id"],
-        "old_session": old_session,
-    })
+    from .memory.session_reset_lineage import SessionResetLineage
+
+    # Keep the existing overflow namespace; a persisted delivery must not
+    # acquire a different successor when recovered after a process restart.
+    SessionResetLineage.rotate(
+        None, connection=conn, bot_id=target, user_id=user_id,
+        new_id=new_session, idempotency_key=f"{head['id']}:overflow:1",
+        accept_pointer=True,
+        context_lifecycle={
+            "action": policy.value,
+            "reason": "confirmed context overflow",
+            "delivery_id": head["id"],
+            "old_session_id": old_session,
+        },
+    )
     from .memory.postgresql import _sanitize_table_name
 
     conn.execute(sa_text("""
@@ -308,7 +242,7 @@ def recover_delivery_after_overflow(
             status='QUEUED', available_at=now(), next_retry_at=now(),
             claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
             transport_accepted_at=NULL, target_turn_id=NULL, delivery_mode=NULL,
-            session_policy=:policy, reset_status='COMPLETED',
+            session_policy=:policy, reset_status='ROTATED',
             reset_reason='confirmed context overflow', old_session_id=:old_session,
             new_session_id=:new_session, reset_at=now(),
             overflow_recovery_count=1, payload_json=CAST(:payload AS jsonb),
@@ -352,10 +286,11 @@ class AgentContextStore:
         configured_ceiling: int | None,
         warning_ratio: float = 0.75,
         critical_ratio: float = 0.90,
+        connection=None,
     ) -> dict[str, Any]:
         if self.engine is None:
             raise RuntimeError("Context-health database unavailable")
-        with self.engine.connect() as conn:
+        with (nullcontext(connection) if connection is not None else self.engine.connect()) as conn:
             session = conn.execute(sa_text("""
                 SELECT id, started_at, session_metadata
                 FROM sessions
@@ -364,7 +299,20 @@ class AgentContextStore:
                 ORDER BY started_at DESC LIMIT 1
             """), {"bot": bot_id, "user": user_id}).mappings().first()
             turn = None
-            if session:
+            snapshot = (session.get("session_metadata") or {}).get("context_stats") if session else None
+            if (isinstance(snapshot, dict) and snapshot.get("turn_id")
+                    and snapshot.get("created_at") and "ended_at" in snapshot):
+                # Terminal writer stamps the owning bot/user session atomically
+                # with the turn log. Older sessions without a snapshot use the
+                # historical session-bound lookup until their next completion.
+                turn = {
+                    "id": snapshot["turn_id"],
+                    "created_at": datetime.fromisoformat(snapshot["created_at"]),
+                    "ended_at": (datetime.fromisoformat(snapshot["ended_at"])
+                                 if snapshot["ended_at"] else None),
+                    "token_usage_json": json.dumps(snapshot.get("usage")),
+                }
+            elif session:
                 # A turn belongs to a durable thread through its trigger user
                 # message. Never carry a previous thread's critical gauge across
                 # a reset merely because its turn log is newest. Query the parent
@@ -372,14 +320,13 @@ class AgentContextStore:
                 from .memory.postgresql import _sanitize_table_name
 
                 turn = conn.execute(sa_text("""
-                    SELECT t.id, t.created_at, t.token_usage_json, t.error_text
+                    SELECT t.id, t.created_at, t.ended_at, t.token_usage_json, t.error_text
                     FROM turn_logs t
                     JOIN messages m
                       ON m.bot_id=:storage_bot AND m.id=t.trigger_message_id
                     WHERE t.bot_id=:bot AND t.user_id=:user
-                      AND t.token_usage_json IS NOT NULL
                       AND m.session_id=:session_id
-                    ORDER BY t.created_at DESC LIMIT 1
+                    ORDER BY t.created_at DESC, t.id DESC LIMIT 1
                 """), {
                     "bot": bot_id,
                     "storage_bot": _sanitize_table_name(bot_id),
@@ -387,7 +334,9 @@ class AgentContextStore:
                     "session_id": session["id"],
                 }).mappings().first()
 
-        usage = self._usage(turn.get("token_usage_json") if turn else None)
+        # A later turn without reliable terminal usage invalidates an earlier
+        # gauge. Creation time is not an inactivity timestamp.
+        usage = self._usage(turn.get("token_usage_json") if turn and turn.get("ended_at") else None)
         observed_ceiling = int(usage.get("context_window") or 0) or None
         ceiling = observed_ceiling or configured_ceiling
         ceiling_source = "provider" if observed_ceiling else ("catalog" if configured_ceiling else "unknown")
@@ -462,7 +411,7 @@ class AgentContextStore:
             "warning_ratio": warning_ratio,
             "critical_ratio": critical_ratio,
             "usage_turn_id": turn.get("id") if turn else None,
-            "usage_observed_at": turn.get("created_at").isoformat() if turn else None,
+            "usage_observed_at": turn.get("ended_at").isoformat() if turn and turn.get("ended_at") else None,
             "last_lifecycle_action": latest_action,
         }
 
@@ -482,52 +431,52 @@ class AgentContextStore:
         if self.engine is None:
             raise RuntimeError("Context-health database unavailable")
         with self.engine.begin() as conn:
-            conn.execute(
-                sa_text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
-                {"target": bot_id},
+            from .service.turn_admission import classify_target, lock_target
+
+            lock_target(conn, bot_id)
+            state = classify_target(conn, bot_id, exclude_turn_id=None)
+            if not state.idle:
+                raise RuntimeError(f"target bot is active in turn {state.blocking_id()}")
+            return self.rotate_locked(
+                conn, bot_id=bot_id, user_id=user_id, policy=policy, reason=reason,
             )
-            active_turn = conn.execute(sa_text("""
-                SELECT id FROM turn_logs
-                WHERE bot_id=:bot AND ended_at IS NULL
-                ORDER BY created_at DESC LIMIT 1
-            """), {"bot": bot_id}).scalar_one_or_none()
-            if active_turn:
-                raise RuntimeError(f"target bot is active in turn {active_turn}")
-            old_session = conn.execute(sa_text("""
-                SELECT id FROM sessions
-                WHERE bot_id=:bot AND user_id=:user
-                  AND status='active' AND ended_at IS NULL
-                ORDER BY started_at DESC LIMIT 1 FOR UPDATE
-            """), {"bot": bot_id, "user": user_id}).scalar_one_or_none()
-            new_session = str(uuid.uuid4())
-            conn.execute(sa_text("""
-                UPDATE sessions SET ended_at=now(), archived_at=now(), status='archived'
-                WHERE bot_id=:bot AND user_id=:user
-                  AND status='active' AND ended_at IS NULL
-            """), {"bot": bot_id, "user": user_id})
-            lifecycle = {
-                "action": policy.value,
-                "reason": reason,
+
+    @staticmethod
+    def rotate_locked(
+        conn, *, bot_id: str, user_id: str, policy: SessionPolicy,
+        reason: str, expected_session_id: str | None = None,
+        new_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Rotate under the caller's per-bot lock, with /new lineage and a receipt.
+
+        An automated caller supplies the expected old thread and a deterministic
+        successor; a changed active thread must never be reset by a stale sweep.
+        """
+        from .memory.session_reset_lineage import SessionResetLineage
+
+        if conn.dialect.name == "postgresql":
+            conn.execute(sa_text("SELECT pg_advisory_xact_lock(hashtext(:bot), hashtext(:user))"),
+                         {"bot": bot_id, "user": user_id})
+        old = conn.execute(sa_text("""
+            SELECT id FROM sessions
+            WHERE bot_id=:bot AND user_id=:user AND status='active' AND ended_at IS NULL
+            ORDER BY started_at DESC LIMIT 1 FOR UPDATE
+        """), {"bot": bot_id, "user": user_id}).mappings().first()
+        if old is None or (expected_session_id is not None and old["id"] != expected_session_id):
+            raise RuntimeError("active context session changed or is missing")
+        old_session = old["id"]
+        new_session = new_session_id or str(uuid.uuid4())
+        SessionResetLineage.rotate(
+            None, connection=conn, bot_id=bot_id, user_id=user_id,
+            new_id=new_session, accept_pointer=True,
+            context_lifecycle={
+                "action": policy.value, "reason": reason,
                 "old_session_id": old_session,
-            }
-            conn.execute(sa_text("""
-                INSERT INTO sessions (
-                    id, bot_id, user_id, started_at, status, session_metadata
-                ) VALUES (
-                    :id, :bot, :user, now(), 'active',
-                    jsonb_build_object('context_lifecycle', CAST(:lifecycle AS jsonb))
-                )
-            """), {
-                "id": new_session,
-                "bot": bot_id,
-                "user": user_id,
-                "lifecycle": json.dumps(lifecycle),
-            })
+            },
+        )
         return {
-            "reset": True,
-            "session_policy": policy.value,
+            "reset": True, "session_policy": policy.value,
             "retained_history": policy == SessionPolicy.RESET_RETAIN_HISTORY,
-            "old_session_id": old_session,
-            "new_session_id": new_session,
+            "old_session_id": old_session, "new_session_id": new_session,
             "reason": reason,
         }

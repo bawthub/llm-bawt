@@ -588,6 +588,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         stream: bool = False,
         inject_messages: list | None = None,
         thread_binding: dict | None = None,
+        bridge_reset_action: str | None = None,
         bridge_request_id: str | None = None,
         bridge_timeout_seconds: float | None = None,
         bridge_event_callback=None,
@@ -617,6 +618,8 @@ class ServiceLLMBawt(BaseLLMBawt):
         # never leak between concurrent turns via shared instance state.
         if thread_binding:
             _q_kwargs["thread_binding"] = thread_binding
+        if bridge_reset_action:
+            _q_kwargs["bridge_reset_action"] = bridge_reset_action
         if bridge_request_id:
             _q_kwargs["bridge_request_id"] = bridge_request_id
         if bridge_timeout_seconds:

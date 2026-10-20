@@ -24,6 +24,11 @@ def context_store():
     user = f"user-{uuid.uuid4().hex}"
     table = partition_name(MESSAGES_PARENT, bot)
     from llm_bawt.memory.postgresql import ensure_bot_partitions
+    from llm_bawt.runtime_settings import BotProfileStore
+
+    profiles = BotProfileStore(config)
+    assert profiles.engine is store.engine
+    profiles.upsert({"slug": bot, "name": "Disposable context target"})
     with store.engine.begin() as conn:
         ensure_bot_partitions(conn, bot)
     try:
@@ -35,6 +40,7 @@ def context_store():
             for parent in PARENT_TABLES:
                 conn.execute(sa_text(f"DROP TABLE IF EXISTS {partition_name(parent, bot)}"))
             conn.execute(sa_text("DELETE FROM sessions WHERE bot_id=:bot"), {"bot": bot})
+            conn.execute(sa_text("DELETE FROM bot_profiles WHERE slug=:bot"), {"bot": bot})
 
 
 def test_health_prefers_native_resident_usage_and_scopes_active_thread(context_store):
@@ -93,6 +99,19 @@ def test_health_prefers_native_resident_usage_and_scopes_active_thread(context_s
         reason="test reset",
     )
     assert reset["old_session_id"] == session_id
+    with store.engine.connect() as conn:
+        predecessor = conn.execute(sa_text(
+            "SELECT session_metadata FROM sessions WHERE id=:id"
+        ), {"id": session_id}).scalar_one()
+        successor = conn.execute(sa_text(
+            "SELECT session_metadata FROM sessions WHERE id=:id"
+        ), {"id": reset["new_session_id"]}).scalar_one()
+        pointer = conn.execute(sa_text(
+            "SELECT last_session_id FROM bot_profiles WHERE slug=:bot"
+        ), {"bot": bot}).scalar_one()
+    assert predecessor["reset_successor_id"] == reset["new_session_id"]
+    assert successor["reset_predecessor_ids"] == [session_id]
+    assert pointer == reset["new_session_id"]
     after = store.health(
         bot_id=bot,
         user_id=user,

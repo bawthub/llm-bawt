@@ -85,6 +85,9 @@ class BotProfile(SQLModel, table=True):
     default_model: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
     harness: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
     endpoint_id: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True, index=True))
+    # Runtime-owned: accepted turn binding, never changed by profile edits.
+    # FK is installed after both independently bootstrapped tables exist.
+    last_session_id: str | None = Field(default=None, sa_column=Column(String(36), nullable=True))
     color: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     avatar: str | None = Field(default=None, sa_column=Column(String(512), nullable=True))
     # Self-hosted, ready-to-embed render of ``avatar`` as a ``data:`` URL
@@ -135,6 +138,8 @@ class BotProfileStore:
         def bootstrap(conn) -> None:
             SQLModel.metadata.create_all(bind=conn, tables=[BotProfile.__table__])
             self._migrate_add_columns(conn)
+            from .bot_session_state import BotSessionState
+            BotSessionState.ensure_schema(conn)
 
         self._schema_guard.run(self.engine, "bot-profile-store", bootstrap)
 
@@ -185,6 +190,9 @@ class BotProfileStore:
         slug = str(payload.get("slug", "")).strip().lower()
         if not slug:
             raise ValueError("Bot profile slug is required")
+        from .bot_identities import RESERVED_JOB_BOT_IDS
+        if slug in RESERVED_JOB_BOT_IDS:
+            raise ValueError(f"Bot slug {slug!r} is reserved for system actions")
 
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:

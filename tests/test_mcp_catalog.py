@@ -108,7 +108,8 @@ async def test_catalog_token_budgets():
     # TASK-1126: task/step/project id args say "ID (cuid)" instead of the wrong
     # "UUID" and accept TASK-N refs. Measured compact catalog: 11,645 (+19).
     # TASK-1147: review list/add typed schemas and attribution guidance: 11,945.
-    assert total <= 11945, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1188: accepted rotation pointer flag adds 12 typed-schema tokens.
+    assert total <= 11957, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

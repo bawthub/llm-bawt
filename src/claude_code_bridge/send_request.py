@@ -57,6 +57,7 @@ class SendRequest:
     skill_bundle: str | None = None
     # App-resolved Claude Code auto-compact window (None = CLI default).
     compact_threshold: int | None = None
+    bridge_reset_action: str | None = None
 
     @classmethod
     def from_fields(cls, fields: dict) -> "SendRequest":
@@ -219,6 +220,7 @@ class SendRequest:
             model=model,
             inject_messages=inject_messages,
             trigger_message_id=trigger_message_id,
+            bridge_reset_action=fields.get("bridge_reset_action") or None,
             bot_effort=bot_effort,
             bot_max_turns=bot_max_turns,
             subagent_model=subagent_model,

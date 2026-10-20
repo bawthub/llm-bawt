@@ -183,6 +183,9 @@ class ProfileManager:
                 ON entity_profiles (entity_type, entity_id)
             """))
 
+            from .bot_identities import seed_system_author
+            seed_system_author(conn)
+
         self._schema_guard.run(self.engine, "profile-manager", bootstrap)
     
     # =========================================================================

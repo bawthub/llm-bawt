@@ -332,7 +332,12 @@ class InterBotDeliveryStore:
             "reset_reason": (reset_reason or "").strip() or None,
         }
         with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
-            # Arrival is a read-only snapshot; claim rechecks it under target lock.
+            from .service.turn_admission import lock_target
+
+            # Enqueue and idle context rotation share the target lock. Otherwise
+            # a queued delivery could appear between the reset's queue check
+            # and its durable thread rotation.
+            lock_target(conn, target)
             stamped = MaintenanceBarrier(conn, target).stamp_enqueue(metadata)
             return RequestIdentityResolver(conn).admit(
                 values=values, payload=payload, metadata=json.loads(stamped),
@@ -413,6 +418,14 @@ class InterBotDeliveryStore:
                 RETURNING *
             """)).mappings().all()
             for row in rows:
+                from .service.session_lifecycle.recovery import NewSessionRecovery
+
+                if NewSessionRecovery.is_reset(row):
+                    conn.execute(sa_text("""
+                        UPDATE inter_bot_deliveries
+                        SET metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb)
+                        WHERE id=:id
+                    """), {"id": row["id"]})
                 conn.execute(sa_text("""
                     UPDATE turn_logs SET status='error', end_reason='error',
                         error_text=:error, ended_at=COALESCE(ended_at, now())
@@ -473,163 +486,15 @@ class InterBotDeliveryStore:
         return DeliveryRecord.from_mapping(cancelled) if cancelled else None
 
     def claim_next(
-        self,
-        target_bot_id: str,
-        *,
-        claim_owner: str,
-        steer_capable: bool,
+        self, target_bot_id: str, *, claim_owner: str, steer_capable: bool,
         lease_seconds: int = 300,
     ) -> DeliveryRecord | None:
-        """Atomically choose STEERING for an active Claude turn or safe dispatch."""
-        if self.engine is None:
-            return None
-        target = target_bot_id.strip().lower()
-        claim_token = f"claim-{uuid.uuid4().hex}"
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa_text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
-                {"target": target},
-            )
-            from .inter_bot_preclaim import load_claim_head
-            head = load_claim_head(conn, target, self.config)
-            if (
-                not head
-                or head["status"] != QUEUED
-                or head["available_at"] > datetime.now(timezone.utc)
-            ):
-                return None
-            if self._explicit_stop_requested(conn, head["turn_id"]):
-                conn.execute(sa_text("""
-                    UPDATE inter_bot_deliveries SET status='CANCELLED',
-                        next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
-                    WHERE id=:id AND status='QUEUED'
-                """), {"id": head["id"]})
-                return None
-            payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
-            policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
-            prefer_steer = bool(payload.get("prefer_steer", True))
-            try:
-                delivery_user_id = resolve_delivery_user(self.config, payload.get("user"))
-            except ValueError as exc:
-                # A recovered legacy claim may still own an open reservation.
-                # Release it under this target lock only when the delivery and
-                # turn evidence prove it was never accepted or started.
-                if head.get("delivery_mode") == "turn" and head.get("transport_accepted_at") is None:
-                    from .service.turn_admission import release_reservation
-                    release_reservation(
-                        self.engine, head["turn_id"], connection=conn,
-                        delivery_id=head["id"], bot_id=target,
-                        trigger_message_id=head["user_message_id"],
-                    )
-                conn.execute(sa_text("""
-                    UPDATE inter_bot_deliveries SET status='FAILED',
-                        last_error=:error, next_retry_at=NULL, updated_at=now()
-                    WHERE id=:id AND status='QUEUED'
-                """), {"id": head["id"], "error": str(exc)})
-                return None
-            from .service.turn_admission import classify_target, write_reservation
-            # Same classified view save_turn admits against (TASK-1082). Only an
-            # unambiguous executing row is a steer target; a fenced reservation
-            # or several open rows fail closed (wait), never "newest row wins".
-            state = classify_target(conn, target, exclude_turn_id=head["turn_id"])
-            busy = not state.idle
-            active = state.executing
-            if active is None and state.kind == "reserved" and len(state.rows) == 1:
-                # TASK-1067: a fallback reservation whose own delivery the target
-                # already accepted is a committed start, not an idle fence. Later
-                # deliveries steer into it (the bridge answers "not ready" until
-                # the run registers) instead of queueing behind it.
-                committed = conn.execute(sa_text("""
-                    SELECT 1 FROM inter_bot_deliveries
-                    WHERE turn_id=:turn_id AND status='DISPATCHING'
-                      AND transport_accepted_at IS NOT NULL
-                """), {"turn_id": state.rows[0]["id"]}).first()
-                if committed:
-                    active = state.rows[0]
-            if any(str(row.get("user_id") or "") != delivery_user_id for row in state.rows):
-                return None
-            if busy and policy != SessionPolicy.CONTINUE:
-                # Reset is an ordered precondition, never an interrupt. Wait until
-                # the authoritative active turn ends; do not steer or rotate under it.
-                return None
-            existing_steer = (
-                head.get("delivery_mode") == "steer"
-                and head.get("target_turn_id")
-                and prefer_steer
-            )
-            rejected_same_turn = (
-                head.get("delivery_mode") == "steer_rejected"
-                and head.get("target_turn_id")
-                and active
-                and active["id"] == head["target_turn_id"]
-            )
-            if existing_steer:
-                # A steer RPC may have reached the bridge even if the app timed
-                # out before seeing its result. Always retry the SAME deterministic
-                # RPC/message against the SAME turn until it proves not accepted;
-                # only then may the dispatcher clear steer intent for idle fallback.
-                status = STEERING
-                target_turn_id = head["target_turn_id"]
-                delivery_mode = "steer"
-            elif MaintenanceBarrier(conn, target).prepare(head) is not None:
-                return None
-            elif busy:
-                if active is None:
-                    # Reserved by another producer, or ambiguous open rows.
-                    return None
-                if rejected_same_turn:
-                    # This exact active row definitively rejected the deterministic
-                    # steer RPC. Wait for it to end rather than hot-looping or
-                    # starting an overlapping fallback turn. A newer active row
-                    # may still be steered on the next claim.
-                    return None
-                if not steer_capable or not prefer_steer:
-                    return None
-                status = STEERING
-                target_turn_id = active["id"]
-                delivery_mode = "steer"
-            else:
-                status = DISPATCHING
-                target_turn_id = head["turn_id"]
-                delivery_mode = "turn"
-                user_id = delivery_user_id
-                from .agent_context import rotate_delivery_session
-                payload, _, _ = rotate_delivery_session(
-                    conn,
-                    head=head,
-                    payload=payload,
-                    target_bot_id=target,
-                    user_id=user_id,
-                )
-                write_reservation(
-                    conn,
-                    turn_id=head["turn_id"],
-                    bot_id=target,
-                    user_id=user_id,
-                    user_prompt=head["message"],
-                    request_json=payload,
-                    trigger_message_id=head["user_message_id"],
-                )
-            row = conn.execute(sa_text("""
-                UPDATE inter_bot_deliveries SET
-                    status=:status, attempt_count=attempt_count+1,
-                    dispatch_started_at=now(),
-                    lease_expires_at=now() + (:lease * interval '1 second'),
-                    claim_token=:claim_token, claim_owner=:claim_owner,
-                    target_turn_id=:target_turn_id, delivery_mode=:delivery_mode,
-                    next_retry_at=NULL, last_error=NULL, updated_at=now()
-                WHERE id=:id AND status='QUEUED'
-                RETURNING *
-            """), {
-                "id": head["id"],
-                "status": status,
-                "lease": max(60, lease_seconds),
-                "claim_token": claim_token,
-                "claim_owner": claim_owner,
-                "target_turn_id": target_turn_id,
-                "delivery_mode": delivery_mode,
-            }).mappings().first()
-        return DeliveryRecord.from_mapping(row) if row else None
+        from .inter_bot_delivery_claim import DeliveryClaim
+
+        return DeliveryClaim.claim_next(
+            self, target_bot_id, claim_owner=claim_owner,
+            steer_capable=steer_capable, lease_seconds=lease_seconds,
+        )
 
     def mark_transport_accepted(self, delivery_id: str, claim_token: str) -> bool:
         if self.engine is None or not claim_token:
@@ -725,7 +590,7 @@ class InterBotDeliveryStore:
                 WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
                 RETURNING *
             """), values).mappings().first()
-            if row and row.get("reset_status") != "COMPLETED":
+            if row and row.get("reset_status") not in {"ROTATED", "COMPLETED"}:
                 conn.execute(sa_text(
                     "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
                 ), {"turn_id": row["turn_id"]})
@@ -744,12 +609,23 @@ class InterBotDeliveryStore:
         from .agent_context import recover_delivery_after_overflow
 
         with self.engine.begin() as conn:
+            # Follow claim_next's lock order: target first, then delivery row.
+            # The preliminary read is not authority; status, claim and target
+            # are checked again under the row lock before any mutation.
+            target = conn.execute(sa_text("""
+                SELECT target_bot_id FROM inter_bot_deliveries WHERE id=:id
+            """), {"id": delivery_id}).scalar_one_or_none()
+            if not target:
+                return None
+            from .service.turn_admission import lock_target
+
+            lock_target(conn, target)
             head = conn.execute(sa_text("""
                 SELECT * FROM inter_bot_deliveries
                 WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim
                 FOR UPDATE
             """), {"id": delivery_id, "claim": claim_token}).mappings().first()
-            if not head:
+            if not head or head["target_bot_id"] != target:
                 return None
             # Generic overflow recovery rotates the active personal thread and
             # changes the logical RPC. Automation must never take that path.
@@ -916,6 +792,22 @@ class InterBotDeliveryStore:
             """)).mappings().all()
             for row in rows:
                 is_turn = row.get("delivery_mode") != "steer"
+                if is_turn and row.get("transport_accepted_at") is not None:
+                    from .service.session_lifecycle.recovery import NewSessionRecovery
+
+                    if NewSessionRecovery.is_reset(row) and (
+                        row.get("turn_ended_at") is None
+                        or row.get("turn_status") not in ("ok", "completed")
+                        or row.get("turn_error_text")
+                    ):
+                        ambiguous = NewSessionRecovery.mark_ambiguous(
+                            conn, delivery_id=row["id"], claim_token=row["claim_token"],
+                            status=row["status"],
+                            reason="accepted reset outcome is ambiguous; never replay provider reset",
+                        )
+                        if ambiguous:
+                            recovered.append(ambiguous)
+                        continue
                 if is_turn and self._explicit_stop_requested(conn, row["turn_id"]):
                     assignments = "status='CANCELLED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, last_error='Stopped by user'"
                 elif is_turn and row.get("turn_ended_at") is not None:

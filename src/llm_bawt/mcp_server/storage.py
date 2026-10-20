@@ -1128,6 +1128,7 @@ class MemoryStorage:
         bot_id: str = "default",
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        accept_pointer: bool = False,
     ) -> str:
         """Close the active thread for (bot, user) and open a new one.
 
@@ -1137,7 +1138,7 @@ class MemoryStorage:
         """
         manager = self.get_short_term_manager(bot_id, provision_schema=True)
         return manager.rotate_session(
-            bot_id=bot_id, user_id=user_id,
+            bot_id=bot_id, user_id=user_id, accept_pointer=accept_pointer,
             **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         )
 

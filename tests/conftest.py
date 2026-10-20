@@ -31,7 +31,7 @@ from tests import pg_connection_guard
 # Plugins loaded before this root conftest remain outside this boundary.
 pg_connection_guard.install()
 
-pytest_plugins = ("tests.private_postgres",)
+pytest_plugins = ("tests.private_postgres", "tests.session_lifecycle_pg_fixtures")
 
 
 _PG_ACCEPTANCE_SUITES = (
@@ -39,6 +39,26 @@ _PG_ACCEPTANCE_SUITES = (
     "test_session_continuity_pg.py::",
     "test_agent_bridge.py::TestEventStore::",
     "test_agent_context.py::",
+    "test_idle_context_reset_pg.py::",
+    "test_turn_context_snapshot_pg.py::",
+    "test_bot_session_state_pg.py::",
+    "test_runtime_switch_pointer_pg.py::",
+    "test_new_session_receipt_pg.py::",
+    "test_new_session_receipt_review_pg.py::",
+    "test_new_session_typed_pg.py::",
+    "test_new_session_typed_review_pg.py::",
+    "test_new_session_typed_follow_up_pg.py::",
+    "test_new_session_chat_pg.py::",
+    "test_new_session_chat_review_pg.py::",
+    "test_new_session_history_review_pg.py::",
+    "test_new_session_transport_review.py::test_text_part_follow_up_receipt_uses_same_command_as_admission",
+    "test_new_session_policy_review_pg.py::",
+    "test_new_session_policy_recovery_pg.py::",
+    "test_new_session_api_review_pg.py::",
+    "test_codex_reset_evidence.py::test_native_codex_ack_requires_exact_persisted_policy_binding",
+    "test_codex_reset_evidence.py::test_standalone_codex_receipt_requires_empty_successor_binding",
+    "test_session_rotation_review_pg.py::",
+    "test_session_overflow_lock_review_pg.py::",
     "test_inter_bot_delivery.py::",
     "test_inter_bot_delivery_retry.py::",
     "test_turn_admission_pg.py::",

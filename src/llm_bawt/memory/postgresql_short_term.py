@@ -412,7 +412,7 @@ class PostgreSQLShortTermManager:
 
     def rotate_session(
         self, bot_id: str | None = None, user_id: str | None = None,
-        idempotency_key: str | None = None,
+        idempotency_key: str | None = None, *, accept_pointer: bool = False,
     ) -> str:
         """Atomically close the active thread for (bot,user) and open a new one.
 
@@ -429,7 +429,7 @@ class PostgreSQLShortTermManager:
         new_id = SessionResetLineage.delivery_successor_id(idempotency_key) if idempotency_key else str(uuid.uuid4())
         SessionResetLineage.rotate(
             self._backend.engine, bot_id=target_bot, user_id=target_user, new_id=new_id,
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key, accept_pointer=accept_pointer,
         )
         # Point this manager at the freshly opened thread.
         self._session_id_cache = new_id
@@ -507,6 +507,9 @@ class PostgreSQLShortTermManager:
         target_bot = self.bot_id if bot_id is None else bot_id
         target_user = self.user_id if user_id is None else user_id
         with self._backend.engine.begin() as conn:
+            from ..service.turn_admission import lock_target
+
+            lock_target(conn, target_bot)
             owned = conn.execute(
                 text("""
                     SELECT id FROM sessions

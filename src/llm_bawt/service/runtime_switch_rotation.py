@@ -24,7 +24,9 @@ from typing import Any
 from sqlalchemy import text
 
 from ..bot_types import durable_agent_backend
+from ..bot_session_state import BotSessionState
 from ..memory.session_reset_lineage import SessionResetLineage
+from .turn_admission import lock_target
 
 log = logging.getLogger(__name__)
 
@@ -58,20 +60,34 @@ def runtime_family_changed(before: Any | None, after: Any) -> bool:
 def rotate_active_threads(engine, bot_id: str) -> list[tuple[str | None, str]]:
     """Rotate every user's active thread for ``bot_id``.
 
-    Returns ``(user_id, new_session_id)`` pairs. Each rotation is the shared
-    ``/new`` primitive (archive + successor link in one transaction), so
-    lineage and approval continuation behave exactly as after ``/new``.
+    Returns ``(user_id, new_session_id)`` pairs. All scopes rotate atomically
+    under the bot admission lock, through the common lineage primitive. Only
+    the successor of the pointed-to predecessor may move ``last_session_id``;
+    iterating other users must not make the last loop iteration the active bot
+    context. A null or explicitly archived pointer is not guessed or replaced.
+    Provider binding remains lazy and there is no reset-confirmation message.
     """
-    with engine.connect() as conn:
-        users = conn.execute(text("""
-            SELECT DISTINCT user_id FROM sessions
-            WHERE bot_id=:bot AND status='active' AND ended_at IS NULL
-        """), {"bot": bot_id}).scalars().all()
     rotated: list[tuple[str | None, str]] = []
-    for user_id in users:
-        new_id = str(uuid.uuid4())
-        SessionResetLineage.rotate(engine, bot_id=bot_id, user_id=user_id, new_id=new_id)
-        rotated.append((user_id, new_id))
+    with engine.begin() as conn:
+        lock_target(conn, bot_id)
+        accepted = BotSessionState.resolve(conn, bot_id=bot_id)
+        active = conn.execute(text("""
+            SELECT id, user_id FROM sessions
+            WHERE bot_id=:bot AND status='active' AND ended_at IS NULL
+            ORDER BY user_id, id
+        """), {"bot": bot_id}).mappings().all()
+        pointed_owner = next(
+            (row for row in active if accepted and row["id"] == accepted["id"]), None,
+        )
+        users = dict.fromkeys(row["user_id"] for row in active)
+        for user_id in users:
+            new_id = str(uuid.uuid4())
+            SessionResetLineage.rotate(
+                None, connection=conn, bot_id=bot_id, user_id=user_id, new_id=new_id,
+                accept_pointer=bool(pointed_owner and pointed_owner["user_id"] == user_id),
+                context_lifecycle={"action": RUNTIME_SWITCH_SOURCE},
+            )
+            rotated.append((user_id, new_id))
     if rotated:
         log.info(
             "Runtime family changed for bot=%s: rotated %d active thread(s)",

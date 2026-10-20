@@ -309,6 +309,7 @@ class CodexBridge(
         tool_result: str | None = None,
         model: str | None = None,
         token_usage: dict | None = None,
+        extra_raw: dict | None = None,
     ) -> None:
         text = self._shorten_paths(text)
         tool_result = self._shorten_paths(tool_result)
@@ -331,7 +332,7 @@ class CodexBridge(
             model=model,
             seq=seq,
             timestamp=datetime.now(timezone.utc),
-            raw={},
+            raw=dict(extra_raw or {}),
             token_usage=token_usage,
             provider=self._backend_name,
             # Inherit from the active run so every event for this request

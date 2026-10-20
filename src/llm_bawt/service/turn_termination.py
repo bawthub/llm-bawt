@@ -93,6 +93,12 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
             interrupt_unresolved_tools(session, row.id, now)
             session.add(row)
             result.append({"id": row.id, "user_id": row.user_id})
+        if result:
+            from .turn_context_snapshot import record_turn_context
+            session.flush()
+            for row in rows:
+                if row.ended_at is not None:
+                    record_turn_context(session, row)
         session.commit()
         return result
 

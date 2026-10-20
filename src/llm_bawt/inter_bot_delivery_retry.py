@@ -22,17 +22,25 @@ def retry_failed_delivery(
 ) -> tuple[DeliveryRecord, bool] | None:
     """Atomically copy one failed bot callback into a new durable delivery.
 
-    The row lock orders concurrent clicks with the first enqueue, and the
-    deterministic key covers ambiguous HTTP outcomes and retries across tabs.
+    Acquire the target lock before the original row lock (the cancel path uses
+    that order too). The deterministic key covers ambiguous HTTP outcomes.
     Returns None for missing/hidden delivery IDs and raises for unsafe states.
     """
     if store.engine is None:
         raise RuntimeError("Inter-bot delivery database unavailable")
     with store.engine.begin() as conn:
+        target = conn.execute(sa_text(
+            "SELECT target_bot_id FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": delivery_id}).scalar_one_or_none()
+        if target is None:
+            return None
+        from .service.turn_admission import lock_target
+
+        lock_target(conn, target)
         row = conn.execute(sa_text(
             "SELECT * FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
         ), {"id": delivery_id}).mappings().first()
-        if row is None:
+        if row is None or row["target_bot_id"] != target:
             return None
         original = DeliveryRecord.from_mapping(row)
         metadata = original.metadata

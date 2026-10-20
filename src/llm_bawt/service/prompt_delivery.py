@@ -84,10 +84,15 @@ class PromptDeliveryWorker:
         snapshot, session_id, model, job_id, key = prepared
         sender = "scheduler:" + hashlib.sha256(snapshot["owner_user_id"].encode()).hexdigest()
         idem = f"schedule:{job_id}:occurrence:{key}"
-        # Serialize each outbox attempt with pause/cancel and other workers.
-        # Enqueue's independent transaction acquires only identity locks;
-        # dispatch acquires target -> job -> delivery, so there is no inversion.
+        # Serialize outbox attempts with pause/cancel and other workers.
+        # Dispatch takes target -> job -> delivery; this transaction now takes
+        # target before the job row and shares its connection with enqueue.
         with Session(self.engine) as session, session.begin():
+            from .turn_admission import lock_target
+
+            # claim_next takes target -> schedule row. Match that order before
+            # _rows locks the schedule; enqueue joins this same transaction.
+            lock_target(session.connection(), snapshot["bot_id"])
             rows = self._rows(session, run_id)
             if not rows or rows[2].state != "pending":
                 return None
@@ -127,7 +132,7 @@ class PromptDeliveryWorker:
                         "schedule_id": job_id, "occurrence_id": run_id,
                         "scheduled_for": snapshot["scheduled_for"],
                     }},
-                    producer="schedule",
+                    producer="schedule", connection=session.connection(),
                 )
             rows[2].delivery_id = record.id
             transition(session, *rows, "queued", now, evidence=self._evidence(record))

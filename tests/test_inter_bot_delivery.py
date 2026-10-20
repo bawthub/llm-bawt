@@ -44,6 +44,11 @@ def delivery_store(monkeypatch):
     token = uuid.uuid4().hex
     sender = f"test-sender-{token}"
     target = f"test-target-{token}"
+    from llm_bawt.runtime_settings import BotProfileStore
+
+    profiles = BotProfileStore(store.config)
+    assert profiles.engine is store.engine
+    profiles.upsert({"slug": target, "name": "Disposable delivery target"})
     yield store, sender, target
     with store.engine.begin() as conn:
         turn_ids = conn.execute(sa_text(
@@ -68,6 +73,9 @@ def delivery_store(monkeypatch):
         ), {"target": _sanitize_table_name(target)})
         conn.execute(sa_text(
             "DELETE FROM sessions WHERE bot_id=:target"
+        ), {"target": target})
+        conn.execute(sa_text(
+            "DELETE FROM bot_profiles WHERE slug=:target"
         ), {"target": target})
 
 
@@ -1046,7 +1054,8 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
     assistant_before = store.payload(record.id)["assistant_message_id"]
     claimed = store.claim_next(target, claim_owner="owner-one", steer_capable=True)
     assert claimed.status == DISPATCHING
-    assert claimed.reset_status == "COMPLETED"
+    assert claimed.reset_status == "ROTATED"
+    assert "new_session_receipt" not in claimed.metadata
     assert claimed.old_session_id == old_session
     assert claimed.new_session_id
     assert claimed.new_session_id != old_session
@@ -1060,7 +1069,7 @@ def test_reset_without_history_rotates_once_and_reserves_new_thread(delivery_sto
         record.id, claimed.claim_token or "", "transient", delay_seconds=0
     )
     assert requeued.status == QUEUED
-    assert requeued.reset_status == "COMPLETED"
+    assert requeued.reset_status == "ROTATED"
     reclaimed = store.claim_next(target, claim_owner="owner-two", steer_capable=True)
     assert reclaimed.new_session_id == claimed.new_session_id
     with store.engine.connect() as conn:
@@ -1102,7 +1111,8 @@ def test_reset_policy_waits_for_active_turn_before_rotation(delivery_store):
         conn.execute(sa_text("UPDATE turn_logs SET status='ok', ended_at=now() WHERE id=:id"), {"id": active_turn})
     claimed = store.claim_next(target, claim_owner="owner", steer_capable=True)
     assert claimed.status == DISPATCHING
-    assert claimed.reset_status == "COMPLETED"
+    assert claimed.reset_status == "ROTATED"
+    assert "new_session_receipt" not in claimed.metadata
 
 
 def test_duplicate_idempotency_key_rejects_different_session_policy(delivery_store):
@@ -1169,6 +1179,9 @@ def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
     assert payload["inter_bot_bridge_request_id"].endswith("_recovery_1")
     assert payload["assistant_message_id"] == assistant_before
     assert payload["inter_bot_seed_session_id"] == old_session
+    assert recovered.new_session_id == str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"inter-bot-overflow:{original.id}:1"
+    ))
     with store.engine.connect() as conn:
         rows = conn.execute(sa_text("""
             SELECT id, session_id FROM messages
@@ -1177,7 +1190,20 @@ def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
             "bot": _sanitize_table_name(target),
             "id": original.user_message_id,
         }).all()
+        predecessor = conn.execute(sa_text(
+            "SELECT session_metadata FROM sessions WHERE id=:id"
+        ), {"id": old_session}).scalar_one()
+        successor = conn.execute(sa_text(
+            "SELECT session_metadata FROM sessions WHERE id=:id"
+        ), {"id": recovered.new_session_id}).scalar_one()
+        pointer = conn.execute(sa_text(
+            "SELECT last_session_id FROM bot_profiles WHERE slug=:bot"
+        ), {"bot": target}).scalar_one()
     assert rows == [(original.user_message_id, recovered.new_session_id)]
+    assert predecessor["reset_successor_id"] == recovered.new_session_id
+    assert successor["reset_predecessor_ids"] == [old_session]
+    assert successor["rotation_delivery_id"] == f"{original.id}:overflow:1"
+    assert pointer == recovered.new_session_id
 
     reclaimed = store.claim_next(target, claim_owner="owner-two", steer_capable=False)
     assert reclaimed.id == original.id

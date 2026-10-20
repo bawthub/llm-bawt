@@ -3,7 +3,6 @@
 import asyncio
 import json
 import time
-import uuid
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -734,111 +733,44 @@ class SessionResetRequest(BaseModel):
     user_id: str | None = Field(
         None, description="User whose thread rotates; defaults to DEFAULT_USER"
     )
+    idempotency_key: str | None = Field(default=None, max_length=256)
 
 
 class SessionResetResponse(BaseModel):
     ok: bool
     bot_id: str
-    session_key: str | None = None
-    detail: str | None = None
+    user_id: str
+    reset: bool
+    outcome: str
+    old_session_id: str | None = None
+    new_session_id: str
+    receipt_message_id: str
+    delivery_id: str | None = None
+    turn_id: str | None = None
 
 
 @router.post("/v1/chat/session/reset", tags=["Agent Backends"])
 async def session_reset(request: SessionResetRequest) -> SessionResetResponse:
-    """Reset the agent backend session for a bot.
-
-    Sends a session.reset RPC for frontend/provider reset signaling, then
-    rotates the durable DB thread. Claude/Codex continuity is per-thread, so
-    the fresh thread naturally cold-starts on the next message; OpenClaw keeps
-    its gateway-owned routing session behavior.
-    """
+    """Submit one clean reset; only a provider-backed receipt is success."""
     service = get_service()
     from ...bots import BotManager
+    from ..session_lifecycle.api import NewSessionAPI
+    from ..session_lifecycle.intent import Continuity, Origin
 
     bot = BotManager(service.config).get_bot(request.bot_id)
     if not bot:
         raise HTTPException(status_code=404, detail=f"Bot '{request.bot_id}' not found")
-
-    backend_name = getattr(bot, "agent_backend", None)
-    if not backend_name:
+    if not getattr(bot, "agent_backend", None):
         raise HTTPException(status_code=400, detail=f"Bot '{request.bot_id}' is not an agent backend bot")
-
-    bc = getattr(bot, "agent_backend_config", {}) or {}
-    # Claude/Codex route RPCs by bot:user and persist SDK continuity on the
-    # durable thread, not in agent_backend_config. The bot slug is sufficient
-    # for reset signaling; OpenClaw still uses its gateway routing key.
-    if backend_name in ("claude-code", "codex"):
-        session_key = request.bot_id
-    else:
-        session_key = bc.get("session_key", "")
-
-    from ...agent_backends.agent_bridge import get_agent_subscriber
-
-    subscriber = get_agent_subscriber()
-    if not subscriber:
-        raise HTTPException(status_code=503, detail="Redis subscriber not available")
-
-    # Resolve the caller before the RPC so reset signaling lands on that
-    # user's unified stream. ``clearProviderSession`` remains meaningful only
-    # for gateway-owned OpenClaw sessions; Claude/Codex reset by thread rotation.
-    default_user = (getattr(service.config, "DEFAULT_USER", "") or "").strip()
-    user_id = (request.user_id or "").strip() or default_user
-    clear_provider = backend_name == "openclaw"
-
-    rpc_req_id = f"reset_{uuid.uuid4().hex}"
-    try:
-        await subscriber.send_rpc(
-            "session.reset",
-            {
-                "sessionKey": session_key,
-                "userId": user_id,
-                "clearProviderSession": clear_provider,
-            },
-            rpc_req_id,
-            timeout_s=10,
-            backend=backend_name,
-        )
-    except Exception as e:
-        log.warning("session.reset RPC failed for bot %s: %s", request.bot_id, e)
-        # Even if the bridge fails to clear gateway-side context, we still
-        # return ok — every bridge (claude-code, codex, openclaw) now
-        # intercepts session.reset and emits a SESSION_RESET unified event
-        # on a best-effort path, so the frontend-visible reset still
-        # happens.  See TASK-249.
-
-    # TASK-284: an explicit session reset also rotates the durable DB thread
-    # (non-destructive) so the provider's fresh session maps onto a fresh
-    # thread — same coordination as agent /new. Best-effort: a rotation
-    # failure never fails the reset.
-    rotated_thread: str | None = None
-    try:
-        if user_id:
-            from ...mcp_server.storage import get_storage
-
-            rotated_thread = await get_storage().rotate_session(
-                bot_id=request.bot_id, user_id=user_id
-            )
-            log.info(
-                "Rotated durable thread on session reset: bot=%s -> %s",
-                request.bot_id, rotated_thread,
-            )
-            # TASK-257: deterministic thread_switched event for the UI's
-            # conversation list (same emit as the /new path; source differs).
-            if rotated_thread:
-                service._publish_thread_switched(
-                    request.bot_id, user_id, str(rotated_thread),
-                    source="session_reset",
-                )
-    except Exception as e:
-        log.warning("Thread rotation on reset failed for %s: %s", request.bot_id, e)
-
-    log.info("Session reset requested: bot=%s session=%s", request.bot_id, session_key)
-    return SessionResetResponse(
-        ok=True,
-        bot_id=request.bot_id,
-        session_key=session_key,
-        detail="reset",
+    user_id = (request.user_id or "").strip() or (
+        getattr(service.config, "DEFAULT_USER", "") or ""
+    ).strip()
+    result = await NewSessionAPI.submit(
+        service, bot_id=bot.slug, user_id=user_id,
+        continuity=Continuity.CLEAN, origin=Origin.SESSION_API,
+        idempotency_key=request.idempotency_key,
     )
+    return SessionResetResponse(**result)
 
 
 @router.post("/v1/chat/completions", tags=["OpenAI Compatible"])

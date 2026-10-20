@@ -7,8 +7,13 @@ between its turn-log insert and bridge publication.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import text
+
+from agent_bridge.maintenance import is_new_command
 
 from ..bot_types import durable_agent_backend
 from ..message_authorship import AuthorReference
@@ -51,6 +56,7 @@ class OrdinaryTurnDecision:
 
 def admit_agent_request(
     service: Any, request: Any, *, bot_id: str, user_id: str, user_prompt: str,
+    chat_reset: bool = False,
 ) -> OrdinaryTurnDecision:
     """Submit one ordinary request through the durable dispatcher."""
     # Preserve omission provenance before the queued request is normalized.
@@ -61,6 +67,7 @@ def admit_agent_request(
         queue = OrdinaryTurnQueue(service._turn_log_store, getattr(dispatcher, "store", None))
     return queue.decide(
         request=queued_request, bot_id=bot_id, user_id=user_id, user_prompt=user_prompt,
+        chat_reset=chat_reset,
     )
 
 
@@ -71,15 +78,22 @@ def admit_ordinary_agent_turn(
 ) -> OrdinaryTurnDecision | None:
     """The one ordinary-start admission branch shared by stream and nonstream.
 
-    Returns None when the request runs directly: chat models, non-durable
-    harnesses, or work already holding a trusted durable admission claim.
+    Returns None for ordinary chat, non-durable harnesses, explicitly selected
+    threads, or work already holding a trusted durable admission claim. A
+    continuous chat /new uses the same WAIT queue as an agent /new.
     """
-    if not is_agent_backend or admission_claim is not None or durable_agent_backend(bot) is None:
+    if admission_claim is not None:
+        return None
+    if is_agent_backend:
+        if durable_agent_backend(bot) is None:
+            return None
+    elif not is_new_command(user_prompt) or getattr(request, "session_id", None):
         return None
     # Direct paths minted a provisional trigger above; durable admission must
     # not present that value as a caller-supplied UUID when the request omitted it.
     decision = admit_agent_request(
         service, request, bot_id=bot_id, user_id=user_id, user_prompt=user_prompt,
+        chat_reset=not is_agent_backend,
     )
     dispatcher = getattr(service, "_inter_bot_dispatcher", None)
     if dispatcher is not None and decision.delivery_id:
@@ -103,6 +117,7 @@ class OrdinaryTurnQueue:
 
     def decide(
         self, *, request: Any, bot_id: str, user_id: str, user_prompt: str,
+        chat_reset: bool = False,
     ) -> OrdinaryTurnDecision:
         message_id = getattr(request, "user_message_id", None)
         payload = request.model_dump(exclude_none=True)
@@ -119,6 +134,38 @@ class OrdinaryTurnQueue:
         key = f"ordinary:{canonical_uuid(message_id, 'user_message_id')}" if message_id else None
         with self.turns.engine.begin() as conn:
             lock_target(conn, bot_id)
+            metadata = {"ordinary_chat": {
+                "session_id": getattr(request, "session_id", None),
+                "stream": bool(getattr(request, "stream", False)),
+            }}
+            # Preserve the exact visible command. Only a trusted claimed
+            # follow-up may override the bridge's outbound message with its task.
+            from .session_lifecycle.execution import NewSessionExecution
+
+            follow_up = NewSessionExecution.typed_follow_up(user_prompt)
+            if (user_prompt.strip() == "/new" or follow_up is not None) and not getattr(request, "session_id", None):
+                from .session_lifecycle.intent import (
+                    Admission, Continuity, NewSessionIntent, Origin,
+                )
+                if follow_up is not None:
+                    payload["inter_bot_typed_follow_up"] = True
+
+                old_id = conn.execute(text("""
+                    SELECT id FROM sessions WHERE bot_id=:bot AND user_id=:user
+                      AND status='active' AND ended_at IS NULL
+                """), {"bot": bot_id, "user": user_id}).scalar_one_or_none()
+                intent = NewSessionIntent(
+                    bot_id=bot_id, user_id=user_id, author=author,
+                    continuity=Continuity.CONFIGURED, admission=Admission.WAIT,
+                    origin=Origin.CHAT_COMMAND,
+                    idempotency_key=key or f"ordinary:{uuid4()}",
+                    expected_session_id=old_id, follow_up=follow_up,
+                )
+                metadata["new_session_intent"] = {
+                    **asdict(intent), "author": author.to_dict(),
+                }
+                if chat_reset:
+                    metadata["new_session_execution"] = "chat"
             # The resolver is the transaction's last action: its identity locks
             # remain held until engine.begin commits on exit.
             record, _ = self.deliveries.enqueue(
@@ -126,10 +173,7 @@ class OrdinaryTurnQueue:
                 message=user_prompt, payload=payload, connection=conn,
                 idempotency_key=key, user_message_id=message_id,
                 assistant_message_id=getattr(request, "assistant_message_id", None),
-                metadata={"ordinary_chat": {
-                    "session_id": getattr(request, "session_id", None),
-                    "stream": bool(getattr(request, "stream", False)),
-                }},
+                metadata=metadata,
                 producer="ordinary",
             )
             return OrdinaryTurnDecision(

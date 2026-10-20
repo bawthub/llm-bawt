@@ -671,18 +671,22 @@ class MemoryClient:
             bot_id=self.bot_id, user_id=self.user_id,
         )))
 
-    def rotate_session(self, idempotency_key: str | None = None) -> str | None:
-        """Rotate the thread; a durable delivery key reuses its first successor."""
+    def rotate_session(
+        self, idempotency_key: str | None = None, *, accept_pointer: bool = False,
+    ) -> str | None:
+        """Rotate the thread; an accepted /new stamps its pointer atomically."""
         self._ensure_initialized()
         key_args = {"idempotency_key": idempotency_key} if idempotency_key else {}
         if self.server_url:
             return self._call_server(
                 "sessions_rotate", {"bot_id": self.bot_id, "user_id": self.user_id,
+                                    "accept_pointer": accept_pointer,
                                     **({"key": idempotency_key} if idempotency_key else {})}
             )
         storage = self._get_storage()
         return _run_async(
-            storage.rotate_session(bot_id=self.bot_id, user_id=self.user_id, **key_args)
+            storage.rotate_session(bot_id=self.bot_id, user_id=self.user_id,
+                                   accept_pointer=accept_pointer, **key_args)
         )
 
     def clear_messages(self) -> int:
@@ -1490,9 +1494,12 @@ class _MCPShortTermManager:
         """Return/create this adapter's active thread for SDK write-back."""
         return self._memory_client.get_or_create_active_session()
 
-    def rotate_session(self, idempotency_key: str | None = None) -> str | None:
-        """TASK-284: rotate the active thread; durable retries reuse a successor."""
+    def rotate_session(
+        self, idempotency_key: str | None = None, *, accept_pointer: bool = False,
+    ) -> str | None:
+        """Rotate the active thread; accepted /new stamps the bot-wide pointer."""
         return self._memory_client.rotate_session(
+            accept_pointer=accept_pointer,
             **({"idempotency_key": idempotency_key} if idempotency_key else {})
         )
 

@@ -332,9 +332,22 @@ test-integration: ## Optional integration tests; tests targeting an unverified s
 	uv run pytest -m integration
 
 test-pg-acceptance: ## REQUIRED private PostgreSQL gate: zero skips, zero missing suites
-	uv run --extra dev --extra service python -m pytest -o addopts='' --require-pg-acceptance \
+	uv run --isolated --frozen --extra dev --extra service --extra memory --extra mcp python -m pytest -o addopts='' --require-pg-acceptance \
 		tests/test_session_search_pg.py tests/test_session_continuity_pg.py \
 		tests/test_agent_bridge.py::TestEventStore tests/test_agent_context.py \
+		tests/test_idle_context_reset_pg.py tests/test_turn_context_snapshot_pg.py \
+		tests/test_bot_session_state_pg.py tests/test_runtime_switch_pointer_pg.py \
+		tests/test_new_session_receipt_pg.py tests/test_new_session_receipt_review_pg.py \
+		tests/test_new_session_typed_pg.py tests/test_new_session_typed_review_pg.py \
+		tests/test_new_session_typed_follow_up_pg.py \
+		tests/test_new_session_chat_pg.py tests/test_new_session_chat_review_pg.py \
+		tests/test_new_session_history_review_pg.py \
+		tests/test_new_session_transport_review.py::test_text_part_follow_up_receipt_uses_same_command_as_admission \
+		tests/test_new_session_policy_review_pg.py tests/test_new_session_policy_recovery_pg.py \
+		tests/test_new_session_api_review_pg.py \
+		tests/test_codex_reset_evidence.py::test_native_codex_ack_requires_exact_persisted_policy_binding \
+		tests/test_codex_reset_evidence.py::test_standalone_codex_receipt_requires_empty_successor_binding \
+		tests/test_session_rotation_review_pg.py tests/test_session_overflow_lock_review_pg.py \
 		tests/test_inter_bot_delivery.py tests/test_inter_bot_delivery_retry.py \
 		tests/test_turn_admission_pg.py tests/test_session_reset_lineage_pg.py \
 		tests/test_session_summaries.py::TestSummarizeThreadLive \

@@ -38,6 +38,7 @@ from agent_bridge.approval import (
     evaluate as evaluate_policies,
 )
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
+from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 from claude_code_bridge.tool_events import normalize_tool_result
@@ -106,6 +107,7 @@ class ClaudeSessionMixin:
         message: str,
         *,
         explicit_thread: bool,
+        reset_action: str | None = None,
         bot_slug: str,
         session_key: str,
         request_id: str,
@@ -124,13 +126,17 @@ class ClaudeSessionMixin:
         turns pass through unchanged because opening an old thread must never
         rotate it.
         """
-        if explicit_thread or not message.lstrip().startswith("/new"):
+        if explicit_thread or (not reset_action and not is_new_command(message)):
             return message
 
         self._publish_session_reset_unified(
             bot_slug or session_key, session_key, had_session=True,
         )
-        remaining = message.lstrip().removeprefix("/new").strip()
+        remaining = (
+            message if reset_action == "reset_follow_up"
+            else "" if reset_action == "reset_only"
+            else message.lstrip().removeprefix("/new").strip()
+        )
         if remaining:
             return remaining
 
@@ -140,6 +146,8 @@ class ClaudeSessionMixin:
             bot_slug, model, injected=inject_messages,
             thread_session_id=thread_session_id,
         )
+        if isinstance(seed_stats, dict) and seed_stats.get("reason") and not seed_stats.get("clean_start"):
+            raise RuntimeError(f"new-session seed failed: {seed_stats['reason']}")
         self._publish_event(
             request_id, session_key, 1,
             kind=AgentEventKind.ASSISTANT_DONE,
@@ -148,6 +156,11 @@ class ClaudeSessionMixin:
             token_usage=self._seed_usage_estimate(
                 seed_stats, context_window=context_window,
             ),
+            extra_raw={"new_session_ack": {
+                "thread_session_id": thread_session_id,
+                "provider_session_id": (seed_stats or {}).get("session_id"),
+                "clean_start": bool((seed_stats or {}).get("clean_start")),
+            }},
         )
         self._publisher.publish_run_done(request_id)
         await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

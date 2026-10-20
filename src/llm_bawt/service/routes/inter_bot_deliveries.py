@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -216,16 +217,37 @@ async def create_delivery(body: DeliveryCreate):
     }
     dispatcher = _dispatcher()
     try:
-        record, duplicate = dispatcher.store.enqueue(
-            sender_bot_id=sender, target_bot_id=target, message=body.message,
-            payload=payload, author=author, idempotency_key=body.idempotency_key,
-            project_id=body.project_id, task_id=body.task_id,
-            message_kind=body.message_kind, metadata=body.metadata,
-            max_attempts=body.max_attempts, session_policy=policy,
-            reset_reason=body.reset_reason or automatic_reason, producer="bot",
-        )
+        if policy.value != "continue":
+            from ..session_lifecycle.intent import Admission, Continuity, NewSessionIntent, Origin
+            from ..session_lifecycle.lifecycle import NewSessionLifecycle
+
+            intent = NewSessionIntent(
+                bot_id=target, user_id=delivery_user, author=author,
+                continuity=(Continuity.RETAIN if policy.value == "reset_retain_history"
+                            else Continuity.CLEAN),
+                admission=Admission.WAIT, origin=Origin.BOT_DELIVERY,
+                idempotency_key=body.idempotency_key or f"bot-reset:{uuid4()}",
+                follow_up=body.message, reason=body.reset_reason or automatic_reason,
+            )
+            record, duplicate = NewSessionLifecycle(get_service()).admit_bot_delivery(
+                intent, payload=payload, metadata=body.metadata,
+                sender_bot_id=sender, project_id=body.project_id, task_id=body.task_id,
+                message_kind=body.message_kind, max_attempts=body.max_attempts,
+                reset_reason=body.reset_reason or automatic_reason, producer="bot",
+            )
+        else:
+            record, duplicate = dispatcher.store.enqueue(
+                sender_bot_id=sender, target_bot_id=target, message=body.message,
+                payload=payload, author=author, idempotency_key=body.idempotency_key,
+                project_id=body.project_id, task_id=body.task_id,
+                message_kind=body.message_kind, metadata=body.metadata,
+                max_attempts=body.max_attempts, session_policy=policy,
+                reset_reason=body.reset_reason or automatic_reason, producer="bot",
+            )
     except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not duplicate and not target_exists:
         record = dispatcher.store.mark_failed(record.id, f"Unknown target bot '{target}'") or record
     elif not duplicate and not durable_capable:

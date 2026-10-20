@@ -40,7 +40,7 @@ def _service(execute_llm_query, *, model_type: str = "claude-code") -> Backgroun
     service._maybe_summarize_on_new = Mock()
     service._maybe_rotate_agent_session = Mock()
     service._finalize_turn = Mock()
-    service._turn_log_store = SimpleNamespace(engine=object())
+    service._turn_log_store = SimpleNamespace(engine=object(), accept_session_binding=Mock())
     service._get_llm_bawt = Mock(return_value=SimpleNamespace(
         client=SimpleNamespace(
             model_definition={"type": model_type},
@@ -131,6 +131,22 @@ def test_agent_nonstream_turn_registers_execution_and_capability(_isolate) -> No
     assert turn_executions.get(execution.turn_id) is None
 
 
+def test_nonstream_multipart_text_survives_response_accounting(_isolate) -> None:
+    service = _service(Mock(return_value=("task answer", "", [])))
+    request = _claimed(_request().model_copy(update={"messages": [ChatMessage(
+        role="user", content=[
+            {"type": "text", "text": "say "},
+            {"type": "image_url", "image_url": {"url": "asset"}},
+            {"type": "text", "text": "hello"},
+        ],
+    )]}))
+
+    response = asyncio.run(service.chat_completion(request))
+    assert response.choices[0].message.content == "task answer"
+    assert response.usage.prompt_tokens == len("say hello") // 4
+    assert service._get_llm_bawt.return_value.prepare_messages_for_query.call_args.args[0] == "say hello"
+
+
 def test_execution_is_released_when_the_query_raises(_isolate) -> None:
     seen: dict = {}
 
@@ -169,7 +185,6 @@ def test_failed_admission_does_not_cancel_running_chat_generation(stream, monkey
     execute = Mock(side_effect=AssertionError("unadmitted request reached inference"))
     service = _service(execute, model_type="openai")
     service._persist_turn_log.side_effect = AdmissionUnavailable("DB unavailable")
-    service._maybe_handle_chat_new_command = Mock(return_value=(None, "do the task"))
     if stream:
         monkeypatch.setattr(
             "llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
@@ -190,8 +205,9 @@ def test_failed_admission_does_not_cancel_running_chat_generation(stream, monkey
     execute.assert_not_called()
 
 
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
 @pytest.mark.parametrize("explicit", [False, True], ids=["active", "explicit"])
-def test_rejected_agent_new_has_no_thread_side_effects(explicit, monkeypatch, _isolate):
+def test_rejected_agent_new_has_no_thread_side_effects(explicit, monkeypatch, _isolate, stream):
     from llm_bawt.service.turn_admission import AdmissionUnavailable
 
     service = _service(Mock(side_effect=AssertionError("unadmitted bridge execution")))
@@ -209,14 +225,17 @@ def test_rejected_agent_new_has_no_thread_side_effects(explicit, monkeypatch, _i
     )
     request = ChatCompletionRequest(
         model="test-model", messages=[ChatMessage(role="user", content="/new")],
-        bot_id="caid", user="nick", stream=True,
+        bot_id="caid", user="nick", stream=stream,
     )
     if explicit:
         request.session_id = "selected-thread"
 
     async def run():
-        async for _ in service.chat_completion_stream(_claimed(request)):
-            pass
+        if stream:
+            async for _ in service.chat_completion_stream(_claimed(request)):
+                pass
+        else:
+            await service.chat_completion(_claimed(request))
 
     with pytest.raises(AdmissionUnavailable):
         asyncio.run(run())
@@ -230,52 +249,99 @@ def test_rejected_agent_new_has_no_thread_side_effects(explicit, monkeypatch, _i
     assert _isolate == []
 
 
-def test_accepted_agent_new_seeds_outgoing_then_routes_to_fresh_thread(monkeypatch, _isolate):
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
+@pytest.mark.parametrize("mode", ["typed", "retain", "clean"])
+def test_accepted_agent_new_seeds_outgoing_then_routes_to_fresh_thread(monkeypatch, _isolate, mode, stream):
     class StopAfterSetup(Exception):
         pass
 
     order = []
-    service = _service(Mock(side_effect=AssertionError("bridge execution started")))
+    execute = Mock(side_effect=StopAfterSetup)
+    service = _service(execute)
     service._persist_turn_log.side_effect = lambda **_kw: order.append("admit")
-    bindings = iter((
-        {"thread_session_id": "old-thread", "thread_resume_id": "old-sdk"},
-        {"thread_session_id": "fresh-thread"},
-    ))
+    binding = (
+        {"thread_session_id": "old-thread", "thread_resume_id": "old-sdk"}
+        if mode == "typed" else {"thread_session_id": "fresh-thread"}
+    )
     service._resolve_active_thread_binding.side_effect = lambda *_a: (
-        order.append("bind") or next(bindings)
+        order.append("bind") or dict(binding)
     )
     service._maybe_summarize_on_new.side_effect = lambda *_a, **_kw: order.append("summarize")
-    service._maybe_rotate_agent_session.side_effect = lambda *_a, **_kw: order.append("rotate")
+
+    def rotate(*_args, **_kwargs):
+        order.append("rotate")
+        binding.clear()
+        binding["thread_session_id"] = "fresh-thread"
+
+    service._maybe_rotate_agent_session.side_effect = rotate
+
     def seed(*_args, **kwargs):
         assert kwargs["thread_binding"]["thread_session_id"] == "old-thread"
         order.append("seed")
         return [{"role": "user", "content": "outgoing context"}]
 
+    def retained_seed(*_args, **kwargs):
+        assert kwargs["session_id"] == "old-thread"
+        order.append("seed")
+        return {"messages": [{"role": "user", "content": "outgoing context"}]}
+
     monkeypatch.setattr("llm_bawt.service.dependencies.get_service", lambda: service)
     monkeypatch.setattr("llm_bawt.service.routes.history.maybe_build_session_seed", seed)
+    monkeypatch.setattr("llm_bawt.service.routes.history.build_context_seed", retained_seed)
     monkeypatch.setattr("llm_bawt.service.chat_streaming.ToolEventCoordinator",
                         Mock(side_effect=StopAfterSetup))
+    prompt = "/new" if mode == "typed" else "do the task"
     monkeypatch.setattr(
         "llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
-        AsyncMock(return_value=("/new", [], [], None)),
+        AsyncMock(return_value=(prompt, [], [], None)),
     )
     request = ChatCompletionRequest(
-        model="test-model", messages=[ChatMessage(role="user", content="/new")],
-        bot_id="caid", user="nick", stream=True,
+        model="test-model", messages=[ChatMessage(role="user", content=prompt)],
+        bot_id="caid", user="nick", stream=stream,
     )
+    if mode != "typed":
+        request.inter_bot_session_policy = (
+            "reset_retain_history" if mode == "retain" else "reset_without_history"
+        )
+        request.inter_bot_seed_session_id = "old-thread"
 
     async def run():
-        async for _ in service.chat_completion_stream(_claimed(request)):
-            pass
+        if stream:
+            async for _ in service.chat_completion_stream(_claimed(request)):
+                pass
+        else:
+            await service.chat_completion(_claimed(request))
 
     with pytest.raises(StopAfterSetup):
         asyncio.run(run())
-    assert order == ["admit", "bind", "summarize", "seed", "rotate", "bind"]
+    expected = {
+        "typed": ["admit", "bind", "summarize", "seed", "rotate", "bind"],
+        "retain": ["admit", "bind", "summarize", "seed"],
+        "clean": ["admit", "bind"],
+    }
+    expected_order = expected[mode]
+    if not stream:
+        # Nonstream resolves the same current binding for its early turn_start.
+        expected_order = ["admit", "bind", *expected_order[1:]]
+    assert order == expected_order
     assert _isolate[0]["session_id"] == "fresh-thread"
-    service._update_turn_log.assert_not_called()
+    if mode != "typed":
+        service._maybe_rotate_agent_session.assert_not_called()
+    if stream:
+        execute.assert_not_called()
+        service._update_turn_log.assert_not_called()
+    else:
+        execute.assert_called_once()
+        assert execute.call_args.kwargs["thread_binding"]["thread_session_id"] == "fresh-thread"
+        assert execute.call_args.kwargs["inject_messages"] == (
+            [] if mode == "clean" else [{"role": "user", "content": "outgoing context"}]
+        )
+        service._update_turn_log.assert_called_once()
+        assert service._update_turn_log.call_args.kwargs["status"] == "error"
 
 
-def test_post_admission_agent_setup_failure_closes_turn(monkeypatch):
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
+def test_post_admission_agent_setup_failure_closes_turn(monkeypatch, stream):
     service = _service(Mock(side_effect=AssertionError("bridge execution started")))
     service._maybe_rotate_agent_session.side_effect = RuntimeError("rotation failed")
     monkeypatch.setattr("llm_bawt.service.dependencies.get_service", lambda: service)
@@ -285,12 +351,15 @@ def test_post_admission_agent_setup_failure_closes_turn(monkeypatch):
     )
     request = ChatCompletionRequest(
         model="test-model", messages=[ChatMessage(role="user", content="/new")],
-        bot_id="caid", user="nick", stream=True,
+        bot_id="caid", user="nick", stream=stream,
     )
 
     async def run():
-        async for _ in service.chat_completion_stream(_claimed(request)):
-            pass
+        if stream:
+            async for _ in service.chat_completion_stream(_claimed(request)):
+                pass
+        else:
+            await service.chat_completion(_claimed(request))
 
     with pytest.raises(RuntimeError, match="rotation failed"):
         asyncio.run(run())
