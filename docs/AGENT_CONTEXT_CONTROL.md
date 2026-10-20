@@ -169,10 +169,10 @@ commands does not imply support for app-managed bot-policy resets.
 
 ## Idle oversized-context job (TASK-1185 / TASK-1188)
 
-**Integration in progress; automation stays disabled pending parity verification
-and explicit operator activation.** The app registers one disabled
-`IDLE_CONTEXT_RESET` job with a five-minute interval; source reload never enables
-it. Eligibility remains **strictly above 100,000 resident tokens** and
+**The shared lifecycle is implemented and verified across callers.** The app
+registers one disabled `IDLE_CONTEXT_RESET` job with a five-minute interval;
+source reload never enables it. Activation requires explicit operator approval
+and a successful disposable-provider/browser check. Eligibility remains **strictly above 100,000 resident tokens** and
 **strictly more than 15 minutes since completion**, not turn creation time.
 
 `IdleContextCandidates` selects at most one session per bot through
