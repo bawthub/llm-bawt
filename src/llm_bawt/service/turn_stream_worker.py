@@ -316,9 +316,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     # so every emitted tool event carries it (frontend
                     # buckets tool activity by trigger_message_id).
                     extra_kwargs["trigger_message_id"] = trigger_message_id
-                if is_agent_backend and inject_seed_messages:
-                    # TASK-501: push the pre-assembled seed so the bridge
-                    # seeds the fresh session without the context-seed callback.
+                if is_agent_backend and inject_seed_messages is not None:
+                    # [] is an explicit clean reset, distinct from an absent seed.
                     extra_kwargs["inject_messages"] = inject_seed_messages
                 if is_agent_backend and ctx.thread_binding:
                     # TASK-252: request-local explicit-thread binding — rides

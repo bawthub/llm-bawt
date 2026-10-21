@@ -610,9 +610,15 @@ class ServiceLLMBawt(BaseLLMBawt):
             tool_context is empty if no tools used.
             tool_call_details is a list of per-call dicts for debug logging.
         """
-        # TASK-501: only agent backends (AgentBackendClient, **kwargs) accept
-        # inject_messages; guard so plain clients never receive an unknown kwarg.
-        _q_kwargs = {"inject_messages": inject_messages} if inject_messages else {}
+        _is_agent_backend = str(
+            (getattr(self.client, "model_definition", None) or {}).get("type", "")
+        ).strip() in ("agent_backend", "claude-code")
+        # An explicit [] is proof of a clean reset, not an absent seed. Only
+        # agent backends accept this request-local bridge argument.
+        _q_kwargs = (
+            {"inject_messages": inject_messages}
+            if _is_agent_backend and inject_messages is not None else {}
+        )
         # TASK-252: request-local per-thread SDK binding (explicit session_id
         # turns) — rides the same kwarg channel as inject_messages so it can
         # never leak between concurrent turns via shared instance state.
@@ -639,10 +645,6 @@ class ServiceLLMBawt(BaseLLMBawt):
         # here so non-streaming stays consistent AND so inject_messages reaches
         # the single client.query below instead of being dropped in the tool
         # branch.
-        _is_agent_backend = str(
-            (getattr(self.client, "model_definition", None) or {}).get("type", "")
-        ).strip() in ("agent_backend", "claude-code")
-
         tool_format_value = str(getattr(self.tool_format, "value", self.tool_format)).strip().lower()
         tools_enabled_for_model = tool_format_value != "none"
 

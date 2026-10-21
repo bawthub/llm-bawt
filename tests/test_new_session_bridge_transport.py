@@ -15,11 +15,13 @@ from llm_bawt.clients.agent_backend_client import AgentBackendClient
 from llm_bawt.models.message import Message
 
 
-@pytest.mark.parametrize("action,message", [
-    ("reset_only", " /new\n"),
-    ("reset_follow_up", "Do the task; this is not a /new command."),
+@pytest.mark.parametrize("backend,action,message", [
+    ("claude-code", "reset_only", " /new\n"),
+    ("claude-code", "reset_follow_up", "Do the task; this is not a /new command."),
+    ("codex", "reset_only", "/new"),
+    ("codex", "reset_follow_up", "Do the task; this is not a /new command."),
 ])
-def test_reset_action_is_serialized_beside_unmodified_message(action, message):
+def test_reset_action_is_serialized_beside_unmodified_message(backend, action, message):
     seen = []
 
     class Redis:
@@ -30,11 +32,26 @@ def test_reset_action_is_serialized_beside_unmodified_message(action, message):
     publisher = CommandPublisherMixin()
     publisher._pub_redis = Redis()
     asyncio.run(publisher.send_command(
-        "bot:test", message, "req_test", backend="claude-code",
+        "bot:test", message, "req_test", backend=backend,
         bridge_reset_action=action,
     ))
     assert seen[0]["message"] == message
     assert seen[0]["bridge_reset_action"] == action
+
+
+@pytest.mark.parametrize("backend,action", [
+    ("codex", "unsupported"),
+    ("openclaw", "reset_only"),
+])
+def test_publisher_rejects_unsupported_reset_action(backend, action):
+    publisher = CommandPublisherMixin()
+    publisher._pub_redis = SimpleNamespace(xadd=AsyncMock())
+    with pytest.raises(ValueError, match="Unsupported agent bridge reset action"):
+        asyncio.run(publisher.send_command(
+            "bot:test", "/new", "req_test", backend=backend,
+            bridge_reset_action=action,
+        ))
+    publisher._pub_redis.xadd.assert_not_awaited()
 
 
 @pytest.mark.parametrize("action,message,expected", [

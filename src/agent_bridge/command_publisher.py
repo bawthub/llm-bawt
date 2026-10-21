@@ -91,8 +91,9 @@ class CommandPublisherMixin:
             )
         if bridge_reset_action:
             supported = (
-                backend == "claude-code" and bridge_reset_action in {"reset_only", "reset_follow_up"}
-            ) or (backend == "codex" and bridge_reset_action == "reset_follow_up")
+                backend in {"claude-code", "codex"}
+                and bridge_reset_action in {"reset_only", "reset_follow_up"}
+            )
             if not supported:
                 raise ValueError("Unsupported agent bridge reset action")
             fields["bridge_reset_action"] = bridge_reset_action
