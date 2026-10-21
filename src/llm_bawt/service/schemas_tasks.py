@@ -65,6 +65,10 @@ class ScheduledJobInfo(BaseModel):
     last_status: str | None = None
     last_duration_ms: int | None = None
     last_error: str | None = None
+    parameter_schema: dict[str, Any] | None = None
+    parameters: dict[str, Any] | None = None
+    configuration_error: str | None = None
+    stored_parameters: dict[str, Any] | None = None
 
 class ScheduledJobsResponse(BaseModel):
     """Response for listing scheduled jobs."""

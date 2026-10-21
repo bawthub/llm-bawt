@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ...message_authorship import AuthorReference
+from ..job_parameters import IdleContextResetParameters
 
 
 class Continuity(StrEnum):
@@ -72,6 +73,7 @@ class NewSessionIntent:
     job_id: str | None = None
     run_id: str | None = None
     reason: str | None = None
+    scheduler_parameters: IdleContextResetParameters | None = None
 
     def __post_init__(self) -> None:
         # Durable delivery JSON turns enum values back into plain strings.
@@ -80,6 +82,12 @@ class NewSessionIntent:
         for name, enum in (("continuity", Continuity), ("admission", Admission),
                            ("origin", Origin)):
             object.__setattr__(self, name, enum(getattr(self, name)))
+        if self.scheduler_parameters is not None:
+            if self.origin is not Origin.SCHEDULER:
+                raise ValueError("scheduler parameters require scheduler origin")
+            object.__setattr__(self, "scheduler_parameters", IdleContextResetParameters.model_validate(
+                self.scheduler_parameters,
+            ))
         for name in ("bot_id", "user_id", "idempotency_key"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"new-session {name} must be nonempty")

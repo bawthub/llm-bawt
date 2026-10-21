@@ -10,8 +10,11 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
-MIN_RESIDENT_TOKENS = 100_000
-MIN_IDLE = timedelta(minutes=15)
+from ..job_parameters import IdleContextResetParameters
+
+# Compatibility exports; the parameter model owns defaults.
+MIN_RESIDENT_TOKENS = IdleContextResetParameters().resident_tokens_gt
+MIN_IDLE = timedelta(minutes=IdleContextResetParameters().idle_minutes_gt)
 # Privacy boundary: exclude before reading any session or turn for this bot.
 PROTECTED_BOT_IDS = frozenset({"mira"})
 
@@ -71,7 +74,10 @@ class IdleContextCandidates:
         return [dict(row) for row in rows.mappings()]
 
     @staticmethod
-    def skip_reason(candidate: dict, *, now: datetime) -> str | None:
+    def skip_reason(
+        candidate: dict, *, now: datetime, parameters: IdleContextResetParameters | None = None,
+    ) -> str | None:
+        parameters = parameters or IdleContextResetParameters()
         if not candidate["session_id"] or not candidate["user_id"]:
             return "no valid accepted session"
         if not candidate["usage_turn_id"] or not candidate["ended_at"]:
@@ -79,7 +85,7 @@ class IdleContextCandidates:
         if candidate["latest_turn_id"] != candidate["usage_turn_id"]:
             return "newer bot activity invalidated measurement"
         completed = candidate["last_completed_at"]
-        if completed is None or now - completed <= MIN_IDLE:
+        if completed is None or now - completed <= timedelta(minutes=parameters.idle_minutes_gt):
             return "idle less than threshold"
         try:
             usage = json.loads(candidate["token_usage_json"] or "null")
@@ -88,6 +94,6 @@ class IdleContextCandidates:
             resident = int(usage.get("resident_tokens") or 0) or int(usage.get("input_tokens") or 0)
         except (TypeError, ValueError, OverflowError):
             return "resident context unknown"
-        if resident <= MIN_RESIDENT_TOKENS:
+        if resident <= parameters.resident_tokens_gt:
             return "resident context within threshold"
         return None

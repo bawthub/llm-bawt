@@ -172,8 +172,11 @@ commands does not imply support for app-managed bot-policy resets.
 **The shared lifecycle is implemented and verified across callers.** The app
 registers one disabled `IDLE_CONTEXT_RESET` job with a five-minute interval;
 source reload never enables it. Activation requires explicit operator approval
-and a successful disposable-provider/browser check. Eligibility remains **strictly above 100,000 resident tokens** and
-**strictly more than 15 minutes since completion**, not turn creation time.
+and a successful disposable-provider/browser check. Eligibility defaults to **strictly above
+100,000 resident tokens** and **strictly more than 15 minutes since completion**,
+not turn creation time. TASK-1197 makes these thresholds configurable; see
+[SCHEDULER_PARAMETERS.md](SCHEDULER_PARAMETERS.md). Each sweep persists its effective
+parameters and passes an immutable snapshot through submission and claim-time checks.
 
 `IdleContextCandidates` selects at most one session per bot through
 `bot_profiles.last_session_id`. It never enumerates per-user active sessions or

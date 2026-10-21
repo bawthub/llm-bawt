@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from ...utils.config import has_database_credentials
 from ..dependencies import get_profile_manager, get_service
+from ..job_parameters import JobConfigurationPatch, JobParameterRegistry
 from ..schemas import JobRunInfo, JobRunsResponse, ScheduledJobInfo, ScheduledJobsResponse
 from ..scheduler import JobRun, JobStatus, JobType, ScheduledJob, create_scheduler_tables
 
@@ -59,6 +60,46 @@ def trigger_job(job_type: str):
         session.commit()
 
     return {"success": True, "job_type": normalized_job_type}
+
+
+@router.patch("/v1/jobs/{job_id}", tags=["Jobs"])
+def update_job_configuration(job_id: str, patch: JobConfigurationPatch):
+    """Edit one maintenance job atomically, without touching legacy resolvers."""
+    from datetime import datetime, timedelta, timezone
+
+    from pydantic import ValidationError
+
+    with Session(_get_scheduler_engine()) as session:
+        job = session.exec(select(ScheduledJob).where(
+            ScheduledJob.id == job_id, ScheduledJob.job_type != JobType.SEND_PROMPT,
+        ).with_for_update()).first()
+        if job is None:
+            raise HTTPException(status_code=404, detail="Scheduled maintenance job not found")
+        try:
+            if "parameters" in patch.model_fields_set:
+                job.config_json = JobParameterRegistry.merge(job.job_type, job.config_json, patch.parameters)
+            # Invalid parameters may be paused, but never enabled through this API.
+            if patch.enabled is True and job.job_type in JobParameterRegistry.models:
+                JobParameterRegistry.resolve(job.job_type, job.config_json)
+        except ValidationError as exc:
+            errors = exc.errors(include_context=False, include_input=False, include_url=False)
+            for error in errors:
+                error["loc"] = ["body", "parameters", *error["loc"]]
+            raise HTTPException(status_code=422, detail=errors) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        reschedule = (
+            patch.interval_minutes is not None and patch.interval_minutes != job.interval_minutes
+        ) or (patch.enabled is True and not job.enabled)
+        if patch.interval_minutes is not None:
+            job.interval_minutes = patch.interval_minutes
+        if patch.enabled is not None:
+            job.enabled = patch.enabled
+        if reschedule:
+            job.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=job.interval_minutes)
+        session.add(job)
+        session.commit()
+    return {"success": True, "job_id": job_id}
 
 
 @router.get("/v1/jobs", response_model=ScheduledJobsResponse, tags=["Jobs"])
@@ -114,6 +155,7 @@ def list_scheduled_jobs(
                     job_type=job.job_type.value if hasattr(job.job_type, "value") else str(job.job_type),
                     bot_id=job.bot_id,
                     enabled=job.enabled,
+                    **JobParameterRegistry.describe(job.job_type, job.config_json),
                     interval_minutes=job.interval_minutes,
                     last_run_at=job.last_run_at,
                     next_run_at=job.next_run_at,

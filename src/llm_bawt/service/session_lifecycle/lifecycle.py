@@ -106,7 +106,10 @@ class NewSessionLifecycle:
         both ordinary enqueue and claim, so no new turn can enter between these
         checks and reservation. No producer may turn SKIP into a delayed queue.
         """
-        candidates = IdleContextCandidates(None)
+        parameters = intent.scheduler_parameters
+        candidates = IdleContextCandidates(
+            None, protected_bot_ids=parameters.protected_bot_ids if parameters else (),
+        )
         if intent.bot_id.strip().lower() in candidates.protected_bot_ids:
             return "protected bot"
         row = candidates.read_one(conn, intent.bot_id)
@@ -116,7 +119,7 @@ class NewSessionLifecycle:
             return "accepted session or owner changed"
         if row["usage_turn_id"] != intent.expected_usage_turn_id:
             return "context measurement changed"
-        reason = candidates.skip_reason(row, now=datetime.now(timezone.utc))
+        reason = candidates.skip_reason(row, now=datetime.now(timezone.utc), parameters=parameters)
         if reason:
             return reason
         try:
@@ -274,11 +277,14 @@ class NewSessionLifecycle:
                 stored = record.metadata.get("new_session_intent")
                 if not isinstance(stored, dict):
                     raise ValueError("existing delivery lacks verifiable new-session intent")
+                stored = dict(stored)
                 submitted = self._encode(intent)
-                # Each scheduler sweep has a new run id, but the same observed
-                # job/session/usage tuple must attach to the original delivery.
-                stored.pop("run_id", None)
-                submitted.pop("run_id", None)
+                # A sweep may have new settings, but the same measured context
+                # must attach to the original operation, never replay a reset.
+                # Claim-time checks keep the ORIGINAL persisted policy snapshot.
+                for key in ("run_id", "scheduler_parameters"):
+                    stored.pop(key, None)
+                    submitted.pop(key, None)
                 if stored != submitted:
                     raise ValueError("idempotency key belongs to another reset intent")
                 return record, None
@@ -424,6 +430,11 @@ class NewSessionLifecycle:
     def _encode(intent: NewSessionIntent) -> dict:
         value = asdict(intent)
         value["author"] = intent.author.to_dict()
+        if intent.scheduler_parameters is not None:
+            value["scheduler_parameters"] = intent.scheduler_parameters.model_dump(mode="json")
+        else:
+            # Preserve the byte shape of pre-parameter intents during recovery.
+            value.pop("scheduler_parameters", None)
         return value
 
     def _observe(self, intent: NewSessionIntent, delivery_id: str) -> NewSessionResult | None:

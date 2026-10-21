@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from ...bot_identities import SYSTEM_BOT_ID
 from ...message_authorship import AuthorReference
+from ..job_parameters import IdleContextResetParameters
 from ..session_lifecycle.intent import (
     Admission, Continuity, NewSessionIntent, NewSessionResult, Origin, Outcome, Stage,
 )
@@ -22,9 +23,12 @@ log = logging.getLogger(__name__)
 
 
 class IdleContextResetJob:
-    def __init__(self, engine, service, *, protected_bot_ids=(), lifecycle=None):
+    def __init__(self, engine, service, *, protected_bot_ids=(), lifecycle=None, parameters=None):
         self.service = service
-        self.candidates = IdleContextCandidates(engine, protected_bot_ids=protected_bot_ids)
+        values = (parameters or IdleContextResetParameters()).model_dump()
+        values["protected_bot_ids"] = (*values["protected_bot_ids"], *protected_bot_ids)
+        self.parameters = IdleContextResetParameters.model_validate(values)
+        self.candidates = IdleContextCandidates(engine, protected_bot_ids=self.parameters.protected_bot_ids)
         self._lifecycle = lifecycle
 
     async def run(self, *, job_id: str, run_id: str, target_bot: str) -> dict:
@@ -35,7 +39,9 @@ class IdleContextResetJob:
             bot_id = candidate["bot_id"]
             # Defense in depth: no submit even if a future selector is replaced.
             reason = ("protected bot" if bot_id.lower() in self.candidates.protected_bot_ids
-                      else self.candidates.skip_reason(candidate, now=datetime.now(timezone.utc)))
+                      else self.candidates.skip_reason(
+                          candidate, now=datetime.now(timezone.utc), parameters=self.parameters,
+                      ))
             if reason:
                 result = NewSessionResult(outcome=Outcome.SKIPPED, stage=Stage.ADMISSION, detail=reason)
             else:
@@ -45,6 +51,7 @@ class IdleContextResetJob:
                         author=AuthorReference.bot(SYSTEM_BOT_ID),
                         continuity=Continuity.CONFIGURED, admission=Admission.SKIP,
                         origin=Origin.SCHEDULER, job_id=job_id, run_id=run_id,
+                        scheduler_parameters=self.parameters,
                         expected_session_id=candidate["session_id"],
                         expected_usage_turn_id=candidate["usage_turn_id"],
                         # Rechecking the same measured context attaches to the
@@ -68,4 +75,5 @@ class IdleContextResetJob:
                     )
             counts["reset" if result.outcome is Outcome.COMPLETED else result.outcome.value] += 1
             results[bot_id] = asdict(result)
-        return {"scanned": len(rows), **counts, "bots": results}
+        return {"scanned": len(rows), **counts, "bots": results,
+                "parameters": self.parameters.model_dump(mode="json")}

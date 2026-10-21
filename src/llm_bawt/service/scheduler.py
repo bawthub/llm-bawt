@@ -278,6 +278,8 @@ class JobScheduler:
 
         # Create job run record
         def create_run():
+            from .job_parameters import JobParameterRegistry
+
             with Session(self.engine) as session:
                 if job.job_type == JobType.IDLE_CONTEXT_RESET:
                     # Claim the occurrence and its ONE run atomically. A stale
@@ -290,6 +292,7 @@ class JobScheduler:
                             or (db_job.next_run_at and db_job.next_run_at > now)):
                         return None
                     job.bot_id, job.config_json = db_job.bot_id, db_job.config_json
+                    job.interval_minutes = db_job.interval_minutes
                     db_job.last_run_at = now
                     db_job.next_run_at = now + timedelta(minutes=db_job.interval_minutes)
                     session.add(db_job)
@@ -297,18 +300,21 @@ class JobScheduler:
                     job_id=job.id,
                     bot_id=job.bot_id,
                     status=JobStatus.RUNNING,
+                    result_json=JobParameterRegistry.run_snapshot(
+                        job.job_type, job.config_json, job.interval_minutes,
+                    ),
                 )
                 session.add(run)
                 session.commit()
                 session.refresh(run)
-                return run.id
+                return run.id, run.result_json
 
-        run_id = await loop.run_in_executor(None, create_run)
-        if run_id is None:
+        claimed = await loop.run_in_executor(None, create_run)
+        if claimed is None:
             return
+        run_id, result_json = claimed
         start_time = datetime.now(timezone.utc)
         status = JobStatus.RUNNING
-        result_json: str | None = None
         error_message: str | None = None
 
         try:
@@ -333,14 +339,17 @@ class JobScheduler:
             elif job.job_type == JobType.IDLE_CONTEXT_RESET:
                 from .jobs.idle_context_reset import IdleContextResetJob
 
-                settings = self._parse_config_json(job.config_json)
-                protected = settings.get("protected_bot_ids", [])
-                if not isinstance(protected, list):
-                    raise ValueError("protected_bot_ids must be a list")
+                from .job_parameters import JobParameterRegistry
+
+                snapshot = json.loads(result_json)
+                if snapshot.get("configuration_error"):
+                    raise ValueError(snapshot["configuration_error"])
+                parameters = JobParameterRegistry.models[job.job_type].model_validate(snapshot["parameters"])
                 maintenance = IdleContextResetJob(
-                    self.engine, self.task_processor, protected_bot_ids=protected,
+                    self.engine, self.task_processor, parameters=parameters,
                 )
                 result = await maintenance.run(job_id=job.id, run_id=run_id, target_bot=job.bot_id)
+                result["interval_minutes"] = job.interval_minutes
                 result_json = json.dumps(result)
                 status = (JobStatus.FAILED if result["failed"] or result["ambiguous"]
                           else JobStatus.SUCCESS if result["reset"] else JobStatus.SKIPPED)
@@ -368,7 +377,8 @@ class JobScheduler:
                     error_message = f"Unknown job type: {job.job_type}"
         except Exception as e:
             status = JobStatus.FAILED
-            result_json = None
+            if job.job_type != JobType.IDLE_CONTEXT_RESET:
+                result_json = None
             error_message = str(e)
             logger.exception(f"Job {job.id} failed")
 
@@ -781,10 +791,12 @@ def init_default_jobs(engine, config) -> None:
             ScheduledJob.job_type == JobType.IDLE_CONTEXT_RESET,
         )).first()
         if not existing_idle:
+            from .job_parameters import IdleContextResetParameters
+
             session.add(ScheduledJob(
                 job_type=JobType.IDLE_CONTEXT_RESET, bot_id=WILDCARD_BOT_ID,
                 enabled=False, interval_minutes=5,
-                config_json=json.dumps({"resident_tokens_gt": 100000, "idle_minutes_gt": 15}),
+                config_json=IdleContextResetParameters().model_dump_json(),
             ))
             session.commit()
         # Check if profile maintenance job exists
