@@ -131,6 +131,30 @@ def test_agent_nonstream_turn_registers_execution_and_capability(_isolate) -> No
     assert turn_executions.get(execution.turn_id) is None
 
 
+@pytest.mark.parametrize("model_type", ["claude-code", "openai"])
+def test_claimed_nonstream_delivery_gets_outbound_only_reply_note(_isolate, model_type) -> None:
+    """Loopy r1: claimed stream=false turns must carry the note too (agents only)."""
+    from llm_bawt.inter_bot_reply_channel import delivery_reply_channel_note
+    from llm_bawt.message_authorship import AuthorReference
+
+    record = SimpleNamespace(reply_mode="async", author=AuthorReference.bot("vex"),
+                             message_kind=None, target_bot_id="caid")
+    lookups: list[str] = []
+    service = _service(Mock(return_value=("done", "", [])), model_type=model_type)
+    service._inter_bot_dispatcher = SimpleNamespace(store=SimpleNamespace(
+        get=lambda delivery_id: lookups.append(delivery_id) or record,
+    ))
+    asyncio.run(service.chat_completion(_claimed(_request())))
+
+    prepare = service._get_llm_bawt.return_value.prepare_messages_for_query
+    assert prepare.call_args.args[0] == "do the task"  # stored prompt stays clean
+    if model_type == "claude-code":
+        assert prepare.call_args.kwargs["context_suffix"] == delivery_reply_channel_note(record)
+        assert lookups == ["delivery-test"]
+    else:
+        assert prepare.call_args.kwargs["context_suffix"] is None
+
+
 def test_nonstream_multipart_text_survives_response_accounting(_isolate) -> None:
     service = _service(Mock(return_value=("task answer", "", [])))
     request = _claimed(_request().model_copy(update={"messages": [ChatMessage(

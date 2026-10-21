@@ -135,3 +135,46 @@ def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
     assert calls[1][1]["content_offset"] == 12
     assert calls[1][1]["source_message_id"] == "trigger"
     assert calls[2] == ("publish", None)
+
+
+def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch):
+    """The reply-channel note reaches the bridge only; history keeps the message."""
+    from llm_bawt.agent_backends import agent_bridge
+    from llm_bawt.bots import BotManager
+    from llm_bawt.service.routes import chat
+
+    persisted = []
+    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="nick", ended_at=None,
+                           status="streaming", agent_session_key="session-key", agent_request_id="req",
+                           trigger_message_id="trigger")
+    memory = SimpleNamespace(get_message_by_id=lambda id: {"session_id": "session-target"},
+                             add_message=lambda *args: persisted.append(args))
+    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda id: turn),
+                              get_memory_client=lambda *args: memory)
+    subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
+    monkeypatch.setattr(BotManager, "__init__", lambda *args: None)
+    monkeypatch.setattr(BotManager, "get_bot", lambda *args: SimpleNamespace(agent_backend="claude-code"))
+
+    class Timeline:
+        def __init__(self, service, **kwargs):
+            pass
+
+        async def content_offset(self, sub, requested):
+            return None
+
+        async def publish(self, sub):
+            pass
+
+    monkeypatch.setattr("llm_bawt.service.steer_timeline.SteerTimeline", Timeline)
+    asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
+        turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer",
+        message="Message from bot 'sender': verdict?",
+    ), steer_request_id="steer_delivery_test", author=AuthorReference.bot("sender"),
+        wire_suffix="[Reply channel: async delivery.]"))
+
+    sent = subscriber.send_steer.await_args.kwargs["message"]
+    assert sent == "Message from bot 'sender': verdict?\n\n[Reply channel: async delivery.]"
+    assert len(persisted) == 1
+    assert "Message from bot 'sender': verdict?" in persisted[0]
+    assert not any("Reply channel" in str(arg) for arg in persisted[0])

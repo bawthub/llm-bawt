@@ -30,6 +30,8 @@ from .prompt_default_loaders import (
     load_agents_task_execution,
     load_agents_task_spec,
     load_global_recall_guidance,
+    load_inter_bot_reply_channel_async,
+    load_inter_bot_reply_channel_waited,
     load_history_summarization_batch,
     load_history_summarization_single,
     load_media_prompt_expansion_video,
@@ -362,6 +364,32 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "user prompt; body is used verbatim (never .format()-ed). Must keep the "
             "JSON findings contract — quotes are re-grounded against source bytes "
             "and ungrounded ones dropped. Bot-scoped overrides supported."
+        )},
+    ),
+    "inter_bot.reply_channel.waited": PromptDefinition(
+        key="inter_bot.reply_channel.waited",
+        title="Inter-Bot Reply Channel: Waited",
+        category="agent_execution",
+        loader=load_inter_bot_reply_channel_waited,
+        metadata={"notes": (
+            "Appended to a bot-authored delivery sent with wait_for_reply=true. Tells "
+            "the recipient its final response is returned to the sender's tool call, "
+            "so it should not send a redundant callback. Resolved per delivery; "
+            "target-bot overrides supported."
+        )},
+    ),
+    "inter_bot.reply_channel.async": PromptDefinition(
+        key="inter_bot.reply_channel.async",
+        title="Inter-Bot Reply Channel: Async",
+        category="agent_execution",
+        required_vars=("sender_bot_id",),
+        loader=load_inter_bot_reply_channel_async,
+        metadata={"notes": (
+            "Appended to a bot-authored async (default, fire-and-forget) delivery. "
+            "Tells the recipient its final response is NOT returned to the sender, so "
+            "any requested answer must be sent back with bots_send_message. "
+            "{sender_bot_id} is substituted by plain replacement (never .format()). "
+            "Resolved per delivery; target-bot overrides supported."
         )},
     ),
     "media.prompt_expansion.video": PromptDefinition(

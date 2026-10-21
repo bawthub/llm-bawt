@@ -74,21 +74,14 @@ def _dispatcher():
     return dispatcher
 
 
-def _format_delivery_message(
-    message: str, author: AuthorReference, reply_mode: str = "async",
-) -> str:
+def _format_delivery_message(message: str, author: AuthorReference) -> str:
+    """The stored delivery text: sender attribution plus the message, nothing else.
+
+    The reply-channel note is instruction text, so it is never stored here; it
+    is added to the outbound copy only (see ``inter_bot_reply_channel``).
+    """
     if author.entity_type == "bot" and author.entity_id != "unknown":
-        formatted = f"Message from bot '{author.entity_id}': {message}"
-        if reply_mode == "waited":
-            formatted += (
-                "\n\n[Reply channel: awaited delivery. Your final response on this turn "
-                "is the answer to the sending bot's tool call (or its durable receipt "
-                "if the wait times out). Give the answer in your final response. "
-                "Do not send a separate message back merely to repeat that answer; "
-                "an intentional, distinct follow-up is still allowed by setting "
-                "separate_message_reason on bots_send_message.]"
-            )
-        return formatted
+        return f"Message from bot '{author.entity_id}': {message}"
     return message
 
 
@@ -203,9 +196,7 @@ async def create_delivery(body: DeliveryCreate):
         or body.message.split(maxsplit=1)[0] != "/compact"
     ):
         raise HTTPException(status_code=422, detail="Compaction maintenance requires an idle Claude /compact command")
-    formatted = body.message if compact_maintenance else _format_delivery_message(
-        body.message, author, body.reply_mode,
-    )
+    formatted = body.message if compact_maintenance else _format_delivery_message(body.message, author)
     payload = {
         "messages": [{"role": "user", "content": formatted}],
         "reply_mode": body.reply_mode,

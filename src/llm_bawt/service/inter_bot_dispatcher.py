@@ -310,6 +310,7 @@ class InterBotDeliveryDispatcher:
         self._wake_event.set()
 
     async def _steer(self, record: DeliveryRecord) -> None:
+        from ..inter_bot_reply_channel import delivery_reply_channel_note
         from .routes.chat import ChatSteerRequest, steer_active_turn
 
         claim_token = record.claim_token or ""
@@ -337,6 +338,7 @@ class InterBotDeliveryDispatcher:
                     f"steer_delivery_{record.id.removeprefix('delivery-')}"
                 ),
                 author=record.author,
+                wire_suffix=delivery_reply_channel_note(record),
             )
             if response.ok:
                 self.store.mark_transport_accepted(record.id, claim_token)

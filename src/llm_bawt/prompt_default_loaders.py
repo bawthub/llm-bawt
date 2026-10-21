@@ -97,6 +97,18 @@ def load_recall_synthesis_system() -> str:
     return DEFAULT_RECALL_SYSTEM_PROMPT
 
 
+def load_inter_bot_reply_channel_waited() -> str:
+    from .inter_bot_reply_channel import DEFAULT_REPLY_CHANNEL_WAITED
+
+    return DEFAULT_REPLY_CHANNEL_WAITED
+
+
+def load_inter_bot_reply_channel_async() -> str:
+    from .inter_bot_reply_channel import DEFAULT_REPLY_CHANNEL_ASYNC
+
+    return DEFAULT_REPLY_CHANNEL_ASYNC
+
+
 def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 

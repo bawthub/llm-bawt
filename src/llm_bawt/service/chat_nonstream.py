@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator
 from agent_bridge.maintenance import is_new_command
 
 from ..bots import get_bot, strip_emotes
+from ..inter_bot_reply_channel import append_request_reply_channel_note
 from .chat_message_text import last_user_text, message_content_text
 from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
 from .ordinary_turn_queue import admit_ordinary_agent_turn
@@ -393,11 +394,17 @@ class ChatNonStreamMixin:
                         backend_name=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
                     )
 
-                # Prepare messages with history and memory context
+                # Prepare messages with history and memory context. A claimed
+                # inter-bot delivery gets its reply-channel note on the outbound
+                # agent message only (never history), as on the stream path.
                 prepared_messages = llm_bawt.prepare_messages_for_query(
                     user_prompt,
                     message_id=trigger_message_id,
                     author=user_author,
+                    context_suffix=(
+                        append_request_reply_channel_note(self, request, None)
+                        if _is_agent else None
+                    ),
                 )
 
                 # Log what we're sending to the LLM (verbose mode)

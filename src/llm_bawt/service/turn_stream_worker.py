@@ -12,6 +12,7 @@ import asyncio
 import time
 import uuid
 
+from ..inter_bot_reply_channel import append_request_reply_channel_note
 from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
 from .logging import get_service_logger
@@ -183,6 +184,15 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     )
                 if manifest:
                     agent_context_suffix = manifest
+            # Durable inter-bot delivery: tell the recipient whether its final
+            # response reaches the sender. Instruction text, so it rides the
+            # same outbound-only suffix and never reaches history or the
+            # timeline. A reset follow-up keeps it: bridge_messages swaps only
+            # the command span of this outbound message.
+            if is_agent_backend:
+                agent_context_suffix = append_request_reply_channel_note(
+                    ctx.svc, request, agent_context_suffix,
+                )
 
             messages = llm_bawt.prepare_messages_for_query(
                 user_prompt,

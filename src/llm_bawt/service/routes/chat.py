@@ -9,7 +9,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...message_authorship import AuthorReference
-
 from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ..dependencies import get_service
 from ..logging import get_service_logger
@@ -140,8 +139,15 @@ async def steer_active_turn(
     *,
     steer_request_id: str | None = None,
     author: AuthorReference | None = None,
+    wire_suffix: str | None = None,
 ) -> ChatSteerResponse:
-    """Shared steer implementation for public chat and durable inter-bot work."""
+    """Shared steer implementation for public chat and durable inter-bot work.
+
+    ``wire_suffix`` is internal-only, model-visible instruction text (the
+    inter-bot reply-channel note). It is appended to what the bridge receives
+    and never persisted or published: history and the timeline keep
+    ``request.message``. The public steer route cannot set it.
+    """
     turn = service._turn_log_store.get_turn(request.turn_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="Turn not found")
@@ -186,6 +192,7 @@ async def steer_active_turn(
         )
 
     message = request.message.strip()
+    wire_message = f"{message}\n\n{wire_suffix}" if wire_suffix else message
     subscriber = get_agent_subscriber()
     if subscriber is None:
         raise HTTPException(status_code=503, detail="Agent bridge unavailable")
@@ -195,7 +202,7 @@ async def steer_active_turn(
         for attempt in range(8):
             result = await subscriber.send_steer(
                 session_key=turn.agent_session_key,
-                message=message,
+                message=wire_message,
                 message_id=request.message_id,
                 backend=backend_name,
                 target_request_id=turn.agent_request_id,
