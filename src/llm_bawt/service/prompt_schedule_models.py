@@ -29,6 +29,8 @@ class PromptSchedule(SQLModel, table=True):
     description: str = Field(default="", sa_column=Column(Text, nullable=False))
     prompt: str = Field(sa_column=Column(Text, nullable=False))
     requested_model: str | None = None
+    target_mode: str = "specific"
+    candidate_bot_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))
     create_request_hash: str | None = None
     # Versioned, validated PromptTiming schema, kept together to avoid two
     # divergent timing validators/representations in API and persistence.

@@ -111,17 +111,13 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
         user_author = inter_bot_author or AuthorReference.user(user_id)
         local_mode = not request.augment_memory
 
-        # Resolve model using shared bot/config logic
-        # Agent-backend bots resolve to their virtual model (e.g. "openclaw")
-        from .prompt_execution import prompt_delivery_record, create_prompt_instance
-        prompt_record = prompt_delivery_record(self, request)
-        prompt_instance = None
+        # Immutable automation/routing endpoints use disposable request-local
+        # instances. Ordinary turns retain their existing cached resolver.
+        from .stream_execution_selection import select_stream_execution
         try:
-            if prompt_record:
-                model_alias, prompt_instance = create_prompt_instance(self, request)
-                model_warnings = []
-            else:
-                model_alias, model_warnings = self._resolve_request_model(request.model, bot_id, local_mode)
+            model_alias, model_warnings, prompt_instance, prompt_record = (
+                select_stream_execution(self, request, bot_id, local_mode)
+            )
         except Exception as e:
             log.api_error(ctx, str(e), 400)
             raise
@@ -392,7 +388,8 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                     )
                 from .session_continuity import record_session_continuity
                 record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
-                                          bot_id=bot_id, user_id=user_id)
+                                          bot_id=bot_id, user_id=user_id,
+                                          history_scope=prepared_reset.history_scope)
                 from ..task_turn_context import mint_for_agent_turn
 
                 task_turn_capability = mint_for_agent_turn(

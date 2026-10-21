@@ -1,7 +1,7 @@
 """Request-local automation instance using the ordinary chat implementation."""
 from __future__ import annotations
 
-from .core import ServiceLLMBawt
+from .request_model_execution import BoundAgentLLMBawt, build_bound_instance
 from ..utils.history import HistoryManager
 
 
@@ -31,16 +31,8 @@ class PromptHistoryManager(HistoryManager):
         self.messages = [message for message in messages if message.session_id == session_id]
 
 
-class PromptLLMBawt(ServiceLLMBawt):
-    """Never read/write personal model overrides or reuse mutable chat instances."""
-
-    def _get_model_lifecycle(self, config):
-        # Agent harnesses own their tools/model execution; no app model switch
-        # tool or global client registration is needed for this isolated request.
-        return None
-
-    def _agent_model_ref(self):
-        return self.resolved_model_alias
+class PromptLLMBawt(BoundAgentLLMBawt):
+    """A bound endpoint with strictly schedule-scoped history."""
 
     def _history_manager_type(self):
         return PromptHistoryManager
@@ -96,10 +88,4 @@ def create_prompt_instance(service, request):
     from .prompt_capabilities import resolve_prompt_target
 
     model = resolve_prompt_target(service, request.bot_id, request.model, request.user)
-    instance = PromptLLMBawt(
-        resolved_model_alias=model, config=service.config.model_copy(deep=True),
-        bot_id=request.bot_id, user_id=request.user,
-        local_mode=not request.augment_memory,
-    )
-    instance.history_manager.extract_memory = request.extract_memory
-    return model, instance
+    return build_bound_instance(service, request, model, instance_type=PromptLLMBawt)

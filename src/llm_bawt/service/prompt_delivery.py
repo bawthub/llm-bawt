@@ -107,6 +107,14 @@ class PromptDeliveryWorker:
             if found:
                 record = self._locked_delivery(session, found)
             else:
+                if snapshot.get("target_mode") == "auto":
+                    from .message_routing import route_opted_in
+
+                    if (not route_opted_in(session.connection(), snapshot["owner_user_id"], snapshot["bot_id"])
+                            or rows[2].snapshot_json.get("bot_id") != snapshot["bot_id"]):
+                        transition(session, *rows, "cancelled", now,
+                                   error="Automatic routing opt-in was revoked or selection changed")
+                        return None
                 reason = gate_reason(*rows, now)
                 if reason:
                     transition(session, *rows, reason[0], now, error=reason[1])
@@ -151,14 +159,44 @@ class PromptDeliveryWorker:
         from ..memory.postgresql_short_term import PostgreSQLShortTermManager
 
         with Session(self.engine) as session, session.begin():
+            preflight = session.exec(select(PromptOccurrence.snapshot_json).where(
+                PromptOccurrence.run_id == run_id,
+            )).first()
+            if preflight and preflight.get("target_mode") == "auto":
+                from .message_routing import lock_routing_pool
+
+                lock_routing_pool(session.connection(), preflight["owner_user_id"])
             rows = self._rows(session, run_id)
             if not rows:
                 return None
             job, schedule, occurrence, run = rows
             if occurrence.state != "pending":
                 return None
-            snapshot = occurrence.snapshot_json
+            snapshot = dict(occurrence.snapshot_json)
             result = receipt(run)
+            # Automatic targeting selects once per occurrence, never once per
+            # retry. The snapshot is the owner-scoped, durable selected identity;
+            # different occurrences may resolve to different bots.
+            if snapshot.get("target_mode") == "auto" and occurrence.enqueue_attempts == 0:
+                from .message_routing import MessageRouter, RouteRequest
+
+                preview = MessageRouter(self.service).preview(RouteRequest(
+                    user_id=snapshot["owner_user_id"],
+                    candidate_bot_ids=snapshot.get("candidate_bot_ids"),
+                    requested_model=snapshot.get("model"), scope="schedule",
+                ))
+                if not preview["selected_bot_id"]:
+                    transition(session, *rows, "failed", now,
+                               error="No opted-in compatible bots for automatic occurrence")
+                    return None
+                snapshot["bot_id"] = preview["selected_bot_id"]
+                snapshot["selection_reason"] = preview["reason"]
+                chosen = next(row for row in preview["candidates"] if row["bot_id"] == snapshot["bot_id"])
+                snapshot["ranking"] = MessageRouter.ranking_evidence(chosen, preview["candidates"])
+                occurrence.snapshot_json = snapshot
+                run.bot_id = snapshot["bot_id"]
+                session.add(occurrence)
+                session.add(run)
             # Once enqueue may have happened, recover by key before consulting
             # mutable capability/lifecycle. An accepted delivery must not be lost.
             if occurrence.enqueue_attempts == 0:
@@ -170,7 +208,8 @@ class PromptDeliveryWorker:
                     model = resolve_prompt_target(self.service, snapshot["bot_id"],
                                                   snapshot.get("model"), snapshot["owner_user_id"])
                     scope = (f"occurrence:{run_id}" if snapshot["clear_context"] else
-                             f"schedule:{job.id}:bot:{snapshot['bot_id']}:owner:{snapshot['owner_user_id']}")
+                             f"schedule:{job.id}:bot:{snapshot['bot_id']}:owner:{snapshot['owner_user_id']}"
+                             + (f":model:{model}" if snapshot.get("target_mode") == "auto" else ""))
                     session_id = occurrence.session_id or str(uuid.uuid5(uuid.NAMESPACE_URL, f"llm-bawt:prompt:{scope}"))
                     PostgreSQLShortTermManager.create_inactive_session_row(
                         session.connection(), session_id=session_id,

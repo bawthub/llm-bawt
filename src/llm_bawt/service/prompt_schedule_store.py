@@ -106,6 +106,7 @@ class PromptScheduleStore:
                 session.flush()
                 snapshot = {
                     "owner_user_id": schedule.owner_user_id, "bot_id": job.bot_id,
+                    "target_mode": schedule.target_mode, "candidate_bot_ids": schedule.candidate_bot_ids,
                     "name": schedule.name, "prompt": schedule.prompt,
                     "model": schedule.requested_model, "clear_context": schedule.clear_context,
                     "augment_memory": schedule.augment_memory, "extract_memory": schedule.extract_memory,

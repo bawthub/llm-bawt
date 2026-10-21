@@ -1,10 +1,11 @@
 """User-owned prompt schedule API; ordinary LAN trust and UI identity boundary."""
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..dependencies import get_profile_manager, get_service
 from ..prompt_capabilities import resolve_prompt_target
@@ -40,7 +41,9 @@ class ScheduleInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     prompt: str = Field(min_length=1, max_length=100000)
-    bot_id: str = Field(min_length=1, max_length=128)
+    bot_id: str | None = Field(default=None, max_length=128)
+    target_mode: Literal["specific", "auto"] = "specific"
+    candidate_bot_ids: list[str] | None = None
     requested_model: str | None = Field(default=None, max_length=256)
     timing: PromptTiming
     clear_context: bool = True
@@ -50,19 +53,31 @@ class ScheduleInput(BaseModel):
     missed_policy: str = Field(default="run_latest", pattern="^(skip|run_latest)$")
     misfire_grace_seconds: int = Field(default=3600, ge=60, le=604800, strict=True)
 
-    @field_validator("name", "prompt", "bot_id")
+    @field_validator("name", "prompt")
     @classmethod
     def nonblank(cls, value):
         if not value.strip():
             raise ValueError("Must not be blank")
         return value.strip()
 
-    @field_validator("bot_id")
-    @classmethod
-    def canonical_bot(cls, value):
-        if value == "*":
-            raise ValueError("Wildcard bot targets are not supported")
-        return value.lower()
+    @model_validator(mode="after")
+    def valid_target(self):
+        if self.target_mode == "specific":
+            if not self.bot_id or not self.bot_id.strip() or self.bot_id == "*":
+                raise ValueError("Specific schedules require a concrete bot_id")
+            self.bot_id = self.bot_id.strip().lower()
+            if self.candidate_bot_ids is not None:
+                raise ValueError("candidate_bot_ids requires automatic targeting")
+        else:
+            if self.bot_id not in {None, ""}:
+                raise ValueError("Automatic schedules must not pin bot_id")
+            self.bot_id = None
+            if self.candidate_bot_ids is not None:
+                normalized = [slug.strip().lower() for slug in self.candidate_bot_ids]
+                if len(normalized) != len(set(normalized)) or any(not slug for slug in normalized):
+                    raise ValueError("candidate_bot_ids must be unique, nonblank IDs")
+                self.candidate_bot_ids = normalized
+        return self
 
 
 class CreateSchedule(ScheduleInput):
@@ -100,11 +115,23 @@ def management():
     return PromptManagement(get_profile_manager(service.config).engine)
 
 
-def validate_target(bot_id, model, user):
+def validate_target(bot_id, model, user, target_mode="specific", candidate_bot_ids=None):
     try:
-        resolve_prompt_target(get_service(), bot_id, model, user)
+        if target_mode == "specific":
+            resolve_prompt_target(get_service(), bot_id, model, user)
+        else:
+            from ..message_routing import MessageRouter, RouteRequest
+
+            preview = MessageRouter(get_service()).preview(RouteRequest(
+                user_id=user, candidate_bot_ids=candidate_bot_ids,
+                requested_model=model, scope="schedule",
+            ))
+            if preview["selected_bot_id"] is None:
+                raise ValueError("No opted-in compatible bots for this automatic schedule")
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 def validation_error(exc):
@@ -149,7 +176,8 @@ def list_schedules(user: str = Query(...), bot_id: str | None = None, lifecycle:
 @router.post("", status_code=201)
 def create(body: CreateSchedule, user: str = Query(...)):
     user = owner(user)
-    validate_target(body.bot_id, body.requested_model, user)
+    validate_target(body.bot_id, body.requested_model, user,
+                    body.target_mode, body.candidate_bot_ids)
     return management().create(user, body)
 
 
@@ -170,7 +198,8 @@ def patch(identifier: str, body: dict, user: str = Query(...)):
         merged = {key: current[key] for key in ScheduleInput.model_fields}
         merged.update({key: value for key, value in body.items() if key != "expected_revision"})
         parsed = ScheduleInput.model_validate(merged)
-        validate_target(parsed.bot_id, parsed.requested_model, user)
+        validate_target(parsed.bot_id, parsed.requested_model, user,
+                        parsed.target_mode, parsed.candidate_bot_ids)
         return management().update(user, identifier, dict(body), ScheduleInput)
     except ValueError as exc:
         raise validation_error(exc) from exc
@@ -195,7 +224,8 @@ def cancel(identifier: str, user: str = Query(...)):
 def run_now(identifier: str, body: RunNow, user: str = Query(...)):
     user = owner(user)
     current = management().get(user, identifier)
-    validate_target(current["bot_id"], current["requested_model"], user)
+    validate_target(current["bot_id"], current["requested_model"], user,
+                    current["target_mode"], current["candidate_bot_ids"])
     return management().run_now(user, identifier, str(body.idempotency_key))
 
 

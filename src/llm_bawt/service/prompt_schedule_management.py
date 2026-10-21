@@ -27,15 +27,18 @@ def run_view(occurrence, run):
                 finished_at=run.finished_at, duration_ms=run.duration_ms,
                 error=occurrence.last_error or run.error_message, session_id=occurrence.session_id,
                 turn_id=receipt.get("turn_id"), delivery_id=occurrence.delivery_id,
-                snapshot=occurrence.snapshot_json, actual_model=receipt.get("actual_model") or receipt.get("model"))
+                snapshot=occurrence.snapshot_json, actual_model=receipt.get("actual_model") or receipt.get("model"),
+                selected_bot_id=(occurrence.snapshot_json.get("bot_id")
+                                 if occurrence.snapshot_json.get("bot_id") not in {None, "*"} else None))
 
 
 def schedule_view(job, schedule, last_run=None):
-    return dict(id=job.id, bot_id=job.bot_id, enabled=job.enabled, next_run_at=db_utc(job.next_run_at) if job.next_run_at else None,
+    return dict(id=job.id, bot_id=job.bot_id if schedule.target_mode == "specific" else None,
+                enabled=job.enabled, next_run_at=db_utc(job.next_run_at) if job.next_run_at else None,
                 timing=schedule.timing_json, last_run=last_run,
                 **{key: getattr(schedule, key) for key in (
                     "owner_user_id", "name", "description", "prompt", "requested_model",
-                    "clear_context", "augment_memory", "extract_memory", "missed_policy",
+                    "target_mode", "candidate_bot_ids", "clear_context", "augment_memory", "extract_memory", "missed_policy",
                     "misfire_grace_seconds", "lifecycle", "revision", "created_at", "updated_at")})
 
 
@@ -104,7 +107,8 @@ class PromptManagement:
             due = data.timing.next_after(now)
             if due is None:
                 raise HTTPException(422, "Schedule has no future execution")
-            job = ScheduledJob(id=identifier, job_type=JobType.SEND_PROMPT, bot_id=data.bot_id,
+            job = ScheduledJob(id=identifier, job_type=JobType.SEND_PROMPT,
+                               bot_id=data.bot_id if data.target_mode == "specific" else "*",
                                enabled=data.enabled, next_run_at=due)
             session.add(job)
             session.flush()
@@ -139,9 +143,10 @@ class PromptManagement:
                 if due is None:
                     raise HTTPException(422, "Schedule has no future execution")
                 job.next_run_at = due
-            if "bot_id" in changes and parsed.bot_id != job.bot_id:
+            bound_bot = parsed.bot_id if parsed.target_mode == "specific" else "*"
+            if ("bot_id" in changes or "target_mode" in changes) and bound_bot != job.bot_id:
                 schedule.dedicated_session_id = None
-            job.bot_id = parsed.bot_id
+            job.bot_id = bound_bot
             if "enabled" in changes:
                 if parsed.enabled and not job.enabled:
                     job.next_run_at = parsed.timing.next_after(now)
@@ -227,6 +232,7 @@ class PromptManagement:
             session.add(run)
             session.flush()
             snapshot = dict(owner_user_id=owner, bot_id=job.bot_id, name=schedule.name, prompt=schedule.prompt,
+                            target_mode=schedule.target_mode, candidate_bot_ids=schedule.candidate_bot_ids,
                             model=schedule.requested_model, clear_context=schedule.clear_context,
                             augment_memory=schedule.augment_memory, extract_memory=schedule.extract_memory,
                             timing=schedule.timing_json, revision=schedule.revision, scheduled_for=now.isoformat(),

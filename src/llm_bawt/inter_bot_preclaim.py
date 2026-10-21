@@ -43,7 +43,12 @@ def load_claim_head(conn, target: str, config):
         meta = json.loads(meta)
     origin = meta.get("prompt_schedule")
     if not origin:
-        return _lock_delivery(conn, candidate["id"])
+        head = _lock_delivery(conn, candidate["id"])
+        if head and meta.get("message_route"):
+            from .route_dispatch_gate import check_route_claim
+
+            return check_route_claim(conn, head, config)
+        return head
 
     from .service.prompt_schedule_models import PromptOccurrence, PromptSchedule
     from .service.prompt_delivery_state import gate_reason, transition, receipt
@@ -94,6 +99,11 @@ def load_claim_head(conn, target: str, config):
         now = datetime.now(timezone.utc)
         reason = gate_reason(job, schedule, occurrence, run, now) if valid else (
             "failed", "Scheduled delivery has no matching immutable outbox")
+        if valid and reason is None and occurrence.snapshot_json.get("target_mode") == "auto":
+            from .service.message_routing import route_opted_in
+
+            if not route_opted_in(conn, occurrence.snapshot_json["owner_user_id"], head["target_bot_id"]):
+                reason = "cancelled", "Automatic routing opt-in revoked before acceptance"
         if valid and reason is None:
             from types import SimpleNamespace
             from .service.prompt_capabilities import resolve_prompt_target

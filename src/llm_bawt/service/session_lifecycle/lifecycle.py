@@ -307,8 +307,13 @@ class NewSessionLifecycle:
         project_id: str | None = None, task_id: str | None = None,
         message_kind: str | None = None, max_attempts: int = 5,
         reset_reason: str | None = None, producer: str = "bot",
+        connection=None,
     ) -> tuple[DeliveryRecord, bool]:
-        """Public bot-send and internal callers share one policy admission."""
+        """Public bot-send and internal callers share one policy admission.
+
+        A caller-owned connection joins the route receipt and delivery intent
+        without committing or closing the caller's transaction.
+        """
         from ...agent_context import SessionPolicy, validate_session_policy
 
         if (intent.origin is not Origin.BOT_DELIVERY or intent.admission is not Admission.WAIT
@@ -339,6 +344,7 @@ class NewSessionLifecycle:
             payload=payload, project_id=project_id, task_id=task_id,
             message_kind=message_kind, max_attempts=max_attempts,
             reset_reason=reset_reason or intent.reason, producer=producer,
+            connection=connection,
         )
         if record.metadata.get("new_session_intent") != self._encode(intent):
             raise ValueError("idempotency key belongs to another reset intent")

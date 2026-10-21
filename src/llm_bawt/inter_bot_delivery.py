@@ -500,6 +500,24 @@ class InterBotDeliveryStore:
         if self.engine is None or not claim_token:
             return False
         with self.engine.begin() as conn:
+            target = conn.execute(sa_text(
+                "SELECT target_bot_id FROM inter_bot_deliveries WHERE id=:id"
+            ), {"id": delivery_id}).scalar_one_or_none()
+            if target is None:
+                return False
+            from .service.turn_admission import lock_target
+
+            lock_target(conn, target)
+            row = conn.execute(sa_text(
+                "SELECT * FROM inter_bot_deliveries WHERE id=:id FOR UPDATE"
+            ), {"id": delivery_id}).mappings().first()
+            if not row or row["claim_token"] != claim_token or row["status"] not in {"STEERING", "DISPATCHING"}:
+                return False
+            if (row.get("metadata_json") or {}).get("message_route") and row["transport_accepted_at"] is None:
+                from .route_dispatch_gate import check_route_claim
+
+                if check_route_claim(conn, row, self.config) is None:
+                    return False
             result = conn.execute(sa_text("""
                 UPDATE inter_bot_deliveries
                 SET transport_accepted_at=COALESCE(transport_accepted_at, now()), updated_at=now()
@@ -695,6 +713,47 @@ class InterBotDeliveryStore:
             ), values).mappings().first()
         return DeliveryRecord.from_mapping(row) if row else None
 
+    @staticmethod
+    def cancel_unaccepted_locked(
+        conn, candidate: dict, reason: str | None = None, *,
+        allow_accepted_queued: bool = False,
+    ) -> dict | None:
+        """Cancel a target-locked, unaccepted delivery without leaving a FIFO head.
+
+        QUEUED rows may keep delivery_mode='turn' after their reservation was
+        removed during requeue; absence of that row is not ambiguous evidence.
+        An actual DISPATCHING claim must prove its reservation is unstarted.
+        """
+        if candidate.get("transport_accepted_at") is not None and not (
+            allow_accepted_queued and candidate["status"] == QUEUED
+        ):
+            return None
+        if candidate["status"] == "DISPATCHING":
+            from .service.turn_admission import release_reservation
+
+            if not release_reservation(
+                None, candidate["turn_id"], connection=conn,
+                delivery_id=candidate["id"], bot_id=candidate["target_bot_id"],
+                trigger_message_id=candidate["user_message_id"],
+            ):
+                return None
+        elif candidate["status"] != QUEUED:
+            return None
+        row = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='CANCELLED',
+                last_error=COALESCE(:reason, last_error),
+                lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
+                next_retry_at=NULL, updated_at=now()
+            WHERE id=:id AND status IN ('QUEUED','DISPATCHING')
+              AND (:allow_accepted OR transport_accepted_at IS NULL) RETURNING *
+        """), {"id": candidate["id"], "reason": reason,
+               "allow_accepted": allow_accepted_queued}).mappings().first()
+        if row and candidate["status"] == QUEUED:
+            conn.execute(sa_text(
+                "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
+            ), {"turn_id": row["turn_id"]})
+        return row
+
     def cancel(self, delivery_id: str) -> DeliveryRecord | None:
         if self.engine is None:
             return None
@@ -717,16 +776,14 @@ class InterBotDeliveryStore:
             if ((current.get("metadata_json") or {}).get("prompt_schedule")
                     and current.get("transport_accepted_at") is not None):
                 return None
-            row = conn.execute(sa_text("""
-                UPDATE inter_bot_deliveries SET status='CANCELLED',
-                    lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
-                    next_retry_at=NULL, updated_at=now()
-                WHERE id=:id AND status='QUEUED' RETURNING *
-            """), {"id": delivery_id}).mappings().first()
-            if row:
-                conn.execute(sa_text(
-                    "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
-                ), {"turn_id": row["turn_id"]})
+            # Preserve legacy cancellation for accepted, queued *ordinary*
+            # callbacks. Routed and scheduled work retain the no-abort-after-
+            # acceptance invariant.
+            origin = current.get("metadata_json") or {}
+            row = self.cancel_unaccepted_locked(
+                conn, current,
+                allow_accepted_queued=not (origin.get("prompt_schedule") or origin.get("message_route")),
+            )
         return DeliveryRecord.from_mapping(row) if row else None
 
     def turn_state(self, delivery_id: str) -> tuple[str | None, datetime | None]:
