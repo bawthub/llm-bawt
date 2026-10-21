@@ -20,12 +20,42 @@ from typing import Any
 from ._bridge_helpers import (
     _estimate_proxy_cost_usd,
     _pick_iteration_usage,
+    _read_session_cost_baseline,
     _usage_input_total,
 )
 
 from .context_env import effective_context_window
 
 logger = logging.getLogger("claude_code_bridge.bridge")
+
+
+def turn_cost_baseline_usd(resume_id: str | None) -> float | None:
+    """Session cost already on the CLI ledger before this turn runs (TASK-1054).
+
+    Fresh sessions start at 0; resumed ones read the transcript
+    (:func:`_read_session_cost_baseline`), which also proves a never-billed
+    seed transcript is 0 however it was created (cold start or bare ``/new``
+    on an earlier request). ``None`` = unknown baseline.
+    Blocking file I/O: call via ``asyncio.to_thread``.
+    """
+    if not resume_id:
+        return 0.0
+    return _read_session_cost_baseline(resume_id)
+
+
+def native_turn_cost_usd(
+    session_total_usd: object, baseline_usd: float | None
+) -> float | None:
+    """This turn's cost = session total − pre-turn baseline; ``None`` if unknowable."""
+    if baseline_usd is None or not isinstance(session_total_usd, (int, float)):
+        return None
+    delta = float(session_total_usd) - baseline_usd
+    # A total below the baseline means the CLI did not restore the ledger we
+    # read; the true split is unknowable, so let the caller estimate instead.
+    # A float-noise negative (-1e-12) is a $0 turn, not a broken ledger.
+    if delta < -1e-9:
+        return None
+    return max(delta, 0.0)
 
 
 @dataclass
@@ -212,9 +242,14 @@ class ClaudeUsageMixin:
         bot_context_window: int | None,
         latest_assistant_usage: dict | None,
         latest_stream_usage: dict | None,
+        cost_baseline_usd: float | None,
         compact_threshold: int | None = None,
     ) -> tuple[dict | None, object, object]:
         """Return ``(token_usage_payload, ctx_window, max_output)``.
+
+        ``cost_baseline_usd`` is the session cost before this turn
+        (:func:`turn_cost_baseline_usd`); ``total_cost_usd`` is this turn's
+        cost, never the CLI's running session total (TASK-1054).
 
         Mirrors the monolith exactly: a failure mid-extraction is swallowed and
         whatever partial ``ctx_window`` / ``max_output`` were resolved (plus a
@@ -231,8 +266,9 @@ class ClaudeUsageMixin:
         # use the LAST AssistantMessage's per-iteration usage, which
         # represents the model's final view of the context (what the
         # user actually wants to see as "context fullness"). Cumulative
-        # output_tokens and total_cost_usd still come from ResultMessage
-        # since those genuinely accumulate across the turn.
+        # output_tokens still come from ResultMessage since they genuinely
+        # accumulate across the turn. ResultMessage.total_cost_usd is the
+        # whole SESSION's running total, so it is reduced to a turn delta.
         #
         # ResultMessage.model_usage is keyed by model id and exposes
         # the model's contextWindow + maxOutputTokens.
@@ -375,8 +411,9 @@ class ClaudeUsageMixin:
                 cost = _estimate_proxy_cost_usd(
                     actual_model or model, usage_for_cost
                 )
+                session_cost = getattr(msg, "total_cost_usd", None)
                 if cost is None:
-                    cost = getattr(msg, "total_cost_usd", None)
+                    cost = native_turn_cost_usd(session_cost, cost_baseline_usd)
                 token_usage_payload = {
                     "input_tokens": _input_tokens,
                     "cache_read_tokens": _cache_read,
@@ -388,6 +425,10 @@ class ClaudeUsageMixin:
                     "context_window": ctx_window,
                     "max_output_tokens": max_output,
                     "total_cost_usd": cost,
+                    # Raw CLI running total, kept for audit; never summed.
+                    "session_cost_usd": session_cost
+                    if isinstance(session_cost, (int, float))
+                    else None,
                 }
                 if has_iteration_snapshot:
                     token_usage_payload["resident_tokens"] = (

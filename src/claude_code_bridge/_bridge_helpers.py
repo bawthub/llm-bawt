@@ -158,6 +158,70 @@ def _pick_iteration_usage(
 
 
 
+def _session_transcript_path(session_id: str | None) -> Path | None:
+    """Locate the CLI's on-disk ``<session_id>.jsonl`` under ``~/.claude/projects/``."""
+    if not session_id:
+        return None
+    base = Path.home() / ".claude" / "projects"
+    matches = list(base.glob(f"*/{session_id}.jsonl")) or list(
+        base.glob(f"**/{session_id}.jsonl")
+    )
+    return matches[0] if matches else None
+
+
+def _read_session_cost_baseline(session_id: str | None) -> float | None:
+    """Session cost already on the CLI ledger before resuming ``session_id``.
+
+    TASK-1054: the CLI appends a ``{"type": "cost-state", "sessionId",
+    "totalCostUSD", ...}`` record to the session transcript each turn and
+    restores its cost ledger from the last one on ``resume=``, so every
+    ``ResultMessage.total_cost_usd`` is the running SESSION total.
+
+    The transcript is the only source of truth for the baseline:
+
+    - last matching ``cost-state`` record → its ``totalCostUSD``;
+    - no record and no model-produced assistant entry → ``0.0``. The CLI has
+      never billed this session (e.g. a bridge-written seed transcript, whose
+      assistant ack is ``model: "<synthetic>"``), regardless of which request
+      wrote the seed;
+    - no record but a billed assistant entry, or no transcript → ``None``
+      (unknown — never guess 0, that would report the session total).
+    """
+    try:
+        path = _session_transcript_path(session_id)
+        if path is None:
+            return None
+        total: float | None = None
+        billed = False
+        with open(path, "r") as fh:
+            for line in fh:
+                is_cost = '"cost-state"' in line
+                if not is_cost and (billed or '"assistant"' not in line):
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                if (
+                    entry.get("type") == "cost-state"
+                    and entry.get("sessionId") == session_id
+                    and isinstance(entry.get("totalCostUSD"), (int, float))
+                ):
+                    total = float(entry["totalCostUSD"])  # keep the LAST record
+                elif entry.get("type") == "assistant" and not billed:
+                    message = entry.get("message")
+                    model = message.get("model") if isinstance(message, dict) else None
+                    billed = model != "<synthetic>"
+        if total is not None:
+            return total
+        return None if billed else 0.0
+    except Exception:
+        logger.debug("cost baseline read failed for %s", session_id, exc_info=True)
+        return None
+
+
 def _read_latest_compact_metadata(session_id: str | None) -> dict | None:
     """Return the most recent ``compact_boundary`` metadata for a session.
 
@@ -170,17 +234,12 @@ def _read_latest_compact_metadata(session_id: str | None) -> dict | None:
     ``compactMetadata`` dict ({trigger, preTokens, postTokens, durationMs, ...}).
     Best-effort: returns ``None`` if the file or marker can't be found.
     """
-    if not session_id:
-        return None
     try:
-        base = Path.home() / ".claude" / "projects"
-        matches = list(base.glob(f"*/{session_id}.jsonl")) or list(
-            base.glob(f"**/{session_id}.jsonl")
-        )
-        if not matches:
+        path = _session_transcript_path(session_id)
+        if path is None:
             return None
         meta: dict | None = None
-        with open(matches[0], "r") as fh:
+        with open(path, "r") as fh:
             for line in fh:
                 if "compact_boundary" not in line:
                     continue

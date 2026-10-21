@@ -64,7 +64,7 @@ def test_live_interrupted_and_result_fallback_share_capped_window(proxy):
         }}, total_cost_usd=None),
         actual_model=model, model=model, bot_context_window=1_000_000,
         compact_threshold=250_000, latest_assistant_usage=snapshot,
-        latest_stream_usage=None,
+        latest_stream_usage=None, cost_baseline_usd=0.0,
     )
     assert window == result["context_window"] == live["context_window"]
     assert result["resident_tokens"] == live["resident_tokens"]

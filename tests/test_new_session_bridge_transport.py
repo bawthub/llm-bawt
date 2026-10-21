@@ -162,8 +162,9 @@ def test_successful_follow_up_done_carries_reset_evidence_not_replacement_text()
         seq=0, text_parts=[], assistant_snapshot_text="", api_retry_count=0,
         api_last_error=None, actual_model="fixture", model="fixture",
         bot_context_window=None, latest_assistant_usage=None,
-        latest_stream_usage=None, native_context_usage=None, compact_status=None,
-        compact_error_msg=None, turn_session_id="sdk-fresh", turn_screenshot_assets=[],
+        latest_stream_usage=None, cost_baseline_usd=0.0, native_context_usage=None,
+        compact_status=None, compact_error_msg=None, turn_session_id="sdk-fresh",
+        turn_screenshot_assets=[],
         reset_ack=evidence,
     ))
     assert events[0]["text"] == "actual task answer"

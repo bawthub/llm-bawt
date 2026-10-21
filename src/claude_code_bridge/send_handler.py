@@ -38,7 +38,7 @@ from .send_preflight import prepare_send
 from .send_result import ClaudeResultMixin
 from .send_stream import ClaudeStreamMixin
 from .send_stream_events import StreamBlockState
-from .send_usage import ClaudeUsageMixin, LiveUsagePublisher
+from .send_usage import ClaudeUsageMixin, LiveUsagePublisher, turn_cost_baseline_usd
 from .subagent_usage import SubagentUsage
 from .turn_phase import TurnPhaseTracker
 from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
@@ -408,6 +408,13 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     compact_status: str | None = None  # None | "success" | "failed"
                     compact_error_msg: str | None = None
                     turn_session_id: str | None = resume_id
+                    # TASK-1054: ResultMessage.total_cost_usd is the CLI's
+                    # running SESSION total. Snapshot the pre-turn total once
+                    # per attempt (a fresh-session retry resets it to 0) so
+                    # results report this turn's cost.
+                    cost_baseline_usd = await asyncio.to_thread(
+                        turn_cost_baseline_usd, resume_id,
+                    )
                     # Some providers / SDK paths terminate after an
                     # AssistantMessage snapshot with text/tool_use content and
                     # NEVER emit a trailing ResultMessage. If we only finalize
@@ -659,6 +666,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     compact_threshold=req.compact_threshold,
                                     latest_assistant_usage=latest_assistant_usage,
                                     latest_stream_usage=live_usage.stream_usage,
+                                    cost_baseline_usd=cost_baseline_usd,
                                 )
                                 if cancel_event is not None and cancel_event.is_set():
                                     aborted = True
@@ -729,6 +737,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     compact_threshold=req.compact_threshold,
                                     latest_assistant_usage=latest_assistant_usage,
                                     latest_stream_usage=live_usage.stream_usage,
+                                    cost_baseline_usd=cost_baseline_usd,
                                     native_context_usage=native_context_usage,
                                     compact_status=compact_status,
                                     compact_error_msg=compact_error_msg,

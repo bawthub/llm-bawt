@@ -66,6 +66,7 @@ class ClaudeResultMixin:
         bot_context_window: int | None,
         latest_assistant_usage: dict | None,
         latest_stream_usage: dict | None,
+        cost_baseline_usd: float | None,
         native_context_usage: dict | None,
         compact_status: str | None,
         compact_error_msg: str | None,
@@ -95,6 +96,7 @@ class ClaudeResultMixin:
             compact_threshold=compact_threshold,
             latest_assistant_usage=latest_assistant_usage,
             latest_stream_usage=latest_stream_usage,
+            cost_baseline_usd=cost_baseline_usd,
         )
         if native_context_usage:
             native_total = int(native_context_usage.get("totalTokens") or 0)
@@ -141,7 +143,8 @@ class ClaudeResultMixin:
                     "resident_source": "claude_compact_metadata",
                     "context_window": ctx_window,
                     "max_output_tokens": max_output,
-                    "total_cost_usd": getattr(msg, "total_cost_usd", None),
+                    # total_cost_usd / session_cost_usd ride through from the
+                    # spread above: the turn delta, never the session total.
                     "context_action": "compact",
                     "context_action_outcome": "success",
                     "context_action_pre_tokens": pre,

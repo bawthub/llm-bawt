@@ -51,6 +51,7 @@ def test_proxy_iteration_usage_reports_total_resident_prompt():
             "cache_creation_input_tokens": 0,
             "output_tokens": 5,
         },
+        cost_baseline_usd=0.0,
     )
 
     assert usage["resident_tokens"] == 32_696
@@ -124,6 +125,7 @@ def test_cumulative_only_usage_does_not_claim_resident_context():
         bot_context_window=372000,
         latest_assistant_usage=None,
         latest_stream_usage=None,
+        cost_baseline_usd=0.0,
     )
 
     assert "resident_tokens" not in usage
@@ -194,6 +196,7 @@ def test_native_context_usage_overrides_resident_not_cost_accounting():
             "output_tokens": 2,
         },
         latest_stream_usage=None,
+        cost_baseline_usd=0.0,
         native_context_usage={
             "totalTokens": 90,
             "maxTokens": 100,
@@ -242,6 +245,7 @@ def test_successful_compact_persists_lifecycle_in_usage(monkeypatch):
         bot_context_window=372000,
         latest_assistant_usage=None,
         latest_stream_usage=None,
+        cost_baseline_usd=0.0,
         native_context_usage={"totalTokens": 250, "maxTokens": 372000},
         compact_status="success",
         compact_error_msg=None,
