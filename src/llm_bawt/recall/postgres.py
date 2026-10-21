@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 
 from .budgets import DATABASE_WORKER, compact_json
 from .contracts import (
-    MAX_RECORD_CHARS, MAX_SOURCE_RECORDS, Evidence, RecallError, RecallScope, SourceProvider,
+    FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
+    RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider,
 )
 
-from .excerpts import sql_window, terms_for
+from .excerpts import fts_query, sql_window, terms_for
 
 # Unknown authors, legacy NULL user sessions, summaries and deleted sessions do
 # not establish provenance. An imported bot message is not caller-owned evidence.
@@ -21,6 +23,36 @@ MESSAGE_AUTHORITY = """
     AND ((m.author_entity_type = 'user' AND m.author_entity_id = :user)
       OR (m.author_entity_type = 'bot' AND m.author_entity_id = :bot))
 """
+
+
+# History rows additionally admit deliveries the caller actually received: a
+# role=user row authored by another bot, inside the caller's own partition and
+# session (both already pinned above), whose author is in the CURRENT allowed
+# search policy. Excluded/protected bots are never in :delivery_authors, so
+# their deliveries stay unreachable by construction. Memories and tool evidence
+# keep the strict MESSAGE_AUTHORITY.
+HISTORY_AUTHORITY = MESSAGE_AUTHORITY.rstrip().removesuffix(")") + """
+      OR (m.role = 'user' AND m.author_entity_type = 'bot'
+          AND m.author_entity_id = ANY(CAST(:delivery_authors AS text[]))))
+"""
+
+
+
+def delivery_authors(scope: RecallScope) -> list[str]:
+    return sorted(scope.allowed_bot_ids - scope.excluded_bot_ids - {scope.bot_id})
+
+
+def utc_iso(value) -> str | None:
+    """Server-owned evidence time. Naive datetimes are stored UTC (utcnow)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = datetime.fromtimestamp(value, timezone.utc)
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    # Fixed-width microseconds: the service sorts these strings oldest-first, so
+    # same-second turns (a correction 0.8 s after the hit) must still order.
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def partition_id(bot_id: str) -> str:
@@ -84,13 +116,12 @@ class PostgresSource(SourceProvider):
         return row["excerpt"]
 
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
-        from llm_bawt.memory.postgresql import build_fts_query
-        tsquery = build_fts_query(query)
+        tsquery = fts_query(query)
         if not tsquery:
             return []
         params = {"query": tsquery, "bot": scope.bot_id, "partition": partition_id(scope.bot_id),
                   "user": scope.user_id, "limit": MAX_SOURCE_RECORDS, "chars": MAX_RECORD_CHARS,
-                  "phrase": query.lower(), "terms": terms_for(query)}
+                  "phrase": query.lower(), "terms": terms_for(query), **self.extra_params(scope)}
         try:
             rows = await DATABASE_WORKER.run(self.database.read, self.statement, params)
         except RecallError:
@@ -100,20 +131,60 @@ class PostgresSource(SourceProvider):
             raise RecallError("source_unavailable") from error
         return [Evidence(self.source, str(row["id"]), scope.bot_id, scope.user_id,
                          self.evidence_text(row), row.get("start_char", 0),
-                         row.get("truncated", False), row.get("window_kind", "matched")) for row in rows]
+                         row.get("truncated", False), row.get("window_kind", "matched"),
+                         utc_iso(row.get("at")), row.get("speaker"),
+                         str(row["follows"]) if row.get("follows") else None) for row in rows]
+
+    def extra_params(self, scope: RecallScope) -> dict:
+        return {}
 
 
 class MessageSource(PostgresSource):
     source = "messages"
+    # Hits plus their follow-on turns; the service's global record/token caps
+    # still bound what reaches the model (follow-ons sit right after their hit).
+    max_records = MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)
     statement = f"""
-        SELECT m.id, {sql_window('m.content')}
-        FROM messages m JOIN sessions s ON s.id = m.session_id
-        WHERE {MESSAGE_AUTHORITY}
-          AND to_tsvector('english', m.content) @@ to_tsquery('english', :query)
-        ORDER BY ts_rank(to_tsvector('english', m.content), to_tsquery('english', :query)) DESC,
-                 m.timestamp DESC, m.id
-        LIMIT :limit
+        WITH hits AS (
+            SELECT m.id, m.session_id, m.timestamp,
+                   ts_rank(to_tsvector('english', m.content), to_tsquery('english', :query))
+                   / (1 + GREATEST(0, extract(epoch FROM now()) - m.timestamp)
+                          / 86400.0 / {RECENCY_HALF_WEIGHT_DAYS}) AS score
+            FROM messages m JOIN sessions s ON s.id = m.session_id
+            WHERE {HISTORY_AUTHORITY}
+              AND to_tsvector('english', m.content) @@ to_tsquery('english', :query)
+            ORDER BY score DESC, m.timestamp DESC, m.id
+            LIMIT :limit
+        ), follow_ons AS (
+            SELECT f.id, h.score, h.id AS hit_id, f.ord
+            FROM hits h CROSS JOIN LATERAL (
+                SELECT m.id, row_number() OVER (ORDER BY m.timestamp, m.id) AS ord
+                FROM messages m JOIN sessions s ON s.id = m.session_id
+                WHERE {HISTORY_AUTHORITY}
+                  AND m.session_id = h.session_id
+                  AND m.timestamp > h.timestamp
+                  AND m.timestamp <= h.timestamp + {FOLLOW_ON_WINDOW_SECONDS}
+                ORDER BY m.timestamp, m.id
+                LIMIT {MAX_FOLLOW_ONS_PER_HIT}
+            ) f
+        ), picked AS (
+            -- One record per message; a message that is itself a hit stays a hit.
+            SELECT DISTINCT ON (id) id, score, hit_id, ord
+            FROM (SELECT id, score, id AS hit_id, 0 AS ord FROM hits
+                  UNION ALL SELECT id, score, hit_id, ord FROM follow_ons) candidates
+            ORDER BY id, ord = 0 DESC, score DESC, hit_id
+        )
+        SELECT m.id, {sql_window('m.content')}, m.timestamp AS at,
+               CASE WHEN p.ord > 0 THEN p.hit_id END AS follows,
+               CASE WHEN m.author_entity_type = 'bot' AND m.author_entity_id <> :bot
+                    THEN 'bot:' || m.author_entity_id ELSE m.role END AS speaker
+        FROM picked p JOIN messages m ON m.id = p.id AND m.bot_id = :partition
+        ORDER BY p.score DESC, p.hit_id, p.ord
+        LIMIT {MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)}
     """
+
+    def extra_params(self, scope: RecallScope) -> dict:
+        return {"delivery_authors": delivery_authors(scope)}
 
 
 class MemorySource(PostgresSource):
@@ -123,7 +194,7 @@ class MemorySource(PostgresSource):
     # Current schema physically deletes consolidated originals; no imaginary
     # superseded column exists to filter. Read only the live memories parent.
     statement = f"""
-        SELECT mem.id, {sql_window('mem.content')}
+        SELECT mem.id, {sql_window('mem.content')}, mem.created_at AS at
         FROM memories mem
         WHERE mem.bot_id = :partition
           AND jsonb_typeof(mem.source_message_ids) = 'array'
@@ -149,6 +220,7 @@ class ToolEvidenceSource(PostgresSource):
     statement = f"""
         SELECT t.id, left(t.tool_name, 128) AS tool_name,
                left(t.approval_status, 32) AS approval_status, t.created_at::text AS created_at,
+               t.created_at AS at,
                left(t.result_sha256, 64) AS result_sha256,
                t.result_total_bytes, t.result_total_chars
         FROM tool_call_records t
@@ -163,4 +235,4 @@ class ToolEvidenceSource(PostgresSource):
     """
 
     def evidence_text(self, row: dict) -> str:
-        return compact_json({key: value for key, value in row.items() if key != "id"})
+        return compact_json({key: value for key, value in row.items() if key not in {"id", "at"}})

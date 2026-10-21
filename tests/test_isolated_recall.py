@@ -296,3 +296,107 @@ async def test_adapter_returns_single_compact_text_packet(monkeypatch):
     result = await recall_tools.context_recall(request())
     assert isinstance(result, str)
     assert tokens(result) == json.loads(result)["metrics"]["parent_tokens"]
+
+
+def follow_on(id_, hit, at, text="x"):
+    return Evidence("messages", id_, "reviewer", "operator", text, at=at, follows=hit)
+
+
+class ThreadSource(Source):
+    max_records = 18
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rows", [
+    # Never more than two follow-ons per hit, even inside the row allowance.
+    [Evidence("messages", "h", "reviewer", "operator", "x"), *[follow_on(f"f{i}", "h", None) for i in range(3)]],
+    [Evidence("messages", str(i), "reviewer", "operator", "x") for i in range(7)],
+])
+async def test_undeclared_or_extra_hits_fail_closed(rows):
+    model = Model()
+    result = await RecallService([ThreadSource(rows)], model).recall(request(), SCOPE)
+    assert result["error_code"] == "retrieval_budget" and not model.calls
+
+
+@pytest.mark.asyncio
+async def test_follow_on_must_continue_a_hit_from_the_same_batch():
+    rows = [Evidence("messages", "h", "reviewer", "operator", "x"), follow_on("f", "elsewhere", None)]
+    result = await RecallService([ThreadSource(rows)], Model()).recall(request(), SCOPE)
+    assert result["error_code"] == "unauthorized"
+
+
+@pytest.mark.asyncio
+async def test_follow_ons_never_displace_hits_and_evidence_is_oldest_first():
+    messages = ThreadSource([
+        Evidence("messages", "stale", "reviewer", "operator", "Messages + summaries", at="2026-10-21T10:33:37Z"),
+        follow_on("correction", "stale", "2026-10-21T10:33:52Z", "No summaries"),
+        follow_on("fixed", "stale", "2026-10-21T10:34:05Z", "Messages only"),
+    ])
+    memories = Source([Evidence("memories", "fact", "reviewer", "operator", "older fact", at="2026-09-01T00:00:00Z")])
+    memories.source = "memories"
+    model = Model()
+    result = await RecallService([messages, memories], model).recall(
+        RecallRequest(query="relay background", sources=("messages", "memories")), SCOPE)
+    assert result["status"] == "ok"
+    assert [row.id for row in model.calls[0][1]] == ["fact", "stale", "correction", "fixed"]
+    assert result["coverage"]["messages"]["records"] == 3
+
+
+@pytest.mark.asyncio
+async def test_follow_ons_fill_only_the_remaining_global_budget():
+    big = "Ω" * 2400  # clipped to 512 tokens each: 18 rows cannot all fit 6000
+    messages = ThreadSource([
+        *[Evidence("messages", f"h{i}", "reviewer", "operator", big) for i in range(6)],
+        *[follow_on(f"f{i}", f"h{i}", None, big) for i in range(6)],
+    ])
+    memories = Source([Evidence("memories", f"m{i}", "reviewer", "operator", big) for i in range(6)])
+    memories.source = "memories"
+    model = Model()
+    result = await RecallService([messages, memories], model).recall(
+        RecallRequest(query="relay background", sources=("messages", "memories")), SCOPE)
+    assert model.calls, result
+    chosen = {row.id for row in model.calls[0][1]}
+    # Direct hits from every source are admitted before any follow-on.
+    assert {f"h{i}" for i in range(6)} <= chosen and {"m0", "m1", "m2"} <= chosen
+    assert not {f"f{i}" for i in range(6)} & chosen
+    assert result["truncated"] and result["metrics"]["utility_input_tokens"] <= 6000
+
+
+@pytest.mark.asyncio
+async def test_follow_ons_cannot_push_out_a_later_direct_hit():
+    """Interleaved rank order (hit, its follow-ons, next hit…) as MessageSource emits it.
+
+    Filling in that order would spend the token budget on follow-ons before
+    later hits; the later direct hits must survive and only follow-ons drop.
+    """
+    from llm_bawt.recall.completion import input_tokens
+    from llm_bawt.recall.contracts import MAX_INPUT_TOKENS
+    from llm_bawt.recall.budgets import clip
+    big = "Ω" * 2400
+    rows = []
+    for i in range(6):
+        rows += [Evidence("messages", f"h{i}", "reviewer", "operator", big),
+                 follow_on(f"f{i}a", f"h{i}", None, big), follow_on(f"f{i}b", f"h{i}", None, big)]
+    memories = Source([Evidence("memories", "m0", "reviewer", "operator", big)])
+    memories.source = "memories"
+    question = "relay background"
+
+    # Counterfactual: single-pass in emitted order loses later hits.
+    naive = []
+    for row in [*rows, *memories.rows]:
+        candidate = replace(row, text=clip(row.text, 512))
+        if input_tokens(question, [*naive, candidate]) <= MAX_INPUT_TOKENS:
+            naive.append(candidate)
+    naive_ids = {row.id for row in naive}
+    assert "m0" not in naive_ids and "h5" not in naive_ids
+
+    model = Model()
+    result = await RecallService([ThreadSource(rows), memories], model).recall(
+        RecallRequest(query=question, sources=("messages", "memories")), SCOPE)
+    assert model.calls, result
+    chosen = [row.id for row in model.calls[0][1]]
+    assert {f"h{i}" for i in range(6)} | {"m0"} <= set(chosen)
+    admitted_follow_ons = [row for row in model.calls[0][1] if row.follows]
+    assert admitted_follow_ons and len(admitted_follow_ons) < 12
+    assert all(row.follows in chosen for row in admitted_follow_ons)
+    assert result["truncated"] and result["metrics"]["utility_input_tokens"] <= MAX_INPUT_TOKENS

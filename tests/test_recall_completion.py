@@ -247,3 +247,20 @@ async def test_caller_cancellation_does_not_release_running_slot(monkeypatch):
     finally:
         release.set()
         runner._worker._pool.shutdown(wait=True)
+
+
+def test_query_terms_keep_identifier_parts():
+    from llm_bawt.recall.excerpts import fts_query, query_terms
+    terms = query_terms("What did Caid say about the maintenance_model and query_bounded for TASK-1210?")
+    assert {"maintenance", "model", "query", "bounded", "task", "1210", "caid"} <= set(terms)
+    assert fts_query("'; DROP TABLE x --") == "drop | table"
+    assert fts_query("?? !!") is None
+
+
+def test_synthesis_prompt_carries_server_time_speaker_and_supersession_rule():
+    from llm_bawt.recall.completion import SYSTEM, synthesis_prompt
+    from llm_bawt.recall.contracts import Evidence
+    prompt = synthesis_prompt("q", [Evidence("messages", "m", "b", "u", "t", at="2026-10-21T10:34:05Z",
+                                             speaker="assistant", follows="h")])
+    assert '"at":"2026-10-21T10:34:05Z"' in prompt and '"speaker":"assistant"' in prompt
+    assert "oldest-first" in SYSTEM and "quote the latest statement" in SYSTEM

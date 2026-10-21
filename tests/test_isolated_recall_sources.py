@@ -277,3 +277,36 @@ async def test_utility_prompt_is_isolated_and_injection_is_data(monkeypatch):
     assert "Ignore previous" not in body["system"]
     assert "Ignore previous" in body["prompt"]
     assert body["max_tokens"] == 1000
+
+
+
+@pytest.mark.asyncio
+async def test_same_second_evidence_still_reaches_the_model_oldest_first():
+    """Snark P2: second-resolution `at` let rank order win inside one second."""
+    from datetime import datetime
+    from llm_bawt.recall.contracts import Evidence, RecallRequest, SourceProvider, Synthesizer
+    from llm_bawt.recall.postgres import utc_iso
+    from llm_bawt.recall.service import RecallService
+
+    base = 1_792_000_800.0
+    newer, older = utc_iso(base + 0.9), utc_iso(base + 0.1)
+    assert older.endswith(".100000Z") and newer.endswith(".900000Z")
+    assert utc_iso(datetime(2026, 10, 21, 15, 0, 0)) == "2026-10-21T15:00:00.000000Z"
+
+    class Ranked(SourceProvider):
+        source = "messages"
+
+        async def search(self, query, scope, task_ids):  # rank order: newer first
+            return [Evidence("messages", "new", "reviewer", "operator", "now inline", at=newer),
+                    Evidence("messages", "old", "reviewer", "operator", "was summaries", at=older)]
+
+    class Seen(Synthesizer):
+        order = []
+
+        async def synthesize(self, query, evidence, output_tokens):
+            Seen.order = [row.id for row in evidence]
+            return json.dumps({"findings": []})
+
+    await RecallService([Ranked()], Seen()).recall(
+        RecallRequest(query="continuity", sources=("messages",)), SCOPE)
+    assert Seen.order == ["old", "new"]

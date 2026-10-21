@@ -1,13 +1,39 @@
 """Query-relevant ORIGINAL contiguous windows, never stitched/generated snippets."""
 from __future__ import annotations
 
+import re
+
 from .contracts import MAX_RECORD_CHARS
 
 
+MAX_QUERY_TERMS = 16
+
+
+def query_terms(query: str) -> list[str]:
+    """Meaningful lowercase alphanumeric terms, in query order.
+
+    Unlike the shared memory FTS builder, identifier parts survive: the
+    `maintenance_model`, `query_bounded` and `TASK-1210` in a question yield
+    maintenance/model, query/bounded and task/1210, matching how PostgreSQL's
+    english parser splits those same identifiers in stored text.
+    """
+    from llm_bawt.memory.postgresql import _FTS_STOP_WORDS
+    words = re.findall(r"[a-z0-9]+", query.lower())
+    meaningful = [word for word in words if word not in _FTS_STOP_WORDS
+                  and (len(word) > 2 or (word.isdigit() and len(word) > 1))]
+    if not meaningful:
+        meaningful = [word for word in words if len(word) > 2][:3]
+    return list(dict.fromkeys(meaningful))[:MAX_QUERY_TERMS]
+
+
+def fts_query(query: str) -> str | None:
+    """OR tsquery of alphanumeric terms only; safe for to_tsquery('english', …)."""
+    terms = query_terms(query)
+    return " | ".join(terms) if terms else None
+
+
 def terms_for(query: str) -> list[str]:
-    from llm_bawt.memory.postgresql import build_fts_query
-    query_text = build_fts_query(query)
-    return sorted(set(query_text.split(" | ")), key=lambda word: (-len(word), word))[:16] if query_text else []
+    return sorted(query_terms(query), key=lambda word: (-len(word), word))
 
 
 def excerpt_window(content: str, query: str) -> tuple[str, int, bool, str]:

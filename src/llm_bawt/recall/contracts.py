@@ -11,6 +11,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Source = Literal["messages", "memories", "tasks", "tool_evidence"]
 MAX_RECORDS = 24
 MAX_SOURCE_RECORDS = 6
+# Message ranking/expansion policy (TASK-1210), kept together on purpose.
+# R1: one recency term inside the full-text rank; rank halves at this age, so a
+# terse recent correction outranks denser statements from weeks ago.
+RECENCY_HALF_WEIGHT_DAYS = 14.0
+# R2: a hit may carry its next turns in the same caller session (a correction
+# can share no query terms). Follow-ons are admitted only after every source's
+# direct hits and still count against MAX_RECORDS / MAX_INPUT_TOKENS.
+MAX_FOLLOW_ONS_PER_HIT = 2
+FOLLOW_ON_WINDOW_SECONDS = 1800
 MAX_RECORD_CHARS = 2400
 MAX_INPUT_TOKENS = 6000
 MAX_QUERY_TOKENS = 256
@@ -89,6 +98,12 @@ class Evidence:
     start_char: int = 0
     truncated: bool = False
     window_kind: str = "matched"
+    # Server-owned provenance so the model can order and supersede statements.
+    # `at` is UTC ISO-8601 (`...Z`); `speaker` is the stored role, never model text.
+    at: str | None = None
+    speaker: str | None = None
+    # Id of the direct hit this record continues; None for a direct hit.
+    follows: str | None = None
 
 
 class EvidenceBatch(list[Evidence]):
@@ -102,10 +117,13 @@ class EvidenceBatch(list[Evidence]):
 
 class SourceProvider(ABC):
     source: Source
+    # Rows a source may return: direct hits are always capped at
+    # MAX_SOURCE_RECORDS; only follow-ons may take a source past it.
+    max_records: int = MAX_SOURCE_RECORDS
 
     @abstractmethod
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
-        """Return at most six provenance-checked, 2400-character excerpts."""
+        """Return at most six provenance-checked hits (plus declared follow-ons)."""
 
 
 class Synthesizer(ABC):

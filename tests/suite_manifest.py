@@ -4,6 +4,7 @@
 # cases only where the surrounding file contains hermetic tests as well.
 PG_ACCEPTANCE_SUITES = (
     "test_session_search_pg.py::",
+    "test_isolated_recall_pg.py::",
     "test_session_continuity_pg.py::",
     "test_agent_bridge.py::TestEventStore::",
     "test_agent_context.py::",

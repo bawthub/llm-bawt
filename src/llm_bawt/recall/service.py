@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import Counter
 import time
 from dataclasses import replace
 
@@ -11,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .budgets import clip, compact_json, tokens
 from .completion import input_tokens
 from .contracts import (
-    MAX_INPUT_TOKENS, MAX_MODEL_BYTES, MAX_QUERY_TOKENS, MAX_RECORD_CHARS,
+    MAX_FOLLOW_ONS_PER_HIT, MAX_INPUT_TOKENS, MAX_MODEL_BYTES, MAX_QUERY_TOKENS, MAX_RECORD_CHARS,
     MAX_RECORDS, MAX_SECONDS, MAX_SOURCE_RECORDS, Evidence, EvidenceBatch, RecallError,
     RecallRequest, RecallScope, Source, SourceProvider, Synthesizer,
 )
@@ -89,19 +90,35 @@ class RecallService:
         # concatenate previous answers/source bodies into the new parent turn.
         question = "\n".join(queries)
         evidence: list[Evidence] = []
+        follow_ons: list[Evidence] = []
         seen = set()
         clipped = False
+
+        def admit(candidate: Evidence) -> None:
+            nonlocal clipped
+            if len(evidence) >= MAX_RECORDS or input_tokens(question, [*evidence, candidate]) > MAX_INPUT_TOKENS:
+                clipped = True
+                return
+            evidence.append(candidate)
+
         for source in request.sources:
             coverage[source] = {"status": "searching", "records": 0}
             provider = self.providers.get(source)
             if provider is None:
                 raise RecallError("source_unavailable")
             rows = await provider.search(question, scope, request.task_ids)
-            if not isinstance(rows, list) or len(rows) > MAX_SOURCE_RECORDS:
+            if not isinstance(rows, list):
+                raise RecallError("retrieval_budget")
+            hits = {row.id for row in rows if isinstance(row, Evidence) and row.follows is None}
+            row_limit = min(getattr(provider, "max_records", MAX_SOURCE_RECORDS),
+                            MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT))
+            per_hit = Counter(row.follows for row in rows if isinstance(row, Evidence) and row.follows)
+            if (len(hits) > MAX_SOURCE_RECORDS or len(rows) > row_limit
+                    or any(count > MAX_FOLLOW_ONS_PER_HIT for count in per_hit.values())):
                 raise RecallError("retrieval_budget")
             coverage[source] = {"status": "ok" if rows else "no_match", "records": len(rows),
                                 "head_fallbacks": sum(row.window_kind == "head_fallback" for row in rows
-                                                      if isinstance(row, Evidence))}
+                                                      if isinstance(row, Evidence) and row.follows is None)}
             if isinstance(rows, EvidenceBatch):
                 coverage[source]["withheld"] = min(3, max(0, rows.withheld))
                 if rows.withheld:
@@ -111,7 +128,8 @@ class RecallService:
             for row in rows:
                 if (not isinstance(row, Evidence) or row.source != source
                         or row.bot_id != scope.bot_id or row.user_id != scope.user_id
-                        or not isinstance(row.id, str) or not 0 < len(row.id) <= 80):
+                        or not isinstance(row.id, str) or not 0 < len(row.id) <= 80
+                        or (row.follows is not None and row.follows not in hits)):
                     raise RecallError("unauthorized")
                 if not isinstance(row.text, str) or len(row.text) > MAX_RECORD_CHARS:
                     raise RecallError("retrieval_budget")
@@ -122,10 +140,18 @@ class RecallService:
                 excerpt = clip(row.text, 512)
                 clipped |= excerpt != row.text or row.truncated
                 candidate = replace(row, text=excerpt)
-                if len(evidence) >= MAX_RECORDS or input_tokens(question, [*evidence, candidate]) > MAX_INPUT_TOKENS:
-                    clipped = True
-                    continue
-                evidence.append(candidate)
+                if row.follows is None:
+                    admit(candidate)
+                else:
+                    follow_ons.append(candidate)
+        # Follow-ons never displace any source's direct hits; they fill whatever
+        # remains of the same global record/token caps, behind an admitted hit.
+        admitted = {(row.source, row.id) for row in evidence}
+        for candidate in follow_ons:
+            if (candidate.source, candidate.follows) in admitted:
+                admit(candidate)
+        # Oldest-first so later corrections read as later; undated rows last.
+        evidence.sort(key=lambda row: (row.at is None, row.at or ""))
         findings = []
         model_calls = 0
         model_output_tokens = 0

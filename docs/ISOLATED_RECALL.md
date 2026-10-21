@@ -88,17 +88,38 @@ is re-read on every request, including follow-ups.
 
 Read only the live `messages` parent; join canonical sessions for caller bot and
 non-null caller user. Only active/archived sessions and user/assistant messages
-with canonical caller-user/own-bot authorship qualify. Deleted sessions,
-forgotten messages, summaries, unknown legacy authors, other users and imported
-other-bot messages are omitted. Those omissions reduce recall coverage deliberately.
+qualify, authored by the caller user, the caller bot, or — **the single
+cross-bot boundary** — a delivery the caller actually received: a `role=user`
+row in the caller's own partition and own session whose bot author is in the
+current DB policy's searchable set and is not excluded/protected
+(`allowed − excluded − caller`, computed per request). Protected bots such as
+Mira are never in that set, so their deliveries stay unreachable even inside the
+caller's own history. Deleted sessions, forgotten messages, summaries, unknown
+legacy authors, other users and imported other-bot assistant rows are omitted.
+Those omissions reduce recall coverage deliberately. Memories and tool evidence
+keep the stricter caller-user/own-bot rule.
 
-Full-text rank selects up to six rows. SQL extracts an **original contiguous
-window** of at most 2,400 characters near the whole query phrase, or the longest
-matching meaningful query term. No full message body crosses the DB boundary.
-Stem-only matches without a literal anchor use a prefix and explicitly report
-`head_fallbacks`. Excerpts are then capped at 512 reference tokens. Offsets and
-truncation accompany internal evidence; generated/joined search highlights are
-never treated as original quotation text.
+Query terms keep identifier parts (`maintenance_model`, `TASK-1210` →
+maintenance/model, task/1210) rather than dropping them. Full-text rank, divided
+by one recency term (`RECENCY_HALF_WEIGHT_DAYS`: rank halves at 14 days), selects
+up to six **hits**. Each hit carries at most two **follow-ons** (`MAX_FOLLOW_ONS_PER_HIT`, defined beside the recency weight in `recall/contracts.py`): the next
+messages in the same session within 30 minutes, under the identical authority,
+partition and session filters — never another session, bot or user. Follow-ons
+reach term-free corrections ("No summaries. I said message history") that FTS
+cannot. Each message appears once; a message that is also a hit stays a hit.
+
+SQL extracts an **original contiguous window** of at most 2,400 characters near
+the whole query phrase, or the longest matching meaningful query term. No full
+message body crosses the DB boundary. Stem-only matches without a literal anchor
+use a prefix and explicitly report `head_fallbacks`. Excerpts are then capped at
+512 reference tokens. Offsets and truncation accompany internal evidence;
+generated/joined search highlights are never treated as original quotation text.
+
+Every evidence item carries server-owned `at` (UTC) and `speaker` (`user`,
+`assistant`, or `bot:<id>` for a received delivery), plus `follows` for a
+follow-on. Admitted evidence reaches the utility model **oldest-first**, and the
+fixed instruction tells it to quote the latest statement when later evidence
+corrects or updates earlier evidence on the same point.
 
 ### Memories
 
@@ -147,7 +168,8 @@ research remains outside this slice.
 | Whole MCP request, including policy | 30 seconds |
 | Concurrent research calls per process | 4; excess rejected, no queue |
 | Source-provider calls | 4 |
-| Rows per source / total | 6 / 24 |
+| Hits per source / admitted total | 6 / 24 |
+| Message follow-ons | 2 per hit; admitted only after every source's hits, within the same 24 / 6,000 caps |
 | Each source excerpt | 2,400 characters, then 512 reference tokens |
 | Utility system + question + evidence | 6,000 reference tokens |
 | Utility calls | 1, no agent/tool loop |
