@@ -795,6 +795,7 @@ from .inter_bot_tools import (  # noqa: E402,F401
     send_message_to_bot,
 )
 from . import message_routing_tools as _message_routing_tools  # noqa: E402,F401
+from . import recall_tools as _recall_tools  # noqa: E402,F401
 from .profile_tools import _get_profile_manager, profile  # noqa: E402,F401
 
 # ---------------------------------------------------------------------------

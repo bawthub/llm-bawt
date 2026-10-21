@@ -16,7 +16,7 @@ def test_explicit_model_uses_direct_client_without_bot_or_history():
     service = MagicMock()
     service._client_cache = {"different-model": MagicMock()}
     service._get_background_client.return_value = (client, "grok-4.3")
-    with patch("llm_bawt.service.routes.llm.get_service", return_value=service):
+    with patch("llm_bawt.service.utility_completion.get_service", return_value=service):
         result = raw_completion(RawCompletionRequest(prompt="what next?", system="curate", model="grok-4.3"))
     assert result.model == "grok-4.3"
     assert result.content == '{"headline":"Next"}'
@@ -34,7 +34,7 @@ def test_reference_image_reaches_configured_utility_client_as_image_part():
     service = MagicMock()
     service._get_background_client.return_value = (client, "configured-maintenance")
     image = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()
-    with patch("llm_bawt.service.routes.llm.get_service", return_value=service), \
+    with patch("llm_bawt.service.utility_completion.get_service", return_value=service), \
          patch("llm_bawt.runtime_settings.resolve_job_model", return_value="configured-maintenance"):
         result = raw_completion(RawCompletionRequest(prompt="describe the subject", image_url=image))
     assert result.content == "Expanded image scene"
@@ -51,7 +51,7 @@ def test_image_model_rejection_does_not_silently_retry_text_only():
     service = MagicMock()
     service._get_background_client.return_value = (client, "configured-maintenance")
     image = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()
-    with patch("llm_bawt.service.routes.llm.get_service", return_value=service), \
+    with patch("llm_bawt.service.utility_completion.get_service", return_value=service), \
          patch("llm_bawt.runtime_settings.resolve_job_model", return_value="configured-maintenance"), \
          pytest.raises(HTTPException) as exc:
         raw_completion(RawCompletionRequest(prompt="describe", image_url=image))
@@ -64,7 +64,7 @@ def test_missing_direct_model_fails_instead_of_using_loaded_client():
     service = MagicMock()
     service._client_cache = {"loaded": MagicMock()}
     service._get_background_client.return_value = (None, None)
-    with patch("llm_bawt.service.routes.llm.get_service", return_value=service), pytest.raises(HTTPException) as exc:
+    with patch("llm_bawt.service.utility_completion.get_service", return_value=service), pytest.raises(HTTPException) as exc:
         raw_completion(RawCompletionRequest(prompt="what next?", model="agent-only"))
     assert exc.value.status_code == 422
     service._client_cache["loaded"].query.assert_not_called()
@@ -76,7 +76,7 @@ def test_no_model_uses_global_maintenance_setting_not_loaded_client():
     service = MagicMock()
     service._client_cache = {"loaded": MagicMock()}
     service._get_background_client.return_value = (client, "configured-maintenance")
-    with patch("llm_bawt.service.routes.llm.get_service", return_value=service), \
+    with patch("llm_bawt.service.utility_completion.get_service", return_value=service), \
          patch("llm_bawt.runtime_settings.resolve_job_model", return_value="configured-maintenance") as setting:
         result = raw_completion(RawCompletionRequest(prompt="hello"))
     assert result.model == "configured-maintenance"
@@ -88,7 +88,7 @@ def test_no_model_uses_global_maintenance_setting_not_loaded_client():
 def test_missing_maintenance_setting_does_not_fall_back_to_loaded_model():
     service = MagicMock()
     service._client_cache = {"loaded": MagicMock()}
-    with patch("llm_bawt.service.routes.llm.get_service", return_value=service), \
+    with patch("llm_bawt.service.utility_completion.get_service", return_value=service), \
          patch("llm_bawt.runtime_settings.resolve_job_model", return_value=None), \
          pytest.raises(HTTPException) as exc:
         raw_completion(RawCompletionRequest(prompt="hello"))

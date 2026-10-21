@@ -6,7 +6,6 @@ Supports OpenAI API and any OpenAI-compatible endpoint (llama.cpp server, vLLM, 
 from __future__ import annotations
 
 import json
-import os
 import httpx
 from openai import OpenAI, OpenAIError
 from typing import List, Iterator, Any
@@ -387,14 +386,14 @@ class OpenAIClient(LLMClient):
             logger.error(f"Error during OpenAI streaming with tools: {e}")
             raise
 
-    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, stop: list[str] | str | None = None, **kwargs) -> str:
-        """Query OpenAI API with full message history."""
-        api_messages = self._prepare_api_messages(messages)
-        should_stream = stream and not self.config.NO_STREAM
+    def _build_query_payload(
+        self, messages: List[Message], *, stream: bool,
+        stop: list[str] | str | None = None, **kwargs,
+    ) -> dict:
         payload = {
             "model": self.model,
-            "messages": api_messages,
-            "stream": should_stream,
+            "messages": self._prepare_api_messages(messages),
+            "stream": stream,
         }
         if stop:
             payload["stop"] = stop
@@ -409,6 +408,26 @@ class OpenAIClient(LLMClient):
             payload["temperature"] = self._as_float(kwargs.get("temperature"), self.config.TEMPERATURE)
             payload["top_p"] = self._as_float(kwargs.get("top_p"), self.config.TOP_P)
 
+        return payload
+
+    def query_bounded(
+        self, messages: List[Message], *, timeout_seconds: float,
+        max_tokens: int, temperature: float = 0.0,
+    ) -> str:
+        payload = self._build_query_payload(
+            messages, stream=False, max_tokens=max_tokens, temperature=temperature,
+        )
+        # Recall never retries token/temperature compatibility errors: each
+        # request is one transport-bounded call, without mutating a pooled client.
+        bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
+        completion = bounded.chat.completions.create(**payload)
+        return (completion.choices[0].message.content or "").strip()
+
+    def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, stop: list[str] | str | None = None, **kwargs) -> str:
+        """Query OpenAI API with full message history."""
+        should_stream = stream and not self.config.NO_STREAM
+        payload = self._build_query_payload(messages, stream=should_stream, stop=stop, **kwargs)
+        api_messages = payload["messages"]
         if self.config.VERBOSE:
             self.console.print(Rule("Querying OpenAI API", style="green"))
             self._print_verbose_params(payload)

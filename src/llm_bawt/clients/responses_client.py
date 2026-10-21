@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Iterator, List
 
 from openai import OpenAI, OpenAIError
@@ -69,7 +68,7 @@ class ResponsesClient(LLMClient):
     # Message -> Responses API input conversion
     # ------------------------------------------------------------------
 
-    def _prepare_input(self, messages: List[Message]) -> tuple[list[dict], str | None]:
+    def _prepare_input(self, messages: List[Message], *, log_input: bool = True) -> tuple[list[dict], str | None]:
         """Convert Message list to Responses API input format.
 
         Returns (input_items, instructions) where instructions is the
@@ -141,7 +140,7 @@ class ResponsesClient(LLMClient):
 
         instructions = "\n\n".join(instructions_parts) if instructions_parts else (system_message or None)
 
-        if logger.isEnabledFor(logging.DEBUG):
+        if log_input and logger.isEnabledFor(logging.DEBUG):
             logger.debug("Responses API input (%d items): %s", len(input_items), json.dumps(input_items, default=str)[:2000])
 
         return input_items, instructions
@@ -194,7 +193,7 @@ class ResponsesClient(LLMClient):
 
     def _build_base_payload(self, messages: List[Message], **kwargs: Any) -> dict[str, Any]:
         """Build the common payload fields for Responses API calls."""
-        input_items, instructions = self._prepare_input(messages)
+        input_items, instructions = self._prepare_input(messages, log_input=kwargs.get("log_input", True))
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -372,6 +371,25 @@ class ResponsesClient(LLMClient):
 
         return {"content": content, "tool_calls": tool_calls_payload}, None
 
+    def query_bounded(
+        self, messages: List[Message], *, timeout_seconds: float,
+        max_tokens: int, temperature: float = 0.0,
+    ) -> str:
+        payload = self._build_base_payload(
+            messages, max_tokens=max_tokens, temperature=temperature, log_input=False,
+        )
+        bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
+        response = bounded.responses.create(**payload)
+        return self._response_text(response).strip()
+
+    @staticmethod
+    def _response_text(response) -> str:
+        return "".join(
+            getattr(part, "text", "")
+            for item in response.output if getattr(item, "type", "") == "message"
+            for part in getattr(item, "content", []) if getattr(part, "type", "") == "output_text"
+        )
+
     def query(
         self,
         messages: List[Message],
@@ -402,14 +420,7 @@ class ResponsesClient(LLMClient):
             logger.error("Responses API error for model '%s': %s", self.model, e)
             return f"ERROR: Responses API Error - {e}"
 
-        content_parts = []
-        for item in response.output:
-            if getattr(item, "type", "") == "message":
-                for part in getattr(item, "content", []):
-                    if getattr(part, "type", "") == "output_text":
-                        content_parts.append(getattr(part, "text", ""))
-
-        response_text = "".join(content_parts)
+        response_text = self._response_text(response)
 
         if not plaintext_output:
             parts = response_text.split("\n\n", 1)

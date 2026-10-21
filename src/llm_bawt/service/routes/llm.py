@@ -1,93 +1,17 @@
-"""Raw LLM utility completion route."""
+"""Raw LLM utility completion routes."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
-from ..dependencies import get_service
-from ..logging import get_service_logger
 from ..schemas import RawCompletionRequest, RawCompletionResponse
+# Preserve the existing import seam for in-process callers.
+from ..utility_completion import complete_utility as complete_utility
+from .recall_completion import router as recall_completion_router
 
 router = APIRouter()
-log = get_service_logger(__name__)
+router.include_router(recall_completion_router)
+
 
 @router.post("/v1/llm/complete", response_model=RawCompletionResponse, tags=["LLM"])
 def raw_completion(request: RawCompletionRequest):
-    """One-shot model completion without bot identity, history, tools or agent execution.
-
-    An explicit model selects a direct API client from the catalog. Without a
-    model, the global maintenance_model setting selects the job's API client.
-    """
+    """One-shot completion without bot identity, history, tools or agent execution."""
     return complete_utility(request)
-
-
-def complete_utility(request: RawCompletionRequest) -> RawCompletionResponse:
-    """Run one botless utility completion; the single implementation behind
-    ``/v1/llm/complete`` and in-process callers such as media prompt expansion.
-
-    Raises HTTPException: 503 when no maintenance model is configured, 422 when
-    the model has no direct API client, 500 when the model call fails.
-    """
-    import time
-    service = get_service()
-
-    from ...runtime_settings import resolve_job_model
-
-    # The global maintenance_model is the source of truth for utility calls.
-    # Never pick a cached model by insertion order or borrow a bot's harness.
-    requested_model = request.model or resolve_job_model(service.config, "maintenance_model")
-    if not requested_model:
-        raise HTTPException(status_code=503, detail="No maintenance model configured")
-    client, model_alias = service._get_background_client(model_override=requested_model)
-    if client is None or model_alias is None:
-        raise HTTPException(status_code=422, detail="Configured model has no direct API client")
-
-    try:
-        start = time.perf_counter()
-
-        from ...models.message import Message
-        messages = []
-        if request.system:
-            messages.append(Message(role="system", content=request.system))
-        image_parts = None
-        if request.image_url:
-            from ...media.prompt_expansion import validate_reference_image
-            image_parts = [{"type": "image_url", "image_url": {
-                "url": validate_reference_image(request.image_url), "detail": "low",
-            }}]
-        messages.append(Message(role="user", content=request.prompt, content_parts=image_parts))
-
-        response = client.query(
-            messages=messages,
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-            plaintext_output=True,
-            stream=False,
-        )
-        if not isinstance(response, str) or not response.strip() or response.lstrip().startswith("ERROR:"):
-            raise ValueError("Model returned no usable completion")
-
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        tokens = len(response) // 4 if response else 0
-
-        return RawCompletionResponse(
-            content=response,
-            model=model_alias,
-            tokens=tokens,
-            elapsed_ms=elapsed_ms,
-        )
-
-    except Exception as e:
-        if request.image_url:
-            from ...media.prompt_expansion import PromptExpansionError
-            if isinstance(e, PromptExpansionError):
-                raise HTTPException(status_code=400, detail=str(e)) from e
-            log.error("Image-aware utility completion failed: %s", e)
-            raise HTTPException(
-                status_code=422,
-                detail="The configured maintenance model could not process the reference image; choose a vision-capable model in settings",
-            ) from e
-        log.error(f"Raw completion failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# =========================================================================
-# History Summarization Endpoints
-# =========================================================================

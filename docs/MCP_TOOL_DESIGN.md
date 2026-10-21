@@ -93,6 +93,18 @@ storage adapter. Measured full-load catalog: 11,957 total tokens (+12 schema
 tokens); the total cap is 11,957, with the description cap unchanged. Keyed
 replays do not re-stamp the pointer. No warnings were removed to meet the cap.
 
+TASK-1210 adds typed `context_recall` (bounded read-only isolated evidence research)
+and reconciles the missing description contract for the already-registered
+TASK-1202 `bots_route_message`. The latter was a baseline catalog regression,
+not a new routing feature. Measured with `scripts/mcp_catalog_report.py` on local
+source: **100 tools, 3,482 description tokens, 7,039 input-schema tokens,
+12,404 full-definition tokens**. Caps are now 3,482 / 12,404 (+102 / +447 over
+3,380 / 11,957); the per-description cap remains 100. Recall contributes 250
+full-definition tokens and retains authority, shared-task opt-in, metadata-only,
+expiry and utility-model warnings. No existing warnings were removed. This is
+local discovery, not live activation, and is not a provider billing measurement.
+See `docs/ISOLATED_RECALL.md` for source/output budgets and failure contracts.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied

@@ -1,0 +1,114 @@
+"""Recall's typed public contracts and non-negotiable resource ceilings."""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+Source = Literal["messages", "memories", "tasks", "tool_evidence"]
+MAX_RECORDS = 24
+MAX_SOURCE_RECORDS = 6
+MAX_RECORD_CHARS = 2400
+MAX_INPUT_TOKENS = 6000
+MAX_QUERY_TOKENS = 256
+MAX_MODEL_BYTES = 16_384
+MAX_SECONDS = 30.0
+TASK_REF = re.compile(r"(?:TASK-[1-9][0-9]{0,9}|c[a-z0-9]{20,31})\Z")
+CUID = re.compile(r"c[a-z0-9]{20,31}\Z")
+
+
+class RecallError(Exception):
+    """Only a fixed code, never exception/provider/source text, reaches callers."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+class RecallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    query: str = Field(min_length=1, max_length=1000)
+    sources: tuple[Source, ...] = ("messages", "memories")
+    task_ids: tuple[str, ...] = Field(default=(), max_length=3)
+    handle: str | None = Field(default=None, max_length=64)
+    output_tokens: int = Field(default=1000, ge=400, le=1600, strict=True)
+
+    @field_validator("query")
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        return value.strip()
+
+    @field_validator("sources")
+    @classmethod
+    def valid_sources(cls, value: tuple[Source, ...]) -> tuple[Source, ...]:
+        if not value or len(value) > 4 or len(set(value)) != len(value):
+            raise ValueError("select one to four distinct sources")
+        return value
+
+    @field_validator("task_ids")
+    @classmethod
+    def valid_tasks(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not TASK_REF.fullmatch(ref) for ref in value):
+            raise ValueError("invalid task reference")
+        return tuple(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def task_scope(self):
+        if self.task_ids and "tasks" not in self.sources:
+            raise ValueError("task_ids require tasks source")
+        return self
+
+
+@dataclass(frozen=True)
+class RecallScope:
+    bot_id: str
+    user_id: str
+    session_id: str
+    excluded_bot_ids: frozenset[str] = frozenset()
+    # Read from the current DB policy, not caller/model supplied.
+    allowed_bot_ids: frozenset[str] = frozenset()
+    capability_expires_at: float | None = None
+
+    @property
+    def owner(self) -> tuple[str, str, str]:
+        return self.bot_id, self.user_id, self.session_id
+
+
+@dataclass(frozen=True)
+class Evidence:
+    source: Source
+    id: str
+    bot_id: str
+    user_id: str
+    text: str
+    start_char: int = 0
+    truncated: bool = False
+    window_kind: str = "matched"
+
+
+class EvidenceBatch(list[Evidence]):
+    """List-compatible source result with bounded, non-identifying coverage."""
+
+    def __init__(self, values=(), *, withheld: int = 0, search_mode: str = "lexical"):
+        super().__init__(values)
+        self.withheld = withheld
+        self.search_mode = search_mode
+
+
+class SourceProvider(ABC):
+    source: Source
+
+    @abstractmethod
+    async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
+        """Return at most six provenance-checked, 2400-character excerpts."""
+
+
+class Synthesizer(ABC):
+    @abstractmethod
+    async def synthesize(self, query: str, evidence: list[Evidence], output_tokens: int) -> str:
+        """Return JSON {findings:[{source,id,quote}]}; no tools or side effects."""

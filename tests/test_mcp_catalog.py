@@ -96,7 +96,9 @@ async def test_catalog_token_budgets():
     assert max(descriptions) <= 100
     # x_counts + x_search relevancy/operator hints: measured 3,251 (was <=3,200).
     # TASK-1147 adds two review tools: measured 3,380 description tokens.
-    assert sum(descriptions) <= 3380
+    # TASK-1210: isolated recall + missing TASK-1202 routing contract reconciled.
+    # Measured 100 tools, 3,482 description tokens (warnings retained).
+    assert sum(descriptions) <= 3482
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -109,7 +111,8 @@ async def test_catalog_token_budgets():
     # "UUID" and accept TASK-N refs. Measured compact catalog: 11,645 (+19).
     # TASK-1147: review list/add typed schemas and attribution guidance: 11,945.
     # TASK-1188: accepted rotation pointer flag adds 12 typed-schema tokens.
-    assert total <= 11957, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1210: measured typed recall schema + existing routing registration.
+    assert total <= 12404, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

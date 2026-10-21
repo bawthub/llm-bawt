@@ -75,6 +75,17 @@ class LLMClient(ABC):
         """
         pass
 
+    def query_bounded(
+        self, messages: List[Message], *, timeout_seconds: float,
+        max_tokens: int, temperature: float = 0.0,
+    ) -> str:
+        """One stateless text call with transport timeout and no retries/tools.
+
+        Utility callers must fail closed for clients without this contract;
+        silently delegating to query() could start an unbounded agent run.
+        """
+        raise NotImplementedError("Client does not support bounded utility completion")
+
     def supports_native_tools(self) -> bool:
         """Return True if the client supports native tool calling."""
         return False
