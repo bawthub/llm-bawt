@@ -18,6 +18,54 @@ from .intent import NewSessionIntent, NewSessionResult, Origin, Outcome, Stage
 RESET_CONFIRMATION = "Session reset. Ready for a new conversation."
 
 
+def _source_count(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _seed_span(oldest, newest) -> str:
+    try:
+        first, last = (datetime.fromtimestamp(float(ts), timezone.utc).strftime("%Y-%m-%d")
+                       for ts in (oldest, newest))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    return f", from {first}" if first == last else f", spanning {first} → {last}"
+
+
+def reset_confirmation(session_metadata) -> str:
+    """App-authored receipt text citing only bridge-acknowledged continuity.
+
+    Bridge ack prose is never authority. The successor's continuity manifest
+    is app-captured and becomes ``restored`` only through the digest-bound
+    bridge receipt, so it is the one record this text may describe. No seed,
+    an empty selection, or an unacknowledged/failed restore keeps the plain
+    confirmation.
+    """
+    continuity = session_metadata.get("continuity") if isinstance(session_metadata, dict) else None
+    if not isinstance(continuity, dict) or continuity.get("status") != "restored":
+        return RESET_CONFIRMATION
+    summaries = _source_count(continuity.get("summary_count"))
+    messages = _source_count(continuity.get("message_count"))
+    buckets = [*([_plural(summaries, "summary record")] if summaries else []),
+               *([_plural(messages, "recent message")] if messages else [])]
+    if not buckets:
+        return RESET_CONFIRMATION
+    tokens = _source_count(continuity.get("approx_tokens"))
+    size = f"~{tokens / 1000:.1f}k" if tokens >= 1000 else f"~{tokens}"
+    span = _seed_span(continuity.get("oldest_timestamp"), continuity.get("newest_timestamp"))
+    return (f"Session reset. Seeded {' + '.join(buckets)} ({size} tokens){span}. "
+            "Continuity restored.")
+
+
+def receipt_content(receipt: dict) -> str:
+    """Exact text a committed receipt wrote; legacy receipts predate the field."""
+    content = receipt.get("content", RESET_CONFIRMATION)
+    return content if isinstance(content, str) else ""
+
+
 class NewSessionReceipt:
     @classmethod
     def reconcile_typed(cls, engine) -> list:
@@ -234,10 +282,13 @@ class NewSessionReceipt:
                     return None
             if intent.origin not in {Origin.SCHEDULER, Origin.CHAT_COMMAND} or not row["assistant_message_id"]:
                 return None
+            # Stateless chat streams the plain text before this commit; agents
+            # get the seed they actually restored, read under this same lock.
+            confirmation = RESET_CONFIRMATION if chat else reset_confirmation(session["session_metadata"])
             if intent.follow_up is not None:
                 return NewSessionReceipt._confirm_follow_up(
                     conn, record, row, intent, storage_bot, provider_key, new_id,
-                    verified_predecessor, receipt_id, user_message["content"],
+                    verified_predecessor, receipt_id, user_message["content"], confirmation,
                 )
             prior_receipt = (row["metadata_json"] or {}).get("new_session_receipt")
             if prior_receipt is not None:
@@ -277,14 +328,14 @@ class NewSessionReceipt:
                         author_entity_id=:bot, processed=true
                     WHERE bot_id=:storage_bot AND id=:assistant AND role='assistant'
                       AND session_id=:session RETURNING id
-                """), {"content": RESET_CONFIRMATION, "bot": intent.bot_id,
+                """), {"content": confirmation, "bot": intent.bot_id,
                         "storage_bot": storage_bot, "assistant": row["assistant_message_id"],
                         "session": new_id}).scalar_one_or_none()
                 if not reply:
                     return None
                 conn.execute(text("""
                     UPDATE turn_logs SET response_text=:content WHERE id=:turn
-                """), {"content": RESET_CONFIRMATION, "turn": row["turn_id"]})
+                """), {"content": confirmation, "turn": row["turn_id"]})
             conn.execute(text("""
                 UPDATE inter_bot_deliveries
                 SET metadata_json=jsonb_set(metadata_json, '{new_session_receipt}',
@@ -292,7 +343,8 @@ class NewSessionReceipt:
                 WHERE id=:id
             """), {"id": record.id, "receipt": json.dumps({
                 "id": receipt_id, "message_id": reply, "new_session_id": new_id,
-                "provider_session_id": provider_key, "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                "provider_session_id": provider_key, "content": confirmation,
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
             })})
             NewSessionOutbox.enqueue(
                 conn, delivery_id=record.id, bot_id=intent.bot_id,
@@ -308,7 +360,7 @@ class NewSessionReceipt:
     @staticmethod
     def _confirm_follow_up(
         conn, record, row, intent, storage_bot, provider_key, new_id, predecessor, receipt_id,
-        visible_command,
+        visible_command, confirmation,
     ) -> NewSessionResult | None:
         """Keep the model's task answer and add one separately-authored reset receipt."""
         from .execution import NewSessionExecution
@@ -344,12 +396,12 @@ class NewSessionReceipt:
                     or previous.get("new_session_id") != new_id
                     or previous.get("provider_session_id") != provider_key):
                 return None
-            confirmation = conn.execute(text("""
+            committed = conn.execute(text("""
                 SELECT content FROM messages WHERE bot_id=:bot AND id=:id
                   AND role='assistant' AND session_id=:session
             """), {"bot": storage_bot, "id": message_id,
                     "session": new_id}).scalar_one_or_none()
-            if confirmation != RESET_CONFIRMATION:
+            if committed != receipt_content(previous):
                 return None
         else:
             timestamp = conn.execute(text("""
@@ -362,7 +414,7 @@ class NewSessionReceipt:
                 VALUES (:bot, :id, 'assistant', :content, :timestamp,
                         :session, 'bot', :author, true)
             """), {"bot": storage_bot, "id": message_id,
-                    "content": RESET_CONFIRMATION,
+                    "content": confirmation,
                     "timestamp": float(timestamp) - 0.0001,
                     "session": new_id, "author": intent.bot_id})
             conn.execute(text("""
@@ -374,6 +426,7 @@ class NewSessionReceipt:
                 "id": receipt_id, "message_id": message_id,
                 "new_session_id": new_id,
                 "provider_session_id": provider_key,
+                "content": confirmation,
                 "confirmed_at": datetime.now(timezone.utc).isoformat(),
             })})
             NewSessionOutbox.enqueue(

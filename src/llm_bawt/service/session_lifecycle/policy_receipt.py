@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from .intent import NewSessionResult, Origin, Outcome, Stage
 from .outbox import NewSessionOutbox
-from .receipt import RESET_CONFIRMATION
+from .receipt import receipt_content, reset_confirmation
 
 
 class BotPolicyReceipt:
@@ -157,11 +157,12 @@ class BotPolicyReceipt:
                       AND role='assistant' AND session_id=:session
                 """), {"bot": storage_bot, "id": message_id,
                         "session": record.new_session_id}).scalar_one_or_none()
-                if receipt != RESET_CONFIRMATION:
+                if receipt != receipt_content(prior_receipt):
                     return None
             else:
                 if row["reset_status"] != "ROTATED":
                     return None
+                confirmation = reset_confirmation(successor["session_metadata"])
                 conn.execute(text("""
                     INSERT INTO messages (bot_id, id, role, content, timestamp,
                                           session_id, author_entity_type,
@@ -169,7 +170,7 @@ class BotPolicyReceipt:
                     VALUES (:bot, :id, 'assistant', :content, :timestamp,
                             :session, 'bot', :author, true)
                 """), {"bot": storage_bot, "id": message_id,
-                        "content": RESET_CONFIRMATION,
+                        "content": confirmation,
                         "timestamp": float(user["timestamp"]) - 0.0001,
                         "session": record.new_session_id,
                         "author": record.target_bot_id})
@@ -177,6 +178,7 @@ class BotPolicyReceipt:
                     "id": receipt_id, "message_id": message_id,
                     "new_session_id": record.new_session_id,
                     "provider_session_id": provider_id,
+                    "content": confirmation,
                     "confirmed_at": datetime.now(timezone.utc).isoformat(),
                 }
                 conn.execute(text("""
@@ -302,22 +304,23 @@ class BotPolicyReceipt:
             """), {"bot": storage_bot, "id": assistant_id,
                     "session": record.new_session_id}).mappings().one_or_none()
             if reply is None or (previous is not None and (
-                    reply["content"] != RESET_CONFIRMATION
+                    reply["content"] != receipt_content(previous)
                     or reply["author_entity_type"] != "bot"
                     or reply["author_entity_id"] != intent.bot_id)):
                 return None
             if previous is None:
                 if row["reset_status"] != "ROTATED":
                     return None
+                confirmation = reset_confirmation(successor["session_metadata"])
                 conn.execute(text("""
                     UPDATE messages SET content=:content, author_entity_type='bot',
                         author_entity_id=:bot, processed=true
                     WHERE bot_id=:storage_bot AND id=:assistant
-                """), {"content": RESET_CONFIRMATION, "bot": intent.bot_id,
+                """), {"content": confirmation, "bot": intent.bot_id,
                         "storage_bot": storage_bot, "assistant": assistant_id})
                 conn.execute(text("""
                     UPDATE turn_logs SET response_text=:content WHERE id=:turn
-                """), {"content": RESET_CONFIRMATION, "turn": record.turn_id})
+                """), {"content": confirmation, "turn": record.turn_id})
                 conn.execute(text("""
                     UPDATE inter_bot_deliveries SET reset_status='COMPLETED',
                         metadata_json=jsonb_set(metadata_json, '{new_session_receipt}',
@@ -327,6 +330,7 @@ class BotPolicyReceipt:
                     "id": receipt_id, "message_id": assistant_id,
                     "new_session_id": record.new_session_id,
                     "provider_session_id": provider_id,
+                    "content": confirmation,
                     "confirmed_at": datetime.now(timezone.utc).isoformat(),
                 })})
                 NewSessionOutbox.enqueue(
