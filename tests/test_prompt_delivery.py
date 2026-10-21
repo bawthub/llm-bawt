@@ -412,7 +412,7 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
     from llm_bawt.service.background_service import BackgroundService
     from llm_bawt.service.schemas import ChatCompletionRequest
     import llm_bawt.service.chat_streaming as streaming
-    from llm_bawt.service import prompt_execution
+    from llm_bawt.service import prompt_execution, stream_execution_selection
 
     _, run = reserve(rig)
     record = enqueue(rig, run)
@@ -439,7 +439,7 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
         client=SimpleNamespace(model_definition={"type": "claude-code"}, _bot_config={}),
         history_manager=SimpleNamespace(_db_backend=SimpleNamespace(get_session=lambda sid: {"session_metadata": {}})),
     )
-    monkeypatch.setattr(prompt_execution, "create_prompt_instance", lambda svc, req: (req.model, isolated))
+    monkeypatch.setattr(stream_execution_selection, "create_prompt_instance", lambda svc, req: (req.model, isolated))
     monkeypatch.setattr(prompt_execution, "build_prompt_seed", lambda *a: [])
     monkeypatch.setattr("llm_bawt.service.routes.history.maybe_build_session_seed", lambda *a, **kw: None)
     monkeypatch.setattr("llm_bawt.service.dependencies.get_service", lambda: service)

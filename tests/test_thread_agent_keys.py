@@ -494,9 +494,10 @@ class TestScopedSeedDecision:
 
         captured = {}
 
-        def _fake_seed(bot_id, model, service, session_id=None, *, llm_bawt=None):
+        def _fake_seed(bot_id, model, service, session_id=None, *, llm_bawt=None, history_scope=None):
             captured["session_id"] = session_id
             captured["owner"] = llm_bawt
+            captured["history_scope"] = history_scope
             return {"messages": [{"role": "summary", "content": "prior"}]}
 
         monkeypatch.setattr(history_seed, "build_context_seed", _fake_seed)
@@ -504,10 +505,12 @@ class TestScopedSeedDecision:
         out = history_seed.maybe_build_session_seed(
             owner, "byte", "m", prompt, None,
             thread_binding={"thread_session_id": "active-1"},
+            history_scope="summaries",
         )
         assert out == [{"role": "summary", "content": "prior"}]
         assert captured["session_id"] is None
         assert captured["owner"] is owner
+        assert captured["history_scope"] == "summaries"
 
     def test_warm_active_thread_does_not_double_seed(self):
         from llm_bawt.service.routes.history import maybe_build_session_seed
