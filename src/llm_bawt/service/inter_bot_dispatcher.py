@@ -442,7 +442,9 @@ class InterBotDeliveryDispatcher:
                 pass
             turn = self.service._turn_log_store.get_turn(record.turn_id)
             if turn is None or turn.ended_at is None:
-                raise RuntimeError("streamed durable turn did not finalize")
+                # TASK-1148: never mask a recorded terminal cause behind the
+                # generic message; say which state the turn row was left in.
+                raise RuntimeError(self._unfinalized_turn_error(record.turn_id, turn))
             if turn.status not in {"ok", "completed"} or turn.error_text:
                 raise RuntimeError(
                     turn.error_text
@@ -657,6 +659,17 @@ class InterBotDeliveryDispatcher:
         }:
             return "fallback"
         return "retry_same_steer"
+
+    @staticmethod
+    def _unfinalized_turn_error(turn_id: str | None, turn) -> str:
+        """Describe a drained stream whose turn row never ended."""
+        if turn is None:
+            return f"streamed durable turn did not finalize: no turn log for {turn_id}"
+        detail = f"status={getattr(turn, 'status', None) or 'unknown'}"
+        error_text = getattr(turn, "error_text", None)
+        if error_text:
+            detail += f"; error: {error_text}"
+        return f"streamed durable turn did not finalize ({detail})"
 
     @staticmethod
     def _is_context_overflow(error: str) -> bool:

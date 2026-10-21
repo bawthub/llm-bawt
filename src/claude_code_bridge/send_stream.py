@@ -50,6 +50,7 @@ from .send_errors import is_auth_failure_text
 from .skill_context import skill_context_tokens
 from .subagent_usage import SubagentUsage
 from .turn_phase import TurnPhaseTracker
+from .worker_liveness import WorkerLiveness
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
@@ -307,6 +308,7 @@ class ClaudeStreamMixin:
     def _emit_subagent_task_events(
         self, msg, *, request_id: str, session_key: str, seq: int,
         usage_ledger: SubagentUsage | None = None,
+        liveness: WorkerLiveness | None = None,
     ) -> int:
         """Publish structured sub-agent lifecycle events; return the new ``seq``."""
         ledger = usage_ledger if usage_ledger is not None else SubagentUsage()
@@ -352,21 +354,34 @@ class ClaudeStreamMixin:
             # Status updates (running, paused, etc.) —
             # surface as SUBAGENT_PROGRESS with the status.
             if msg.status:
+                status, failure = (
+                    liveness.stop_status(msg.task_id, msg.status)
+                    if liveness is not None else (msg.status, None)
+                )
                 seq += 1
                 self._publish_event(
                     request_id, session_key, seq,
                     kind=AgentEventKind.SUBAGENT_PROGRESS,
+                    # task_updated has no tool_use_id; a bridge stop knows its
+                    # host call, so the UI can end that exact card.
+                    tool_use_id=failure["tool_use_id"] if failure else None,
                     extra_raw={
                         "task_id": msg.task_id,
-                        "status": msg.status,
+                        "status": status,
+                        **({"failure": failure} if failure else {}),
                     },
                 )
         elif isinstance(msg, TaskNotificationMessage):
             seq += 1
             usage = msg.usage if isinstance(msg.usage, dict) else {}
+            # TASK-1148: a bridge liveness stop is a timeout, not a user stop.
+            status, failure = (
+                liveness.stop_status(msg.task_id, msg.status, msg.tool_use_id)
+                if liveness is not None else (msg.status, None)
+            )
             logger.info(
                 "Sub-agent done: task_id=%s status=%s tool_use_id=%s",
-                msg.task_id, msg.status, msg.tool_use_id,
+                msg.task_id, status, msg.tool_use_id,
             )
             self._publish_event(
                 request_id, session_key, seq,
@@ -375,9 +390,10 @@ class ClaudeStreamMixin:
                 text=getattr(msg, "summary", "") or "",
                 extra_raw={
                     "task_id": msg.task_id,
-                    "status": msg.status,
+                    "status": status,
                     "output_file": getattr(msg, "output_file", ""),
                     "usage": ledger.for_event(msg.tool_use_id, usage),
+                    **({"failure": failure} if failure else {}),
                 },
             )
         return seq
@@ -516,6 +532,7 @@ class ClaudeStreamMixin:
         tool_arguments_by_id: dict | None = None,
         usage_ledger: SubagentUsage | None = None,
         skill_bundle: str | None = None,
+        liveness: WorkerLiveness | None = None,
     ) -> int:
         """Handle a UserMessage's tool_result blocks (TOOL_END); return ``seq``."""
         # Mirror of the AssistantMessage path: a sub-agent's
@@ -578,6 +595,18 @@ class ClaudeStreamMixin:
                 # re-hydrating the full on-disk file, so DB/history and
                 # the token badge reflect real model-facing cost — not
                 # the untruncated result the model never saw.
+                # TASK-1148: the CLI reports a bridge-stopped resume as an
+                # unflagged "interrupted" result. The model also received the
+                # PostToolUse liveness note, so the card/history show both and
+                # the call is marked failed.
+                worker_stop = liveness.stop_for_tool(block.tool_use_id) if liveness else None
+                if worker_stop is not None:
+                    note = worker_stop.parent_note()
+                    result_content = (
+                        [*result_content, {"type": "text", "text": note}]
+                        if isinstance(result_content, list)
+                        else f"{result_content}\n\n{note}".lstrip()
+                    )
                 result_payload = normalize_tool_result(result_content)
                 result_data = result_payload.to_dict()
                 if (
@@ -631,7 +660,7 @@ class ClaudeStreamMixin:
                     # is_error on the ToolResultBlock — the
                     # single authoritative failure signal.
                     # Thread it so the UI can tint the card.
-                    tool_error=bool(getattr(block, "is_error", False)),
+                    tool_error=bool(getattr(block, "is_error", False)) or worker_stop is not None,
                     # Screenshot refs for this tool call so the
                     # UI can show the image inline immediately
                     # (TASK-483). turn_screenshot_assets still

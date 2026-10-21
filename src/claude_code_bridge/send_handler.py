@@ -40,6 +40,7 @@ from .send_stream import ClaudeStreamMixin
 from .send_stream_events import StreamBlockState
 from .send_usage import ClaudeUsageMixin, LiveUsagePublisher, turn_cost_baseline_usd
 from .subagent_usage import SubagentUsage
+from .worker_liveness import WorkerLiveness
 from .turn_phase import TurnPhaseTracker
 from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
 
@@ -339,8 +340,10 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                         seq_holder=seq_holder,
                         task_turn_capability=task_turn_capability,
                     )
+                    worker_liveness = WorkerLiveness()  # TASK-1148 resumed-worker containment
                     post_tool_use_cb = self._make_post_tool_use_hook(
                         session_key=session_key,
+                        worker_liveness=worker_liveness,
                         screenshot_artifacts_by_tool_use_id=(
                             screenshot_artifacts_by_tool_use_id
                         ),
@@ -486,6 +489,8 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             self._request_timeout,
                             on_health=_publish_turn_health,
                             resolve_parent=subagent_usage.host_parent,
+                            liveness=worker_liveness,
+                            stop_task=getattr(sdk_client, "stop_task", None),
                         )
                         # Register one live run controller for both control paths:
                         # chat.abort calls disconnect(), while chat.steer performs
@@ -586,6 +591,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                 seq = self._emit_subagent_task_events(
                                     msg, request_id=request_id,
                                     session_key=session_key, seq=seq, usage_ledger=subagent_usage,
+                                    liveness=worker_liveness,
                                 )
                             msg_type = type(msg).__name__
                             if not isinstance(msg, (StreamEvent, SystemMessage)):
@@ -654,6 +660,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                                     ),
                                     usage_ledger=subagent_usage,
                                     skill_bundle=req.skill_bundle,
+                                    liveness=worker_liveness,
                                 )
                                 # The watchdog observed this message before
                                 # returning it, so active_tools is current.

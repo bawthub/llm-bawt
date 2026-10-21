@@ -6,6 +6,11 @@ cannot distinguish a wedged CLI from a legitimate long-running tool. This
 module tracks that SDK-visible lifecycle: ordinary tools use their declared
 runtime limit, while Agent workers use the same limit as an inactivity window
 that refreshes whenever their nested SDK activity arrives.
+
+TASK-1148: a resumed worker (``SendMessage``) that exceeds that inactivity
+window is stopped on its own; its call returns an unsuccessful tool result and
+the parent continues. Only an unacknowledged stop, an SDK-idle CLI, or a
+non-containable tool still ends the parent turn.
 """
 
 from __future__ import annotations
@@ -13,20 +18,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
 from claude_agent_sdk.types import (
     AssistantMessage,
     TaskProgressMessage,
+    TaskNotificationMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
 )
 
+from .worker_liveness import WorkerLiveness, WorkerStop
+
 HealthCallback = Callable[[dict[str, Any]], None]
+StopTask = Callable[[str], Awaitable[None]]
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
@@ -58,6 +68,16 @@ class ActiveTool:
     # TASK-1095: any tool that hosts a sub-agent run (Agent, Workflow, or a
     # SendMessage resuming a stopped agent) is judged on inactivity.
     hosts_subagent: bool = False
+    # TASK-1148: set when the bridge has asked the SDK to stop this tool's
+    # worker; the tool then has one grace window to deliver its result.
+    stop_requested_at: float | None = None
+    # The CLI reported the stopped task terminal; its tool result may still be
+    # buffered behind siblings like any other result.
+    stop_acknowledged: bool = False
+
+    @property
+    def stop_outstanding(self) -> bool:
+        return self.stop_requested_at is not None and not self.stop_acknowledged
 
     @property
     def progress_aware(self) -> bool:
@@ -68,6 +88,11 @@ class ActiveTool:
     def deadline_base(self) -> float:
         """Orchestrators time out on inactivity; other tools on total runtime."""
         return self.last_activity_at if self.progress_aware else self.started_at
+
+    def deadline(self, tool_grace: float) -> float:
+        if self.stop_requested_at is not None:
+            return self.stop_requested_at + tool_grace
+        return self.deadline_base + self.timeout_seconds + tool_grace
 
 
 class TurnWatchdog:
@@ -83,6 +108,8 @@ class TurnWatchdog:
         clock: Callable[[], float] = time.monotonic,
         on_health: HealthCallback | None = None,
         resolve_parent: Callable[[str], str | None] | None = None,
+        liveness: WorkerLiveness | None = None,
+        stop_task: StopTask | None = None,
     ) -> None:
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be positive")
@@ -102,6 +129,10 @@ class TurnWatchdog:
         # resumed-agent activity keeps the RUNNING host alive, not its old spawn.
         self._resolve_parent = resolve_parent
         self._active_tools: dict[str, ActiveTool] = {}
+        # Worker containment needs both the ledger and a way to stop a task;
+        # without either, every expiry stays parent-terminal (old behaviour).
+        self._liveness = liveness
+        self._stop_task = stop_task if liveness is not None else None
 
     @property
     def active_tools(self) -> tuple[ActiveTool, ...]:
@@ -110,6 +141,16 @@ class TurnWatchdog:
     def observe(self, message: Any) -> None:
         """Update tool state and refresh active Agent workers on child activity."""
         now = self._clock()
+        if self._liveness is not None:
+            if isinstance(message, TaskStartedMessage):
+                self._liveness.task_started(message.tool_use_id, message.task_id)
+            elif isinstance(message, (TaskUpdatedMessage, TaskNotificationMessage)):
+                acked = self._liveness.task_status(
+                    message.task_id, message.status, getattr(message, "tool_use_id", None),
+                )
+                tool = self._active_tools.get(acked.tool_use_id) if acked else None
+                if tool is not None and tool.stop_requested_at is not None:
+                    self._active_tools[tool.tool_use_id] = replace(tool, stop_acknowledged=True)
         parent_tool_use_id = getattr(message, "parent_tool_use_id", None)
         if not parent_tool_use_id and isinstance(
             message, (TaskStartedMessage, TaskProgressMessage)
@@ -160,6 +201,9 @@ class TurnWatchdog:
         wait_started_at = self._clock()
         try:
             while True:
+                await self._contain_expired_workers(
+                    request_id=request_id, session_key=session_key,
+                )
                 now = self._clock()
                 deadline, phase = self._deadline(wait_started_at)
                 remaining = deadline - now
@@ -178,7 +222,11 @@ class TurnWatchdog:
 
                 done, _ = await asyncio.wait(
                     {receive_task},
-                    timeout=min(self._health_interval, remaining),
+                    timeout=min(
+                        self._health_interval,
+                        remaining,
+                        self._next_containment_in(now),
+                    ),
                 )
                 if receive_task in done:
                     message = receive_task.result()
@@ -197,24 +245,90 @@ class TurnWatchdog:
                 receive_task.cancel()
                 await asyncio.gather(receive_task, return_exceptions=True)
 
+    def _containable(self, tool: ActiveTool) -> str | None:
+        if self._stop_task is None or tool.stop_requested_at is not None:
+            return None
+        return self._liveness.containable(tool.tool_use_id, tool.name)
+
+    def _next_containment_in(self, now: float) -> float:
+        """Seconds until the earliest containable worker expires."""
+        pending = [
+            tool.deadline(self._tool_grace) - now
+            for tool in self._active_tools.values()
+            if self._containable(tool)
+        ]
+        return max(0.0, min(pending)) if pending else float("inf")
+
+    async def _contain_expired_workers(self, *, request_id: str, session_key: str) -> None:
+        """Stop each expired resumed worker instead of failing the parent turn."""
+        for tool in list(self._active_tools.values()):
+            task_id = self._containable(tool)
+            now = self._clock()
+            if task_id is None or now < tool.deadline(self._tool_grace):
+                continue
+            stop = WorkerStop(
+                tool_use_id=tool.tool_use_id,
+                task_id=task_id,
+                tool_name=tool.name,
+                idle_seconds=now - tool.last_activity_at,
+                limit_seconds=tool.timeout_seconds,
+                requested_at=now,
+            )
+            # Record first: the PostToolUse hook and task events triggered by
+            # the stop must already see why the worker ended.
+            self._liveness.record_stop(stop)
+            self._active_tools[tool.tool_use_id] = replace(tool, stop_requested_at=now)
+            logger.warning(
+                "worker_liveness_stop request_id=%s session=%s tool=%s tool_use_id=%s "
+                "task_id=%s idle_s=%.0f limit_s=%.0f runtime_s=%.0f",
+                request_id, session_key, tool.name, tool.tool_use_id, task_id,
+                stop.idle_seconds, stop.limit_seconds, now - tool.started_at,
+            )
+            try:
+                await asyncio.wait_for(
+                    self._stop_task(task_id), timeout=max(self._tool_grace, 1.0)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "worker_liveness_stop_failed request_id=%s session=%s "
+                    "tool_use_id=%s task_id=%s error=%s",
+                    request_id, session_key, tool.tool_use_id, task_id,
+                    type(exc).__name__,
+                )
+                raise TurnWatchdogTimeout(
+                    f"Could not stop timed-out worker {task_id} for "
+                    f"{tool.name}({tool.tool_use_id}): {type(exc).__name__}",
+                    phase="tool_running",
+                ) from exc
+
     def _deadline(self, wait_started_at: float) -> tuple[float, str]:
         if not self._active_tools:
             return wait_started_at + self._idle_timeout, "sdk_idle"
         deadlines = [
-            tool.deadline_base + tool.timeout_seconds + self._tool_grace
-            for tool in self._active_tools.values()
+            tool.deadline(self._tool_grace) for tool in self._active_tools.values()
         ]
         # The CLI can buffer sibling results behind a long-running Agent.
         # When that Agent completes, an already-expired sibling must not stop
         # us from reading its queued result. Allow one bounded drain window
         # per SDK read; a genuinely silent tool still expires after this grace.
-        return max(max(deadlines), wait_started_at + self._tool_grace), "tool_running"
+        deadline = max(max(deadlines), wait_started_at + self._tool_grace)
+        # TASK-1148: an unacknowledged worker stop gets one absolute grace
+        # window; sibling deadlines and unrelated activity cannot extend it.
+        outstanding = [
+            tool.stop_requested_at + self._tool_grace
+            for tool in self._active_tools.values() if tool.stop_outstanding
+        ]
+        if outstanding:
+            deadline = min(deadline, min(outstanding))
+        return deadline, "tool_running"
 
     def _timeout_message(self, phase: str) -> str:
         if phase == "sdk_idle":
             return f"No SDK messages for {self._idle_timeout}s — CLI may be hung"
         tools = ", ".join(
-            f"{tool.name}({tool.tool_use_id})" for tool in self._active_tools.values()
+            f"{tool.name}({tool.tool_use_id})"
+            + (" [worker stop unacknowledged]" if tool.stop_outstanding else "")
+            for tool in self._active_tools.values()
         )
         return (
             "No SDK tool result before the active-tool deadline "

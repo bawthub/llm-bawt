@@ -124,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                     "RUN_CLAUDE_OAUTH_SDK_PROBE": "1",
                     "RUN_COMPACT_SDK_PROBE": "1",
                     "RUN_PROXY_SDK_PROBE": "1",
+                    "RUN_WORKER_LIVENESS_SDK_PROBE": "1",
                 })
                 run(SDK, "--require-no-skips")
             elif args.suite == "profile":

@@ -236,17 +236,32 @@ class ClaudeEventMixin:
         *,
         session_key: str,
         screenshot_artifacts_by_tool_use_id: dict[str, list[dict]],
+        worker_liveness=None,
     ):
         """Persist Playwright images before the SDK resumes model reasoning.
 
         ``additionalContext`` is appended to the original MCP tool result, so the
         model keeps the inline image for vision and also receives durable Garage
         URLs it can curl later in the same turn.
+
+        TASK-1148: a SendMessage whose resumed worker the bridge stopped gets a
+        note telling the parent model the worker timed out and why.
         """
 
         async def post_tool_use(input_data, tool_use_id, context):
             del context
             tool_name = input_data.get("tool_name") or ""
+            worker_stop = (
+                worker_liveness.stop_for_tool(tool_use_id or input_data.get("tool_use_id"))
+                if worker_liveness is not None else None
+            )
+            if worker_stop is not None:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": worker_stop.parent_note(),
+                    }
+                }
             if tool_name.split("__")[-1] != "browser_take_screenshot":
                 return {}
             tuid = (tool_use_id or input_data.get("tool_use_id") or "").strip()

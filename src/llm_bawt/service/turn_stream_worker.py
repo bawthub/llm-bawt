@@ -682,6 +682,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 "summary": item.get("summary"),
                                 "last_tool_name": item.get("last_tool_name"),
                                 "usage": item.get("usage"),
+                                # TASK-1148: bridge liveness timeout diagnostic.
+                                "failure": item.get("failure"),
                                 "tool_use_id": item.get("tool_use_id"),
                                 "provider": item.get("provider"),
                                 "ts": time.time(),
