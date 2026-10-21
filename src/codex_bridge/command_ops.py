@@ -19,7 +19,8 @@ from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 
-from .transport import CodexTransport, validate_auth_json
+from .auth_broker import materialize_auth_from_broker
+from .transport import CodexTransport, auth_path, validate_auth_json
 from .mcp_context import codex_mcp_environment
 from .local_plugins import CodexMcpContextConfigError
 from ._bridge_helpers import (
@@ -488,12 +489,19 @@ class CodexCommandMixin:
                         break
 
                     except Exception as e:
-                        # Auth failure → publish ERROR, drop SDK handle, no retry.
+                        # Never replay a possibly started turn after auth failure.
+                        # Refresh the local CLI bundle from the app owner for the
+                        # NEXT request, including after an account reconnect.
                         if _is_auth_failure(e):
                             logger.warning(
-                                "Codex auth failure for %s: %s — resetting SDK handle",
+                                "Codex auth failure for %s: %s — refreshing broker bundle",
                                 request_id, e,
                             )
+                            refreshed = await asyncio.to_thread(
+                                materialize_auth_from_broker, auth_path(),
+                            )
+                            if not refreshed:
+                                logger.warning("Codex broker bundle refresh unavailable")
                             self._supervisor_teardown()
                             seq += 1
                             self._publish_event(

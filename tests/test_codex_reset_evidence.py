@@ -122,6 +122,22 @@ def test_clean_follow_up_proves_exact_binding_and_keeps_task_answer(harness, sta
     harness.publisher.publish_unified_event.assert_not_called()
 
 
+def test_auth_failure_refreshes_app_bundle_without_replaying_turn(harness, monkeypatch):
+    refresh = MagicMock(return_value=True)
+    monkeypatch.setattr("codex_bridge.command_ops.materialize_auth_from_broker", refresh)
+    harness.bridge._supervisor_teardown = MagicMock()
+    harness.script = [RuntimeError("invalid_grant: stale local refresh token")]
+
+    events = send(harness)
+
+    refresh.assert_called_once()
+    harness.bridge._supervisor_teardown.assert_called_once()
+    harness.sdk.start_thread.assert_called_once()
+    assert len(harness.prompts) == 1
+    assert len(events) == 1 and events[0].kind == AgentEventKind.ERROR
+    assert_no_ack(harness)
+
+
 def test_thread_started_identity_is_sufficient_when_sdk_property_missing(harness):
     harness.provider_id = None
     send(harness)

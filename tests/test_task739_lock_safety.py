@@ -203,7 +203,7 @@ def test_database_connections_receive_deadman_timeouts() -> None:
 
 def test_codex_auth_broker_retry_uses_module_logger(monkeypatch, tmp_path: Path) -> None:
     import httpx
-    from codex_bridge import __main__ as bridge_main
+    from codex_bridge import auth_broker
 
     calls = 0
 
@@ -223,7 +223,7 @@ def test_codex_auth_broker_retry_uses_module_logger(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(httpx, "get", get)
     auth_file = tmp_path / "auth.json"
 
-    assert bridge_main._materialize_auth_from_broker(auth_file) is True
+    assert auth_broker.materialize_auth_from_broker(auth_file) is True
     assert calls == 2
     assert auth_file.exists()
     assert auth_file.stat().st_mode & 0o777 == 0o600
