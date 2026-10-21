@@ -124,12 +124,22 @@ def test_deliveries_ignore_future_backoff_valid_lease_and_old_failure(delivery_h
     assert RuntimeHealthChecks(delivery_host).deliveries(NOW)["status"] == "ok"
 
 
-def test_deliveries_surface_recent_failures_and_expired_leases(delivery_host):
+def test_recent_failed_requests_do_not_make_live_queue_unhealthy(delivery_host):
+    # Terminal request outcomes are history, not work requiring intervention.
+    for _ in range(8):
+        insert(delivery_host, "FAILED", age=60)
+    row = RuntimeHealthChecks(delivery_host).deliveries(NOW)
+    assert row["status"] == "ok"
+    assert row["reason"] is None
+
+
+def test_deliveries_surface_expired_leases_not_historical_failures(delivery_host):
     insert(delivery_host, "STEERING", age=180, lease=-1)
     insert(delivery_host, "FAILED", age=60)
     row = RuntimeHealthChecks(delivery_host).deliveries(NOW)
     assert row["status"] == "degraded"
-    assert "expired leases" in row["reason"] and "failed in the last hour" in row["reason"]
+    assert "expired leases" in row["reason"]
+    assert "failed in the last hour" not in row["reason"]
     delivery_host._inter_bot_dispatcher._leader_task = task(True)
     assert RuntimeHealthChecks(delivery_host).deliveries(NOW)["status"] == "down"
 
