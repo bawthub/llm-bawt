@@ -191,7 +191,10 @@ class OpsService:
     def dispatch_job(self, *, operation_slug: str, args: dict[str, Any] | None,
                      idempotency_key: str | None = None, approved_snapshot: dict | None = None,
                      caller_actor=None, caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
-                     caller_session_key=None, caller_backend=None, approval_request_id=None) -> dict:
+                     caller_session_key=None, caller_backend=None, approval_request_id=None,
+                     create_fence=None) -> dict:
+        """Create (or, for a known key, read) a job. ``create_fence`` guards only
+        creation; see ``OpsStore.create_job``. A key replay stays a plain read."""
         supplied = {} if args is None else args
         try:
             payload = canonical_json({"operation": operation_slug, "args": supplied})
@@ -227,7 +230,7 @@ class OpsService:
                 idempotency_key=key, invocation_snapshot_json=canonical_json(snapshot), request_payload_json=payload,
                 caller_actor=caller_actor, caller_bot_id=caller_bot_id, caller_user_id=caller_user_id,
                 caller_turn_id=caller_turn_id, caller_session_key=caller_session_key, caller_backend=caller_backend,
-                approval_request_id=approval_request_id)
+                approval_request_id=approval_request_id, fence=create_fence)
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
         self._dispatch_queued(job)

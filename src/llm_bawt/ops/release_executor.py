@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from typing import Any
 
-from .executor import DispatchResult, Executor, ExecutorError, ReconcileResult
-from .github_workflow import HttpGitHubWorkflowGateway
+import redis
+from agent_bridge.publisher import UNIFIED_EVENTS_PREFIX, UNIFIED_STREAM_MAXLEN
+
+from .executor import DispatchResult, Executor, ExecutorError, ReconcileResult, validate_spec
+from .github_workflow import GitHubWorkflowError, HttpGitHubWorkflowGateway
 from .release_coordinator import ReleaseCoordinator
 from .release_spec import RELEASE_EXECUTOR_KIND
 from .release_store import ReleaseStore
@@ -37,9 +42,6 @@ class ReleaseExecutor(Executor):
 
     def approval_source(self, spec: dict, args: dict) -> dict:
         """Freeze the source and production baseline for one end-to-end approval."""
-        from .executor import validate_spec
-        from .github_workflow import GitHubWorkflowError
-
         try:
             head = self.coordinator.gateway.resolve_branch_head(
                 spec["github_repository"], spec["canonical_branch"])
@@ -82,9 +84,6 @@ def _redis_approval_publisher(redis_url: str):
     def publish(payload: dict) -> None:
         if not redis_url:
             return
-        import redis
-        from agent_bridge.publisher import UNIFIED_EVENTS_PREFIX, UNIFIED_STREAM_MAXLEN
-
         client = redis.Redis.from_url(redis_url, decode_responses=True,
                                       socket_timeout=1.0, socket_connect_timeout=1.0)
         try:
@@ -96,18 +95,20 @@ def _redis_approval_publisher(redis_url: str):
     return publish
 
 
-def build_ops_service(config, store: OpsStore | None = None, *, gateway=None,
-                      approval_store=None, publisher=None) -> OpsService:
-    """Register release execution in both the app and the independent pump."""
-    from ..service.dependencies import get_tool_approval_policy_store
+def build_ops_service(config, store: OpsStore | None = None, *,
+                      approvals: Callable[[], Any], gateway=None, publisher=None) -> OpsService:
+    """Register release execution in both the app and the independent pump.
 
+    ``approvals`` returns the approval store. Each process passes its own, so
+    building or dispatching never imports the app's FastAPI wiring (TASK-1220).
+    """
     service = OpsService(store or OpsStore(config))
     releases = ReleaseStore(config)
     coordinator = ReleaseCoordinator(
         releases=releases,
         ops=service,
         gateway=gateway or HttpGitHubWorkflowGateway(),
-        approvals=lambda: approval_store or get_tool_approval_policy_store(config),
+        approvals=approvals,
         publisher=publisher if publisher is not None else _redis_approval_publisher(config.REDIS_URL),
     )
     service.register_executor(ReleaseExecutor(coordinator))

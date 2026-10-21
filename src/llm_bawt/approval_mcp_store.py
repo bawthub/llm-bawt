@@ -9,7 +9,7 @@ from datetime import timedelta
 from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import and_, case, or_, update
+from sqlalchemy import and_, case, func, not_, or_, update
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -28,7 +28,9 @@ from .approval_models import (
     EXEC_RUNNING,
     EXEC_SKIPPED,
     EXEC_SUCCEEDED,
+    ExecutionDeadlinePassed,
     KIND_MCP,
+    OPS_RUN_TOOL,
     REQ_APPROVED,
     REQ_CANCELLED,
     REQ_PENDING,
@@ -39,6 +41,50 @@ from .approval_models import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _unfinished_execution(request_id: str, *, state: str, claim_token: str | None):
+    """This row, still without a result, in ``state`` (and under this claim)."""
+    conditions = [
+        ToolApprovalRequest.id == request_id,
+        ToolApprovalRequest.result_json.is_(None),
+        ToolApprovalRequest.execution_state == state,
+    ]
+    if claim_token is not None:
+        conditions.append(ToolApprovalRequest.execution_claim_token == claim_token)
+    return conditions
+
+
+def _awaiting_execution(*, lease_seconds: int):
+    """No result yet, and unclaimed or its claim lease has expired.
+
+    The one predicate shared by the execution claim, app recovery and ops
+    admission, so the three can never disagree about what is claimable.
+    """
+    stale_before = _utcnow() - timedelta(seconds=max(0, lease_seconds))
+    return and_(
+        ToolApprovalRequest.result_json.is_(None),
+        or_(
+            ToolApprovalRequest.execution_state == EXEC_PENDING,
+            and_(
+                ToolApprovalRequest.execution_state == EXEC_RUNNING,
+                or_(
+                    ToolApprovalRequest.execution_started_at.is_(None),
+                    ToolApprovalRequest.execution_started_at <= stale_before,
+                ),
+            ),
+        ),
+    )
+
+
+def _approved_ops_run():
+    """SQL form of ``is_approved_ops_run``: the ops reconciler admits these (TASK-1220)."""
+    return and_(
+        ToolApprovalRequest.request_kind == KIND_MCP,
+        ToolApprovalRequest.status == REQ_APPROVED,
+        ToolApprovalRequest.tool_name == OPS_RUN_TOOL,
+    )
+
 
 _SENTINEL_IDENTITIES = {"unknown", "none", "null", "undefined"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -356,23 +402,12 @@ class McpApprovalStoreMixin:
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         now = _utcnow()
-        stale_before = now - timedelta(seconds=max(0, lease_seconds))
         with Session(self.engine) as session:
             claimable = and_(
                 ToolApprovalRequest.id == request_id,
                 ToolApprovalRequest.status == REQ_APPROVED,
                 ToolApprovalRequest.request_kind == KIND_MCP,
-                ToolApprovalRequest.result_json.is_(None),
-                or_(
-                    ToolApprovalRequest.execution_state == EXEC_PENDING,
-                    and_(
-                        ToolApprovalRequest.execution_state == EXEC_RUNNING,
-                        or_(
-                            ToolApprovalRequest.execution_started_at.is_(None),
-                            ToolApprovalRequest.execution_started_at <= stale_before,
-                        ),
-                    ),
-                ),
+                _awaiting_execution(lease_seconds=lease_seconds),
             )
             stmt = (
                 update(ToolApprovalRequest)
@@ -408,6 +443,50 @@ class McpApprovalStoreMixin:
             return None
         return row
 
+    def execution_fence(
+        self,
+        request_id: str,
+        claim_token: str,
+        *,
+        approved_within: timedelta | None = None,
+        clock=_utcnow,
+    ):
+        """Guard for side effects that may start only while this claim is held.
+
+        Returns ``fence(session)``. Inside the caller's transaction it renews the
+        claim's lease. With ``approved_within`` it also requires the approval
+        (``resolved_at``, else ``created_at``) to be no older than that window,
+        measured when the fence runs.
+        - Claim superseded or completed: raises ``ApprovalPersistError``.
+        - Claim held but window closed: raises ``ExecutionDeadlinePassed``.
+        A newer claimant cannot re-claim until the transaction commits, and it
+        sees what was committed. So neither a stale claimant nor a stalled lone
+        one can start work after its claim or deadline is gone (TASK-1220).
+        """
+
+        def fence(session: Session) -> None:
+            held = _unfinished_execution(request_id, state=EXEC_RUNNING, claim_token=claim_token)
+            in_window = (
+                [func.coalesce(ToolApprovalRequest.resolved_at, ToolApprovalRequest.created_at)
+                 >= clock() - approved_within]
+                if approved_within is not None else []
+            )
+            renewed = session.exec(
+                update(ToolApprovalRequest)
+                .where(*held, *in_window)
+                .values(execution_started_at=_utcnow())
+            )
+            if int(renewed.rowcount or 0) == 1:
+                return
+            still_held = session.exec(
+                select(ToolApprovalRequest.id).where(*held)
+            ).first()
+            if still_held is not None:
+                raise ExecutionDeadlinePassed("Approval execution window closed; work not started")
+            raise ApprovalPersistError("Execution claim lost; work not started")
+
+        return fence
+
     def complete_mcp_execution(
         self,
         request_id: str,
@@ -430,18 +509,11 @@ class McpApprovalStoreMixin:
             if skipped and row.status == REQ_APPROVED:
                 return row
             now = _utcnow()
-            conditions = [
-                ToolApprovalRequest.id == request_id,
-                ToolApprovalRequest.result_json.is_(None),
-            ]
-            if claim_token is not None:
-                conditions.append(
-                    ToolApprovalRequest.execution_claim_token == claim_token
-                )
-            if skipped:
-                conditions.append(ToolApprovalRequest.execution_state == EXEC_PENDING)
-            else:
-                conditions.append(ToolApprovalRequest.execution_state == EXEC_RUNNING)
+            conditions = _unfinished_execution(
+                request_id,
+                state=EXEC_PENDING if skipped else EXEC_RUNNING,
+                claim_token=claim_token,
+            )
             enqueue = bool(row.continuation_capable and row.status != REQ_CANCELLED)
             result = session.exec(
                 update(ToolApprovalRequest)
@@ -746,6 +818,12 @@ class McpApprovalStoreMixin:
             return list(session.exec(stmt).all())
 
     def find_recoverable_mcp_requests(self, *, limit=20, lease_seconds=300):
+        """App-side recovery: resolved MCP rows with no committed result.
+
+        Excludes APPROVED ops_run only — the ops reconciler admits those. Denied,
+        cancelled and responded ops_run rows still need the app's skip-completion
+        (their receipt would otherwise strand after a resolve/complete crash).
+        """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         with Session(self.engine) as session:
@@ -755,24 +833,39 @@ class McpApprovalStoreMixin:
                     .where(
                         ToolApprovalRequest.request_kind == KIND_MCP,
                         ToolApprovalRequest.status != REQ_PENDING,
-                        ToolApprovalRequest.result_json.is_(None),
-                        or_(
-                            ToolApprovalRequest.execution_state == EXEC_PENDING,
-                            and_(
-                                ToolApprovalRequest.execution_state == EXEC_RUNNING,
-                                or_(
-                                    ToolApprovalRequest.execution_started_at.is_(None),
-                                    ToolApprovalRequest.execution_started_at
-                                    <= _utcnow() - timedelta(seconds=lease_seconds),
-                                ),
-                            ),
-                        ),
+                        _awaiting_execution(lease_seconds=lease_seconds),
+                        not_(_approved_ops_run()),
                     )
                     .order_by(ToolApprovalRequest.created_at)
                     .limit(limit)
                 ).all()
             )
 
+    def find_admittable_ops_requests(self, *, limit=10, lease_seconds=300):
+        """Ops admission: approved ops_run rows awaiting (re-)admission, oldest first."""
+        if self.engine is None:
+            raise ApprovalStoreUnavailable("Approval database unavailable")
+        with Session(self.engine) as session:
+            return list(
+                session.exec(
+                    select(ToolApprovalRequest)
+                    .where(_approved_ops_run(), _awaiting_execution(lease_seconds=lease_seconds))
+                    .order_by(ToolApprovalRequest.resolved_at, ToolApprovalRequest.created_at)
+                    .limit(limit)
+                ).all()
+            )
+
+    def oldest_unadmitted_ops_resolved_at(self):
+        """When the oldest approved ops_run without a result was approved (health)."""
+        if self.engine is None:
+            raise ApprovalStoreUnavailable("Approval database unavailable")
+        with Session(self.engine) as session:
+            return session.exec(
+                select(ToolApprovalRequest.resolved_at)
+                .where(_approved_ops_run(), ToolApprovalRequest.result_json.is_(None))
+                .order_by(ToolApprovalRequest.resolved_at)
+                .limit(1)
+            ).first()
 
     def renew_mcp_execution_claim(self, request_id, claim_token):
         if self.engine is None:

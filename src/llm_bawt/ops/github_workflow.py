@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from ..service.providers.github_deploy import GitHubReleaseDispatchAdapter
 from ..utils.config import Config
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -310,8 +311,6 @@ class HttpGitHubWorkflowGateway(GitHubWorkflowGateway):
 
 
 def _stored_dispatch_token() -> str:
-    from ..service.providers.github_deploy import GitHubReleaseDispatchAdapter
-
     try:
         return GitHubReleaseDispatchAdapter(Config()).api_key() or ""
     except Exception as exc:  # noqa: BLE001 - credential-store errors are surfaced safely

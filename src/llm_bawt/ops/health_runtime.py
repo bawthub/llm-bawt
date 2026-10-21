@@ -16,7 +16,9 @@ def database_engine():
 
 
 def build_reconciler(interval):
+    from ..approval_policy_store import ToolApprovalPolicyStore
     from ..utils.config import Config
+    from .approved_admission import ApprovedOpsAdmission
     from .reconciler import OpsReconciler
     from .release_executor import build_ops_service
     from .store import OpsStore
@@ -25,7 +27,12 @@ def build_reconciler(interval):
     store = OpsStore(config)
     if store.engine is None:
         raise RuntimeError("ops reconciler requires a configured canonical database")
-    return OpsReconciler(build_ops_service(config, store), interval=interval)
+    # This process's own approval store: building it never imports the app's
+    # FastAPI dependency wiring (TASK-1220).
+    approvals = ToolApprovalPolicyStore(config, engine=store.engine)
+    service = build_ops_service(config, store, approvals=lambda: approvals)
+    return OpsReconciler(service, interval=interval,
+                         admission=ApprovedOpsAdmission(approvals, service))
 
 
 class OpsHealthRuntime:

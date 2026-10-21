@@ -225,9 +225,11 @@ def test_ops_continuation_waits_for_terminal_job_receipt():
     service = OpsServiceHost({"job_id": "job-1", "state": "running", "terminal": False})
 
     assert _terminal_ops_result(service, row) is None
+    # S1 (TASK-1220): the app reads the ops-owned receipt; the reconciler, not
+    # the continuation outbox, reconciles active jobs.
     assert service._ops_service.calls == [(
         "job-1",
-        {"output_tail_bytes": 4096, "reconcile_if_active": True},
+        {"output_tail_bytes": 4096, "reconcile_if_active": False},
     )]
 
 
@@ -532,3 +534,40 @@ def test_new_target_retry_retains_deterministic_identity_and_original_execution(
     assert first.user_message_id == second.user_message_id
     assert first.inter_bot_turn_id == second.inter_bot_turn_id
     assert store.get_request(row.id).execution_attempts == 1
+
+
+def test_admission_failure_result_is_written_to_the_tool_card(monkeypatch):
+    """TASK-1220: an approved ops_run's resolve left the card as a placeholder;
+    the outbox writes the admission outcome before continuing."""
+    from types import SimpleNamespace
+    from llm_bawt.service import approval_continuations as module
+
+    store = _store()
+    failure = {"status": "failed", "error": "[admission_expired] approved but not admitted"}
+    row = _ready_row(store, result=failure)
+    store.mark_continuation_failed(row.id, error="fixture reset", backoff_seconds=0,
+                                   claim_token=row.continuation_claim_token)
+    written, continued = [], []
+
+    class FakeToolCallStore:
+        def __init__(self, engine):
+            pass
+
+        def resolve_approval_result(self, **kwargs):
+            written.append(kwargs)
+
+    async def continue_turn(service, store, claimed, *, result_override=None):
+        continued.append((claimed.id, result_override))
+
+    monkeypatch.setattr(module, "ToolCallStore", FakeToolCallStore)
+    monkeypatch.setattr(module, "dispatch_mcp_result_continuation", continue_turn)
+    monkeypatch.setattr(module, "recover_approval_requests", lambda _store: asyncio.sleep(0))
+    service = FakeService()
+    service._turn_log_store = SimpleNamespace(engine=object())
+    service._ops_service = SimpleNamespace(get_job_status=lambda *a, **k: pytest.fail("no job to read"))
+
+    asyncio.run(dispatch_due_continuations_once(service, store))
+
+    assert written == [{"tool_use_id": "toolu-1", "approval_request_id": row.id,
+                        "approval_status": REQ_APPROVED, "result": failure, "is_error": True}]
+    assert continued == [(row.id, None)]

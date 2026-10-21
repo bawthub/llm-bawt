@@ -334,32 +334,20 @@ def test_list_operations_for_agent_hides_disabled():
 
 # ---- caller provenance (TASK-639) ------------------------------------------
 
-def test_ops_run_records_approved_caller_provenance(monkeypatch):
+def test_ops_run_records_approved_caller_provenance():
     """An approved job must be traceable back to who asked for it.
 
     Regression: ``ops_run`` never passed caller identity to ``dispatch_job``,
     so ``ops_jobs.caller_bot_id`` / ``approval_request_id`` stayed empty and a
-    completed restart had no audit linkage back to its approval.
+    completed restart had no audit linkage back to its approval. Since
+    TASK-1220 ops admission records it from the persisted approval row.
     """
-    from llm_bawt.mcp_server import ops_tools
-    from llm_bawt.mcp_server.approval_interceptor import (
-        ApprovedCallerContext,
-        _approved_caller_context,
-    )
+    from types import SimpleNamespace
+    from llm_bawt.ops.approved_admission import approved_provenance
 
-    token = _approved_caller_context.set(
-        ApprovedCallerContext(
-            bot_id="snark", user_id="nick", turn_id="turn-1",
-            session_key="sk-1", backend="claude-code",
-            approval_request_id="mcp-appr-abc",
-        )
-    )
-    try:
-        provenance = ops_tools._caller_provenance()
-    finally:
-        _approved_caller_context.reset(token)
-
-    assert provenance == {
+    row = SimpleNamespace(id="mcp-appr-abc", bot_id="snark", user_id="nick",
+                          turn_id="turn-1", session_key="sk-1", backend="claude-code")
+    assert approved_provenance(row) == {
         "caller_bot_id": "snark",
         "caller_user_id": "nick",
         "caller_turn_id": "turn-1",
@@ -367,6 +355,23 @@ def test_ops_run_records_approved_caller_provenance(monkeypatch):
         "caller_backend": "claude-code",
         "approval_request_id": "mcp-appr-abc",
     }
+
+
+def test_direct_ops_run_provenance_ignores_an_approved_context():
+    """Approved calls never reach the tool; its provenance is the turn capability only."""
+    from llm_bawt.mcp_server import ops_tools
+    from llm_bawt.mcp_server.approval_interceptor import (
+        ApprovedCallerContext,
+        _approved_caller_context,
+    )
+
+    token = _approved_caller_context.set(ApprovedCallerContext(
+        bot_id="snark", user_id="nick", turn_id="turn-1", session_key="sk-1",
+        backend="claude-code", approval_request_id="mcp-appr-abc"))
+    try:
+        assert ops_tools._caller_provenance() == {}
+    finally:
+        _approved_caller_context.reset(token)
 
 
 def test_ops_run_provenance_is_empty_without_any_trusted_context():

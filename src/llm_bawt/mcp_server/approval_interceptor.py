@@ -64,15 +64,20 @@ def _approval_context_error(
     }
 
 
+class ToolRegistryUnavailable(RuntimeError):
+    """Approved execution refused: tools were not registered at startup."""
+
+
 @dataclass(frozen=True)
 class ApprovedCallerContext:
     """Who originally asked for an approved call, replayed at execution time.
 
     Server-side execution happens in the FastAPI process, long after the
     agent's turn-scoped contextvars are gone, so a tool that wants to record
-    provenance (``ops_run`` writing ``ops_jobs.caller_*``) has nothing to read.
-    This carries it without adding anything to the tool's public MCP schema —
-    an agent must never be able to supply its own caller identity.
+    provenance has nothing to read. This carries it without adding anything to
+    the tool's public MCP schema — an agent must never be able to supply its
+    own caller identity. (Approved ``ops_run`` is not executed here at all;
+    ops admission reads provenance from the approval row, TASK-1220.)
     """
 
     bot_id: str = ""
@@ -81,7 +86,6 @@ class ApprovedCallerContext:
     session_key: str = ""
     backend: str = ""
     approval_request_id: str = ""
-    operations_snapshot: dict[str, Any] | None = None
 
 
 _approved_caller_context: contextvars.ContextVar[ApprovedCallerContext | None] = (
@@ -109,6 +113,15 @@ class ApprovalAwareFastMCP(FastMCP):
         self._approval_store_provider = approval_store_provider
         self._approval_publisher = approval_publisher
         self._operations_preparer = operations_preparer
+        self._tools_registered = False
+
+    def mark_tools_registered(self) -> None:
+        """Every tool module has registered on this instance (``registry``)."""
+        self._tools_registered = True
+
+    @property
+    def tools_registered(self) -> bool:
+        return self._tools_registered
 
     def _approval_store(self):
         if self._approval_store_provider is not None:
@@ -170,11 +183,12 @@ class ApprovalAwareFastMCP(FastMCP):
         caller-supplied ``idempotency_key`` survives approval (TASK-959).
         Server-owned provenance travels in ``caller_context``, never in args.
         """
-        # The FastAPI process reaches this without ever importing the tool
-        # modules, so the singleton would otherwise be bare (TASK-639).
-        from .registry import ensure_tools_registered
-
-        ensure_tools_registered()
+        # Registration happens once in the app lifespan, never here: a late
+        # import from the live tree is the stale-module mismatch (TASK-1220).
+        if not self._tools_registered:
+            raise ToolRegistryUnavailable(
+                "[tool_registry_unavailable] MCP tools were not registered at startup; "
+                "the approved call was not run")
         received = dict(arguments or {})
         actual_hash = canonical_invocation_hash(name, received)
         if actual_hash != str(expected_invocation_hash or ""):
@@ -431,5 +445,6 @@ class ApprovalAwareFastMCP(FastMCP):
 __all__ = [
     "ApprovalAwareFastMCP",
     "ApprovedCallerContext",
+    "ToolRegistryUnavailable",
     "current_approved_caller_context",
 ]

@@ -18,9 +18,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from agent_bridge.approval import evaluate
 from ...approval_validation import candidate_policy
-from ..approval_execution import ApprovalExecutionLeaseLost
+from ...agent_backends.agent_bridge import get_agent_subscriber
+from ...mcp_server import registry as mcp_registry
+from ...mcp_server.approval_interceptor import ApprovedCallerContext
+from ..approval_execution import ApprovalExecutionLeaseLost, run_with_execution_lease
 from ..tool_call_store import ToolCallStore
 from ...approval_policies import ApprovalStoreUnavailable, CONT_DELIVERED, CONT_PENDING, CONT_DISPATCHING
+from ...ops.approved_admission import OPS_FAILURE_STATES, TOOL_ERROR_RESULT
 
 from ..approval_continuations import (
     build_continuation_prompt,
@@ -40,10 +44,17 @@ from ...approval_policies import (
     REQ_APPROVED,
     REQ_CANCELLED,
     REQ_DENIED,
+    REQ_PENDING,
     REQ_RESPONDED,
+    awaits_ops_admission,
+    is_approved_ops_run,
 )
 
 log = logging.getLogger(__name__)
+
+# Shown while an approved ops_run waits for the ops reconciler (TASK-1220).
+# Response/display only: never persisted as the request's result.
+OPS_ADMISSION_PENDING_MESSAGE = "Approved; waiting for the ops reconciler to start it."
 router = APIRouter()
 
 
@@ -305,7 +316,7 @@ def _mcp_result_is_error(result: Any) -> bool:
         if (result.get("isError") or result.get("is_error") or result.get("error")
                 or result.get("success") is False or result.get("ok") is False
                 or result.get("status") in ("failed", "error", "denied")
-                or result.get("state") in ("failed", "error", "timed_out", "lost", "cancelled")):
+                or result.get("state") in OPS_FAILURE_STATES):
             return True
         return any(_mcp_result_is_error(result[key]) for key in ("content", "structuredContent") if key in result)
     if isinstance(result, (list, tuple)):
@@ -320,14 +331,21 @@ def _mcp_result_is_error(result: Any) -> bool:
 
 
 def _stored_mcp_resolution(row) -> dict[str, Any]:
+    """The resolve/result contract for an MCP request.
+
+    An approved ``ops_run`` the reconciler has not admitted yet is a successful
+    resolution with a non-terminal ``execution_state`` and NO ``result`` key:
+    clients must not finalize the tool card from it (TASK-1220).
+    """
+    awaiting = awaits_ops_admission(row)
     result: Any = None
     if row.result_json:
         try:
             result = json.loads(row.result_json)
         except json.JSONDecodeError:
             result = row.result_json
-    return {
-        "ok": row.execution_state in (EXEC_SUCCEEDED, EXEC_SKIPPED) and not bool(row.result_is_error),
+    response = {
+        "ok": awaiting or (row.execution_state in (EXEC_SUCCEEDED, EXEC_SKIPPED) and not bool(row.result_is_error)),
         "detail": "already_resolved",
         "status": row.status,
         "request_id": row.id,
@@ -343,6 +361,11 @@ def _stored_mcp_resolution(row) -> dict[str, Any]:
         "server_dispatched": row.continuation_state in (CONT_PENDING, CONT_DISPATCHING, CONT_DELIVERED),
         "continuation_status": row.continuation_state,
     }
+    if awaiting:
+        del response["result"]
+        response["awaiting_admission"] = True
+        response["pending_message"] = OPS_ADMISSION_PENDING_MESSAGE
+    return response
 
 
 async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolved_by: str | None):
@@ -353,6 +376,7 @@ async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolv
         "cancel": REQ_CANCELLED,
         "respond": REQ_RESPONDED,
     }[outcome]
+    already_resolved = row.status != REQ_PENDING
     updated = store.resolve_request(row.id, status=new_status, resolved_by=resolved_by, message=message, continuation_owner="server")
     if updated is None:
         raise HTTPException(status_code=404, detail="Request disappeared during resolve")
@@ -379,21 +403,20 @@ async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolv
             is_error=outcome != "cancel",
             skipped=True,
         )
+    elif is_approved_ops_run(row):
+        # The ops reconciler admits it from this row (ops/approved_admission.py);
+        # the app never imports or runs the tool for it (TASK-1220).
+        if already_resolved:
+            return _stored_mcp_resolution(row)
+        completed = row
     else:
         claimed = store.claim_mcp_execution(row.id)
         if claimed is None:
             current = store.get_request(row.id)
             return _stored_mcp_resolution(current or updated)
         try:
-            from ...mcp_server.approval_interceptor import ApprovedCallerContext
-            from ...mcp_server.registry import mcp
-
             stored_args = _decode_stored_args(claimed)
-            if claimed.tool_name == "ops_run" and not claimed.operations_snapshot_json:
-                raise ValueError("Legacy operation approval has no immutable snapshot; create a new approval")
-            from ..approval_execution import run_with_execution_lease
-
-            result = await run_with_execution_lease(store, claimed, mcp.call_approved_tool(
+            result = await run_with_execution_lease(store, claimed, mcp_registry.mcp.call_approved_tool(
                 claimed.tool_name,
                 stored_args,
                 expected_invocation_hash=claimed.invocation_hash or "",
@@ -406,12 +429,11 @@ async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolv
                     session_key=claimed.session_key or "",
                     backend=claimed.backend or "",
                     approval_request_id=claimed.id,
-                    operations_snapshot=json.loads(claimed.operations_snapshot_json) if claimed.operations_snapshot_json else None,
                 ),
             ))
             payload = _normalize_mcp_result(result)
             is_error = _mcp_result_is_error(result) or _mcp_result_is_error(payload)
-            execution_error = "Tool returned an error result" if is_error else None
+            execution_error = TOOL_ERROR_RESULT if is_error else None
         except ApprovalExecutionLeaseLost:
             raise
         except Exception as error:  # noqa: BLE001
@@ -522,16 +544,26 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
         # The SDK call already ended with an ``approval_required`` placeholder.
         # Replace that exact card's persisted result with the server-owned
         # execution outcome. Approval IDs and SDK tool-use IDs are distinct on
-        # this path; never assume request_id is the tool identity.
+        # this path; never assume request_id is the tool identity. An ops_run
+        # awaiting admission has no outcome yet: record the decision only; the
+        # continuation outbox writes the real result (TASK-1220).
+        awaiting = bool(result.get("awaiting_admission"))
         try:
-            turn_store = get_turn_log_store()
-            ToolCallStore(turn_store.engine).resolve_approval_result(
-                tool_use_id=row.tool_use_id or "",
-                approval_request_id=request_id,
-                approval_status=result["status"],
-                result=result.get("result"),
-                is_error=bool(result.get("result_is_error")),
-            )
+            cards = ToolCallStore(get_turn_log_store().engine)
+            if awaiting:
+                cards.mark_approval_status(
+                    tool_use_id=row.tool_use_id or "",
+                    approval_request_id=request_id,
+                    approval_status=result["status"],
+                )
+            else:
+                cards.resolve_approval_result(
+                    tool_use_id=row.tool_use_id or "",
+                    approval_request_id=request_id,
+                    approval_status=result["status"],
+                    result=result.get("result"),
+                    is_error=bool(result.get("result_is_error")),
+                )
         except Exception:
             log.debug("Could not reconcile MCP approval tool card %s", request_id, exc_info=True)
         await _fanout_resolved(
@@ -539,6 +571,8 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
             tool_use_id=row.tool_use_id,
             result=result.get("result"),
             is_error=bool(result.get("result_is_error")),
+            execution_state=result.get("execution_state"),
+            has_result=not awaiting,
         )
         return result
 
@@ -601,8 +635,6 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
 
 def _subscriber():
     try:
-        from ...agent_backends.agent_bridge import get_agent_subscriber
-
         return get_agent_subscriber()
     except Exception:  # noqa: BLE001
         return None
@@ -619,25 +651,36 @@ async def _fanout_resolved(
     tool_use_id=None,
     result=None,
     is_error=None,
+    execution_state=None,
+    has_result=True,
 ) -> None:
-    """Fan out resolution and, for MCP, its terminal original-call result."""
+    """Fan out resolution and, for MCP, its terminal original-call result.
+
+    ``has_result=False`` (an approved ops_run awaiting admission) omits the
+    ``result`` key entirely: a client that sees ``result: null`` would
+    finalize the card as a null success (TASK-1220).
+    """
     if subscriber is None:
         return
+    event = {
+        "_type": "approval_resolved",
+        "bot_id": bot_id,
+        "user_id": user_id,
+        "request_id": request_id,
+        "turn_id": turn_id,
+        "status": status,
+        "tool_use_id": tool_use_id,
+        "result": result,
+        "is_error": is_error,
+        "execution_state": execution_state,
+        "ts": time.time(),
+    }
+    if not has_result:
+        del event["result"], event["is_error"]
     try:
         await subscriber._redis.xadd(
             f"events:{bot_id}:{user_id}",
-            {"payload": json.dumps({
-                "_type": "approval_resolved",
-                "bot_id": bot_id,
-                "user_id": user_id,
-                "request_id": request_id,
-                "turn_id": turn_id,
-                "status": status,
-                "tool_use_id": tool_use_id,
-                "result": result,
-                "is_error": is_error,
-                "ts": time.time(),
-            }, ensure_ascii=False, default=str)},
+            {"payload": json.dumps(event, ensure_ascii=False, default=str)},
             maxlen=5000,
             approximate=True,
         )

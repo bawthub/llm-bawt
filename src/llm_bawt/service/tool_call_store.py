@@ -287,6 +287,40 @@ class ToolCallStore:
             session.refresh(row)
             return row.id
 
+    def mark_approval_status(
+        self,
+        *,
+        tool_use_id: str,
+        approval_request_id: str,
+        approval_status: str,
+    ) -> bool:
+        """Record an approval decision on its card, leaving the result alone.
+
+        For a decision whose outcome arrives later (an approved ``ops_run``
+        awaiting admission, TASK-1220); the result is written when it exists.
+        """
+        if self.engine is None or not tool_use_id:
+            return False
+        try:
+            with Session(self.engine) as session:
+                current = session.exec(
+                    select(ToolCallRecord)
+                    .where(ToolCallRecord.tool_use_id == tool_use_id)
+                    .order_by(ToolCallRecord.created_at.desc())
+                ).first()
+                if current is None:
+                    return False
+                current.approval_request_id = approval_request_id
+                current.approval_status = approval_status
+                session.add(current)
+                session.commit()
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to record approval status tool_use_id=%s", tool_use_id,
+            )
+            return False
+
     def resolve_approval_result(
         self,
         *,

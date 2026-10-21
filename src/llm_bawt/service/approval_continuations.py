@@ -13,11 +13,15 @@ import logging
 from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 from ..approval_policies import KIND_MCP, REQ_APPROVED, REQ_DENIED, REQ_CANCELLED, REQ_RESPONDED, CONT_DISPATCHING
-from ..approval_models import _as_aware_utc, _utcnow
+from ..approval_models import OPS_RUN_TOOL, _as_aware_utc, _utcnow, is_approved_ops_run
+from ..ops.approved_admission import ops_receipt_is_error
 from typing import Any
 
-from .dependencies import get_service
+from .dependencies import get_ops_service, get_service
 from .approval_continuation_session import approval_delivery_session, approval_origin_session
+from .ops_blocked_notification import OpsBlockedNotifier
+from .schemas import ChatCompletionRequest, ChatMessage, McpToolResultContinuation
+from .tool_call_store import ToolCallStore
 from .inter_bot_claims import turn_admission_claim
 from .turn_admission import RESERVED, TargetBusy, turn_request_extensions
 
@@ -50,11 +54,7 @@ def continuation_payload_from_row(row, *, result_override: Any = None) -> dict[s
             result = json.loads(row.result_json or "null")
         except json.JSONDecodeError:
             result = row.result_json
-    terminal_error = (
-        isinstance(result_override, dict)
-        and result_override.get("state")
-        in {"failed", "error", "timed_out", "lost", "cancelled"}
-    )
+    terminal_error = ops_receipt_is_error(result_override)
     return {
         "kind": "mcp_tool_result",
         "approval_request_id": row.id,
@@ -70,8 +70,12 @@ def _continuation_session(row):
 
 
 def _terminal_ops_result(service, row) -> dict[str, Any] | None:
-    """Return terminal ops receipt, or None while the restart is still active."""
-    if row.request_kind != KIND_MCP or row.tool_name != "ops_run":
+    """Return terminal ops receipt, or None while the restart is still active.
+
+    ``{}`` means the row carries no admitted job (not ops_run, or admission
+    refused it); its stored result is the outcome.
+    """
+    if row.request_kind != KIND_MCP or row.tool_name != OPS_RUN_TOOL:
         return {}
     try:
         current = json.loads(row.result_json or "null")
@@ -81,39 +85,48 @@ def _terminal_ops_result(service, row) -> dict[str, Any] | None:
         return {}
     ops = getattr(service, "_ops_service", None)
     if ops is None:
-        from .dependencies import get_ops_service
         ops = get_ops_service(service.config)
+    # A read only: the ops reconciler owns reconciliation (TASK-1220).
     result = ops.get_job_status(
-        str(current["job_id"]), output_tail_bytes=4096, reconcile_if_active=True,
+        str(current["job_id"]), output_tail_bytes=4096, reconcile_if_active=False,
     )
     if not result or not result.get("terminal"):
         if result:
-            from .ops_blocked_notification import OpsBlockedNotifier
-
             OpsBlockedNotifier(service).notify(row, result)
         return None
     return result
 
 
-def _persist_terminal_ops_tool_result(service, row, result: dict[str, Any]) -> None:
-    """Make the original tool card agree with the terminal ops receipt."""
+def _persist_terminal_ops_tool_result(service, row, result: Any) -> None:
+    """Make the original tool card agree with the final ops outcome."""
     turn_store = getattr(service, "_turn_log_store", None)
     engine = getattr(turn_store, "engine", None)
     if engine is None or not row.tool_use_id:
         return
     try:
-        from .tool_call_store import ToolCallStore
-
         ToolCallStore(engine).resolve_approval_result(
             tool_use_id=row.tool_use_id,
             approval_request_id=row.id,
             approval_status=row.status,
             result=result,
-            is_error=result.get("state")
-            in {"failed", "error", "timed_out", "lost", "cancelled"},
+            is_error=ops_receipt_is_error(result),
         )
     except Exception:
         log.exception("Could not persist terminal ops tool result id=%s", row.id)
+
+
+def _admission_card_result(row) -> Any:
+    """The stored outcome of an approved ops_run that never became a job.
+
+    Its resolve recorded the decision only, so the card still shows the
+    approval placeholder until this result is written (TASK-1220).
+    """
+    if not is_approved_ops_run(row) or row.result_json is None:
+        return None
+    try:
+        return json.loads(row.result_json)
+    except json.JSONDecodeError:
+        return {"status": "failed", "error": row.result_json}
 
 
 def _continuation_identity(row):
@@ -207,8 +220,6 @@ async def dispatch_mcp_result_continuation(
     service, store, row, *, result_override: Any = None,
 ) -> None:
     """Deliver MCP results or harness decisions with a fenced, renewable claim."""
-    from .schemas import ChatCompletionRequest, ChatMessage, McpToolResultContinuation
-
     token = row.continuation_claim_token
     identity = _continuation_identity(row)
     payload = (
@@ -380,12 +391,13 @@ async def dispatch_due_continuations_once(service, store, *, limit: int = 20) ->
             continue
         if terminal_ops_result is None:
             continue
-        if terminal_ops_result:
+        card_result = terminal_ops_result or _admission_card_result(pending)
+        if card_result:
             await asyncio.to_thread(
                 _persist_terminal_ops_tool_result,
                 service,
                 pending,
-                terminal_ops_result,
+                card_result,
             )
         claimed = await asyncio.to_thread(
             store.claim_continuation, pending.id, lease_seconds=120,
@@ -446,8 +458,6 @@ def spawn_continuation(
     tool call arrives, so it isn't re-gated by a race.
     """
     try:
-        from .schemas import ChatCompletionRequest, ChatMessage
-
         service = get_service()
         req = ChatCompletionRequest(
             messages=[ChatMessage(role="user", content=prompt)],

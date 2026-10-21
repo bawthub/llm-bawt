@@ -34,6 +34,9 @@ except ImportError:  # pragma: no cover - FastAPI is optional at import time
     def Depends(dep):  # type: ignore[misc]
         return dep
 
+from ..approval_policies import ToolApprovalPolicyStore
+from ..ops import OpsStore
+from ..ops.release_executor import build_ops_service
 from .logging import generate_request_id as _generate_request_id
 from .schemas import UserProfileAttribute
 
@@ -165,8 +168,6 @@ def get_media_generation_store(config: Any) -> "MediaGenerationStore":
 
 def get_tool_approval_policy_store(config: Any):
     """Process-wide ``ToolApprovalPolicyStore`` singleton (TASK-290)."""
-    from ..approval_policies import ToolApprovalPolicyStore
-
     return _get_or_build_store(
         "tool_approval_policy_store", config, lambda: ToolApprovalPolicyStore(config)
     )
@@ -174,8 +175,6 @@ def get_tool_approval_policy_store(config: Any):
 
 def get_ops_store(config: Any):
     """Process-wide ``OpsStore`` singleton (TASK-639)."""
-    from ..ops import OpsStore
-
     return _get_or_build_store("ops_store", config, lambda: OpsStore(config))
 
 
@@ -184,11 +183,14 @@ def get_ops_service(config: Any):
 
     Registers both the Docker worker and durable release executors. Callers
     swapping executors for tests should construct their own OpsService.
+    The ops imports are module-level: the approval continuation outbox reaches
+    this on its first ops receipt, and a first-use import there would load the
+    live bind-mounted tree into a process holding older modules (TASK-1220).
     """
-    from ..ops.release_executor import build_ops_service
-
     return _get_or_build_store(
-        "ops_service", config, lambda: build_ops_service(config, get_ops_store(config))
+        "ops_service", config, lambda: build_ops_service(
+            config, get_ops_store(config),
+            approvals=lambda: get_tool_approval_policy_store(config)),
     )
 
 

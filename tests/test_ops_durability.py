@@ -362,32 +362,32 @@ def approved_ops(system, ops_gate):
     return approvals, row
 
 
+def _admit(approvals, service, **kwargs):
+    """Run the reconciler's admission step (TASK-1220) once."""
+    from llm_bawt.ops.approved_admission import ApprovedOpsAdmission
+
+    return ApprovedOpsAdmission(approvals, service, **kwargs).admit_due()
+
+
 def test_real_interception_approval_ops_execution_preserves_snapshot(system, approved_ops, monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from llm_bawt.service.routes import approval_policies as routes
+    """TASK-1220: the app records the decision; the reconciler admits the job."""
     from llm_bawt.mcp_server.approval_interceptor import current_approved_caller_context
-    from llm_bawt.approval_policies import EXEC_SUCCEEDED, CONT_PENDING
-    from types import SimpleNamespace
+    from llm_bawt.approval_policies import EXEC_PENDING, EXEC_SUCCEEDED, CONT_PENDING
 
     store, service, executor, op = system
     approvals, row = approved_ops
     store.update_operation(op.slug, {"args_defaults_json": {"name": "edited"},
         "command_script": '{"action":"stop","container_name_from_arg":"name"}', "timeout_seconds": 71})
-    monkeypatch.setattr(routes, "_store", lambda: approvals)
-    monkeypatch.setattr(routes, "_subscriber", lambda: None)
-    monkeypatch.setattr(routes, "get_turn_log_store", lambda: SimpleNamespace(set_approval_status=lambda **kwargs: None))
-    app = FastAPI()
-    app.include_router(routes.router)
-    with TestClient(app) as client:
-        response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "approve"})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is True and data["execution_state"] == EXEC_SUCCEEDED
-        assert isinstance(data["result"], dict)
-        assert data["result"]["state"] == "accepted"
-        again = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "approve"}).json()
-        assert again["already_resolved"] is True and again["result"] == data["result"]
+    data = _approve_via_route(approvals, row.id, monkeypatch)
+    assert data["ok"] is True and data["execution_state"] == EXEC_PENDING
+    assert data["awaiting_admission"] is True and "result" not in data
+    assert not executor.calls and store.count_jobs() == 0
+    again = _approve_via_route(approvals, row.id, monkeypatch)
+    assert again["already_resolved"] is True and again["awaiting_admission"] is True
+    assert "result" not in again
+
+    assert _admit(approvals, service) == 1
+    assert _admit(approvals, service) == 0
     assert current_approved_caller_context() is None
     assert len(executor.calls) == 1
     snapshot = executor.calls[0]["snapshot"]
@@ -397,12 +397,18 @@ def test_real_interception_approval_ops_execution_preserves_snapshot(system, app
     job = store.get_job_by_key(row.id)
     assert job.operation_version == 1 and job.caller_bot_id == "ops-test"
     assert job.approval_request_id == row.id and job.caller_user_id == "unit-user"
-    assert approvals.get_request(row.id).continuation_state == CONT_PENDING
+    final = approvals.get_request(row.id)
+    assert final.continuation_state == CONT_PENDING
+    assert final.execution_state == EXEC_SUCCEEDED and not final.result_is_error
+    assert json.loads(final.result_json)["state"] == "accepted"
+    stored = _approve_via_route(approvals, row.id, monkeypatch)
+    assert stored["ok"] is True and stored["result"]["job_id"] == job.id
+    assert "awaiting_admission" not in stored
     executor.result = ReconcileResult("succeeded", 0)
     assert service.get_job_status(job.id)["terminal"] is True
 
 
-def _approve_via_route(approvals, request_id, monkeypatch):
+def _approve_via_route(approvals, request_id, monkeypatch, decision="approve"):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from llm_bawt.service.routes import approval_policies as routes
@@ -414,7 +420,7 @@ def _approve_via_route(approvals, request_id, monkeypatch):
     app = FastAPI()
     app.include_router(routes.router)
     with TestClient(app) as client:
-        response = client.post(f"/v1/chat/approvals/{request_id}/resolve", json={"decision": "approve"})
+        response = client.post(f"/v1/chat/approvals/{request_id}/resolve", json={"decision": decision})
     assert response.status_code == 200
     return response.json()
 
@@ -437,12 +443,14 @@ def test_identical_pending_ops_run_is_refused_not_duplicated(system, ops_gate):
 
 def test_caller_key_survives_approval_and_collapses_repeat_to_one_job(system, ops_gate, monkeypatch):
     """TASK-959: approved replays keep the caller's key, so ops dedupes them."""
-    store, _, executor, op = system
+    store, service, executor, op = system
     approvals, call = ops_gate
     args = {"operation": op.slug, "args": {}, "idempotency_key": "TASK-958-restart-app-1"}
     first = call(args, tool_use_id="toolu_first")
-    done = _approve_via_route(approvals, first["approval_request_id"], monkeypatch)
-    assert done["result"]["idempotency_key"] == "TASK-958-restart-app-1"
+    _approve_via_route(approvals, first["approval_request_id"], monkeypatch)
+    assert _admit(approvals, service) == 1
+    receipt = json.loads(approvals.get_request(first["approval_request_id"]).result_json)
+    assert receipt["idempotency_key"] == "TASK-958-restart-app-1"
     job = store.get_job_by_key("TASK-958-restart-app-1")
     assert job is not None and job.approval_request_id == first["approval_request_id"]
     # After resolution an identical call may ask again; if approved it must
@@ -450,53 +458,95 @@ def test_caller_key_survives_approval_and_collapses_repeat_to_one_job(system, op
     again = call(args, tool_use_id="toolu_second")
     assert again["status"] == "approval_required"
     assert again["approval_request_id"] != first["approval_request_id"]
-    replay = _approve_via_route(approvals, again["approval_request_id"], monkeypatch)
-    assert replay["result"]["job_id"] == job.id
+    _approve_via_route(approvals, again["approval_request_id"], monkeypatch)
+    assert _admit(approvals, service) == 1
+    replay = json.loads(approvals.get_request(again["approval_request_id"]).result_json)
+    assert replay["job_id"] == job.id
     assert len(executor.calls) == 1 and store.count_jobs() == 1
 
 
 @pytest.mark.parametrize("snapshot_json", [None, "", "{}", "null", "[]"])
-def test_recovery_missing_or_empty_snapshot_fails_without_dispatch(system, approved_ops, snapshot_json):
-    from llm_bawt.approval_policies import ToolApprovalRequest, REQ_APPROVED, EXEC_FAILED
-    from llm_bawt.service.approval_continuations import recover_approval_requests
+def test_admission_missing_or_empty_snapshot_fails_without_dispatch(system, approved_ops, snapshot_json):
+    from llm_bawt.approval_policies import ToolApprovalRequest, REQ_APPROVED, EXEC_FAILED, CONT_PENDING
 
-    store, _, executor, _ = system
+    store, service, executor, _ = system
     approvals, row = approved_ops
-    approvals.resolve_request(row.id, status=REQ_APPROVED)
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
     with Session(approvals.engine) as session:
         current = session.get(ToolApprovalRequest, row.id)
         current.operations_snapshot_json = snapshot_json
         session.add(current)
         session.commit()
-    asyncio.run(recover_approval_requests(approvals))
+    assert _admit(approvals, service) == 1
     final = approvals.get_request(row.id)
     assert final.execution_state == EXEC_FAILED and final.result_is_error
+    assert json.loads(final.result_json)["error"].startswith("[snapshot_invalid]")
+    assert final.continuation_state == CONT_PENDING
     assert store.count_jobs() == 0 and not executor.calls
 
 
-def test_recovery_after_job_acceptance_reuses_durable_snapshot_job(system, approved_ops, monkeypatch):
+def test_app_recovery_leaves_approved_ops_run_to_admission(system, approved_ops):
+    """M2: the app's recovery never executes an approved ops_run."""
     from datetime import datetime, timedelta, timezone
-    from llm_bawt.approval_policies import ToolApprovalRequest, EXEC_SUCCEEDED
+    from llm_bawt.approval_policies import ToolApprovalRequest, REQ_APPROVED, EXEC_PENDING
     from llm_bawt.service.approval_continuations import recover_approval_requests
-    from llm_bawt.service.routes.approval_policies import _resolve_mcp_request
 
-    store, _, executor, op = system
+    store, service, executor, _ = system
     approvals, row = approved_ops
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    with Session(approvals.engine) as session:
+        current = session.get(ToolApprovalRequest, row.id)
+        current.resolved_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        session.add(current)
+        session.commit()
+    asyncio.run(recover_approval_requests(approvals))
+    assert approvals.get_request(row.id).execution_state == EXEC_PENDING
+    assert store.count_jobs() == 0 and not executor.calls
+    assert _admit(approvals, service) == 1 and store.count_jobs() == 1
+
+
+def test_app_recovery_still_completes_denied_ops_run(system, approved_ops):
+    """M2: only APPROVED ops_run is excluded; a stranded denial still completes."""
+    from llm_bawt.approval_policies import REQ_DENIED, EXEC_PENDING, EXEC_SKIPPED
+    from llm_bawt.service.approval_continuations import recover_approval_requests
+
+    store, service, executor, _ = system
+    approvals, row = approved_ops
+    denied = approvals.resolve_request(row.id, status=REQ_DENIED, continuation_owner="server")
+    assert denied.execution_state == EXEC_PENDING
+    assert approvals.find_admittable_ops_requests() == []
+    asyncio.run(recover_approval_requests(approvals))
+    final = approvals.get_request(row.id)
+    assert final.execution_state == EXEC_SKIPPED and final.result_is_error
+    assert json.loads(final.result_json)["status"] == "denied"
+    assert store.count_jobs() == 0 and not executor.calls
+
+
+def test_admission_after_job_acceptance_reuses_durable_snapshot_job(system, approved_ops, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from llm_bawt.approval_policies import ToolApprovalRequest, REQ_APPROVED, EXEC_RUNNING, EXEC_SUCCEEDED
+
+    store, service, executor, op = system
+    approvals, row = approved_ops
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
     original = approvals.complete_mcp_execution
     def unavailable(*args, **kwargs):
         raise RuntimeError("simulated result-commit crash")
     monkeypatch.setattr(approvals, "complete_mcp_execution", unavailable)
-    with pytest.raises(RuntimeError, match="result-commit crash"):
-        asyncio.run(_resolve_mcp_request(approvals, row, outcome="approve", message="", resolved_by=None))
+    # Per-row isolation: the crash is logged, not raised out of the tick.
+    assert _admit(approvals, service) == 0
     assert len(executor.calls) == 1
+    assert approvals.get_request(row.id).execution_state == EXEC_RUNNING
+    # Within the lease the claim is still owned: no re-entry.
+    monkeypatch.setattr(approvals, "complete_mcp_execution", original)
+    assert _admit(approvals, service) == 0
     with Session(approvals.engine) as session:
         current = session.get(ToolApprovalRequest, row.id)
         current.execution_started_at = datetime.now(timezone.utc) - timedelta(seconds=301)
         session.add(current)
         session.commit()
     store.update_operation(op.slug, {"args_defaults_json": {"name": "edited"}})
-    monkeypatch.setattr(approvals, "complete_mcp_execution", original)
-    asyncio.run(recover_approval_requests(approvals))
+    assert _admit(approvals, service) == 1
     final = approvals.get_request(row.id)
     assert final.execution_state == EXEC_SUCCEEDED
     assert final.execution_attempts == 2
@@ -504,21 +554,239 @@ def test_recovery_after_job_acceptance_reuses_durable_snapshot_job(system, appro
     assert json.loads(final.result_json)["job_id"] == store.get_job_by_key(row.id).id
 
 
-@pytest.mark.parametrize("state,is_error", [("succeeded", False), ("failed", True),
-    ("timed_out", True), ("lost", True), ("cancelled", True)])
-def test_recovered_terminal_ops_job_has_truthful_approval_result(system, approved_ops, state, is_error):
-    from llm_bawt.approval_policies import EXEC_FAILED, EXEC_SUCCEEDED
-    from llm_bawt.service.routes.approval_policies import _resolve_mcp_request
+def _backdate_resolution(approvals, request_id, seconds):
+    from datetime import datetime, timedelta, timezone
+    from llm_bawt.approval_policies import ToolApprovalRequest
+
+    with Session(approvals.engine) as session:
+        current = session.get(ToolApprovalRequest, request_id)
+        current.resolved_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        session.add(current)
+        session.commit()
+
+
+def test_admission_expires_unadmitted_approval_without_dispatch(system, approved_ops):
+    """M1: an approval not admitted within the window never fires late."""
+    from llm_bawt.approval_policies import REQ_APPROVED, EXEC_FAILED, CONT_PENDING
+
+    store, service, executor, _ = system
+    approvals, row = approved_ops
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    _backdate_resolution(approvals, row.id, 601)
+    assert _admit(approvals, service) == 1
+    final = approvals.get_request(row.id)
+    assert final.execution_state == EXEC_FAILED and final.result_is_error
+    assert json.loads(final.result_json)["error"].startswith("[admission_expired]")
+    assert final.continuation_state == CONT_PENDING
+    assert store.count_jobs() == 0 and not executor.calls
+
+
+def test_admission_reports_existing_job_even_after_window(system, approved_ops):
+    """M1: the job read precedes expiry, so an accepted job is always reported."""
+    from llm_bawt.approval_policies import REQ_APPROVED, EXEC_SUCCEEDED
 
     store, service, executor, op = system
     approvals, row = approved_ops
-    # Simulate an accepted worker whose terminal receipt was reconciled after
-    # the app died, before its approval result could be persisted.
+    job = service.dispatch_job(operation_slug=op.slug, args={}, idempotency_key=row.id,
+        approved_snapshot=json.loads(row.operations_snapshot_json))
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    _backdate_resolution(approvals, row.id, 3600)
+    assert _admit(approvals, service) == 1
+    final = approvals.get_request(row.id)
+    assert final.execution_state == EXEC_SUCCEEDED
+    assert json.loads(final.result_json)["job_id"] == job["id"]
+    assert len(executor.calls) == 1 and store.count_jobs() == 1
+
+
+def test_two_admitters_produce_one_job(system, approved_ops):
+    """M7: concurrent admitters are fenced by the claim and the job key."""
+    from llm_bawt.approval_policies import REQ_APPROVED, EXEC_SUCCEEDED
+    from llm_bawt.ops.approved_admission import ApprovedOpsAdmission
+
+    store, service, executor, _ = system
+    approvals, row = approved_ops
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    admitters = [ApprovedOpsAdmission(approvals, service) for _ in range(2)]
+    barrier = threading.Barrier(2)
+
+    def run(admitter):
+        barrier.wait()
+        return admitter.admit_due()
+
+    with ThreadPoolExecutor(2) as pool:
+        counts = list(pool.map(run, admitters))
+    assert sorted(counts) == [0, 1]
+    assert approvals.get_request(row.id).execution_state == EXEC_SUCCEEDED
+    assert len(executor.calls) == 1 and store.count_jobs() == 1
+
+
+def test_superseded_admission_claim_is_logged_not_raised(system, approved_ops, caplog):
+    """M7: a claim lost to a newer claimant leaves the result to its owner."""
+    from datetime import datetime, timedelta, timezone
+    from llm_bawt.approval_policies import ToolApprovalRequest, REQ_APPROVED, EXEC_RUNNING, EXEC_SUCCEEDED
+    from llm_bawt.ops.approved_admission import ApprovedOpsAdmission
+
+    store, service, executor, _ = system
+    approvals, row = approved_ops
+    approved = approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    original_claim = approvals.claim_mcp_execution
+    newer = {}
+
+    def stalled_claim(request_id, **kwargs):
+        claimed = original_claim(request_id, **kwargs)
+        # This admitter stalls past its lease and a second one re-claims.
+        with Session(approvals.engine) as session:
+            current = session.get(ToolApprovalRequest, request_id)
+            current.execution_started_at = datetime.now(timezone.utc) - timedelta(seconds=301)
+            session.add(current)
+            session.commit()
+        newer["row"] = original_claim(request_id, **kwargs)
+        assert newer["row"].execution_claim_token != claimed.execution_claim_token
+        return claimed
+
+    approvals.claim_mcp_execution = stalled_claim
+    try:
+        with caplog.at_level("WARNING"):
+            assert ApprovedOpsAdmission(approvals, service).admit(approved) is False
+    finally:
+        approvals.claim_mcp_execution = original_claim
+    assert "superseded" in caplog.text
+    # The stale result was fenced out; the newer owner still holds the claim.
+    assert approvals.get_request(row.id).execution_state == EXEC_RUNNING
+    owner = ApprovedOpsAdmission(approvals, service)
+    outcome = owner._decide(newer["row"])
+    approvals.complete_mcp_execution(row.id, result_json=json.dumps(outcome.payload),
+        is_error=outcome.is_error, error=outcome.error, claim_token=newer["row"].execution_claim_token)
+    assert approvals.get_request(row.id).execution_state == EXEC_SUCCEEDED
+    assert len(executor.calls) == 1 and store.count_jobs() == 1
+
+
+def _stall_before_job_creation(approvals, stall):
+    """Run ``stall()`` once, after admission has read the job key and checked the
+    stored invocation, just before the transaction that would create the job."""
+    real_fence = approvals.execution_fence
+    stalled = []
+
+    def fence_with_stall(*args, **kwargs):
+        guard = real_fence(*args, **kwargs)
+
+        def stalled_guard(session):
+            if not stalled:
+                stalled.append(True)
+                stall()
+            guard(session)
+
+        return stalled_guard
+
+    approvals.execution_fence = fence_with_stall
+    return lambda: setattr(approvals, "execution_fence", real_fence)
+
+
+def _backdate_lease(approvals, request_id, seconds):
+    from datetime import datetime, timedelta, timezone
+    from llm_bawt.approval_policies import ToolApprovalRequest
+
+    with Session(approvals.engine) as session:
+        current = session.get(ToolApprovalRequest, request_id)
+        current.execution_started_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        session.add(current)
+        session.commit()
+
+
+def test_stale_admitter_cannot_create_job_after_newer_claimant_expired_it(system, approved_ops, caplog):
+    """A stalls past its lease just before creating the job. B re-claims and
+    commits [admission_expired]. When A resumes it must not create a job: the
+    creation fence, not the later completion, is what stops it."""
+    from llm_bawt.approval_policies import REQ_APPROVED, EXEC_FAILED
+    from llm_bawt.ops.approved_admission import ApprovedOpsAdmission
+
+    store, service, executor, _ = system
+    approvals, row = approved_ops
+    approved = approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+
+    def newer_claimant_expires_it():
+        _backdate_resolution(approvals, row.id, 601)
+        _backdate_lease(approvals, row.id, 301)
+        assert ApprovedOpsAdmission(approvals, service).admit(approvals.get_request(row.id)) is True
+
+    restore = _stall_before_job_creation(approvals, newer_claimant_expires_it)
+    try:
+        with caplog.at_level("WARNING"):
+            assert ApprovedOpsAdmission(approvals, service).admit(approved) is False
+    finally:
+        restore()
+    assert "superseded" in caplog.text
+    final = approvals.get_request(row.id)
+    assert final.execution_state == EXEC_FAILED
+    assert json.loads(final.result_json)["error"].startswith("[admission_expired]")
+    assert store.count_jobs() == 0 and not executor.calls
+
+
+def test_lone_admitter_that_stalls_past_the_window_creates_no_job(system, approved_ops):
+    """No competitor: A is inside the window when it starts, stalls past the
+    cutoff, then resumes. The deadline is checked in the creating transaction,
+    so A completes the row [admission_expired] itself and dispatches nothing."""
+    from llm_bawt.approval_policies import REQ_APPROVED, EXEC_FAILED, CONT_PENDING
+
+    store, service, executor, _ = system
+    approvals, row = approved_ops
+    approved = approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    restore = _stall_before_job_creation(
+        approvals, lambda: _backdate_resolution(approvals, row.id, 601))
+    try:
+        assert _admit(approvals, service) == 1
+    finally:
+        restore()
+    final = approvals.get_request(row.id)
+    assert final.execution_state == EXEC_FAILED and final.result_is_error
+    assert json.loads(final.result_json)["error"].startswith("[admission_expired]")
+    assert final.continuation_state == CONT_PENDING
+    assert store.count_jobs() == 0 and not executor.calls
+
+
+def test_execution_fence_renews_a_held_claim_and_refuses_a_lost_one(system, approved_ops):
+    from datetime import datetime, timedelta, timezone
+    from llm_bawt.approval_policies import (
+        ApprovalPersistError, ExecutionDeadlinePassed, ToolApprovalRequest, REQ_APPROVED)
+
+    approvals, row = approved_ops
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    claimed = approvals.claim_mcp_execution(row.id)
+    token = claimed.execution_claim_token
+    _backdate_lease(approvals, row.id, 200)
+    old = datetime.now(timezone.utc) - timedelta(seconds=199)
+    window = timedelta(seconds=600)
+    with Session(approvals.engine) as session:
+        approvals.execution_fence(row.id, token, approved_within=window)(session)
+        session.commit()
+    renewed = approvals.get_request(row.id).execution_started_at
+    assert renewed.replace(tzinfo=renewed.tzinfo or timezone.utc) > old
+    with Session(approvals.engine) as session, pytest.raises(ApprovalPersistError):
+        approvals.execution_fence(row.id, "someone-else", approved_within=window)(session)
+    # Held claim, closed window: a distinct refusal, and nothing is renewed.
+    _backdate_resolution(approvals, row.id, 601)
+    with Session(approvals.engine) as session, pytest.raises(ExecutionDeadlinePassed):
+        approvals.execution_fence(row.id, token, approved_within=window)(session)
+    with Session(approvals.engine) as session:
+        approvals.execution_fence(row.id, token)(session)  # no window: ownership only
+
+
+@pytest.mark.parametrize("state,is_error", [("succeeded", False), ("failed", True),
+    ("timed_out", True), ("lost", True), ("cancelled", True)])
+def test_admitted_terminal_ops_job_has_truthful_approval_result(system, approved_ops, state, is_error):
+    from llm_bawt.approval_policies import REQ_APPROVED, EXEC_FAILED, EXEC_SUCCEEDED
+    from llm_bawt.service.routes.approval_policies import _stored_mcp_resolution
+
+    store, service, executor, op = system
+    approvals, row = approved_ops
+    # Simulate an accepted worker whose terminal receipt was reconciled before
+    # the admitter could persist the approval result.
     job = service.dispatch_job(operation_slug=op.slug, args={}, idempotency_key=row.id,
         approved_snapshot=json.loads(row.operations_snapshot_json))
     store.mark_terminal(job["id"], state=state, exit_code=0 if state == "succeeded" else None)
-    result = asyncio.run(_resolve_mcp_request(approvals, row,
-        outcome="approve", message="", resolved_by=None))
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    assert _admit(approvals, service) == 1
+    result = _stored_mcp_resolution(approvals.get_request(row.id))
     assert result["result"]["state"] == state
     assert result["result_is_error"] is is_error
     assert result["ok"] is (not is_error)

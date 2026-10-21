@@ -12,6 +12,7 @@ from sqlmodel import Session, create_engine
 
 from llm_bawt.approval_policies import (
     EXEC_FAILED,
+    EXEC_PENDING,
     EXEC_SKIPPED,
     EXEC_SUCCEEDED,
     REQ_APPROVED,
@@ -91,10 +92,9 @@ class FakeMcp:
         self.calls.append((name, arguments))
         self.caller_contexts.append(caller_context)
         return [SimpleNamespace(text=json.dumps({
-            "job_id": "job-1",
-            "operation": arguments["operation"],
-            "idempotency_key": arguments.get("idempotency_key") or caller_context.approval_request_id,
-            "state": "queued",
+            "task_id": "TASK-1",
+            "title": arguments["title"],
+            "approval_request_id": caller_context.approval_request_id,
         }))]
 
 
@@ -102,12 +102,22 @@ def persisted_bot(store, request_id):
     return store.get_request(request_id).bot_id
 
 
-def _record(store, *, continuation_capable=True, invocation_hash=None):
-    args = {"operation": "llm-bawt.restart-app", "args": {}}
+# A generic (non-ops) approved MCP tool: the app executes it in-process.
+GENERIC_TOOL = "tasks_create"
+GENERIC_ARGS = {"title": "Ship it"}
+OPS_ARGS = {"operation": "llm-bawt.restart-app", "args": {}}
+
+
+def _record(store, *, continuation_capable=True, invocation_hash=None, tool_name=GENERIC_TOOL):
+    args = OPS_ARGS if tool_name == "ops_run" else GENERIC_ARGS
+    extra = {} if tool_name == "ops_run" else {
+        "operations_snapshot": None, "subject": "title=Ship it", "prompt": "Create task?"}
     return store.record_mcp_request(**_mcp_req(
+        tool_name=tool_name,
         tool_arguments=args,
         continuation_capable=continuation_capable,
-        invocation_hash=invocation_hash or canonical_invocation_hash("ops_run", args),
+        invocation_hash=invocation_hash or canonical_invocation_hash(tool_name, args),
+        **extra,
     ))
 
 
@@ -133,9 +143,9 @@ def test_approve_executes_stored_call_once_and_persists_actual_result(monkeypatc
 
     assert len(fake.calls) == 1
     name, public_args = fake.calls[0]
-    assert name == "ops_run"
-    # Stored args replay unchanged; no server-side key override (TASK-959).
-    assert public_args == {"operation": "llm-bawt.restart-app", "args": {}}
+    assert name == GENERIC_TOOL
+    # Stored args replay unchanged.
+    assert public_args == GENERIC_ARGS
     # Provenance comes from the persisted row, so the executed job is
     # traceable back to the approval that authorized it (TASK-639).
     caller = fake.caller_contexts[0]
@@ -143,8 +153,8 @@ def test_approve_executes_stored_call_once_and_persists_actual_result(monkeypatc
     assert caller.approval_request_id == row.id
     assert caller.bot_id == persisted_bot(store, row.id)
     assert first["execution_state"] == EXEC_SUCCEEDED
-    assert first["result"]["job_id"] == "job-1"
-    assert first["result"]["idempotency_key"] == row.id
+    assert first["result"]["task_id"] == "TASK-1"
+    assert first["result"]["approval_request_id"] == row.id
     assert first["continuation_prompt"] is None
     assert first["server_dispatched"] is True
     assert second["already_resolved"] is True
@@ -207,7 +217,84 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
         "tool_use_id": "toolu_01ABC",
         "result": payload["result"],
         "is_error": False,
+        "execution_state": EXEC_SUCCEEDED,
+        "has_result": True,
     }
+
+
+def test_approved_ops_run_records_decision_only_and_never_executes(monkeypatch):
+    """TASK-1220: the app never imports or runs ops_run; the reconciler admits it."""
+    store = _store()
+    row = _record(store, tool_name="ops_run")
+    fake = FakeMcp()
+    from llm_bawt.mcp_server import registry
+    monkeypatch.setattr(registry, "mcp", fake)
+
+    first = _run(store, row)
+    second = _run(store, store.get_request(row.id))
+
+    assert fake.calls == []
+    for response in (first, second):
+        assert response["ok"] is True
+        assert response["execution_state"] == EXEC_PENDING
+        assert response["awaiting_admission"] is True
+        assert response["pending_message"] == routes.OPS_ADMISSION_PENDING_MESSAGE
+        assert "result" not in response
+        assert response["server_dispatched"] is False
+    assert first["already_resolved"] is False and second["already_resolved"] is True
+    persisted = store.get_request(row.id)
+    assert persisted.status == REQ_APPROVED
+    assert persisted.execution_attempts == 0 and persisted.result_json is None
+    assert [r.id for r in store.find_admittable_ops_requests()] == [row.id]
+    # The admitted result is then reported through the same contract.
+    completed = store.complete_mcp_execution(
+        row.id, result_json=json.dumps({"status": "failed", "error": "[admission_expired] x"}),
+        is_error=True, error="[admission_expired] x",
+        claim_token=store.claim_mcp_execution(row.id).execution_claim_token)
+    stored = routes._stored_mcp_resolution(completed)
+    assert stored["ok"] is False and stored["result"]["error"] == "[admission_expired] x"
+    assert "awaiting_admission" not in stored
+
+
+def test_resolve_route_for_ops_run_marks_card_and_fanout_without_result(monkeypatch):
+    store = _store()
+    row = _record(store, tool_name="ops_run")
+    marked, finalized, events = [], [], []
+    monkeypatch.setattr(routes, "get_turn_log_store", lambda: SimpleNamespace(engine=object()))
+
+    class FakeToolCallStore:
+        def __init__(self, engine):
+            pass
+
+        def mark_approval_status(self, **kwargs):
+            marked.append(kwargs)
+
+        def resolve_approval_result(self, **kwargs):
+            finalized.append(kwargs)
+
+    class FakeRedis:
+        async def xadd(self, stream, fields, **kwargs):
+            events.append((stream, json.loads(fields["payload"])))
+
+    monkeypatch.setattr(routes, "ToolCallStore", FakeToolCallStore)
+    monkeypatch.setattr(routes, "_subscriber", lambda: SimpleNamespace(_redis=FakeRedis()))
+    monkeypatch.setattr(routes, "_store", lambda: store)
+    app = FastAPI()
+    app.include_router(routes.router)
+    with TestClient(app) as client:
+        response = client.post(f"/v1/chat/approvals/{row.id}/resolve",
+                               json={"decision": "approve", "resolved_by": "nick"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["awaiting_admission"] is True and "result" not in payload
+    assert finalized == []
+    assert marked == [{"tool_use_id": "toolu_01ABC", "approval_request_id": row.id,
+                       "approval_status": REQ_APPROVED}]
+    [(stream, event)] = events
+    assert stream == "events:snark:nick"
+    assert event["status"] == REQ_APPROVED and event["execution_state"] == EXEC_PENDING
+    assert "result" not in event and "is_error" not in event
 
 
 def test_deny_never_executes_and_stores_refusal(monkeypatch):
@@ -233,6 +320,23 @@ def test_deny_never_executes_and_stores_refusal(monkeypatch):
     assert result["result"]["status"] == "denied"
     assert result["result_is_error"] is True
     assert result["server_dispatched"] is False
+
+
+def test_generic_approved_call_refused_when_registry_unavailable(monkeypatch):
+    """S3: a registry failure at startup refuses the call; it never lazily imports."""
+    from llm_bawt.mcp_server.approval_interceptor import ApprovalAwareFastMCP
+
+    store = _store()
+    row = _record(store)
+    bare = ApprovalAwareFastMCP("bare")
+    assert bare.tools_registered is False
+    from llm_bawt.mcp_server import registry
+    monkeypatch.setattr(registry, "mcp", bare)
+
+    result = _run(store, row)
+
+    assert result["execution_state"] == EXEC_FAILED and result["result_is_error"] is True
+    assert result["result"]["error"].startswith("[tool_registry_unavailable]")
 
 
 def test_hash_mismatch_fails_without_invoking(monkeypatch):
@@ -304,9 +408,11 @@ def test_ensure_tools_registered_populates_bare_app_process_singleton():
                 return {tool.name for tool in await registry.mcp.list_tools()}
 
             assert "ops_run" not in asyncio.run(names()), "expected bare singleton"
+            assert registry.mcp.tools_registered is False
             registry.ensure_tools_registered()
             after = asyncio.run(names())
             assert {"ops_run", "ops_job_status"} <= after, after
+            assert registry.mcp.tools_registered is True
             pipe.send(None)
         except BaseException:
             pipe.send(traceback.format_exc())

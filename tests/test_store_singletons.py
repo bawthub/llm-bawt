@@ -101,11 +101,10 @@ def test_nested_store_factory_does_not_deadlock(monkeypatch) -> None:
     on the event loop, that wedged the whole MCP server until restart. A warm
     inner cache hides it, so the cold path is the one worth pinning.
     """
-    from llm_bawt import ops
-    from llm_bawt.ops import release_executor
-
-    monkeypatch.setattr(ops, "OpsStore", lambda config: ("store", config))
-    monkeypatch.setattr(release_executor, "build_ops_service", lambda config, store: ("service", store))
+    # Patched where the accessors look them up: dependencies imports both at
+    # module level so the continuation outbox never imports on first use.
+    monkeypatch.setattr(dependencies, "OpsStore", lambda config: ("store", config))
+    monkeypatch.setattr(dependencies, "build_ops_service", lambda config, store, **_kwargs: ("service", store))
     config = object()
 
     done = threading.Event()

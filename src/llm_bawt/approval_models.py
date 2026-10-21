@@ -69,6 +69,15 @@ class ApprovalDuplicatePending(ApprovalPersistError):
         self.existing_request_id = existing_request_id
 
 
+class ExecutionDeadlinePassed(RuntimeError):
+    """The claim is still held, but the approval's execution window closed.
+
+    Raised by ``execution_fence`` inside the creating transaction, so nothing
+    was started. Distinct from ``ApprovalPersistError`` (claim lost): here the
+    claimant still owns the row and must complete it as expired (TASK-1220).
+    """
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -131,6 +140,22 @@ EXEC_RUNNING = "running"
 EXEC_SUCCEEDED = "succeeded"
 EXEC_FAILED = "failed"
 EXEC_SKIPPED = "skipped"
+
+# TASK-1220: the one MCP tool whose APPROVED execution the ops reconciler
+# admits (ops/approved_admission.py). The app records the decision only; every
+# other approved MCP tool still executes in the resolving app process.
+OPS_RUN_TOOL = "ops_run"
+
+
+def is_approved_ops_run(row) -> bool:
+    """An APPROVED MCP ``ops_run`` row: ops admission owns its execution."""
+    return (row.request_kind == KIND_MCP and row.status == REQ_APPROVED
+            and row.tool_name == OPS_RUN_TOOL)
+
+
+def awaits_ops_admission(row) -> bool:
+    """Approved ``ops_run`` with no committed result yet (not admitted)."""
+    return is_approved_ops_run(row) and row.result_json is None
 
 # TASK-639: continuation outbox state. Harness-kind = CONT_NOT_NEEDED (client
 # dispatches its own continuation). MCP-kind = CONT_PENDING once the tool has

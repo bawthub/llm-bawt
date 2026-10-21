@@ -68,8 +68,20 @@ def ensure_tools_registered() -> None:
     under ``__main__``. The import is lazy (``registry`` is imported *by*
     ``server``, so a module-level import here would cycle) and idempotent via
     ``sys.modules``.
+
+    The FastAPI process calls this once in its lifespan, before it serves
+    (TASK-1220). It must never run at approval time: the tree is bind-mounted,
+    so a late import loads whatever is on disk *now* into a process still
+    holding modules from its start.
     """
     from . import server  # noqa: F401
 
+    mcp.mark_tools_registered()
 
-__all__ = ["mcp", "ensure_tools_registered"]
+
+def tools_registration_complete() -> bool:
+    """Whether :func:`ensure_tools_registered` finished in this process."""
+    return mcp.tools_registered
+
+
+__all__ = ["mcp", "ensure_tools_registered", "tools_registration_complete"]

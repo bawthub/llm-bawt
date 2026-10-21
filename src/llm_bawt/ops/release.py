@@ -29,6 +29,8 @@ import zipfile
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
+from ..service.providers.github_deploy import GitHubReleaseAdapter
+from ..utils.config import Config
 from .image_deploy import DEPLOY_ACTION, ROLLBACK_ACTION, parse_deployment
 
 RECEIPT_SCHEMA = "bawthub.release-receipt/v1"
@@ -64,8 +66,6 @@ class ReleaseVerifier(ABC):
 
 
 def _stored_release_token() -> str:
-    from ..service.providers.github_deploy import GitHubReleaseAdapter
-    from ..utils.config import Config
     try:
         return GitHubReleaseAdapter(Config()).api_key() or ""
     except Exception as exc:  # noqa: BLE001 - DB/key trouble must surface as "unverified"

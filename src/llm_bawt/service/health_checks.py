@@ -16,6 +16,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from ..mcp_server.registry import tools_registration_complete
+from ..ops.approved_admission import ADMISSION_WINDOW_SECONDS
+
 OK, DEGRADED, DOWN = "ok", "degraded", "down"
 _RANK = {OK: 0, DEGRADED: 1, DOWN: 2}
 
@@ -23,6 +26,9 @@ _RANK = {OK: 0, DEGRADED: 1, DOWN: 2}
 # reconciler ticks (default 5s); an active job is re-reconciled every tick.
 QUEUED_STALE_SECONDS = 120
 ACTIVE_UNRECONCILED_SECONDS = 120
+# An approved ops_run is admitted within a tick or two. The reconciler cannot
+# report its own absence, so the app watches the oldest unadmitted approval.
+ADMISSION_STALE_SECONDS = 60
 
 
 def _check(name: str, status: str, reason: str | None = None) -> dict:
@@ -111,6 +117,26 @@ def check_ops_queue(store, now: datetime | None = None) -> dict:
     return _check("ops.queue", status, "; ".join(problems) or None)
 
 
+def check_ops_admission(approvals, now: datetime | None = None) -> dict:
+    """Approved ops_run requests the reconciler has not admitted (TASK-1220)."""
+    if approvals is None or approvals.engine is None:
+        return _check("ops.admission", DOWN, "approval store database unavailable")
+    now = now or datetime.now(timezone.utc)
+    age = _age_seconds(approvals.oldest_unadmitted_ops_resolved_at(), now)
+    if age is None or age <= ADMISSION_STALE_SECONDS:
+        return _check("ops.admission", OK)
+    status = DOWN if age > ADMISSION_WINDOW_SECONDS else DEGRADED
+    return _check("ops.admission", status,
+                  f"approved ops_run waiting {int(age)}s for admission (is the ops reconciler running?)")
+
+
+def check_mcp_tool_registry() -> dict:
+    if tools_registration_complete():
+        return _check("mcp.tool_registry", OK)
+    return _check("mcp.tool_registry", DEGRADED,
+                  "MCP tools were not registered at startup; approved MCP calls are refused")
+
+
 def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
     from .runtime_health import RuntimeHealthChecks
 
@@ -127,6 +153,9 @@ def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
         probes.extend([
             ("deliveries.queue", lambda: [runtime.deliveries()]),
             ("scheduler", runtime.scheduler),
+            ("ops.admission", lambda: [check_ops_admission(
+                getattr(service, "_tool_approval_policy_store", None))]),
+            ("mcp.tool_registry", lambda: [check_mcp_tool_registry()]),
         ])
     for name, probe in probes:
         try:

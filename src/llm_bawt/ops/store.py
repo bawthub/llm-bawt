@@ -264,7 +264,11 @@ class OpsStore:
     def create_job(self, *, operation, args_json, display_args_json, idempotency_key,
                    invocation_snapshot_json=None, request_payload_json=None, caller_actor=None,
                    caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
-                   caller_session_key=None, caller_backend=None, approval_request_id=None):
+                   caller_session_key=None, caller_backend=None, approval_request_id=None,
+                   fence=None):
+        """Insert a queued job. ``fence(session)``, when given, runs in the same
+        transaction first and raises to refuse creation (an admission claim
+        that is no longer held)."""
         self._require()
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
             raise ValueError("idempotency_key must be 1..128 characters")
@@ -278,6 +282,8 @@ class OpsStore:
             caller_user_id=caller_user_id, caller_turn_id=caller_turn_id, caller_session_key=caller_session_key,
             caller_backend=caller_backend, approval_request_id=approval_request_id)
         with Session(self.engine) as session:
+            if fence is not None:
+                fence(session)
             session.add(row)
             try:
                 session.commit()

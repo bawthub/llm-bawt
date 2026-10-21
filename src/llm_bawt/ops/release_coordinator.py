@@ -46,6 +46,7 @@ from .release_models import (RELEASE_AWAITING_DEPLOY_APPROVAL, RELEASE_BUILD_COM
                              RELEASE_PREFLIGHT, RELEASE_TERMINAL_STATES, ReleaseRun)
 from .release_spec import workflow_file
 from .release_store import ReleaseStore
+from .service import OpsDispatchError
 from .validation import canonical_json
 
 logger = logging.getLogger(__name__)
@@ -473,8 +474,6 @@ class ReleaseCoordinator:
         return parent
 
     def _request_authorized_deploy(self, row: ReleaseRun, token: str, snapshot: dict) -> float:
-        from .service import OpsDispatchError
-
         try:
             parent = self._release_authority(row, snapshot)
         except ValueError as exc:
@@ -521,8 +520,6 @@ class ReleaseCoordinator:
                 and parent is not None and parent.caller_backend != "http-operator"):
             return self._request_authorized_deploy(row, token, snapshot)
         # Older build-only approvals and direct HTTP runs keep the second card.
-        from .service import OpsDispatchError
-
         plan = _loads(row.release_plan_json)
         slug = plan.get("deploy_operation") or snapshot["spec"]["deploy_operation"]
         try:
@@ -647,8 +644,6 @@ class ReleaseCoordinator:
 
     # ── deploy ───────────────────────────────────────────────────────────
     def _deploying(self, row: ReleaseRun, token: str, snapshot: dict) -> float:
-        from .service import OpsDispatchError
-
         plan = _loads(row.release_plan_json)
         if row.deploy_approval_request_id is None and (snapshot.get("release_source") or {}).get("deploy_authorization") == "after_verified_build":
             try:

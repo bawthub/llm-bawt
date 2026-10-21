@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..service.providers.github_deploy import GhcrPullAdapter
+from ..utils.config import Config
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec, validate_release_spec
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
@@ -153,8 +155,6 @@ def validate_spec(command_script: str) -> dict:
 
 def _stored_pull_auth() -> dict | None:
     """ghcr.io pull credential from the encrypted CredentialStore (TASK-997)."""
-    from ..service.providers.github_deploy import GhcrPullAdapter
-    from ..utils.config import Config
     return GhcrPullAdapter(Config()).pull_auth()
 
 

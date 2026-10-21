@@ -286,6 +286,18 @@ async def lifespan(app):
         log.info("Scheduler started (maintenance interval=%ss; prompt sweep=5s)",
                  config.SCHEDULER_CHECK_INTERVAL_SECONDS)
 
+    # TASK-1220: register every MCP tool now, before approvals can execute.
+    # A lazy import at approval time loads the live bind-mounted tree into a
+    # process holding older modules. A failure degrades (approved generic calls
+    # refuse with [tool_registry_unavailable]; /v1/health/checks reports it)
+    # rather than taking the whole app down.
+    try:
+        from ..mcp_server.registry import ensure_tools_registered
+
+        ensure_tools_registered()
+    except Exception:
+        log.exception("MCP tool registration failed; approved MCP calls will be refused")
+
     # TASK-861: recover stranded approved MCP claims (uncertain generic calls
     # are not replayed), repair old result/outbox gaps, and deliver MCP results
     # plus server-owned harness decisions through the fenced durable outbox.

@@ -22,7 +22,12 @@ import logging
 import uuid
 from typing import Any
 
+from ..ops.approved_admission import dispatch_error_text, ops_run_receipt
+from ..ops.service import OpsDispatchError
+from ..task_turn_context import open_task_turn_context
+from .approval_interceptor import current_approved_caller_context
 from .registry import mcp
+from .task_association import current_task_turn_capability
 
 logger = logging.getLogger(__name__)
 
@@ -83,35 +88,15 @@ async def ops_list_operations(include_disabled: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 
 def _caller_provenance() -> dict[str, str]:
-    """Who is running this job, for the ``ops_jobs.caller_*`` audit columns.
+    """Who is running a directly allowed job, for the ``ops_jobs.caller_*`` columns.
 
-    Two arrival paths:
-
-    * approved server-side execution — the resolve route replays the persisted
-      approval row's identity through a contextvar;
-    * a directly allowed call — the agent's signed per-turn capability is still
-      on the contextvar stack.
-
-    Never sourced from tool arguments: caller identity must not be forgeable
-    through the public MCP schema. Returns ``{}`` when neither is available
-    (manual/generic MCP clients), leaving the columns null rather than guessing.
+    Read from the agent's signed per-turn capability on the contextvar stack,
+    never from tool arguments: caller identity must not be forgeable through
+    the public MCP schema. Returns ``{}`` when none is present (manual/generic
+    MCP clients), leaving the columns null rather than guessing. Approved calls
+    never reach this tool; ops admission records their provenance from the
+    persisted approval row (TASK-1220).
     """
-    from .approval_interceptor import current_approved_caller_context
-
-    approved = current_approved_caller_context()
-    if approved is not None:
-        return {
-            "caller_bot_id": approved.bot_id or None,
-            "caller_user_id": approved.user_id or None,
-            "caller_turn_id": approved.turn_id or None,
-            "caller_session_key": approved.session_key or None,
-            "caller_backend": approved.backend or None,
-            "approval_request_id": approved.approval_request_id or None,
-        }
-
-    from ..task_turn_context import open_task_turn_context
-    from .task_association import current_task_turn_capability
-
     try:
         # Raises (never returns None) when no capability is present.
         turn = open_task_turn_context(current_task_turn_capability())
@@ -147,51 +132,28 @@ async def ops_run(
         Job metadata (`job_id`, optional `release_id`, state). Errors carry
         a machine-readable code; inspect it rather than retrying blindly.
     """
-    from ..ops.service import OpsDispatchError
-
     if not operation or not isinstance(operation, str):
         raise ValueError("operation slug is required")
+    if current_approved_caller_context() is not None:
+        # An approved ops_run is admitted by the ops reconciler from the
+        # persisted approval row, never replayed through this tool (TASK-1220).
+        raise RuntimeError("[admission_owned] approved ops_run is admitted by the ops reconciler, not executed here")
     ops = await asyncio.to_thread(_get_ops_service)
-    from .approval_interceptor import current_approved_caller_context
-
-    approved = current_approved_caller_context()
-    # ApprovedCallerContext is minted by the trusted replay path, NEVER from
-    # public tool input. Contextvars propagate across asyncio.to_thread.
-    snapshot = approved.operations_snapshot if approved else None
-    if approved is not None and snapshot is None:
-        raise RuntimeError("[snapshot_invalid] approved operation has no persisted invocation snapshot; request fresh approval")
-    # The caller's key wins, including through approval replay, so identical
-    # approved calls collapse onto one job (TASK-959). Without one, an approved
-    # call keys on its durable approval id: a reclaimed execution lease after a
-    # crash then returns the already-created job instead of dispatching again.
-    idem = (idempotency_key or "").strip() or (
-        approved.approval_request_id if approved and approved.approval_request_id else uuid.uuid4().hex
-    )
-    provenance = _caller_provenance()
+    idem = (idempotency_key or "").strip() or uuid.uuid4().hex
     try:
         result = await asyncio.to_thread(
             ops.dispatch_job,
             operation_slug=operation,
             args={} if args is None else args,
             idempotency_key=idem,
-            approved_snapshot=snapshot,
-            **provenance,
+            **_caller_provenance(),
         )
     except OpsDispatchError as exc:
         # Surface a structured error the agent can parse. MCP tools
         # signal errors by raising; the caller sees a tool_result with
         # is_error=True and the message text.
-        raise RuntimeError(f"[{exc.code}] {exc}") from exc
-    return {
-        "id": result["id"],
-        "job_id": result["id"],
-        "release_id": result.get("release_id"),
-        "operation": result["operation"],
-        "state": result["state"],
-        "submitted_at": result["submitted_at"],
-        "host_unit_name": result.get("host_unit_name"),
-        "idempotency_key": idem,
-    }
+        raise RuntimeError(dispatch_error_text(exc)) from exc
+    return ops_run_receipt(result, idem)
 
 
 # ---------------------------------------------------------------------------

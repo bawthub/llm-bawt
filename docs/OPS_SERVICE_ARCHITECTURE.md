@@ -2,7 +2,7 @@
 
 **Status:** design baseline; implementation and rollout are queued, not complete.
 
-**Updated:** 2026-10-18. **Accountable owner:** Snark.
+**Updated:** 2026-10-21 (TASK-1220 approved-admission move, implemented, not deployed). **Accountable owner:** Snark.
 
 **Tasks:** TASK-1169–TASK-1173. Related health delivery: TASK-1157.
 
@@ -36,7 +36,35 @@ ops-reconciler process <---- durable request/receipt volume
           +---------------- canonical ops job database
 ```
 
-The app constructs `DockerExecutor`, resolves targets during invocation preparation, persists approved jobs and can dispatch them immediately. Even `get_job_status()` can dispatch/reconcile active jobs. The separate reconciler also pumps the ledger; conditional claims coordinate dispatchers.
+The app constructs `DockerExecutor`, resolves targets during invocation preparation, and dispatches directly submitted jobs immediately: a directly allowed MCP `ops_run` (MCP server process) and `POST /v1/ops/jobs`. A `get_job_status()` read still dispatches/reconciles active jobs unless the caller passes `reconcile_if_active=False`. The separate reconciler also pumps the ledger; conditional claims coordinate dispatchers. **Approved** MCP `ops_run` calls are the exception: since TASK-1220 the app records only the decision and the reconciler admits the job (below).
+
+### Approved MCP `ops_run` admission (TASK-1220) — implemented, not yet deployed
+
+Incident: approving an `ops_run` made the app lazily import the MCP tool tree at approval time. The app imports code from the live bind-mounted tree, so newer on-disk modules met older loaded ones and the approved call died with an `ImportError` after the human had approved it. Approved ops work now has one owner, which is ops:
+
+```text
+human approves ──> app resolve route: record decision only (no import, no execution)
+                     returns ok + execution_state=pending + awaiting_admission, no `result`
+ops-reconciler tick ──> reconcile active jobs  ─┐ independent; first failure reported
+                   └──> ApprovedOpsAdmission.admit_due(limit=10)
+                           claim (lease 300s) → invocation hash → ops_run schema → snapshot
+                           → dispatch_job: existing job for key → report it (any age)
+                                           else create it behind execution_fence
+                                           (claim held + approved ≤600s ago)
+                           → result + continuation enqueue in one transaction
+app continuation outbox ──> reads the job (no reconcile), writes the outcome to the tool card,
+                            continues the agent once the job is terminal
+```
+
+- **App** (`service/routes/approval_policies.py`): an approved `ops_run` is never claimed or run in the app. The card gets only its approval status, and the `approval_resolved` event omits `result`/`is_error`, so no client can finalize it as a null success. App recovery skips APPROVED `ops_run`; denied/cancelled/responded `ops_run` rows are still completed by the app.
+- **Admission** (`ops/approved_admission.py`, run by `ops/reconciler.py`): it uses the existing fences: the claim token and lease, the job idempotency key (caller key, else approval id), and the fenced result commit. It adds one more: job creation runs in the same transaction as `execution_fence` (→ `OpsStore.create_job(fence=)`), which checks that the claim token is still held and the approval is inside the 10-minute window, and renews the lease. A claimant that stalls past its lease therefore can't create a job after a newer claimant has already refused or expired the row, and a lone admitter that stalls past the window can't create one late. Concurrent admitters produce one job. A claim superseded after lease expiry is logged and left to its newer owner. Job provenance comes from the persisted approval row. Refusals complete as error results with a machine-readable code: `[invocation_mismatch]`, `[args_invalid]`, `[snapshot_invalid]`, `[admission_expired]` or an ops dispatch code. An approval not admitted within 10 minutes expires without a job, but an existing job for its key is always reported. The window is checked only at creation, after the invocation checks, so an expired row whose stored invocation or operation no longer validates reports that code (for example `[snapshot_invalid]` or an ops dispatch code such as `[operation_disabled]`) rather than `[admission_expired]`. Either way, no job is created.
+- **One contract** for both paths: the receipt and the `[code] message` error format are shared with the direct tool. The direct tool refuses an approved caller context with `[admission_owned]`.
+- **No lazy imports** on these paths. The startup imports are hoisted, a unit test bans function-level imports in the path functions, and an offline-integration test checks in a cold interpreter that resolve, admission and continuation load no new `llm_bawt`/`agent_bridge` modules.
+- **App health:**
+  - `ops.admission` (on `/v1/health/checks`) reports DEGRADED when an approved `ops_run` has waited more than 60s for admission, and DOWN beyond 600s.
+  - The app registers MCP tools eagerly at startup. If that fails, `mcp.tool_registry` reports DEGRADED and approved generic MCP calls are refused with `[tool_registry_unavailable]` rather than lazily importing.
+- **Deploy order:** reconciler first, then app. An app that records decisions only must not run without an admitting reconciler.
+- **Known gap (TASK-1169):** an admitted job whose executor preflight fails stays QUEUED with `error_text`. Every reconcile pass retries it, with no deadline or attempt limit (`OpsService._dispatch_queued`, `OpsStore.note_queued_error`). Its continuation waits for a terminal job, and the existing blocked-ops notifier warns the agent.
 
 Each operation uses a short-lived Docker worker with an immutable request, deterministic identity and durable receipt. This allows execution to outlive app restarts. Workers have no network or DB credentials, but carry the privileged Docker socket. Isolation settings do not make a socket-owning worker safe for untrusted code. Exited workers and receipts remain for audit; ordinary jobs therefore leave container objects behind.
 
@@ -205,6 +233,9 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `src/llm_bawt/ops/executor.py`, `worker.py`, `image_deploy.py`: Docker execution and per-job worker lifecycle.
 - `src/llm_bawt/ops/release_executor.py`: release execution/coordinator integration.
 - `src/llm_bawt/ops/reconciler.py`, `health_runtime.py`, `health_http.py`, `health_collector.py`, `health_state.py`: current independent loop and monitoring.
+- `src/llm_bawt/ops/approved_admission.py`: approved MCP `ops_run` admission and the shared `ops_run` receipt/error contract (TASK-1220).
+- `src/llm_bawt/approval_mcp_store.py`: approval execution claims, plus the shared awaiting-execution predicate used by the claim, app recovery and admission.
+- `src/llm_bawt/service/routes/approval_policies.py`, `service/approval_continuations.py`: approval decision recording and the continuation outbox, which reads ops results without reconciling them.
 - `src/llm_bawt/service/routes/ops.py`: existing app HTTP surface.
 - `src/llm_bawt/media/gpu_handoff_adapter.py`: direct GPU-service observation.
 - `docker-compose.ops.yml`: ops deployment and source healthcheck configuration.
@@ -216,3 +247,4 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - **2026-10-18:** Health monitoring fixed independently of full isolation; broader tasks remain queued.
 - **2026-10-18:** Caid review narrows scope: reuse ledger, portable service contracts, shared observations, routing owned by deployment, guardrails first. Follow-up found repository mount inspection; TASK-1170 explicitly covers it.
 - **2026-10-18:** Nick asks for a proper FastAPI operations service and a repo design document maintained through implementation, then transitioned to skills upon completion. This document records that direction; no service/code rollout performed.
+- **2026-10-21 (TASK-1220):** After the approval-time stale-import incident, Nick approved moving admission of approved MCP `ops_run` from the app into the ops reconciler. Snark's design review added these must-fixes: the admission deadline, recovery exclusion, the pending resolve contract, the shared contract, the hash check, no lazy imports, and per-row isolation. Nick set a 10-minute admission window, and chose to degrade and refuse (not crash) when MCP tool registration fails at startup. Implemented and tested; not yet deployed. This is the first step of the §3 ownership move ("approved job admission" to ops). Directly submitted jobs still dispatch in the app until TASK-1169.

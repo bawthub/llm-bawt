@@ -368,30 +368,35 @@ def test_recovery_finishes_stranded_generic_claim_without_execution(store, monke
     assert store.get_request(row.id).execution_state == EXEC_FAILED
 
 
-def test_ops_recovery_uses_same_key_and_immutable_snapshot(store, monkeypatch):
+class _UntouchableOps:
+    """An ops service admission must never reach for a refused invocation."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"ops.{name} touched for a refused invocation")
+
+
+def test_stranded_ops_claim_is_left_to_ops_admission(store, monkeypatch):
+    """TASK-1220 (M2): app recovery never executes an approved ops_run."""
     from llm_bawt.mcp_server import registry
     snapshot = {"operation_slug": "demo", "script": "approved", "args": {}}
     row = approve_claim(store, record(store, tool_name="ops_run", operations_snapshot=snapshot))
     expire(store, row, execution_started_at=datetime.now(timezone.utc) - timedelta(minutes=10))
     calls = []
 
-    async def execute(name, arguments, **kwargs):
+    async def execute(*args, **kwargs):
         calls.append(kwargs)
-        assert kwargs["caller_context"].operations_snapshot == snapshot
-        assert "trusted_argument_overrides" not in kwargs
-        assert kwargs["caller_context"].approval_request_id == row.id
-        assert kwargs["expected_invocation_hash"] == row.invocation_hash
-        return {"job_id": "same-job", "state": "queued"}
 
     monkeypatch.setattr(registry, "mcp", SimpleNamespace(call_approved_tool=execute))
     asyncio.run(continuations.recover_approval_requests(store))
-    asyncio.run(continuations.recover_approval_requests(store))
-    assert len(calls) == 1
-    assert store.get_request(row.id).execution_state == EXEC_SUCCEEDED
+    assert calls == []
+    current = store.get_request(row.id)
+    assert current.result_json is None and current.execution_attempts == 1
+    assert [r.id for r in store.find_admittable_ops_requests()] == [row.id]
 
 
 def test_legacy_ops_without_snapshot_fails_without_using_live_catalog(store, monkeypatch):
     from llm_bawt.mcp_server import registry
+    from llm_bawt.ops.approved_admission import ApprovedOpsAdmission
     row = record(store, tool_name="ops_run")
     calls = []
 
@@ -401,8 +406,11 @@ def test_legacy_ops_without_snapshot_fails_without_using_live_catalog(store, mon
     monkeypatch.setattr(registry, "mcp", SimpleNamespace(call_approved_tool=execute))
     response = asyncio.run(routes._resolve_mcp_request(store, row, outcome="approve", message="", resolved_by=None))
     assert calls == []
-    assert response["execution_state"] == EXEC_FAILED
-    assert "no immutable snapshot" in response["result"]["error"]
+    assert response["awaiting_admission"] is True
+    assert ApprovedOpsAdmission(store, _UntouchableOps()).admit_due() == 1
+    final = routes._stored_mcp_resolution(store.get_request(row.id))
+    assert final["execution_state"] == EXEC_FAILED
+    assert final["result"]["error"].startswith("[snapshot_invalid]")
 
 
 def test_recovery_repairs_pre_atomic_result_outbox_gap(store):
