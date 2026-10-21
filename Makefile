@@ -311,7 +311,10 @@ endif  # not Windows
 # DEV TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all
+.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-service test-paid
+
+# Every scenario enters the same locked runner; CI calls these targets too.
+TEST_RUNNER := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory python -m scripts.test_suite
 
 lint: ## Lint with ruff
 	uv run ruff check src/
@@ -322,45 +325,38 @@ format: ## Format with ruff
 typecheck: ## Type-check with mypy
 	uv run mypy src/
 
-test: ## Run hermetic tests only (fast, no DB/Redis/live service needed)
-	uv run pytest
+test: ## Fast hermetic unit suite; enforce setup+call+teardown <1s
+	$(TEST_RUNNER) unit
 
-test-cov: ## Run hermetic tests with coverage
-	uv run pytest --cov=src --cov-report=term-missing
+test-cov: ## Hermetic coverage (unit marker filter)
+	$(TEST_RUNNER) coverage
 
-test-integration: ## Optional integration tests; tests targeting an unverified service fail closed
-	uv run pytest -m integration
+test-integration: ## Private PG and local HTTP integration, never an operational service
+	$(TEST_RUNNER) integration
 
-test-pg-acceptance: ## REQUIRED private PostgreSQL gate: zero skips, zero missing suites
-	uv run --isolated --frozen --extra dev --extra service --extra memory --extra mcp python -m pytest -o addopts='' --require-pg-acceptance \
-		tests/test_session_search_pg.py tests/test_session_continuity_pg.py \
-		tests/test_agent_bridge.py::TestEventStore tests/test_agent_context.py \
-		tests/test_idle_context_reset_pg.py tests/test_turn_context_snapshot_pg.py \
-		tests/test_bot_session_state_pg.py tests/test_runtime_switch_pointer_pg.py \
-		tests/test_new_session_receipt_pg.py tests/test_new_session_receipt_review_pg.py \
-		tests/test_new_session_typed_pg.py tests/test_new_session_typed_review_pg.py \
-		tests/test_new_session_typed_follow_up_pg.py \
-		tests/test_new_session_chat_pg.py tests/test_new_session_chat_review_pg.py \
-		tests/test_new_session_history_review_pg.py \
-		tests/test_new_session_transport_review.py::test_text_part_follow_up_receipt_uses_same_command_as_admission \
-		tests/test_new_session_policy_review_pg.py tests/test_new_session_policy_recovery_pg.py \
-		tests/test_new_session_api_review_pg.py \
-		tests/test_codex_reset_evidence.py::test_native_codex_ack_requires_exact_persisted_policy_binding \
-		tests/test_codex_reset_evidence.py::test_standalone_codex_receipt_requires_empty_successor_binding \
-		tests/test_session_rotation_review_pg.py tests/test_session_overflow_lock_review_pg.py \
-		tests/test_inter_bot_delivery.py tests/test_inter_bot_delivery_retry.py \
-		tests/test_turn_admission_pg.py tests/test_session_reset_lineage_pg.py \
-		tests/test_session_summaries.py::TestSummarizeThreadLive \
-		tests/test_session_summaries.py::TestResummarizeHeuristicSummaries \
-		tests/test_session_scoping.py::TestScopedPersistenceProofs \
-		tests/test_session_scoping.py::TestScopedContextProofs \
-		tests/test_session_threads.py::TestRegistryInvariantsLiveDB \
-		tests/test_session_unique_index_pg.py tests/test_orphan_partitions_pg.py \
-		tests/test_schema_convergence_pg.py tests/test_schema_full_store_pg.py \
-		tests/test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB
+test-pg-acceptance: ## Private networkless PostgreSQL; one container per run/worker
+	$(TEST_RUNNER) pg
 
-test-all: ## Run EVERY test (hermetic + integration + service + llm_call). Use before merging inter-bot / dispatcher / capability / bridge changes — a bare `pytest` silently skips those (TASK-780).
-	uv run pytest -m ""
+test-offline-integration: ## Real local sockets/threads, no DB or service
+	$(TEST_RUNNER) offline-integration
+
+test-sdk-probe: ## Opt-in installed SDK CLI vs fake localhost providers
+	$(TEST_RUNNER) sdk-probe
+
+test-all: ## Exhaustive fail-closed offline gate: unit + private PG + local integration
+	$(TEST_RUNNER) offline
+
+test-profile: ## Report all unit durations including setup/call/teardown
+	$(TEST_RUNNER) profile
+
+test-target: ## Safe explicit nodes, e.g. make test-target NODES=tests/test_ops_health.py
+	$(TEST_RUNNER) target $(NODES)
+
+test-service: ## Refuse unverified live service until an isolated target is wired
+	$(TEST_RUNNER) service
+
+test-paid: ## Refuse paid calls until isolated target/credentials are wired
+	$(TEST_RUNNER) paid
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CLEAN

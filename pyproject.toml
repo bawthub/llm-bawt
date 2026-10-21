@@ -150,21 +150,20 @@ where = ["src"]
 # A bare `pytest` / `pytest tests/` runs ONLY hermetic unit tests — nothing that
 # touches the live service or real bots. Opt in explicitly to run the gated ones:
 #
-#   make test              # hermetic only (this default)
-#   make test-pg-acceptance # REQUIRED private socket-cluster SQL acceptance gate
-#   make test-integration   # opt-in integration tests (CLI service cases fail closed)
-#   make test-all           # -m "" (CLI service cases require an isolated target)
-#   uv run pytest -m service        # CLI/integration tests vs a running :8642
-#   uv run pytest -m llm_call       # tests that spend real LLM credits
+#   make test              # hermetic, setup+call+teardown <1s
+#   make test-pg-acceptance # private socket-cluster SQL acceptance gate
+#   make test-integration   # private PG + offline local integration
+#   make test-all           # all offline tests exactly once, fail closed
+#   make test-profile       # show per-case setup/call/teardown durations
+#   make test-service/test-paid # intentionally fail until isolated targets exist
 #
 # The default filter silently drops whole files (test_inter_bot_delivery.py is
 # module-scoped `pytestmark = pytest.mark.integration` — ~25 tests) which used
 # to be a false-green trap for anyone verifying inter-bot changes with plain
-# `pytest`. `tests/conftest.py` now prints a session-end WARNING that names
-# every file fully deselected by the default filter (see TASK-780). If you touch
-# inter-bot / dispatcher / delivery / capability code, run the relevant guarded
-# tests and `make test-pg-acceptance`; `make test-all` remains blocked by CLI
-# tests until an independently verified isolated service target exists.
+# `pytest`. `tests/conftest.py` prints files fully deselected by the default
+# filter (TASK-780). The canonical `make test-all` verifies coverage of every
+# offline node once; external CLI and paid tests remain explicitly disabled
+# until isolated targets exist.
 #
 # Intentional live smoke tools live OUTSIDE tests/ (e.g. scripts/smoke/) so they
 # are never auto-collected — run them by explicit path only.
@@ -173,5 +172,8 @@ addopts = "-m 'not service and not llm_call and not integration'"
 markers = [
     "service: requires the llm-bawt service running at :8642",
     "llm_call: makes real LLM API calls (slow, uses API credits)",
-    "integration: opt-in PostgreSQL or CLI tests; only private or explicitly verified test targets",
+    "integration: opt-in PostgreSQL, offline HTTP, or CLI tests; only private or explicitly verified targets",
+    "offline_integration: real local socket/thread integration requiring no external services",
+    "sdk_probe: opt-in subprocess SDK proof against a fake localhost provider",
+    "external: needs independently provisioned test service or PostgreSQL target; never operational infrastructure",
 ]

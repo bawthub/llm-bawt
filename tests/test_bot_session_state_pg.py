@@ -14,8 +14,8 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def conn(private_pg):
-    engine = create_engine(private_url(private_pg, "postgres"))
+def conn(private_pg, private_module_db):
+    engine = create_engine(private_url(private_pg, private_module_db))
     with engine.connect() as connection:
         transaction = connection.begin()
         schema = "pointer_" + uuid.uuid4().hex

@@ -18,9 +18,9 @@ from fastapi import FastAPI
 
 from claude_code_bridge.proxy import claude_oauth as gateway
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.integration, pytest.mark.sdk_probe, pytest.mark.skipif(
     os.environ.get("RUN_CLAUDE_OAUTH_SDK_PROBE") != "1", reason="opt-in installed CLI probe",
-)
+)]
 
 
 def wire(block, *, tool=False):

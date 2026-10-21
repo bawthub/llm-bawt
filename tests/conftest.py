@@ -25,6 +25,9 @@ import pytest
 
 from collections import defaultdict
 from tests import pg_connection_guard
+from tests.suite_manifest import PG_ACCEPTANCE_SUITES
+
+_DURATIONS = defaultdict(float)
 
 # Root conftest is imported before nested conftests and test modules; a
 # pytest_configure hook would be too late for their import-time side effects.
@@ -34,50 +37,13 @@ pg_connection_guard.install()
 pytest_plugins = ("tests.private_postgres", "tests.session_lifecycle_pg_fixtures")
 
 
-_PG_ACCEPTANCE_SUITES = (
-    "test_session_search_pg.py::",
-    "test_session_continuity_pg.py::",
-    "test_agent_bridge.py::TestEventStore::",
-    "test_agent_context.py::",
-    "test_idle_context_reset_pg.py::",
-    "test_turn_context_snapshot_pg.py::",
-    "test_bot_session_state_pg.py::",
-    "test_runtime_switch_pointer_pg.py::",
-    "test_new_session_receipt_pg.py::",
-    "test_new_session_receipt_review_pg.py::",
-    "test_new_session_typed_pg.py::",
-    "test_new_session_typed_review_pg.py::",
-    "test_new_session_typed_follow_up_pg.py::",
-    "test_new_session_chat_pg.py::",
-    "test_new_session_chat_review_pg.py::",
-    "test_new_session_history_review_pg.py::",
-    "test_new_session_transport_review.py::test_text_part_follow_up_receipt_uses_same_command_as_admission",
-    "test_new_session_policy_review_pg.py::",
-    "test_new_session_policy_recovery_pg.py::",
-    "test_new_session_api_review_pg.py::",
-    "test_codex_reset_evidence.py::test_native_codex_ack_requires_exact_persisted_policy_binding",
-    "test_codex_reset_evidence.py::test_standalone_codex_receipt_requires_empty_successor_binding",
-    "test_session_rotation_review_pg.py::",
-    "test_session_overflow_lock_review_pg.py::",
-    "test_inter_bot_delivery.py::",
-    "test_inter_bot_delivery_retry.py::",
-    "test_turn_admission_pg.py::",
-    "test_session_reset_lineage_pg.py::",
-    "test_session_summaries.py::TestSummarizeThreadLive::",
-    "test_session_summaries.py::TestResummarizeHeuristicSummaries::",
-    "test_session_scoping.py::TestScopedPersistenceProofs::",
-    "test_session_scoping.py::TestScopedContextProofs::",
-    "test_session_threads.py::TestRegistryInvariantsLiveDB::",
-    "test_session_unique_index_pg.py::",
-    "test_orphan_partitions_pg.py::",
-    "test_schema_convergence_pg.py::",
-    "test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB::",
-)
-
-
 def pytest_addoption(parser):
     parser.addoption("--require-pg-acceptance", action="store_true", default=False,
                      help="fail if any private-cluster acceptance suite is absent or skipped")
+    parser.addoption("--unit-time-budget", type=float, default=None,
+                     help="fail when setup + call + teardown for any selected unit exceeds this many seconds")
+    parser.addoption("--require-no-skips", action="store_true", default=False,
+                     help="fail when any selected test skips or xfails")
 
 
 def _require_pg_acceptance(config):
@@ -85,11 +51,15 @@ def _require_pg_acceptance(config):
 
 
 def pytest_configure(config):
+    if config.getoption("--require-pg-acceptance"):
+        pg_connection_guard.require_private_only()
     # Per-file counters of deselected vs surviving items. Populated across the
     # collection lifecycle (pytest_deselected + pytest_collection_finish) and
     # read in pytest_terminal_summary.
     config._task780_deselected_by_file = defaultdict(int)
     config._task780_surviving_by_file = defaultdict(int)
+    _DURATIONS.clear()
+    config._task1189_durations = _DURATIONS
 
 
 def pytest_deselected(items):
@@ -114,23 +84,48 @@ def pytest_collection_finish(session):
         session.config._task780_surviving_by_file[str(item.path)] += 1
     if _require_pg_acceptance(session.config):
         selected = [item.nodeid for item in session.items]
-        missing = [suite for suite in _PG_ACCEPTANCE_SUITES
+        missing = [suite for suite in PG_ACCEPTANCE_SUITES
                    if not any(suite in nodeid for nodeid in selected)]
         if missing:
             pytest.exit(f"PostgreSQL acceptance gate missing selected suites: {missing}", returncode=1)
 
 
+def pytest_runtest_logreport(report):
+    if report.when in {"setup", "call", "teardown"}:
+        _DURATIONS[report.nodeid] += report.duration
+
+
 def pytest_sessionfinish(session, exitstatus):
-    if _require_pg_acceptance(session.config) and exitstatus == 0:
-        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-        stats = reporter.stats if reporter is not None else {}
-        if not stats.get("passed") or stats.get("skipped") or stats.get("xfailed"):
+    config = session.config
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    stats = reporter.stats if reporter is not None else {}
+    if exitstatus == 0:
+        if _require_pg_acceptance(config) and not stats.get("passed"):
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
-            print("PostgreSQL acceptance gate requires executed passes and zero skips/xfails")
+            print("PostgreSQL acceptance gate requires executed passes")
+        if (_require_pg_acceptance(config) or config.getoption("--require-no-skips")) and (
+            stats.get("skipped") or stats.get("xfailed")
+        ):
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+            print("Test gate requires zero skips/xfails")
+        budget = config.getoption("--unit-time-budget")
+        if type(budget) in (int, float):
+            slow = {nodeid: duration for nodeid, duration in config._task1189_durations.items()
+                    if duration >= budget}
+            if slow:
+                session.exitstatus = pytest.ExitCode.TESTS_FAILED
+                print(f"Unit time budget exceeded ({budget}s including fixture setup/teardown):")
+                for nodeid, duration in sorted(slow.items(), key=lambda pair: -pair[1]):
+                    print(f"  {duration:.3f}s {nodeid}")
     pg_connection_guard.uninstall()
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    # The detailed missing-file warning describes the *default* filter only.
+    # Explicit suite selections print their own counts; listing thousands of
+    # intentionally deselected tests there obscures failures.
+    if config.getoption("markexpr") != "not service and not llm_call and not integration":
+        return
     deselected = getattr(config, "_task780_deselected_by_file", {}) or {}
     surviving = getattr(config, "_task780_surviving_by_file", {}) or {}
     fully_dropped = sorted(

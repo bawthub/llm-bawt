@@ -8,18 +8,12 @@ import pytest
 from sqlalchemy import text
 
 from llm_bawt.service.talk_reply_outbox import TalkReplyOutbox, TalkReplySubscription
-from llm_bawt.utils.config import Config
 from llm_bawt.utils.db import get_shared_engine
 
 
 @pytest.mark.integration
-def test_subscription_survives_reopen_and_only_one_worker_claims_send():
-    config = Config()
-    if not config.POSTGRES_DATABASE.endswith("_test") or config.POSTGRES_HOST != "127.0.0.1":
-        pytest.skip("requires localhost private *_test PostgreSQL")
-    engine = get_shared_engine(config)
-    if engine is None:
-        pytest.skip("private PostgreSQL unavailable")
+def test_subscription_survives_reopen_and_only_one_worker_claims_send(private_app_pg):
+    engine = get_shared_engine(private_app_pg)
     outbox = TalkReplyOutbox(engine)
     message_id = str(uuid.uuid4())
     subscription = TalkReplySubscription(
@@ -52,13 +46,8 @@ def test_subscription_survives_reopen_and_only_one_worker_claims_send():
 
 
 @pytest.mark.integration
-def test_pending_subscription_checks_cannot_starve_newer_replies():
-    config = Config()
-    if not config.POSTGRES_DATABASE.endswith("_test") or config.POSTGRES_HOST != "127.0.0.1":
-        pytest.skip("requires localhost private *_test PostgreSQL")
-    engine = get_shared_engine(config)
-    if engine is None:
-        pytest.skip("private PostgreSQL unavailable")
+def test_pending_subscription_checks_cannot_starve_newer_replies(private_app_pg):
+    engine = get_shared_engine(private_app_pg)
     outbox = TalkReplyOutbox(engine)
     ids = [str(uuid.uuid4()) for _ in range(21)]
     try:
@@ -82,16 +71,11 @@ def test_pending_subscription_checks_cannot_starve_newer_replies():
 
 
 @pytest.mark.integration
-def test_finished_turn_late_reply_uses_real_turn_log_once(monkeypatch):
+def test_finished_turn_late_reply_uses_real_turn_log_once(private_app_pg, monkeypatch):
     from llm_bawt.integrations.nextcloud import manager, webhook
     from llm_bawt.service.turn_logs import TurnLogStore
 
-    config = Config()
-    if not config.POSTGRES_DATABASE.endswith("_test") or config.POSTGRES_HOST != "127.0.0.1":
-        pytest.skip("requires localhost private *_test PostgreSQL")
-    turns = TurnLogStore(config)
-    if turns.engine is None:
-        pytest.skip("private PostgreSQL unavailable")
+    turns = TurnLogStore(private_app_pg)
     outbox = TalkReplyOutbox(turns.engine)
     message_id = str(uuid.uuid4())
     turn_id = f"turn-{uuid.UUID(message_id).hex}"

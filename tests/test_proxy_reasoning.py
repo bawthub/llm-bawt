@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapter
 from claude_code_bridge.proxy.chatgpt_transport import lite_request, _event_object
@@ -211,9 +212,9 @@ def test_adapter_final_payload_replays_native_state_and_stable_prefix(monkeypatc
     asyncio.run(run())
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 def test_real_openai_sdk_serializes_replayed_item_on_standard_http(monkeypatch):
-    from openai import AsyncOpenAI
-
     monkeypatch.setattr("claude_code_bridge.proxy.usage_capture.schedule_capture", lambda _: None)
     async def run():
         captured = []

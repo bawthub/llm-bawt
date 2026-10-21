@@ -196,6 +196,14 @@ def test_delivery_in_flight_is_observed_until_terminal(monkeypatch):
                              author_entity_id="nick", user_message_id=RECEIPT["user_message_id"],
                              turn_id="turn-1", metadata={"ordinary_chat": {"digest": "test"}})
     delivery = SimpleNamespace(get=lambda _id: record)
+    polled = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def wait_for_next_poll(_delay):
+        polled.set()
+        await resume.wait()
+
+    monkeypatch.setattr("llm_bawt.service.delivery_reply.asyncio.sleep", wait_for_next_poll)
     turn = SimpleNamespace(ended_at=1, status="ok", error_text=None,
                            bot_id="test-bot", user_id="nick",
                            trigger_message_id=RECEIPT["user_message_id"], response_text="done")
@@ -206,9 +214,10 @@ def test_delivery_in_flight_is_observed_until_terminal(monkeypatch):
             delivery, turns, "delivery-1", bot_id="test-bot", user_id="nick",
             user_message_id=RECEIPT["user_message_id"], timeout_seconds=2,
         ))
-        await asyncio.sleep(0.03)
+        await asyncio.wait_for(polled.wait(), timeout=1)
         assert not task.done()
         record.status = "DELIVERED"
+        resume.set()
         return await task
 
     assert asyncio.run(wait())["response_text"] == "done"

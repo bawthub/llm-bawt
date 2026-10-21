@@ -135,8 +135,12 @@ Useful commands:
 ```bash
 make dev
 make test
+make test-all  # complete offline suite (requires Docker)
 make typecheck
 make lint
+
+See [test-suite commands and safety rules](docs/TESTING.md) for private
+PostgreSQL, profiling, targeted cases, and external/paid gates.
 ```
 
 ## Required Configuration

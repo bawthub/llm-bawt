@@ -240,6 +240,8 @@ def test_gets_are_cache_only_and_no_generic_proxy_is_exposed(collector):
     assert not server.thread.is_alive()
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded():
     clock = Clock()
     state = clock.state()
@@ -390,6 +392,8 @@ def test_maximum_inventory_fits_consumers_body_limit(collector):
     assert len(json.dumps(body).encode()) < 512 * 1024
 
 
+@pytest.mark.integration
+@pytest.mark.offline_integration
 def test_http_shutdown_is_bounded_even_if_request_handler_stalls():
     server = OpsHealthServer(Clock().state(), ("127.0.0.1", 0))
     entered, release = Event(), Event()

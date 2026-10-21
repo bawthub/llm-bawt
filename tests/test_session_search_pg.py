@@ -15,9 +15,9 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")
-def repository(private_pg):
-    """Own schema in a test-owned, networkless PostgreSQL container."""
-    engine = create_engine(private_url(private_pg, "postgres"))
+def repository(private_pg, private_module_db):
+    """Own schema in a module-owned database on the private cluster."""
+    engine = create_engine(private_url(private_pg, private_module_db))
     try:
         with engine.connect() as conn:
             assert conn.exec_driver_sql("SHOW unix_socket_directories").scalar_one() == "/var/run/postgresql"

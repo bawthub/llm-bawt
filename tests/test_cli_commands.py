@@ -25,7 +25,7 @@ import pytest
 # module is marked `integration` and excluded from the default `pytest` run.
 # Run it explicitly with `uv run pytest -m integration`. Per-test `service` /
 # `llm_call` marks still apply for finer slicing.
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.service]
 
 
 def assert_private_cli_target():

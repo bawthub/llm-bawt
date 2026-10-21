@@ -330,6 +330,7 @@ def _et_epoch(*parts, fold=0):
 
 
 @pytest.mark.integration
+@pytest.mark.external
 class TestLivePostgres:
     @pytest.fixture(scope="class")
     def engine(self):

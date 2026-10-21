@@ -24,6 +24,29 @@ def test_acceptance_exit_status_requires_passes_without_skips(monkeypatch, passe
     assert session.exitstatus == expected
 
 
+def test_unit_budget_includes_setup_call_and_teardown(monkeypatch):
+    monkeypatch.setattr(conftest.pg_connection_guard, "uninstall", Mock())
+    config = Mock()
+    config.getoption.side_effect = lambda key: {
+        "--require-pg-acceptance": False,
+        "--require-no-skips": False,
+        "--unit-time-budget": 1.0,
+    }[key]
+    config.pluginmanager.get_plugin.return_value.stats = {"passed": [object()]}
+    config._task1189_durations = conftest._DURATIONS
+    nodeid = "tests/virtual.py::test_summed"
+    try:
+        for when, duration in (("setup", 0.4), ("call", 0.35), ("teardown", 0.26)):
+            conftest.pytest_runtest_logreport(
+                SimpleNamespace(nodeid=nodeid, when=when, duration=duration)
+            )
+        session = SimpleNamespace(config=config, exitstatus=None)
+        conftest.pytest_sessionfinish(session, 0)
+        assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    finally:
+        conftest._DURATIONS.pop(nodeid, None)
+
+
 def test_acceptance_gate_rejects_deselected_private_suite():
     config = Mock()
     config.getoption.return_value = True

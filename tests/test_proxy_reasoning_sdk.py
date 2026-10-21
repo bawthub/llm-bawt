@@ -14,9 +14,9 @@ from claude_code_bridge.proxy.reasoning import ReasoningCodec
 from claude_code_bridge.proxy.stream import responses_to_anthropic_sse
 from claude_code_bridge.proxy.chatgpt_transport import _event_object
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.integration, pytest.mark.sdk_probe, pytest.mark.skipif(
     os.environ.get("RUN_PROXY_SDK_PROBE") != "1", reason="opt-in installed CLI probe",
-)
+)]
 
 
 @pytest.mark.parametrize("continuation", [False, True])

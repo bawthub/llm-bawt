@@ -66,6 +66,17 @@ def test_private_socket_allowed_only_when_registered_and_identity_matches(monkey
     conn.rollback.assert_called_once()
 
 
+def test_pg_acceptance_rejects_explicit_test_database_on_unowned_socket(monkeypatch):
+    original = Mock(side_effect=AssertionError("network connect was attempted"))
+    monkeypatch.setattr(guard, "_original_connect", original)
+    monkeypatch.setattr(guard, "_private_only", True)
+    monkeypatch.setenv("LLM_BAWT_POSTGRES_DATABASE", "fake_test")
+    with pytest.raises(RuntimeError, match="refuses PostgreSQL target"):
+        guard.checked_connect(dbname="fake_test", user="test_user",
+                              host="/tmp/unowned-postgres", port="55439")
+    original.assert_not_called()
+
+
 def test_cli_session_probe_is_blocked_before_http(monkeypatch):
     probe = Mock(side_effect=AssertionError("live service probed"))
     monkeypatch.setattr(cli.urllib.request, "urlopen", probe)

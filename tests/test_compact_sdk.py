@@ -28,9 +28,9 @@ from claude_code_bridge.compact_prompt_lookup import COMPACT_PROMPT_KEY, fetch_c
 from claude_code_bridge.send_stream import ClaudeStreamMixin
 from llm_bawt.chat_prompt_defaults import COMPACT_SUMMARY_DEFAULT
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.integration, pytest.mark.sdk_probe, pytest.mark.skipif(
     os.environ.get("RUN_COMPACT_SDK_PROBE") != "1", reason="opt-in isolated CLI probe",
-)
+)]
 
 FACTS = (
     "Active goal: fix TASK-4242 Unicode export without deleting history. "
@@ -319,6 +319,8 @@ def test_installed_cli_auto_compaction_receives_hook_default(tmp_path):
     asyncio.run(asyncio.wait_for(run(), timeout=90))
 
 
+@pytest.mark.external
+@pytest.mark.llm_call
 @pytest.mark.skipif(
     not (os.environ.get("COMPACT_PROBE_MODEL") and os.environ.get("LLM_BAWT_API_URL")),
     reason="explicit live probe model and app prompt URL required",
