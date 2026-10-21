@@ -54,7 +54,8 @@ def test_listing_effective_defaults_and_unmigrated_compatibility(api):
     rows = {row["id"]: row for row in result["jobs"]}
     assert "prompt" not in rows
     reset = rows["reset"]
-    assert reset["parameters"] == {"resident_tokens_gt": 100000, "idle_minutes_gt": 15, "protected_bot_ids": []}
+    assert reset["parameters"] == {"resident_tokens_gt": 100000, "idle_minutes_gt": 15, "protected_bot_ids": [],
+                                   "continuity": "configured"}
     assert reset["parameter_schema"]["properties"]["idle_minutes_gt"]["minimum"] == 1
     assert rows["legacy"]["parameter_schema"] is None
     assert rows["legacy"]["parameters"] is None
@@ -156,7 +157,7 @@ def test_pause_and_cadence_do_not_repair_or_replace_invalid_parameters(api, stor
         assert client.patch("/v1/jobs/reset", json={"parameters": {"idle_minutes_gt": 15}}).status_code == 200
         with Session(engine) as session:
             row = session.get(ScheduledJob, "reset")
-            assert json.loads(row.config_json) == {**stored, "idle_minutes_gt": 15}
+            assert json.loads(row.config_json) == {**stored, "idle_minutes_gt": 15, "continuity": "configured"}
 
 
 def candidate():
@@ -304,6 +305,7 @@ def test_failed_sweep_keeps_snapshot_visible_during_and_after_execution(api, mon
     _, engine = api
     saved = {"resident_tokens_gt": 350000, "idle_minutes_gt": 20,
              "protected_bot_ids": ["fixture-protected"]}
+    effective = {**saved, "continuity": "configured"}
     with Session(engine) as session:
         job = session.get(ScheduledJob, "reset")
         job.enabled, job.config_json = True, json.dumps(saved)
@@ -316,7 +318,7 @@ def test_failed_sweep_keeps_snapshot_visible_during_and_after_execution(api, mon
         with Session(engine) as session:
             running = session.exec(select(JobRun)).one()
             assert running.status.value == "running"
-            assert json.loads(running.result_json) == {"parameters": saved, "interval_minutes": 5}
+            assert json.loads(running.result_json) == {"parameters": effective, "interval_minutes": 5}
             # A concurrent settings edit must not rewrite the running policy receipt.
             current = session.get(ScheduledJob, "reset")
             current.config_json = '{"resident_tokens_gt":999999}'
@@ -333,7 +335,7 @@ def test_failed_sweep_keeps_snapshot_visible_during_and_after_execution(api, mon
         failed = session.exec(select(JobRun)).one()
         assert failed.status.value == "failed"
         assert failed.error_message == "synthetic candidate-read failure"
-        assert json.loads(failed.result_json) == {"parameters": saved, "interval_minutes": 5}
+        assert json.loads(failed.result_json) == {"parameters": effective, "interval_minutes": 5}
 
 
 def test_invalid_claimed_configuration_is_recorded_without_executing(api, monkeypatch):

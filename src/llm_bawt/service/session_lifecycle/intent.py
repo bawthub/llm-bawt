@@ -73,6 +73,9 @@ class NewSessionIntent:
     job_id: str | None = None
     run_id: str | None = None
     reason: str | None = None
+    # Scheduled resets stay ``Continuity.CONFIGURED`` (a literal /new). Their
+    # optional per-job scope override is ``scheduler_parameters.continuity``,
+    # read back from this persisted snapshot at execution time.
     scheduler_parameters: IdleContextResetParameters | None = None
 
     def __post_init__(self) -> None:

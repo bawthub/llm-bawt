@@ -57,6 +57,35 @@ Run history requests `include_result=true` and can display the policy snapshot.
 | `resident_tokens_gt` | 100000 | integer 1–2000000 | Resident context must be strictly greater |
 | `idle_minutes_gt` | 15 | integer 1–10080 | Completion must be strictly more than this many minutes ago |
 | `protected_bot_ids` | [] | array of nonempty bot IDs | Additional exclusions; built-in protected bots cannot be removed |
+| `continuity` | `configured` | `configured`, `inline+summaries`, `inline`, `summaries`, `none` | What the new session carries (TASK-1203) |
+
+### Continuity (TASK-1203)
+
+`configured` ("Use bot setting") keeps the established behavior: each reset
+follows the bot's own `history_scope`. Any other value is one of the canonical
+`history_scope` values (`setting_definitions.HISTORY_SCOPES`) and replaces the
+bot's scope for this job's resets only; it never writes the bot's setting.
+
+| Value | UI label | Seed | Pre-seed summary of outgoing thread |
+|---|---|---|---|
+| `inline+summaries` | Messages + summaries | recent messages + summaries | yes |
+| `inline` | Messages only | recent messages | no (would starve the raw seed) |
+| `summaries` | Summaries only | summaries | yes |
+| `none` | Nothing (clean start) | empty | no; the background summarization job still archives it later |
+
+The scope rides only the persisted `new_session_intent.scheduler_parameters`
+snapshot. At `/new` preparation `NewSessionExecution.scheduled_history_scope`
+reads it from the delivery's own durable metadata, never from request fields.
+`prepare_agent` resolves one concrete scope per configured `/new` (the override,
+else the bot setting, read once via `utils.history.effective_history_scope`) and
+hands that same value to `_maybe_summarize_on_new`, `maybe_build_session_seed`,
+`build_context_seed` and the session continuity receipt, so a concurrent
+bot-setting edit cannot split them. Only `NewSessionLifecycle` stamps
+`new_session_intent`: public `POST /v1/inter-bot-deliveries` rejects caller
+metadata carrying that key (422). Ordinary chat `/new`, bot-delivery and API
+resets never carry an override. Scheduled
+resets already admit only `claude-code` bots, so Codex needs no separate rule.
+Older persisted intents without `continuity` decode as `configured`.
 
 The scheduler snapshots saved configuration while claiming the occurrence. The
 same validated, immutable policy is used by candidate filtering, submission,

@@ -138,5 +138,7 @@ def test_synthetic_protected_bot_never_reaches_lifecycle():
 def test_empty_sweep_never_constructs_lifecycle():
     job = IdleContextResetJob(None, object())
     job.candidates.read = Mock(return_value=[])
-    assert run(job) == {"scanned": 0, "reset": 0, "skipped": 0, "failed": 0, "ambiguous": 0, "bots": {}}
+    assert run(job) == {"scanned": 0, "reset": 0, "skipped": 0, "failed": 0, "ambiguous": 0, "bots": {},
+                        "parameters": {"resident_tokens_gt": 100000, "idle_minutes_gt": 15,
+                                       "protected_bot_ids": [], "continuity": "configured"}}
     assert job._lifecycle is None

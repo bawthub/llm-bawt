@@ -12,7 +12,7 @@ from typing import Any
 
 from agent_bridge.maintenance import is_new_command
 
-from .intent import Continuity
+from .intent import Continuity, Origin
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,9 @@ class PreparedNewSession:
     rotated_id: str | None
     bridge_reset_action: str | None = None
     bridge_prompt: str | None = None
+    # The one scope this configured /new summarized and seeded with; None when
+    # no configured /new ran or the bot setting could not be resolved.
+    history_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,33 @@ class NewSessionExecution:
         )
 
     @staticmethod
+    def scheduled_history_scope(service: Any, delivery_id: str | None) -> str | None:
+        """A scheduled /new's continuity override, from its own durable intent.
+
+        The scope comes only from the server-stamped ``new_session_intent``
+        policy snapshot persisted at admission, never from request fields, so
+        a later parameter edit or a public caller cannot change what an
+        admitted reset carries. Every non-scheduler /new returns ``None``.
+        """
+        if not delivery_id:
+            return None
+        dispatcher = getattr(service, "_inter_bot_dispatcher", None)
+        if dispatcher is None:
+            # Bare harness clients have no durable store; deployed /new
+            # deliveries are always dispatched through one.
+            return None
+        record = dispatcher.store.get(delivery_id)
+        if record is None:
+            raise ValueError("durable /new delivery is missing")
+        raw = record.metadata.get("new_session_intent")
+        if not isinstance(raw, dict) or raw.get("origin") != Origin.SCHEDULER:
+            return None
+        from .lifecycle import NewSessionLifecycle
+
+        parameters = NewSessionLifecycle._decode(raw).scheduler_parameters
+        return parameters.history_scope_override if parameters else None
+
+    @staticmethod
     def typed_follow_up(user_prompt: str) -> str | None:
         """Parse an actual /new command, never a /newspaper-style task."""
         stripped = (user_prompt or "").lstrip()
@@ -152,6 +182,23 @@ class NewSessionExecution:
             raise ValueError("typed reset follow-up needs a supported agent bridge")
         if plan and backend_name == "codex" and plan.continuity is Continuity.RETAIN:
             raise ValueError("native Codex cannot retain reset history")
+        # Resolve one concrete scope per configured /new and hand the same value
+        # to the summarize gate, the seed and the continuity receipt, so a
+        # concurrent bot-setting edit cannot split them. Only a scheduled reset
+        # can override the bot's scope. If the bot setting cannot be resolved to
+        # a canonical scope, None keeps each consumer's established fallback.
+        reset_scope = None
+        if plan and plan.continuity is Continuity.CONFIGURED and not prompt_record:
+            from ...setting_definitions import HISTORY_SCOPES
+            from ...utils.history import effective_history_scope
+
+            reset_scope = NewSessionExecution.scheduled_history_scope(service, delivery_id)
+            try:
+                resolved = effective_history_scope(llm_bawt.config_resolver, reset_scope)
+            except Exception:
+                resolved = None
+            if resolved in HISTORY_SCOPES:
+                reset_scope = resolved
         # Both configured /new and retained bot resets summarize the outgoing
         # thread before building a seed. The latter was already rotated at claim,
         # so point the summarizer at the fenced predecessor rather than the new
@@ -164,6 +211,7 @@ class NewSessionExecution:
             )
             service._maybe_summarize_on_new(
                 llm_bawt, bot_id, "/new", thread_binding=predecessor,
+                history_scope=reset_scope,
             )
         from ..routes.history import build_context_seed, maybe_build_session_seed
 
@@ -185,6 +233,7 @@ class NewSessionExecution:
             seed = maybe_build_session_seed(
                 llm_bawt, bot_id, model_alias, user_prompt, service,
                 thread_binding=thread_binding,
+                history_scope=reset_scope,
             )
         if (is_agent and plan and backend_name == "codex"
                 and plan.rotate_here and (user_prompt.strip() == "/new" or typed_task)
@@ -225,4 +274,5 @@ class NewSessionExecution:
                     seed = []
             elif (typed_task is not None or not plan.rotate_here) and backend_name in {"claude-code", "codex"}:
                 bridge_action = "reset_follow_up"
-        return PreparedNewSession(seed, thread_binding, rotated, bridge_action, typed_task)
+        return PreparedNewSession(seed, thread_binding, rotated, bridge_action, typed_task,
+                                  reset_scope)

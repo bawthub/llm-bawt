@@ -294,6 +294,7 @@ class BridgeSessionResetMixin:
     def _maybe_summarize_on_new(
         self, llm_bawt, bot_id: str, user_prompt: str,
         thread_binding: dict | None = None, timeout_s: float = 8.0,
+        *, history_scope: str | None = None,
     ) -> bool:
         """TASK-641: summarize the OUTGOING thread before the /new seed builds.
 
@@ -307,6 +308,8 @@ class BridgeSessionResetMixin:
         Gated on the bot's ``history_scope`` including summaries: with
         summaries off, summarizing would only STARVE the seed (flagged rows
         leave the raw pool and no summary bucket exists to carry the result).
+        ``history_scope`` is the same per-reset override the seed builder
+        receives, so the gate and the seed can never disagree.
 
         Bounded: the summarize (LLM attempt with short timeout -> heuristic
         fallback -> DB write) runs in a worker thread joined for at most
@@ -323,11 +326,9 @@ class BridgeSessionResetMixin:
             if thread_binding and thread_binding.get("explicit_thread"):
                 log.info("/new summarize skipped: explicit-thread turn (bot=%s)", bot_id)
                 return False
-            from ...utils.history import scope_flags
+            from ...utils.history import effective_history_scope, scope_flags
             try:
-                scope = llm_bawt.config_resolver.resolve_config_setting(
-                    "history_scope"
-                ).value
+                scope = effective_history_scope(llm_bawt.config_resolver, history_scope)
             except Exception:
                 scope = None
             include_history, include_summaries = scope_flags(scope)

@@ -6,6 +6,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
+from ..setting_definitions import HISTORY_SCOPES
+
+# Scheduled-reset continuity: the bot's own ``history_scope`` or one explicit
+# canonical scope for this job's resets only. Titles ride the JSON schema
+# (``x-enum-titles``, parallel to ``enum``) so the generic editor can label them.
+_SCOPE_TITLES = {
+    "inline+summaries": "Messages + summaries",
+    "inline": "Messages only",
+    "summaries": "Summaries only",
+    "none": "Nothing (clean start)",
+}
+if tuple(_SCOPE_TITLES) != HISTORY_SCOPES:
+    raise RuntimeError("continuity titles must cover every history scope, in order")
+RESET_CONTINUITY_TITLES = {"configured": "Use bot setting", **_SCOPE_TITLES}
+ResetContinuity = Literal[tuple(RESET_CONTINUITY_TITLES)]  # type: ignore[valid-type]
+
+
 class JobParameters(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -23,6 +40,19 @@ class IdleContextResetParameters(JobParameters):
         default=(), title="Additional protected bots",
         description="Additional bot IDs to exclude. Built-in protected bots are always excluded.",
     )
+    continuity: ResetContinuity = Field(
+        default="configured", title="Continuity",
+        description=("What the new session carries over. 'Use bot setting' follows each bot's "
+                     "history scope; the other choices apply to this job's resets only and never "
+                     "change the bot's setting."),
+        json_schema_extra={"x-enum-titles": list(RESET_CONTINUITY_TITLES.values())},
+    )
+
+    @property
+    def history_scope_override(self) -> str | None:
+        """The scope a scheduled reset must use instead of the bot's, if any."""
+        return None if self.continuity == "configured" else self.continuity
+
     @field_validator("protected_bot_ids", mode="before")
     @classmethod
     def validate_protected(cls, value):

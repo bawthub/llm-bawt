@@ -36,7 +36,7 @@ def cap_seed_contents(
 
 def build_context_seed(
     bot_id: str, model: str | None, service, session_id: str | None = None,
-    *, llm_bawt=None,
+    *, llm_bawt=None, history_scope: str | None = None,
 ) -> dict:
     """Build the context-seed payload for a fresh Claude Code SDK session.
 
@@ -53,6 +53,10 @@ def build_context_seed(
 
     Returns ``{bot_id, model, budget_tokens, messages:[{role,content,timestamp}],
     stats:{...}}``. Raises on failure (callers decide whether to swallow).
+
+    ``history_scope`` is the scope a /new already resolved for this one seed
+    (the bot setting, or a scheduled reset's continuity parameter); ``None``
+    reads the bot setting here.
     """
     effective_bot_id = bot_id or service._default_bot
     # Pass the caller's model through AS-IS (usually None for a preview). Do NOT
@@ -93,15 +97,16 @@ def build_context_seed(
     # != "none"); history_scope decodes into two INDEPENDENT flags so the seed
     # can be recent-only, summary-only (dense), or both. delivery="seed" ->
     # system rows dropped (the SDK injects its own system prompt every turn).
-    from ...utils.history import scope_flags
+    from ...utils.history import effective_history_scope, scope_flags
 
-    try:
-        scope = str(
-            llm_bawt.config_resolver.resolve_config_setting("history_scope").value
-            or "inline+summaries"
-        )
-    except Exception:
-        scope = "inline+summaries"
+    if history_scope is not None:
+        # An invalid resolved scope is a caller bug; never degrade it to "both on".
+        scope = effective_history_scope(None, history_scope)
+    else:
+        try:
+            scope = effective_history_scope(llm_bawt.config_resolver)
+        except Exception:
+            scope = "inline+summaries"
     include_history, include_summaries = scope_flags(scope)
     payload = llm_bawt.history_manager.build_context_payload(
         include_history=include_history,
@@ -169,7 +174,10 @@ def build_context_seed(
         },
         # The sizing knobs that bound each ladder bucket, with provenance.
         "sizing": {
-            "history_scope": _eff("history_scope", "inline+summaries"),
+            "history_scope": (
+                {"value": scope, "source": "reset"} if history_scope is not None
+                else _eff("history_scope", "inline+summaries")
+            ),
             "history_tokens": _eff("history_tokens", 12000),
             "history_max_age_hours": _eff("history_max_age_hours", 0),
             "summary_count": _eff("summary_count", 5),
@@ -199,6 +207,7 @@ def build_context_seed(
 
 def maybe_build_session_seed(
     llm_bawt, bot_id, model, user_prompt, service, thread_binding: dict | None = None,
+    *, history_scope: str | None = None,
 ) -> list | None:
     """Decide whether to seed a fresh SDK session and, if so, build it (TASK-501).
 
@@ -213,6 +222,11 @@ def maybe_build_session_seed(
     ``/new``. Never raises — any failure yields None. This is the SOLE seed
     payload authority (TASK-615/501 Phase 2): the app decides what continuity
     context is injected; the bridge only hydrates the fresh SDK transcript.
+
+    ``history_scope`` is the scope this ``/new`` resolved once (the bot
+    setting, or a scheduled reset's continuity parameter), shared with the
+    summarize gate. It applies to the active-thread carry below, never to
+    explicit-thread hydration or policy resets.
     """
     try:
         if (getattr(llm_bawt.bot, "agent_backend", "") or "") != "claude-code":
@@ -257,11 +271,8 @@ def maybe_build_session_seed(
         # "false" value. scope != "none" is the canonical truth; the mirror
         # is kept for legacy readers but no longer gates the seed.
         try:
-            from ...utils.history import scope_flags
-            _scope_rv = llm_bawt.config_resolver.resolve_config_setting(
-                "history_scope"
-            )
-            _scope = str(_scope_rv.value or "inline+summaries")
+            from ...utils.history import effective_history_scope, scope_flags
+            _scope = effective_history_scope(llm_bawt.config_resolver, history_scope)
             _inc_hist, _inc_summ = scope_flags(_scope)
             continuity_on = _inc_hist or _inc_summ
         except Exception:
@@ -281,7 +292,9 @@ def maybe_build_session_seed(
         # exchange and makes live delivery disagree with the preview. Explicit
         # historical-thread hydration and reset_retain_history remain scoped in
         # their dedicated branches above.
-        seed = build_context_seed(bot_id, model, service, llm_bawt=llm_bawt)
+        seed = build_context_seed(
+            bot_id, model, service, llm_bawt=llm_bawt, history_scope=history_scope,
+        )
         return seed.get("messages", [])
     except Exception:
         return None

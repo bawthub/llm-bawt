@@ -117,6 +117,10 @@ async def create_delivery(body: DeliveryCreate):
         raise HTTPException(status_code=422, detail="target_bot_id is required")
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="message is required")
+    # Only NewSessionLifecycle stamps this key. Receipts, recovery and scheduled
+    # reset continuity trust its origin, so a caller must never supply one.
+    if "new_session_intent" in body.metadata:
+        raise HTTPException(status_code=422, detail="new_session_intent is server-owned delivery metadata")
     target_bot = BotManager(get_service().config).get_bot(target)
     target_exists = target_bot is not None
     durable_capable = bool(target_bot and durable_agent_backend(target_bot))

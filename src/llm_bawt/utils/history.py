@@ -10,7 +10,7 @@ from ..clients.base import LLMClient
 from ..models.message import Message
 from rich.rule import Rule
 from .config import Config
-from ..setting_definitions import setting_default
+from ..setting_definitions import HISTORY_SCOPES, setting_default
 
 if TYPE_CHECKING:
     from ..memory.postgresql import PostgreSQLShortTermManager as ShortTermMemoryManager
@@ -91,6 +91,20 @@ def scope_flags(scope: str | None) -> tuple[bool, bool]:
     """
     s = scope or "inline+summaries"
     return ("inline" in s, "summaries" in s)
+
+
+def effective_history_scope(config_resolver, override: str | None = None) -> str:
+    """The scope a /new summary and seed use: an explicit override, else the bot's.
+
+    ``override`` is a server-owned per-operation choice (a scheduled reset's
+    continuity parameter); it never writes the bot's setting. Resolver errors
+    propagate so each caller keeps its established fail-closed behavior.
+    """
+    if override is not None:
+        if override not in HISTORY_SCOPES:
+            raise ValueError(f"unsupported history scope override: {override!r}")
+        return override
+    return str(config_resolver.resolve_config_setting("history_scope").value or "inline+summaries")
 
 
 def estimate_tokens(text: str) -> int:

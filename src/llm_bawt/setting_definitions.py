@@ -23,6 +23,12 @@ STORAGE_REQUEST_FLAG = "request_flag"               # per-turn request-only flag
 
 BOT_TYPES_ALL = ("chat", "agent")
 
+# The four canonical ``history_scope`` values: the full cross-product of the two
+# independent carry-bits decoded by ``utils.history.scope_flags``. Anything that
+# accepts a scope (e.g. a scheduled reset's continuity override) validates
+# against this tuple rather than restating it.
+HISTORY_SCOPES: tuple[str, ...] = ("inline+summaries", "inline", "summaries", "none")
+
 # Tier-1 offline-summarization job parameters (TASK-602/610). ONE global-only
 # dict; never bot-aware, never model-catalog policy. These are the canonical
 # CODE defaults (fresh install / no DB row). TASK-614 later inserts the
