@@ -8,6 +8,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...message_authorship import AuthorReference
+
 from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ..dependencies import get_service
 from ..logging import get_service_logger
@@ -137,7 +139,7 @@ async def steer_active_turn(
     request: ChatSteerRequest,
     *,
     steer_request_id: str | None = None,
-    author=None,
+    author: AuthorReference | None = None,
 ) -> ChatSteerResponse:
     """Shared steer implementation for public chat and durable inter-bot work."""
     turn = service._turn_log_store.get_turn(request.turn_id)
@@ -147,6 +149,8 @@ async def steer_active_turn(
     user_id = request.user_id.strip().lower() or "nick"
     if turn.bot_id != bot_id or (turn.user_id or "").lower() != user_id:
         raise HTTPException(status_code=409, detail="Turn ownership mismatch")
+    # Inter-bot steers pass their sender; a composer steer is the turn owner's.
+    author = author or AuthorReference.user(user_id)
     from agent_bridge.maintenance import is_compact_command
     if not steer_request_id and (
         is_compact_command(getattr(turn, "user_prompt", None)) or is_compact_command(request.message)
@@ -242,8 +246,8 @@ async def steer_active_turn(
             request.message_id,
             None,
             None,
-            (author.entity_type if author else None),
-            (author.entity_id if author else None),
+            author.entity_type,
+            author.entity_id,
         )
         if content_offset is not None:
             anchored = await asyncio.to_thread(

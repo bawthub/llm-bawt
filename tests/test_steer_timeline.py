@@ -84,7 +84,18 @@ def test_publish_failure_does_not_undo_persisted_message(timeline, monkeypatch):
     assert timeline._message()["interrupt_content_offset"] == 12
 
 
-def test_active_steer_persists_anchor_then_publishes_without_ending_turn(monkeypatch):
+@pytest.mark.parametrize(
+    ("author", "steer_request_id", "persisted_author"),
+    [
+        (AuthorReference.bot("sender"), "steer_delivery_test", ("bot", "sender")),
+        # Public /v1/chat/steer passes no author: the composer message is the
+        # turn owner's. NULL authorship hid live user corrections from recall.
+        (None, None, ("user", "nick")),
+    ],
+)
+def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
+    monkeypatch, author, steer_request_id, persisted_author,
+):
     from llm_bawt.agent_backends import agent_bridge
     from llm_bawt.bots import BotManager
     from llm_bawt.service.routes import chat
@@ -117,10 +128,10 @@ def test_active_steer_persists_anchor_then_publishes_without_ending_turn(monkeyp
     monkeypatch.setattr(chat, "_persist_interrupt_anchor", lambda *args, **kwargs: calls.append(("anchor", kwargs)) or True)
     result = asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
         turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer", message="ready",
-    ), steer_request_id="steer_delivery_test", author=AuthorReference.bot("sender")))
+    ), steer_request_id=steer_request_id, author=author))
     assert result.persisted is True
     assert [call[0] for call in calls] == ["persist", "anchor", "publish"]
-    assert calls[0][1][-2:] == ("bot", "sender")
+    assert calls[0][1][-2:] == persisted_author
     assert calls[1][1]["content_offset"] == 12
     assert calls[1][1]["source_message_id"] == "trigger"
     assert calls[2] == ("publish", None)
