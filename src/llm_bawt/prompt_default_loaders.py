@@ -91,6 +91,12 @@ def load_self_recap_system() -> str:
     return RECAP_SYSTEM_PROMPT
 
 
+def load_recall_synthesis_system() -> str:
+    from .recall.prompt import DEFAULT_RECALL_SYSTEM_PROMPT
+
+    return DEFAULT_RECALL_SYSTEM_PROMPT
+
+
 def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 

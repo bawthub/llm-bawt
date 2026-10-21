@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from .budgets import DATABASE_WORKER, compact_json
 from .contracts import (
-    FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
+    COVERAGE_BUCKETS, FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
     RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider,
 )
 
@@ -58,6 +58,10 @@ def utc_iso(value) -> str | None:
 def partition_id(bot_id: str) -> str:
     from llm_bawt.memory.postgresql import _sanitize_table_name
     return _sanitize_table_name(bot_id)
+
+
+_MESSAGE_WINDOW = sql_window("m.content")
+_MEMORY_WINDOW = sql_window("mem.content")
 
 
 class RecallDatabase:
@@ -145,18 +149,28 @@ class MessageSource(PostgresSource):
     # still bound what reaches the model (follow-ons sit right after their hit).
     max_records = MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)
     statement = f"""
-        WITH hits AS (
+        WITH query_lexemes AS (
+            -- Same parser and config as the tsquery, so coverage counts exactly
+            -- the lexemes the match can hit (stop words never count).
+            SELECT ARRAY(SELECT DISTINCT unnest(tsvector_to_array(
+                       to_tsvector('english', array_to_string(CAST(:terms AS text[]), ' '))))) AS lexemes
+        ), hits AS (
             SELECT m.id, m.session_id, m.timestamp,
-                   ts_rank(to_tsvector('english', m.content), to_tsquery('english', :query))
+                   CEIL(cardinality(ARRAY(SELECT unnest(q.lexemes)
+                                          INTERSECT SELECT unnest(tsvector_to_array(v.doc))))
+                        * {COVERAGE_BUCKETS}::numeric / GREATEST(cardinality(q.lexemes), 1)) AS coverage,
+                   ts_rank(v.doc, to_tsquery('english', :query))
                    / (1 + GREATEST(0, extract(epoch FROM now()) - m.timestamp)
                           / 86400.0 / {RECENCY_HALF_WEIGHT_DAYS}) AS score
             FROM messages m JOIN sessions s ON s.id = m.session_id
+            CROSS JOIN query_lexemes q
+            CROSS JOIN LATERAL (SELECT to_tsvector('english', m.content) AS doc) v
             WHERE {HISTORY_AUTHORITY}
-              AND to_tsvector('english', m.content) @@ to_tsquery('english', :query)
-            ORDER BY score DESC, m.timestamp DESC, m.id
+              AND v.doc @@ to_tsquery('english', :query)
+            ORDER BY coverage DESC, score DESC, m.timestamp DESC, m.id
             LIMIT :limit
         ), follow_ons AS (
-            SELECT f.id, h.score, h.id AS hit_id, f.ord
+            SELECT f.id, h.coverage, h.score, h.id AS hit_id, f.ord
             FROM hits h CROSS JOIN LATERAL (
                 SELECT m.id, row_number() OVER (ORDER BY m.timestamp, m.id) AS ord
                 FROM messages m JOIN sessions s ON s.id = m.session_id
@@ -169,17 +183,18 @@ class MessageSource(PostgresSource):
             ) f
         ), picked AS (
             -- One record per message; a message that is itself a hit stays a hit.
-            SELECT DISTINCT ON (id) id, score, hit_id, ord
-            FROM (SELECT id, score, id AS hit_id, 0 AS ord FROM hits
-                  UNION ALL SELECT id, score, hit_id, ord FROM follow_ons) candidates
-            ORDER BY id, ord = 0 DESC, score DESC, hit_id
+            SELECT DISTINCT ON (id) id, coverage, score, hit_id, ord
+            FROM (SELECT id, coverage, score, id AS hit_id, 0 AS ord FROM hits
+                  UNION ALL SELECT id, coverage, score, hit_id, ord FROM follow_ons) candidates
+            ORDER BY id, ord = 0 DESC, coverage DESC, score DESC, hit_id
         )
-        SELECT m.id, {sql_window('m.content')}, m.timestamp AS at,
+        SELECT m.id, {_MESSAGE_WINDOW[0]}, m.timestamp AS at,
                CASE WHEN p.ord > 0 THEN p.hit_id END AS follows,
                CASE WHEN m.author_entity_type = 'bot' AND m.author_entity_id <> :bot
                     THEN 'bot:' || m.author_entity_id ELSE m.role END AS speaker
         FROM picked p JOIN messages m ON m.id = p.id AND m.bot_id = :partition
-        ORDER BY p.score DESC, p.hit_id, p.ord
+        {_MESSAGE_WINDOW[1]}
+        ORDER BY p.coverage DESC, p.score DESC, p.hit_id, p.ord
         LIMIT {MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)}
     """
 
@@ -194,8 +209,9 @@ class MemorySource(PostgresSource):
     # Current schema physically deletes consolidated originals; no imaginary
     # superseded column exists to filter. Read only the live memories parent.
     statement = f"""
-        SELECT mem.id, {sql_window('mem.content')}, mem.created_at AS at
+        SELECT mem.id, {_MEMORY_WINDOW[0]}, mem.created_at AS at
         FROM memories mem
+        {_MEMORY_WINDOW[1]}
         WHERE mem.bot_id = :partition
           AND jsonb_typeof(mem.source_message_ids) = 'array'
           AND jsonb_array_length(mem.source_message_ids) BETWEEN 1 AND 64

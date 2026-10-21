@@ -41,8 +41,23 @@ A single compact JSON text block (no duplicate structured-output copy):
   substring of this call's authorized evidence, at most 400 characters / 100
   reference tokens. IDs are validated against this call's evidence map. There
   is no freeform model prose to accidentally reproduce an entire document.
+  The model only points at evidence: its quote is located in the excerpt
+  (tolerating whitespace reflow, dropped or added `*`/`_`/backtick markers at
+  word edges, and `...`/`…` elisions, each elided fragment at
+  least three words, in source order) and the packet returns the exact
+  contiguous source span, never the model's text. A grounded span longer than
+  `MAX_QUOTE_CHARS`/`MAX_QUOTE_TOKENS` (contracts.py) is shortened to a prefix
+  ending on a sentence or word boundary, not dropped. That finding carries
+  `"truncated": true` (and `uncertainty` says so): it is a prefix and may omit a
+  trailing qualifier or correction. Packet-level `truncated` also covers clipped
+  evidence excerpts, so read the per-finding flag.
+- `rejected_findings`: count of selected excerpts that failed schema or
+  grounding and were omitted. Each is dropped individually; if every selection
+  is rejected the call is `error`/`ungrounded_synthesis`.
 - `uncertainty`: server-authored warning that these are untrusted historical
-  excerpts, neither exhaustive nor proof of current state.
+  excerpts, neither exhaustive nor proof of current state. When
+  `rejected_findings > 0` it also says omitted excerpts may include a later
+  correction.
 - `coverage`: per-source success/no-match, counts and prefix-fallback counts;
   task results additionally report semantic/keyword/explicit mode and withheld
   candidates. Incomplete task provenance is `partial`, not a clean no-match.
@@ -100,8 +115,13 @@ Those omissions reduce recall coverage deliberately. Memories and tool evidence
 keep the stricter caller-user/own-bot rule.
 
 Query terms keep identifier parts (`maintenance_model`, `TASK-1210` →
-maintenance/model, task/1210) rather than dropping them. Full-text rank, divided
-by one recency term (`RECENCY_HALF_WEIGHT_DAYS`: rank halves at 14 days), selects
+maintenance/model, task/1210) rather than dropping them. Hits rank by **query
+coverage** first: the share of the query's distinct lexemes a message contains,
+rounded up into `COVERAGE_BUCKETS` (4) so near-equal coverage ties. A message
+matching one or two generic words of the question ("nick", "error") never
+outranks one matching most of it, however old. Within a bucket, full-text rank
+divided by one recency term (`RECENCY_HALF_WEIGHT_DAYS`: rank halves at 14 days)
+orders hits, so the newer of two equally relevant statements wins. This selects
 up to six **hits**. Each hit carries at most two **follow-ons** (`MAX_FOLLOW_ONS_PER_HIT`, defined beside the recency weight in `recall/contracts.py`): the next
 messages in the same session within 30 minutes, under the identical authority,
 partition and session filters — never another session, bot or user. Follow-ons
@@ -192,9 +212,18 @@ MCP runs separately from the app. `UtilitySynthesizer` calls the app's
 reuses the global DB-backed `maintenance_model` resolver, not a bot, cached-client
 insertion order or extraction-model fallback. It accepts only prompt/system/token
 budget, has no caller model/bot override, checks the catalog's context/output
-limits, and sanitizes failures. The utility context contains only the fixed
-extractive instruction, question and authorized bounded evidence: no persona,
-parent transcript, tools or automatic writes.
+limits, and sanitizes failures. The utility context contains only the extractive
+instruction, question and authorized bounded evidence: no persona, parent
+transcript, tools or automatic writes.
+
+**Instruction source:** the system prompt is the prompt-registry key
+`recall.synthesis.system`, editable in BawtHub's Prompt Registry, and it is never
+hardcoded. `recall/prompt.py` holds only the seed default. Each recall resolves the
+body once, trying the caller's bot override, then the global row, then the seed; a
+blank body or a registry error falls back to the seed. The service budgets evidence
+against that exact text and sends it, so an edit can't break the 6k input cap. Any
+edit must keep the JSON `findings` contract, because grounding still re-checks
+every quote against the source bytes.
 
 **Data egress:** authorized history excerpts go to whatever utility model the DB
 currently selects, potentially a cloud provider. No model/config change is made

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from llm_bawt.recall.budgets import BoundedWorker, compact_json, tokens
 from llm_bawt.recall.contracts import Evidence, RecallError, RecallRequest, RecallScope, SourceProvider, Synthesizer
 from llm_bawt.recall.handles import HandleStore
+from llm_bawt.recall.prompt import DEFAULT_RECALL_SYSTEM_PROMPT
 from llm_bawt.recall.service import RecallService
 
 SCOPE = RecallScope("reviewer", "operator", "session-a", frozenset({"excluded"}), frozenset({"reviewer", "peer"}))
@@ -34,8 +35,13 @@ class Model(Synthesizer):
     def __init__(self, raw=None):
         self.raw = raw
         self.calls = []
+        self.systems = []
 
-    async def synthesize(self, query, evidence, output_tokens):
+    def system_prompt(self, bot_id):
+        return DEFAULT_RECALL_SYSTEM_PROMPT
+
+    async def synthesize(self, system, query, evidence, output_tokens):
+        self.systems.append(system)
         self.calls.append((query, evidence, output_tokens))
         if self.raw is not None:
             return self.raw
@@ -385,7 +391,7 @@ async def test_follow_ons_cannot_push_out_a_later_direct_hit():
     naive = []
     for row in [*rows, *memories.rows]:
         candidate = replace(row, text=clip(row.text, 512))
-        if input_tokens(question, [*naive, candidate]) <= MAX_INPUT_TOKENS:
+        if input_tokens(DEFAULT_RECALL_SYSTEM_PROMPT, question, [*naive, candidate]) <= MAX_INPUT_TOKENS:
             naive.append(candidate)
     naive_ids = {row.id for row in naive}
     assert "m0" not in naive_ids and "h5" not in naive_ids
@@ -400,3 +406,291 @@ async def test_follow_ons_cannot_push_out_a_later_direct_hit():
     assert admitted_follow_ons and len(admitted_follow_ons) < 12
     assert all(row.follows in chosen for row in admitted_follow_ons)
     assert result["truncated"] and result["metrics"]["utility_input_tokens"] <= MAX_INPUT_TOKENS
+
+
+# TASK-1210 live shapes (al, fc0dab70): grok collapses "\n\n" and elides with
+# "..." inside quotes; one misquote used to discard every grounded finding.
+LIVE_TEXT = ("Option B fits better.\n\n- **What it does:** keeps hits first.\n\n"
+             "It gave wrong answers live. Later we fixed it. It hasn't been pushed yet.")
+
+
+def _live_source():
+    return Source([Evidence("messages", "fc0dab70", "reviewer", "operator", LIVE_TEXT)])
+
+
+@pytest.mark.asyncio
+async def test_misquoted_finding_is_dropped_not_fatal():
+    raw = compact_json({"findings": [
+        {"source": "messages", "id": "fc0dab70", "quote": "Option B fits better."},
+        {"source": "messages", "id": "fc0dab70", "quote": "SECRET invented claim"},
+        {"source": "messages", "id": "outside", "quote": "SECRET"},
+        {"source": "messages", "id": "fc0dab70", "quote": "x" * 401},
+        {"source": "messages", "id": "fc0dab70", "quote": "ok", "prose": "SECRET"},
+    ]})
+    result = await RecallService([_live_source()], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok"
+    assert result["findings"] == [{"source": "messages", "id": "fc0dab70", "quote": "Option B fits better."}]
+    assert result["rejected_findings"] == 4 and "ungrounded_dropped" not in result["metrics"]
+    assert "4 selected excerpt(s) could not be verified" in result["uncertainty"]
+    assert "SECRET" not in compact_json(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote,expected", [
+    ("fits better.\n- **What it does:**", "fits better.\n\n- **What it does:**"),
+    ("gave wrong answers live. ... It hasn't been pushed",
+     "gave wrong answers live. Later we fixed it. It hasn't been pushed"),
+    ("...gave wrong answers live.…It hasn't been", "gave wrong answers live. Later we fixed it. It hasn't been"),
+])
+async def test_reformatted_quote_returns_exact_source_span(quote, expected):
+    raw = compact_json({"findings": [{"source": "messages", "id": "fc0dab70", "quote": quote}]})
+    result = await RecallService([_live_source()], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok"
+    assert result["findings"][0]["quote"] == expected
+    assert expected in LIVE_TEXT and result["rejected_findings"] == 0
+    assert "could not be verified" not in result["uncertainty"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote", [
+    "It hasn't been pushed ... gave wrong answers live",  # fragments out of order
+    "fits better. ... SECRET",                            # one fragment invented
+    "Option B fits\nbetter SECRET",                       # whitespace drift plus an added word
+    "fits ... pushed",                                    # short fragments would bridge on common words
+    "Option B fits better. ... pushed yet.",              # every elided fragment needs 3 words
+])
+async def test_tolerant_matching_cannot_ground_reordered_or_invented_text(quote):
+    raw = compact_json({"findings": [{"source": "messages", "id": "fc0dab70", "quote": quote}]})
+    result = await RecallService([_live_source()], Model(raw)).recall(request(), SCOPE)
+    assert result["error_code"] == "ungrounded_synthesis"
+    assert "SECRET" not in compact_json(result)
+
+
+@pytest.mark.asyncio
+async def test_dropped_correction_is_surfaced_not_a_silent_stale_answer():
+    # Stale-vs-correction shape: the old statement grounds, the later correction
+    # is mangled by the model and dropped. The caller must be told.
+    stale = Evidence("messages", "old", "reviewer", "operator", "Use messages plus summaries.",
+                     at="2026-10-21T15:00:00.000000Z")
+    correction = Evidence("messages", "new", "reviewer", "operator",
+                          "No summaries. I said message history only.", at="2026-10-21T15:05:00.000000Z")
+    raw = compact_json({"findings": [
+        {"source": "messages", "id": "old", "quote": "Use messages plus summaries."},
+        {"source": "messages", "id": "new", "quote": "No summaries. ... message history only, always"},
+    ]})
+    result = await RecallService([Source([stale, correction])], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok"
+    assert [item["id"] for item in result["findings"]] == ["old"]
+    assert result["rejected_findings"] == 1
+    assert "a later correction may be missing" in result["uncertainty"]
+    assert result["metrics"]["parent_tokens"] == tokens(compact_json(result))
+
+
+# Al's 8-run stress (TASK-1210): grok often quotes 440-600 chars; the key answer
+# ("Only partly. The first version...") was dropped by the length cap.
+LONG_ANSWER = ("Only partly. The first version of recall is live. The latest fix isn't.\n\n"
+               + " ".join(f"- **Item {n}:** detail sentence number {n} explains the status." for n in range(12)))
+
+
+@pytest.mark.asyncio
+async def test_over_long_grounded_quote_is_shortened_not_dropped():
+    assert len(LONG_ANSWER) > 600
+    rows = [Evidence("messages", "2a5f048f", "reviewer", "operator", LONG_ANSWER)]
+    raw = compact_json({"findings": [{"source": "messages", "id": "2a5f048f",
+                                      "quote": LONG_ANSWER.replace("\n\n", "\n")}]})
+    result = await RecallService([Source(rows)], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok" and result["rejected_findings"] == 0
+    quote = result["findings"][0]["quote"]
+    assert LONG_ANSWER.startswith(quote) and quote.startswith("Only partly.")
+    assert len(quote) <= 400 and tokens(quote) <= 100
+    assert quote.endswith(".")  # cut on a sentence boundary, not mid-word
+    assert result["truncated"] is True and result["findings"][0]["truncated"] is True
+    assert "1 quote(s) marked truncated" in result["uncertainty"]
+
+
+@pytest.mark.asyncio
+async def test_unshortened_findings_carry_no_truncation_marker():
+    result = await RecallService([Source()], Model()).recall(request(), SCOPE)
+    assert "truncated" not in result["findings"][0]
+    assert "marked truncated" not in result["uncertainty"]
+
+
+def test_capped_span_drops_a_trailing_correction_so_it_is_marked():
+    # Snark probe shape: the revocation sits past the cap.
+    from llm_bawt.recall.grounding import cap_span
+    span = "Approved. " + "The plan moves ahead with the rollout as described. " * 8 \
+        + "That approval was revoked on Wednesday; nothing shipped."
+    assert len(span) > 400
+    capped = cap_span(span, 400, 100)
+    assert capped != span and span.startswith(capped) and "revoked" not in capped
+
+
+@pytest.mark.asyncio
+async def test_non_object_finding_is_rejected_not_fatal():
+    raw = '{"findings":["SECRET", 7, {"source":"messages","id":"m1","quote":"The relay background"}]}'
+    result = await RecallService([Source()], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok" and result["rejected_findings"] == 2
+    assert "SECRET" not in compact_json(result)
+
+
+def test_elision_considers_overlapping_first_fragment_starts():
+    from llm_bawt.recall.grounding import ground_quote
+    assert ground_quote("a a a ... b c d", "a a a a b c d") == "a a a b c d"
+
+
+def test_successful_chain_on_adversarial_repetition_is_linear():
+    import time as _time
+    from llm_bawt.recall.grounding import ground_quote
+    text = _repetitive_excerpt() + " closing words end"
+    started = _time.perf_counter()
+    for _ in range(5):
+        assert ground_quote("the bot said ... the bot said ... closing words end", text)
+    assert _time.perf_counter() - started < 0.05
+
+
+@pytest.mark.asyncio
+async def test_literal_ellipsis_in_source_is_not_an_elision_point():
+    text = "We tried it… and then\n\nthe recall tool returned nothing useful at all."
+    rows = [Evidence("messages", "e1", "reviewer", "operator", text)]
+    raw = compact_json({"findings": [{"source": "messages", "id": "e1",
+                                      "quote": "We tried it… and then\nthe recall tool returned nothing"}]})
+    result = await RecallService([Source(rows)], Model(raw)).recall(request(), SCOPE)
+    assert result["findings"][0]["quote"] == "We tried it… and then\n\nthe recall tool returned nothing"
+
+
+# Snark r3 P1/P2: elision grounding must be linear (it runs on the MCP event
+# loop, which asyncio.timeout cannot interrupt) and return the tightest span.
+def _repetitive_excerpt():
+    from llm_bawt.recall.budgets import clip
+    return clip("the bot said the bot said the bot " * 400, 511)
+
+
+@pytest.mark.parametrize("fragments", [3, 4])
+def test_elision_grounding_is_linear_on_repetitive_text(fragments):
+    import time as _time
+    from llm_bawt.recall.grounding import ground_quote
+    text = _repetitive_excerpt()
+    quote = " ... ".join(["the bot said"] * (fragments - 1) + ["absent words here"])
+    started = _time.perf_counter()
+    for _ in range(5):
+        assert ground_quote(quote, text) is None
+    assert _time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize("fragments", [5, 6])
+def test_elision_fragment_count_is_capped(fragments):
+    from llm_bawt.recall.grounding import MAX_ELIDED_FRAGMENTS, ground_quote
+    assert MAX_ELIDED_FRAGMENTS == 4
+    text = _repetitive_excerpt()
+    assert ground_quote(" ... ".join(["the bot said"] * fragments), text) is None
+
+
+def test_elision_grounds_to_the_tightest_span_not_the_leftmost():
+    from llm_bawt.recall.grounding import ground_quote
+    text = ("We discussed the recall tool at length. " + "Filler words go here. " * 10
+            + "Later we discussed the recall tool again and it now works fine.")
+    span = ground_quote("discussed the recall ... now works fine", text)
+    assert span == "discussed the recall tool again and it now works fine"
+
+
+# Al's last live miss (3a7c87dc): grok dropped bold markers from the quote.
+@pytest.mark.parametrize("quote,text,expected", [
+    ("Why it fails: I re-ran the probe",
+     "Intro.\n\n**Why it fails:** I re-ran the probe twice.", "**Why it fails:** I re-ran the probe"),
+    ("set the maintenance_model to grok", "We set the `maintenance_model` to grok today.",
+     "set the `maintenance_model` to grok"),
+    ("**Running:** the app restarted", "Running: the app restarted at 16:14.", "Running: the app restarted"),
+])
+def test_markdown_emphasis_markers_are_tolerated_and_source_bytes_returned(quote, text, expected):
+    from llm_bawt.recall.grounding import ground_quote
+    assert ground_quote(quote, text) == expected
+
+
+def test_markers_inside_a_word_still_match_literally():
+    from llm_bawt.recall.grounding import ground_quote
+    assert ground_quote("set the maintenancemodel to grok", "We set the maintenance_model to grok.") is None
+    assert ground_quote("set the maintenance*model to grok", "We set the maintenance_model to grok.") is None
+
+
+# Nick 2026-10-21: NO PROMPTS ARE EVER HARDCODED. The recall instructions are a
+# prompt-registry key resolved per call; what is budgeted is what is sent.
+class RegistryModel(Model):
+    def __init__(self, system):
+        super().__init__()
+        self.system = system
+        self.resolved_for = []
+
+    def system_prompt(self, bot_id):
+        self.resolved_for.append(bot_id)
+        return self.system
+
+
+@pytest.mark.asyncio
+async def test_recall_sends_and_budgets_the_registry_resolved_prompt_once():
+    from llm_bawt.recall.completion import input_tokens
+    model = RegistryModel("EDITED IN THE PROMPT REGISTRY " * 40)
+    result = await RecallService([Source()], model).recall(
+        RecallRequest(query="relay background", sources=("messages",)), SCOPE)
+    assert result["status"] == "ok", result
+    assert model.resolved_for == ["reviewer"]  # caller bot, once per recall
+    assert model.systems == [model.system]
+    evidence = model.calls[0][1]
+    assert result["metrics"]["utility_input_tokens"] == input_tokens(model.system, "relay background", evidence)
+    assert input_tokens(model.system, "q", evidence) > input_tokens("short", "q", evidence)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("system", ["", "   ", None])
+async def test_blank_resolved_prompt_fails_closed_without_a_model_call(system):
+    model = RegistryModel(system)
+    result = await RecallService([Source()], model).recall(
+        RecallRequest(query="relay background", sources=("messages",)), SCOPE)
+    assert result["error_code"] == "model_unavailable" and not model.calls
+
+
+def _resolver(monkeypatch, behaviour):
+    import llm_bawt.prompt_registry as registry
+    seen = []
+
+    class Resolver:
+        def resolve(self, key, scope_type="global", scope_id=None):
+            seen.append((key, scope_type, scope_id))
+            if isinstance(behaviour, Exception):
+                raise behaviour
+            return behaviour
+
+    monkeypatch.setattr(registry, "get_prompt_resolver", lambda config=None: Resolver())
+    return seen
+
+
+def test_resolver_uses_bot_scoped_registry_body(monkeypatch):
+    from llm_bawt.recall.prompt import RECALL_SYSTEM_PROMPT_KEY, resolve_recall_system_prompt
+    seen = _resolver(monkeypatch, SimpleNamespace(body="bot override"))
+    assert resolve_recall_system_prompt("reviewer") == "bot override"
+    assert seen == [(RECALL_SYSTEM_PROMPT_KEY, "bot", "reviewer")]
+
+
+@pytest.mark.parametrize("behaviour", [None, SimpleNamespace(body="  "), RuntimeError("db down")])
+def test_resolver_falls_back_to_seed_on_blank_or_registry_failure(monkeypatch, behaviour):
+    from llm_bawt.recall.prompt import resolve_recall_system_prompt
+    _resolver(monkeypatch, behaviour)
+    assert resolve_recall_system_prompt("reviewer") == DEFAULT_RECALL_SYSTEM_PROMPT
+
+
+def test_recall_prompt_is_registered_with_seed_default_and_no_placeholders():
+    from llm_bawt.prompt_registry import DEFAULT_PROMPT_DEFINITIONS, PromptResolver
+    from llm_bawt.recall.prompt import RECALL_SYSTEM_PROMPT_KEY
+    definition = DEFAULT_PROMPT_DEFINITIONS[RECALL_SYSTEM_PROMPT_KEY]
+    assert definition.default_body() == DEFAULT_RECALL_SYSTEM_PROMPT
+    assert definition.required_vars == ()
+    assert "untrusted data" in definition.default_body()
+    # Verbatim body (never .format()-ed): its JSON braces must not trip save-time
+    # validation in the Prompt Registry editor.
+    resolver = PromptResolver.__new__(PromptResolver)  # validate() is pure; skip the DB store
+    assert resolver.validate(key=RECALL_SYSTEM_PROMPT_KEY, body=definition.default_body())["valid"]
+
+
+def test_recall_completion_module_holds_no_prompt_literal():
+    import llm_bawt.recall.completion as completion
+    assert not hasattr(completion, "SYSTEM")
+    assert DEFAULT_RECALL_SYSTEM_PROMPT not in open(completion.__file__, encoding="utf-8").read()

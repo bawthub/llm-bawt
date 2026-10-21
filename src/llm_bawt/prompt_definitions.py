@@ -39,6 +39,7 @@ from .prompt_default_loaders import (
     load_memory_maintenance_intent_content_only,
     load_memory_maintenance_intent_with_context,
     load_profile_consolidation,
+    load_recall_synthesis_system,
     load_self_recap_system,
 )
 
@@ -349,6 +350,19 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "Bot-scoped overrides supported via scope_type=bot."
             ),
         },
+    ),
+    "recall.synthesis.system": PromptDefinition(
+        key="recall.synthesis.system",
+        title="Context Recall Evidence Selector",
+        category="agent_execution",
+        loader=load_recall_synthesis_system,
+        metadata={"notes": (
+            "System prompt for the context_recall MCP tool's isolated synthesis call "
+            "(global maintenance_model). The question + evidence JSON is the separate "
+            "user prompt; body is used verbatim (never .format()-ed). Must keep the "
+            "JSON findings contract — quotes are re-grounded against source bytes "
+            "and ungrounded ones dropped. Bot-scoped overrides supported."
+        )},
     ),
     "media.prompt_expansion.video": PromptDefinition(
         key="media.prompt_expansion.video",

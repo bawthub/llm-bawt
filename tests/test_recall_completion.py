@@ -258,7 +258,8 @@ def test_query_terms_keep_identifier_parts():
 
 
 def test_synthesis_prompt_carries_server_time_speaker_and_supersession_rule():
-    from llm_bawt.recall.completion import SYSTEM, synthesis_prompt
+    from llm_bawt.recall.completion import synthesis_prompt
+    from llm_bawt.recall.prompt import DEFAULT_RECALL_SYSTEM_PROMPT as SYSTEM
     from llm_bawt.recall.contracts import Evidence
     prompt = synthesis_prompt("q", [Evidence("messages", "m", "b", "u", "t", at="2026-10-21T10:34:05Z",
                                              speaker="assistant", follows="h")])

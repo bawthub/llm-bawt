@@ -12,8 +12,14 @@ Source = Literal["messages", "memories", "tasks", "tool_evidence"]
 MAX_RECORDS = 24
 MAX_SOURCE_RECORDS = 6
 # Message ranking/expansion policy (TASK-1210), kept together on purpose.
-# R1: one recency term inside the full-text rank; rank halves at this age, so a
-# terse recent correction outranks denser statements from weeks ago.
+# R1: hits order by query coverage first: the share of the query's distinct
+# lexemes a message contains, rounded UP into this many buckets so near-equal
+# coverage ties (7/10 and 6/10 share the top-but-one bucket). A message that
+# matches one or two generic words never outranks one that matches most of the
+# question, however old. Within a bucket, one recency term divides the
+# full-text rank (rank halves at this age), so the newer of two equally
+# relevant statements wins.
+COVERAGE_BUCKETS = 4
 RECENCY_HALF_WEIGHT_DAYS = 14.0
 # R2: a hit may carry its next turns in the same caller session (a correction
 # can share no query terms). Follow-ons are admitted only after every source's
@@ -21,6 +27,9 @@ RECENCY_HALF_WEIGHT_DAYS = 14.0
 MAX_FOLLOW_ONS_PER_HIT = 2
 FOLLOW_ON_WINDOW_SECONDS = 1800
 MAX_RECORD_CHARS = 2400
+# Returned quote caps; an over-long grounded pick is shortened to a prefix, not dropped.
+MAX_QUOTE_CHARS = 400
+MAX_QUOTE_TOKENS = 100
 MAX_INPUT_TOKENS = 6000
 MAX_QUERY_TOKENS = 256
 MAX_MODEL_BYTES = 16_384
@@ -128,5 +137,14 @@ class SourceProvider(ABC):
 
 class Synthesizer(ABC):
     @abstractmethod
-    async def synthesize(self, query: str, evidence: list[Evidence], output_tokens: int) -> str:
+    def system_prompt(self, bot_id: str) -> str:
+        """Resolve the live instructions once per recall (prompt registry; never hardcoded).
+
+        The service budgets evidence against exactly this text and passes it
+        back to ``synthesize``, so what is counted is what is sent.
+        """
+
+    @abstractmethod
+    async def synthesize(self, system: str, query: str, evidence: list[Evidence],
+                         output_tokens: int) -> str:
         """Return JSON {findings:[{source,id,quote}]}; no tools or side effects."""

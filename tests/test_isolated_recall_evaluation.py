@@ -54,7 +54,10 @@ class SelectingSynthesizer:
         self.quote = quote
         self.inputs: list[tuple] = []
 
-    async def synthesize(self, query, evidence, output_tokens):
+    def system_prompt(self, bot_id):
+        return "select evidence"
+
+    async def synthesize(self, system, query, evidence, output_tokens):
         self.inputs.append((query, evidence, output_tokens))
         assert any(item.id == self.source_id and self.quote in item.text for item in evidence)
         return json.dumps({"findings": [{
@@ -101,7 +104,10 @@ class UntrustedSynthesizer:
         self.response = response
         self.calls = 0
 
-    async def synthesize(self, query, evidence, output_tokens):
+    def system_prompt(self, bot_id):
+        return "select evidence"
+
+    async def synthesize(self, system, query, evidence, output_tokens):
         self.calls += 1
         if isinstance(self.response, Exception):
             raise self.response

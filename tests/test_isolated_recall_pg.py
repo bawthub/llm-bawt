@@ -25,6 +25,7 @@ from llm_bawt.recall.excerpts import fts_query
 from llm_bawt.recall.postgres import MessageSource, RecallDatabase
 from llm_bawt.utils import db
 from tests.pg_isolation import require_test_db_config
+from tests.test_isolated_recall_sources import AL_REPLY, NICK_ASK
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -151,11 +152,11 @@ def test_hit_that_is_also_a_follow_on_is_quoted_once_as_a_hit(rig):
 
 
 def test_recency_lifts_the_terse_newer_statement_over_an_older_dense_one(rig):
-    """52f101ef shape: one-term confirmation now vs a denser statement weeks ago."""
+    """52f101ef shape at equal coverage: a terse statement now vs a denser one weeks ago."""
     assert RECENCY_HALF_WEIGHT_DAYS == 14.0
     old = rig.add("Continuity setting: continuity uses messages and summaries for continuity.",
                   at=rig.now - 30 * DAY)
-    new = rig.add(CONFIRMATION, at=rig.now - 60)
+    new = rig.add("Continuity setting is now messages only.", at=rig.now - 60)
     with rig.engine.connect() as conn:
         raw = dict(conn.execute(text("""
             SELECT id, ts_rank(to_tsvector('english', content), to_tsquery('english', :q))
@@ -163,6 +164,33 @@ def test_recency_lifts_the_terse_newer_statement_over_an_older_dense_one(rig):
         """), {"q": fts_query("continuity setting"), "bot": rig.bot}).all())
     assert raw[old] > raw[new]  # without recency the stale dense row wins
     assert [row.id for row in rig.recall("continuity setting")] == [new, old]
+
+
+OPENCLAW_QUESTION = ("What happened when Nick ran openclaw auth login openai-codex in March, "
+                     "and what was the error?")
+
+
+def test_coverage_outranks_recency_for_an_old_exact_answer(rig):
+    """Live miss: a 225-day-old exact answer lost to today's 1-2 generic-word matches."""
+    march = rig.add("Ran `openclaw auth login openai-codex` and it failed with: error: unknown "
+                    "command 'auth'. The login subcommand moved.", at=rig.now - 225 * DAY)
+    recent = [rig.add(text_, at=rig.now - 60 * (i + 1)) for i, text_ in enumerate([
+        "Nick, that error is gone now.",
+        "What happened with the deploy? Nick asked about it.",
+        "The error in the log was a timeout.",
+        "Nick ran the migration in March.",
+        "Nothing happened after the restart.",
+        "Error budget is fine.",
+        "Nick said the error happened twice.",
+    ])]
+    rows = rig.recall(OPENCLAW_QUESTION)
+    assert rows[0].id == march
+    assert set(row.id for row in rows) - {march} <= set(recent)
+    # Recency still decides between answers in the same coverage bucket (both
+    # 7/10 lexemes, the newer one terser): newest first.
+    newer = rig.add("Ran openclaw auth login openai-codex: error, unknown command.",
+                    at=rig.now - 3 * DAY)
+    assert [row.id for row in rig.recall(OPENCLAW_QUESTION)][:2] == [newer, march]
 
 
 def test_received_deliveries_follow_the_current_allowed_policy(rig):
@@ -179,3 +207,24 @@ def test_received_deliveries_follow_the_current_allowed_policy(rig):
     # Policy is read now: once peer is excluded, its old deliveries disappear.
     assert rig.recall(query, allowed=frozenset(), excluded=frozenset({"peer", "protected"})) == []
     assert {protected, stranger, imported}.isdisjoint(row.id for row in rig.recall(query))
+
+
+@pytest.mark.parametrize("content,query", [
+    (AL_REPLY, "steer"), (NICK_ASK, "hardcoded"),
+    ("lead in " + "z" * 300 + "needle tail", "needle"),
+    ("short needle", "needle"), ("no literal hit here", "absent"),
+    ("x" * 30 + " " + "y" * 45 + "needle", "needle"),
+])
+def test_sql_window_matches_python_twin_and_opens_on_word_start(engine, content, query):
+    from llm_bawt.recall.contracts import MAX_RECORD_CHARS
+    from llm_bawt.recall.excerpts import excerpt_window, sql_window, terms_for
+    columns, lateral = sql_window("m.content")
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            f"SELECT {columns} FROM (SELECT CAST(:content AS text) AS content) m {lateral}"
+        ), {"content": content, "phrase": query.lower(), "terms": terms_for(query),
+            "chars": MAX_RECORD_CHARS}).mappings().one()
+    excerpt, start, _, kind = excerpt_window(content, query)
+    # Window parity only: the twins' `truncated` flags already differ (SQL compares
+    # total length to the window size; Python also counts a skipped head).
+    assert (row["excerpt"], row["start_char"], row["window_kind"]) == (excerpt, start, kind)
