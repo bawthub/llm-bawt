@@ -28,6 +28,7 @@ bridge answers v1 since TASK-1232 P3; the pre-contract adapter was removed
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -39,6 +40,19 @@ _PROCESS_BOOT_ID = uuid.uuid4().hex
 def process_boot_id() -> str:
     """Return this bridge process's boot id (fixed for the process lifetime)."""
     return _PROCESS_BOOT_ID
+
+
+_PROCESS_IS_PID1 = os.getpid() == 1
+
+
+def process_is_pid1() -> bool:
+    """Is this bridge process its container's PID 1? (TASK-1233 Vex S2)
+
+    Only then does a new boot id prove the old process's children are gone:
+    when PID 1 exits the kernel kills the whole PID namespace. A bridge run
+    under a supervisor or a shell can restart while its CLI children survive.
+    """
+    return _PROCESS_IS_PID1
 
 
 END_REASON_ABORTED = "aborted"
@@ -244,4 +258,5 @@ __all__ = [
     "abort_cause_of",
     "aborted_terminal_raw",
     "process_boot_id",
+    "process_is_pid1",
 ]

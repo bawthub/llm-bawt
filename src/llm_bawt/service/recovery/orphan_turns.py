@@ -119,32 +119,45 @@ class BridgeRunProbe:
         self.timeout_seconds = timeout_seconds
 
     async def probe(self, turn: dict[str, Any]) -> ProbeResult:
+        _reply, result = await self.status(
+            backend=turn.get("agent_backend"), session_key=turn.get("agent_session_key"),
+            request_id=turn.get("agent_request_id"), label=turn.get("turn_id"),
+        )
+        return result
+
+    async def status(self, *, backend: str | None, session_key: str | None, request_id: str | None,
+                     label: Any = None) -> tuple[Any, ProbeResult]:
+        """The one ``run.status`` call: ``(RunStatusReply | None, ProbeResult)``.
+
+        The parsed reply is returned only when the addressed backend answered
+        with a v1 reply; every ambiguous outcome is ``None`` plus its
+        ``ProbeResult`` state. The quiesce exit sweep (TASK-1233) needs the
+        reply itself (its ``pid1``); recovery needs only the result.
+        """
         from agent_bridge.run_status import RUN_STATUS_METHOD, RunStatusReply, RunStatusReplyError
 
-        backend = turn.get("agent_backend")
         if not backend:
-            return ProbeResult(state="unaddressed", detail="turn has no recorded bridge backend")
+            return None, ProbeResult(state="unaddressed", detail="turn has no recorded bridge backend")
         subscriber = self._subscriber()
         if subscriber is None:
-            return ProbeResult(state="bridge_unreachable", backend=backend, detail="no agent subscriber")
+            return None, ProbeResult(state="bridge_unreachable", backend=backend, detail="no agent subscriber")
         try:
             wire = await subscriber.send_rpc(
-                RUN_STATUS_METHOD,
-                {"sessionKey": turn["agent_session_key"], "requestId": turn["agent_request_id"]},
+                RUN_STATUS_METHOD, {"sessionKey": session_key, "requestId": request_id},
                 f"run_status_{uuid.uuid4().hex}", timeout_s=self.timeout_seconds, backend=backend,
             )
         except TimeoutError:
-            return ProbeResult(state="timeout", backend=backend,
-                               detail=f"no reply within {self.timeout_seconds:.0f}s")
+            return None, ProbeResult(state="timeout", backend=backend,
+                                     detail=f"no reply within {self.timeout_seconds:.0f}s")
         except Exception as exc:
-            logger.warning("run.status for turn %s failed: %s", turn.get("turn_id"), exc)
-            return ProbeResult(state="rpc_error", backend=backend, detail=type(exc).__name__)
+            logger.warning("run.status for %s failed: %s", label, exc)
+            return None, ProbeResult(state="rpc_error", backend=backend, detail=type(exc).__name__)
         try:
             reply = RunStatusReply.from_wire(wire, backend=backend)
         except RunStatusReplyError as exc:
-            return ProbeResult(state="malformed_reply", backend=backend, detail=str(exc))
-        return ProbeResult(state=reply.state.value, backend_matched=True, backend=reply.backend,
-                           boot_id=reply.boot_id, detail=reply.detail)
+            return None, ProbeResult(state="malformed_reply", backend=backend, detail=str(exc))
+        return reply, ProbeResult(state=reply.state.value, backend_matched=True, backend=reply.backend,
+                                  boot_id=reply.boot_id, detail=reply.detail)
 
 
 class OrphanTurnsStep(RecoveryStep):

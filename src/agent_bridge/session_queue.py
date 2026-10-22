@@ -18,7 +18,8 @@ from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Any
 
-from .request_tombstones import RequestTombstones
+from .request_tombstones import AcceptedRequests, RequestTombstones
+from .run_contract import REFUSED, UNATTEMPTED, TeardownReport
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,9 @@ class SessionQueue:
         self._request_phases: dict[tuple[str, str], RequestPhase] = {}
         # Stopped request ids; a send for one is refused at accept().
         self._tombstones = RequestTombstones()
+        # Requests this process accepted; renewed at release and at a Stop,
+        # so it outlives any tombstone written while it was known.
+        self._accepted = AcceptedRequests()
         # Why a registered send was cancelled, when the canceller knows
         # (TASK-1231B: host shutdown). Read by the send's terminal publication;
         # dropped with the request registration.
@@ -161,13 +165,27 @@ class SessionQueue:
             raise RuntimeError("accept() must be called from the send's own task")
         self._request_tasks[key] = owner
         self._request_phases[key] = RequestPhase.PREFLIGHT
+        self._accepted.add(session_key, request_id)
         return Admission.ACCEPTED
 
     def release(self, session_key: str, request_id: str) -> None:
         """Drop the calling task's registration for this request, if it owns it."""
         key = (session_key, request_id)
         if self._request_tasks.get(key) is asyncio.current_task():
+            self._accepted.add(session_key, request_id)
             self._forget_request(key)
+
+    def refusal_teardown(self, session_key: str, request_id: str) -> TeardownReport:
+        """The teardown report for a send refused as TOMBSTONED.
+
+        ``exited=True`` (``disconnect="refused"``) only when this process
+        never accepted the request, so nothing for it ever ran here. A
+        previously accepted request (a redelivered send after a Stop) proves
+        nothing: its earlier run reported its own teardown.
+        """
+        if self._accepted.never_accepted(session_key, request_id):
+            return REFUSED
+        return UNATTEMPTED
 
     def _forget_request(self, key: tuple[str, str]) -> None:
         self._request_tasks.pop(key, None)
@@ -203,6 +221,8 @@ class SessionQueue:
         For a bridge whose stop must first be confirmed elsewhere (OpenClaw's
         gateway abort) before the local task may be cancelled.
         """
+        if (session_key, request_id) in self._request_tasks or self._accepted.contains(session_key, request_id):
+            self._accepted.add(session_key, request_id)
         self._tombstones.add(session_key, request_id)
 
     def is_tombstoned(self, session_key: str, request_id: str) -> bool:
@@ -246,6 +266,7 @@ class SessionQueue:
         if request_key is not None and owner is not None:
             if self._request_tasks.get(request_key) is not owner:
                 self._request_tasks[request_key] = owner
+                self._accepted.add(*request_key)
                 registered_here = True
             self._request_phases[request_key] = RequestPhase.QUEUED
         try:

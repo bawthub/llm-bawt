@@ -8,7 +8,12 @@ must treat as ambiguous.
 
 Reply (:class:`RunStatusReply`, v1)::
 
-    {backend, boot_id, request_id, state, detail}
+    {backend, boot_id, request_id, state, detail, pid1}
+
+``pid1`` (TASK-1233 Vex S2) says whether the answering process is its
+container's PID 1. It is optional on the wire: a bridge that predates it
+parses to ``None`` (unknown). :func:`proves_restart` is the B1(b) rule built
+on it, against a durable :class:`RunSighting` of the run on its earlier boot.
 
 ``state`` is a :class:`RunState`. Only ``not_found`` from the addressed
 backend is evidence of absence, and only for this ``boot_id``: tombstones and
@@ -28,7 +33,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .abort_contract import process_boot_id
+from .abort_contract import process_boot_id, process_is_pid1
+from .run_contract import RunAccepted
 from .session_queue import RequestPhase
 
 if TYPE_CHECKING:
@@ -59,6 +65,7 @@ class RunState(str, Enum):
 
 
 _REPLY_FIELDS = ("backend", "boot_id", "request_id", "state", "detail")
+_OPTIONAL_FIELDS = ("pid1",)
 _V1_MARKERS = ("state", "boot_id")
 _UNKNOWN_REQUEST_ID = "unknown"
 
@@ -74,6 +81,7 @@ class RunStatusReply:
     request_id: str
     state: RunState
     detail: str = ""
+    pid1: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("backend", "boot_id", "request_id"):
@@ -84,6 +92,8 @@ class RunStatusReply:
             raise RunStatusReplyError("state must be a RunState")
         if not isinstance(self.detail, str):
             raise RunStatusReplyError("detail must be a string")
+        if self.pid1 is not None and not isinstance(self.pid1, bool):
+            raise RunStatusReplyError("pid1 must be a bool or null")
 
     @property
     def proves_absent(self) -> bool:
@@ -98,7 +108,7 @@ class RunStatusReply:
         return self.state is RunState.NOT_FOUND
 
     def to_dict(self) -> dict[str, Any]:
-        data = {name: getattr(self, name) for name in _REPLY_FIELDS}
+        data = {name: getattr(self, name) for name in (*_REPLY_FIELDS, *_OPTIONAL_FIELDS)}
         data["state"] = self.state.value
         return data
 
@@ -120,7 +130,8 @@ class RunStatusReply:
                 detail=str(error) if error else "unrecognized_legacy_reply",
             )
         keys = set(data)
-        missing, extra = set(_REPLY_FIELDS) - keys, keys - set(_REPLY_FIELDS)
+        missing = set(_REPLY_FIELDS) - keys
+        extra = keys - set(_REPLY_FIELDS) - set(_OPTIONAL_FIELDS)
         if missing or extra:
             raise RunStatusReplyError(
                 f"run.status reply keys mismatch: missing={sorted(missing)} extra={sorted(extra)}"
@@ -134,6 +145,7 @@ class RunStatusReply:
         reply = cls(
             backend=data["backend"], boot_id=data["boot_id"],
             request_id=data["request_id"], state=state, detail=data["detail"],
+            pid1=data.get("pid1"),
         )
         if reply.backend != backend:
             raise RunStatusReplyError(
@@ -185,14 +197,94 @@ def answer_run_status(backend: str, params: Mapping[str, Any], state_of: RunStat
         state = state_of(session_key, request_id)
         if state is RunState.UNSUPPORTED:
             raise RunStatusReplyError("unsupported is parser-only, never sent")
-        return RunStatusReply(backend, boot_id, request_id, state).to_dict()
+        return RunStatusReply(backend, boot_id, request_id, state, pid1=process_is_pid1()).to_dict()
     except Exception as exc:
         return RunStatusReply(
             backend, boot_id, request_id, RunState.ERROR, f"{type(exc).__name__}: {exc}",
+            pid1=process_is_pid1(),
         ).to_dict()
 
 
+RESTART_PROOF_BACKENDS = frozenset({"claude-code", "codex"})
+"""Backends whose run processes are the bridge process's own children.
+
+Only for these can a bridge restart kill a run: claude-code's CLI and codex's
+per-turn ``codex`` subprocess live in the bridge container's PID namespace.
+openclaw runs execute in the OpenClaw gateway, outside the bridge, so a new
+openclaw-bridge boot proves nothing about them (TASK-1233, Snark step 34).
+Any backend not named here never proves a restart."""
+
+LIVE_STATES = frozenset({RunState.PREFLIGHT, RunState.QUEUED, RunState.RUNNING, RunState.STOPPING})
+"""States in which the answering process holds the request in its registry."""
+
+ABSENT_STATES = frozenset({RunState.NOT_FOUND, RunState.TOMBSTONED})
+
+
+@dataclass(frozen=True)
+class RunSighting:
+    """A durable record that one process held one request (TASK-1233 B1(b)).
+
+    Built from the RUN_ACCEPTED payload (:meth:`from_accepted`) or from a
+    ``run.status`` reply in a :data:`LIVE_STATES` state (:meth:`from_reply`):
+    the request is registered only in the memory of the process that accepted
+    it, so a live answer names the accepting boot. ``pid1`` is ``None`` when
+    the source predates the field: unknown, so never proof.
+    """
+
+    request_id: str
+    backend: str
+    boot_id: str
+    pid1: bool | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("request_id", "backend", "boot_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise RunStatusReplyError(f"sighting {name} must be a non-empty string")
+        if self.pid1 is not None and not isinstance(self.pid1, bool):
+            raise RunStatusReplyError("sighting pid1 must be a bool or null")
+
+    @classmethod
+    def from_accepted(cls, accepted: RunAccepted) -> "RunSighting":
+        return cls(accepted.request_id, accepted.backend, accepted.boot_id, accepted.pid1)
+
+    @classmethod
+    def from_reply(cls, reply: RunStatusReply) -> "RunSighting":
+        if reply.state not in LIVE_STATES:
+            raise RunStatusReplyError(f"a {reply.state.value} reply does not sight the run")
+        return cls(reply.request_id, reply.backend, reply.boot_id, reply.pid1)
+
+
+def proves_restart(sighting: RunSighting, reply: RunStatusReply) -> bool:
+    """TASK-1233 B1(b): does *reply* prove the sighted run's process is gone?
+
+    Only when all of these hold:
+
+    * the backend is in :data:`RESTART_PROOF_BACKENDS` (its runs die with the
+      bridge; openclaw's never do);
+    * the same backend answers for the same request from a different boot and
+      says the request is absent there (``not_found``/``tombstoned``);
+    * BOTH the sighted and the answering process were their container's PID 1.
+      A PID 1 exit kills the container's whole PID namespace, so the sighted
+      boot's children went with it. Without PID 1 on either side (or unknown),
+      a new boot proves nothing about surviving children.
+
+    The sighting must come from a durable record (Snark step 34), never be
+    inferred; that is the caller's contract.
+    """
+    return (
+        sighting.backend.lower() in RESTART_PROOF_BACKENDS
+        and reply.backend.lower() == sighting.backend.lower()
+        and reply.request_id == sighting.request_id
+        and reply.boot_id != sighting.boot_id
+        and reply.state in ABSENT_STATES
+        and sighting.pid1 is True
+        and reply.pid1 is True
+    )
+
+
 __all__ = [
-    "RUN_STATUS_METHOD", "RunState", "RunStateFn", "RunStatusReply", "RunStatusReplyError",
-    "answer_run_status", "queue_run_state", "run_status_target",
+    "ABSENT_STATES", "LIVE_STATES", "RESTART_PROOF_BACKENDS", "RUN_STATUS_METHOD", "RunSighting",
+    "RunState", "RunStateFn", "RunStatusReply", "RunStatusReplyError", "answer_run_status",
+    "proves_restart", "queue_run_state", "run_status_target",
 ]

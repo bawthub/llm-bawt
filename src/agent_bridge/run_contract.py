@@ -4,9 +4,11 @@ Accepted
 --------
 When a bridge admits a ``chat.send`` (``Admission.ACCEPTED``) it publishes a
 ``RUN_ACCEPTED`` run event whose ``raw`` is :meth:`RunAccepted.to_dict`:
-``{request_id, backend, boot_id}``. ``boot_id`` names the bridge process that
-accepted the request; a later ``run.status`` from a different boot proves the
-run died with that process (TASK-1233 B1(b), Vex S2).
+``{request_id, backend, boot_id, pid1}``. ``boot_id`` names the bridge process
+that accepted the request. A later ``run.status`` absence from a different boot
+proves the run died with that process only when both processes were their
+container's PID 1 (TASK-1233 B1(b), Vex S2;
+:func:`agent_bridge.run_status.proves_restart`).
 
 Terminal
 --------
@@ -27,9 +29,20 @@ and not every path publishes one. The sentinel's stream fields are
 * ``false``: teardown ran and something survived, or a cancelled run's work
   could not be shown to have stopped.
 * ``null``: not attempted before publish. Host shutdown publishes before
-  teardown so the stop fits its grace; a send refused or stopped before it
-  ran anything identifiable (tombstoned, a Claude send stopped in preflight)
-  never had a teardown.
+  teardown so the stop fits its grace; a send stopped before it ran anything
+  identifiable (a Claude send stopped in preflight), or refused for a request
+  this process had accepted before, never had a teardown.
+
+``teardown.disconnect`` is free text for logs: ``"ok"``, a failure name, null,
+or ``"refused"`` (:data:`REFUSED`). ``"refused"`` marks a send refused as
+tombstoned by a process that never accepted that request, so nothing for it
+ran there and ``exited`` is ``true``. That rests on two delivery facts (Vex
+r2 N1): a request id's ``chat.send`` is published once per dedupe window
+(``command_publisher.command_dedupe_ttl_s``), and bridges read commands with
+``">"`` only, so a send published before a restart never reaches the new
+process. If either broke, a republished send refused by a new openclaw bridge
+could mark a run the gateway still holds as exited. No consumer reads ``disconnect`` as
+success or failure; only ``exited`` is evidence.
 
 Only ``exited is True`` is evidence that execution stopped
 (:attr:`RunTerminal.proves_exit`). A sentinel without the v1 fields comes from a
@@ -58,7 +71,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .abort_contract import process_boot_id
+from .abort_contract import process_boot_id, process_is_pid1
 
 DONE_FIELD = "done"
 RUN_TERMINAL_KEY_PREFIX = "agent:run_terminal:"
@@ -155,19 +168,30 @@ class TeardownReport:
 UNATTEMPTED = TeardownReport()
 """All-null: no teardown before publish, so nothing is claimed."""
 
+DISCONNECT_REFUSED = "refused"
+REFUSED = TeardownReport(disconnect=DISCONNECT_REFUSED, exited=True)
+"""A send refused at receipt by a process that never accepted that request:
+nothing for it ever ran there (``SessionQueue.refusal_teardown``)."""
+
 
 @dataclass(frozen=True)
 class RunAccepted:
     request_id: str
     backend: str
     boot_id: str
+    pid1: bool | None = None
+    """Was the accepting process its container's PID 1 (Vex S2)? ``None``
+    from a bridge that predates the field: unknown, so never proof."""
 
-    def to_dict(self) -> dict[str, str]:
-        return {"request_id": self.request_id, "backend": self.backend, "boot_id": self.boot_id}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id, "backend": self.backend,
+            "boot_id": self.boot_id, "pid1": self.pid1,
+        }
 
     @classmethod
     def here(cls, request_id: str, backend: str) -> "RunAccepted":
-        return cls(request_id, backend, process_boot_id())
+        return cls(request_id, backend, process_boot_id(), process_is_pid1())
 
     @classmethod
     def from_dict(cls, data: Any) -> "RunAccepted":
@@ -176,7 +200,10 @@ class RunAccepted:
         values = [data.get(name) for name in ("request_id", "backend", "boot_id")]
         if not all(isinstance(v, str) and v.strip() for v in values):
             raise RunContractError("accepted payload needs request_id, backend and boot_id")
-        return cls(*values)
+        pid1 = data.get("pid1")
+        if pid1 is not None and not isinstance(pid1, bool):
+            raise RunContractError("accepted pid1 must be a bool or null")
+        return cls(*values, pid1)
 
 
 @dataclass(frozen=True)
@@ -248,6 +275,6 @@ class RunTerminal:
 __all__ = [
     "DONE_FIELD", "QUIESCE_SWEEP_INTERVAL_MAX_S", "QUIESCE_TIMEOUT_MAX_S",
     "RUN_TERMINAL_KEY_PREFIX", "RUN_TERMINAL_RETENTION_MARGIN_S", "RUN_TERMINAL_RETENTION_S",
-    "UNATTEMPTED", "RunAccepted", "RunContractError", "RunTerminal", "TeardownReport",
+    "DISCONNECT_REFUSED", "REFUSED", "UNATTEMPTED", "RunAccepted", "RunContractError", "RunTerminal", "TeardownReport",
     "run_terminal_key",
 ]

@@ -15,7 +15,9 @@ this helper, :func:`admit_send` owns the run's two contract events. It
 publishes ``RUN_ACCEPTED`` on admission and the run's one ``done`` sentinel
 after ``run`` has finished and cleaned up, so the sentinel's teardown report
 describes a run that has already stopped. ``run`` itself never publishes
-``done``. A refused (tombstoned) send gets a ``done`` with nothing attempted.
+``done``. A refused (tombstoned) send gets a ``done`` whose teardown is
+:meth:`SessionQueue.refusal_teardown`: ``exited=True`` only if this process
+never accepted that request.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .publisher import COMMANDS_STREAM
-from .run_contract import UNATTEMPTED, TeardownReport
+from .run_contract import TeardownReport
 from .session_queue import Admission, RequestPhase, SessionQueue
 
 logger = logging.getLogger(__name__)
@@ -85,7 +87,7 @@ async def admit_send(
     admission = queue.accept(session_key, request_id)
     if admission is Admission.TOMBSTONED:
         logger.info("Refusing stopped send: request_id=%s session=%s", request_id, session_key)
-        publisher.publish_run_done(request_id, teardown=UNATTEMPTED)
+        publisher.publish_run_done(request_id, teardown=queue.refusal_teardown(session_key, request_id))
         await async_redis.xack(COMMANDS_STREAM, consumer_group, msg_id)
         return
     if admission is Admission.DUPLICATE:

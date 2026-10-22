@@ -11,12 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
-from agent_bridge.abort_contract import HOST_SHUTDOWN, process_boot_id
+from agent_bridge.abort_contract import HOST_SHUTDOWN, process_boot_id, process_is_pid1
 from agent_bridge.events import AgentEventKind
 from agent_bridge.publisher import RUN_STREAM_PREFIX, RedisPublisher
 from agent_bridge.run_contract import (
     QUIESCE_SWEEP_INTERVAL_MAX_S,
     QUIESCE_TIMEOUT_MAX_S,
+    REFUSED,
     RUN_TERMINAL_RETENTION_S,
     UNATTEMPTED,
     RunAccepted,
@@ -92,6 +93,19 @@ def test_accepted_round_trips_and_names_this_boot():
     assert RunAccepted.from_dict(accepted.to_dict()) == accepted
     with pytest.raises(RunContractError):
         RunAccepted.from_dict({"request_id": "r1", "backend": "openclaw"})
+
+
+def test_accepted_pid1_is_optional_and_typed():
+    """TASK-1233 Vex S2: pid1 names the accepting process's PID-1 status."""
+    accepted = RunAccepted.here("r1", "openclaw")
+    assert accepted.pid1 is process_is_pid1()
+    assert accepted.to_dict()["pid1"] is accepted.pid1
+    legacy = {"request_id": "r1", "backend": "openclaw", "boot_id": "b"}
+    assert RunAccepted.from_dict(legacy).pid1 is None
+    assert RunAccepted.from_dict({**legacy, "pid1": True}).pid1 is True
+    for bad in ("true", 1, 0):
+        with pytest.raises(RunContractError, match="pid1"):
+            RunAccepted.from_dict({**legacy, "pid1": bad})
 
 
 @pytest.mark.parametrize("reports,expected", [
@@ -184,7 +198,8 @@ def test_accepted_event_names_backend_and_boot():
     request_id, event = publisher.publish_run_event.call_args.args
     assert request_id == "r1" and event.kind == AgentEventKind.RUN_ACCEPTED
     assert event.session_key == "bot:user"
-    assert RunAccepted.from_dict(event.raw) == RunAccepted("r1", "codex", process_boot_id())
+    assert RunAccepted.from_dict(event.raw) == RunAccepted("r1", "codex", process_boot_id(),
+                                                           process_is_pid1())
 
 
 # -- Subscriber ---------------------------------------------------------------
@@ -285,7 +300,7 @@ def test_probe_sees_the_outcome_and_its_failure_is_not_a_reap():
     asyncio.run(run())
 
 
-def test_tombstoned_send_gets_an_unattempted_done_and_no_accepted():
+def test_a_send_tombstoned_before_receipt_gets_a_refused_done_and_no_accepted():
     async def run():
         queue = SessionQueue()
         queue.tombstone("bot:user", "r1")
@@ -293,6 +308,30 @@ def test_tombstoned_send_gets_an_unattempted_done_and_no_accepted():
         task, publisher = _admit(queue, body)
         await task
         body.assert_not_awaited()
+        publisher.publish_run_accepted.assert_not_called()
+        publisher.publish_run_done.assert_called_once_with("r1", teardown=REFUSED)
+    asyncio.run(run())
+
+
+def test_a_redelivered_send_after_a_stop_gets_an_unattempted_done():
+    """admit_send: accept → abort → release → the same send again is refused
+    with no evidence, since this process accepted it before (Snark)."""
+    async def run():
+        queue = SessionQueue()
+        entered = asyncio.Event()
+
+        async def body():
+            entered.set()
+            await asyncio.Event().wait()
+
+        task, _ = _admit(queue, body)
+        await entered.wait()
+        assert queue.stop_request("bot:user", "r1") is True
+        await asyncio.gather(task, return_exceptions=True)
+        again = AsyncMock()
+        task, publisher = _admit(queue, again)
+        await task
+        again.assert_not_awaited()
         publisher.publish_run_accepted.assert_not_called()
         publisher.publish_run_done.assert_called_once_with("r1", teardown=UNATTEMPTED)
     asyncio.run(run())

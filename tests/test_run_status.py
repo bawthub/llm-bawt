@@ -6,12 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_bridge.abort_contract import process_boot_id
+from agent_bridge.abort_contract import process_boot_id, process_is_pid1
+from agent_bridge.run_contract import RunAccepted
 from agent_bridge.run_status import (
+    LIVE_STATES,
+    RESTART_PROOF_BACKENDS,
+    RunSighting,
     RunState,
     RunStatusReply,
     RunStatusReplyError,
     answer_run_status,
+    proves_restart,
     queue_run_state,
 )
 from agent_bridge.session_queue import RequestPhase
@@ -22,7 +27,7 @@ PARAMS = {"sessionKey": "bot:user", "requestId": "r1"}
 def test_answer_is_the_v1_shape_for_this_process():
     reply = answer_run_status("codex", PARAMS, lambda sk, rid: RunState.RUNNING)
     assert reply == {"backend": "codex", "boot_id": process_boot_id(), "request_id": "r1",
-                     "state": "running", "detail": ""}
+                     "state": "running", "detail": "", "pid1": process_is_pid1()}
     assert RunStatusReply.from_wire(reply, backend="codex").state is RunState.RUNNING
 
 
@@ -107,3 +112,74 @@ def test_registered_tombstoned_request_still_reports_its_phase():
 def test_unregistered_request_is_tombstoned_or_not_found():
     assert queue_run_state(_queue(tombstoned=True), "bot:user", "r1") is RunState.TOMBSTONED
     assert queue_run_state(_queue(), "bot:user", "r1") is RunState.NOT_FOUND
+
+
+# -- TASK-1233 Vex S2: pid1 and proves_restart ---------------------------------
+
+def test_error_reply_also_reports_pid1():
+    reply = answer_run_status("codex", {}, lambda sk, rid: RunState.NOT_FOUND)
+    assert reply["state"] == "error" and reply["pid1"] is process_is_pid1()
+
+
+def test_pid1_is_optional_on_the_wire():
+    legacy = {"backend": "codex", "boot_id": "b", "request_id": "r1", "state": "not_found",
+              "detail": ""}
+    assert RunStatusReply.from_wire(legacy, backend="codex").pid1 is None
+    assert RunStatusReply.from_wire({**legacy, "pid1": True}, backend="codex").pid1 is True
+    with pytest.raises(RunStatusReplyError, match="pid1"):
+        RunStatusReply.from_wire({**legacy, "pid1": "yes"}, backend="codex")
+
+
+SIGHTED = RunSighting("r1", "codex", "boot-a", pid1=True)
+
+
+def _reply(**over):
+    fields = dict(backend="codex", boot_id="boot-b", request_id="r1", state=RunState.NOT_FOUND,
+                  pid1=True)
+    fields.update(over)
+    return RunStatusReply(**fields)
+
+
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+def test_a_new_pid1_boot_without_the_request_proves_restart(backend):
+    sighted = RunSighting("r1", backend, "boot-a", pid1=True)
+    assert proves_restart(sighted, _reply(backend=backend))
+    assert proves_restart(sighted, _reply(backend=backend, state=RunState.TOMBSTONED))
+
+
+def test_only_backends_whose_runs_die_with_the_bridge_prove_restart():
+    """Snark step 34: openclaw runs live in the gateway, so a new openclaw-bridge boot proves nothing."""
+    assert RESTART_PROOF_BACKENDS == {"claude-code", "codex"}
+    for backend in ("openclaw", "local-model", "made-up"):
+        sighted = RunSighting("r1", backend, "boot-a", pid1=True)
+        assert not proves_restart(sighted, _reply(backend=backend))
+
+
+@pytest.mark.parametrize("sighting,reply", [
+    (SIGHTED, _reply(boot_id="boot-a")),                      # same process
+    (SIGHTED, _reply(backend="claude-code")),                 # another backend
+    (SIGHTED, _reply(request_id="r2")),                       # another request
+    (SIGHTED, _reply(state=RunState.RUNNING)),                # still there
+    (SIGHTED, _reply(state=RunState.STOPPING)),               # stopping there
+    (SIGHTED, _reply(state=RunState.ERROR)),                  # no answer
+    (SIGHTED, _reply(pid1=False)),                            # answerer not PID 1
+    (SIGHTED, _reply(pid1=None)),                             # answerer unknown
+    (RunSighting("r1", "codex", "boot-a", pid1=False), _reply()),  # sighted not PID 1
+    (RunSighting("r1", "codex", "boot-a"), _reply()),              # sighted unknown
+])
+def test_anything_less_never_proves_restart(sighting, reply):
+    assert not proves_restart(sighting, reply)
+
+
+def test_a_sighting_comes_from_acceptance_or_a_live_reply_only():
+    accepted = RunAccepted("r1", "codex", "boot-a", pid1=True)
+    assert RunSighting.from_accepted(accepted) == SIGHTED
+    for state in LIVE_STATES:
+        assert RunSighting.from_reply(_reply(state=state, boot_id="boot-a")) == SIGHTED
+    for state in set(RunState) - set(LIVE_STATES) - {RunState.UNSUPPORTED}:
+        with pytest.raises(RunStatusReplyError, match="does not sight"):
+            RunSighting.from_reply(_reply(state=state))
+    with pytest.raises(RunStatusReplyError, match="pid1"):
+        RunSighting("r1", "codex", "boot-a", pid1="yes")
+    with pytest.raises(RunStatusReplyError, match="boot_id"):
+        RunSighting("r1", "codex", " ")

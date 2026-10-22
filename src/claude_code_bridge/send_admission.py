@@ -7,7 +7,8 @@ refuses the send here. Nothing a send does (``/new`` reset, seed, the run
 itself) happens outside that registration. Exactly one terminal event is
 published per request:
 
-* refused (tombstoned): the cancelled terminal, published here;
+* refused (tombstoned): the cancelled terminal, published here, with the
+  ``done`` teardown from :meth:`SessionQueue.refusal_teardown`;
 * Stopped during preflight: the cancelled terminal, published here, unless
   preflight already published its own terminal;
 * Stopped or finished after preflight: :meth:`_run_send` owns the terminal,
@@ -29,7 +30,6 @@ from dataclasses import dataclass
 from agent_bridge.abort_contract import aborted_terminal_raw
 from agent_bridge.events import AgentEventKind
 from agent_bridge.publisher import COMMANDS_STREAM
-from agent_bridge.run_contract import UNATTEMPTED
 from agent_bridge.session_queue import Admission
 
 from .run_terminal import RunTerminalLatch
@@ -68,7 +68,9 @@ class ClaudeSendAdmissionMixin:
             await self._publish_request_cancelled(
                 request_id, session_key, 1, msg_id, async_redis,
             )
-            self._publisher.publish_run_done(request_id, teardown=UNATTEMPTED)
+            self._publisher.publish_run_done(
+                request_id, teardown=self._session_queue.refusal_teardown(session_key, request_id),
+            )
             return
         if admission is Admission.DUPLICATE:
             logger.warning(

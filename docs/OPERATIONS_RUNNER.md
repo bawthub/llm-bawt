@@ -124,6 +124,60 @@ action submitted. This bounds a preflight that keeps failing (its error is kept
 in `error_text` meanwhile) and a concurrency slot that never frees. The drain
 deadline after the hold opens is unchanged.
 
+## Quiesce exit evidence: the run.status sweep (TASK-1233 B1 (b)/(c))
+
+A held member drains only on a confirmed `execution_exit` for its pinned
+request (`turn_gates.execution_exit_drains`). Source (a) is the run's own
+terminal, stamped by the app's run subscriber. For members (a) never covers (a
+bridge that restarted, a terminal the app missed), the app's quiesce exit
+sweep (`service/quiesce_exit_sweep.py`) asks each undrained member's own
+backend `run.status`, reads the run's terminal record
+(`agent:run_terminal:<rid>`, `RUN_TERMINAL_RETENTION_S`), and applies
+`ops/quiesce_exit.judge`.
+
+*Pass bound.* Passes start every 10 s and each is cut at a 25 s budget
+(`PASS_BUDGET_SECONDS`: half of `QUIESCE_SWEEP_INTERVAL_MAX_S`, less one probe
+timeout). Probes run 8 at a time with a 5 s timeout, start only while a whole
+probe still fits the budget, and go least-recently-probed first. So up to 32
+held members (`PASS_CAPACITY`: 8 slots × 4 probes, even when every probe
+times out) each get probed at least every 60 s; with n
+more than that, a member waits about ceil(n/32) passes. Members left out or
+cut are logged and lead the next pass. A member whose turn row was rebound to
+another request is skipped (no stamp could land).
+
+- **live** (`preflight`/`queued`/`running`/`stopping`): records a *sighting*
+  in `quiesce_run_sightings` (backend, request_id → latest live boot_id,
+  pid1). No evidence.
+- **(b) restart:** `not_found`/`tombstoned` from a different boot than the
+  sighting, `proves_restart` true: claude-code or codex only (openclaw never
+  proves), and PID 1 on both the sighted and the answering boot. Stamps
+  `exited: true` with the answering boot.
+- **(c) terminal record:** `teardown.exited` true stamps a confirmed exit;
+  `false` stamps `exit_unconfirmed` (never drains; re-probed every pass but
+  stamped once, and a later restart proof replaces it). `exited: null` is no
+  evidence. A send refused at receipt by a bridge process that never accepted
+  that request publishes `teardown: {disconnect: "refused", exited: true}`
+  (`run_contract.REFUSED`): nothing for it ran there. A refused send the
+  process had accepted before (redelivered after a Stop) publishes the
+  all-null teardown.
+- **A tombstone alone is never evidence.** Every bridge unregisters a request
+  in `finally` whatever its teardown did, and openclaw tombstones as its abort
+  starts, so `tombstoned` with no terminal (or an `exited: null` one) writes
+  nothing.
+- Anything else (timeout, error, unsupported, a mismatched request or backend,
+  `not_found` with no terminal and no restart proof) writes nothing.
+
+The stamp goes on the turn row (`stamp_turn_exit`), or, when the turn row is
+gone, the member row (`stamp_member_exit`), in separate transactions. Neither
+replaces a confirmed exit. The sweep is not leader-only: every write is
+conditional and idempotent.
+
+*Limitation.* A sighting is written only by the sweep, so a member whose bridge
+died before its first sweep probe cannot get (b) and waits for the quiesce
+timeout (fail-safe). Sightings idle 24 h are purged hourly. A probe to a
+bridge that is down stays in its command stream and is answered (and ignored)
+when it returns.
+
 ## Quiesce visibility and operator cancel (TASK-1233 (f))
 
 **Job reads.** Every job read (`GET /v1/ops/jobs`, `GET /v1/ops/jobs/{id}`,

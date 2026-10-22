@@ -18,8 +18,8 @@ from agent_bridge.command_publisher import (
     command_dedupe_ttl_s,
 )
 from agent_bridge.events import AgentEventKind
-from agent_bridge.request_tombstones import RequestTombstones
-from agent_bridge.run_contract import UNATTEMPTED, TeardownReport
+from agent_bridge.request_tombstones import AcceptedRequests, RequestTombstones
+from agent_bridge.run_contract import REFUSED, UNATTEMPTED, TeardownReport
 from agent_bridge.session_queue import Admission, RequestPhase, SessionQueue
 from claude_code_bridge.session_ops import ClaudeSessionMixin
 from tests.test_claude_code_send_boundaries import CANCELLED, MODEL, SESSION, _SendHarness
@@ -52,13 +52,14 @@ def _send_xacks(harness, msg_id):
     return [c.args[-1] for c in harness.redis.xack.call_args_list].count(msg_id)
 
 
-def _assert_one_cancelled_terminal(harness, request_id):
+def _assert_one_cancelled_terminal(harness, request_id, teardown=UNATTEMPTED):
     terminal, = harness.terminal(request_id)
     assert terminal.raw == CANCELLED
     assert terminal.trigger_message_id == f"message-{request_id}"
-    # TASK-1233: refused or stopped before the SDK ran, so no teardown was
-    # attempted (a /new seed's CLI may have been in flight).
-    harness._publisher.publish_run_done.assert_called_once_with(request_id, teardown=UNATTEMPTED)
+    # TASK-1233: stopped before the SDK ran, so no teardown was attempted (a
+    # /new seed's CLI may have been in flight); refused before this process
+    # ever accepted it, so nothing ran (REFUSED).
+    harness._publisher.publish_run_done.assert_called_once_with(request_id, teardown=teardown)
     assert _send_xacks(harness, f"send-{request_id}") == 1
     assert harness._session_queue.request_phase(SESSION, request_id) is None
     assert (SESSION, request_id) not in harness._session_queue._request_tasks
@@ -71,7 +72,7 @@ def test_claude_send_tombstoned_before_receipt_is_refused_without_side_effects(k
         harness = _claude_harness()
         await harness.abort("r1")
         await harness._handle_send(_claude_fields("r1", **CLAUDE_SENDS[kind]), "send-r1", harness.redis)
-        _assert_one_cancelled_terminal(harness, "r1")
+        _assert_one_cancelled_terminal(harness, "r1", REFUSED)
         harness._preprocess_new_command.assert_not_awaited()
         harness._publish_session_reset_unified.assert_not_called()
         harness._run_send.assert_not_awaited()
@@ -85,8 +86,32 @@ def test_claude_cancel_rpc_also_tombstones(method):
         await harness.abort("r1", method=method)
         assert harness._session_queue.is_tombstoned(SESSION, "r1")
         await harness._handle_send(_claude_fields("r1"), "send-r1", harness.redis)
-        _assert_one_cancelled_terminal(harness, "r1")
+        _assert_one_cancelled_terminal(harness, "r1", REFUSED)
         harness._run_send.assert_not_awaited()
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
+def test_claude_redelivered_send_after_a_stop_proves_nothing():
+    """accept → abort → release → the same send again: refused, but this
+    process ran it before, so the refusal is no exit evidence (Snark)."""
+    async def run():
+        harness = _claude_harness()
+        entered = asyncio.Event()
+
+        async def run_send(*args, **kw):
+            entered.set()
+            await asyncio.Event().wait()
+
+        harness._run_send = AsyncMock(side_effect=run_send)
+        task = asyncio.create_task(harness._handle_send(_claude_fields("r1"), "send-r1", harness.redis))
+        await entered.wait()
+        await harness.abort("r1")
+        await asyncio.gather(task, return_exceptions=True)
+        assert (SESSION, "r1") not in harness._session_queue._request_tasks
+        harness._publisher.publish_run_done.reset_mock()
+        await harness._handle_send(_claude_fields("r1"), "send-r1b", harness.redis)
+        harness._publisher.publish_run_done.assert_called_once_with("r1", teardown=UNATTEMPTED)
+        assert harness._run_send.await_count == 1
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
@@ -232,7 +257,7 @@ def test_other_bridge_tombstoned_send_is_refused_without_side_effects(kind, mess
         redis = SimpleNamespace(xack=AsyncMock())
         assert (await abort(bridge, "r1", redis))["state"] == "tombstoned"
         await send(bridge, "r1", redis, message=message)
-        bridge._publisher.publish_run_done.assert_called_once_with("r1", teardown=UNATTEMPTED)
+        bridge._publisher.publish_run_done.assert_called_once_with("r1", teardown=REFUSED)
         bridge._publisher.publish_run_accepted.assert_not_called()
         assert _xacks(redis, "r1") == 1
         bridge._publish_session_reset_unified.assert_not_called()
@@ -303,6 +328,8 @@ def test_openclaw_failed_abort_of_a_running_request_still_tombstones(unavailable
         await send(bridge, "active", redis, message="hello again")
         assert not ws.started.is_set()
         assert bridge._publisher.publish_run_done.call_count == run_dones + 1
+        # This process accepted "active" before: the refusal proves nothing.
+        assert bridge._publisher.publish_run_done.call_args.kwargs == {"teardown": UNATTEMPTED}
         assert ("bot:user", "active") not in bridge._session_queue._request_tasks
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
@@ -484,6 +511,102 @@ def test_tombstone_cap_evicts_oldest_and_logs(caplog):
     assert store.contains("s", "b") and store.contains("s", "c")
     assert len(store) == 2
     assert "evicted before its TTL" in caplog.text and "request=a" in caplog.text
+
+
+def _accepted_after_a_run(queue, session_key, request_id):
+    async def owner():
+        assert queue.accept(session_key, request_id) is Admission.ACCEPTED
+        queue.release(session_key, request_id)
+    return owner()
+
+
+def test_refusal_is_evidence_only_for_a_request_never_accepted():
+    async def run():
+        queue = SessionQueue()
+        queue.tombstone("s", "never")
+        assert queue.accept("s", "never") is Admission.TOMBSTONED
+        assert queue.refusal_teardown("s", "never") == REFUSED == TeardownReport("refused", None, True)
+        await asyncio.create_task(_accepted_after_a_run(queue, "s", "ran"))
+        queue.tombstone("s", "ran")
+        assert queue.accept("s", "ran") is Admission.TOMBSTONED
+        assert queue.refusal_teardown("s", "ran") == UNATTEMPTED
+        # Same request id in another session was never accepted.
+        assert queue.refusal_teardown("other", "ran") == REFUSED
+    asyncio.run(run())
+
+
+def test_a_send_registered_by_active_alone_counts_as_accepted():
+    async def run():
+        queue = SessionQueue()
+        await asyncio.create_task(holder_for(queue, "r"))
+        assert queue.refusal_teardown("s", "r") == UNATTEMPTED
+    asyncio.run(run())
+
+
+def test_accepted_outlives_the_tombstone_of_a_long_run():
+    """A Stop renews the accepted entry, so it never lapses before the tombstone."""
+    clock = _Clock()
+    store = AcceptedRequests(clock=clock)
+    queue = SessionQueue()
+    queue._accepted = store
+    queue._tombstones = RequestTombstones(clock=clock)
+
+    async def run():
+        assert queue.accept("s", "r") is Admission.ACCEPTED
+        clock.now += COMMAND_DEDUPE_TTL_S + 10  # a run longer than the TTL
+        queue.tombstone("s", "r")
+        queue.release("s", "r")
+        clock.now += COMMAND_DEDUPE_TTL_S - 1
+        assert queue.is_tombstoned("s", "r")
+        assert queue.refusal_teardown("s", "r") == UNATTEMPTED
+    asyncio.run(run())
+
+
+def _clocked_queue():
+    clock = _Clock()
+    queue = SessionQueue()
+    queue._accepted = AcceptedRequests(clock=clock)
+    queue._tombstones = RequestTombstones(clock=clock)
+    return clock, queue
+
+
+def test_release_renews_accepted_for_a_run_longer_than_the_ttl():
+    clock, queue = _clocked_queue()
+
+    async def run():
+        assert queue.accept("s", "r") is Admission.ACCEPTED
+        clock.now += COMMAND_DEDUPE_TTL_S + 10
+        queue.release("s", "r")
+        clock.now += 10
+        queue.tombstone("s", "r")  # a Stop after the run ended
+        assert queue.refusal_teardown("s", "r") == UNATTEMPTED
+    asyncio.run(run())
+
+
+def test_a_late_stop_renews_accepted_to_the_tombstone_ttl():
+    clock, queue = _clocked_queue()
+
+    async def run():
+        await asyncio.create_task(_accepted_after_a_run(queue, "s", "r"))
+        clock.now += COMMAND_DEDUPE_TTL_S - 1
+        queue.tombstone("s", "r")
+        clock.now += 2  # past the release's TTL, inside the tombstone's
+        assert queue.is_tombstoned("s", "r")
+        assert queue.refusal_teardown("s", "r") == UNATTEMPTED
+    asyncio.run(run())
+
+
+def test_accepted_eviction_fails_safe_until_its_ttl():
+    clock = _Clock()
+    store = AcceptedRequests(cap=1, clock=clock)
+    assert store.never_accepted("s", "x")
+    store.add("s", "a")
+    store.add("s", "b")  # evicts "a" before its TTL
+    assert not store.contains("s", "a")
+    assert not store.never_accepted("s", "a")
+    assert not store.never_accepted("s", "x")  # nothing is provable now
+    clock.now += COMMAND_DEDUPE_TTL_S
+    assert store.never_accepted("s", "x")
 
 
 def test_tombstone_cap_must_be_positive():

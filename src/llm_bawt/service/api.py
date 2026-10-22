@@ -328,6 +328,10 @@ async def lifespan(app):
     # dispatcher, so each is announced (QUEUED) at once.
     from .ops_receipt_outbox import run_ops_receipt_outbox
     service._ops_receipt_task = asyncio.create_task(run_ops_receipt_outbox(service))
+    # TASK-1233 B1 (b)/(c): run.status exit evidence for held quiesce members;
+    # needs the shared Redis transport started above.
+    from .quiesce_exit_sweep import run_quiesce_exit_sweep
+    service._quiesce_exit_task = asyncio.create_task(run_quiesce_exit_sweep(service))
 
     # Log startup with rich formatting
     log.startup(
@@ -394,6 +398,7 @@ async def lifespan(app):
             "_tool_persist_task",
             "_mcp_continuation_task",
             "_ops_receipt_task",
+            "_quiesce_exit_task",
             "_claude_refresh_task",
             "_codex_refresh_task",
         ):

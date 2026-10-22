@@ -17,7 +17,7 @@ from redis.asyncio import BlockingConnectionPool
 
 from .command_publisher import CommandPublisherMixin
 from .events import AgentEvent, AgentEventKind
-from .run_contract import DONE_FIELD, RunContractError, RunTerminal
+from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
 from .publisher import (
     COMMANDS_STREAM,
     EVENTS_STREAM_PREFIX,
@@ -344,6 +344,19 @@ class RedisSubscriber(CommandPublisherMixin):
         recipients = await self._pub_redis.publish("approval:policies:reload", "1")
         logger.info("Published approval:policies:reload recipients=%s", recipients)
         return recipients
+
+    async def read_run_terminal(self, request_id: str) -> RunTerminal | None:
+        """The run's compact terminal record, or None (TASK-1233 B1(c)).
+
+        ``None`` when no record exists (still running, never accepted, or past
+        ``RUN_TERMINAL_RETENTION_S``) or when it is a pre-contract bare
+        sentinel. A malformed v1 record raises :class:`RunContractError`
+        (the one parser, ``RunTerminal.from_fields``), never "no evidence".
+        """
+        fields = await self._pub_redis.hgetall(run_terminal_key(request_id))
+        if not fields:
+            return None
+        return RunTerminal.from_fields(fields)
 
     async def send_rpc(
         self,
