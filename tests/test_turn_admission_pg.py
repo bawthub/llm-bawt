@@ -675,3 +675,81 @@ def test_claim_fence_serializes_a_concurrent_reclaim(pg_approvals):
     worker.join(5)
     assert not worker.is_alive() and reclaimed
     assert reclaimed[0].continuation_claim_token != row.continuation_claim_token
+
+
+def _claimed_delivery(store, bot, sender, *, metadata=None):
+    from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+
+    deliveries = InterBotDeliveryStore(store.config)
+    record, _ = deliveries.enqueue(
+        sender_bot_id=sender, target_bot_id=bot, message="callback",
+        payload={"messages": [{"role": "user", "content": "callback"}],
+                 "bot_id": bot, "user": "nick", "stream": True},
+        metadata=metadata,
+    )
+    claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=False)
+    assert claimed and claimed.id == record.id and claimed.delivery_mode == "turn"
+    return deliveries, claimed
+
+
+def _delivery_metadata(deliveries, delivery_id):
+    with deliveries.engine.connect() as conn:
+        return conn.execute(sa_text(
+            "SELECT status, metadata_json FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": delivery_id}).one()
+
+
+def _drop_sender(deliveries, sender):
+    with deliveries.engine.begin() as conn:
+        conn.execute(sa_text("DELETE FROM inter_bot_deliveries WHERE sender_bot_id=:s"), {"s": sender})
+
+
+@pytest.mark.integration
+def test_requeue_metadata_merge_lands_with_the_queued_transition(pg_turns):
+    """TASK-1251: the merge is shallow, keeps other keys, and rides the requeue UPDATE."""
+    store, bot = pg_turns
+    sender = f"test-admission-sender-{uuid.uuid4().hex}"
+    deliveries, claimed = _claimed_delivery(store, bot, sender, metadata={"kept": "yes"})
+    try:
+        assert deliveries.requeue(claimed.id, claimed.claim_token, "rejected", delay_seconds=0,
+                                  metadata_merge={"steer_generation": 1})
+        status, metadata = _delivery_metadata(deliveries, claimed.id)
+        assert status == "QUEUED"
+        assert metadata["steer_generation"] == 1 and metadata["kept"] == "yes"
+    finally:
+        _drop_sender(deliveries, sender)
+
+
+@pytest.mark.integration
+def test_requeue_without_metadata_merge_leaves_metadata_untouched(pg_turns):
+    store, bot = pg_turns
+    sender = f"test-admission-sender-{uuid.uuid4().hex}"
+    deliveries, claimed = _claimed_delivery(store, bot, sender, metadata={"kept": "yes"})
+    try:
+        _, before = _delivery_metadata(deliveries, claimed.id)
+        assert deliveries.requeue(claimed.id, claimed.claim_token, "busy", delay_seconds=0)
+        status, after = _delivery_metadata(deliveries, claimed.id)
+        assert status == "QUEUED" and after == before
+    finally:
+        _drop_sender(deliveries, sender)
+
+
+@pytest.mark.integration
+def test_requeue_metadata_merge_is_ignored_when_stop_cancels(pg_turns):
+    store, bot = pg_turns
+    sender = f"test-admission-sender-{uuid.uuid4().hex}"
+    deliveries, claimed = _claimed_delivery(store, bot, sender, metadata={"kept": "yes"})
+    try:
+        _, before = _delivery_metadata(deliveries, claimed.id)
+        with store.engine.begin() as conn:
+            conn.execute(sa_text("UPDATE turn_logs SET request_json=:rj WHERE id=:id"), {
+                "id": claimed.turn_id,
+                "rj": json.dumps({"abort_request": {"source": "chat_stop"}}),
+            })
+        cancelled = deliveries.requeue(claimed.id, claimed.claim_token, "rejected",
+                                       delay_seconds=0, metadata_merge={"steer_generation": 1})
+        assert cancelled and cancelled.status == "CANCELLED"
+        status, after = _delivery_metadata(deliveries, claimed.id)
+        assert status == "CANCELLED" and after == before
+    finally:
+        _drop_sender(deliveries, sender)

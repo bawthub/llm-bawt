@@ -14,7 +14,7 @@ import logging
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sqlalchemy import text as sa_text
@@ -569,7 +569,15 @@ class InterBotDeliveryStore:
         clear_delivery_mode: bool = False,
         reject_steer_target: bool = False,
         refund_attempt: bool = False,
+        metadata_merge: Mapping[str, Any] | None = None,
     ) -> DeliveryRecord | None:
+        """Return a claimed delivery to QUEUED, fenced by its claim token.
+
+        ``metadata_merge`` is shallow-merged (jsonb ``||``) into metadata_json
+        in the same UPDATE as the QUEUED transition, so the caller's state
+        advances atomically with the requeue (TASK-1251). The explicit-Stop
+        CANCELLED branch never applies it.
+        """
         if self.engine is None or not claim_token:
             return None
         values = {
@@ -577,6 +585,7 @@ class InterBotDeliveryStore:
             "claim_token": claim_token,
             "delay": max(0.0, float(delay_seconds)),
             "error": error[:4000],
+            "metadata_merge": json.dumps(dict(metadata_merge or {})),
         }
         with self.engine.begin() as conn:
             if clear_delivery_mode and reject_steer_target:
@@ -602,12 +611,16 @@ class InterBotDeliveryStore:
                 if reject_steer_target else ""
             )
             attempt_refund = ", attempt_count=GREATEST(attempt_count - 1, 0)" if refund_attempt else ""
+            metadata = (
+                ", metadata_json=metadata_json || CAST(:metadata_merge AS jsonb)"
+                if metadata_merge else ""
+            )
             row = conn.execute(sa_text(f"""
                 UPDATE inter_bot_deliveries SET
                     status='QUEUED', available_at=now() + (:delay * interval '1 second'),
                     next_retry_at=now() + (:delay * interval '1 second'),
                     lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
-                    last_error=:error, updated_at=now(){mode_reset}{steer_rejected}{attempt_refund}
+                    last_error=:error, updated_at=now(){mode_reset}{steer_rejected}{attempt_refund}{metadata}
                 WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
                 RETURNING *
             """), values).mappings().first()
