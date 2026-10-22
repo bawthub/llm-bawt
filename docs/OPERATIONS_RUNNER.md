@@ -137,13 +137,31 @@ backend `run.status`, reads the run's terminal record
 
 *Pass bound.* Passes start every 10 s and each is cut at a 25 s budget
 (`PASS_BUDGET_SECONDS`: half of `QUIESCE_SWEEP_INTERVAL_MAX_S`, less one probe
-timeout). Probes run 8 at a time with a 5 s timeout, start only while a whole
-probe still fits the budget, and go least-recently-probed first. So up to 32
-held members (`PASS_CAPACITY`: 8 slots × 4 probes, even when every probe
-times out) each get probed at least every 60 s; with n
-more than that, a member waits about ceil(n/32) passes. Members left out or
-cut are logged and lead the next pass. A member whose turn row was rebound to
-another request is skipped (no stamp could land).
+timeout). Probes run 8 at a time and go least-recently-probed first. One 5 s
+deadline (`PROBE_TIMEOUT_SECONDS`) covers a member's whole network phase in its
+slot: publishing `run.status`, the reply, and the terminal-record read. A
+member that misses it is ambiguous (no abort, no write). A probe starts only
+while that deadline plus a 1 s write reserve (`WRITE_RESERVE_SECONDS`) still
+fits the budget. So up to 32 held members (`PASS_CAPACITY`: 8 slots × 4
+probes, even when every probe times out) each get probed at least every 60 s;
+with n more than that, a member waits about ceil(n/32) passes. Members left out
+(`deferred`), cut in their network phase at the budget (`cut`) or whose write
+missed its deadline (`write_deadline`) are logged and lead the next pass. A
+member whose turn row was rebound to another request is skipped (no stamp
+could land).
+
+*Write deadline.* A member that reaches its write is never cancelled:
+cancelling the coroutine would not stop the write thread, which could commit
+after the pass. The pass waits for it instead, through any number of cancels of the pass itself, and every
+write transaction is bounded by the pass deadline: before each statement,
+PostgreSQL `lock_timeout` and `statement_timeout` are reset to the time left
+(transaction-local `set_config`), so waits across statements share the one
+deadline, and a transaction still open at the deadline rolls back instead of
+committing. A transaction that would start after it, or a lock wait or
+statement cancelled by it, raises `WriteDeadline` and writes nothing. So no
+write of a pass lands after the pass returns. (The COMMIT itself is not
+bounded, and waiting for a pool connection can make a pass late, never a
+write late.)
 
 - **live** (`preflight`/`queued`/`running`/`stopping`): records a *sighting*
   in `quiesce_run_sightings` (backend, request_id → latest live boot_id,
@@ -170,7 +188,9 @@ another request is skipped (no stamp could land).
 - **Abort:** `not_found` with no holder record (no accept, no sighting) and no
   terminal may be a send still on the command stream. The sweep sends one
   backend-matched `chat.abort` per member and answering boot, outside the
-  pass (no probe slot, no budget, `ABORT_RPC_TIMEOUT_S`). The abort writes
+  pass (no probe slot, no budget). Each abort ends within
+  `ABORT_RPC_TIMEOUT_S`, publication included, and the sweep cancels the abort
+  of a member no longer held at its next pass. The abort writes
   nothing itself: a send read after it is refused as tombstoned (`REFUSED`,
   so (c) next pass), and a send read before it is cancelled and publishes its
   own terminal (source (a)). A send that never reaches that bridge leaves the

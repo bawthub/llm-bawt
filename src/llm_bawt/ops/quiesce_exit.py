@@ -45,14 +45,27 @@ Every write is its own short transaction. Nothing here locks a member row and
 then a turn row: a turn stamp (``stamp_turn_exit``, turn row only) and a
 member stamp (``stamp_member_exit``, member row only) are separate
 transactions. PostgreSQL only.
+
+**Write deadline.** The sweep passes its pass deadline (``time.monotonic``)
+to :func:`record_sighting` and :func:`stamp`. A transaction doesn't start
+once the deadline has passed, every statement in it runs with
+``lock_timeout`` and ``statement_timeout`` reset to the time left (so waits
+across statements share the one deadline), and it rolls back instead of
+committing once the deadline has passed. A write blocked on a lock gives up at
+the deadline (:class:`WriteDeadline`, nothing written) and never commits after
+the pass has returned (Loopy r1 A2, r2). The COMMIT itself is not bounded.
 """
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError, StatementError
 
 from agent_bridge.run_contract import RunTerminal
 from agent_bridge.run_status import (ABSENT_STATES, LIVE_STATES, RunSighting, RunState, RunStatusReply,
@@ -227,9 +240,59 @@ def undrained_members(engine) -> list[SweepMember]:
     return [_member(row, undrained[int(row["member_id"])]) for row in rows if int(row["member_id"]) in undrained]
 
 
-def record_sighting(engine, sighting: RunSighting) -> None:
-    """Keep the latest live boot of a request (its own transaction)."""
-    with engine.begin() as conn:
+class WriteDeadline(Exception):
+    """The write's deadline passed before or while it ran; its transaction wrote nothing."""
+
+
+_DEADLINE_SQLSTATES = frozenset({"55P03", "57014"})  # lock_not_available, query_canceled
+
+
+@contextmanager
+def _transaction(engine, deadline: float | None) -> Iterator[Any]:
+    """``engine.begin()``; with a *deadline*, every statement in it ends by then or raises WriteDeadline."""
+    if deadline is None:
+        with engine.begin() as conn:
+            yield conn
+        return
+    if time.monotonic() >= deadline:
+        raise WriteDeadline("write deadline passed before the transaction began")
+
+    def bound(conn, cursor, statement, parameters, context, executemany):
+        # Every statement gets only the time left, so waits across statements
+        # share the one absolute deadline (Loopy r2: per-statement timeouts add up).
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise WriteDeadline("write deadline passed before a statement")
+        cursor.execute("SELECT set_config('lock_timeout', %(ms)s, true), set_config('statement_timeout', %(ms)s, true)",
+                       {"ms": f"{remaining_ms}ms"})
+
+    try:
+        with engine.begin() as conn:
+            # The pool checkout can itself wait: recheck once it is done.
+            if time.monotonic() >= deadline:
+                raise WriteDeadline("write deadline passed while waiting for a connection")
+            postgres = conn.dialect.name == "postgresql"
+            if postgres:
+                event.listen(conn, "before_cursor_execute", bound)
+            try:
+                yield conn
+                if time.monotonic() >= deadline:  # leaving the block commits: roll back instead
+                    raise WriteDeadline("write deadline passed before commit")
+            finally:
+                if postgres:
+                    event.remove(conn, "before_cursor_execute", bound)
+    except StatementError as exc:
+        if isinstance(exc.orig, WriteDeadline):
+            raise exc.orig from None
+        code = getattr(exc.orig, "pgcode", None) or getattr(exc.orig, "sqlstate", None)
+        if isinstance(exc, DBAPIError) and code in _DEADLINE_SQLSTATES:
+            raise WriteDeadline(f"write cancelled at its deadline ({code})") from exc
+        raise
+
+
+def record_sighting(engine, sighting: RunSighting, *, deadline: float | None = None) -> None:
+    """Keep the latest live boot of a request (its own transaction, bounded by *deadline*)."""
+    with _transaction(engine, deadline) as conn:
         conn.execute(text(
             "INSERT INTO quiesce_run_sightings (backend, request_id, boot_id, pid1)"
             " VALUES (:backend, :request, :boot, :pid1)"
@@ -239,18 +302,19 @@ def record_sighting(engine, sighting: RunSighting) -> None:
             "pid1": sighting.pid1})
 
 
-def stamp(engine, member: SweepMember, record: Mapping[str, Any]) -> bool:
+def stamp(engine, member: SweepMember, record: Mapping[str, Any], *, deadline: float | None = None) -> bool:
     """Stamp ``record`` on the turn row, else (row gone) on the member row.
 
     Two transactions, never one: ``stamp_turn_exit`` locks only the turn row,
     ``stamp_member_exit`` only the member row (and writes only when the turn
-    row is gone), so a turn deleted between them is still covered.
+    row is gone), so a turn deleted between them is still covered. Each is
+    bounded by *deadline* (:class:`WriteDeadline`).
     """
     if member.turn_present:
-        with engine.begin() as conn:
+        with _transaction(engine, deadline) as conn:
             if stamp_turn_exit(conn, member.turn_id, record):
                 return True
-    with engine.begin() as conn:
+    with _transaction(engine, deadline) as conn:
         return stamp_member_exit(conn, member.member_id, record)
 
 
@@ -262,6 +326,6 @@ def purge_sightings(engine, *, retention_s: int = SIGHTING_RETENTION_S) -> int:
 
 
 __all__ = [
-    "Judgement", "SIGHTING_RETENTION_S", "SweepMember", "ensure_sighting_schema", "judge", "purge_sightings",
-    "record_sighting", "stamp", "undrained_members",
+    "Judgement", "SIGHTING_RETENTION_S", "SweepMember", "WriteDeadline", "ensure_sighting_schema", "judge",
+    "purge_sightings", "record_sighting", "stamp", "undrained_members",
 ]

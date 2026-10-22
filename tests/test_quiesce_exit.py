@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,7 +13,8 @@ from agent_bridge.run_contract import (QUIESCE_SWEEP_INTERVAL_MAX_S, RunContract
                                        run_terminal_key)
 from agent_bridge.run_status import RunSighting, RunState, RunStatusReply
 from agent_bridge.subscriber import RedisSubscriber
-from llm_bawt.ops.quiesce_exit import SweepMember, judge
+from llm_bawt.ops import quiesce_exit
+from llm_bawt.ops.quiesce_exit import SweepMember, WriteDeadline, judge
 from llm_bawt.service import quiesce_exit_sweep
 from llm_bawt.service.quiesce_exit_sweep import QuiesceExitSweep
 from llm_bawt.service.recovery.orphan_turns import BridgeRunProbe
@@ -195,6 +198,7 @@ def test_a_pass_where_every_probe_times_out_covers_exactly_its_capacity(monkeypa
     """Vex r2 R1: the real run_once at 1/100 scale, every probe taking the full timeout."""
     timeout = quiesce_exit_sweep.PROBE_TIMEOUT_SECONDS / 100
     budget = quiesce_exit_sweep.PASS_BUDGET_SECONDS / 100
+    reserve = quiesce_exit_sweep.WRITE_RESERVE_SECONDS / 100
 
     class TimesOut:
         async def status(self, **kwargs):
@@ -204,8 +208,8 @@ def test_a_pass_where_every_probe_times_out_covers_exactly_its_capacity(monkeypa
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(60))
     monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", timeout)
     sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=TimesOut())
-    sweep.budget_seconds = budget
-    capacity = quiesce_exit_sweep.pass_capacity(budget, timeout, quiesce_exit_sweep.CONCURRENCY)
+    sweep.budget_seconds, sweep.write_reserve_seconds = budget, reserve
+    capacity = quiesce_exit_sweep.pass_capacity(budget, timeout, quiesce_exit_sweep.CONCURRENCY, reserve)
     assert capacity == quiesce_exit_sweep.PASS_CAPACITY
     assert asyncio.run(sweep.run_once()) == {"ambiguous": capacity, "deferred": 60 - capacity}
 
@@ -227,7 +231,7 @@ def test_a_pass_stops_at_its_budget_and_the_left_out_member_leads_the_next(monke
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: list(members))
     monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.2)
     sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=Slow(), concurrency=1)
-    sweep.budget_seconds = 0.5  # probes may start until 0.3s: two of three fit
+    sweep.budget_seconds, sweep.write_reserve_seconds = 0.5, 0.0  # probes may start until 0.3s: two of three fit
 
     async def two_passes():
         return await sweep.run_once(), await sweep.run_once()
@@ -239,7 +243,7 @@ def test_a_pass_stops_at_its_budget_and_the_left_out_member_leads_the_next(monke
     assert asked == ["req-1", "req-2", "req-3", "req-1"]
 
 
-def test_a_probe_still_running_at_the_budget_is_cut(monkeypatch):
+def test_a_hung_probe_ends_at_the_member_deadline_and_is_ambiguous(monkeypatch):
     class Hung:
         async def status(self, **kwargs):
             await asyncio.sleep(10)
@@ -247,8 +251,156 @@ def test_a_probe_still_running_at_the_budget_is_cut(monkeypatch):
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(1))
     monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.05)
     sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=Hung())
-    sweep.budget_seconds = 0.1  # starts by 0.05s, still running at 0.1s
+    sweep.budget_seconds, sweep.write_reserve_seconds = 1.0, 0.0
+    started = time.monotonic()
+    assert asyncio.run(sweep.run_once()) == {"ambiguous": 1}
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_member_still_probing_at_the_budget_is_cut(monkeypatch):
+    """Only scheduling drift gets a member here; it is cancelled and writes nothing."""
+    class Hung:
+        async def status(self, **kwargs):
+            await asyncio.sleep(10)
+
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(1))
+    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.5)
+    sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=Hung())
+    sweep.budget_seconds, sweep.write_reserve_seconds = 0.1, -1.0  # starts anyway, still probing at 0.1s
     assert asyncio.run(sweep.run_once()) == {"cut": 1}
+
+
+def test_the_terminal_read_is_inside_the_member_deadline(monkeypatch):
+    """Loopy r1 A1: status answers in time, the terminal read doesn't; the slot is still freed at T."""
+    asked = []
+
+    class Probe:
+        async def status(self, **kwargs):
+            asked.append(kwargs["request_id"])
+            await asyncio.sleep(0.04)
+            return RunStatusReply("claude-code", "boot-a", kwargs["request_id"], RunState.NOT_FOUND), None
+
+    class Subscriber:
+        async def read_run_terminal(self, request_id):
+            await asyncio.sleep(0.12)
+            return None
+
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(40))
+    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.05)
+    sweep = QuiesceExitSweep(None, subscriber=lambda: Subscriber(), probe=Probe())
+    sweep.budget_seconds, sweep.write_reserve_seconds = 0.25, 0.01
+    capacity = quiesce_exit_sweep.pass_capacity(0.25, 0.05, quiesce_exit_sweep.CONCURRENCY, 0.01)
+    counts = asyncio.run(sweep.run_once())
+    assert capacity == 32 and len(asked) == capacity
+    # not_found without its terminal read is no judgement: no abort, no evidence.
+    assert counts == {"ambiguous": capacity, "deferred": 40 - capacity} and sweep._aborts == {}
+
+
+async def _bounded(awaitable, seconds=2.0):
+    """A stalled-publication test fails, not hangs, when the bound under test is missing."""
+    try:
+        return await asyncio.wait_for(awaitable, seconds)
+    except TimeoutError:
+        pytest.fail(f"no bound: still waiting after {seconds}s")
+
+
+def test_status_publication_is_inside_the_probe_timeout():
+    """Loopy r1 A1/B1: send_rpc's own timeout starts after XADD; the probe's must not."""
+    class Redis:
+        async def xadd(self, *args, **kwargs):
+            await asyncio.Event().wait()
+
+    sub = RedisSubscriber.__new__(RedisSubscriber)
+    sub._pub_redis = Redis()
+    started = time.monotonic()
+    reply, result = asyncio.run(_bounded(BridgeRunProbe(lambda: sub, timeout_seconds=0.05).status(
+        backend="claude-code", session_key="s", request_id="req-1")))
+    assert reply is None and result.state == "timeout" and time.monotonic() - started < 0.5
+
+
+def test_a_member_writing_at_the_budget_is_waited_for_never_cut(monkeypatch):
+    """Loopy r1 A2: cancelling to_thread doesn't stop the write, so the pass owns it to the end."""
+    entered, release = threading.Event(), threading.Event()
+    writes = []
+
+    def blocked_stamp(engine, member, record, *, deadline):
+        entered.set()
+        assert release.wait(2)
+        writes.append(record)
+        return True
+
+    monkeypatch.setattr(quiesce_exit_sweep, "stamp", blocked_stamp)
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: [_member()])
+    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.02)
+    sweep = QuiesceExitSweep(None, subscriber=lambda: _Rpc(_wire("not_found")))
+    sweep.budget_seconds, sweep.write_reserve_seconds = 0.08, 0.0
+
+    async def run():
+        task = asyncio.create_task(sweep.run_once())
+        await asyncio.to_thread(entered.wait, 1)
+        await asyncio.sleep(0.15)  # well past the budget
+        assert not task.done(), "the pass returned while its write was still running"
+        release.set()
+        return await task
+
+    try:
+        assert asyncio.run(run()) == {"restart": 1}
+    finally:
+        release.set()
+    assert len(writes) == 1
+
+
+def test_a_write_past_its_deadline_writes_nothing(monkeypatch):
+    def late(engine, member, record, *, deadline):
+        raise WriteDeadline("passed")
+
+    monkeypatch.setattr(quiesce_exit_sweep, "stamp", late)
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: [_member()])
+    sweep = QuiesceExitSweep(None, subscriber=lambda: _Rpc(_wire("not_found")))
+    assert asyncio.run(sweep.run_once()) == {"write_deadline": 1}
+    with pytest.raises(WriteDeadline):  # a transaction never begins after its deadline
+        with quiesce_exit._transaction(None, time.monotonic() - 1):
+            pass
+
+
+def test_a_connection_checked_out_past_the_deadline_runs_nothing():
+    """The time left is measured after the pool checkout, which can itself wait."""
+    from contextlib import contextmanager
+
+    executed = []
+
+    class Engine:
+        @contextmanager
+        def begin(self):
+            time.sleep(0.05)  # the checkout outlasts the deadline
+            yield SimpleNamespace(dialect=SimpleNamespace(name="postgresql"),
+                                  execute=lambda *args: executed.append(args))
+
+    with pytest.raises(WriteDeadline):
+        with quiesce_exit._transaction(Engine(), time.monotonic() + 0.02):
+            executed.append("body")
+    assert executed == []
+
+
+def test_a_transaction_past_its_deadline_rolls_back_instead_of_committing():
+    from contextlib import contextmanager
+
+    outcome = []
+
+    class Engine:
+        @contextmanager
+        def begin(self):
+            try:
+                yield SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+            except BaseException:
+                outcome.append("rollback")
+                raise
+            outcome.append("commit")
+
+    with pytest.raises(WriteDeadline):
+        with quiesce_exit._transaction(Engine(), time.monotonic() + 0.02):
+            time.sleep(0.05)  # the body's statements outlast the deadline
+    assert outcome == ["rollback"]
 
 
 def test_a_member_whose_turn_was_rebound_is_not_probed():
@@ -311,8 +463,9 @@ def test_probe_status_returns_the_parsed_reply_with_pid1():
 
 def test_sweep_member_stamps_proof_and_keeps_sightings(monkeypatch):
     stamped, sighted = [], []
-    monkeypatch.setattr(quiesce_exit_sweep, "stamp", lambda engine, m, r: stamped.append((m.member_id, r)) or True)
-    monkeypatch.setattr(quiesce_exit_sweep, "record_sighting", lambda engine, s: sighted.append(s))
+    monkeypatch.setattr(quiesce_exit_sweep, "stamp",
+                        lambda engine, m, r, *, deadline: stamped.append((m.member_id, r)) or True)
+    monkeypatch.setattr(quiesce_exit_sweep, "record_sighting", lambda engine, s, *, deadline: sighted.append(s))
 
     def run(wire, record=None, member=None):
         rpc = _Rpc(wire, record)
@@ -376,7 +529,7 @@ def test_an_abort_holds_no_probe_slot_and_no_budget(monkeypatch):
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(3))
     monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.2)
     sweep = QuiesceExitSweep(None, subscriber=lambda: rpc, concurrency=1)
-    sweep.budget_seconds = 1.0  # probes start by 0.8s; each abort alone would take 10s
+    sweep.budget_seconds, sweep.write_reserve_seconds = 1.0, 0.0  # probes start by 0.8s; each abort alone would take 10s
 
     async def one_pass():
         started = asyncio.get_running_loop().time()
@@ -410,3 +563,82 @@ def test_a_confirmed_abort_is_its_reply():
     reply = asyncio.run(BridgeRunProbe(lambda: _AbortRpc(state="cancelled")).abort(
         backend="claude-code", session_key="s", request_id="req-1"))
     assert reply.state is AbortState.CANCELLED and reply.boot_id == "boot-a"
+
+
+def _stalled_subscriber(published: asyncio.Event | None = None):
+    """A real RedisSubscriber whose XADD never returns (socket_timeout=None in production)."""
+    class Redis:
+        async def xadd(self, *args, **kwargs):
+            if published is not None:
+                published.set()
+            await asyncio.Event().wait()
+
+    sub = RedisSubscriber.__new__(RedisSubscriber)
+    sub._pub_redis = Redis()
+    sub.read_run_terminal = AsyncMock(return_value=None)
+    return sub
+
+
+def test_the_probe_abort_bound_covers_publication(monkeypatch):
+    import agent_bridge.abort_contract as contract
+
+    monkeypatch.setattr(contract, "ABORT_RPC_TIMEOUT_S", 0.02)
+    sub = _stalled_subscriber()
+
+    async def run():
+        started = time.monotonic()
+        reply = await BridgeRunProbe(lambda: sub).abort(backend="claude-code", session_key="s", request_id="req-1")
+        return reply, time.monotonic() - started
+
+    reply, elapsed = asyncio.run(_bounded(run()))
+    assert reply is None and elapsed < 0.5
+
+
+def test_a_detached_abort_ends_by_its_deadline_even_when_publication_stalls(monkeypatch):
+    """Loopy r1 B1: the real BridgeRunProbe.abort over RedisSubscriber.send_rpc, XADD stalled."""
+    import agent_bridge.abort_contract as contract
+
+    monkeypatch.setattr(contract, "ABORT_RPC_TIMEOUT_S", 0.02)
+    members = _members(1)
+
+    async def run():
+        published = asyncio.Event()
+        sub = _stalled_subscriber(published)
+
+        class Probe(BridgeRunProbe):
+            async def status(self, **kwargs):
+                return _reply(boot_id="boot-a", request_id=kwargs["request_id"]), None
+
+        monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: list(members))
+        sweep = QuiesceExitSweep(None, subscriber=lambda: sub, probe=Probe(lambda: sub))
+        try:
+            assert await sweep.run_once() == {"absent_unaccepted": 1}
+            await published.wait()
+            await asyncio.sleep(0.08)  # 4x the abort deadline; the member is still held
+            assert [t for t in sweep._aborts.values() if not t.done()] == []
+            assert await sweep.run_once() == {"absent_unaccepted": 1}  # still once per member and boot
+            assert len(sweep._aborts) == 1
+        finally:
+            await sweep.aclose()
+
+    asyncio.run(_bounded(run()))
+
+
+def test_the_abort_of_a_member_no_longer_held_is_retired(monkeypatch):
+    """The sweep owns every detached abort: the member's release cancels it at the next pass."""
+    rpc = _AbortRpc(delay=10)
+    members = _members(1)
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: list(members))
+    sweep = QuiesceExitSweep(None, subscriber=lambda: rpc)
+
+    async def run():
+        assert await sweep.run_once() == {"absent_unaccepted": 1}
+        (task,) = sweep._aborts.values()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        members.clear()  # the job released or expired
+        assert await sweep.run_once() == {}
+        return task
+
+    task = asyncio.run(run())
+    assert task.cancelled() and sweep._aborts == {}

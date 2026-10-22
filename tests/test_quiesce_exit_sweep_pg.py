@@ -9,6 +9,8 @@ and, where it drains, that the job dispatches.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 import uuid
 from threading import Event
 from types import SimpleNamespace
@@ -21,7 +23,8 @@ from agent_bridge.session_queue import Admission, SessionQueue
 from llm_bawt.ops import JOB_ACCEPTED
 from llm_bawt.ops.models import JOB_QUIESCING
 from llm_bawt.ops.quiesce_exit import ensure_sighting_schema, purge_sightings
-from llm_bawt.service.quiesce_exit_sweep import QuiesceExitSweep
+from llm_bawt.service import quiesce_exit_sweep
+from llm_bawt.service.quiesce_exit_sweep import WRITE_DEADLINE, QuiesceExitSweep
 from llm_bawt.service.run_accepts import purge_accepts, record_accept
 from llm_bawt.service.turn_execution import TurnExecution
 from llm_bawt.service.turn_gates import gate_drain_status
@@ -261,6 +264,137 @@ def test_a_deleted_turn_is_stamped_on_its_member_row(sweep):
     member_exit = sweep.sql("SELECT execution_exit FROM gate_members WHERE turn_id=:t", t=turn_id).scalar_one()
     assert (member_exit["source"], member_exit["boot_id"], member_exit["exited"]) == ("b", "boot-b", True)
     assert _dispatched(sweep, job_id)
+
+
+class _TurnLock:
+    """Holds the turn row ``FOR UPDATE`` on its own connection and thread until released."""
+
+    def __init__(self, engine, turn_id):
+        self._locked, self._release = Event(), Event()
+        self._thread = threading.Thread(target=self._hold, args=(engine, turn_id), daemon=True)
+
+    def _hold(self, engine, turn_id):
+        with engine.begin() as conn:
+            conn.execute(text("SELECT 1 FROM turn_logs WHERE id=:t FOR UPDATE"), {"t": turn_id})
+            self._locked.set()
+            self._release.wait(30)
+
+    def __enter__(self):
+        self._thread.start()
+        assert self._locked.wait(10)
+        return self
+
+    def release(self, after=0.0):
+        threading.Timer(after, self._release.set).start()
+
+    def __exit__(self, *exc):
+        self._release.set()
+        self._thread.join(10)
+
+
+def _deadlines(sweep, monkeypatch, *, probe=0.2, budget=1.5, reserve=0.5):
+    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", probe)
+    sweep.sweep.budget_seconds, sweep.sweep.write_reserve_seconds = budget, reserve
+
+
+def test_a_write_blocked_past_the_pass_deadline_ends_and_never_lands_later(sweep, monkeypatch):
+    """Loopy r1 A2: a cut write committed execution_exit:c after run_once returned."""
+    turn_id, req = sweep.turn_with()
+    _job, gate_id = sweep.hold(turn_id)
+    sweep.bridge.answer(req, "not_found", boot=BOOT)
+    sweep.bridge.terminals[req] = RunTerminal(req, "claude-code", BOOT, TeardownReport(exited=True))
+    _deadlines(sweep, monkeypatch)
+    with _TurnLock(sweep.engine, turn_id):
+        started = time.monotonic()
+        assert sweep.run_once() == {WRITE_DEADLINE: 1}
+        assert time.monotonic() - started < 3.0  # budget 1.5s; the lock is held for 30s
+    time.sleep(0.5)  # the lock is gone: nothing still in flight may now commit
+    assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
+    assert "execution_exit" not in (sweep.sql("SELECT request_json FROM turn_logs WHERE id=:t",
+                                              t=turn_id).scalar_one() or {})
+
+    sweep.run_once()  # the next pass writes it
+    assert sweep.drain(gate_id)[turn_id] == (True, "execution_exit:c")
+
+
+def test_a_write_unblocked_before_the_deadline_lands_within_the_pass(sweep, monkeypatch):
+    turn_id, req = sweep.turn_with()
+    _job, gate_id = sweep.hold(turn_id)
+    sweep.bridge.answer(req, "not_found", boot=BOOT)
+    sweep.bridge.terminals[req] = RunTerminal(req, "claude-code", BOOT, TeardownReport(exited=True))
+    _deadlines(sweep, monkeypatch, budget=0.6, reserve=0.2)
+    with _TurnLock(sweep.engine, turn_id) as lock:
+        lock.release(after=0.4)  # after the probes' start-by (0.2s), before the write deadline (0.6s)
+        assert sweep.run_once() == {"terminal_exited": 1}
+        # run_once returned only after the write committed
+        assert sweep.drain(gate_id)[turn_id] == (True, "execution_exit:c")
+
+
+@pytest.mark.parametrize("cancels", [1, 2])
+def test_a_cancelled_pass_waits_for_its_write_through_every_cancel(sweep, monkeypatch, cancels):
+    """Loopy r2 A2(1): a second cancel interrupted the join and run_once returned before the commit."""
+    turn_id, req = sweep.turn_with()
+    _job, gate_id = sweep.hold(turn_id)
+    sweep.bridge.answer(req, "not_found", boot=BOOT)
+    sweep.bridge.terminals[req] = RunTerminal(req, "claude-code", BOOT, TeardownReport(exited=True))
+    _deadlines(sweep, monkeypatch, probe=0.02, budget=4.0, reserve=0.1)
+    entered = Event()
+    original_stamp = quiesce_exit_sweep.stamp
+
+    def observed_stamp(*args, **kwargs):
+        entered.set()
+        return original_stamp(*args, **kwargs)
+
+    monkeypatch.setattr(quiesce_exit_sweep, "stamp", observed_stamp)
+
+    async def exercise(lock):
+        task = asyncio.create_task(sweep.sweep.run_once())
+        assert await asyncio.to_thread(entered.wait, 2)
+        writers = list(sweep.sweep._writing)
+        assert len(writers) == 1
+        for _ in range(cancels):
+            task.cancel()
+            await asyncio.sleep(0.05)
+        returned_while_writing = task.done()
+        lock.release()
+        await asyncio.wait(writers, timeout=3)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return returned_while_writing
+
+    with _TurnLock(sweep.engine, turn_id) as lock:
+        assert not asyncio.run(exercise(lock)), "run_once returned while its PostgreSQL write was in flight"
+    assert sweep.drain(gate_id)[turn_id] == (True, "execution_exit:c")
+
+
+class _ShareTableLock(_TurnLock):
+    """SHARE lets the stamp's SELECT ... FOR UPDATE through but blocks its UPDATE."""
+
+    def _hold(self, engine, turn_id):
+        with engine.begin() as conn:
+            conn.execute(text("LOCK TABLE turn_logs IN SHARE MODE"))
+            self._locked.set()
+            self._release.wait(10)
+
+
+def test_two_lock_waits_share_one_absolute_write_deadline(sweep, monkeypatch):
+    """Loopy r2 A2(2): each wait fit its own statement_timeout; together they ran past the deadline."""
+    turn_id, req = sweep.turn_with()
+    _job, gate_id = sweep.hold(turn_id)
+    sweep.bridge.answer(req, "not_found", boot=BOOT)
+    sweep.bridge.terminals[req] = RunTerminal(req, "claude-code", BOOT, TeardownReport(exited=True))
+    _deadlines(sweep, monkeypatch, probe=0.02, budget=1.0, reserve=0.1)
+    with _TurnLock(sweep.engine, turn_id) as row_lock, _ShareTableLock(sweep.engine, turn_id) as table_lock:
+        row_lock.release(after=0.6)
+        table_lock.release(after=1.3)
+        started = time.monotonic()
+        counts = sweep.run_once()
+        elapsed = time.monotonic() - started
+    drained = sweep.drain(gate_id)[turn_id]
+    assert counts == {WRITE_DEADLINE: 1}, (counts, elapsed, drained)
+    # The UPDATE's lock wait gets only the time left (~0.4s), not a fresh 1s.
+    assert elapsed < 1.2, elapsed
+    assert drained == (False, "no_execution_exit")
 
 
 def test_a_drained_member_is_not_probed_again(sweep):

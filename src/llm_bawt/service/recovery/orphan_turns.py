@@ -142,10 +142,13 @@ class BridgeRunProbe:
         if subscriber is None:
             return None, ProbeResult(state="bridge_unreachable", backend=backend, detail="no agent subscriber")
         try:
-            wire = await subscriber.send_rpc(
-                RUN_STATUS_METHOD, {"sessionKey": session_key, "requestId": request_id},
-                f"run_status_{uuid.uuid4().hex}", timeout_s=self.timeout_seconds, backend=backend,
-            )
+            # The outer deadline also covers publishing the command: send_rpc's
+            # own timeout starts only once its XADD returns (Loopy r1 A1/B1).
+            async with asyncio.timeout(self.timeout_seconds):
+                wire = await subscriber.send_rpc(
+                    RUN_STATUS_METHOD, {"sessionKey": session_key, "requestId": request_id},
+                    f"run_status_{uuid.uuid4().hex}", timeout_s=self.timeout_seconds, backend=backend,
+                )
         except TimeoutError:
             return None, ProbeResult(state="timeout", backend=backend,
                                      detail=f"no reply within {self.timeout_seconds:.0f}s")
@@ -163,10 +166,11 @@ class BridgeRunProbe:
     async def abort(self, *, backend: str, session_key: str, request_id: str) -> Any:
         """One backend-matched ``chat.abort`` for *request_id*: the ``AbortReply``, or ``None``.
 
-        Waits ``ABORT_RPC_TIMEOUT_S`` (the bridge replies after the run's
-        teardown), not this probe's timeout. The abort takes effect on the
-        bridge whether or not the reply arrives, so ``None`` (no subscriber,
-        timeout, error, malformed reply) is logged and nothing more.
+        Takes at most ``ABORT_RPC_TIMEOUT_S`` in all, publication included
+        (the bridge replies after the run's teardown), not this probe's
+        timeout. The abort takes effect on the bridge whether or not the reply
+        arrives, so ``None`` (no subscriber, timeout, error, malformed reply)
+        is logged and nothing more.
         """
         from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S, AbortReply, AbortReplyError
 
@@ -174,10 +178,11 @@ class BridgeRunProbe:
         if subscriber is None:
             return None
         try:
-            wire = await subscriber.send_rpc(
-                "chat.abort", {"sessionKey": session_key, "requestId": request_id},
-                f"abort_{uuid.uuid4().hex}", timeout_s=ABORT_RPC_TIMEOUT_S, backend=backend,
-            )
+            async with asyncio.timeout(ABORT_RPC_TIMEOUT_S):
+                wire = await subscriber.send_rpc(
+                    "chat.abort", {"sessionKey": session_key, "requestId": request_id},
+                    f"abort_{uuid.uuid4().hex}", timeout_s=ABORT_RPC_TIMEOUT_S, backend=backend,
+                )
             return AbortReply.from_wire(wire, backend=backend)
         except AbortReplyError as exc:
             logger.warning("chat.abort for %s: malformed reply: %s", request_id, exc)
