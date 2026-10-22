@@ -176,15 +176,23 @@ def dirty_canonical(repo: Path) -> None:
     (repo / "old.py").unlink()
 
 
-def full_lines_provenance(tmp_path: Path, author: str, paths: dict[str, int]) -> Path:
-    recon = {
-        "dirty": [{"path": p, "change_count": n, "hunk_count": 1} for p, n in paths.items()],
-        "groups": [{"bot_id": author, "files": [
-            {"path": p, "confidence": "exact", "matched_changes": n} for p, n in paths.items()]}],
-        "unattributed": [],
-    }
+def head_bytes(repo: Path, path: str) -> bytes | None:
+    shown = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=repo, capture_output=True)
+    return shown.stdout if shown.returncode == 0 else None
+
+
+def edit_row(repo: Path, author: str, path: str, ts: float = 1) -> str:
+    """One recorded edit taking ``path`` from HEAD's bytes to its current bytes."""
+    before = head_bytes(repo, path)
+    after = (repo / path).read_bytes() if (repo / path).exists() else None
+    kind = "added" if before is None else "deleted" if after is None else "modified"
+    return (f"{author},{path},{kind},{sha(before) if before is not None else ''},"
+            f"{sha(after) if after is not None else ''},f,{ts}\n")
+
+
+def rows_provenance(repo: Path, tmp_path: Path, author: str, paths: list[str]) -> Path:
     out = tmp_path / "provenance.json"
-    out.write_text(json.dumps({"recon": recon}))
+    out.write_text(json.dumps({"rows": "".join(edit_row(repo, author, p) for p in paths)}))
     return out
 
 
@@ -192,7 +200,7 @@ def test_canonical_tree_index_and_refs_are_byte_identical_across_runs(repo, root
     dirty_canonical(repo)
     before = canonical_state(repo)
     patch = make_patch_from_copy(repo, tmp_path)
-    provenance = full_lines_provenance(tmp_path, "snark", {"mine.py": 1, "old.py": 1})
+    provenance = rows_provenance(repo, tmp_path, "snark", ["mine.py", "old.py"])
 
     patches_code, _ = run_cli(repo, root, "--patch", str(patch),
                               suite=check("import sys; sys.exit(0)"))
@@ -219,7 +227,7 @@ def test_paths_carries_untracked_and_deleted_files_into_the_snapshot(repo, root,
     x2(repo)
     (repo / "new.py").write_text("new = 1\n")
     (repo / "old.py").unlink()
-    provenance = full_lines_provenance(tmp_path, "snark", {"app.py": 2, "new.py": 1, "old.py": 1})
+    provenance = rows_provenance(repo, tmp_path, "snark", ["app.py", "new.py", "old.py"])
     suite = check("import pathlib,sys; p=pathlib.Path; "
                   "sys.exit(0 if p('new.py').exists() and not p('old.py').exists() "
                   "and 'x = 2' in p('app.py').read_text() else 4)")
@@ -234,23 +242,78 @@ def test_paths_carries_untracked_and_deleted_files_into_the_snapshot(repo, root,
     assert set(receipt["ownership"]) == {"app.py", "new.py", "old.py"}
 
 
-def test_paths_refuses_another_bots_lines_without_creating_a_snapshot(repo, root, tmp_path):
+def test_paths_refuses_another_bots_edit_without_creating_a_snapshot(repo, root, tmp_path):
     x2(repo)
-    recon = {"dirty": [{"path": "app.py", "change_count": 2}],
-             "groups": [{"bot_id": "snark", "files": [{"path": "app.py", "confidence": "strong",
-                                                         "matched_changes": 1}]},
-                        {"bot_id": "al", "files": [{"path": "app.py", "confidence": "strong",
-                                                      "matched_changes": 1}]}],
-             "unattributed": []}
     provenance = tmp_path / "provenance.json"
-    provenance.write_text(json.dumps({"recon": recon}))
+    provenance.write_text(json.dumps({"rows": edit_row(repo, "snark", "app.py", ts=1)
+                                      + f"al,app.py,modified,{sha(b'x')},{sha(b'y')},f,2\n"}))
 
     code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
                             "--provenance-file", str(provenance))
 
     assert (code, receipt["status"]) == (2, "refused")
-    assert "attributed to al" in receipt["error"] and "Never clone" in receipt["error"]
+    assert "also edited by al" in receipt["error"] and "Never clone" in receipt["error"]
     assert receipt["patches"] == [] and not (root / "wt").exists()
+
+
+def test_a_line_attribution_report_is_never_ownership_proof(repo, root, tmp_path):
+    """Loopy r3 B1: recon credited AUTHOR with identical text in a different
+    function. Only an exact byte chain proves ownership; a report is ignored."""
+    before = "def first():\n    return False\n\ndef second():\n    return False\n"
+    own_after = before.replace("return False", "return True", 1)
+    foreign_after = "def first():\n    return False\n\ndef second():\n    return True\n"
+    (repo / "app.py").write_text(before)
+    git(repo, "commit", "-qam", "two similar functions")
+    (repo / "app.py").write_text(foreign_after)  # an unrecorded edit, not snark's
+    recon = {"dirty": [{"path": "app.py", "change_count": 2}], "unattributed": [],
+             "groups": [{"bot_id": "snark", "files": [
+                 {"path": "app.py", "confidence": "exact", "matched_changes": 2}]}]}
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({
+        "recon": recon,
+        "rows": f"snark,app.py,modified,{sha(before.encode())},{sha(own_after.encode())},f,1\n"}))
+
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance), suite=check("pass"))
+
+    assert (code, receipt["status"]) == (snap.EXIT_REFUSED, "refused"), receipt
+    assert "current bytes were not produced by any recorded snark edit" in receipt["error"]
+
+
+def test_a_write_after_the_ownership_check_never_reaches_the_patch(repo, root, tmp_path, monkeypatch):
+    """Loopy r3 B2: bytes written between the proof and the patch build stay out."""
+    x2(repo)
+    owned = (repo / "app.py").read_bytes()
+    provenance = rows_provenance(repo, tmp_path, "snark", ["app.py"])
+    real_build = snap.build_paths_patch
+
+    def racing_build(*args, **kwargs):
+        (repo / "app.py").write_bytes(owned + b"foreign = True\n")  # another writer
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(snap, "build_paths_patch", racing_build)
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+
+    pinned = Path(receipt["patches"][0]["saved_as"]).read_text()
+    assert code == 0 and "+x = 2" in pinned and "foreign" not in pinned, receipt
+
+
+def test_paths_refuses_a_symlink(repo, root, tmp_path):
+    (repo / "link.py").symlink_to("app.py")
+    provenance = rows_provenance(repo, tmp_path, "snark", ["link.py"])
+    code, receipt = run_cli(repo, root, "--path", "link.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+    assert (code, receipt["status"]) == (2, "refused") and "symlink" in receipt["error"]
+
+
+def test_paths_without_recorded_edits_is_refused(repo, root, tmp_path):
+    x2(repo)
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({}))
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+    assert (code, receipt["status"]) == (2, "refused") and "recorded edits" in receipt["error"]
 
 
 @pytest.mark.parametrize(("extra", "message"), [
@@ -309,7 +372,7 @@ def row(bot, before, after, ts, kind="modified", exact=True, path="app.py"):
 
 
 def test_byte_chain_proves_ownership_across_several_author_turns():
-    check = snap.OwnershipCheck("snark", [row("snark", HEAD, MID, 1), row("snark", MID, NOW, 2)], None)
+    check = snap.OwnershipCheck("snark", [row("snark", HEAD, MID, 1), row("snark", MID, NOW, 2)])
     assert check.chain("app.py", HEAD, NOW) == (True, "byte chain: 2 recorded snark edit(s) from HEAD")
 
 
@@ -321,45 +384,17 @@ def test_byte_chain_proves_ownership_across_several_author_turns():
     ([row("al", HEAD, NOW, 1)], "current bytes were not produced"),
 ])
 def test_byte_chain_refuses_foreign_or_unexplained_bytes(rows, reason):
-    ok, why = snap.OwnershipCheck("snark", rows, None).chain("app.py", HEAD, NOW)
+    ok, why = snap.OwnershipCheck("snark", rows).chain("app.py", HEAD, NOW)
     assert not ok and reason in why
 
 
 def test_byte_chain_handles_added_and_deleted_files():
     check = snap.OwnershipCheck("snark", [row("snark", None, NOW, 1, kind="added", path="new.py"),
-                                          row("snark", HEAD, None, 1, kind="deleted", path="old.py")],
-                                None)
+                                          row("snark", HEAD, None, 1, kind="deleted", path="old.py")])
     assert check.chain("new.py", None, NOW)[0]
     assert check.chain("old.py", HEAD, None)[0]
     # An unknown "before" on a modified row is not "absent".
-    assert not snap.OwnershipCheck("snark", [row("snark", None, NOW, 1)], None).chain("app.py", None, NOW)[0]
-
-
-def recon_for(*groups, change_count=4, unattributed=()):
-    return {"dirty": [{"path": "app.py", "change_count": change_count}],
-            "groups": [{"bot_id": bot, "files": [{"path": "app.py", "confidence": conf,
-                                                  "matched_changes": n}]} for bot, conf, n in groups],
-            "unattributed": [{"path": p} for p in unattributed]}
-
-
-@pytest.mark.parametrize(("recon", "ok", "reason"), [
-    (recon_for(("snark", "strong", 3), ("snark", "partial", 1)), True, "4/4"),
-    (recon_for(("snark", "exact", 3)), False, "3/4 dirty lines"),
-    (recon_for(("snark", "exact", 3), ("al", "partial", 1)), False, "attributed to al"),
-    (recon_for(("snark", "exact", 4), ("nova", "probable", 0)), False, "attributed to nova"),
-    (recon_for(unattributed=("app.py",)), False, "no recorded edit explains"),
-])
-def test_line_coverage_requires_every_dirty_line_and_no_other_bot(recon, ok, reason):
-    result = snap.OwnershipCheck("snark", None, recon).lines("app.py")
-    assert result[0] is ok and reason in result[1]
-
-
-def test_either_proof_suffices_and_a_refusal_names_both():
-    lines_only = snap.OwnershipCheck("snark", [], recon_for(("snark", "exact", 4)))
-    assert lines_only.verdict("app.py", HEAD, NOW) == (True, "recon: 4/4 dirty lines attributed to snark")
-    neither = snap.OwnershipCheck("snark", [], recon_for(("snark", "exact", 1)))
-    ok, why = neither.verdict("app.py", HEAD, NOW)
-    assert not ok and "current bytes were not produced" in why and "1/4 dirty lines" in why
+    assert not snap.OwnershipCheck("snark", [row("snark", None, NOW, 1)]).chain("app.py", None, NOW)[0]
 
 
 def test_provenance_rows_parse_and_normalize_paths():
@@ -424,6 +459,73 @@ def test_a_second_interrupt_cannot_orphan_a_suite_that_ignores_sigint(repo, root
     # The escalation finished (SIGTERM) before the second Ctrl-C was honoured.
     assert not Path(f"/proc/{child_pid.read_text()}").exists()
     assert_no_snapshot_left(repo, root)
+
+
+IGNORING_CHILD = ("import os,pathlib,signal,sys,time; "
+                  "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                  "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                  "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)")
+
+
+def live(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def wait_for(path: Path, seconds: float = 10) -> int:
+    deadline = time.monotonic() + seconds
+    while not (path.exists() and path.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return int(path.read_text())
+
+
+@pytest.mark.integration
+@pytest.mark.offline_integration
+def test_stop_group_kills_a_descendant_that_outlives_its_leader(tmp_path):
+    """Loopy r3 B3: the leader exits on SIGINT; its child ignores SIGINT/SIGTERM."""
+    pid_file = tmp_path / "child.pid"
+    leader = ("import signal,subprocess,sys,time; "
+              "signal.signal(signal.SIGINT, lambda *_: sys.exit(0)); "
+              f"subprocess.Popen([sys.executable, '-c', {IGNORING_CHILD!r}, {str(pid_file)!r}]); "
+              "time.sleep(60)")
+    proc = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        child = wait_for(pid_file)
+        started = time.monotonic()
+        snap.stop_group(proc, (0.2, 0.2))
+        assert proc.poll() is not None
+        assert not live(child), f"descendant {child} survived stop_group"
+        assert not snap.group_alive(proc.pid)
+        assert time.monotonic() - started < 0.2 + 0.2 + 5 + 1
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+@pytest.mark.integration
+@pytest.mark.offline_integration
+def test_a_finished_suite_leaves_no_descendant_behind(tmp_path):
+    """A suite that exits 0 while a detached-stdout descendant lives on: run_suite
+    still reports the suite's exit and stops the rest of the group."""
+    pid_file = tmp_path / "child.pid"
+    leader = ("import subprocess,sys; "
+              f"subprocess.Popen([sys.executable, '-c', {IGNORING_CHILD!r}, {str(pid_file)!r}], "
+              "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+              "import pathlib,time; p=pathlib.Path(sys.argv[1]); "
+              "[time.sleep(0.01) for _ in range(1000) if not (p.exists() and p.read_text())]")
+    receipt = snap.Receipt(run_id="t", repo=str(tmp_path))
+
+    code = snap.run_suite([sys.executable, "-c", leader, str(pid_file)], tmp_path,
+                          tmp_path / "log", 0, receipt, (0.2, 0.2))
+
+    child = int(pid_file.read_text())
+    assert code == 0
+    assert not live(child), f"descendant {child} outlived the finished suite"
 
 
 def test_a_patch_that_changes_the_runner_is_flagged(repo, root, tmp_path):

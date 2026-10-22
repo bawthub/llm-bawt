@@ -39,9 +39,13 @@ inside a container.
 | `LOCK_WAIT=<s>` | How long to wait for another suite to finish (default 1800). The runner lock is never bypassed. |
 
 **Ownership.** `PATHS` refuses a file unless its uncommitted bytes provably
-belong to `AUTHOR`: either they chain back to HEAD through only `AUTHOR`'s
-recorded edits (`turn_changed_files`, via `pgq`), or `commit-recon` attributes
-every dirty line to `AUTHOR` and none to anyone else. Edit tracked files only
+belong to `AUTHOR`: they must chain back to HEAD through only `AUTHOR`'s
+recorded edits (`turn_changed_files`, via `pgq`), every link an exact sha256
+match. Line-level attribution (`commit-recon`) is not accepted as proof: it can
+credit you with identical text somewhere else. Each file is read once; the
+ownership proof and the patch use those same bytes, so a write that lands
+during the run is simply not in the patch. Symlinks are refused (use
+`PATCHES`). Edit tracked files only
 with Edit/Write: a turn's record of a file runs from the bytes before its first
 Edit/Write in that turn to the bytes after its last, so a Bash edit outside that
 span can't be proven. If you edited a file through Bash, restore it to HEAD and
@@ -54,8 +58,11 @@ edits, is absorbed into your turn's snapshot.
 **Receipt.** Every run writes `runs/<run_id>/receipt.json` (status, exit, base,
 each patch's sha256 and pinned copy, `diff_sha256`, changed files, runner and
 pytest summary lines, log path) and prints the same summary. `diff_sha256` is
-sha256 of `git diff BASE` in the snapshot, the same bytes as `git diff BASE
-<commit>` once the change is committed: the pin reviewers use. The run id and
+sha256 of `git diff BASE` in the snapshot: the pin reviewers use. Once committed
+on BASE it equals sha256 of `git diff <commit>^ <commit>`. It is not the patch
+file's sha256 (patch text carries its own headers); the receipt records both.
+An interrupted or finished suite has its whole process group stopped, so no
+descendant outlives the run holding the runner lock. The run id and
 receipt path print first, so a caller that disconnects can read the receipt
 later; the run continues without stdout. Exit codes: 0 passed, 1 failed /
 patch rejected / error, 2 refused before testing, 130 interrupted. A patch that

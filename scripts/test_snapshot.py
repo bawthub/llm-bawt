@@ -10,9 +10,9 @@ removes the worktree on every exit path, including failure and interrupt.
     make test-snapshot PATHS=... AUTHOR=<bot> SUITE=target NODES="tests/test_x.py"
 
 PATHS builds the patch from this checkout's working tree (BASE must be HEAD) and
-refuses a path unless its uncommitted bytes provably belong to AUTHOR: either
-they chain back to HEAD through only AUTHOR's recorded edits, or commit-recon
-attributes every dirty line to AUTHOR and none to anyone else.
+refuses a path unless its uncommitted bytes provably belong to AUTHOR: they must
+chain back to HEAD through only AUTHOR's recorded edits. Each file is read once;
+ownership is proved on those bytes and the patch is built from exactly them.
 
 Run it on the test host (echo), never inside a bridge container. It reads the
 canonical repository only: its working tree, index, HEAD, branches and stash
@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 import datetime as dt
@@ -87,9 +86,9 @@ class Git:
         self.env = env or clean_env()
 
     def run(self, *args: str, check: bool = True, env: dict[str, str] | None = None,
-            ) -> subprocess.CompletedProcess[bytes]:
+            input: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
         result = subprocess.run(["git", *args], cwd=self.cwd, env=env or self.env,
-                                capture_output=True)
+                                capture_output=True, input=input)
         if check and result.returncode:
             raise Refused(f"git {' '.join(args)} failed ({result.returncode}): "
                           f"{result.stderr.decode(errors='replace').strip()}")
@@ -213,23 +212,20 @@ def relative_record_path(raw: str, repo_name: str) -> str:
 class OwnershipCheck:
     """Decide whether every uncommitted byte of a path is AUTHOR's.
 
-    Method A (byte chain): starting from the working-tree bytes, each step must be
-    an AUTHOR edit whose recorded ``after`` equals the current bytes; its
-    ``before`` becomes the next target, until HEAD's bytes are reached. No other
-    bot may have touched the path since the first step.
-    Method B (line coverage): commit-recon explains every dirty line with
-    AUTHOR's recorded edits and none with anyone else's.
-    Either proves ownership. Neither means refuse; the tool never guesses.
+    Byte chain: starting from the working-tree bytes, each step must be an AUTHOR
+    edit whose recorded ``after`` equals the current bytes; its ``before`` becomes
+    the next target, until HEAD's bytes are reached. No other bot may have touched
+    the path since the first step. Every link is an exact sha256 match, so the
+    proof covers every byte. Anything else is a refusal; the tool never guesses.
+    (Line-level attribution such as commit-recon's is evidence for a human, not
+    proof: it can credit AUTHOR with identical text in a different place.)
     """
 
-    def __init__(self, author: str, rows: list[EditRow] | None, recon: dict | None) -> None:
+    def __init__(self, author: str, rows: list[EditRow]) -> None:
         self.author = author
         self.rows = rows
-        self.recon = recon
 
     def chain(self, path: str, head_sha: str | None, current_sha: str | None) -> tuple[bool, str]:
-        if self.rows is None:
-            return False, "no provenance rows (pgq unavailable)"
         rows = [row for row in self.rows if row.path == path]
         mine = sorted((row for row in rows if row.bot_id == self.author),
                       key=lambda row: row.ts, reverse=True)
@@ -253,41 +249,6 @@ class OwnershipCheck:
         if others:
             return False, f"also edited by {', '.join(others)} during {self.author}'s edits"
         return True, f"byte chain: {len(used)} recorded {self.author} edit(s) from HEAD"
-
-    def lines(self, path: str) -> tuple[bool, str]:
-        if self.recon is None:
-            return False, "no commit-recon report"
-        dirty = next((item for item in self.recon.get("dirty", []) if item.get("path") == path), None)
-        if dirty is None:
-            return False, "recon: not dirty"
-        if any(item.get("path") == path for item in self.recon.get("unattributed", [])):
-            return False, "recon: no recorded edit explains these changes"
-        matched: dict[str, int] = defaultdict(int)
-        foreign: set[str] = set()
-        for group in self.recon.get("groups", []):
-            bot = str(group.get("bot_id") or "unknown").lower()
-            for item in group.get("files", []):
-                if item.get("path") != path:
-                    continue
-                if item.get("confidence") == "probable" and bot != self.author:
-                    foreign.add(bot)
-                matched[bot] += int(item.get("matched_changes") or 0)
-        foreign |= {bot for bot, count in matched.items() if bot != self.author and count}
-        if foreign:
-            return False, f"recon: lines attributed to {', '.join(sorted(foreign))}"
-        total = int(dirty.get("change_count") or 0)
-        if not total or matched[self.author] != total:
-            return False, f"recon: {matched[self.author]}/{total} dirty lines attributed to {self.author}"
-        return True, f"recon: {total}/{total} dirty lines attributed to {self.author}"
-
-    def verdict(self, path: str, head_sha: str | None, current_sha: str | None) -> tuple[bool, str]:
-        chain_ok, chain_why = self.chain(path, head_sha, current_sha)
-        if chain_ok:
-            return True, chain_why
-        lines_ok, lines_why = self.lines(path)
-        if lines_ok:
-            return True, lines_why
-        return False, f"{chain_why}; {lines_why}"
 
 
 def find_tool(name: str, override: str | None) -> str | None:
@@ -331,23 +292,6 @@ def rows_from_csv(text: str, repo_name: str) -> list[EditRow]:
                             before_sha256=before or None, after_sha256=after or None,
                             exact=inexact.lower() not in {"t", "true", "1"}, ts=float(ts)))
     return rows
-
-
-def load_recon(recon: str | None, repo: Path) -> dict | None:
-    if not recon:
-        return None
-    try:
-        result = subprocess.run([recon, "--repo", str(repo), "--json", "--no-repair",
-                                 "--since", f"{PROVENANCE_WINDOW_DAYS}d"],
-                                capture_output=True, env=clean_env(), timeout=120)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
 
 
 # ── Worktree lifecycle ─────────────────────────────────────────────────────
@@ -473,15 +417,54 @@ def validate_paths(git: Git, paths: list[str]) -> list[str]:
     return sorted(set(clean))
 
 
-def build_paths_patch(git: Git, base: str, paths: list[str], out: Path) -> None:
-    """Diff BASE → working tree for exactly these paths, untracked files included,
-    through a temporary index so the canonical index is never touched."""
+@dataclass(frozen=True)
+class Captured:
+    """One read of a PATHS file: the bytes ownership is proved on and patched from."""
+
+    data: bytes | None  # None: deleted in the working tree
+    mode: str  # git index mode for data
+
+    @property
+    def sha(self) -> str | None:
+        return None if self.data is None else sha256(self.data)
+
+
+def capture_paths(repo: Path, paths: list[str]) -> dict[str, Captured]:
+    """Read each file exactly once. Nothing later reads the working tree again, so a
+    write after this point can't reach the patch (it is simply not in it)."""
+    captured = {}
+    for path in paths:
+        full = repo / path
+        if full.is_symlink():
+            raise Refused(f"PATHS entry {path!r} is a symlink; use PATCHES for it")
+        try:
+            fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            captured[path] = Captured(None, "")
+            continue
+        with os.fdopen(fd, "rb") as handle:
+            # Mode and bytes from the same open file, never a second path lookup.
+            mode = "100755" if os.fstat(handle.fileno()).st_mode & 0o100 else "100644"
+            captured[path] = Captured(handle.read(), mode)
+    return captured
+
+
+def build_paths_patch(git: Git, base: str, captured: dict[str, Captured], out: Path) -> None:
+    """Diff BASE → exactly the captured bytes, through a temporary index so the
+    canonical index is never touched."""
     index = out.with_suffix(".index")
     env = clean_env(GIT_INDEX_FILE=str(index))
     try:
         git.run("read-tree", base, env=env)
-        pathspecs = [f":(literal){path}" for path in paths]
-        git.run("add", "-A", "--", *pathspecs, env=env)
+        for path, item in sorted(captured.items()):
+            if item.data is None:
+                git.run("update-index", "--force-remove", "--", path, env=env)
+                continue
+            # --path applies the same attributes/filters `git add` would.
+            oid = git.run("hash-object", "-w", "--stdin", f"--path={path}",
+                          env=env, input=item.data).stdout.decode().strip()
+            git.run("update-index", "--add", "--cacheinfo", f"{item.mode},{oid},{path}", env=env)
+        pathspecs = [f":(literal){path}" for path in sorted(captured)]
         patch = git.run("diff", "--cached", "--binary", "--no-color", "--no-ext-diff",
                         base, "--", *pathspecs, env=env).stdout
     finally:
@@ -537,30 +520,77 @@ def run_suite(command: list[str], cwd: Path, log_path: Path, lock_wait: int,
                         sys.stdout.flush()
                     except (BrokenPipeError, OSError):
                         echo = False  # caller went away; finish the run and the receipt
-            return proc.wait()
+            code = proc.wait()
         except BaseException:
             # A second Ctrl-C must not abort the escalation and orphan a suite that
             # still holds the runner lock; it is delivered once the group is gone.
             with signals_blocked():
                 stop_group(proc, stop_grace)
             raise
+        # A finished suite must not leave a descendant behind (it could hold the
+        # runner lock's inherited fd). Nothing to do in the normal case.
+        if group_alive(proc.pid):
+            with signals_blocked():
+                stop_group(proc, stop_grace)
+        return code
+
+
+def group_alive(pgid: int) -> bool:
+    """True while any non-zombie process is still in the process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # killpg also succeeds for zombies awaiting reaping; only live members count.
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return True
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 2 and fields[2] == str(pgid) and fields[0] not in ("Z", "X"):
+            return True
+    return False
+
+
+def _wait_group_gone(proc: subprocess.Popen, pgid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while True:
+        proc.poll()  # reap the leader so it never lingers as a zombie
+        if not group_alive(pgid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def stop_group(proc: subprocess.Popen, grace: tuple[float, float] = STOP_GRACE_S) -> None:
-    """SIGINT first so pytest runs its teardown (e.g. private PostgreSQL), then escalate.
-    Bounded: at most grace[0] + grace[1] + 5 seconds."""
+    """Stop the suite's whole process group, not just its leader: SIGINT first so
+    pytest runs its teardown (e.g. private PostgreSQL), then SIGTERM, then SIGKILL,
+    each to the group, until no live member is left. A descendant that ignores the
+    soft signals is killed even after the leader has exited. Bounded: at most
+    grace[0] + grace[1] + 5 seconds. (A descendant that left the group with setsid
+    is out of reach by design; nothing in the suite does that.)"""
+    pgid = proc.pid
     for sig, wait in ((signal.SIGINT, grace[0]), (signal.SIGTERM, grace[1]), (signal.SIGKILL, 5.0)):
-        if proc.poll() is not None:
-            return
+        if not group_alive(pgid):
+            break
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(pgid, sig)
         except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=wait)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+            break
+        if _wait_group_gone(proc, pgid, wait):
+            break
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -582,10 +612,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--lock-wait", type=int, default=DEFAULT_LOCK_WAIT_S)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--repo", type=Path, default=REPO)
-    parser.add_argument("--recon", help="commit-recon executable (default: discovered)")
     parser.add_argument("--pgq", help="pgq executable (default: discovered)")
     parser.add_argument("--provenance-file", type=Path,
-                        help='offline/test input: {"recon": {...}, "rows": "<csv>"}')
+                        help='offline/test input: {"rows": "<csv>"}')
     parser.add_argument("--allow-container", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--suite-command", help=argparse.SUPPRESS)  # tests: JSON argv
     parser.add_argument("--stop-grace", default=",".join(str(s) for s in STOP_GRACE_S),
@@ -618,24 +647,21 @@ def check_args(args: argparse.Namespace) -> None:
         raise Refused("run on the test host (ssh echo), never inside a bridge container")
 
 
-def check_ownership(args: argparse.Namespace, git: Git, paths: list[str]) -> dict[str, str]:
+def check_ownership(args: argparse.Namespace, git: Git,
+                    captured: dict[str, Captured]) -> dict[str, str]:
     if args.provenance_file:
         payload = json.loads(args.provenance_file.read_text())
-        recon = payload.get("recon")
         rows = rows_from_csv(payload["rows"], args.repo.name) if "rows" in payload else None
     else:
-        recon = load_recon(find_tool("commit-recon", args.recon), args.repo)
         rows = load_rows(find_tool("pgq", args.pgq), args.repo.name)
-    if recon is None and rows is None:
-        raise Refused("PATHS needs edit provenance (pgq or commit-recon) and neither is available")
-    check = OwnershipCheck(args.author, rows, recon)
+    if rows is None:
+        raise Refused("PATHS needs recorded edits (turn_changed_files via pgq) and none are available")
+    check = OwnershipCheck(args.author, rows)
     verdicts: dict[str, str] = {}
     refused = []
-    for path in paths:
+    for path, item in sorted(captured.items()):
         head = git.blob("HEAD", path)
-        current = (args.repo / path).read_bytes() if (args.repo / path).is_file() else None
-        ok, why = check.verdict(path, sha256(head) if head is not None else None,
-                                sha256(current) if current is not None else None)
+        ok, why = check.chain(path, sha256(head) if head is not None else None, item.sha)
         verdicts[path] = why
         if not ok:
             refused.append(f"  {path}: {why}")
@@ -643,7 +669,8 @@ def check_ownership(args: argparse.Namespace, git: Git, paths: list[str]) -> dic
         raise Refused(
             f"PATHS can't prove these changes are all {args.author}'s:\n" + "\n".join(refused)
             + "\nIf another bot has uncommitted changes in the same file, sequence it on the task "
-            "through the coordinator. Never clone.")
+            "through the coordinator. If the bytes are yours but weren't recorded (a Bash edit), "
+            "restore the file to HEAD and redo the change with Edit/Write in a new turn. Never clone.")
     return verdicts
 
 
@@ -665,9 +692,10 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
         if receipt.base != receipt.canonical_head:
             raise Refused("PATHS diffs this checkout's working tree, so BASE must be its HEAD")
         receipt.paths = validate_paths(git, args.path)
-        receipt.ownership = check_ownership(args, git, receipt.paths)
+        captured = capture_paths(repo, receipt.paths)
+        receipt.ownership = check_ownership(args, git, captured)
         generated = run_dir / "paths.patch"
-        build_paths_patch(git, receipt.base, receipt.paths, generated)
+        build_paths_patch(git, receipt.base, captured, generated)
         sources = [generated]
     elif args.patch:
         receipt.mode = "patches"
