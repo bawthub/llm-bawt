@@ -43,9 +43,10 @@ def _store():
 
 
 class FakeExecutor(Executor):
-    def __init__(self, *, available: bool = True, dispatch_error: str | None = None):
+    def __init__(self, *, available: bool = True, dispatch_error: str | None = None, fenced: bool = True):
         self._available = available
         self._dispatch_error = dispatch_error
+        self._fenced = fenced
         self.dispatch_calls: list[dict] = []
         self.reconcile_calls: list[dict] = []
         self.next_reconcile: ReconcileResult | None = None
@@ -72,6 +73,10 @@ class FakeExecutor(Executor):
         self.reconcile_calls.append(kwargs)
         assert self.next_reconcile is not None, "test forgot to set next_reconcile"
         return self.next_reconcile
+
+    def check_quiesce_fence(self, settings: dict) -> None:
+        if not self._fenced:
+            raise ExecutorError("worker does not enforce the quiesce start fence")
 
 
 def _op_data(**over):

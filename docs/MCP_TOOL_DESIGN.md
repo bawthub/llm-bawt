@@ -123,6 +123,16 @@ the signed per-turn capability, never from arguments. Measured: **3,545
 description / 12,611 full-definition tokens** (+31 / +91 over 3,514 / 12,520);
 caps updated. No existing warnings were removed.
 
+The `ops_run` and `ops_job_status` results also carry `caller_instruction`:
+`null`, or, while a quiescing job holds the calling bot's own scope,
+`{action: "end_turn", held_bot, result_delivery: "new_turn", message}`. The
+caller's running turn is in the hold roster, so polling in the same turn would
+keep the job held until `quiesce_timeout`. The terminal receipt always arrives
+as a new turn: an approved job's continuation delivers it, and a direct job
+pushes it through its receipt callback (`docs/OPERATIONS_RUNNER.md` § Quiesce
+receipt callback). This is a result field only; tool descriptions and schemas
+are unchanged.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied

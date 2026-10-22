@@ -41,6 +41,7 @@ from .prompt_default_loaders import (
     load_memory_extraction_update,
     load_memory_maintenance_intent_content_only,
     load_memory_maintenance_intent_with_context,
+    load_ops_quiesce_receipt,
     load_profile_consolidation,
     load_recall_synthesis_system,
     load_self_recap_system,
@@ -403,6 +404,20 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "resumes a turn killed by its bridge host shutting down. It is prefixed "
             "to the original request, so it must tell the bot to check what it "
             "already completed and not repeat side effects. Used verbatim; a blank "
+            "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_receipt": PromptDefinition(
+        key="ops.quiesce_receipt",
+        title="Ops Quiesce Receipt",
+        category="agent_execution",
+        loader=load_ops_quiesce_receipt,
+        metadata={"notes": (
+            "Prefix of the system delivery (TASK-1233 e) that brings a direct "
+            "quiesce ops job's terminal receipt to the caller it held: that caller "
+            "was told to end its turn, so this new turn is how it learns the "
+            "outcome. The receipt JSON is appended. It must say the operation "
+            "already ran or failed and is not to be re-run. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
         )},
     ),

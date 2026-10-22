@@ -53,6 +53,7 @@ _JOB_QUIESCE_COLUMNS = (
     ("quiesce_driver_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
     ("quiesce_deadline_at", "TIMESTAMP WITH TIME ZONE"),
     ("quiesce_fence_json", "TEXT"), ("quiesce_json", "TEXT"),
+    ("receipt_callback_json", "TEXT"), ("receipt_callback_delivery_id", "VARCHAR(128)"),
 )
 _OP_QUIESCE_COLUMNS = (
     ("quiesce_enabled", "BOOLEAN NOT NULL DEFAULT false"),
@@ -320,7 +321,7 @@ class OpsStore:
                    invocation_snapshot_json=None, request_payload_json=None, caller_actor=None,
                    caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
                    caller_session_key=None, caller_backend=None, approval_request_id=None,
-                   fence=None, state=JOB_QUEUED):
+                   fence=None, state=JOB_QUEUED, receipt_callback_json=None):
         """Insert a queued job. ``fence(session)``, when given, runs in the same
         transaction first and raises to refuse creation (an admission claim
         that is no longer held). A quiesce invocation is created directly in
@@ -340,7 +341,8 @@ class OpsStore:
             invocation_snapshot_json=invocation_snapshot_json, request_payload_json=payload,
             idempotency_key=idempotency_key, caller_actor=caller_actor, caller_bot_id=caller_bot_id,
             caller_user_id=caller_user_id, caller_turn_id=caller_turn_id, caller_session_key=caller_session_key,
-            caller_backend=caller_backend, approval_request_id=approval_request_id, state=state)
+            caller_backend=caller_backend, approval_request_id=approval_request_id, state=state,
+            receipt_callback_json=receipt_callback_json)
         with Session(self.engine) as session:
             if fence is not None:
                 fence(session)
@@ -438,9 +440,6 @@ class OpsStore:
 
     def note_queued_error(self, job_id, error):
         return self._transition(job_id, (JOB_QUEUED,), {"error_text": error})
-
-    def note_quiescing_error(self, job_id, error):
-        return self._transition(job_id, (JOB_QUIESCING,), {"error_text": error})
 
     def touch_reconcile(self, job_id):
         self._transition(job_id, _OPEN_STATES, {"last_reconcile_at": _utcnow()})

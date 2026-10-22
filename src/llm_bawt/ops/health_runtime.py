@@ -34,8 +34,12 @@ def build_reconciler(interval):
     # Quiesce jobs are driven only here, never by the app (TASK-1233).
     from .quiesce import build_quiesce_driver
     service.quiesce_driver = build_quiesce_driver(store.engine)
+    from ..inter_bot_delivery import InterBotDeliveryStore
+    from .receipt_callback import QuiesceReceiptSender
+
+    receipts = QuiesceReceiptSender(service, InterBotDeliveryStore(config))
     return OpsReconciler(service, interval=interval,
-                         admission=ApprovedOpsAdmission(approvals, service))
+                         admission=ApprovedOpsAdmission(approvals, service), receipts=receipts)
 
 
 class OpsHealthRuntime:

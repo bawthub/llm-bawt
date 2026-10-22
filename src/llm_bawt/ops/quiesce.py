@@ -11,7 +11,10 @@ moves it forward one bounded step at a time:
    (another driver holds a live lease, or the job left QUIESCING) rolls back
    having written nothing, so a stale driver can never open an orphan gate.
 2. **Open.** No gate yet: a disabled operation fails the job (no action
-   submitted); a reached concurrency cap waits with a visible note; otherwise
+   submitted); a job still unopened ``quiesce_timeout_seconds`` after
+   submission fails ``quiesce_timeout`` (a preflight that keeps failing, noted
+   by :meth:`QuiesceDriver.note_unopened`, or a slot that never frees); a
+   reached concurrency cap waits with a visible note; otherwise
    ``activate_hold`` opens a job-owned hold gate (id = generation) and the
    quiesce deadline starts on the DB clock.
 3. **Hold.** Each step renews the gate. A gate that lapsed (the driver was
@@ -121,6 +124,55 @@ def record_ack(engine, *, bot_id: str, turn_id: str, status: str, note: str | No
     return int(row[0]) if row else None
 
 
+def scope_covers_bot(conn, snapshot: dict[str, Any], bot_id: str) -> bool:
+    """Whether a quiesce snapshot's scope covers ``bot_id``'s current profile."""
+    row = conn.execute(text("SELECT bot_type, agent_backend FROM bot_profiles WHERE slug=:slug"),
+                       {"slug": bot_id}).mappings().first()
+    if row is None:
+        return False
+    scope = GateScope.from_json(snapshot["quiesce"]["scope"])
+    return scope.covers(bot_id, bot_type=row["bot_type"], agent_backend=row["agent_backend"])
+
+
+def caller_instruction(engine, job_id: str, bot_id: str | None) -> dict[str, Any] | None:
+    """What the job's own caller must do while the job is QUIESCING and holds it.
+
+    The caller's running turn is in the hold roster like any other member
+    (Snark ruling): the job dispatches only once that turn exits. Polling
+    ops_job_status in the same turn keeps the turn alive until the quiesce
+    deadline fails the job, so the caller is told to end its turn. Its terminal
+    receipt always arrives as a new turn (TASK-1233 e): an approved job's
+    continuation delivers it, and a direct job carries the receipt callback
+    recorded at creation exactly when its scope covered the caller. ``None``
+    for any other state, any other bot, or a caller the job does not hold.
+    """
+    if not bot_id or engine is None or engine.dialect.name != "postgresql":
+        return None
+    with engine.connect() as conn:
+        job = conn.execute(text(
+            "SELECT state, invocation_snapshot_json, approval_request_id, caller_bot_id,"
+            " receipt_callback_json FROM ops_jobs WHERE id=:id"
+        ), {"id": job_id}).mappings().first()
+        if job is None or job["state"] != JOB_QUIESCING or job["caller_bot_id"] != bot_id:
+            return None
+        if job["approval_request_id"]:
+            held = scope_covers_bot(conn, json.loads(job["invocation_snapshot_json"]), bot_id)
+        else:
+            callback = json.loads(job["receipt_callback_json"]) if job["receipt_callback_json"] else {}
+            held = callback.get("bot_id") == bot_id
+    if not held:
+        return None
+    return {
+        "action": "end_turn",
+        "held_bot": bot_id,
+        "result_delivery": "new_turn",
+        "message": ("This operation waits for your current turn to exit before it runs. End your turn "
+                    "now and do not poll in this turn: polling keeps the turn alive until "
+                    "quiesce_timeout fails the job with no action. The terminal receipt arrives "
+                    "as a new turn."),
+    }
+
+
 def _status_row(status: Any) -> dict[str, Any]:
     return {"turn_id": status.turn_id, "drained": bool(status.drained), "reason": status.reason}
 
@@ -168,7 +220,7 @@ class QuiesceDriver:
             " WHERE id=:id AND state=:quiescing AND (quiesce_driver_id IS NULL"
             "   OR quiesce_driver_id=:me OR quiesce_driver_lease_expires_at <= now())"
             " RETURNING id, operation_slug, invocation_snapshot_json, quiesce_gate_id,"
-            "   quiesce_json, now() >= quiesce_deadline_at AS past_deadline"
+            "   quiesce_json, error_text, submitted_at, now() >= quiesce_deadline_at AS past_deadline"
         ), {"me": self.driver_id, "lease": float(self.lease_seconds), "id": job_id,
             "quiescing": JOB_QUIESCING}).mappings().first()
 
@@ -188,7 +240,38 @@ class QuiesceDriver:
         conn.execute(text(f"UPDATE ops_jobs SET {', '.join(sets)} WHERE id=:id"),
                      {**values, "id": job_id, "timeout": deadline_from})
 
+    @staticmethod
+    def _open_expired(conn, job, snapshot) -> bool:
+        """A job that has not opened its hold within ``quiesce_timeout_seconds``
+        of submission fails: nothing else bounds a preflight that keeps failing
+        or a slot that never frees, and its caller waits for the receipt."""
+        return bool(conn.execute(text(
+            "SELECT now() >= CAST(:submitted AS timestamptz) + (:timeout * interval '1 second')"
+        ), {"submitted": job["submitted_at"],
+            "timeout": float(snapshot["quiesce"]["timeout_seconds"])}).scalar())
+
+    def _fail_unopened(self, conn, job, note: str | None) -> StepResult:
+        detail = f"; last: {note}" if note else ""
+        return self._fail(conn, job, "quiesce_timeout: the hold did not open within quiesce_timeout_seconds"
+                                     f" of submission; no action submitted{detail}")
+
+    def note_unopened(self, job_id: str, error: str) -> StepResult:
+        """Record why a not-yet-opened job cannot open (a preflight failure),
+        failing it once its open deadline has passed."""
+        with self.engine.begin() as conn:
+            job = self._claim(conn, job_id)
+            if job is None:
+                return StepResult("not_owner")
+            if job["quiesce_gate_id"] is not None:
+                return StepResult("opened")
+            if self._open_expired(conn, job, json.loads(job["invocation_snapshot_json"])):
+                return self._fail_unopened(conn, job, error)
+            self._write(conn, job["id"], {"error_text": error})
+            return StepResult("preflight_blocked")
+
     def _open(self, conn, job, snapshot) -> StepResult:
+        if self._open_expired(conn, job, snapshot):
+            return self._fail_unopened(conn, job, job["error_text"])
         holders = slot_holders(conn, job["operation_slug"], exclude_job_id=job["id"])
         if slot_cap_reached(holders, snapshot["execution"].get("max_concurrent")):
             self._write(conn, job["id"], {"error_text": "waiting for a concurrency slot before quiescing"})
@@ -285,5 +368,6 @@ def build_quiesce_driver(engine, *, factory: Callable[..., QuiesceDriver] = Quie
 __all__ = [
     "ACK_STATUSES", "GATE_TTL_SECONDS", "LEASE_SECONDS", "MARGIN_SECONDS", "QuiesceDriver",
     "QuiesceUnavailable", "StepResult", "TurnGates", "build_quiesce_driver",
-    "cancel_pending_controls", "record_ack", "release_job_gates",
+    "caller_instruction", "cancel_pending_controls", "record_ack", "release_job_gates",
+    "scope_covers_bot",
 ]

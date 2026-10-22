@@ -115,6 +115,12 @@ def load_inter_bot_restart_retry_continue() -> str:
     return DEFAULT_RESTART_RETRY_CONTINUE
 
 
+def load_ops_quiesce_receipt() -> str:
+    from .ops.receipt_callback import DEFAULT_QUIESCE_RECEIPT
+
+    return DEFAULT_QUIESCE_RECEIPT
+
+
 def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 

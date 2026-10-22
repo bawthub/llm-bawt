@@ -107,7 +107,25 @@ def _caller_provenance() -> dict[str, str]:
         "caller_bot_id": turn.bot_id or None,
         "caller_user_id": turn.user_id or None,
         "caller_turn_id": turn.turn_id or None,
+        # Not a column: the session a direct quiesce job's receipt returns to.
+        "caller_session_id": turn.session_id or None,
     }
+
+
+def _caller_instruction(ops, result: dict, bot_id: str | None) -> dict | None:
+    """End-your-turn instruction while a quiesce job holds the caller's own
+    bot (TASK-1233), else ``None``. Never fails the call: an ops_run whose job
+    already exists must not read as an error an agent would retry."""
+    from ..ops.models import JOB_QUIESCING
+    from ..ops.quiesce import caller_instruction
+
+    if result.get("state") != JOB_QUIESCING:
+        return None
+    try:
+        return caller_instruction(ops.store.engine, result["id"], bot_id)
+    except Exception:  # noqa: BLE001 - advisory; the job itself is unaffected
+        logger.warning("quiesce caller instruction unavailable for %s", result.get("id"), exc_info=True)
+        return None
 
 
 @mcp.tool(name="ops_run")
@@ -141,20 +159,22 @@ async def ops_run(
         raise RuntimeError("[admission_owned] approved ops_run is admitted by the ops reconciler, not executed here")
     ops = await asyncio.to_thread(_get_ops_service)
     idem = (idempotency_key or "").strip() or uuid.uuid4().hex
+    provenance = _caller_provenance()
     try:
         result = await asyncio.to_thread(
             ops.dispatch_job,
             operation_slug=operation,
             args={} if args is None else args,
             idempotency_key=idem,
-            **_caller_provenance(),
+            **provenance,
         )
     except OpsDispatchError as exc:
         # Surface a structured error the agent can parse. MCP tools
         # signal errors by raising; the caller sees a tool_result with
         # is_error=True and the message text.
         raise RuntimeError(dispatch_error_text(exc)) from exc
-    return ops_run_receipt(result, idem)
+    instruction = await asyncio.to_thread(_caller_instruction, ops, result, provenance.get("caller_bot_id"))
+    return ops_run_receipt(result, idem, caller_instruction=instruction)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +210,8 @@ async def ops_job_status(
     )
     if result is None:
         raise LookupError(f"no job with id {job_id!r}")
+    result["caller_instruction"] = await asyncio.to_thread(
+        _caller_instruction, ops, result, _caller_provenance().get("caller_bot_id"))
     return result
 
 

@@ -72,6 +72,15 @@ class OpsService:
             raise OpsDispatchError("executor_kind_unknown", f"no executor registered for {kind!r}")
         return executor
 
+    @staticmethod
+    def _require_quiesce_fence(executor, execution):
+        """A quiesce job runs only on a worker that proves it enforces the start
+        fence (TASK-1233); an older worker would start after its hold lapsed."""
+        try:
+            executor.check_quiesce_fence(execution)
+        except ExecutorError as exc:
+            raise OpsDispatchError("quiesce_unavailable", str(exc)) from exc
+
     def list_operations_for_agent(self, *, include_disabled=False):
         return [row.to_agent_summary() for row in self.store.list_operations(include_disabled=include_disabled)]
 
@@ -137,6 +146,8 @@ class OpsService:
             raise OpsDispatchError("args_invalid", str(exc)) from exc
         if binding is not None:
             snapshot["quiesce"] = binding
+            # Never put a quiesce action before an approver that cannot run fenced.
+            self._require_quiesce_fence(executor, execution)
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
         return json.loads(canonical_json(snapshot))
 
@@ -204,9 +215,11 @@ class OpsService:
                      idempotency_key: str | None = None, approved_snapshot: dict | None = None,
                      caller_actor=None, caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
                      caller_session_key=None, caller_backend=None, approval_request_id=None,
-                     create_fence=None) -> dict:
+                     create_fence=None, caller_session_id=None) -> dict:
         """Create (or, for a known key, read) a job. ``create_fence`` guards only
-        creation; see ``OpsStore.create_job``. A key replay stays a plain read."""
+        creation; see ``OpsStore.create_job``. A key replay stays a plain read.
+        ``caller_session_id`` (from the caller's signed turn capability) lets a
+        direct quiesce job push its terminal receipt to the caller it holds."""
         supplied = {} if args is None else args
         try:
             payload = canonical_json({"operation": operation_slug, "args": supplied})
@@ -239,6 +252,13 @@ class OpsService:
         quiesce = bool(snapshot.get("quiesce"))
         if quiesce and getattr(getattr(self.store.engine, "dialect", None), "name", None) != "postgresql":
             raise OpsDispatchError("quiesce_unavailable", "quiesce operations require the PostgreSQL ops store")
+        if quiesce:
+            # Re-checked for an approved snapshot: the worker it pins is what runs.
+            self._require_quiesce_fence(self._resolve_executor(snapshot["execution"]["executor_kind"]),
+                                        snapshot["execution"])
+        callback = (self._receipt_callback(snapshot, bot_id=caller_bot_id, user_id=caller_user_id,
+                                           session_id=caller_session_id)
+                    if quiesce and not approval_request_id else None)
         try:
             job = self.store.create_job(operation=op, args_json=canonical_json(snapshot["resolved_args"]),
                 display_args_json=canonical_json(_display_args(snapshot["resolved_args"], op.args_schema_json)),
@@ -246,7 +266,7 @@ class OpsService:
                 caller_actor=caller_actor, caller_bot_id=caller_bot_id, caller_user_id=caller_user_id,
                 caller_turn_id=caller_turn_id, caller_session_key=caller_session_key, caller_backend=caller_backend,
                 approval_request_id=approval_request_id, fence=create_fence,
-                state=JOB_QUIESCING if quiesce else JOB_QUEUED)
+                state=JOB_QUIESCING if quiesce else JOB_QUEUED, receipt_callback_json=callback)
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
         # A quiescing job returns at once; the reconciler's driver holds,
@@ -257,6 +277,20 @@ class OpsService:
             release = self.releases.get_by_parent_job(job.id)
             result["release_id"] = release.id if release else None
         return result
+
+    def _receipt_callback(self, snapshot, *, bot_id, user_id, session_id) -> str | None:
+        """The receipt callback of a direct quiesce job whose scope covers its
+        caller (TASK-1233 e). That caller is told to end its turn, so nothing
+        else would ever start the turn that reads the result. An approved job
+        needs none: its approval continuation delivers the receipt."""
+        if not bot_id or not session_id:
+            return None
+        from .quiesce import scope_covers_bot
+
+        with self.store.engine.connect() as conn:
+            if not scope_covers_bot(conn, snapshot, bot_id):
+                return None
+        return canonical_json({"bot_id": bot_id, "user_id": user_id, "session_id": session_id})
 
     def _dispatch_queued(self, job):
         if job.state != JOB_QUEUED:
@@ -315,8 +349,9 @@ class OpsService:
             try:
                 executor.preflight(snapshot)
             except ExecutorError as exc:
-                # Before any hold: nothing is held while prerequisites are fixed.
-                self.store.note_quiescing_error(job.id, str(exc))
+                # Before any hold: nothing is held while prerequisites are
+                # fixed, until the job's open deadline fails it.
+                self.quiesce_driver.note_unopened(job.id, str(exc))
                 return
         if self.quiesce_driver.step(job.id).dispatch:
             fresh = self.store.get_job(job.id)

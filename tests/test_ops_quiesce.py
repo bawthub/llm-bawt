@@ -10,17 +10,18 @@ import json
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
 from llm_bawt.ops import JOB_FAILED, JOB_QUEUED, OpsDispatchError
-from llm_bawt.ops.executor import ExecutorError, worker_request
+from llm_bawt.ops.executor import DockerExecutor, Executor, ExecutorError, worker_request
 from llm_bawt.ops.models import JOB_QUIESCING
 from llm_bawt.ops.quiesce_settings import quiesce_binding, resolve_scope, validate_quiesce_settings
 from llm_bawt.ops.seeds import SEEDS
-from llm_bawt.ops.worker import atomic_json, fence_expired, run
+from llm_bawt.ops.worker import QUIESCE_FENCE_LABEL, atomic_json, fence_expired, run
 from llm_bawt.service.turn_gates import GateScope
 from tests.test_ops_executor import JOB, FakeAPI, FakeContainer, setup
 from tests.test_ops_service import _make, _op_data, _store
@@ -292,6 +293,102 @@ def test_fence_boundary():
     assert not fence_expired({}, limit + timedelta(days=1))
 
 
+# -- fence capability: the immutable worker must prove it enforces the fence ----
+
+def _labelled_docker(monkeypatch, labels):
+    images = SimpleNamespace(get=lambda _: SimpleNamespace(attrs={"Config": {"Labels": labels}}))
+    executor = DockerExecutor(client_factory=lambda: SimpleNamespace(images=images))
+    monkeypatch.setattr(executor, "_check_prerequisites", lambda _: None)
+    return executor, images
+
+
+def test_docker_refuses_a_quiesce_job_for_a_worker_without_the_fence_label(monkeypatch):
+    executor, images = _labelled_docker(monkeypatch, {})
+    spec = {"action": "restart", "container_name": "x"}
+    quiesced = {"spec": spec, "execution": {"worker_image": "old"}, "quiesce": {"enabled": True}}
+    with pytest.raises(ExecutorError, match="repin LLM_BAWT_OPS_WORKER_IMAGE"):
+        executor.check_quiesce_fence({"worker_image": "old"})
+    with pytest.raises(ExecutorError, match="repin LLM_BAWT_OPS_WORKER_IMAGE"):
+        executor.preflight(quiesced)
+    executor.preflight({"spec": spec, "execution": {"worker_image": "old"}})  # unquiesced: no label needed
+    images.get = lambda _: SimpleNamespace(attrs={"Config": {"Labels": {QUIESCE_FENCE_LABEL: "1"}}})
+    executor.preflight(quiesced)
+
+    def unreachable(_):
+        raise RuntimeError("daemon gone")
+    images.get = unreachable
+    with pytest.raises(ExecutorError, match="cannot verify quiesce fence"):
+        executor.check_quiesce_fence({"worker_image": "new"})
+
+
+def test_fence_capability_fails_closed_and_the_worker_image_declares_it():
+    class PlainExecutor(Executor):  # overrides nothing about the fence
+        kind = available = dispatch = reconcile = lambda self, **_: "plain"
+
+    with pytest.raises(ExecutorError, match="plain executor cannot enforce the quiesce start fence"):
+        PlainExecutor().check_quiesce_fence({})
+    dockerfile = Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker"
+    assert f'LABEL {QUIESCE_FENCE_LABEL}="1"' in dockerfile.read_text()
+
+
+def test_no_quiesce_approval_is_prepared_for_an_unfenced_worker():
+    service, executor = _quiesce_service()
+    executor._fenced = False
+    with pytest.raises(OpsDispatchError) as exc:
+        service.prepare_invocation("test.restart-thing", {"target": "a"})
+    assert exc.value.code == "quiesce_unavailable"
+    service.store.create_operation(_op_data(slug="test.plain"))
+    assert "quiesce" not in service.prepare_invocation("test.plain", {"target": "a"})
+
+
+# -- (e): a direct caller's receipt is pushed by the reconciler ----------------
+
+class _Part:
+    def __init__(self, error=None):
+        self.error, self.calls = error, 0
+
+    def __call__(self, **_):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return 0
+
+
+def test_the_reconciler_tick_sends_receipts_even_when_another_half_fails():
+    from llm_bawt.ops.reconciler import OpsReconciler
+
+    reconcile, admit, send = _Part(RuntimeError("reconcile down")), _Part(), _Part()
+    tick = OpsReconciler(SimpleNamespace(reconcile_active_jobs=reconcile),
+                         admission=SimpleNamespace(admit_due=admit),
+                         receipts=SimpleNamespace(deliver_due=send))
+    with pytest.raises(RuntimeError, match="reconcile down"):
+        tick.tick()
+    assert (reconcile.calls, admit.calls, send.calls) == (1, 1, 1)
+    tick.receipts = SimpleNamespace(deliver_due=_Part(RuntimeError("delivery down")))
+    reconcile.error = None
+    with pytest.raises(RuntimeError, match="delivery down"):
+        tick.tick()
+
+
+def test_the_receipt_prefix_is_a_registry_prompt_with_a_seed_fallback(monkeypatch):
+    from llm_bawt import prompt_registry
+    from llm_bawt.ops.receipt_callback import DEFAULT_QUIESCE_RECEIPT, PROMPT_KEY, receipt_prompt
+    from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
+
+    assert DEFAULT_PROMPT_DEFINITIONS[PROMPT_KEY].default_body() == DEFAULT_QUIESCE_RECEIPT
+    resolved = SimpleNamespace(body="[custom receipt prefix]")
+    monkeypatch.setattr(prompt_registry, "get_prompt_resolver",
+                        lambda: SimpleNamespace(resolve=lambda *a, **k: resolved))
+    assert receipt_prompt("byte") == "[custom receipt prefix]"
+    resolved.body = "  "
+    assert receipt_prompt("byte") == DEFAULT_QUIESCE_RECEIPT
+
+    def broken():
+        raise RuntimeError("registry down")
+    monkeypatch.setattr(prompt_registry, "get_prompt_resolver", broken)
+    assert receipt_prompt("byte") == DEFAULT_QUIESCE_RECEIPT
+
+
 # -- C7: the reconciler's import closure ---------------------------------------
 
 # A fresh interpreter importing the closure costs ~1s, over the unit budget:
@@ -301,6 +398,7 @@ def test_fence_boundary():
 def test_quiesce_driver_import_closure_has_no_app_wiring():
     code = (
         "import sys, llm_bawt.ops.quiesce, llm_bawt.ops.health_runtime, llm_bawt.ops.quiesce_settings\n"
+        "import llm_bawt.ops.receipt_callback, llm_bawt.inter_bot_delivery\n"
         "bad = [m for m in ('fastapi', 'starlette', 'llm_bawt.service.dependencies',"
         " 'llm_bawt.service.api') if m in sys.modules]\n"
         "print(','.join(bad))\n"

@@ -6,6 +6,8 @@ are safe (conditional claims), though a single configured replica is sufficient.
 
 It also admits approved MCP ``ops_run`` requests into durable jobs
 (TASK-1220, :mod:`.approved_admission`); the app only records the decision.
+It also pushes a direct quiesce job's terminal receipt to the caller it held
+(TASK-1233 e, :mod:`.receipt_callback`).
 """
 from __future__ import annotations
 
@@ -24,12 +26,14 @@ logger = logging.getLogger(__name__)
 
 class OpsReconciler:
     def __init__(self, service: OpsService, *, interval=5.0, batch_size=100,
-                 admission: ApprovedOpsAdmission | None = None):
+                 admission: ApprovedOpsAdmission | None = None, receipts=None):
         self.service = service
         self.interval = interval
         self.batch_size = batch_size
         self.offset = 0
         self.admission = admission
+        # TASK-1233 e: terminal receipts of direct quiesce jobs to their callers.
+        self.receipts = receipts
 
     def tick(self):
         # Each half runs even when the other fails; the cycle reports the first
@@ -46,6 +50,13 @@ class OpsReconciler:
         if self.admission is not None:
             try:
                 self.admission.admit_due()
+            except Exception as exc:
+                failure = failure or exc
+        if self.receipts is not None:
+            # After reconciliation, so a job that just turned terminal is sent
+            # in the same cycle.
+            try:
+                self.receipts.deliver_due()
             except Exception as exc:
                 failure = failure or exc
         if failure is not None:

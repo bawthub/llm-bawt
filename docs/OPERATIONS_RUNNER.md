@@ -61,6 +61,60 @@ approval-gated operation. Approved job `389fd3f7eb2742a8944f82158b51154b`
 completed the repair and both hostname-routed health endpoints returned HTTP 200.
 A catalog row alone does not upgrade an immutable worker on other installations.
 
+## Quiesce start fence: worker rollout (TASK-1233)
+
+A quiesce job dispatches with `fence.start_not_after`, and the worker refuses a
+later start (`worker.fence_expired`). The worker runs from its immutable image,
+not the bind-mounted source, so the fence is enforced only by a worker image
+built from a tree that has it. Such an image carries the label
+`llm-bawt.ops.quiesce-fence="1"` (`docker/Dockerfile.ops-worker`).
+
+The app fails closed without it. `DockerExecutor.check_quiesce_fence` inspects
+the configured worker image, and a quiesce operation is refused with
+`quiesce_unavailable` when preparing its approval, again when creating the job
+(including from an approved snapshot), and in the driver's preflight before any
+hold opens. Operations without quiesce are unaffected.
+
+**Rollout step, before `quiesce_enabled` is set on any operation.** This needs
+Nick's approval; it is not an ops catalog action:
+
+1. Build `docker/Dockerfile.ops-worker` from the commit that has the fence, as
+   in the setup checklist below, and record its immutable image ID or digest.
+2. Confirm the label: `docker image inspect <id> --format
+   '{{ index .Config.Labels "llm-bawt.ops.quiesce-fence" }}'` prints `1`.
+3. Repin `LLM_BAWT_OPS_WORKER_IMAGE` to it and recreate app and ops-reconciler
+   so both read it (a restart alone does not change the environment).
+
+Jobs already created keep the worker image in their snapshot.
+
+## Quiesce receipt callback and open deadline (TASK-1233)
+
+A quiesce job whose scope covers its own caller tells that caller to end its
+turn (`caller_instruction`), so the caller must get the terminal receipt as a
+new turn. An approval-gated job already does, through its approval
+continuation. A direct `ops_run` job records `receipt_callback_json`
+(`{bot_id, user_id, session_id}`, from the caller's signed turn capability) at
+creation, exactly when the scope covers the caller and the turn has a session.
+Out-of-scope callers and approved jobs record none.
+
+The ops reconciler's `QuiesceReceiptSender` (`ops/receipt_callback.py`) runs
+each tick. For every terminal job with a callback and no
+`receipt_callback_delivery_id` it enqueues one durable inter-bot delivery from
+`system` to the caller (`message_kind=OPS_RECEIPT`, `on_gate="hold"`, a new
+turn bound to the caller's session, never a steer), framed by the
+prompt-registry key `ops.quiesce_receipt`, then stamps the delivery id. The
+delivery's idempotency key is `ops-receipt:<job_id>`, so a crash before the
+stamp re-reads the same delivery. Pre-dispatch failures are terminal too, so
+the receipt also reports `quiesce_timeout`, `quiesce_lost` and a disabled
+operation. The app's dispatcher picks the row up on its periodic sweep; under
+a live hold it waits at the claim and is delivered after release.
+
+**Open deadline.** A job that has not opened its hold within
+`quiesce_timeout_seconds` of `submitted_at` fails `quiesce_timeout` with no
+action submitted. This bounds a preflight that keeps failing (its error is kept
+in `error_text` meanwhile) and a concurrency slot that never frees. The drain
+deadline after the hold opens is unchanged.
+
 ## Deployment setup checklist (original TASK-861 setup; installed on echo)
 
 The base compose app mounts Docker's socket and `./.logs:/app/.logs`; the dev

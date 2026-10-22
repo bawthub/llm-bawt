@@ -8,6 +8,7 @@ are ever held. Every test drives the production ``TurnGates`` seam: the real
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,9 +17,12 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
-from llm_bawt.ops import JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, OpsService
+from llm_bawt.ops import JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_SUCCEEDED, OpsDispatchError, OpsService
+from llm_bawt.ops.executor import ReconcileResult
 from llm_bawt.ops.models import JOB_QUIESCING
-from llm_bawt.ops.quiesce import MARGIN_SECONDS, QuiesceDriver, TurnGates, record_ack
+from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+from llm_bawt.ops.quiesce import MARGIN_SECONDS, QuiesceDriver, TurnGates, caller_instruction, record_ack
+from llm_bawt.ops.receipt_callback import QuiesceReceiptSender
 from llm_bawt.service.turn_admission import lock_target
 from llm_bawt.service.turn_gates import EXECUTION_EXIT_KEY, EXIT_SOURCES, GateActor, gate_blocks
 from tests.test_ops_service import FakeExecutor, _op_data
@@ -63,8 +67,10 @@ def rig(private_app_pg):
     service = OpsService(store, executor=executor)
     gates = RecordingGates()
     service.quiesce_driver = QuiesceDriver(engine, driver_id="driver-a", gates=gates)
+    deliveries = InterBotDeliveryStore(private_app_pg)
     ctx = SimpleNamespace(store=store, engine=engine, bot=bot, slug=slug, executor=executor,
-                          service=service, gates=gates, driver=service.quiesce_driver)
+                          service=service, gates=gates, driver=service.quiesce_driver,
+                          deliveries=deliveries, receipts=QuiesceReceiptSender(service, deliveries))
 
     def job(key=None):
         return service.dispatch_job(operation_slug=slug, args={"target": "a"},
@@ -114,6 +120,7 @@ def rig(private_app_pg):
                           " (SELECT id FROM system_gates WHERE owner_id = ANY(:o))"), {"o": owners})
         conn.execute(text("DELETE FROM system_gates WHERE owner_id = ANY(:o)"), {"o": owners})
         conn.execute(text("DELETE FROM ops_jobs WHERE operation_slug=:s"), {"s": slug})
+        conn.execute(text("DELETE FROM inter_bot_deliveries WHERE target_bot_id LIKE :b"), {"b": f"{bot}%"})
         conn.execute(text("DELETE FROM turn_logs WHERE bot_id=:b"), {"b": bot})
         conn.execute(text("DELETE FROM bot_profiles WHERE slug=:b"), {"b": bot})
 
@@ -358,3 +365,173 @@ def test_ack_is_refused_once_the_job_dispatches(rig):
     assert rig.row(job_id)["state"] == JOB_DISPATCHING
     assert record_ack(rig.engine, bot_id=rig.bot, turn_id=turn_id, status="stopping") is None
     assert rig.sql("SELECT ack_status FROM gate_members WHERE turn_id=:t", t=turn_id).scalar() is None
+
+
+# -- the caller's own turn (Snark ruling): in the roster, told to end it ---------
+
+def _agent_bot(rig, slug):
+    rig.sql("INSERT INTO bot_profiles (slug, name, description, system_prompt, requires_memory,"
+            " voice_optimized, uses_tools, uses_search, uses_home_assistant, bot_type, agent_backend,"
+            " created_at, updated_at) VALUES (:s, :s, '', '', false, false, false, false, false,"
+            " 'agent', 'claude-code', now(), now())", s=slug)
+
+
+def _as_caller(rig, monkeypatch, *, bot=None, turn_id=None, session="sess-caller"):
+    from llm_bawt.mcp_server import ops_tools
+
+    monkeypatch.setattr(ops_tools, "_get_ops_service", lambda: rig.service)
+    monkeypatch.setattr(ops_tools, "_caller_provenance", lambda: {
+        "caller_bot_id": bot or rig.bot, "caller_user_id": "nick", "caller_turn_id": turn_id,
+        "caller_session_id": session})
+    return ops_tools
+
+
+def _receipt_deliveries(rig, bot=None):
+    return rig.sql("SELECT id, sender_bot_id, message_kind, payload_json, metadata_json, message"
+                   " FROM inter_bot_deliveries WHERE target_bot_id=:b ORDER BY created_at",
+                   b=bot or rig.bot).mappings().all()
+
+
+def _succeed(rig, job_id):
+    rig.executor.next_reconcile = ReconcileResult(state="succeeded", exit_code=0, output_tail="ok\n",
+                                                  started_at="2026-01-01T00:00:00Z",
+                                                  finished_at="2026-01-01T00:00:05Z")
+    assert rig.service.get_job_status(job_id)["state"] == JOB_SUCCEEDED
+
+
+def test_the_callers_own_turn_holds_until_it_exits_and_it_is_told_to_end_it(rig, monkeypatch):
+    turn_id = rig.turn()
+    ops_tools = _as_caller(rig, monkeypatch, turn_id=turn_id)
+    receipt = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))
+    job_id = receipt["job_id"]
+    assert receipt["state"] == JOB_QUIESCING and rig.row(job_id)["caller_turn_id"] == turn_id
+    assert json.loads(rig.row(job_id)["receipt_callback_json"]) == {
+        "bot_id": rig.bot, "user_id": "nick", "session_id": "sess-caller"}
+    told = receipt["caller_instruction"]
+    assert (told["action"], told["held_bot"], told["result_delivery"]) == ("end_turn", rig.bot, "new_turn")
+    assert "do not poll in this turn" in told["message"] and "poll_later" not in json.dumps(told)
+
+    status = asyncio.run(ops_tools.ops_job_status(job_id))  # the step that opens the hold
+    assert status["state"] == JOB_QUIESCING and status["caller_instruction"] == told
+    roster = json.loads(rig.row(job_id)["quiesce_json"])["roster"]
+    assert [m["turn_id"] for m in roster] == [turn_id]
+    for _ in range(2):  # however often it polls, its own live turn keeps the job held
+        assert rig.driver.step(job_id).outcome == "holding"
+    assert rig.executor.dispatch_calls == []
+    assert rig.receipts.deliver_due() == []  # nothing is sent before the job is terminal
+
+    other = f"{rig.bot}-x"  # an agent bot outside the scope polls freely
+    _agent_bot(rig, other)
+    try:
+        assert caller_instruction(rig.engine, job_id, other) is None
+    finally:
+        rig.sql("DELETE FROM bot_profiles WHERE slug=:s", s=other)
+    assert caller_instruction(rig.engine, job_id, None) is None
+
+    rig.end(turn_id)  # the caller ends its turn
+    assert rig.service.get_job_status(job_id)["state"] == JOB_ACCEPTED
+    [call] = rig.executor.dispatch_calls
+    assert call["job_id"] == job_id
+    assert caller_instruction(rig.engine, job_id, rig.bot) is None
+    rig.executor.next_reconcile = ReconcileResult(None)  # worker not done yet
+    assert asyncio.run(ops_tools.ops_job_status(job_id))["caller_instruction"] is None
+
+    _succeed(rig, job_id)  # terminal; the hold gate may still be live until the sweep
+    assert rig.receipts.deliver_due() == [job_id]
+    [delivery] = _receipt_deliveries(rig)
+    assert (delivery["sender_bot_id"], delivery["message_kind"]) == ("system", "OPS_RECEIPT")
+    payload = delivery["payload_json"]
+    assert (payload["session_id"], payload["user"], payload["bot_id"]) == ("sess-caller", "nick", rig.bot)
+    assert payload["prefer_steer"] is False and payload["extract_memory"] is False
+    assert delivery["metadata_json"]["ops_job_id"] == job_id
+    sent = json.loads(delivery["message"].split("\n", 1)[1])
+    assert (sent["id"], sent["state"]) == (job_id, JOB_SUCCEEDED)
+    assert rig.row(job_id)["receipt_callback_delivery_id"] == delivery["id"]
+
+    assert rig.receipts.deliver_due() == []  # stamped: exactly once
+    rig.sql("UPDATE ops_jobs SET receipt_callback_delivery_id=NULL WHERE id=:id", id=job_id)
+    assert rig.receipts.deliver(job_id) == delivery["id"]  # a crash before the stamp re-reads it
+    assert len(_receipt_deliveries(rig)) == 1
+
+
+def test_a_direct_caller_outside_the_scope_gets_no_callback(rig, monkeypatch):
+    other = f"{rig.bot}-x"
+    _agent_bot(rig, other)
+    try:
+        ops_tools = _as_caller(rig, monkeypatch, bot=other)
+        receipt = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))
+        assert receipt["caller_instruction"] is None
+        assert rig.row(receipt["job_id"])["receipt_callback_json"] is None
+    finally:
+        rig.sql("DELETE FROM bot_profiles WHERE slug=:s", s=other)
+
+
+def test_a_caller_without_a_session_gets_no_callback(rig, monkeypatch):
+    ops_tools = _as_caller(rig, monkeypatch, session=None)
+    receipt = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))
+    assert receipt["caller_instruction"] is None
+    assert rig.row(receipt["job_id"])["receipt_callback_json"] is None
+
+
+def test_a_failing_caller_instruction_never_fails_ops_run(rig, monkeypatch):
+    import llm_bawt.ops.quiesce as quiesce
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("instruction read failed")
+
+    monkeypatch.setattr(quiesce, "caller_instruction", broken)
+    ops_tools = _as_caller(rig, monkeypatch)
+    receipt = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))
+    assert receipt["caller_instruction"] is None and receipt["state"] == JOB_QUIESCING
+    assert rig.row(receipt["job_id"])["state"] == JOB_QUIESCING
+
+
+def test_an_unopened_job_fails_at_its_open_deadline_and_its_receipt_is_sent(rig, monkeypatch):
+    ops_tools = _as_caller(rig, monkeypatch)
+    job_id = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))["job_id"]
+    rig.executor._available = False  # preflight fails before any hold
+    rig.service._drive_quiesce(rig.store.get_job(job_id))
+    row = rig.row(job_id)
+    assert row["state"] == JOB_QUIESCING and row["quiesce_gate_id"] is None
+    assert row["error_text"] == "executor not available"
+
+    rig.sql("UPDATE ops_jobs SET submitted_at = now() - interval '301 seconds' WHERE id=:id", id=job_id)
+    rig.service._drive_quiesce(rig.store.get_job(job_id))
+    row = rig.row(job_id)
+    assert row["state"] == JOB_FAILED and row["error_text"].startswith("quiesce_timeout: the hold did not open")
+    assert "last: executor not available" in row["error_text"]
+    assert rig.gates_of(job_id) == [] and rig.executor.dispatch_calls == []
+
+    assert rig.receipts.deliver_due() == [job_id]
+    [delivery] = _receipt_deliveries(rig)
+    assert json.loads(delivery["message"].split("\n", 1)[1])["state"] == JOB_FAILED
+
+
+def test_a_job_waiting_for_a_slot_fails_at_its_open_deadline(rig):
+    first, second = rig.job(), rig.job()
+    assert rig.driver.step(first).outcome == "opened"
+    assert rig.driver.step(second).outcome == "waiting_slot"
+    rig.sql("UPDATE ops_jobs SET submitted_at = now() - interval '301 seconds' WHERE id=:id", id=second)
+    assert rig.driver.step(second).outcome == "failed"
+    row = rig.row(second)
+    assert row["state"] == JOB_FAILED and "last: waiting for a concurrency slot" in row["error_text"]
+    assert rig.gates_of(second) == []
+
+
+def test_an_approved_caller_is_told_its_receipt_arrives_as_a_new_turn(rig):
+    job_id = rig.service.dispatch_job(operation_slug=rig.slug, args={"target": "a"},
+                                      idempotency_key=uuid.uuid4().hex, caller_bot_id=rig.bot,
+                                      caller_session_id="sess-caller",
+                                      approval_request_id=f"appr-{uuid.uuid4().hex}")["id"]
+    assert caller_instruction(rig.engine, job_id, rig.bot)["result_delivery"] == "new_turn"
+    assert rig.row(job_id)["receipt_callback_json"] is None  # its continuation delivers it
+
+
+def test_an_approved_quiesce_job_is_refused_for_an_unfenced_worker(rig):
+    approved = rig.service.prepare_invocation(rig.slug, {"target": "a"})
+    rig.executor._fenced = False  # the worker was repinned to an image without the fence
+    with pytest.raises(OpsDispatchError) as exc:
+        rig.service.dispatch_job(operation_slug=rig.slug, args={"target": "a"},
+                                 idempotency_key=uuid.uuid4().hex, approved_snapshot=approved)
+    assert exc.value.code == "quiesce_unavailable" and "fence" in str(exc.value)
+    assert rig.sql("SELECT count(*) FROM ops_jobs WHERE operation_slug=:s", s=rig.slug).scalar() == 0

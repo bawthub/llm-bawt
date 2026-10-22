@@ -431,6 +431,15 @@ class OpsJob(SQLModel, table=True):
     quiesce_json: str | None = Field(
         default=None, sa_column=Column(Text, nullable=True)
     )
+    # {bot_id, user_id, session_id}: a direct (unapproved) quiesce job whose
+    # scope covered its caller pushes its terminal receipt to that caller as a
+    # new turn (TASK-1233 e). Written with the row; stamped once enqueued.
+    receipt_callback_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    receipt_callback_delivery_id: str | None = Field(
+        default=None, sa_column=Column(String(128), nullable=True)
+    )
 
     def to_api(self, *, include_output: bool = False) -> dict[str, Any]:
         import json
@@ -482,7 +491,7 @@ class OpsJob(SQLModel, table=True):
 
 def _quiesce_api(job: "OpsJob") -> dict[str, Any] | None:
     import json
-    if job.quiesce_json is None and job.quiesce_gate_id is None:
+    if job.quiesce_json is None and job.quiesce_gate_id is None and job.receipt_callback_json is None:
         return None
     try:
         receipt = json.loads(job.quiesce_json) if job.quiesce_json else {}
@@ -492,11 +501,18 @@ def _quiesce_api(job: "OpsJob") -> dict[str, Any] | None:
         fence = json.loads(job.quiesce_fence_json) if job.quiesce_fence_json else None
     except (json.JSONDecodeError, TypeError):
         fence = None
+    try:
+        callback = json.loads(job.receipt_callback_json) if job.receipt_callback_json else None
+    except (json.JSONDecodeError, TypeError):
+        callback = {"unreadable": True}
     return {
         "gate_id": job.quiesce_gate_id,
         "deadline_at": _iso_utc(job.quiesce_deadline_at),
         "fence": fence,
         "receipt": receipt,
+        "receipt_callback": None if callback is None else {
+            "bot_id": callback.get("bot_id"), "delivery_id": job.receipt_callback_delivery_id,
+        },
     }
 
 

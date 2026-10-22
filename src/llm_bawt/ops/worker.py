@@ -34,6 +34,10 @@ else:  # pragma: no cover - standalone worker image
 
 
 OPS_JOB_LABEL = "llm-bawt.ops.job"
+# Image label a worker built with :func:`fence_expired` carries (TASK-1233). The
+# app refuses quiesce jobs for a worker image without it: an older worker
+# ignores ``fence`` and would start after the hold it was fenced into.
+QUIESCE_FENCE_LABEL = "llm-bawt.ops.quiesce-fence"
 
 
 def target_selector(spec: dict, args: dict) -> tuple[str | None, dict | None]:

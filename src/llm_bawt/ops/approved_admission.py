@@ -58,8 +58,14 @@ TOOL_ERROR_RESULT = "Tool returned an error result"
 _OPS_RUN_ARGUMENTS = frozenset({"operation", "args", "idempotency_key"})
 
 
-def ops_run_receipt(result: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
-    """The ``ops_run`` result contract, shared by the MCP tool and admission."""
+def ops_run_receipt(result: dict[str, Any], idempotency_key: str, *,
+                    caller_instruction: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The ``ops_run`` result contract, shared by the MCP tool and admission.
+
+    ``caller_instruction`` (TASK-1233) is set only by the direct tool, for a
+    caller its own quiesce holds. Admission leaves it null: an admitted
+    receipt reaches its caller only once the job is terminal.
+    """
     return {
         "id": result["id"],
         "job_id": result["id"],
@@ -69,6 +75,7 @@ def ops_run_receipt(result: dict[str, Any], idempotency_key: str) -> dict[str, A
         "submitted_at": result["submitted_at"],
         "host_unit_name": result.get("host_unit_name"),
         "idempotency_key": idempotency_key,
+        "caller_instruction": caller_instruction,
     }
 
 

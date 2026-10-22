@@ -21,7 +21,8 @@ from .release_spec import is_release_spec, validate_release_spec
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
 from .validation import canonical_json
-from .worker import OPS_JOB_LABEL, atomic_json, is_ops_worker, target_selector
+from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, atomic_json, is_ops_worker,
+                     target_selector)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 
@@ -87,6 +88,11 @@ class Executor(ABC):
     def routing_approval(self, spec: dict) -> dict:
         """Public routing delta plus a private-config fingerprint; read-only."""
         raise ExecutorError(f"{self.kind()} executor cannot reconcile frontend routing")
+
+    def check_quiesce_fence(self, settings: dict) -> None:
+        """Read-only: the worker this executor would start enforces the quiesce
+        start fence (TASK-1233). Fails closed unless an executor proves it."""
+        raise ExecutorError(f"{self.kind()} executor cannot enforce the quiesce start fence")
 
     def check_target(self, spec: dict, args: dict) -> None:
         """Approval-time, read-only: the spec's target exists where this executor
@@ -212,16 +218,32 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError(f"cannot inspect deploy target health {spec['container_name']}: {exc}") from exc
 
-    def _check_routing_worker(self, settings):
+    def _require_worker_label(self, settings, label, *, missing, unverifiable):
+        """The configured immutable worker image proves a capability by label."""
         try:
             worker = self.client.images.get(settings["worker_image"])
             labels = worker.attrs.get("Config", {}).get("Labels") or {}
-            if labels.get(WORKER_CAPABILITY_LABEL) != "1":
-                raise ExecutorError("configured immutable ops worker lacks routing-reconcile v1; deploy the tested worker first")
+            if labels.get(label) != "1":
+                raise ExecutorError(missing)
         except ExecutorError:
             raise
         except Exception as exc:
-            raise ExecutorError("cannot verify routing worker capability") from exc
+            raise ExecutorError(unverifiable) from exc
+
+    def _check_routing_worker(self, settings):
+        self._require_worker_label(
+            settings, WORKER_CAPABILITY_LABEL,
+            missing="configured immutable ops worker lacks routing-reconcile v1; deploy the tested worker first",
+            unverifiable="cannot verify routing worker capability")
+
+    def check_quiesce_fence(self, settings):
+        # The worker runs from its image, not the bind-mounted source: an image
+        # built before the fence would start a quiesced job after its hold.
+        self._require_worker_label(
+            settings, QUIESCE_FENCE_LABEL,
+            missing=("configured immutable ops worker does not enforce the quiesce start fence; "
+                     "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
+            unverifiable="cannot verify quiesce fence support of the ops worker")
 
     def routing_approval(self, spec):
         self._check_prerequisites(self.execution_settings(spec))
@@ -273,6 +295,8 @@ class DockerExecutor(Executor):
         self._check_prerequisites(snapshot["execution"])
         if snapshot["spec"].get("action") == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
+        if snapshot.get("quiesce"):
+            self.check_quiesce_fence(snapshot["execution"])
         if snapshot["spec"].get("action") == DEPLOY_ACTION:
             self.ensure_release_image(snapshot["release"]["image_ref"])
 
