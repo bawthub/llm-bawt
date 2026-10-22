@@ -33,6 +33,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from agent_bridge.abort_contract import HOST_SHUTDOWN
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
 from agent_bridge.approval import (
     ApprovalDecision,
@@ -298,16 +299,59 @@ class ClaudeCodeBridge(
             self._backend_name,
         )
 
+    # Bounded wait for host-shutdown-cancelled sends to publish their
+    # terminal events. Each send publishes ASSISTANT_DONE + done before its
+    # (up to 20s) SDK disconnect, so this only needs to cover that first step;
+    # it must stay well inside Docker's 10s stop grace.
+    SHUTDOWN_SEND_GRACE_SECONDS = 5.0
+
+    async def _cancel_sends_for_shutdown(self) -> None:
+        """TASK-1231B: cancel queued/running sends as ``host_shutdown``.
+
+        Runs after the command listener stops (so no new send can register
+        behind ``cancel_all``) and before the publisher closes. Otherwise the
+        sends are only cancelled by ``asyncio.run``'s teardown, after the
+        publisher is closed, and are stamped like a user Stop.
+        """
+        tasks = self._session_queue.cancel_all(cause=HOST_SHUTDOWN)
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(
+            tasks, timeout=self.SHUTDOWN_SEND_GRACE_SECONDS,
+        )
+        if pending:
+            logger.warning(
+                "%d send(s) still cleaning up after %.0fs shutdown grace",
+                len(pending), self.SHUTDOWN_SEND_GRACE_SECONDS,
+            )
+
     async def stop(self) -> None:
-        for task in (self._command_task, self._cleanup_task, self._approval_reload_task):
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        # Single-flight: __main__ awaits stop() while run_forever's finally
+        # also calls it. A second caller must not close the listener and
+        # publisher while the first is still waiting on shutdown publication.
+        stopping = getattr(self, "_stopping", None)
+        if stopping is None:
+            stopping = self._stopping = asyncio.ensure_future(self._stop_once())
+        await asyncio.shield(stopping)
+
+    async def _stop_once(self) -> None:
+        # Listener first: a chat.send read during the shutdown grace would
+        # otherwise register after cancel_all and outlive the publisher.
+        await self._cancel_and_wait(self._command_task)
+        await self._cancel_sends_for_shutdown()
+        for task in (self._cleanup_task, self._approval_reload_task):
+            await self._cancel_and_wait(task)
         self._publisher.close()
         logger.info("ClaudeCodeBridge stopped")
+
+    @staticmethod
+    async def _cancel_and_wait(task: asyncio.Task | None) -> None:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def run_forever(self) -> None:
         await self.start()

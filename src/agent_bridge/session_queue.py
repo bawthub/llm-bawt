@@ -48,6 +48,10 @@ class SessionQueue:
         self._locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._request_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        # Why a registered send was cancelled, when the canceller knows
+        # (TASK-1231B: host shutdown). Read by the send's terminal publication;
+        # dropped with the request registration.
+        self._cancel_causes: dict[tuple[str, str], str] = {}
         # Cooperative cancel signals — handlers check this between SDK
         # messages so an abort takes effect without waiting for the next
         # `await` point to fire CancelledError.
@@ -180,6 +184,7 @@ class SessionQueue:
                 lock.release()
             if request_key is not None and self._request_tasks.get(request_key) is owner:
                 self._request_tasks.pop(request_key, None)
+                self._cancel_causes.pop(request_key, None)
 
     def cancel_request(self, session_key: str, request_id: str) -> bool:
         """Cancel exactly one queued/running send, never its session siblings."""
@@ -192,6 +197,35 @@ class SessionQueue:
         if not task.cancelling():
             task.cancel()
         return True
+
+    def cancel_all(self, *, cause: str) -> list[asyncio.Task]:
+        """Cancel every queued and running send, recording *cause* for each.
+
+        Used when the bridge host shuts down (TASK-1231B). A send that is
+        already being cancelled (e.g. by chat.abort) keeps its original
+        attribution and isn't cancelled again, so its cleanup isn't cut off.
+        Returns the tasks cancelled here so the caller can bound a wait on
+        their terminal publication.
+        """
+        cancelled: list[asyncio.Task] = []
+        for key, task in list(self._request_tasks.items()):
+            if task.done() or task.cancelling():
+                continue
+            self._cancel_causes[key] = cause
+            session_key = key[0]
+            if self._active_tasks.get(session_key) is task:
+                # Same as cancel_request: the SDK may absorb task.cancel(), so
+                # also raise the cooperative flag the send loop checks.
+                self.signal_cancel(session_key)
+            task.cancel()
+            cancelled.append(task)
+        if cancelled:
+            logger.info("Cancelled %d send(s): cause=%s", len(cancelled), cause)
+        return cancelled
+
+    def cancel_cause(self, session_key: str, request_id: str) -> str | None:
+        """Return the recorded cause for this request's cancellation, if any."""
+        return self._cancel_causes.get((session_key, request_id))
 
     def cancel_active(self, session_key: str) -> bool:
         """Cancel the active task for *session_key*.

@@ -13,6 +13,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from agent_bridge.abort_contract import aborted_terminal_raw
 from agent_bridge.events import AgentEventKind
 from agent_bridge.maintenance import is_compact_command
 from agent_bridge.publisher import COMMANDS_STREAM
@@ -85,6 +86,13 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
         queue_seq = 0
         run_done_published = False
 
+        def _cancelled_raw() -> dict:
+            # TASK-1231B: a host-shutdown cancel is stamped so the app can
+            # retry it; an abort/cancel RPC keeps the historical shape.
+            return aborted_terminal_raw(
+                self._session_queue.cancel_cause(session_key, request_id)
+            )
+
         async def _publish_early_cancel() -> None:
             nonlocal run_done_published
             if run_done_published:
@@ -92,7 +100,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
             self._publish_event(
                 request_id, session_key, queue_seq + 1,
                 kind=AgentEventKind.ASSISTANT_DONE, text="",
-                extra_raw={"end_reason": "aborted", "status": "cancelled"},
+                extra_raw=_cancelled_raw(),
             )
             run_done_published = publish_run_done_once(
                 self._publisher, request_id, already_published=run_done_published,
@@ -459,7 +467,7 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                             request_id, session_key, seq, kind=AgentEventKind.ASSISTANT_DONE,
                             text=text, model=actual_model, token_usage=interrupted_usage,
                             attachments=attachments or turn_screenshot_assets or None,
-                            extra_raw={"end_reason": "aborted", "status": "cancelled"} if cancelled else None,
+                            extra_raw=_cancelled_raw() if cancelled else None,
                         )
                         assistant_done_emitted = True
 
