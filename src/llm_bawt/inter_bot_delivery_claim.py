@@ -32,11 +32,13 @@ class DeliveryClaim:
             return None
         target = target_bot_id.strip().lower()
         claim_token = f"claim-{uuid.uuid4().hex}"
+        from .service.turn_admission import lock_target
+        from .service.turn_gates import GateActor, gate_blocks
+
         with store.engine.begin() as conn:
-            conn.execute(
-                sa_text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
-                {"target": target},
-            )
+            # The one per-bot admission lock, so a claim linearizes with gate
+            # activation and every other admission edge (TASK-1233).
+            lock_target(conn, target)
             from .inter_bot_preclaim import load_claim_head
             head = load_claim_head(conn, target, store.config)
             if (
@@ -51,6 +53,12 @@ class DeliveryClaim:
                         next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
                     WHERE id=:id AND status='QUEUED'
                 """), {"id": head["id"]})
+                return None
+            if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"])) is not None:
+                # A live system gate holds the head: it stays QUEUED with no
+                # attempt spent and nothing written, and the target's FIFO
+                # waits behind it. The first sweep after release claims it.
+                # An explicit Stop above still settles under a gate.
                 return None
             from .service.session_lifecycle.recovery import NewSessionRecovery
 

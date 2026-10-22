@@ -46,6 +46,8 @@ class InterBotDeliveryDispatcher:
     # row after the drain ends. The claim heartbeat keeps the lease meanwhile.
     FINALIZE_WAIT_SECONDS = 30.0
     FINALIZE_POLL_SECONDS = 0.05
+    # A fallback turn refused at admission is deferred, never spun at delay 0.
+    TARGET_BUSY_REQUEUE_SECONDS = 1.0
 
     def __init__(
         self, service: Any, *, recovery_interval_seconds: float = 15.0,
@@ -532,7 +534,16 @@ class InterBotDeliveryDispatcher:
             if delivered:
                 await self._finish_delivered(delivered)
         except DeliveryTargetBusy as exc:
-            queued = self.store.requeue(record.id, claim_token, str(exc), delay_seconds=0)
+            # save_turn, the turn's first write, refused it: another producer
+            # won the target, or a system gate went live after the claim
+            # (SystemGateRefused is a TargetBusy). Nothing reached the
+            # transport, so this is no attempt and no acceptance; under a
+            # gate the claim then holds the row until release (TASK-1233).
+            queued = self.store.requeue(
+                record.id, claim_token, str(exc),
+                delay_seconds=self.TARGET_BUSY_REQUEUE_SECONDS,
+                clear_delivery_mode=True, refund_attempt=True,
+            )
             if queued:
                 await self._emit(queued)
         except Exception as exc:  # classification is intentionally centralized
