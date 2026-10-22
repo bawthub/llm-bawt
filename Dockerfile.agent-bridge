@@ -112,7 +112,7 @@ RUN uv venv && uv pip install --constraint /app/agent-bridge-constraints.txt \
     "websockets>=13.0" \
     "httpx>=0.26.0" \
     "anyio>=4.0" \
-    "claude-agent-sdk>=0.2.158" \
+    "claude-agent-sdk>=0.2.160" \
     "openai-codex-sdk>=0.1.11" \
     "openai>=1.69.0" \
     "fastapi>=0.109.0" \
