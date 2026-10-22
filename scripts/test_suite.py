@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 from tests.suite_manifest import PG_SELECTORS
 
@@ -85,20 +86,58 @@ def run(marker: str, *extra: str) -> None:
         raise RuntimeError(f"test suite failed (exit {result.returncode})")
 
 
+LOCK_WAIT_ENV = "LLM_BAWT_TEST_LOCK_WAIT_SECONDS"
+
+
+def lock_wait_seconds() -> float:
+    """Bounded wait for a busy runner; 0 (the default) fails immediately.
+
+    ``make test-snapshot`` sets it so a queued snapshot gate waits its turn.
+    Waiting never bypasses the lock: the suite still runs only while it holds it.
+    """
+    configured = os.environ.get(LOCK_WAIT_ENV, "").strip()
+    if not configured:
+        return 0.0
+    try:
+        seconds = float(configured)
+    except ValueError:
+        seconds = -1.0
+    if not 0 <= seconds <= 24 * 3600:
+        raise RuntimeError(f"{LOCK_WAIT_ENV} must be 0-86400 seconds, got {configured!r}")
+    return seconds
+
+
 @contextmanager
-def runner_lock():
+def runner_lock(wait_seconds: float | None = None, poll_seconds: float = 1.0):
     # All heavy suites on one runner serialize, even across separate worktrees.
     # The descriptor releases on process exit, including Ctrl-C and pytest failure.
     try:
         import fcntl
     except ImportError as exc:
         raise RuntimeError("test-suite serialization requires a Unix runner") from exc
+    wait = lock_wait_seconds() if wait_seconds is None else wait_seconds
     lock_path = Path(tempfile.gettempdir()) / "llm-bawt-test-suite.lock"
     with lock_path.open("w") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("another llm-bawt test suite is running on this host") from exc
+        started = time.monotonic()
+        announced = False
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                waited = time.monotonic() - started
+                if waited >= wait:
+                    detail = f" (waited {waited:.1f}s)" if wait else ""
+                    raise RuntimeError(
+                        f"another llm-bawt test suite is running on this host{detail}"
+                    ) from exc
+                if not announced:
+                    print(f"Test runner lock: busy, waiting up to {wait:.0f}s", flush=True)
+                    announced = True
+                time.sleep(min(poll_seconds, wait - waited))
+        if announced:
+            print(f"Test runner lock: acquired after {time.monotonic() - started:.1f}s",
+                  flush=True)
         yield
 
 
@@ -122,7 +161,10 @@ def main(argv: list[str] | None = None) -> int:
     )):
         parser.error("target requires one or more safe tests/... node IDs")
     try:
-        with runner_lock():
+        wait = lock_wait_seconds()
+        # The wait is the runner's own setting; the tests it launches never inherit it.
+        os.environ.pop(LOCK_WAIT_ENV, None)
+        with runner_lock(wait):
             if args.suite == "offline":
                 verify_offline_partition()
                 run(UNIT, "--unit-time-budget=1", "--require-no-skips", *parallel("load"))

@@ -2,6 +2,8 @@
 
 from contextlib import nullcontext
 from multiprocessing import get_context
+import os
+import time
 
 import pytest
 
@@ -49,6 +51,7 @@ def _hold_lock(ready, release):
 
 def test_global_runner_lock_rejects_concurrent_processes(monkeypatch, tmp_path):
     monkeypatch.setattr(suite.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.delenv(suite.LOCK_WAIT_ENV, raising=False)
     context = get_context("fork")  # The runner itself requires Unix flock.
     ready_parent, ready_child = context.Pipe()
     release_parent, release_child = context.Pipe()
@@ -68,3 +71,58 @@ def test_global_runner_lock_rejects_concurrent_processes(monkeypatch, tmp_path):
     assert worker.exitcode == 0
     with suite.runner_lock():
         pass
+
+
+def _hold_lock_for(ready, seconds):
+    with suite.runner_lock():
+        ready.send(True)
+        time.sleep(seconds)
+
+
+def test_a_bounded_wait_acquires_after_release_and_times_out_while_held(monkeypatch, tmp_path):
+    monkeypatch.setattr(suite.tempfile, "gettempdir", lambda: str(tmp_path))
+    context = get_context("fork")
+    ready_parent, ready_child = context.Pipe()
+    worker = context.Process(target=_hold_lock_for, args=(ready_child, 0.3))
+    worker.start()
+    try:
+        assert ready_parent.poll(3) and ready_parent.recv()
+        with pytest.raises(RuntimeError, match=r"another llm-bawt test suite .*waited \d+\.\ds"):
+            with suite.runner_lock(wait_seconds=0.1, poll_seconds=0.02):
+                pass
+        # The holder releases at ~0.3s; a 3s bounded wait must then acquire.
+        with suite.runner_lock(wait_seconds=3, poll_seconds=0.02):
+            pass
+    finally:
+        worker.join(timeout=3)
+    assert worker.exitcode == 0
+
+
+def test_the_runner_consumes_the_lock_wait_so_launched_tests_never_inherit_it(monkeypatch):
+    seen = {}
+
+    def lock(wait):
+        seen["wait"] = wait
+        return nullcontext()
+
+    def run(*_args):
+        seen["env"] = os.environ.get(suite.LOCK_WAIT_ENV)
+
+    monkeypatch.setenv(suite.LOCK_WAIT_ENV, "90")
+    monkeypatch.setattr(suite, "runner_lock", lock)
+    monkeypatch.setattr(suite, "run", run)
+    assert suite.main(["unit"]) == 0
+    assert seen == {"wait": 90.0, "env": None}
+
+
+@pytest.mark.parametrize(("value", "expected"), [("", 0.0), ("0", 0.0), ("90", 90.0)])
+def test_lock_wait_comes_from_the_environment(monkeypatch, value, expected):
+    monkeypatch.setenv(suite.LOCK_WAIT_ENV, value)
+    assert suite.lock_wait_seconds() == expected
+
+
+@pytest.mark.parametrize("value", ["soon", "-1", "100000"])
+def test_a_bad_lock_wait_fails_closed(monkeypatch, value):
+    monkeypatch.setenv(suite.LOCK_WAIT_ENV, value)
+    with pytest.raises(RuntimeError, match="must be 0-86400"):
+        suite.lock_wait_seconds()

@@ -311,7 +311,7 @@ endif  # not Windows
 # DEV TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-service test-paid
+.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-service test-paid
 
 # Every scenario enters the same locked runner; CI calls these targets too.
 TEST_RUNNER := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory python -m scripts.test_suite
@@ -351,6 +351,15 @@ test-profile: ## Report all unit durations including setup/call/teardown
 
 test-target: ## Safe explicit nodes, e.g. make test-target NODES=tests/test_ops_health.py
 	$(TEST_RUNNER) target $(NODES)
+
+# Gate exactly BASE + patches in a throwaway worktree outside ~/dev (TASK-1137).
+# PATHS=... AUTHOR=<bot> builds the patch from this tree; PATCHES=... applies files in order.
+SNAPSHOT_SUITE := $(if $(SUITE),$(SUITE),$(if $(NODES),target,offline))
+test-snapshot: ## Gate BASE + patches in a throwaway worktree: make test-snapshot PATHS="src/x.py" AUTHOR=<bot>
+	python3 scripts/test_snapshot.py --base '$(if $(BASE),$(BASE),HEAD)' --suite '$(SNAPSHOT_SUITE)' \
+		--author '$(AUTHOR)' $(if $(LOCK_WAIT),--lock-wait '$(LOCK_WAIT)') \
+		$(foreach p,$(PATCHES),--patch '$(p)') $(foreach p,$(PATHS),--path '$(p)') \
+		$(foreach n,$(NODES),--node '$(n)')
 
 test-service: ## Refuse unverified live service until an isolated target is wired
 	$(TEST_RUNNER) service

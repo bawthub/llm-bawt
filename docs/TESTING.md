@@ -17,7 +17,65 @@ Do not use `pytest -m ""`: that bypasses the external-target boundary.
 | `make test-cov` | Hermetic coverage (not a latency gate) | Python only |
 | `make test-profile` | Detailed hermetic setup/call/teardown timings | Python only |
 | `make test-target NODES=tests/test_file.py::test_name` | Explicit offline target, no skips | Relevant private fixtures |
+| `make test-snapshot PATHS="…" AUTHOR=<bot>` / `PATCHES="…"` | `test-all` (or `test-target` with `NODES`) on exactly BASE + patches in a throwaway worktree | Test host only; see below |
 | `make test-service` / `make test-paid` | **Refuse** until a disposable service/DB and credential scope are provisioned and verified | Never run against live :8642 |
+
+## Exact-bytes gate: `make test-snapshot` (TASK-1137)
+
+The shared checkout carries other bots' uncommitted work, so `make test-all`
+there tests a mix. `make test-snapshot` runs the same suite on a detached git
+worktree outside `~/dev` (`~/.cache/llm-bawt-test-snapshot/wt/`) holding only
+BASE plus the given patches, then removes it on every exit path, including
+failure and interrupt. Run it on echo
+(`ssh nick@172.18.0.1 'cd ~/dev/llm-bawt && make test-snapshot …'`); it refuses
+inside a container.
+
+| Variable | Meaning |
+| --- | --- |
+| `PATHS="a.py b.py"` + `AUTHOR=<bot>` | Build the patch from this checkout's working tree for exactly these files (new, modified or deleted) vs HEAD. BASE must be HEAD. |
+| `PATCHES="/abs/one.patch /abs/two.patch"` | Apply these patch files in order with `git apply --index` (no fuzz; any reject fails the run). |
+| `BASE=<commit>` | Default `HEAD`. |
+| `NODES="tests/…"` / `SUITE=offline\|target` | `NODES` alone selects `test-target`; the default is `test-all`. |
+| `LOCK_WAIT=<s>` | How long to wait for another suite to finish (default 1800). The runner lock is never bypassed. |
+
+**Ownership.** `PATHS` refuses a file unless its uncommitted bytes provably
+belong to `AUTHOR`: either they chain back to HEAD through only `AUTHOR`'s
+recorded edits (`turn_changed_files`, via `pgq`), or `commit-recon` attributes
+every dirty line to `AUTHOR` and none to anyone else. Edit tracked files only
+with Edit/Write: a turn's record of a file runs from the bytes before its first
+Edit/Write in that turn to the bytes after its last, so a Bash edit outside that
+span can't be proven. If you edited a file through Bash, restore it to HEAD and
+redo the change with Edit/Write in a new turn. When another bot has uncommitted
+changes in the same file, `PATHS` refuses; sequence the work on the task.
+`AUTHOR` is self-declared and recorded in the receipt for the reviewer. Known
+limit: another bot's *unrecorded* edit made inside your turn, between your
+edits, is absorbed into your turn's snapshot.
+
+**Receipt.** Every run writes `runs/<run_id>/receipt.json` (status, exit, base,
+each patch's sha256 and pinned copy, `diff_sha256`, changed files, runner and
+pytest summary lines, log path) and prints the same summary. `diff_sha256` is
+sha256 of `git diff BASE` in the snapshot, the same bytes as `git diff BASE
+<commit>` once the change is committed: the pin reviewers use. The run id and
+receipt path print first, so a caller that disconnects can read the receipt
+later; the run continues without stdout. Exit codes: 0 passed, 1 failed /
+patch rejected / error, 2 refused before testing, 130 interrupted. A patch that
+changes the runner itself (`Makefile`, `scripts/test_suite.py`, `tests/conftest.py`,
+…) is flagged in the receipt: that gate ran the patched runner. Run directories
+are pruned after 14 days, so commit (or re-gate) a reviewed patch before then.
+
+**Flow.**
+1. Edit in the shared checkout.
+2. `make test-snapshot PATHS="…" AUTHOR=<bot>` → receipt plus
+   `runs/<run_id>/01-paths.patch`.
+3. The reviewer reruns with `PATCHES="<that patch>"` on the same BASE, adding a
+   mutant patch to prove a test fails without the fix.
+4. Commit exactly the pinned patch: `git apply --cached <patch>`, then
+   `git commit` with **no pathspec**, so another bot's unstaged hunks in the same
+   files stay out of the commit.
+
+Only `.git/worktrees/<run_id>` metadata (and new blob objects) are written in
+the canonical repository; the working tree, index, HEAD, branches and stash
+are untouched. A snapshot left by a killed run is removed by the next run.
 
 The required offline gate compares pytest's safe collection with the union of
 three disjoint suites and reports selected counts before executing any test.
