@@ -25,9 +25,6 @@ log = get_service_logger(__name__)
 # a later finalize cannot reopen the row (update_turn is terminal-monotonic).
 WORKER_FINALIZE_GRACE_SECONDS = 5.0
 _WORKER_POLL_SECONDS = 0.02
-# Margin over the bridge's teardown bound, so the reply that carries the
-# teardown outcome lands before the app gives up (Vex S3).
-_ABORT_RPC_MARGIN_SECONDS = 5.0
 
 # bridge_state values that mean execution itself confirmed it stopped.
 CONFIRMED_STATES = frozenset({"cancelled", "worker_finalized"})
@@ -132,13 +129,15 @@ async def _abort_bridge_run(service, turn, execution) -> dict:
     if subscriber is None or not backend:
         return {"bridge_state": "bridge_unreachable", "backend": backend}
     try:
-        from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortReply, AbortReplyError
+        # The RPC outlives the bridge's teardown bound, so the reply that
+        # carries the teardown outcome lands before the app gives up (Vex S3).
+        from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S, AbortReply, AbortReplyError
 
         result = await subscriber.send_rpc(
             "chat.abort",
             {"sessionKey": turn.agent_session_key, "requestId": turn.agent_request_id},
             f"abort_{uuid.uuid4().hex}",
-            timeout_s=ABORT_TEARDOWN_BOUND_S + _ABORT_RPC_MARGIN_SECONDS, backend=backend,
+            timeout_s=ABORT_RPC_TIMEOUT_S, backend=backend,
         )
     except Exception as exc:
         log.warning("Abort acknowledgement unavailable for turn %s: %s", turn.id, exc)

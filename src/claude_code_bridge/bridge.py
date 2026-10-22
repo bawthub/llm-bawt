@@ -137,6 +137,9 @@ class ClaudeCodeBridge(
         # request_id -> live TurnPhaseTracker (TASK-1074). Proxy statuses route
         # through it so one owner decides the transient turn phase.
         self._turn_phase_trackers: dict[str, Any] = {}
+        # request_id -> RunTeardown of its live SDK client (TASK-1232 P4), so
+        # chat.abort can await the send-owned teardown instead of disconnecting.
+        self._run_teardowns: dict[str, Any] = {}
         # Tool-use id -> Future for a live AskUserQuestion on this process.
         # Only the matching command may resolve it; cleaned up on timeout/abort.
         # Result: dict = native answers (allow), str = deny text (dismissal).
@@ -301,8 +304,8 @@ class ClaudeCodeBridge(
 
     # Bounded wait for host-shutdown-cancelled sends to publish their
     # terminal events. Each send publishes ASSISTANT_DONE + done before its
-    # (up to 20s) SDK disconnect, so this only needs to cover that first step;
-    # it must stay well inside Docker's 10s stop grace.
+    # bounded run teardown (run_teardown.py), so this only needs to cover that
+    # first step; it must stay well inside Docker's 10s stop grace.
     SHUTDOWN_SEND_GRACE_SECONDS = 5.0
 
     async def _cancel_sends_for_shutdown(self) -> None:

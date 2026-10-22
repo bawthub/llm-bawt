@@ -299,9 +299,12 @@ class AgentBridgeBackend(AgentBackend):
                         if execution is not None and execution.dispatched():
                             # Stop won while send_command was in flight. Publish
                             # AFTER chat.send so cancellation cannot overtake it.
+                            from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
+
                             result = await local_sub.send_rpc(
                                 "chat.abort", {"sessionKey": session_key, "requestId": request_id},
-                                f"abort_{uuid.uuid4().hex}", timeout_s=25, backend=self.name,
+                                f"abort_{uuid.uuid4().hex}", timeout_s=ABORT_RPC_TIMEOUT_S,
+                                backend=self.name,
                             )
                             if not (result.get("cancelled") is True or result.get("aborted") is True):
                                 logger.warning("Dispatch-time abort unconfirmed request=%s", request_id)

@@ -74,7 +74,9 @@ def test_a_malformed_abort_is_a_strict_v1_error(kind, session, target, request_i
     assert "requires sessionKey and requestId" in reply.detail
 
 
-def test_claude_running_request_is_cancelled_and_disconnected(monkeypatch):
+def test_claude_running_request_reply_waits_for_and_reports_the_send_teardown(monkeypatch):
+    # TASK-1232 P4: the abort never disconnects; the cancelled send owns one
+    # teardown and the reply carries its outcome.
     async def run():
         harness = _SendHarness()
         sdk = _SDKStream()
@@ -84,8 +86,11 @@ def test_claude_running_request_is_cancelled_and_disconnected(monkeypatch):
         await harness.abort()
         reply = _parse(harness._publisher.publish_rpc_result.call_args.args[1], "claude-code")
         assert reply.state is AbortState.CANCELLED and reply.request_id == "turn-request"
-        assert reply.detail.startswith("task_cancelled")
+        # The fake client has no CLI process, so exit can't be judged.
+        assert reply.detail == "task_cancelled,teardown:disconnect=ok;signal=none;exited=unknown"
+        assert sdk.disconnect_calls == 1
         await asyncio.gather(send, return_exceptions=True)
+        assert harness._run_teardowns == {}
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 

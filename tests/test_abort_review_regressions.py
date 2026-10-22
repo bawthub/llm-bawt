@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from sqlmodel import Session, SQLModel, create_engine
 
+from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
 from agent_bridge.events import AgentEvent, AgentEventKind
 from claude_code_bridge.command_ops import ClaudeCommandMixin
 from llm_bawt.agent_backends import agent_bridge
@@ -69,26 +70,28 @@ def test_claude_does_not_answer_another_bridges_abort(backend):
     redis.xack.assert_awaited_once()
 
 
-@pytest.mark.parametrize(("reply", "state"), [
-    ({"ok": True}, "error"),
-    ({"ok": True, "cancelled": False}, "not_found"),
-    # claude-code's legacy ``aborted`` is the session key: only a bool counts.
-    ({"ok": True, "aborted": "test:nick", "detail": "no_active_task"}, "error"),
+@pytest.mark.parametrize("reply", [
+    {"ok": True},
+    {"ok": True, "cancelled": False},
+    # claude-code's old ``aborted`` was the session key.
+    {"ok": True, "aborted": "test:nick", "detail": "no_active_task"},
 ])
-def test_ok_without_actual_cancellation_stops_but_is_not_confirmation(store, monkeypatch, reply, state):
-    """TASK-1232 P4: an unconfirmed legacy reply still stops the turn (was 503),
-    but the audit never records it as confirmed."""
+def test_pre_contract_reply_is_malformed_but_still_stops(store, monkeypatch, reply):
+    """TASK-1232 #21: a reply without the v1 shape is no longer mapped. It
+    still stops the turn (the P4 guarantee), but is recorded as an
+    unconfirmed ``error``, never as cancelled or not_found."""
     owner = execution(store)
     owner.bind_bridge(backend="local", session_key="test:nick", request_id="req-A")
     owner.dispatched()
     rpc = AsyncMock(return_value=reply)
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
     result = asyncio.run(abort_turn(service(store), store.get_turn("A"), source="chat_stop", peer=None))
-    assert result == f"aborted:{state}"
+    assert result == "aborted:error"
     row = store.get_turn("A")
     assert (row.status, row.end_reason) == ("aborted", "aborted") and row.ended_at is not None
     stop = json.loads(row.request_json)["user_stop"]
-    assert (stop["bridge_state"], stop["confirmed"], stop["contract"]) == (state, False, "legacy")
+    assert (stop["bridge_state"], stop["confirmed"]) == ("error", False)
+    assert stop["detail"].startswith("malformed reply") and "contract" not in stop
     assert rpc.call_args.kwargs["backend"] == "local"
 
 
@@ -253,6 +256,9 @@ def test_abort_during_command_publication_is_sent_after_chat_send(store, monkeyp
         async def send_rpc(self, method, params, request_id, **kwargs):
             assert params["requestId"] == "req-A"
             assert kwargs["backend"] == "agent-bridge"
+            # Same timeout as the Stop path: it must outlive the bridge's
+            # teardown bound (TASK-1232 P4).
+            assert kwargs["timeout_s"] == ABORT_RPC_TIMEOUT_S
             order.append("abort")
             return {"cancelled": True}
         async def subscribe_run(self, request_id, **kwargs):
@@ -618,14 +624,12 @@ def test_user_stop_settles_orphan_on_every_bridge_outcome(store, monkeypatch, rp
 def test_user_stop_waits_out_the_bridge_teardown_and_audits_its_detail(store, monkeypatch):
     """Vex S3: the RPC outlives the bridge's teardown bound, so the reply that
     carries the teardown outcome is what the user_stop audit records."""
-    from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S
-
     _orphan_bound_to_bridge(store, monkeypatch)
     rpc = AsyncMock(return_value=_normalized_abort_reply(
         "cancelled", cancelled=True, detail="teardown_killed_after_backstop"))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
     assert asyncio.run(abort_turn(service(store), store.get_turn("A"), source="chat_stop", peer=None)) == "aborted:cancelled"
-    assert rpc.call_args.kwargs["timeout_s"] > ABORT_TEARDOWN_BOUND_S
+    assert rpc.call_args.kwargs["timeout_s"] == ABORT_RPC_TIMEOUT_S
     _assert_user_stop_settled(store, bridge_state="cancelled", confirmed=True)
     stop = json.loads(store.get_turn("A").request_json)["user_stop"]
     assert (stop["detail"], stop["boot_id"], stop["backend"], stop["contract"]) == (

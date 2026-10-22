@@ -8,6 +8,8 @@ import pytest
 
 from agent_bridge.abort_contract import (
     ABORT_CAUSE_KEY,
+    ABORT_RPC_MARGIN_S,
+    ABORT_RPC_TIMEOUT_S,
     ABORT_TEARDOWN_BOUND_S,
     HOST_SHUTDOWN,
     TEARDOWN_DISCONNECT_BACKSTOP_S,
@@ -136,37 +138,26 @@ def test_from_wire_rejects_a_non_mapping():
         AbortReply.from_wire(["cancelled"], backend="codex")
 
 
-@pytest.mark.parametrize("data, state, request_id", [
-    # claude-code legacy: `aborted` is the session key, `cancelled` the bool.
-    ({"ok": True, "aborted": "bot:user", "cancelled": True, "request_id": "r"}, "cancelled", "r"),
-    ({"ok": True, "aborted": "bot:user", "cancelled": False, "request_id": "r"}, "not_found", "r"),
-    # codex / local / openclaw legacy.
-    ({"ok": True, "aborted": True, "requestId": "r", "detail": "task_cancelled"}, "cancelled", "r"),
-    ({"ok": True, "aborted": False, "requestId": "r"}, "not_found", "r"),
-    # Errors and anything unrecognized never confirm anything.
-    ({"ok": False, "error": "chat.abort requires sessionKey and requestId"}, "error", "unknown"),
-    ({"ok": True, "aborted": True, "error": "late"}, "error", "unknown"),
-    ({"ok": True}, "error", "unknown"),
-    ({"ok": True, "aborted": "bot:user"}, "error", "unknown"),
-    # A detail is prose, not proof: only a bool flag counts.
-    ({"ok": True, "aborted": "bot:user", "detail": "no_active_task"}, "error", "unknown"),
-    ({"ok": True, "aborted": True, "detail": "no_active_task"}, "cancelled", "unknown"),
-    ({"ok": True, "cancelled": 1}, "error", "unknown"),
+@pytest.mark.parametrize("data", [
+    # The pre-contract shapes every bridge used to send (TASK-1232 #21): no
+    # longer mapped, so they can't be read as a confirmation or a not_found.
+    {"ok": True, "aborted": "bot:user", "cancelled": True, "request_id": "r"},
+    {"ok": True, "aborted": "bot:user", "cancelled": False, "request_id": "r"},
+    {"ok": True, "aborted": True, "requestId": "r", "detail": "task_cancelled"},
+    {"ok": True, "aborted": False, "requestId": "r"},
+    {"ok": False, "error": "chat.abort requires sessionKey and requestId"},
+    {"ok": True},
+    {},
 ])
-def test_from_wire_legacy_mapping_claims_no_more_than_the_reply_proves(data, state, request_id):
-    reply = AbortReply.from_wire(data, backend="claude-code")
-    assert reply.state is AbortState(state)
-    assert reply.cancelled is (state == "cancelled")
-    assert (reply.backend, reply.boot_id, reply.contract) == ("claude-code", "legacy", "legacy")
-    assert reply.request_id == request_id
+def test_from_wire_rejects_every_pre_contract_reply(data):
+    with pytest.raises(AbortReplyError, match="keys mismatch"):
+        AbortReply.from_wire(data, backend="claude-code")
 
 
-def test_legacy_mapping_can_never_produce_tombstoned():
-    shapes = [{"ok": ok, key: value} for ok in (True, False)
-              for key in ("cancelled", "aborted", "detail", "error")
-              for value in (True, False, "tombstoned", None)]
-    assert all(AbortReply.from_wire(s, backend="codex").state is not AbortState.TOMBSTONED
-               for s in shapes)
+def test_v1_is_the_only_contract():
+    with pytest.raises(AbortReplyError, match="unknown contract"):
+        AbortReply(backend="codex", boot_id="b", request_id="r", cancelled=False,
+                   state=AbortState.NOT_FOUND, contract="legacy")
 
 
 # -- teardown bound (TASK-1232 S3) ----------------------------------------------
@@ -178,6 +169,11 @@ def test_teardown_waits_fit_inside_the_published_bound():
     assert TEARDOWN_DISCONNECT_BACKSTOP_S + TEARDOWN_KILL_WAIT_S < ABORT_TEARDOWN_BOUND_S
     # claude-agent-sdk close(): 5s write lock + 5s EOF + 5s SIGTERM + 5s SIGKILL.
     assert TEARDOWN_DISCONNECT_BACKSTOP_S > 4 * 5
+
+
+def test_the_app_abort_rpc_outlives_the_teardown_bound():
+    assert ABORT_RPC_MARGIN_S > 0
+    assert ABORT_RPC_TIMEOUT_S == ABORT_TEARDOWN_BOUND_S + ABORT_RPC_MARGIN_S
 
 
 # -- SessionQueue cause attribution -----------------------------------------

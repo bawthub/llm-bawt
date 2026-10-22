@@ -59,8 +59,12 @@ def test_user_abort_keeps_historical_shape_through_a_later_shutdown(monkeypatch)
             await sdk.disconnect_entered.wait()
             # Shutdown arrives while the user Stop is still cleaning up.
             harness._session_queue.cancel_all(cause=HOST_SHUTDOWN)
-            await asyncio.gather(send, return_exceptions=True)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            # The terminal was published before the teardown; the send itself
+            # keeps the session until its teardown ends (TASK-1232 P4, PE1).
             assert _terminal_raw(harness, "turn-request").raw == CANCELLED
+            assert not send.done()
         finally:
             sdk.release_disconnect.set()
             await asyncio.gather(abort, send, return_exceptions=True)

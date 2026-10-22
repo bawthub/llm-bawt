@@ -90,7 +90,8 @@ def test_run_done_is_published_exactly_once() -> None:
     assert publisher.request_ids == ["req-terminal"]
 
 
-def test_abort_arms_proxy_gate_before_task_cancel_and_disconnect() -> None:
+def test_abort_arms_proxy_gate_before_task_cancel_and_never_disconnects() -> None:
+    # TASK-1232 P4: teardown belongs to the cancelled send, not the abort.
     async def run():
         harness = _SendHarness()
         order: list[str] = []
@@ -114,7 +115,9 @@ def test_abort_arms_proxy_gate_before_task_cancel_and_disconnect() -> None:
 
         await harness.abort()
 
-        assert order == ["gate:turn-request", "cancel", "disconnect"]
+        assert order == ["gate:turn-request", "cancel"]
+        reply = harness._publisher.publish_rpc_result.call_args.args[1]
+        assert (reply["state"], reply["detail"]) == ("cancelled", "task_cancelled")
 
     asyncio.run(run())
 
@@ -131,6 +134,7 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
         self._proxy_base_url = None
         self._proxy_request_sessions = {}
         self._turn_phase_trackers = {}
+        self._run_teardowns = {}
         self._trigger_message_ids = {}
         self._backend_name = "claude-code"
         self._request_timeout = 5
@@ -271,13 +275,24 @@ def test_delayed_abort_never_cancels_successor_or_repeats_done(monkeypatch):
         await harness.queued.wait()
         abort = asyncio.create_task(harness.abort())
         await first.disconnect_entered.wait()
-        # Repeat while cleanup is pending: no second task.cancel injection.
-        await harness.abort()
-        await asyncio.gather(first_send, return_exceptions=True)
-        await second.waiting.wait()
+        # The cancelled terminal is out before the teardown (TASK-1232 P4).
         _assert_cancelled(harness)
+        # Repeat while the teardown is pending: no second task.cancel
+        # injection, and both replies wait for the same teardown.
+        repeat = asyncio.create_task(harness.abort())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not abort.done() and not repeat.done() and not first_send.done()
+        # PE1: the session lock is held until the CLI is torn down.
+        assert not second.waiting.is_set()
         first.release_disconnect.set()
-        await abort
+        await asyncio.gather(first_send, abort, repeat, return_exceptions=True)
+        assert first.disconnect_calls == 1
+        replies = [c.args[1] for c in harness._publisher.publish_rpc_result.call_args_list]
+        assert [r["detail"] for r in replies] == [
+            "task_cancelled,teardown:disconnect=ok;signal=none;exited=unknown"
+        ] * 2
+        await second.waiting.wait()
         await harness.abort()  # stale target after the successor owns the session
         assert not successor.done()
         assert not harness._session_queue.cancel_event(SESSION).is_set()
@@ -440,8 +455,16 @@ def test_abort_after_terminal_during_cleanup_does_not_duplicate_done(monkeypatch
         await sdk.disconnect_entered.wait()
         terminal, = harness.terminal()
         assert terminal.raw == {}
-        await harness.abort()
-        await send
+        # The abort lands mid-teardown: it must neither cut the teardown short
+        # (PE1) nor publish a second terminal; its reply waits for the outcome.
+        abort = asyncio.create_task(harness.abort())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not send.done() and not abort.done()
+        sdk.release_disconnect.set()
+        await abort
+        await asyncio.gather(send, return_exceptions=True)
+        assert sdk.disconnect_calls == 1
         assert harness.terminal() == [terminal]
         harness._publisher.publish_run_done.assert_called_once_with("turn-request")
     asyncio.run(asyncio.wait_for(run(), timeout=5))

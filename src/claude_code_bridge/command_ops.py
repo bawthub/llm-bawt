@@ -31,7 +31,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from agent_bridge.abort_contract import AbortState
+from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.approval import (
@@ -394,10 +394,17 @@ class ClaudeCommandMixin:
             await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
 
     async def _abort_request(self, session_key: str, target_request_id: str) -> tuple[AbortState, str]:
-        """Cancel exactly ``target_request_id``; :func:`answer_abort` replies."""
-        # Claim and cancel only this request before yielding. Disconnect
-        # may outlive the run and a successor may own the session by then.
-        client = self._session_queue.get_active_client(session_key)
+        """Cancel exactly ``target_request_id``; :func:`answer_abort` replies.
+
+        TASK-1232 P4: the abort never disconnects the client itself. The
+        cancelled send owns one bounded teardown (``run_teardown``); the reply
+        waits for its outcome, up to ``ABORT_TEARDOWN_BOUND_S``, and carries it
+        in ``detail`` so the app's ``user_stop`` audit records whether the CLI
+        is confirmed gone.
+        """
+        # Look up and cancel only this request before yielding; a successor
+        # may own the session by the time the teardown finishes.
+        teardown = getattr(self, "_run_teardowns", {}).get(target_request_id)
         cancel_proxy = getattr(self, "_cancel_proxy_sampling", None)
         if cancel_proxy is not None:
             cancel_proxy(target_request_id)
@@ -406,34 +413,16 @@ class ClaudeCommandMixin:
             clear_proxy = getattr(self, "_clear_proxy_sampling_cancel", None)
             if clear_proxy is not None:
                 clear_proxy(target_request_id)
-        if cancelled and getattr(client, "request_id", None) == target_request_id:
-            client = self._session_queue.pop_active_client(session_key)
+        if not cancelled:
+            detail = "no_active_task"
+        elif teardown is None:
+            # Cancelled before the SDK client existed: nothing to tear down.
+            detail = "task_cancelled"
         else:
-            client = None
-        client_disconnected = False
-        if client is not None:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=20.0)
-                client_disconnected = True
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "disconnect() timed out for session %s — subprocess may be stuck",
-                    session_key,
-                )
-            except Exception:
-                logger.debug(
-                    "disconnect() raised on chat.abort for session %s",
-                    session_key,
-                    exc_info=True,
-                )
-        detail_parts: list[str] = []
-        if cancelled:
-            detail_parts.append("task_cancelled")
-        if client_disconnected:
-            detail_parts.append("client_disconnected")
-        if not detail_parts:
-            detail_parts.append("no_active_task")
-        detail = ",".join(detail_parts)
+            outcome = await teardown.wait(ABORT_TEARDOWN_BOUND_S)
+            detail = "task_cancelled," + (
+                outcome.detail() if outcome is not None else "teardown:pending"
+            )
         logger.info("chat.abort: session=%s detail=%s", session_key, detail)
         if not cancelled:
             return AbortState.TOMBSTONED, detail

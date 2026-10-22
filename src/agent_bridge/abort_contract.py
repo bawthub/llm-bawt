@@ -18,13 +18,12 @@ cause"; consumers must not infer a restart from it.
 
 Normalized abort reply (TASK-1232 P3)
 -------------------------------------
-``chat.abort`` replies from every bridge are converging on
+``chat.abort`` replies from every bridge use
 :class:`AbortReply`. :meth:`AbortReply.from_wire` is the one parser the app
-uses. It picks the path from the reply's shape: a reply carrying any v1 field
-is parsed strictly by :meth:`AbortReply.from_dict`, so a bridge drifting from
-the contract fails loudly instead of being read as "not confirmed". A reply
-with no v1 field comes from a bridge that predates the contract (mixed-version
-rollout) and is mapped without claiming more than it proves.
+uses. It is strict (:meth:`AbortReply.from_dict`), so a bridge drifting from
+the contract fails loudly instead of being read as "not confirmed". Every
+bridge answers v1 since TASK-1232 P3; the pre-contract adapter was removed
+(TASK-1232 #21).
 """
 
 from __future__ import annotations
@@ -69,6 +68,13 @@ TEARDOWN_KILL_WAIT_S = 2.0
 ABORT_TEARDOWN_BOUND_S = 25.0
 """Upper bound on one run's teardown: backstop + kill wait + 1s slack."""
 
+ABORT_RPC_MARGIN_S = 5.0
+"""How long the app waits past ``ABORT_TEARDOWN_BOUND_S`` for the reply."""
+
+ABORT_RPC_TIMEOUT_S = ABORT_TEARDOWN_BOUND_S + ABORT_RPC_MARGIN_S
+"""The app's ``chat.abort`` RPC timeout. Every caller uses this one value so
+the app never gives up just as the bridge's teardown reply arrives."""
+
 
 def aborted_terminal_raw(cause: str | None = None) -> dict[str, str]:
     """Return the ``raw`` payload for a cancelled run's terminal event.
@@ -110,13 +116,8 @@ class AbortState(str, Enum):
 
 
 _REPLY_FIELDS = ("backend", "boot_id", "request_id", "cancelled", "state", "detail")
-# Fields only a v1 reply carries; their presence selects the strict parser.
-_V1_MARKERS = ("state", "boot_id")
 
 CONTRACT_V1 = "v1"
-CONTRACT_LEGACY = "legacy"
-LEGACY_BOOT_ID = "legacy"
-_LEGACY_REQUEST_ID = "unknown"
 
 
 class AbortReplyError(ValueError):
@@ -131,9 +132,8 @@ class AbortReply:
     as its own field so callers can branch on a bool without knowing the enum.
     ``boot_id`` identifies the bridge process that answered, so a reply from a
     process that has since restarted can be told apart from the current one.
-    ``contract`` records which wire shape was parsed (``v1`` or ``legacy``) so
-    the Stop audit shows which bridges still answer in the old shape; it is
-    never on the wire.
+    ``contract`` records which wire shape was parsed (only ``v1`` exists) for
+    the Stop audit; it is never on the wire.
     """
 
     backend: str
@@ -157,7 +157,7 @@ class AbortReply:
             raise AbortReplyError("detail must be a string")
         if self.cancelled != (self.state is AbortState.CANCELLED):
             raise AbortReplyError("cancelled must be true exactly when state is cancelled")
-        if self.contract not in (CONTRACT_V1, CONTRACT_LEGACY):
+        if self.contract != CONTRACT_V1:
             raise AbortReplyError(f"unknown contract: {self.contract!r}")
 
     @classmethod
@@ -190,55 +190,16 @@ class AbortReply:
     def from_wire(cls, data: Mapping[str, Any], *, backend: str) -> "AbortReply":
         """Parse a ``chat.abort`` RPC result from the bridge for *backend*.
 
-        The path is chosen by shape, never by trying strict and falling back:
-        a reply with any v1 field is parsed strictly and must name *backend*;
-        anything malformed raises :class:`AbortReplyError`. A reply with no v1
-        field is mapped by :meth:`_from_legacy`.
+        Strict: the reply must be exactly the v1 shape and must name *backend*;
+        anything else raises :class:`AbortReplyError`, which the caller records
+        as ``error``, never as ``not_found``.
         """
-        if not isinstance(data, Mapping):
-            raise AbortReplyError("abort reply must be an object")
-        if not any(key in data for key in _V1_MARKERS):
-            return cls._from_legacy(data, backend=backend)
         reply = cls.from_dict(data)
         if reply.backend != backend:
             raise AbortReplyError(
                 f"abort reply from backend {reply.backend!r}, addressed {backend!r}"
             )
         return reply
-
-    @classmethod
-    def _from_legacy(cls, data: Mapping[str, Any], *, backend: str) -> "AbortReply":
-        """Map a pre-contract reply, never claiming more than it proves.
-
-        ``cancelled``/``aborted`` literally True -> cancelled (claude-code's
-        legacy ``aborted`` is the session key, so only a bool counts); False
-        with no error -> not_found; an error or anything else -> error. A
-        legacy reply can never prove ``tombstoned``.
-        """
-        request_id = data.get("request_id") or data.get("requestId")
-        if not isinstance(request_id, str) or not request_id.strip():
-            request_id = _LEGACY_REQUEST_ID
-        error = data.get("error")
-        flags = [data[key] for key in ("cancelled", "aborted") if key in data]
-        detail = data.get("detail")
-        detail = detail if isinstance(detail, str) else ""
-        if error or data.get("ok") is False:
-            state, detail = AbortState.ERROR, str(error or detail or "legacy_error")
-        elif any(flag is True for flag in flags):
-            state = AbortState.CANCELLED
-        elif any(flag is False for flag in flags):
-            state = AbortState.NOT_FOUND
-        else:
-            state, detail = AbortState.ERROR, detail or "unrecognized_legacy_reply"
-        return cls(
-            backend=backend,
-            boot_id=LEGACY_BOOT_ID,
-            request_id=request_id,
-            cancelled=state is AbortState.CANCELLED,
-            state=state,
-            detail=detail,
-            contract=CONTRACT_LEGACY,
-        )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "AbortReply":
@@ -269,10 +230,10 @@ class AbortReply:
 __all__ = [
     "ABORT_CAUSES",
     "ABORT_CAUSE_KEY",
+    "ABORT_RPC_MARGIN_S",
+    "ABORT_RPC_TIMEOUT_S",
     "ABORT_TEARDOWN_BOUND_S",
-    "CONTRACT_LEGACY",
     "CONTRACT_V1",
-    "LEGACY_BOOT_ID",
     "AbortReply",
     "AbortReplyError",
     "AbortState",

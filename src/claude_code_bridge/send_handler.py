@@ -36,6 +36,7 @@ from .send_errors import (
     result_message_error,
     retry_exhausted_text,
 )
+from .run_teardown import RunTeardown
 from .send_admission import ClaudeSendAdmissionMixin
 from .send_preflight import SendPreflight
 from .send_result import ClaudeResultMixin
@@ -464,9 +465,12 @@ class ClaudeSendMixin(
 
                     sdk_client = None
                     active_run = None
+                    teardown = None
                     msg_stream = None
                     try:
                         sdk_client = ClaudeSDKClient(options=options)
+                        teardown = RunTeardown(sdk_client)
+                        self._run_teardowns[request_id] = teardown
                         await sdk_client.connect(prompt_input)
                         def _publish_run_signal(kind: AgentEventKind, raw: dict) -> None:
                             nonlocal seq
@@ -913,23 +917,22 @@ class ClaudeSendMixin(
                         turn_done.set()
                         if active_run is not None:
                             active_run.mark_completed()
-                        # Always deregister this iteration's client so a
-                        # subsequent chat.abort doesn't try to disconnect()
-                        # something that's already finished. We pop only if
-                        # the registry still points at our client — concurrent
-                        # aborts may have already popped it to disconnect().
-                        if session_key and sdk_client is not None:
+                        # Always deregister this iteration's client so steers
+                        # stop targeting a finished run. Pop only if the
+                        # registry still points at our client; a successor
+                        # may already own the slot.
+                        if session_key and active_run is not None:
                             current = self._session_queue.get_active_client(session_key)
                             if current is active_run:
                                 self._session_queue.pop_active_client(session_key)
+                        if teardown is not None:
+                            # TASK-1232 P4: the one bounded teardown, inside the
+                            # session lock; a repeated cancel waits for it (PE1).
                             try:
-                                await asyncio.wait_for(sdk_client.disconnect(), timeout=20.0)
-                            except (asyncio.TimeoutError, asyncio.CancelledError):
-                                pass
-                            except Exception:
-                                logger.debug(
-                                    "sdk_client.disconnect() raised", exc_info=True,
-                                )
+                                await teardown.run_owned()
+                            finally:
+                                if self._run_teardowns.get(request_id) is teardown:
+                                    del self._run_teardowns[request_id]
 
                 run_done_published = publish_run_done_once(
                     self._publisher,

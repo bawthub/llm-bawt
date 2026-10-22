@@ -116,6 +116,7 @@ def test_late_start_and_legacy_history_remain_terminal(store):
 
 
 def test_abort_is_persisted_before_request_scoped_rpc(store, monkeypatch):
+    from agent_bridge.abort_contract import AbortReply, AbortState
     from llm_bawt.service.turn_abort import abort_turn
     from llm_bawt.agent_backends import agent_bridge
     import llm_bawt.bots
@@ -126,7 +127,8 @@ def test_abort_is_persisted_before_request_scoped_rpc(store, monkeypatch):
         assert store.get_turn("turn").status == "cancelling"
         assert params == {"sessionKey": "al:nick", "requestId": "req-original"}
         store.update_turn(turn_id="turn", status="ok", end_reason="stop", response_text="EOF partial")
-        return {"ok": True, "cancelled": True, "detail": "task_cancelled"}
+        return AbortReply.build(backend="claude-code", boot_id="b", request_id="req-original",
+                                state=AbortState.CANCELLED, detail="task_cancelled").to_dict()
     rpc = AsyncMock(side_effect=send_rpc)
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
     service = SimpleNamespace(_turn_log_store=store, config=None)
