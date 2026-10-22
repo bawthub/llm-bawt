@@ -54,33 +54,68 @@ def test_private_export_excludes_public_owned_skill_names(tmp_path):
     assert not (tmp_path / 'package/skills/llm-bawt').exists()
 
 
-def test_real_private_export_is_additive_overlay(tmp_path):
-    source = next((path for path in (
-        Path('/home/bridge/dev/agent-skills'),
-        Path('/home/nick/dev/agent-skills'),
-    ) if path.is_dir()), None)
-    if source is None:
-        pytest.skip('private authoring source is not mounted')
+def _write_skill(root: Path, name: str, body: str = '') -> Path:
+    skill = root / name
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: {name} skill\n---\n{body}')
+    return skill
 
+
+def _authoring_tree(root: Path) -> Path:
+    """A synthetic authoring checkout shaped like the real one: every
+    public-owned skill, private skills that cite public docs at several depths,
+    a shared scripts tree, and directories that are not skills."""
+    for name in PUBLIC_PACKAGE_SKILLS:
+        _write_skill(root, name, 'public product knowledge\n')
+    infra = _write_skill(
+        root, 'local-infrastructure',
+        'See [llm-bawt](../llm-bawt/SKILL.md) and '
+        '[ops](../llm-bawt/reference/ops-actions.md).\n'
+        'Read `../agent-system/task-conversation-architecture.md`.\n'
+        'Run ../scripts/pgq.\n',
+    )
+    (infra / 'reference').mkdir()
+    (infra / 'reference/hosts.md').write_text(
+        'Release: ../../bawthub/references/prod-release.md\n'
+        '[arch](../../agent-system/SKILL.md)\n'
+    )
+    _write_skill(root, 'game-modding', 'Prompt rules: ../bawthub/references/prompts.md\n')
+    (root / 'scripts').mkdir()
+    (root / 'scripts/pgq').write_text('#!/bin/sh\n')
+    (root / 'scripts/README.md').write_text('See ../llm-bawt/reference/data-model.md\n')
+    (root / 'backups').mkdir()  # no SKILL.md: not a skill
+    (root / 'backups/notes.md').write_text('not exported\n')
+    return root
+
+
+def test_private_export_is_an_additive_overlay_of_the_authoring_tree(tmp_path):
+    source = _authoring_tree(tmp_path / 'source')
     destination = tmp_path / 'personal'
+
     result = export_personal(source, destination, version='1.0.0')
 
-    assert 'local-infrastructure' in result['skills']
-    assert not set(result['skills']).intersection({
-        'agent-system', 'bawthub', 'frontend-design', 'git-commits',
-        'llm-bawt', 'skill-creation', 'skill-maintenance', 'ui-ux-guidelines',
-    })
-    expected_private_skills = {
-        path.name for path in source.iterdir()
-        if path.is_dir() and (path / 'SKILL.md').is_file()
-        and path.name not in PUBLIC_PACKAGE_SKILLS
-    }
-    assert set(result['skills']) == expected_private_skills
-    for document in destination.rglob('*.md'):
+    # Exactly the private skills: no public-owned name, no non-skill directory.
+    assert result['skills'] == ['game-modding', 'local-infrastructure']
+    assert validate_package(destination).skills == ('game-modding', 'local-infrastructure')
+    assert not (destination / 'skills/backups').exists()
+    # Every exported document is self-contained: no path into a public tree
+    # survives, at any depth, linked or inline.
+    documents = list(destination.rglob('*.md'))
+    assert len(documents) == 4
+    for document in documents:
         text = document.read_text()
-        assert '../llm-bawt/reference/' not in text
-        assert '../bawthub/references/' not in text
-        assert '../agent-system/' not in text
+        for public in PUBLIC_PACKAGE_SKILLS:
+            assert f'../{public}/' not in text, (document, public)
+    hosts = (destination / 'skills/local-infrastructure/reference/hosts.md').read_text()
+    assert 'bawthub:bawthub public skill' in hosts
+    assert '`bawthub:agent-system` public skill' in hosts
+    # hosts.md only cites public docs (two levels up), so a partial rewrite
+    # that leaves any dangling '../' prefix is a leak.
+    assert '../' not in hosts, hosts
+    # Shared scripts keep resolving from the moved skill location.
+    infra = (destination / 'skills/local-infrastructure/SKILL.md').read_text()
+    assert '../../scripts/pgq' in infra
+    assert (destination / 'scripts/pgq').is_file()
 
 
 def test_private_export_never_overwrites(tmp_path):

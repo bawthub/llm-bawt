@@ -2,7 +2,6 @@
 
 import json
 from copy import deepcopy
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -198,14 +197,18 @@ async def test_mcp_protocol_advertises_compact_catalog():
     assert "title" not in task.inputSchema
 
 
-def test_skill_references_resolve_when_skills_checkout_is_present():
-    root = Path(__file__).resolve().parents[2] / "agent-skills"
-    if not root.is_dir():
-        pytest.skip("Separate agent-skills checkout absent; validate references when publishing")
-    skill = root / "bawthub-mcp" / "SKILL.md"
-    assert skill.is_file()
-    assert "name: bawthub-mcp" in skill.read_text()
-    for name in TOOL_SUMMARIES:
-        reference = root / tool_reference(name)
-        assert reference.is_file(), reference
-        assert reference.stat().st_size > 200
+# The bawthub-mcp skill publishes exactly these pages. Its own check
+# (agent-skills scripts/test_bawthub_mcp_references.py) pins the same set, so a
+# rename on either side fails one of the two suites.
+PUBLISHED_REFERENCES = frozenset({
+    "bawthub-mcp/references/tasks.md",
+    "bawthub-mcp/references/memory-history.md",
+    "bawthub-mcp/references/sessions-delivery.md",
+    "bawthub-mcp/references/ops-media.md",
+})
+
+
+def test_every_tool_points_at_a_published_skill_reference():
+    used = {tool_reference(name) for name in TOOL_SUMMARIES}
+    # No pointer to an unpublished page, and no published page left unused.
+    assert used == PUBLISHED_REFERENCES
