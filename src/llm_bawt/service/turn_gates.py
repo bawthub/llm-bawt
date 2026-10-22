@@ -1,0 +1,444 @@
+"""System gates: the hold/deny primitive shared by freeze and quiesce (TASK-1233).
+
+One gate row per owner activation (``system_gates``), never overwritten. The
+row id IS the generation. A gate is live while ``released_at IS NULL AND
+expires_at > now()`` on the database clock, so the app and the ops reconciler
+share one time source. Gates from several owners coexist; an owner releases
+only its own.
+
+``gate_blocks`` is the one predicate every admission edge asks. The caller
+holds ``turn_admission.lock_target(conn, bot_id)`` and evaluates it in the
+same transaction, so each check is linearized with ``activate_hold`` (which
+takes the same per-bot locks before it inserts the gate): either the producer
+commits first and the roster captures its row, or the gate commits first and
+the producer sees it.
+
+Scope is stored as a predicate and resolved at check time against the bot's
+current profile (S3): a bot that moves onto a held backend is held, one that
+moves off is released. Only agent bots are ever gated; chat bots (Mira among
+them) never are. Gates are PostgreSQL-only, like the lock that linearizes them.
+
+``turn_admission`` imports this module; never the reverse.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Mapping
+
+from sqlalchemy import text as sa_text
+
+from ..bot_types import normalize_bot_type
+from ..utils.schema import SchemaBootstrapGuard
+
+HOLD = "hold"
+DENY = "deny"
+GATE_MODES = frozenset({HOLD, DENY})
+
+OWNER_JOB = "job"
+OWNER_OPERATOR = "operator"
+OWNER_KINDS = frozenset({OWNER_JOB, OWNER_OPERATOR})
+
+# The closed set of admission edges that ask a gate.
+ACTOR_KINDS = frozenset({"reserve", "save_turn", "enqueue", "delivery_claim", "schedule", "steer"})
+# Edges that may re-attach to a run already accepted before the gate (C1).
+_REATTACH_ACTORS = frozenset({"delivery_claim", "save_turn"})
+
+# Roster dispositions, assigned by ``activate_hold`` (B4).
+REVOKED_UNSTARTED = "revoked_unstarted"  # reservation revoked; counts as drained
+ACCEPTED = "accepted"  # reserved with execution evidence; drains on exit
+RUNNING = "running"  # pending / streaming / cancelling
+DISPOSITIONS = frozenset({REVOKED_UNSTARTED, ACCEPTED, RUNNING})
+
+# Control states on a member row (Al's control lane, B3).
+CONTROL_STATES = frozenset({
+    "pending", "steering", "steered", "unsupported", "not_needed", "self", "unconfirmed", "cancelled",
+})
+
+
+class GateScopeError(ValueError):
+    """A gate scope or spec that cannot be stored."""
+
+
+@dataclass(frozen=True)
+class GateScope:
+    """Which agent bots a gate covers, as a predicate evaluated at check time.
+
+    Exactly one of: every agent bot, agent bots on the named backends, or the
+    named agent bots. Chat bots are never covered.
+    """
+
+    all_agents: bool = False
+    backends: frozenset[str] = frozenset()
+    bots: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if sum((bool(self.all_agents), bool(self.backends), bool(self.bots))) != 1:
+            raise GateScopeError("a gate scope names exactly one of all_agents, backends or bots")
+
+    @classmethod
+    def every_agent(cls) -> "GateScope":
+        return cls(all_agents=True)
+
+    @classmethod
+    def on_backends(cls, *backends: str) -> "GateScope":
+        return cls(backends=frozenset(b.strip().lower() for b in backends if b and b.strip()))
+
+    @classmethod
+    def for_bots(cls, *bots: str) -> "GateScope":
+        return cls(bots=frozenset(b.strip().lower() for b in bots if b and b.strip()))
+
+    def covers(self, bot_id: str, *, bot_type: str | None, agent_backend: str | None) -> bool:
+        if normalize_bot_type(bot_type, agent_backend) != "agent":
+            return False
+        if self.all_agents:
+            return True
+        if self.backends:
+            return (agent_backend or "").strip().lower() in self.backends
+        return bot_id.strip().lower() in self.bots
+
+    def to_json(self) -> str:
+        if self.all_agents:
+            return json.dumps({"all_agents": True})
+        if self.backends:
+            return json.dumps({"backends": sorted(self.backends)})
+        return json.dumps({"bots": sorted(self.bots)})
+
+    @classmethod
+    def from_json(cls, raw: Any) -> "GateScope":
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(data, Mapping):
+            raise GateScopeError(f"unreadable gate scope: {raw!r}")
+        if data.get("all_agents"):
+            return cls.every_agent()
+        if data.get("backends"):
+            return cls.on_backends(*data["backends"])
+        return cls.for_bots(*(data.get("bots") or ()))
+
+
+@dataclass(frozen=True)
+class GateActor:
+    """Which admission edge is asking, and for which turn (no authority of its own)."""
+
+    kind: str
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ACTOR_KINDS:
+            raise ValueError(f"unknown gate actor kind {self.kind!r}")
+
+
+@dataclass(frozen=True)
+class GateBlock:
+    """The live gate that refused an admission. ``id`` is the generation."""
+
+    id: int
+    mode: str
+    owner_kind: str
+    owner_id: str
+    reason: str | None
+    expires_at: datetime
+
+    @property
+    def refusal(self) -> str:
+        """The wire code: a deny gate freezes (503), a hold gate holds (409)."""
+        return "system_frozen" if self.mode == DENY else "system_held"
+
+
+@dataclass(frozen=True)
+class GateSpec:
+    """What ``activate_hold`` inserts. ``ttl_seconds`` is added to the DB clock."""
+
+    owner_kind: str
+    owner_id: str
+    mode: str
+    scope: GateScope
+    ttl_seconds: float
+    reason: str | None = None
+    allow_actors: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        if self.owner_kind not in OWNER_KINDS:
+            raise GateScopeError(f"unknown gate owner kind {self.owner_kind!r}")
+        if not (self.owner_id or "").strip():
+            raise GateScopeError("a gate needs an owner_id")
+        if self.mode not in GATE_MODES:
+            raise GateScopeError(f"unknown gate mode {self.mode!r}")
+        if not self.ttl_seconds or self.ttl_seconds <= 0:
+            raise GateScopeError("a gate needs a positive ttl")
+        unknown = set(self.allow_actors) - ACTOR_KINDS
+        if unknown:
+            raise GateScopeError(f"unknown allow_actors: {sorted(unknown)}")
+
+
+_schema_guard = SchemaBootstrapGuard()
+
+
+def ensure_gate_schema(engine) -> None:
+    """Create ``system_gates`` and ``gate_members`` once per engine (PostgreSQL only)."""
+    if _is_postgres(engine):
+        _schema_guard.run(engine, "system-gates", _bootstrap)
+
+
+def _bootstrap(conn) -> None:
+    conn.execute(sa_text("""
+        CREATE TABLE IF NOT EXISTS system_gates (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            owner_kind VARCHAR(16) NOT NULL CHECK (owner_kind IN ('job','operator')),
+            owner_id VARCHAR(128) NOT NULL,
+            mode VARCHAR(8) NOT NULL CHECK (mode IN ('hold','deny')),
+            scope JSONB NOT NULL,
+            reason TEXT,
+            allow_actors JSONB NOT NULL DEFAULT '[]'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires_at TIMESTAMPTZ NOT NULL,
+            released_at TIMESTAMPTZ
+        )
+    """))
+    conn.execute(sa_text("""
+        CREATE INDEX IF NOT EXISTS ix_system_gates_unreleased
+        ON system_gates (expires_at) WHERE released_at IS NULL
+    """))
+    conn.execute(sa_text("""
+        CREATE INDEX IF NOT EXISTS ix_system_gates_owner ON system_gates (owner_id)
+    """))
+    conn.execute(sa_text("""
+        CREATE TABLE IF NOT EXISTS gate_members (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            gate_id BIGINT NOT NULL REFERENCES system_gates(id),
+            bot_id VARCHAR(128) NOT NULL,
+            turn_id VARCHAR(128) NOT NULL,
+            turn_status VARCHAR(32) NOT NULL,
+            disposition VARCHAR(24) NOT NULL
+              CHECK (disposition IN ('revoked_unstarted','accepted','running')),
+            backend VARCHAR(64),
+            agent_session_key VARCHAR(128),
+            agent_request_id VARCHAR(128),
+            producer_kind VARCHAR(16) NOT NULL DEFAULT 'ordinary',
+            producer_id VARCHAR(128),
+            producer_claim VARCHAR(128),
+            control_state VARCHAR(16) NOT NULL DEFAULT 'pending'
+              CHECK (control_state IN ('pending','steering','steered','unsupported',
+                                       'not_needed','self','unconfirmed','cancelled')),
+            control_request_id VARCHAR(255),
+            control_claim_token VARCHAR(128),
+            control_lease_expires_at TIMESTAMPTZ,
+            control_attempts INTEGER NOT NULL DEFAULT 0,
+            control_error TEXT,
+            ack_status VARCHAR(32),
+            ack_note TEXT,
+            acked_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (gate_id, turn_id)
+        )
+    """))
+    conn.execute(sa_text("""
+        CREATE INDEX IF NOT EXISTS ix_gate_members_turn ON gate_members (turn_id)
+    """))
+
+
+def _is_postgres(conn) -> bool:
+    return getattr(getattr(conn, "dialect", None), "name", None) == "postgresql"
+
+
+_LIVE = "released_at IS NULL AND expires_at > now()"
+
+
+def _live_gates(conn) -> list[Mapping[str, Any]]:
+    return conn.execute(sa_text(
+        "SELECT id, mode, owner_kind, owner_id, reason, expires_at, scope, allow_actors"
+        f" FROM system_gates WHERE {_LIVE}"
+    )).mappings().all()
+
+
+def _bot_profile(conn, bot_id: str) -> Mapping[str, Any] | None:
+    return conn.execute(sa_text(
+        "SELECT bot_type, agent_backend FROM bot_profiles WHERE slug=:bot"
+    ), {"bot": bot_id}).mappings().first()
+
+
+def _jsonb(raw: Any) -> Any:
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def _block(row: Mapping[str, Any]) -> GateBlock:
+    return GateBlock(
+        id=int(row["id"]), mode=row["mode"], owner_kind=row["owner_kind"],
+        owner_id=row["owner_id"], reason=row["reason"], expires_at=row["expires_at"],
+    )
+
+
+def gate_blocks(conn, bot_id: str, actor: GateActor) -> GateBlock | None:
+    """The strictest live gate refusing ``actor`` on ``bot_id``, else None.
+
+    Call after ``lock_target(conn, bot_id)`` in the admission's transaction.
+    A gate does not block when: it doesn't cover the bot (scope resolved now,
+    agent bots only); ``actor.kind`` is in its ``allow_actors``; or the actor
+    re-attaches (``delivery_claim``/``save_turn``) to a turn that gate's
+    roster recorded as ``accepted`` (C1). Strictest: deny before hold, then
+    the latest ``expires_at``. Always None off PostgreSQL.
+    """
+    if not _is_postgres(conn):
+        return None
+    gates = _live_gates(conn)
+    if not gates:
+        return None
+    profile = _bot_profile(conn, bot_id)
+    if profile is None:
+        return None  # not a known bot, so not an agent bot
+    blocking = []
+    for row in gates:
+        scope = GateScope.from_json(row["scope"])
+        if not scope.covers(bot_id, bot_type=profile["bot_type"], agent_backend=profile["agent_backend"]):
+            continue
+        if actor.kind in set(_jsonb(row["allow_actors"]) or ()):
+            continue
+        if actor.kind in _REATTACH_ACTORS and actor.turn_id and _accepted_member(conn, row["id"], actor.turn_id):
+            continue
+        blocking.append(row)
+    if not blocking:
+        return None
+    strictest = max(blocking, key=lambda row: (row["mode"] == DENY, row["expires_at"], row["id"]))
+    return _block(strictest)
+
+
+def _accepted_member(conn, gate_id: int, turn_id: str) -> bool:
+    return conn.execute(sa_text(
+        "SELECT 1 FROM gate_members WHERE gate_id=:gate AND turn_id=:turn AND disposition='accepted'"
+    ), {"gate": gate_id, "turn": turn_id}).first() is not None
+
+
+def gate_is_live(conn, gate_id: int) -> bool:
+    """Is generation ``gate_id`` unreleased and unexpired on the DB clock?"""
+    if not _is_postgres(conn):
+        return False
+    return conn.execute(sa_text(
+        f"SELECT 1 FROM system_gates WHERE id=:id AND {_LIVE}"
+    ), {"id": gate_id}).first() is not None
+
+
+def extend_gate(conn, gate_id: int, *, owner_id: str, ttl_seconds: float) -> bool:
+    """Renew a live gate's lease; extends only, never shortens.
+
+    False when the gate is released, already expired, or not ``owner_id``'s:
+    a lapsed gate is never revived (the caller opens a new generation).
+    """
+    return bool(conn.execute(sa_text(f"""
+        UPDATE system_gates
+        SET expires_at=GREATEST(expires_at, now() + (:ttl * interval '1 second'))
+        WHERE id=:id AND owner_id=:owner AND {_LIVE}
+    """), {"id": gate_id, "owner": owner_id, "ttl": float(ttl_seconds)}).rowcount)
+
+
+def release_gates(conn, *, owner_id: str, gate_id: int | None = None) -> list[int]:
+    """Release ``owner_id``'s unreleased gates (one generation, or all of them).
+
+    Owner-matched: no owner can release another owner's gate. Releasing an
+    expired gate still stamps ``released_at`` (idempotent). Returns the ids
+    released by this call.
+    """
+    clause = " AND id=:id" if gate_id is not None else ""
+    rows = conn.execute(sa_text(
+        "UPDATE system_gates SET released_at=now()"
+        f" WHERE owner_id=:owner AND released_at IS NULL{clause} RETURNING id"
+    ), {"owner": owner_id, "id": gate_id}).all()
+    return sorted(int(row[0]) for row in rows)
+
+
+def has_execution_evidence(turn: Mapping[str, Any]) -> bool:
+    """May this reserved turn already be executing at a bridge? (C1)
+
+    ``agent_request_id`` is bound before every chat.send publish, and the
+    expired-lease re-arm keeps it, so its absence proves nothing was sent.
+    A crash between bind and publish over-counts, the conservative direction.
+    """
+    return bool(turn.get("agent_request_id"))
+
+
+def bots_in_scope(conn, scope: GateScope) -> list[str]:
+    """Every agent bot the scope covers right now, in lock order (sorted)."""
+    rows = conn.execute(sa_text("SELECT slug, bot_type, agent_backend FROM bot_profiles")).mappings().all()
+    return sorted(
+        row["slug"] for row in rows
+        if scope.covers(row["slug"], bot_type=row["bot_type"], agent_backend=row["agent_backend"])
+    )
+
+
+def insert_gate(conn, spec: GateSpec) -> GateBlock:
+    """Insert one gate row (``activate_hold`` calls this under the target locks)."""
+    row = conn.execute(sa_text("""
+        INSERT INTO system_gates (owner_kind, owner_id, mode, scope, reason, allow_actors, expires_at)
+        VALUES (:owner_kind, :owner_id, :mode, CAST(:scope AS jsonb), :reason,
+                CAST(:allow AS jsonb), now() + (:ttl * interval '1 second'))
+        RETURNING id, mode, owner_kind, owner_id, reason, expires_at
+    """), {
+        "owner_kind": spec.owner_kind, "owner_id": spec.owner_id, "mode": spec.mode,
+        "scope": spec.scope.to_json(), "reason": spec.reason,
+        "allow": json.dumps(sorted(spec.allow_actors)), "ttl": float(spec.ttl_seconds),
+    }).mappings().one()
+    return _block(row)
+
+
+@dataclass(frozen=True)
+class GateMember:
+    """One roster row: an open turn captured at activation, with its disposition."""
+
+    gate_id: int
+    bot_id: str
+    turn_id: str
+    turn_status: str
+    disposition: str
+    backend: str | None = None
+    agent_session_key: str | None = None
+    agent_request_id: str | None = None
+    producer_kind: str = "ordinary"
+    producer_id: str | None = None
+    producer_claim: str | None = None
+    control_state: str = "pending"
+
+    def __post_init__(self) -> None:
+        if self.disposition not in DISPOSITIONS:
+            raise ValueError(f"unknown disposition {self.disposition!r}")
+        if self.control_state not in CONTROL_STATES:
+            raise ValueError(f"unknown control state {self.control_state!r}")
+
+
+def insert_member(conn, member: GateMember) -> None:
+    conn.execute(sa_text("""
+        INSERT INTO gate_members (gate_id, bot_id, turn_id, turn_status, disposition, backend,
+            agent_session_key, agent_request_id, producer_kind, producer_id, producer_claim,
+            control_state)
+        VALUES (:gate_id, :bot_id, :turn_id, :turn_status, :disposition, :backend,
+            :agent_session_key, :agent_request_id, :producer_kind, :producer_id, :producer_claim,
+            :control_state)
+    """), vars(member))
+
+
+__all__ = [
+    "ACCEPTED",
+    "ACTOR_KINDS",
+    "DENY",
+    "DISPOSITIONS",
+    "GateActor",
+    "GateBlock",
+    "GateMember",
+    "GateScope",
+    "GateScopeError",
+    "GateSpec",
+    "HOLD",
+    "OWNER_JOB",
+    "OWNER_OPERATOR",
+    "REVOKED_UNSTARTED",
+    "RUNNING",
+    "bots_in_scope",
+    "ensure_gate_schema",
+    "extend_gate",
+    "gate_blocks",
+    "gate_is_live",
+    "has_execution_evidence",
+    "insert_gate",
+    "insert_member",
+    "release_gates",
+]

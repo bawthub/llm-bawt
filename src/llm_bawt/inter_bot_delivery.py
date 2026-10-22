@@ -23,6 +23,7 @@ from sqlalchemy.engine import Connection
 from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference
 from .maintenance_delivery import MaintenanceBarrier
+from .service.turn_gates import ensure_gate_schema
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_user import resolve_delivery_user
@@ -40,6 +41,9 @@ FAILED = "FAILED"
 CANCELLED = "CANCELLED"
 TERMINAL_STATES = frozenset({DELIVERED, FAILED, CANCELLED})
 ACTIVE_STATES = frozenset({QUEUED, STEERING, DISPATCHING})
+# A requeued delivery whose /new reset already rotated (or completed) keeps
+# its reservation row; every other requeue releases it.
+RESERVATION_KEPT_RESET_STATUSES = frozenset({"ROTATED", "COMPLETED"})
 
 
 def submission_result(
@@ -236,6 +240,8 @@ class InterBotDeliveryStore:
             """))
 
         self._schema_guard.run(self.engine, "inter-bot-deliveries", bootstrap)
+        # The delivery claim asks the system gate under the target lock (TASK-1233).
+        ensure_gate_schema(self.engine)
 
     def acquire_dispatcher_lock(
         self, lock_name: str = "inter-bot-dispatcher"
@@ -580,6 +586,34 @@ class InterBotDeliveryStore:
         """
         if self.engine is None or not claim_token:
             return None
+        with self.engine.begin() as conn:
+            return self.requeue_claim(
+                conn, delivery_id, claim_token, error, delay_seconds=delay_seconds,
+                clear_delivery_mode=clear_delivery_mode, reject_steer_target=reject_steer_target,
+                refund_attempt=refund_attempt, metadata_merge=metadata_merge,
+            )
+
+    @classmethod
+    def requeue_claim(
+        cls,
+        conn: Connection,
+        delivery_id: str,
+        claim_token: str,
+        error: str,
+        *,
+        delay_seconds: float,
+        clear_delivery_mode: bool = False,
+        reject_steer_target: bool = False,
+        refund_attempt: bool = False,
+        metadata_merge: Mapping[str, Any] | None = None,
+    ) -> DeliveryRecord | None:
+        """``requeue`` inside the caller's transaction (TASK-1233 hold revoke).
+
+        The one QUEUED-return authority for a claimed delivery: the caller
+        supplies the transaction and its locks; the claim token fences it.
+        """
+        if not claim_token:
+            return None
         values = {
             "id": delivery_id,
             "claim_token": claim_token,
@@ -587,47 +621,46 @@ class InterBotDeliveryStore:
             "error": error[:4000],
             "metadata_merge": json.dumps(dict(metadata_merge or {})),
         }
-        with self.engine.begin() as conn:
-            if clear_delivery_mode and reject_steer_target:
-                raise ValueError("clear_delivery_mode and reject_steer_target are mutually exclusive")
-            claim = conn.execute(sa_text("""
-                SELECT turn_id, delivery_mode FROM inter_bot_deliveries
-                WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token FOR UPDATE
+        if clear_delivery_mode and reject_steer_target:
+            raise ValueError("clear_delivery_mode and reject_steer_target are mutually exclusive")
+        claim = conn.execute(sa_text("""
+            SELECT turn_id, delivery_mode FROM inter_bot_deliveries
+            WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token FOR UPDATE
+        """), values).mappings().first()
+        if claim and claim["delivery_mode"] == "turn" and cls._explicit_stop_requested(conn, claim["turn_id"]):
+            row = conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries SET status='CANCELLED', lease_expires_at=NULL,
+                    claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
+                    last_error='Stopped by user', updated_at=now()
+                WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token RETURNING *
             """), values).mappings().first()
-            if claim and claim["delivery_mode"] == "turn" and self._explicit_stop_requested(conn, claim["turn_id"]):
-                row = conn.execute(sa_text("""
-                    UPDATE inter_bot_deliveries SET status='CANCELLED', lease_expires_at=NULL,
-                        claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
-                        last_error='Stopped by user', updated_at=now()
-                    WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token RETURNING *
-                """), values).mappings().first()
-                return DeliveryRecord.from_mapping(row) if row else None
-            mode_reset = (
-                ", delivery_mode=NULL, target_turn_id=NULL, transport_accepted_at=NULL"
-                if clear_delivery_mode else ""
-            )
-            steer_rejected = (
-                ", delivery_mode='steer_rejected', transport_accepted_at=NULL"
-                if reject_steer_target else ""
-            )
-            attempt_refund = ", attempt_count=GREATEST(attempt_count - 1, 0)" if refund_attempt else ""
-            metadata = (
-                ", metadata_json=metadata_json || CAST(:metadata_merge AS jsonb)"
-                if metadata_merge else ""
-            )
-            row = conn.execute(sa_text(f"""
-                UPDATE inter_bot_deliveries SET
-                    status='QUEUED', available_at=now() + (:delay * interval '1 second'),
-                    next_retry_at=now() + (:delay * interval '1 second'),
-                    lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
-                    last_error=:error, updated_at=now(){mode_reset}{steer_rejected}{attempt_refund}{metadata}
-                WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
-                RETURNING *
-            """), values).mappings().first()
-            if row and row.get("reset_status") not in {"ROTATED", "COMPLETED"}:
-                conn.execute(sa_text(
-                    "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
-                ), {"turn_id": row["turn_id"]})
+            return DeliveryRecord.from_mapping(row) if row else None
+        mode_reset = (
+            ", delivery_mode=NULL, target_turn_id=NULL, transport_accepted_at=NULL"
+            if clear_delivery_mode else ""
+        )
+        steer_rejected = (
+            ", delivery_mode='steer_rejected', transport_accepted_at=NULL"
+            if reject_steer_target else ""
+        )
+        attempt_refund = ", attempt_count=GREATEST(attempt_count - 1, 0)" if refund_attempt else ""
+        metadata = (
+            ", metadata_json=metadata_json || CAST(:metadata_merge AS jsonb)"
+            if metadata_merge else ""
+        )
+        row = conn.execute(sa_text(f"""
+            UPDATE inter_bot_deliveries SET
+                status='QUEUED', available_at=now() + (:delay * interval '1 second'),
+                next_retry_at=now() + (:delay * interval '1 second'),
+                lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
+                last_error=:error, updated_at=now(){mode_reset}{steer_rejected}{attempt_refund}{metadata}
+            WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
+            RETURNING *
+        """), values).mappings().first()
+        if row and row.get("reset_status") not in RESERVATION_KEPT_RESET_STATUSES:
+            conn.execute(sa_text(
+                "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
+            ), {"turn_id": row["turn_id"]})
         return DeliveryRecord.from_mapping(row) if row else None
 
     def recover_context_overflow(

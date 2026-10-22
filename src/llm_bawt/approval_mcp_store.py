@@ -67,6 +67,32 @@ def requeued_continuation_state():
     return case((ToolApprovalRequest.status == REQ_CANCELLED, CONT_SUPPRESSED), else_=CONT_PENDING)
 
 
+def returned_claim(*, claim_token: str, reason: str, delay_seconds: float):
+    """``(where, values)`` that hand a dispatching claim back without spending an attempt.
+
+    The one "not an attempt" return, shared by an admission loss
+    (``defer_continuation_claim``) and a system-gate hold
+    (``turn_admission.revoke_reservation(disposition="hold")``, TASK-1233 C2):
+    token-fenced, cancelled requests suppressed (S1), attempt refunded.
+    """
+    where = (
+        ToolApprovalRequest.continuation_state == CONT_DISPATCHING,
+        ToolApprovalRequest.continuation_claim_token == claim_token,
+    )
+    values = dict(
+        continuation_state=requeued_continuation_state(),
+        continuation_claim_token=None,
+        continuation_last_error=str(reason)[:2000],
+        continuation_next_attempt_at=_utcnow() + timedelta(seconds=max(0.0, delay_seconds)),
+        continuation_attempts=case(
+            (ToolApprovalRequest.continuation_attempts > 0,
+             ToolApprovalRequest.continuation_attempts - 1),
+            else_=0,
+        ),
+    )
+    return where, values
+
+
 def _awaiting_execution(*, lease_seconds: int):
     """No result yet, and unclaimed or its claim lease has expired.
 
@@ -750,26 +776,14 @@ class McpApprovalStoreMixin:
         """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
+        where, values = returned_claim(
+            claim_token=claim_token, reason=reason, delay_seconds=delay_seconds,
+        )
         with Session(self.engine) as session:
             result = session.exec(
                 update(ToolApprovalRequest)
-                .where(
-                    ToolApprovalRequest.id == request_id,
-                    ToolApprovalRequest.continuation_state == CONT_DISPATCHING,
-                    ToolApprovalRequest.continuation_claim_token == claim_token,
-                )
-                .values(
-                    continuation_state=requeued_continuation_state(),
-                    continuation_claim_token=None,
-                    continuation_last_error=str(reason)[:2000],
-                    continuation_next_attempt_at=_utcnow()
-                    + timedelta(seconds=max(0.0, delay_seconds)),
-                    continuation_attempts=case(
-                        (ToolApprovalRequest.continuation_attempts > 0,
-                         ToolApprovalRequest.continuation_attempts - 1),
-                        else_=0,
-                    ),
-                )
+                .where(ToolApprovalRequest.id == request_id, *where)
+                .values(**values)
             )
             session.commit()
             return int(result.rowcount or 0) == 1

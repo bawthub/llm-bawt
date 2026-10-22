@@ -28,6 +28,7 @@ from .turn_admission import (
     RESERVED,
     AdmissionClaim,
     AdmissionUnavailable,
+    SystemGateRefused,
     TargetBusy,
     TurnAdmission,
     classify_target,
@@ -37,6 +38,7 @@ from .turn_admission import (
     release_reservation,
     reserve_turn,
 )
+from .turn_gates import GateActor, ensure_gate_schema, gate_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,7 @@ class TurnLogStore:
         ChangedFilesStore(self.engine).ensure_schema()
 
         self._schema_guard.run(self.engine, "turn-log-store", bootstrap_turn_log_schema)
+        ensure_gate_schema(self.engine)  # every admission here asks the system gate
 
     def _backfill_trigger_message_ids(self) -> None:
         """One-time backfill: populate trigger_message_id for existing rows."""
@@ -187,8 +190,10 @@ class TurnLogStore:
                 existing_status = fence_consumption(
                     conn, turn_id=turn_id, claim=admission_claim,
                 )
+                # TASK-1233 backstop: a live gate refuses like a busy target (C1 re-attach exempt).
+                block = gate_blocks(conn, bot_id, GateActor("save_turn", turn_id))
                 state = classify_target(conn, bot_id, exclude_turn_id=turn_id)
-                if not state.admits(admission):
+                if block is not None or not state.admits(admission):
                     if admission is TurnAdmission.IDLE_ONLY and existing_status == RESERVED:
                         # Release this request's own reservation (ownership
                         # proven above, under the same lock).
@@ -196,7 +201,7 @@ class TurnLogStore:
                             sa_text("DELETE FROM turn_logs WHERE id=:id AND status='reserved'"),
                             {"id": turn_id},
                         )
-                    busy = TargetBusy(
+                    busy = SystemGateRefused(block) if block is not None else TargetBusy(
                         f"target '{bot_id}' is {state.describe()}"
                     )
                 else:

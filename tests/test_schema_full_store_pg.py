@@ -120,7 +120,9 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     lines, metadata = catalog_tool["capture_test"](config.POSTGRES_DATABASE)
     catalog = catalog_tool["parse_catalog"](lines)
     relations = {key for kind, key in catalog if kind == "relation" and catalog[(kind, key)]["kind"] in ("r", "p")}
-    assert len(relations) == 49, sorted(relations)
+    # 51 = 49 + TASK-1233's system_gates and gate_members (TurnLogStore bootstraps them).
+    assert len(relations) == 51, sorted(relations)
+    assert {"system_gates", "gate_members"} <= {key.split(".")[-1] for key in relations}
     assert not any("schema_full_fixture" in key for _, key in catalog)
     assert catalog_tool["compare"](catalog, catalog) == []
     metadata["bootstrap_manifest"] = manifest

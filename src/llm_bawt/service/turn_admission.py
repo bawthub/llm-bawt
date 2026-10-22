@@ -34,8 +34,25 @@ from typing import Any, Callable, Mapping
 from sqlalchemy import text as sa_text, update
 from sqlmodel import Session, select
 
-from ..approval_mcp_store import requeued_continuation_state
+from ..approval_mcp_store import requeued_continuation_state, returned_claim
 from ..approval_models import CONT_DISPATCHING, CONT_SUPPRESSED, ToolApprovalRequest
+from ..inter_bot_delivery import RESERVATION_KEPT_RESET_STATUSES, InterBotDeliveryStore
+from ..request_identity import AdmissionUnavailable as IdentityAdmissionUnavailable
+from .turn_gates import (
+    ACCEPTED,
+    OWNER_JOB,
+    REVOKED_UNSTARTED,
+    RUNNING,
+    GateActor,
+    GateBlock,
+    GateMember,
+    GateSpec,
+    bots_in_scope,
+    gate_blocks,
+    has_execution_evidence,
+    insert_gate,
+    insert_member,
+)
 from .turn_termination import rearm_request_payload, settle_open_turn
 
 log = logging.getLogger(__name__)
@@ -48,6 +65,31 @@ RESERVATION_OWNER_KEY = "reservation_owner"
 
 class TargetBusy(RuntimeError):
     """A request lost the target's admission race (nothing was started)."""
+
+
+class SystemGateRefused(TargetBusy, IdentityAdmissionUnavailable):
+    """A live system gate refused this admission; nothing was started or written.
+
+    One refusal honoured by every existing handler (TASK-1233 C4): durable
+    producers already treat ``TargetBusy`` as "not an attempt" and defer with
+    a refund, and the HTTP edges map the identity ``AdmissionUnavailable`` to
+    ``status_code``: 503 ``system_frozen`` under a deny gate, 409
+    ``system_held`` under a hold gate.
+    """
+
+    def __init__(self, block: GateBlock):
+        self.block = block
+        self.code = block.refusal
+        self.status_code = 503 if self.code == "system_frozen" else 409
+        detail = self.code + (f": {block.reason}" if block.reason else "")
+        super().__init__(f"{detail} (until {block.expires_at.isoformat()})")
+
+
+def refuse_if_gated(conn, bot_id: str, actor: GateActor) -> None:
+    """Raise ``SystemGateRefused`` when a live gate blocks ``actor`` (under the lock)."""
+    block = gate_blocks(conn, bot_id, actor)
+    if block is not None:
+        raise SystemGateRefused(block)
 
 
 class AdmissionFenceLost(RuntimeError):
@@ -325,12 +367,15 @@ def reserve_turn(
     re-armed; that is reported as ``TargetBusy`` so the outbox re-evaluates.
 
     ``fence(conn)`` proves, inside this same transaction, that the producer
-    still owns its durable claim; otherwise ``AdmissionFenceLost``.
+    still owns its durable claim; otherwise ``AdmissionFenceLost``. A live
+    system gate covering the bot refuses with ``SystemGateRefused`` (a
+    ``TargetBusy``, so the producer defers without spending an attempt).
     """
     with engine.begin() as conn:
         lock_target(conn, bot_id)
         if fence is not None and not fence(conn):
             raise AdmissionFenceLost(f"claim for turn '{turn_id}' is no longer held")
+        refuse_if_gated(conn, bot_id, GateActor("reserve", turn_id))
         state = classify_target(conn, bot_id, exclude_turn_id=turn_id)
         if not state.idle:
             raise TargetBusy(f"target '{bot_id}' is {state.describe()}")
@@ -407,29 +452,42 @@ def release_reservation(
     return bool(result.rowcount)
 
 
+REVOKE_DISPOSITIONS = frozenset({"user_stop", "hold"})
+
+
 def revoke_reservation(
-    engine, turn_id: str, *, disposition: str, audit: Mapping[str, Any],
+    engine, turn_id: str, *, disposition: str, audit: Mapping[str, Any], connection=None,
 ) -> dict[str, Any] | None:
     """End an open reservation by first revoking its producer's authority.
 
-    TASK-1232 Stop on a ``reserved`` row (``disposition="user_stop"``). One
-    transaction in the admission lock order (target lock → producer row → turn
-    row): the producer loses its claim (delivery CANCELLED, approval
-    continuation ``suppressed``), so a stalled claimant can never consume the
-    row — ``fence_consumption`` checks the claim before the row exists or not.
-    Only then does the row settle through the shared settle. Returns the
-    revoked producer, or None, with nothing written, when ``turn_id`` is not
-    (or is no longer) an open reservation.
+    One transaction in the admission lock order (target lock → producer row →
+    turn row), so a stalled claimant can never consume the row —
+    ``fence_consumption`` checks the claim before the row exists or not.
+
+    * ``user_stop`` (TASK-1232 Stop on a ``reserved`` row): the producer
+      loses its claim (delivery CANCELLED, approval continuation
+      ``suppressed``), then the row settles through the shared settle.
+    * ``hold`` (TASK-1233 B4, from ``activate_hold``): the producer gets its
+      claim back without spending an attempt — the delivery returns to QUEUED
+      through ``requeue_claim(refund_attempt)``, the approval continuation to
+      pending through ``returned_claim`` (cancelled → suppressed, S1) — then
+      the row is released, so the held work re-claims after thaw.
+
+    Returns the producer outcome, or None, with nothing written, when
+    ``turn_id`` is not (or is no longer) an open reservation. ``connection``
+    runs inside the caller's transaction (``activate_hold``).
 
     Every lock is taken, and the turn row re-checked, BEFORE any write (Vex
     B1): a claimant holding the target lock may consume the row between the
     unlocked head read and our lock, and revoking a consumed row's producer
     would cancel a live run's delivery.
     """
-    if disposition != "user_stop":
+    if disposition not in REVOKE_DISPOSITIONS:
         raise ValueError(f"unsupported reservation disposition: {disposition!r}")
     for _ in range(_REVOKE_ATTEMPTS):
-        outcome = _revoke_reservation_once(engine, turn_id, audit=audit)
+        with (nullcontext(connection) if connection is not None else engine.begin()) as conn, \
+                Session(bind=conn) as session:
+            outcome = _revoke_reservation_once(conn, session, turn_id, disposition=disposition, audit=audit)
         if outcome is not _PRODUCER_CHANGED:
             return outcome
     log.warning("reservation %s changed producer on every revoke attempt; left open", turn_id)
@@ -489,15 +547,189 @@ def _lock_open_reservation(conn, session: Session, turn_id: str, *, owner: str |
     return _LockedReservation(row, delivery_id, head_owner)
 
 
-def _revoke_reservation_once(engine, turn_id: str, *, audit: Mapping[str, Any]):
-    with engine.begin() as conn, Session(bind=conn) as session:
-        locked = _lock_open_reservation(conn, session, turn_id)
-        if not isinstance(locked, _LockedReservation):
-            return locked
-        producer = _revoke_producer(conn, turn_id, delivery_id=locked.delivery_id, owner=locked.owner)
-        settle_open_turn(session, locked.row, audit_key="user_stop", now=datetime.now(timezone.utc),
-                         audit={**audit, "reservation_producer": producer})
+def _revoke_reservation_once(conn, session: Session, turn_id: str, *, disposition: str,
+                             audit: Mapping[str, Any]):
+    locked = _lock_open_reservation(conn, session, turn_id)
+    if not isinstance(locked, _LockedReservation):
+        return locked
+    if disposition == "hold":
+        return _hold_producer(conn, turn_id, locked, reason=str(audit.get("reason") or "system gate hold"))
+    producer = _revoke_producer(conn, turn_id, delivery_id=locked.delivery_id, owner=locked.owner)
+    settle_open_turn(session, locked.row, audit_key="user_stop", now=datetime.now(timezone.utc),
+                     audit={**audit, "reservation_producer": producer})
     return producer
+
+
+def _hold_producer(conn, turn_id: str, locked: _LockedReservation, *, reason: str) -> dict[str, Any]:
+    """Hand the reservation's producer its claim back (not an attempt), release the row.
+
+    Rows already locked by ``_lock_open_reservation``. A delivery still
+    DISPATCHING returns to QUEUED through the one requeue authority, which also
+    releases its reservation (kept after a rotated /new reset, by requeue's
+    rule); a delivery already QUEUED (an expired lease re-armed it) spent
+    nothing, so only its reservation is released, under the same rule.
+    """
+    if locked.delivery_id:
+        claim = conn.execute(sa_text(
+            "SELECT status, claim_token, reset_status FROM inter_bot_deliveries"
+            " WHERE id=:id AND turn_id=:turn_id"
+        ), {"id": locked.delivery_id, "turn_id": turn_id}).mappings().first()
+        record = None
+        if claim and claim["status"] == "DISPATCHING" and claim["claim_token"]:
+            # Releases the reservation by requeue's own rule.
+            record = InterBotDeliveryStore.requeue_claim(
+                conn, locked.delivery_id, claim["claim_token"], reason,
+                delay_seconds=0, refund_attempt=True,
+            )
+        elif claim is None or claim["reset_status"] not in RESERVATION_KEPT_RESET_STATUSES:
+            _release_unstarted(conn, turn_id)
+        return {"kind": "delivery", "id": locked.delivery_id,
+                "claim": claim["claim_token"] if claim else None,
+                "held": record is not None and record.status == "QUEUED",
+                "status": record.status if record else None}
+    if locked.owner:
+        where, values = returned_claim(claim_token=locked.owner, reason=reason, delay_seconds=0)
+        held = conn.execute(
+            update(ToolApprovalRequest).where(*where).values(**values)
+            .returning(ToolApprovalRequest.id)
+        ).scalars().all()
+        if len(held) > 1:
+            # The token column is not unique; never return two claims at once.
+            raise RuntimeError(f"claim token for reservation {turn_id} matched {len(held)} approvals")
+        if not release_reservation(None, turn_id, owner=locked.owner, connection=conn):
+            # Unreachable while the row is held and re-checked; raising rolls
+            # the claim return back with the caller's transaction.
+            raise RuntimeError(f"locked reservation {turn_id} was not released")
+        return {"kind": "approval", "id": held[0] if held else None, "claim": locked.owner,
+                "held": bool(held)}
+    _release_unstarted(conn, turn_id)
+    return {"kind": "ordinary", "id": None, "claim": None, "held": False}
+
+
+def _release_unstarted(conn, turn_id: str) -> bool:
+    """Delete a reservation that provably never ran (no bridge request bound)."""
+    return bool(conn.execute(sa_text(
+        "DELETE FROM turn_logs WHERE id=:id AND status='reserved' AND ended_at IS NULL"
+        " AND agent_request_id IS NULL"
+    ), {"id": turn_id}).rowcount)
+
+
+@dataclass(frozen=True)
+class ActivatedGate:
+    """``activate_hold``'s result: the gate (id = generation) and its roster."""
+
+    gate: GateBlock
+    members: tuple[GateMember, ...]
+
+
+_OPEN_ROWS = (
+    "SELECT id, status, agent_session_key, agent_request_id, agent_backend, request_json"
+    " FROM turn_logs WHERE bot_id=:bot AND ended_at IS NULL ORDER BY created_at, id"
+)
+
+
+def activate_hold(conn, spec: GateSpec) -> ActivatedGate:
+    """Open a gate and capture its roster in the caller's transaction (TASK-1233 B2/B4).
+
+    1. ``lock_target`` every in-scope agent bot, in sorted bot_id order.
+    2. Insert the gate row (its id is the generation).
+    3. Capture EVERY open turn row of those bots (``ended_at IS NULL``).
+    4. Disposition each: a reservation with no execution evidence has its
+       producer's claim returned and the row released (``revoked_unstarted``,
+       drained); a reservation with evidence is ``accepted`` (drains on
+       exit; re-attaching to it is exempt from this gate); any other open row
+       is ``running``.
+
+    The caller commits. Every admission evaluates ``gate_blocks`` after the
+    same per-bot lock, so either it committed first and its row is captured
+    here, or it sees this gate. Lock order: sorted target locks, then every
+    producer row a revoke will lock (``_lock_producers``), then turn rows.
+    No path locks a producer row before its target lock, and the one
+    multi-row delivery locker without a target lock (``recover_expired``)
+    also locks in ordinal order, so no cycle forms. Only a job-owned gate's
+    members are steered; an operator gate's roster exists for revocation and
+    the C1 exemption (``control_state='not_needed'``).
+    """
+    if conn.dialect.name != "postgresql":
+        raise AdmissionUnavailable("system gates require PostgreSQL")
+    bots = bots_in_scope(conn, spec.scope)
+    for bot_id in bots:
+        lock_target(conn, bot_id)
+    # Under every target lock no row can be reserved or consumed, only ended.
+    rows = [(bot_id, row) for bot_id in bots
+            for row in conn.execute(sa_text(_OPEN_ROWS), {"bot": bot_id}).mappings().all()]
+    _lock_producers(conn, [row for _, row in rows])
+    gate = insert_gate(conn, spec)
+    members: list[GateMember] = []
+    for bot_id, row in rows:
+        member = _capture_member(conn, gate, spec, bot_id, row)
+        if member is not None:
+            insert_member(conn, member)
+            members.append(member)
+    return ActivatedGate(gate, tuple(members))
+
+
+def _lock_producers(conn, rows) -> None:
+    """Lock every producer row the capture will revoke, one table per statement in its canonical order.
+
+    Per-member locking would take deliveries in bot/created order, while
+    ``recover_expired`` locks lease-expired deliveries in ordinal order with
+    no target lock: two such rows in opposite orders deadlock. Each producer
+    is picked exactly as ``_lock_open_reservation`` picks it.
+    """
+    payloads = [_reservation_payload(row["request_json"]) for row in rows
+                if row["status"] == RESERVED and not has_execution_evidence(row)]
+    deliveries = sorted({p["inter_bot_delivery_id"] for p in payloads if p.get("inter_bot_delivery_id")})
+    owners = sorted({p[RESERVATION_OWNER_KEY] for p in payloads
+                     if p.get(RESERVATION_OWNER_KEY) and not p.get("inter_bot_delivery_id")})
+    if deliveries:
+        conn.execute(sa_text("SELECT 1 FROM inter_bot_deliveries WHERE id = ANY(:ids)"
+                             " ORDER BY ordinal FOR UPDATE"), {"ids": deliveries})
+    if owners:
+        conn.execute(sa_text("SELECT 1 FROM tool_approval_requests WHERE continuation_claim_token = ANY(:owners)"
+                             " ORDER BY id FOR UPDATE"), {"owners": owners})
+
+
+def _capture_member(conn, gate: GateBlock, spec: GateSpec, bot_id: str, row) -> GateMember | None:
+    payload = _reservation_payload(row["request_json"])
+    delivery_id = payload.get("inter_bot_delivery_id")
+    owner = payload.get(RESERVATION_OWNER_KEY)
+    producer = {"kind": "delivery" if delivery_id else "approval" if owner else "ordinary",
+                "id": delivery_id, "claim": owner}
+    status = row["status"]
+    if status == RESERVED and not has_execution_evidence(row):
+        outcome = revoke_reservation(
+            None, row["id"], disposition="hold", connection=conn,
+            audit={"reason": f"held by system gate {gate.id}"},
+        )
+        if outcome is not None:
+            disposition, producer = REVOKED_UNSTARTED, outcome
+        else:
+            # No longer an open reservation (nothing else can consume it under
+            # our locks; an unlocked re-arm or end may have): re-read it.
+            current = conn.execute(sa_text(
+                "SELECT status, ended_at FROM turn_logs WHERE id=:id"
+            ), {"id": row["id"]}).mappings().first()
+            if current is None or current["ended_at"] is not None:
+                return None
+            disposition, status = RUNNING, current["status"]
+    elif status == RESERVED:
+        disposition = ACCEPTED
+    else:
+        disposition = RUNNING
+    if producer["kind"] == "delivery" and producer.get("claim") is None and disposition != REVOKED_UNSTARTED:
+        producer["claim"] = conn.execute(sa_text(
+            "SELECT claim_token FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": delivery_id}).scalar_one_or_none()
+    steered = spec.owner_kind == OWNER_JOB and disposition != REVOKED_UNSTARTED
+    return GateMember(
+        gate_id=gate.id, bot_id=bot_id, turn_id=row["id"], turn_status=status,
+        disposition=disposition, backend=row["agent_backend"],
+        agent_session_key=row["agent_session_key"], agent_request_id=row["agent_request_id"],
+        producer_kind=producer["kind"], producer_id=producer.get("id"),
+        producer_claim=producer.get("claim"),
+        control_state="pending" if steered else "not_needed",
+    )
 
 
 def requeue_stale_reservation(
@@ -596,16 +828,20 @@ def turn_start_extensions(
 
 __all__ = [
     "ADMISSION_KEY",
+    "ActivatedGate",
     "AdmissionClaim",
     "AdmissionFenceLost",
     "AdmissionUnavailable",
     "RESERVATION_OWNER_KEY",
+    "SystemGateRefused",
     "TargetBusy",
     "TargetState",
     "TurnAdmission",
+    "activate_hold",
     "classify_target",
     "fence_consumption",
     "lock_target",
+    "refuse_if_gated",
     "release_reservation",
     "requeue_stale_reservation",
     "reserve_turn",

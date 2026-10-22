@@ -28,7 +28,7 @@ from .schemas import ChatCompletionRequest
 from .stream_request_attachments import prepare_stream_request_attachments
 from .ordinary_turn_queue import admit_ordinary_agent_turn
 from .tool_event_coordinator import ToolEventCoordinator
-from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, turn_start_extensions
+from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, SystemGateRefused, turn_start_extensions
 from .turn_stream_context import TurnStreamContext
 from .turn_stream_finalize import turn_failure_suffix
 from .turn_stream_worker import TurnStreamWorker
@@ -311,17 +311,25 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             yield f"data: {json.dumps(decision.receipt())}\n\n"
             yield "data: [DONE]\n\n"
             return
-        self._persist_turn_log(
-            turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
-            stream=True, model=model_alias, bot_id=bot_id, user_id=user_id,
-            status="streaming", latency_ms=None, user_prompt=user_prompt,
-            prepared_messages=[], response_text="", agent_session_key=oc_session_key,
-            trigger_message_id=trigger_message_id, assistant_message_id=assistant_message_id,
-            parent_turn_id=parent_turn_id, admission_claim=admission_claim,
-            request_extensions=turn_start_extensions(
-                request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
-            ),
-        )
+        try:
+            self._persist_turn_log(
+                turn_id=turn_log_id, request_id=ctx.request_id, path=ctx.path,
+                stream=True, model=model_alias, bot_id=bot_id, user_id=user_id,
+                status="streaming", latency_ms=None, user_prompt=user_prompt,
+                prepared_messages=[], response_text="", agent_session_key=oc_session_key,
+                trigger_message_id=trigger_message_id, assistant_message_id=assistant_message_id,
+                parent_turn_id=parent_turn_id, admission_claim=admission_claim,
+                request_extensions=turn_start_extensions(
+                    request, is_agent_backend=is_agent_backend, admission_claim=admission_claim,
+                ),
+            )
+        except SystemGateRefused as refused:  # TASK-1233 C4: refuse a direct start in-band
+            if admission_claim is not None:
+                raise  # a durable producer defers it as TargetBusy (not an attempt)
+            log.api_error(ctx, f"admission refused: {refused}", refused.status_code)
+            for event in request_failed_events(response_id, created, model_alias, refused):
+                yield event
+            return
         chat_reset = None
         if not is_agent_backend:
             try:
