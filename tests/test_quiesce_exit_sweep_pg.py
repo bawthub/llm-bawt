@@ -2,22 +2,28 @@
 
 The real driver opens a real hold (``rig`` from :mod:`tests.test_ops_quiesce_pg`);
 only the bridge is faked: ``run.status`` replies and terminal records per
-request id. Each test checks the driver's own verdict (``gate_drain_status``)
+request id, and ``chat.abort`` over a real :class:`agent_bridge.session_queue.SessionQueue`
+so the abort's two orderings run the bridge's own admission rule. Each test checks the driver's own verdict (``gate_drain_status``)
 and, where it drains, that the job dispatches.
 """
 from __future__ import annotations
 
 import asyncio
 import uuid
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
-from agent_bridge.run_contract import RunTerminal, TeardownReport
+from agent_bridge.run_contract import RunAccepted, RunTerminal, TeardownReport
+from agent_bridge.session_queue import Admission, SessionQueue
 from llm_bawt.ops import JOB_ACCEPTED
 from llm_bawt.ops.models import JOB_QUIESCING
 from llm_bawt.ops.quiesce_exit import ensure_sighting_schema, purge_sightings
 from llm_bawt.service.quiesce_exit_sweep import QuiesceExitSweep
+from llm_bawt.service.run_accepts import purge_accepts, record_accept
+from llm_bawt.service.turn_execution import TurnExecution
 from llm_bawt.service.turn_gates import gate_drain_status
 from tests import test_ops_quiesce_pg as _quiesce
 
@@ -26,19 +32,75 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 rig = _quiesce.rig
 
 
+BOOT = "boot-a"
+
+
 class _Bridge:
-    """Answers ``run.status`` for the requests it knows; times out for every other."""
+    """Answers ``run.status`` for the requests it knows; times out for every other.
+
+    ``chat.abort`` stops the request in a real ``SessionQueue``. A send in
+    ``ahead`` was read off the command stream before the abort, so it is
+    accepted first and the abort cancels it. A run's terminal goes to the
+    stream ``worker`` when one is attached (source (a)), and to the terminal
+    record unless ``records`` is off.
+    """
 
     def __init__(self):
         self.replies: dict[str, dict] = {}
         self.terminals: dict[str, RunTerminal] = {}
         self.asked: list[str] = []
+        self.aborted: list[str] = []
+        self.queue = SessionQueue()
+        self.ahead: set[str] = set()
+        self.worker: TurnExecution | None = None
+        self.records = True
+        self._runs: dict[str, asyncio.Task] = {}
+
+    def publish(self, terminal):
+        if self.worker is not None:
+            self.worker.record_exit(terminal.to_dict())
+        if self.records:
+            self.terminals[terminal.request_id] = terminal
+
+    async def _send(self, session_key, request_id):
+        if self.queue.accept(session_key, request_id) is not Admission.ACCEPTED:
+            self.publish(RunTerminal(request_id, "claude-code", BOOT,
+                                     self.queue.refusal_teardown(session_key, request_id)))
+            return
+        try:
+            if self.worker is not None:
+                self.worker.record_accept(RunAccepted(request_id, "claude-code", BOOT, True).to_dict())
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.publish(RunTerminal(request_id, "claude-code", BOOT, TeardownReport("ok", "none", True, 3)))
+        finally:
+            self.queue.release(session_key, request_id)
+
+    async def deliver(self, session_key, request_id):
+        """The send command reaches the bridge; returns its run task."""
+        task = self._runs[request_id] = asyncio.create_task(self._send(session_key, request_id))
+        await asyncio.sleep(0)
+        return task
+
+    async def _abort(self, session_key, request_id):
+        self.aborted.append(request_id)
+        if request_id in self.ahead:
+            self.ahead.discard(request_id)
+            await self.deliver(session_key, request_id)
+        cancelled = self.queue.stop_request(session_key, request_id)
+        if cancelled:  # a bridge replies after the cancelled run's teardown
+            await asyncio.gather(self._runs[request_id], return_exceptions=True)
+        state = "cancelled" if cancelled else "tombstoned"
+        return {"backend": "claude-code", "boot_id": BOOT, "request_id": request_id, "cancelled": cancelled,
+                "state": state, "detail": ""}
 
     def answer(self, request_id, state, *, boot, backend="claude-code", pid1=True):
         self.replies[request_id] = {"backend": backend, "boot_id": boot, "request_id": request_id,
                                     "state": state, "detail": "", "pid1": pid1}
 
     async def send_rpc(self, method, params, request_id, *, timeout_s, backend):
+        if method == "chat.abort":
+            return await self._abort(params["sessionKey"], params["requestId"])
         self.asked.append(params["requestId"])
         reply = self.replies.get(params["requestId"])
         if reply is None:
@@ -77,11 +139,17 @@ def sweep(rig):
             return {s.turn_id: (s.drained, s.reason) for s in gate_drain_status(conn, gate_id)}
 
     def run_once():
-        return asyncio.run(rig.sweep.run_once())
+        async def one_pass():
+            counts = await rig.sweep.run_once()
+            await rig.sweep.settle_aborts()
+            return counts
+
+        return asyncio.run(one_pass())
 
     rig.turn_with, rig.hold, rig.drain, rig.run_once = turn, held, drain, run_once
     yield rig
     rig.sql("DELETE FROM quiesce_run_sightings WHERE request_id LIKE 'req-turn-%'")
+    rig.sql("DELETE FROM bridge_run_accepts WHERE request_id LIKE 'req-turn-%'")
 
 
 def _dispatched(rig, job_id):
@@ -219,3 +287,98 @@ def test_bootstrap_is_idempotent(sweep):
     ensure_sighting_schema(sweep.engine)
     with sweep.engine.connect() as conn:
         assert conn.execute(text("SELECT to_regclass('quiesce_run_sightings')")).scalar_one() is not None
+
+
+# -- (b) from the accept record ------------------------------------------------
+
+def _accept(sweep, req, *, boot=BOOT, pid1=True, backend="claude-code"):
+    return record_accept(sweep.engine, RunAccepted(req, backend, boot, pid1).to_dict())
+
+
+def test_the_boot_changes_before_any_sighting_and_the_accept_drains_it(sweep):
+    """Snark: the accepting bridge died before the sweep ever saw the run live."""
+    turn_id, req = sweep.turn_with()
+    job_id, gate_id = sweep.hold(turn_id)
+    assert _accept(sweep, req) is True
+    sweep.bridge.answer(req, "not_found", boot="boot-b")
+    sweep.run_once()
+    assert sweep.sql("SELECT count(*) FROM quiesce_run_sightings WHERE request_id=:r", r=req).scalar_one() == 0
+    assert sweep.drain(gate_id)[turn_id] == (True, "execution_exit:b")
+    assert sweep.bridge.aborted == []
+    assert _dispatched(sweep, job_id)
+
+
+@pytest.mark.parametrize("pid1", [None, False])
+def test_an_accept_without_pid1_proves_nothing(sweep, pid1):
+    turn_id, req = sweep.turn_with()
+    _job, gate_id = sweep.hold(turn_id)
+    _accept(sweep, req, pid1=pid1)
+    sweep.bridge.answer(req, "not_found", boot="boot-b")
+    sweep.run_once()
+    assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
+    assert sweep.bridge.aborted == []  # the accept is a bridge record: nothing to abort
+
+
+def test_the_accept_and_the_sighting_must_both_prove_it(sweep):
+    turn_id, req = sweep.turn_with()
+    _job, gate_id = sweep.hold(turn_id)
+    _accept(sweep, req)
+    sweep.bridge.answer(req, "running", boot="boot-b", pid1=False)
+    sweep.run_once()
+    sweep.bridge.answer(req, "not_found", boot="boot-c")
+    sweep.run_once()
+    assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
+
+
+def test_record_accept_is_idempotent_per_request(sweep):
+    req = f"req-turn-{uuid.uuid4().hex}"
+    assert _accept(sweep, req) is True
+    assert _accept(sweep, req, boot="boot-b") is False
+    assert _accept(sweep, req, backend="Claude-Code") is False  # the backend key is lowercased
+    assert sweep.sql("SELECT boot_id, pid1 FROM bridge_run_accepts WHERE request_id=:r", r=req).all() == [
+        ("boot-a", True)]
+
+
+def test_old_accepts_are_purged(sweep):
+    req = f"req-turn-{uuid.uuid4().hex}"
+    sweep.sql("INSERT INTO bridge_run_accepts (backend, request_id, boot_id, accepted_at)"
+              " VALUES ('codex', :r, 'boot-a', now() - interval '2 days')", r=req)
+    assert purge_accepts(sweep.engine) >= 1
+    assert sweep.sql("SELECT count(*) FROM bridge_run_accepts WHERE request_id=:r", r=req).scalar_one() == 0
+
+
+# -- the sweep abort: both orderings -------------------------------------------
+
+def test_an_abort_ahead_of_the_send_refuses_it_and_c_drains(sweep):
+    turn_id, req = sweep.turn_with()
+    job_id, gate_id = sweep.hold(turn_id)
+    sweep.bridge.answer(req, "not_found", boot=BOOT)  # the send is still on the command stream
+    sweep.run_once()
+    assert sweep.bridge.aborted == [req]
+    assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
+
+    async def deliver():
+        await (await sweep.bridge.deliver(f"{sweep.bot}:nick", req))
+
+    asyncio.run(deliver())
+    assert sweep.bridge.terminals[req].teardown == TeardownReport(disconnect="refused", exited=True)
+    sweep.bridge.answer(req, "tombstoned", boot=BOOT)
+    sweep.run_once()
+    assert sweep.drain(gate_id)[turn_id] == (True, "execution_exit:c")
+    assert sweep.bridge.aborted == [req]  # once per member and boot
+    assert _dispatched(sweep, job_id)
+
+
+def test_a_send_queued_ahead_of_the_abort_is_cancelled_and_a_drains(sweep):
+    turn_id, req = sweep.turn_with()
+    job_id, gate_id = sweep.hold(turn_id)
+    worker = TurnExecution(turn_id, Event(), is_agent=True, store=SimpleNamespace(engine=sweep.engine))
+    worker.request_id = req
+    sweep.bridge.worker, sweep.bridge.records = worker, False  # only the run's own terminal can drain it
+    sweep.bridge.ahead.add(req)
+    sweep.bridge.answer(req, "not_found", boot=BOOT)
+    sweep.run_once()
+    assert sweep.bridge.aborted == [req]
+    assert sweep.drain(gate_id)[turn_id] == (True, "execution_exit:a")
+    assert sweep.sql("SELECT boot_id FROM bridge_run_accepts WHERE request_id=:r", r=req).scalar_one() == BOOT
+    assert _dispatched(sweep, job_id)

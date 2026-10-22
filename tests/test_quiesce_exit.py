@@ -19,8 +19,8 @@ from llm_bawt.service.recovery.orphan_turns import BridgeRunProbe
 SIGHTED = RunSighting("req-1", "claude-code", "boot-a", pid1=True)
 
 
-def _member(*, sighting=SIGHTED, backend="claude-code", request_id="req-1"):
-    return SweepMember(7, 3, "turn-1", True, backend, "snark:nick", request_id, sighting)
+def _member(*, sighting=SIGHTED, backend="claude-code", request_id="req-1", accepted=None, session_key="snark:nick"):
+    return SweepMember(7, 3, "turn-1", True, backend, session_key, request_id, sighting, accepted=accepted)
 
 
 def _reply(state=RunState.NOT_FOUND, *, boot_id="boot-b", backend="claude-code", request_id="req-1", pid1=True):
@@ -52,7 +52,8 @@ def test_a_pid1_restart_of_a_sighted_run_is_b_on_the_answering_boot(backend, sta
 @pytest.mark.parametrize(("member", "reply"), [
     (_member(sighting=RunSighting("req-1", "openclaw", "boot-a", True), backend="openclaw"),
      _reply(backend="openclaw")),                                               # openclaw never proves
-    (_member(sighting=None), _reply()),                                         # no durable sighting
+    (_member(sighting=None, accepted=RunSighting("req-1", "claude-code", "boot-a", None)),
+     _reply()),                                                                 # accepted pid1 unknown
     (_member(sighting=RunSighting("req-1", "claude-code", "boot-a", False)), _reply()),  # sighted not PID 1
     (_member(sighting=RunSighting("req-1", "claude-code", "boot-a", None)), _reply()),   # sighted pid1 unknown
     (_member(), _reply(pid1=False)),                                            # answering not PID 1
@@ -112,7 +113,51 @@ def test_restart_proof_wins_over_a_survivor_terminal():
 
 def test_a_terminal_of_another_request_or_backend_is_ignored():
     for terminal in (_terminal(True, request_id="req-2"), _terminal(True, backend="codex")):
-        assert _verdict(_member(sighting=None), _reply(boot_id="boot-a"), terminal) == ("absent_unproven", None)
+        assert _verdict(_member(sighting=None), _reply(boot_id="boot-a"), terminal) == ("absent_unaccepted", None)
+
+
+# -- (b) holders: the accept first, then the sighting --------------------------
+
+ACCEPTED = RunSighting("req-1", "claude-code", "boot-a", pid1=True)
+
+
+def test_an_accept_proves_a_restart_with_no_sighting():
+    """Snark: the boot changes before any sighting, so only the accept record names the holder."""
+    assert _verdict(_member(sighting=None, accepted=ACCEPTED), _reply()) == ("restart", ("b", True, "boot-b"))
+
+
+@pytest.mark.parametrize(("accepted", "sighting", "reply"), [
+    (ACCEPTED, RunSighting("req-1", "claude-code", "boot-c", True), _reply(boot_id="boot-c")),  # sighted boot answers
+    (ACCEPTED, RunSighting("req-1", "claude-code", "boot-c", True), _reply(boot_id="boot-a")),  # accepting boot answers
+    (ACCEPTED, RunSighting("req-1", "claude-code", "boot-c", None), _reply()),                  # sighting pid1 unknown
+    (RunSighting("req-1", "claude-code", "boot-a", False), SIGHTED, _reply(boot_id="boot-c")),  # accept not PID 1
+])
+def test_every_holder_must_prove_the_restart(accepted, sighting, reply):
+    assert _verdict(_member(sighting=sighting, accepted=accepted), reply) == ("absent_unproven", None)
+
+
+def test_holders_are_the_accept_then_the_sighting():
+    assert _member(sighting=SIGHTED, accepted=ACCEPTED).holders == (ACCEPTED, SIGHTED)
+    assert _member(sighting=None).holders == ()
+
+
+# -- abort for a bound member with no bridge record ----------------------------
+
+def test_not_found_with_no_holder_and_no_terminal_asks_for_an_abort():
+    v = judge(_member(sighting=None), _reply(boot_id="boot-a"), None)
+    assert (v.reason, v.record, v.sighting, v.abort) == ("absent_unaccepted", None, None, True)
+
+
+@pytest.mark.parametrize(("member", "reply", "terminal"), [
+    (_member(sighting=None), _reply(RunState.TOMBSTONED, boot_id="boot-a"), None),  # already stopped there
+    (_member(sighting=SIGHTED), _reply(boot_id="boot-a"), None),                    # a sighting holds it
+    (_member(sighting=None, accepted=ACCEPTED), _reply(boot_id="boot-a"), None),    # an accept holds it
+    (_member(sighting=None), _reply(boot_id="boot-a"), _terminal(None)),            # it already ended
+    (_member(sighting=None, session_key=None), _reply(boot_id="boot-a"), None),     # nothing to address
+    (_member(sighting=None), _reply(RunState.RUNNING, boot_id="boot-a"), None),     # live
+])
+def test_no_abort_where_the_bridge_has_or_had_a_record(member, reply, terminal):
+    assert judge(member, reply, terminal).abort is False
 
 
 # -- sightings and ambiguity ---------------------------------------------------
@@ -280,5 +325,88 @@ def test_sweep_member_stamps_proof_and_keeps_sightings(monkeypatch):
     assert stamped[-1][0] == 7 and stamped[-1][1]["source"] == "b"
     # A malformed terminal record is no evidence, never a crash.
     assert run(_wire("not_found", boot="boot-a"), RunContractError("bad"), _member(sighting=None)) == (
-        "absent_unproven", ["req-1"])
+        "absent_unaccepted", ["req-1"])
     assert len(stamped) == 1
+
+
+def _abort_wire(state, request_id="req-1"):
+    return {"backend": "claude-code", "boot_id": "boot-a", "request_id": request_id,
+            "cancelled": state == "cancelled", "state": state, "detail": ""}
+
+
+class _AbortRpc:
+    """run.status says ``not_found``; chat.abort waits ``delay`` and answers ``state``."""
+
+    def __init__(self, delay=0.0, state="tombstoned"):
+        self.delay, self.state, self.calls = delay, state, []
+
+    async def send_rpc(self, method, params, request_id, *, timeout_s, backend):
+        self.calls.append((method, params["requestId"], timeout_s, backend))
+        if method == "chat.abort":
+            await asyncio.sleep(self.delay)
+            return _abort_wire(self.state, params["requestId"])
+        return {**_wire("not_found", boot="boot-a"), "request_id": params["requestId"]}
+
+    async def read_run_terminal(self, request_id):
+        return None
+
+
+def test_the_sweep_aborts_once_per_member_and_boot_with_the_abort_timeout(monkeypatch):
+    from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
+
+    rpc = _AbortRpc()
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(1))
+    sweep = QuiesceExitSweep(None, subscriber=lambda: rpc)
+
+    async def passes():
+        first = await sweep.run_once()
+        await sweep.settle_aborts()
+        second = await sweep.run_once()
+        await sweep.settle_aborts()
+        return first, second
+
+    assert asyncio.run(passes()) == ({"absent_unaccepted": 1}, {"absent_unaccepted": 1})
+    aborts = [c for c in rpc.calls if c[0] == "chat.abort"]
+    assert aborts == [("chat.abort", "req-1", ABORT_RPC_TIMEOUT_S, "claude-code")]
+
+
+def test_an_abort_holds_no_probe_slot_and_no_budget(monkeypatch):
+    """The abort waits on the bridge's teardown; the pass must not."""
+    rpc = _AbortRpc(delay=10)
+    monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(3))
+    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.2)
+    sweep = QuiesceExitSweep(None, subscriber=lambda: rpc, concurrency=1)
+    sweep.budget_seconds = 1.0  # probes start by 0.8s; each abort alone would take 10s
+
+    async def one_pass():
+        started = asyncio.get_running_loop().time()
+        counts = await sweep.run_once()
+        elapsed = asyncio.get_running_loop().time() - started
+        await sweep.aclose()
+        return counts, elapsed
+
+    counts, elapsed = asyncio.run(one_pass())
+    assert counts == {"absent_unaccepted": 3} and elapsed < 0.5
+    assert sorted(c[1] for c in rpc.calls if c[0] == "chat.abort") == ["req-1", "req-2", "req-3"]
+
+
+@pytest.mark.parametrize("wire", [TimeoutError("late"), {"backend": "codex"}, _abort_wire("bogus")])
+def test_an_unconfirmed_abort_is_none(wire):
+    class Rpc:
+        async def send_rpc(self, *args, **kwargs):
+            if isinstance(wire, Exception):
+                raise wire
+            return wire
+
+    assert asyncio.run(BridgeRunProbe(lambda: Rpc()).abort(
+        backend="claude-code", session_key="s", request_id="req-1")) is None
+    assert asyncio.run(BridgeRunProbe(lambda: None).abort(
+        backend="claude-code", session_key="s", request_id="req-1")) is None
+
+
+def test_a_confirmed_abort_is_its_reply():
+    from agent_bridge.abort_contract import AbortState
+
+    reply = asyncio.run(BridgeRunProbe(lambda: _AbortRpc(state="cancelled")).abort(
+        backend="claude-code", session_key="s", request_id="req-1"))
+    assert reply.state is AbortState.CANCELLED and reply.boot_id == "boot-a"

@@ -82,6 +82,23 @@ class TurnExecution:
             log.exception("Could not stamp the run terminal for turn %s", self.turn_id)
         return False
 
+    def record_accept(self, accepted: Mapping[str, Any] | None) -> bool:
+        """Durably record which bridge boot accepted this run (``RUN_ACCEPTED``, TASK-1233 B1 (b)).
+
+        Never raises into the stream worker: a missing record only means the
+        sweep's restart proof falls back to its own sighting, or the quiesce
+        times out. Returns whether it wrote the record.
+        """
+        from .run_accepts import record_accept
+
+        try:
+            return record_accept(getattr(self.store, "engine", None), accepted, request_id=self.request_id)
+        except ValueError:  # RunContractError included: a malformed or foreign payload
+            log.error("Unusable RUN_ACCEPTED for turn %s: %r", self.turn_id, accepted)
+        except Exception:
+            log.exception("Could not record RUN_ACCEPTED for turn %s", self.turn_id)
+        return False
+
     def dispatched(self) -> bool:
         with self._lock:
             self._dispatched = True

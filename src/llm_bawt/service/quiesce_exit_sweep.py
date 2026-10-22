@@ -28,6 +28,14 @@ member, and the terminal record's retention margin
 (``RUN_TERMINAL_RETENTION_MARGIN_S``) absorbs the excess first. Not leader-only: every stamp is conditional and idempotent, so two app
 processes only repeat no-ops. A failed pass logs and retries; it never kills
 the loop.
+
+Abort. When the judgement asks for it (``Judgement.abort``: ``not_found``, no
+holder record, no terminal), the sweep sends one backend-matched ``chat.abort``
+per member and answering boot. It runs outside the pass: it is not held by a
+probe slot or the budget, so it never shrinks :data:`PASS_CAPACITY`, and it
+waits the full ``ABORT_RPC_TIMEOUT_S`` because a bridge replies only after the
+cancelled run's teardown. Its reply is logged, never stamped: the evidence is
+the refused or cancelled run's own terminal.
 """
 from __future__ import annotations
 
@@ -41,6 +49,7 @@ from agent_bridge.run_contract import QUIESCE_SWEEP_INTERVAL_MAX_S, RunContractE
 
 from ..ops.quiesce_exit import (SweepMember, ensure_sighting_schema, judge, purge_sightings, record_sighting, stamp,
                                 undrained_members)
+from .run_accepts import purge_accepts
 from .dependencies import get_ops_service
 from .recovery.orphan_turns import BridgeRunProbe
 
@@ -78,6 +87,7 @@ class QuiesceExitSweep:
         self.probe = probe or BridgeRunProbe(subscriber, timeout_seconds=PROBE_TIMEOUT_SECONDS)
         self._limit = asyncio.Semaphore(concurrency)
         self._probed_at: dict[int, float] = {}
+        self._aborts: dict[tuple[int, str], asyncio.Task] = {}
         self.budget_seconds = PASS_BUDGET_SECONDS
 
     async def _terminal(self, request_id: str) -> RunTerminal | None:
@@ -105,6 +115,8 @@ class QuiesceExitSweep:
             if reply is not None and member.request_id:
                 terminal = await self._terminal(member.request_id)
         verdict = judge(member, reply, terminal)
+        if verdict.abort:
+            self._abort(member, reply.boot_id)
         if verdict.sighting is not None:
             await asyncio.to_thread(record_sighting, self.engine, verdict.sighting)
         if verdict.record is not None:
@@ -114,12 +126,37 @@ class QuiesceExitSweep:
                      verdict.record["exited"], stamped)
         return verdict.reason
 
+    def _abort(self, member: SweepMember, boot_id: str) -> None:
+        """Start this member's ``chat.abort`` unless one already went to this boot."""
+        key = (member.member_id, boot_id)
+        if key in self._aborts:
+            return
+
+        async def send() -> None:
+            reply = await self.probe.abort(backend=member.backend, session_key=member.session_key,
+                                           request_id=member.request_id)
+            log.info("quiesce exit sweep: member %s turn %s chat.abort %s -> %s", member.member_id,
+                     member.turn_id, member.request_id, "unconfirmed" if reply is None else reply.state.value)
+
+        self._aborts[key] = asyncio.create_task(send())
+
+    async def settle_aborts(self) -> None:
+        """Wait for every abort in flight (tests; :meth:`aclose` cancels them instead)."""
+        await asyncio.gather(*(t for t in self._aborts.values() if not t.done()), return_exceptions=True)
+
+    async def aclose(self) -> None:
+        pending = [t for t in self._aborts.values() if not t.done()]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
     async def run_once(self) -> dict[str, int]:
         """One bounded pass; returns a count per verdict reason (``deferred``/``cut`` for the budget)."""
         started = time.monotonic()
         members = await asyncio.to_thread(undrained_members, self.engine)
         live = {m.member_id for m in members}
         self._probed_at = {k: v for k, v in self._probed_at.items() if k in live}
+        self._aborts = {k: t for k, t in self._aborts.items() if k[0] in live or not t.done()}
         members.sort(key=lambda m: (self._probed_at.get(m.member_id, 0.0), m.member_id))
         start_by = started + self.budget_seconds - PROBE_TIMEOUT_SECONDS
         tasks = [asyncio.create_task(self._one(m, start_by)) for m in members]
@@ -160,7 +197,7 @@ def build_quiesce_exit_sweep(service) -> QuiesceExitSweep | None:
 
 
 async def run_quiesce_exit_sweep(service, *, interval_seconds: float = INTERVAL_SECONDS) -> None:
-    """Lifespan loop: passes start ``interval_seconds`` apart; sightings purged hourly.
+    """Lifespan loop: passes start ``interval_seconds`` apart; holder records purged hourly.
 
     The interval is capped at the pass budget, so the per-member bound in the
     module docstring holds whatever the caller passes.
@@ -168,22 +205,27 @@ async def run_quiesce_exit_sweep(service, *, interval_seconds: float = INTERVAL_
     interval_seconds = min(interval_seconds, PASS_BUDGET_SECONDS)
     sweep = None
     purged_at = 0.0
-    while True:
-        started = time.monotonic()
-        try:
-            sweep = sweep or build_quiesce_exit_sweep(service)
-            if sweep is None:
-                log.info("quiesce exit sweep disabled: no PostgreSQL ops store")
-                return
-            await sweep.run_once()
-            if started - purged_at >= PURGE_EVERY_SECONDS:
-                await asyncio.to_thread(purge_sightings, sweep.engine)
-                purged_at = started
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("quiesce exit sweep pass failed; retrying")
-        await asyncio.sleep(max(0.0, interval_seconds - (time.monotonic() - started)))
+    try:
+        while True:
+            started = time.monotonic()
+            try:
+                sweep = sweep or build_quiesce_exit_sweep(service)
+                if sweep is None:
+                    log.info("quiesce exit sweep disabled: no PostgreSQL ops store")
+                    return
+                await sweep.run_once()
+                if started - purged_at >= PURGE_EVERY_SECONDS:
+                    await asyncio.to_thread(purge_sightings, sweep.engine)
+                    await asyncio.to_thread(purge_accepts, sweep.engine)
+                    purged_at = started
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("quiesce exit sweep pass failed; retrying")
+            await asyncio.sleep(max(0.0, interval_seconds - (time.monotonic() - started)))
+    finally:
+        if sweep is not None:
+            await sweep.aclose()
 
 
 __all__ = ["CONCURRENCY", "INTERVAL_SECONDS", "PASS_BUDGET_SECONDS", "PASS_CAPACITY", "PROBE_TIMEOUT_SECONDS", "pass_capacity",

@@ -148,10 +148,13 @@ another request is skipped (no stamp could land).
 - **live** (`preflight`/`queued`/`running`/`stopping`): records a *sighting*
   in `quiesce_run_sightings` (backend, request_id → latest live boot_id,
   pid1). No evidence.
-- **(b) restart:** `not_found`/`tombstoned` from a different boot than the
-  sighting, `proves_restart` true: claude-code or codex only (openclaw never
-  proves), and PID 1 on both the sighted and the answering boot. Stamps
-  `exited: true` with the answering boot.
+- **(b) restart:** `not_found`/`tombstoned` with `proves_restart` true against
+  every holder record of the run: the *accept* first (`bridge_run_accepts`,
+  the boot that admitted the send, written by the run's stream worker from
+  `RUN_ACCEPTED` via `TurnExecution.record_accept`; first accept wins), then
+  the sighting. claude-code or codex only (openclaw never proves), a boot
+  different from every holder, and PID 1 on every holder and on the answering
+  boot. Stamps `exited: true` with the answering boot.
 - **(c) terminal record:** `teardown.exited` true stamps a confirmed exit;
   `false` stamps `exit_unconfirmed` (never drains; re-probed every pass but
   stamped once, and a later restart proof replaces it). `exited: null` is no
@@ -164,17 +167,26 @@ another request is skipped (no stamp could land).
   in `finally` whatever its teardown did, and openclaw tombstones as its abort
   starts, so `tombstoned` with no terminal (or an `exited: null` one) writes
   nothing.
+- **Abort:** `not_found` with no holder record (no accept, no sighting) and no
+  terminal may be a send still on the command stream. The sweep sends one
+  backend-matched `chat.abort` per member and answering boot, outside the
+  pass (no probe slot, no budget, `ABORT_RPC_TIMEOUT_S`). The abort writes
+  nothing itself: a send read after it is refused as tombstoned (`REFUSED`,
+  so (c) next pass), and a send read before it is cancelled and publishes its
+  own terminal (source (a)). A send that never reaches that bridge leaves the
+  member to the quiesce timeout.
 - Anything else (timeout, error, unsupported, a mismatched request or backend,
-  `not_found` with no terminal and no restart proof) writes nothing.
+  `not_found` with a holder but no terminal and no restart proof) writes nothing.
 
 The stamp goes on the turn row (`stamp_turn_exit`), or, when the turn row is
 gone, the member row (`stamp_member_exit`), in separate transactions. Neither
 replaces a confirmed exit. The sweep is not leader-only: every write is
 conditional and idempotent.
 
-*Limitation.* A sighting is written only by the sweep, so a member whose bridge
-died before its first sweep probe cannot get (b) and waits for the quiesce
-timeout (fail-safe). Sightings idle 24 h are purged hourly. A probe to a
+*Limitation.* A member with no holder record (its worker could not write the
+accept and its bridge died before the first sweep probe) cannot get (b) and
+waits for the quiesce timeout (fail-safe). Accepts and sightings older than
+24 h are purged hourly. A probe to a
 bridge that is down stays in its command stream and is answered (and ignored)
 when it returns.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -279,6 +279,31 @@ def test_record_exit_never_raises(caplog):
     assert "Unusable run terminal" in caplog.text and "Could not stamp" in caplog.text
 
 
+def _accepted(request_id="req-1", backend="claude-code", pid1=True):
+    from agent_bridge.run_contract import RunAccepted
+
+    return RunAccepted(request_id, backend, "boot-1", pid1).to_dict()
+
+
+def test_record_accept_never_raises_into_the_stream_worker(caplog):
+    from threading import Event
+
+    from llm_bawt.service.turn_execution import TurnExecution
+
+    no_db = TurnExecution("t", Event(), is_agent=True, store=Mock(engine=None))
+    assert no_db.record_accept(_accepted()) is False
+    pg = Mock(dialect=Mock(), begin=Mock(side_effect=OSError))
+    pg.dialect.name = "postgresql"
+    broken = TurnExecution("t", Event(), is_agent=True, store=Mock(engine=pg))
+    broken.request_id = "req-1"
+    assert broken.record_accept({"request_id": "req-1"}) is False  # malformed accept
+    assert broken.record_accept(_accepted(request_id="req-other")) is False  # another request's accept
+    assert "Unusable RUN_ACCEPTED" in caplog.text and "Could not record" not in caplog.text
+    with patch("llm_bawt.service.run_accepts.ensure_accept_schema"):
+        assert broken.record_accept(_accepted()) is False  # database failure
+    assert "Could not record RUN_ACCEPTED" in caplog.text
+
+
 def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
     from types import SimpleNamespace
 
@@ -286,7 +311,9 @@ def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
     from llm_bawt.agent_backends import agent_bridge
 
     terminal = _terminal(request_id="req-A")
-    owner = Mock(dispatched=Mock(return_value=False), record_exit=Mock(return_value=True))
+    accepted = _accepted(request_id="req-A")
+    owner = Mock(dispatched=Mock(return_value=False), record_exit=Mock(return_value=True),
+                 record_accept=Mock(return_value=True))
 
     class Subscriber:
         def __init__(self, url): pass
@@ -294,6 +321,8 @@ def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
         async def close(self): pass
         async def send_command(self, **kwargs): pass
         async def subscribe_run(self, request_id, **kwargs):
+            yield AgentEvent(event_id=f"{request_id}:accepted", session_key="", run_id=request_id,
+                             kind=AgentEventKind.RUN_ACCEPTED, origin="system", raw=accepted)
             yield AgentEvent(event_id=f"{request_id}:terminal", session_key="", run_id=request_id,
                              kind=AgentEventKind.RUN_TERMINAL, origin="system", raw=terminal)
 
@@ -303,4 +332,7 @@ def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
     list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
         "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
     }))
+    owner.record_accept.assert_called_once_with(accepted)
     owner.record_exit.assert_called_once_with(terminal)
+    assert [c[0] for c in owner.mock_calls if c[0] in ("record_accept", "record_exit")] == [
+        "record_accept", "record_exit"]

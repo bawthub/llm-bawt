@@ -160,6 +160,32 @@ class BridgeRunProbe:
                                   boot_id=reply.boot_id, detail=reply.detail)
 
 
+    async def abort(self, *, backend: str, session_key: str, request_id: str) -> Any:
+        """One backend-matched ``chat.abort`` for *request_id*: the ``AbortReply``, or ``None``.
+
+        Waits ``ABORT_RPC_TIMEOUT_S`` (the bridge replies after the run's
+        teardown), not this probe's timeout. The abort takes effect on the
+        bridge whether or not the reply arrives, so ``None`` (no subscriber,
+        timeout, error, malformed reply) is logged and nothing more.
+        """
+        from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S, AbortReply, AbortReplyError
+
+        subscriber = self._subscriber()
+        if subscriber is None:
+            return None
+        try:
+            wire = await subscriber.send_rpc(
+                "chat.abort", {"sessionKey": session_key, "requestId": request_id},
+                f"abort_{uuid.uuid4().hex}", timeout_s=ABORT_RPC_TIMEOUT_S, backend=backend,
+            )
+            return AbortReply.from_wire(wire, backend=backend)
+        except AbortReplyError as exc:
+            logger.warning("chat.abort for %s: malformed reply: %s", request_id, exc)
+        except Exception as exc:
+            logger.warning("chat.abort for %s unconfirmed: %s", request_id, type(exc).__name__)
+        return None
+
+
 class OrphanTurnsStep(RecoveryStep):
     name = "orphan_turns"
     # Probes wait on bridges, so they run concurrently; settles stay serial.

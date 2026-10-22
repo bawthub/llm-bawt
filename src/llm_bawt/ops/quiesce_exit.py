@@ -6,10 +6,10 @@ from the run's own terminal. This module is the pure rule and the DB half of
 the sweep (:mod:`..service.quiesce_exit_sweep`) that writes sources (b) and (c)
 for members (a) never covered:
 
-* **(b) restart.** ``not_found``/``tombstoned`` from a different boot than the
-  durable sighting of the run, and :func:`agent_bridge.run_status.proves_restart`
-  holds: a backend whose runs die with the bridge, PID 1 on both sides.
-  openclaw never proves. ``boot_id`` is the answering boot.
+* **(b) restart.** ``not_found``/``tombstoned`` from a boot that held none of
+  the run's durable holder records, and :func:`agent_bridge.run_status.proves_restart`
+  holds against every one of them: a backend whose runs die with the bridge,
+  PID 1 on both sides. openclaw never proves. ``boot_id`` is the answering boot.
 * **(c) same boot.** The run's compact terminal record (``RUN_TERMINAL_RETENTION_S``)
   says ``teardown.exited``: ``true`` stamps a confirmed exit, ``false`` stamps
   ``exit_unconfirmed`` (re-probed every pass, never drained). A terminal with
@@ -18,12 +18,28 @@ for members (a) never covered:
   registered, and every bridge unregisters in ``finally`` whatever its
   teardown did (Vex r1 B1).
 
-**Sightings.** The (b) boot record is durable: ``quiesce_run_sightings`` keeps,
-per ``(backend, request_id)``, the latest boot that answered a live state and
-whether it was PID 1. The sweep writes it; it survives the turn row's
-deletion. A member whose bridge dies before its first sighting cannot get (b)
-and falls to the quiesce timeout (fail-safe). Rows idle past
-:data:`SIGHTING_RETENTION_S` are deleted.
+**Holders.** (b) reads two durable boot records per ``(backend, request_id)``,
+both independent of the turn row: the accept first, then the sighting.
+
+* The accept (``bridge_run_accepts``, :mod:`..service.run_accepts`) is the
+  boot that admitted the send, written by the stream worker from the run's
+  ``RUN_ACCEPTED``. A bridge that dies before the sweep ever sees the run live
+  still left it.
+* The sighting (``quiesce_run_sightings``) is the latest boot that answered a
+  live state. The sweep writes it; it covers a run accepted before the accept
+  record existed, or whose worker could not write it.
+
+A member with neither cannot get (b) and falls to the quiesce timeout
+(fail-safe). Rows past their retention are deleted.
+
+**Abort.** A member bound to a request its bridge reports ``not_found``, with
+no holder record and no terminal, may be a send still queued on the command
+stream. The judgement asks for one backend-matched ``chat.abort``
+(:attr:`Judgement.abort`) so the run produces evidence through the paths that
+already prove it: a send read after the abort is refused as tombstoned by a
+process that never accepted it (``REFUSED``, so (c) on the next pass), and a
+send read before it is cancelled and publishes its own terminal (source (a)).
+Either way the abort itself is never evidence.
 
 Every write is its own short transaction. Nothing here locks a member row and
 then a turn row: a turn stamp (``stamp_turn_exit``, turn row only) and a
@@ -39,9 +55,10 @@ from typing import Any, Mapping
 from sqlalchemy import text
 
 from agent_bridge.run_contract import RunTerminal
-from agent_bridge.run_status import (ABSENT_STATES, LIVE_STATES, RunSighting, RunStatusReply,
+from agent_bridge.run_status import (ABSENT_STATES, LIVE_STATES, RunSighting, RunState, RunStatusReply,
                                      proves_restart)
 
+from ..service.run_accepts import ensure_accept_schema
 from ..service.turn_gates import (ensure_gate_schema, execution_exit_record, gate_drain_status, stamp_member_exit,
                                   stamp_turn_exit)
 from ..utils.schema import SchemaBootstrapGuard, ensure_relations
@@ -74,8 +91,9 @@ _schema_guard = SchemaBootstrapGuard()
 
 
 def ensure_sighting_schema(engine) -> None:
-    """Create the gate tables and ``quiesce_run_sightings`` once per engine."""
+    """Create the gate tables, ``bridge_run_accepts`` and ``quiesce_run_sightings`` once per engine."""
     ensure_gate_schema(engine)
+    ensure_accept_schema(engine)
     _schema_guard.run(engine, "quiesce-run-sightings", lambda conn: ensure_relations(conn, _SIGHTING_RELATIONS))
 
 
@@ -96,6 +114,14 @@ class SweepMember:
     turn_request_id: str | None = None
     """The request the turn row is bound to now; differs from ``request_id`` (the pin) after a rebind."""
 
+    accepted: RunSighting | None = None
+    """The durable accept record (``bridge_run_accepts``): the boot that admitted the send."""
+
+    @property
+    def holders(self) -> tuple[RunSighting, ...]:
+        """Every durable record of a boot that held the run: the accept first, then the sighting."""
+        return tuple(h for h in (self.accepted, self.sighting) if h is not None)
+
     @property
     def unstampable(self) -> bool:
         """The turn row is the evidence home but bound to another request: no stamp can land."""
@@ -109,6 +135,8 @@ class Judgement:
     reason: str
     record: dict[str, Any] | None = None
     sighting: RunSighting | None = None
+    abort: bool = False
+    """Send one ``chat.abort`` for the member's request (see the module docstring)."""
 
 
 def _record(source: str, request_id: str, backend: str, boot_id: str, exited: bool) -> dict[str, Any]:
@@ -128,8 +156,8 @@ def judge(member: SweepMember, reply: RunStatusReply | None, terminal: RunTermin
         return Judgement(f"live:{reply.state.value}", sighting=RunSighting.from_reply(reply))
     if reply.state not in ABSENT_STATES:
         return Judgement(f"no_evidence:{reply.state.value}")
-    sighting = member.sighting
-    if sighting is not None and proves_restart(sighting, reply):
+    holders = member.holders
+    if holders and all(proves_restart(holder, reply) for holder in holders):
         return Judgement("restart", _record("b", reply.request_id, reply.backend, reply.boot_id, True))
     if terminal is not None and (terminal.request_id != reply.request_id
                                  or terminal.backend.lower() != reply.backend.lower()):
@@ -144,7 +172,11 @@ def judge(member: SweepMember, reply: RunStatusReply | None, terminal: RunTermin
     # request in ``finally`` whatever its teardown did, and openclaw tombstones
     # as an abort starts, so the run may still be alive in the boot that
     # answers ``tombstoned``.
-    return Judgement("absent_unproven" if terminal is None else "terminal_unattempted")
+    if terminal is not None:
+        return Judgement("terminal_unattempted")
+    if reply.state is RunState.NOT_FOUND and not holders and member.session_key:
+        return Judgement("absent_unaccepted", abort=True)
+    return Judgement("absent_unproven")
 
 
 _MEMBERS = """
@@ -153,7 +185,8 @@ _MEMBERS = """
            COALESCE(m.agent_session_key, t.agent_session_key) AS session_key,
            COALESCE(m.agent_request_id, t.agent_request_id) AS request_id,
            t.agent_request_id AS turn_request_id,
-           s.backend AS sighted_backend, s.boot_id AS sighted_boot, s.pid1 AS sighted_pid1
+           s.backend AS sighted_backend, s.boot_id AS sighted_boot, s.pid1 AS sighted_pid1,
+           a.backend AS accepted_backend, a.boot_id AS accepted_boot, a.pid1 AS accepted_pid1
     FROM system_gates g
     JOIN ops_jobs j ON j.id = g.owner_id AND j.quiesce_gate_id = g.id
     JOIN gate_members m ON m.gate_id = g.id
@@ -161,6 +194,9 @@ _MEMBERS = """
     LEFT JOIN quiesce_run_sightings s
       ON s.backend = lower(COALESCE(m.backend, t.agent_backend))
      AND s.request_id = COALESCE(m.agent_request_id, t.agent_request_id)
+    LEFT JOIN bridge_run_accepts a
+      ON a.backend = lower(COALESCE(m.backend, t.agent_backend))
+     AND a.request_id = COALESCE(m.agent_request_id, t.agent_request_id)
     WHERE g.owner_kind = 'job' AND j.state = :quiescing
       AND g.released_at IS NULL AND g.expires_at > now()
     ORDER BY m.id
@@ -168,12 +204,14 @@ _MEMBERS = """
 
 
 def _member(row: Mapping[str, Any], drain_reason: str) -> SweepMember:
-    sighting = None
-    if row["sighted_boot"]:
-        sighting = RunSighting(row["request_id"], row["sighted_backend"], row["sighted_boot"], row["sighted_pid1"])
+    def holder(prefix: str) -> RunSighting | None:
+        if not row[f"{prefix}_boot"]:
+            return None
+        return RunSighting(row["request_id"], row[f"{prefix}_backend"], row[f"{prefix}_boot"], row[f"{prefix}_pid1"])
+
     return SweepMember(int(row["member_id"]), int(row["gate_id"]), row["turn_id"], bool(row["turn_present"]),
-                       row["backend"], row["session_key"], row["request_id"], sighting, drain_reason,
-                       row["turn_request_id"])
+                       row["backend"], row["session_key"], row["request_id"], holder("sighted"), drain_reason,
+                       row["turn_request_id"], holder("accepted"))
 
 
 def undrained_members(engine) -> list[SweepMember]:
