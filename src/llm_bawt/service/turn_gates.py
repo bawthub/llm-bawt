@@ -31,7 +31,7 @@ from typing import Any, Mapping
 from sqlalchemy import text as sa_text
 
 from ..bot_types import normalize_bot_type
-from ..utils.schema import SchemaBootstrapGuard
+from ..utils.schema import SchemaBootstrapGuard, ensure_columns, ensure_relations
 
 HOLD = "hold"
 DENY = "deny"
@@ -183,7 +183,15 @@ def ensure_gate_schema(engine) -> None:
 
 
 def _bootstrap(conn) -> None:
-    conn.execute(sa_text("""
+    ensure_relations(conn, _GATE_RELATIONS)
+    ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS)
+
+
+# Created only when the catalog lacks them (``ensure_relations``): even a no-op
+# ``CREATE INDEX IF NOT EXISTS`` takes SHARE on its table and would queue every
+# writer (binds pin members, ``pin_member_request``) behind an open transaction.
+_GATE_RELATIONS = {
+    "system_gates": """
         CREATE TABLE IF NOT EXISTS system_gates (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             owner_kind VARCHAR(16) NOT NULL CHECK (owner_kind IN ('job','operator')),
@@ -196,15 +204,15 @@ def _bootstrap(conn) -> None:
             expires_at TIMESTAMPTZ NOT NULL,
             released_at TIMESTAMPTZ
         )
-    """))
-    conn.execute(sa_text("""
+    """,
+    "ix_system_gates_unreleased": """
         CREATE INDEX IF NOT EXISTS ix_system_gates_unreleased
         ON system_gates (expires_at) WHERE released_at IS NULL
-    """))
-    conn.execute(sa_text("""
+    """,
+    "ix_system_gates_owner": """
         CREATE INDEX IF NOT EXISTS ix_system_gates_owner ON system_gates (owner_id)
-    """))
-    conn.execute(sa_text("""
+    """,
+    "gate_members": """
         CREATE TABLE IF NOT EXISTS gate_members (
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             gate_id BIGINT NOT NULL REFERENCES system_gates(id),
@@ -233,16 +241,23 @@ def _bootstrap(conn) -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             UNIQUE (gate_id, turn_id)
         )
-    """))
-    conn.execute(sa_text("""
+    """,
+    "ix_gate_members_turn": """
         CREATE INDEX IF NOT EXISTS ix_gate_members_turn ON gate_members (turn_id)
-    """))
-    # TASK-1233 (f): when control_state last changed. Every UPDATE that changes
-    # control_state sets it in the same statement (no trigger). Nullable so the
-    # migration never stamps pre-existing rows with its own time; readers use
-    # COALESCE(control_changed_at, created_at).
-    conn.execute(sa_text("ALTER TABLE gate_members ADD COLUMN IF NOT EXISTS control_changed_at TIMESTAMPTZ"))
-    conn.execute(sa_text("ALTER TABLE gate_members ALTER COLUMN control_changed_at SET DEFAULT now()"))
+    """,
+}
+
+# Every gate_members column added after the table shipped; ``ensure_columns``
+# alters only what the catalog lacks, so a migrated schema takes no lock.
+_MEMBER_ADDED_COLUMNS = {
+    # (f): when control_state last changed. Every UPDATE that changes it sets
+    # it in the same statement (no trigger). NULL on pre-existing rows, never
+    # the migration's own time; readers use COALESCE(control_changed_at, created_at).
+    "control_changed_at": ("TIMESTAMPTZ", "now()"),
+    # test_Z (b): the exit evidence home when the member's turn row is gone
+    # (``stamp_member_exit``); the same record shape as the turn-row stamp.
+    "execution_exit": ("JSONB", None),
+}
 
 
 def _is_postgres(conn) -> bool:
@@ -401,18 +416,30 @@ def execution_exit_drains(record: Any, *, request_id: str | None, backend: str |
     return True, f"execution_exit:{record['source']}"
 
 
+def _pinned_request(row: Mapping[str, Any]) -> str | None:
+    """A member's request: the roster's pin, else the one its turn bound after capture (same attempt)."""
+    return row["agent_request_id"] or row["turn_request_id"]
+
+
 def _drain_status(row: Mapping[str, Any]) -> DrainStatus:
     from .turn_termination import turn_payload  # keeps this module's import closure DB-only
 
     if row["disposition"] == REVOKED_UNSTARTED:
         drained, reason = True, REVOKED_UNSTARTED
     elif row["turn_present"] is None:
-        drained, reason = False, "turn_missing"
+        # test_Z: the turn row is gone, so the member row is the evidence home.
+        # A request id is bound (and pinned here, ``pin_member_request``)
+        # before every publish, so a member that never got one never ran.
+        if not row["agent_request_id"]:
+            drained, reason = True, "never_bound"
+        else:
+            drained, reason = execution_exit_drains(
+                row["member_exit"], request_id=row["agent_request_id"], backend=row["backend"])
+            reason = reason if drained else f"turn_missing:{reason}"
     else:
         drained, reason = execution_exit_drains(
             turn_payload(row["request_json"]).get(EXECUTION_EXIT_KEY),
-            # The roster pins the request; one bound after capture is the same attempt.
-            request_id=row["agent_request_id"] or row["turn_request_id"],
+            request_id=_pinned_request(row),
             backend=row["backend"],
         )
     return DrainStatus(int(row["id"]), row["turn_id"], drained, reason)
@@ -420,7 +447,7 @@ def _drain_status(row: Mapping[str, Any]) -> DrainStatus:
 
 _DRAIN_ROWS = """
     SELECT m.id, m.turn_id, m.disposition, m.backend, m.agent_request_id,
-           t.id AS turn_present, t.agent_request_id AS turn_request_id, t.request_json
+           m.execution_exit AS member_exit, t.id AS turn_present, t.agent_request_id AS turn_request_id, t.request_json
     FROM gate_members m LEFT JOIN turn_logs t ON t.id = m.turn_id
     WHERE m.gate_id = :gate {extra} ORDER BY m.id
 """
@@ -437,6 +464,36 @@ def member_drained(conn, gate_id: int, turn_id: str) -> DrainStatus | None:
     row = conn.execute(sa_text(_DRAIN_ROWS.format(extra="AND m.turn_id = :turn")),
                        {"gate": gate_id, "turn": turn_id}).mappings().first()
     return _drain_status(row) if row is not None else None
+
+
+def pin_member_request(conn, turn_id: str, request_id: str) -> int:
+    """test_Z (a) pin-at-bind: record a newly bound request on every member row of the turn.
+
+    The binder calls this in its own transaction, after it has locked the turn
+    row; ``activate_hold`` locks the captured turn rows too, so a bind racing a
+    capture is either read by the capture or pins the committed member. Only an
+    unpinned member is filled: the roster's pinned request decides (B1). Every
+    gate, live or not (Snark z-r1): ``never_bound`` is sound only if every bind
+    pins, and a member of a lost generation may still be carried.
+    """
+    if not _is_postgres(conn):
+        return 0
+    return conn.execute(sa_text(
+        "UPDATE gate_members SET agent_request_id=:request WHERE turn_id=:turn AND agent_request_id IS NULL"
+    ), {"turn": turn_id, "request": request_id}).rowcount
+
+
+def stamp_member_exit(conn, member_id: int, record: Mapping[str, Any]) -> bool:
+    """test_Z (b): stamp exit evidence on a member whose turn row is gone.
+
+    ``record`` has the turn-row ``execution_exit`` shape and is judged by the
+    same ``execution_exit_drains``. While the turn row exists it stays the one
+    evidence home, so this writes nothing and returns False.
+    """
+    return bool(conn.execute(sa_text(
+        "UPDATE gate_members m SET execution_exit=CAST(:record AS jsonb) WHERE m.id=:id"
+        " AND NOT EXISTS (SELECT 1 FROM turn_logs t WHERE t.id = m.turn_id)"
+    ), {"id": member_id, "record": json.dumps(dict(record), default=str)}).rowcount)
 
 
 def bots_in_scope(conn, scope: GateScope) -> list[str]:
@@ -514,13 +571,20 @@ def carry_forward(conn, *, predecessor: int, gate: GateBlock) -> list[GateMember
     Scope governs admission only (``gate_blocks``); the roster governs drain.
     Carried members are kept regardless of current scope (r2 S3): a bot that
     left the scope is admitted again, but its old run still sits on the held
-    backend and must drain. Over-waiting is bounded by the quiesce timeout. A turn the fresh capture already has keeps the
-    fresh row (UNIQUE(gate_id, turn_id)); acknowledgements carry onto it either
-    way, so a rebuild never erases a bot's ack. Runs in the caller's transaction.
+    backend and must drain. Over-waiting is bounded by the quiesce timeout. A
+    turn the fresh capture already has keeps the fresh row (UNIQUE(gate_id,
+    turn_id)); acknowledgements carry onto it either way, so a rebuild never
+    erases a bot's ack. A member-row ``execution_exit`` is not carried: one that
+    drains is never carried, and the exit sweep stamps the live generation.
+
+    A carried member takes ``_pinned_request``, the drain's own rule: a second
+    guard behind pin-at-bind for a request bound without ``bind_agent_bridge``
+    (test_Z z-r1). Runs in the caller's transaction.
     """
     undrained = [status.member_id for status in gate_drain_status(conn, predecessor) if not status.drained]
     rows = conn.execute(sa_text(
-        f"SELECT {', '.join('m.' + name for name in _MEMBER_FIELDS)}, t.status AS current_status"
+        f"SELECT {', '.join('m.' + name for name in _MEMBER_FIELDS)}, t.status AS current_status,"
+        " t.agent_request_id AS turn_request_id"
         " FROM gate_members m LEFT JOIN turn_logs t ON t.id = m.turn_id"
         " WHERE m.gate_id = :old AND m.id = ANY(:ids) ORDER BY m.id"
     ), {"old": predecessor, "ids": undrained}).mappings().all() if undrained else []
@@ -530,6 +594,7 @@ def carry_forward(conn, *, predecessor: int, gate: GateBlock) -> list[GateMember
         # C1 re-attach exemption must not let a re-armed retry start under hold.
         member = GateMember(**{**{name: row[name] for name in _MEMBER_FIELDS}, "gate_id": gate.id,
                                "turn_status": row["current_status"] or row["turn_status"],
+                               "agent_request_id": _pinned_request(row),
                                "disposition": RUNNING,
                                "control_state": initial_control_state(gate.owner_kind, RUNNING)})
         if insert_member(conn, member, skip_existing=True):
@@ -577,5 +642,7 @@ __all__ = [
     "insert_gate",
     "insert_member",
     "member_drained",
+    "pin_member_request",
     "release_gates",
+    "stamp_member_exit",
 ]

@@ -626,10 +626,9 @@ class ActivatedGate:
     members: tuple[GateMember, ...]
 
 
-_OPEN_ROWS = (
-    "SELECT id, status, agent_session_key, agent_request_id, agent_backend, request_json"
-    " FROM turn_logs WHERE bot_id=:bot AND ended_at IS NULL ORDER BY created_at, id"
-)
+_ROW_COLUMNS = "id, status, agent_session_key, agent_request_id, agent_backend, request_json"
+_OPEN_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE bot_id=:bot AND ended_at IS NULL ORDER BY created_at, id"
+_LOCK_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE id = ANY(:ids) ORDER BY id FOR UPDATE"
 
 
 def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> ActivatedGate:
@@ -647,7 +646,8 @@ def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> Ac
     The caller commits. Every admission evaluates ``gate_blocks`` after the
     same per-bot lock, so either it committed first and its row is captured
     here, or it sees this gate. Lock order: sorted target locks, then every
-    producer row a revoke will lock (``_lock_producers``), then turn rows.
+    producer row a revoke will lock (``_lock_producers``), then the captured
+    turn rows (``_lock_rows``), then member rows.
     No path locks a producer row before its target lock, and the one
     multi-row delivery locker without a target lock (``recover_expired``)
     also locks in ordinal order, so no cycle forms. Only a job-owned gate's
@@ -674,6 +674,7 @@ def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> Ac
     rows = [(bot_id, row) for bot_id in bots
             for row in conn.execute(sa_text(_OPEN_ROWS), {"bot": bot_id}).mappings().all()]
     _lock_producers(conn, [row for _, row in rows])
+    rows = _lock_rows(conn, rows)
     gate = insert_gate(conn, spec)
     members: list[GateMember] = []
     for bot_id, row in rows:
@@ -705,6 +706,22 @@ def _lock_producers(conn, rows) -> None:
     if owners:
         conn.execute(sa_text("SELECT 1 FROM tool_approval_requests WHERE continuation_claim_token = ANY(:owners)"
                              " ORDER BY id FOR UPDATE"), {"owners": owners})
+
+
+def _lock_rows(conn, rows):
+    """Lock the captured turn rows after their producers (the admission lock order) and re-read them.
+
+    ``bind_agent_bridge`` holds only the turn row, so this lock orders every
+    bind against the capture (test_Z (a)): one committed first is read here,
+    one that waited pins the committed member (``pin_member_request``). A
+    member never lacks the request its run was sent with. A row deleted
+    meanwhile is no longer captured; one that ended still is, as before.
+    """
+    if not rows:
+        return rows
+    locked = {row["id"]: row for row in conn.execute(
+        sa_text(_LOCK_ROWS), {"ids": [row["id"] for _, row in rows]}).mappings().all()}
+    return [(bot_id, locked[row["id"]]) for bot_id, row in rows if row["id"] in locked]
 
 
 def _capture_member(conn, gate: GateBlock, spec: GateSpec, bot_id: str, row) -> GateMember | None:

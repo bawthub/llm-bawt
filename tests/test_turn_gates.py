@@ -105,6 +105,31 @@ def test_execution_exit_drains_only_on_a_confirmed_exit_of_this_request(record, 
     assert execution_exit_drains(record, request_id=request_id, backend=backend) == expected
 
 
+def _member_row(*, turn_present=None, request_id="req-1", member_exit=None, turn_exit=None, disposition="running"):
+    return {"id": 3, "turn_id": "t", "disposition": disposition, "backend": "claude-code",
+            "agent_request_id": request_id, "member_exit": member_exit, "turn_present": turn_present,
+            "turn_request_id": None,
+            "request_json": json.dumps({"execution_exit": turn_exit}) if turn_exit else None}
+
+
+@pytest.mark.parametrize(("row", "expected"), [
+    (_member_row(request_id=None), (True, "never_bound")),  # test_Z (c): nothing was ever sent
+    (_member_row(), (False, "turn_missing:no_execution_exit")),
+    (_member_row(member_exit=_EXIT), (True, "execution_exit:a")),  # test_Z (b): one rule, member home
+    (_member_row(member_exit={**_EXIT, "request_id": "req-2"}), (False, "turn_missing:request_mismatch")),
+    (_member_row(member_exit={**_EXIT, "exited": False}), (False, "turn_missing:exit_unconfirmed")),
+    (_member_row(request_id=None, disposition="revoked_unstarted"), (True, "revoked_unstarted")),
+    # While the turn row exists it is the only evidence home.
+    (_member_row(turn_present="t", member_exit=_EXIT), (False, "no_execution_exit")),
+    (_member_row(turn_present="t", turn_exit=_EXIT), (True, "execution_exit:a")),
+])
+def test_a_missing_turn_drains_on_member_row_evidence_or_never_bound(row, expected):
+    from llm_bawt.service.turn_gates import _drain_status
+
+    status = _drain_status(row)
+    assert (status.drained, status.reason) == expected
+
+
 def test_execution_exit_survives_late_turn_writes_and_drops_on_rearm():
     """update_turn rewrites request_json through request_payload_with_audit: a
     stamped exit must survive that, and a re-arm (new attempt) must drop it."""

@@ -34,6 +34,7 @@ from llm_bawt.service.turn_gates import (
     gate_is_live,
     member_drained,
     release_gates,
+    stamp_member_exit,
 )
 from tests.pg_isolation import isolated_pg_store
 from tests.test_turn_admission import _mcp_claim
@@ -710,3 +711,208 @@ def test_claim_admission_without_gate_rows_is_unaffected(gated):
     _save(store, bot, turn_id=turn_id, admission="idle_only",
           claim=AdmissionClaim(owner="owner-a", fence=lambda conn: True))
     assert store.get_turn(turn_id).status == "streaming"
+
+
+# ---------------------------------------------------------------------------
+# test_Z: a member whose turn row is gone, and the startup column guard
+# ---------------------------------------------------------------------------
+
+
+def _bind(store, turn_id, request_id):
+    store.bind_agent_bridge(turn_id=turn_id, backend="claude-code", session_key="s", request_id=request_id)
+
+
+def _delete_turns(store, *turn_ids):
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("DELETE FROM turn_logs WHERE id = ANY(:ids)"), {"ids": list(turn_ids)})
+
+
+def _drain(store, gate_id):
+    with store.engine.connect() as conn:
+        return {s.turn_id: (s.drained, s.reason) for s in gate_drain_status(conn, gate_id)}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("holder_sql", [
+    "SELECT count(*) FROM gate_members",  # Vex N2: an open reader
+    "UPDATE gate_members SET ack_note = ack_note WHERE false",  # an open writer
+])
+def test_bootstrap_on_a_migrated_schema_waits_on_no_open_transaction(gated, holder_sql):
+    from llm_bawt.service.turn_gates import _GATE_RELATIONS, _MEMBER_ADDED_COLUMNS, _bootstrap
+    from llm_bawt.utils.schema import SchemaBootstrapGuard, ensure_columns, ensure_relations
+
+    engine = gated.store.engine
+    with engine.begin() as conn:  # the declared defaults are spelled as the catalog reports them
+        assert ensure_relations(conn, _GATE_RELATIONS) == []
+        assert ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS) == []
+
+    def bootstrap(conn):
+        conn.execute(sa_text("SET LOCAL lock_timeout = '300ms'"))
+        _bootstrap(conn)
+
+    with engine.connect() as holder:
+        txn = holder.begin()
+        holder.execute(sa_text(holder_sql))
+        try:
+            assert SchemaBootstrapGuard().run(engine, "test-gates", bootstrap) is True
+        finally:
+            txn.rollback()
+
+
+@pytest.mark.integration
+def test_ensure_columns_adds_null_columns_and_repairs_only_a_drifted_default(gated):
+    from llm_bawt.utils.schema import ensure_columns, ensure_relations
+
+    columns = {"changed_at": ("TIMESTAMPTZ", "now()"), "evidence": ("JSONB", None)}
+    with gated.store.engine.begin() as conn:
+        conn.execute(sa_text("CREATE TEMP TABLE caid_ensure (id INT) ON COMMIT DROP"))
+        conn.execute(sa_text("INSERT INTO caid_ensure VALUES (1)"))
+        assert ensure_columns(conn, "caid_ensure", columns) == [
+            "ALTER TABLE caid_ensure ADD COLUMN IF NOT EXISTS changed_at TIMESTAMPTZ",
+            "ALTER TABLE caid_ensure ALTER COLUMN changed_at SET DEFAULT now()",
+            "ALTER TABLE caid_ensure ADD COLUMN IF NOT EXISTS evidence JSONB",
+        ]
+        conn.execute(sa_text("INSERT INTO caid_ensure (id) VALUES (2)"))
+        rows = dict(conn.execute(sa_text("SELECT id, changed_at IS NULL FROM caid_ensure")).all())
+        assert rows == {1: True, 2: False}  # existing rows stay NULL; new rows take the default
+        assert ensure_columns(conn, "caid_ensure", columns) == []
+        conn.execute(sa_text("ALTER TABLE caid_ensure ALTER COLUMN changed_at DROP DEFAULT"))
+        assert ensure_columns(conn, "caid_ensure", columns) == [
+            "ALTER TABLE caid_ensure ALTER COLUMN changed_at SET DEFAULT now()"]
+        index = {"caid_ensure_ix": "CREATE INDEX IF NOT EXISTS caid_ensure_ix ON caid_ensure (id)"}
+        assert ensure_relations(conn, index) == ["caid_ensure_ix"]
+        assert ensure_relations(conn, index) == []
+
+
+@pytest.mark.integration
+def test_bind_pins_the_request_on_every_member_row_of_the_turn(gated):
+    store, bot = gated.store, gated.bot()
+    turn, prepinned = _open(store, bot), _open(store, bot)
+    live = _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate
+    expired = _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate  # lost, not released
+    released_owner = gated.owner()
+    released = _activate(store, _spec(released_owner, GateScope.for_bots(bot))).gate
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE system_gates SET expires_at = now() - interval '1 second' WHERE id=:g"),
+                     {"g": expired.id})
+        release_gates(conn, owner_id=released_owner)
+        conn.execute(sa_text("UPDATE gate_members SET agent_request_id='req-pinned' WHERE turn_id=:t"),
+                     {"t": prepinned})
+    _bind(store, turn, "req-bound")
+    _bind(store, prepinned, "req-rebound")
+    for gate in (live, expired, released):  # never_bound is sound only if every bind pins
+        assert _members(store, gate.id)[turn]["agent_request_id"] == "req-bound"
+        assert _members(store, gate.id)[prepinned]["agent_request_id"] == "req-pinned"  # the pin decides
+    _delete_turns(store, turn)
+    assert _drain(store, live.id)[turn] == (False, "turn_missing:no_execution_exit")
+
+
+@pytest.mark.integration
+def test_a_missing_turn_drains_on_member_row_evidence_or_never_bound(gated):
+    store, bot = gated.store, gated.bot()
+    owner_id = gated.owner()
+    spec = _spec(owner_id, GateScope.for_bots(bot))
+    pinned, unbound = _open(store, bot, request_id="req-pinned"), _open(store, bot)
+    mismatched, present = _open(store, bot, request_id="req-mine"), _open(store, bot, request_id="req-present")
+    gate = _activate(store, spec).gate
+    _delete_turns(store, pinned, unbound, mismatched)
+    record = {"backend": "claude-code", "boot_id": "boot-1", "source": "b", "exited": True,
+              "at": "2026-10-22T15:00:00+00:00"}
+    ids = {row["turn_id"]: row["id"] for row in _members(store, gate.id).values()}
+    with store.engine.begin() as conn:
+        assert stamp_member_exit(conn, ids[mismatched], {**record, "request_id": "req-other"}) is True
+        assert stamp_member_exit(conn, ids[present], {**record, "request_id": "req-present"}) is False
+    assert _members(store, gate.id)[present]["execution_exit"] is None  # the turn row stays the home
+    assert _drain(store, gate.id) == {
+        pinned: (False, "turn_missing:no_execution_exit"),
+        unbound: (True, "never_bound"),
+        mismatched: (False, "turn_missing:request_mismatch"),
+        present: (False, "no_execution_exit"),
+    }
+
+    with store.engine.begin() as conn:  # gate loss: the pinned identity is carried, never_bound is not
+        release_gates(conn, owner_id=owner_id, gate_id=gate.id)
+    with store.engine.begin() as conn:
+        rebuilt = activate_hold(conn, spec, predecessor=gate.id).gate
+    members = _members(store, rebuilt.id)
+    assert set(members) == {pinned, mismatched, present}
+    assert members[pinned]["agent_request_id"] == "req-pinned"
+    with store.engine.begin() as conn:
+        assert stamp_member_exit(conn, members[pinned]["id"], {**record, "request_id": "req-pinned"})
+    assert _drain(store, rebuilt.id)[pinned] == (True, "execution_exit:b")
+
+
+@pytest.mark.integration
+def test_a_bind_in_the_gate_loss_window_survives_a_turn_delete_before_the_rebuild(gated):
+    """Snark z-r1: capture -> gate lost -> bind -> turn row deleted -> rebuild with predecessor."""
+    store, bot = gated.store, gated.bot()
+    owner_id = gated.owner()
+    spec = _spec(owner_id, GateScope.for_bots(bot))
+    turn = _open(store, bot)
+    first = _activate(store, spec).gate
+    with store.engine.begin() as conn:
+        release_gates(conn, owner_id=owner_id, gate_id=first.id)
+    _bind(store, turn, "req-lost-window")
+    _delete_turns(store, turn)  # e.g. agent_context.py's head-turn delete on recovery
+    assert _drain(store, first.id)[turn] == (False, "turn_missing:no_execution_exit")  # not never_bound
+    with store.engine.begin() as conn:
+        rebuilt = activate_hold(conn, spec, predecessor=first.id).gate
+    assert _members(store, rebuilt.id)[turn]["agent_request_id"] == "req-lost-window"
+    assert _drain(store, rebuilt.id)[turn] == (False, "turn_missing:no_execution_exit")
+
+
+@pytest.mark.integration
+def test_rebuild_carries_a_request_the_member_never_pinned(gated):
+    """Loopy z-r1 second guard: a turn bound outside bind_agent_bridge, ended unconfirmed, carried, deleted."""
+    store, bot = gated.store, gated.bot()
+    owner_id = gated.owner()
+    spec = _spec(owner_id, GateScope.for_bots(bot))
+    turn = _open(store, bot)
+    first = _activate(store, spec).gate
+    with store.engine.begin() as conn:
+        release_gates(conn, owner_id=owner_id, gate_id=first.id)
+        conn.execute(sa_text("UPDATE turn_logs SET agent_request_id='req-late' WHERE id=:id"), {"id": turn})
+    _exit(store, turn, ended=True)  # ended with no confirmed exit: the run may be live
+    with store.engine.begin() as conn:
+        rebuilt = activate_hold(conn, spec, predecessor=first.id).gate
+    assert _members(store, rebuilt.id)[turn]["agent_request_id"] == "req-late"
+    _delete_turns(store, turn)
+    assert _drain(store, rebuilt.id)[turn] == (False, "turn_missing:no_execution_exit")
+
+
+@pytest.mark.integration
+def test_capture_waits_for_an_uncommitted_bind_and_reads_its_request(gated):
+    store, bot = gated.store, gated.bot()
+    turn = _open(store, bot)
+    result = {}
+    with store.engine.connect() as binder:
+        txn = binder.begin()
+        pid = binder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+        binder.execute(sa_text("UPDATE turn_logs SET agent_request_id='req-race' WHERE id=:id"), {"id": turn})
+        activation = threading.Thread(target=lambda: result.setdefault(
+            "gate", _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate))
+        activation.start()
+        try:
+            _wait_blocked_by(store.engine, pid, activation)
+        finally:
+            txn.commit()
+            activation.join(10)
+    assert _members(store, result["gate"].id)[turn]["agent_request_id"] == "req-race"
+
+
+@pytest.mark.integration
+def test_a_bind_behind_an_uncommitted_capture_pins_the_member(gated):
+    store, bot = gated.store, gated.bot()
+    turn = _open(store, bot)
+    with store.engine.connect() as capturer:
+        txn = capturer.begin()
+        pid = capturer.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+        gate = activate_hold(capturer, _spec(gated.owner(), GateScope.for_bots(bot))).gate
+        bind = threading.Thread(target=_bind, args=(store, turn, "req-race"))
+        bind.start()
+        try:
+            _wait_blocked_by(store.engine, pid, bind)
+        finally:
+            txn.commit()
+            bind.join(10)
+    assert _members(store, gate.id)[turn]["agent_request_id"] == "req-race"

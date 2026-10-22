@@ -38,7 +38,7 @@ from .turn_admission import (
     release_reservation,
     reserve_turn,
 )
-from .turn_gates import GateActor, ensure_gate_schema, gate_blocks
+from .turn_gates import GateActor, ensure_gate_schema, gate_blocks, pin_member_request
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +377,7 @@ class TurnLogStore:
             row.agent_session_key = session_key
             row.agent_request_id = request_id
             session.add(row)
+            pin_member_request(session.connection(), turn_id, request_id)  # TASK-1233 test_Z (a)
             session.commit()
 
     def update_turn(
