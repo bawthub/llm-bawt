@@ -659,6 +659,8 @@ def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> Ac
     transaction (``carry_forward``), so a rebuild is a union, never a drop.
     Scope governs admission only: carried members are kept regardless of
     ``spec.scope``, and are not target-locked (their admission isn't gated).
+    Their turn rows are locked with the captured ones (``_lock_rows``), so a
+    concurrent bind is never lost between the predecessor read and the insert.
     """
     if conn.dialect.name != "postgresql":
         raise AdmissionUnavailable("system gates require PostgreSQL")
@@ -674,7 +676,9 @@ def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> Ac
     rows = [(bot_id, row) for bot_id in bots
             for row in conn.execute(sa_text(_OPEN_ROWS), {"bot": bot_id}).mappings().all()]
     _lock_producers(conn, [row for _, row in rows])
-    rows = _lock_rows(conn, rows)
+    carried_turns = [] if predecessor is None else list(conn.execute(sa_text(
+        "SELECT DISTINCT turn_id FROM gate_members WHERE gate_id=:old"), {"old": predecessor}).scalars())
+    rows = _lock_rows(conn, rows, also=carried_turns)
     gate = insert_gate(conn, spec)
     members: list[GateMember] = []
     for bot_id, row in rows:
@@ -708,7 +712,7 @@ def _lock_producers(conn, rows) -> None:
                              " ORDER BY id FOR UPDATE"), {"owners": owners})
 
 
-def _lock_rows(conn, rows):
+def _lock_rows(conn, rows, *, also=()):
     """Lock the captured turn rows after their producers (the admission lock order) and re-read them.
 
     ``bind_agent_bridge`` holds only the turn row, so this lock orders every
@@ -716,11 +720,19 @@ def _lock_rows(conn, rows):
     one that waited pins the committed member (``pin_member_request``). A
     member never lacks the request its run was sent with. A row deleted
     meanwhile is no longer captured; one that ended still is, as before.
+
+    ``also`` is a rebuild's predecessor roster (``carry_forward``): those turn
+    rows are locked in the same id-ordered statement, so a bind is ordered
+    against the carried member too, including a bot outside the new scope
+    with no target lock here (xp-z-r1). A bind committed first has pinned the
+    predecessor member that ``carry_forward`` reads; one that waited pins the
+    carried row. One statement keeps two rebuilds from locking each other's
+    rows in opposite orders.
     """
-    if not rows:
+    ids = sorted({row["id"] for _, row in rows} | set(also))
+    if not ids:
         return rows
-    locked = {row["id"]: row for row in conn.execute(
-        sa_text(_LOCK_ROWS), {"ids": [row["id"] for _, row in rows]}).mappings().all()}
+    locked = {row["id"]: row for row in conn.execute(sa_text(_LOCK_ROWS), {"ids": ids}).mappings().all()}
     return [(bot_id, locked[row["id"]]) for bot_id, row in rows if row["id"] in locked]
 
 

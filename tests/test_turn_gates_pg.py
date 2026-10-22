@@ -916,3 +916,66 @@ def test_a_bind_behind_an_uncommitted_capture_pins_the_member(gated):
             txn.commit()
             bind.join(10)
     assert _members(store, gate.id)[turn]["agent_request_id"] == "req-race"
+
+
+def _carried_out_of_scope(gated):
+    """A predecessor whose unbound member's bot is outside the rebuilt scope (no target lock covers it)."""
+    store = gated.store
+    kept_bot, left_bot = gated.bot(), gated.bot()
+    owner_id = gated.owner()
+    turn = _open(store, left_bot)
+    first = _activate(store, _spec(owner_id, GateScope.for_bots(kept_bot, left_bot))).gate
+    with store.engine.begin() as conn:
+        release_gates(conn, owner_id=owner_id, gate_id=first.id)
+    return turn, first, _spec(owner_id, GateScope.for_bots(kept_bot))
+
+
+@pytest.mark.integration
+def test_a_bind_behind_an_uncommitted_rebuild_pins_the_carried_member(gated):
+    """Loopy xp-z-r1: carry_forward's read and insert must not let a bind fall between them."""
+    store = gated.store
+    turn, first, spec = _carried_out_of_scope(gated)
+    with store.engine.connect() as rebuilder:
+        txn = rebuilder.begin()
+        pid = rebuilder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+        rebuilt = activate_hold(rebuilder, spec, predecessor=first.id)
+        assert turn in {m.turn_id for m in rebuilt.members}  # carried, still unbound
+        rebuilt = rebuilt.gate
+        bind = threading.Thread(target=_bind, args=(store, turn, "req-carry-race"))
+        bind.start()
+        try:
+            _wait_blocked_by(store.engine, pid, bind)
+        finally:
+            txn.commit()
+            bind.join(10)
+    assert _members(store, rebuilt.id)[turn]["agent_request_id"] == "req-carry-race"
+    _delete_turns(store, turn)
+    assert _drain(store, rebuilt.id)[turn] == (False, "turn_missing:no_execution_exit")  # never never_bound
+
+
+@pytest.mark.integration
+def test_a_rebuild_waits_for_an_uncommitted_bind_and_carries_its_request(gated):
+    store = gated.store
+    turn, first, spec = _carried_out_of_scope(gated)
+    result = {}
+    with store.engine.connect() as binder:
+        txn = binder.begin()
+        pid = binder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+        binder.execute(sa_text("SELECT 1 FROM turn_logs WHERE id=:id FOR UPDATE"), {"id": turn})
+        binder.execute(sa_text("UPDATE turn_logs SET agent_request_id='req-carry-race' WHERE id=:id"), {"id": turn})
+        binder.execute(sa_text(
+            "UPDATE gate_members SET agent_request_id='req-carry-race' WHERE turn_id=:id AND agent_request_id IS NULL"
+        ), {"id": turn})
+
+        def rebuild():
+            with store.engine.begin() as conn:
+                result["gate"] = activate_hold(conn, spec, predecessor=first.id).gate
+
+        rebuilding = threading.Thread(target=rebuild)
+        rebuilding.start()
+        try:
+            _wait_blocked_by(store.engine, pid, rebuilding)
+        finally:
+            txn.commit()
+            rebuilding.join(10)
+    assert _members(store, result["gate"].id)[turn]["agent_request_id"] == "req-carry-race"
