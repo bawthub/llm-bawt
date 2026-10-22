@@ -32,6 +32,11 @@ class InterBotDeliveryDispatcher:
     ``wake``); the timed sweep is only restart/missed-signal recovery.
     """
 
+    # TASK-1234: bound on waiting for the stream worker to finalize the turn
+    # row after the drain ends. The claim heartbeat keeps the lease meanwhile.
+    FINALIZE_WAIT_SECONDS = 30.0
+    FINALIZE_POLL_SECONDS = 0.05
+
     def __init__(
         self, service: Any, *, recovery_interval_seconds: float = 15.0,
         leadership_retry_delay_seconds: float = 1.0,
@@ -427,6 +432,7 @@ class InterBotDeliveryDispatcher:
             self._heartbeat(record.id, claim_token),
             name=f"inter-bot-heartbeat:{record.id}",
         )
+        finalize_awaited = False
         try:
             payload = {
                 **payload,
@@ -442,6 +448,8 @@ class InterBotDeliveryDispatcher:
                 # reasoning, tools, offsets, persistence, and turn_complete are
                 # published independently through the unified Redis stream.
                 pass
+            await self._await_turn_finalized(record.turn_id)
+            finalize_awaited = True
             turn = self.service._turn_log_store.get_turn(record.turn_id)
             if turn is None or turn.ended_at is None:
                 # TASK-1148: never mask a recorded terminal cause behind the
@@ -467,6 +475,8 @@ class InterBotDeliveryDispatcher:
                 await self._emit(queued)
         except Exception as exc:  # classification is intentionally centralized
             error = str(exc) or exc.__class__.__name__
+            if not finalize_awaited:
+                await self._await_turn_finalized(record.turn_id)
             current = self.store.get(record.id) or record
             turn_status, turn_ended_at = self.store.turn_state(record.id)
             turn = self.service._turn_log_store.get_turn(record.turn_id)
@@ -661,6 +671,30 @@ class InterBotDeliveryDispatcher:
         }:
             return "fallback"
         return "retry_same_steer"
+
+    async def _await_turn_finalized(self, turn_id: str | None) -> None:
+        """Wait (bounded) until the stream worker has finalized ``turn_id``.
+
+        TASK-1234: the worker hands an upstream failure to the chat stream,
+        which ends the drain, *before* it writes the terminal turn row; its
+        execution handle is retired only after finalize. Classifying on the
+        earlier read saw ``streaming``, so the TASK-1095 ended-turn guard never
+        fired and each fast replay burned an attempt (incident a67418db).
+        """
+        if not turn_id:
+            return
+        from .turn_execution import turn_executions
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.FINALIZE_WAIT_SECONDS
+        while turn_executions.get(turn_id) is not None:
+            if loop.time() >= deadline:
+                logger.warning(
+                    "durable turn %s still finalizing after %.1fs; classifying anyway",
+                    turn_id, self.FINALIZE_WAIT_SECONDS,
+                )
+                return
+            await asyncio.sleep(self.FINALIZE_POLL_SECONDS)
 
     @staticmethod
     def _unfinalized_turn_error(turn_id: str | None, turn) -> str:

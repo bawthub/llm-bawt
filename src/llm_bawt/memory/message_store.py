@@ -214,7 +214,12 @@ class MessageRowStore:
                     select(self.table).where(self.table.c.id == message_id)
                 ).first()
                 if existing:
-                    values: dict = {"content": content, "timestamp": timestamp}
+                    values: dict = {"content": content}
+                    # TASK-1234: a user row's timestamp is first-write-wins, so
+                    # a retried delivery cannot reorder it after later replies.
+                    # Assistant partial->final upserts keep refreshing theirs.
+                    if existing.role != "user":
+                        values["timestamp"] = timestamp
                     if not extract_memory:
                         values["processed"] = True
                         values["summary_metadata"] = {
