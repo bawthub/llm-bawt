@@ -162,6 +162,59 @@ stop_service() {
   rm -f "$pid_file"
 }
 
+# Docker foreground mode (TASK-1286): this script is PID 1, and the kernel
+# drops SIGTERM to PID 1 unless the process handles it. Without the trap below,
+# `docker stop`/`restart` waited out the 10s stop timeout and then SIGKILLed
+# every process, so the app's lifespan shutdown never ran. Forward the signal
+# and give the children SHUTDOWN_WAIT_SECONDS to exit, inside Docker's window.
+# uvicorn's own graceful timeout is 3s (api.py), so 8s leaves the lifespan
+# teardown room to finish. Exit 0 when every child stopped on its own, 1 when
+# one had to be SIGKILLed (visible in `docker inspect` as a degraded stop).
+SHUTDOWN_WAIT_SECONDS="${LLM_BAWT_SHUTDOWN_WAIT_SECONDS:-8}"
+MONITOR_SLEEP_PID=""
+
+shutdown_foreground() {
+  trap '' TERM INT
+  echo "[server] $1 received; stopping llm-service and MCP server..."
+  if [[ -n "$MONITOR_SLEEP_PID" ]]; then
+    kill "$MONITOR_SLEEP_PID" 2>/dev/null || true
+  fi
+  local pids=() alive=() pid_file pid
+  for pid_file in "$SERVICE_PID_FILE" "$MCP_PID_FILE"; do
+    if is_running "$pid_file"; then
+      pids+=("$(cat "$pid_file")")
+    fi
+  done
+  if (( ${#pids[@]} )); then
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+  fi
+  # Count 0.2s polls rather than reading $SECONDS: that is whole seconds, so a
+  # deadline taken just before a tick boundary would cut the wait short.
+  local ticks=0 rc=0 max_ticks=$((SHUTDOWN_WAIT_SECONDS * 5))
+  while (( ${#pids[@]} )); do
+    alive=()
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive+=("$pid")
+      fi
+    done
+    if (( ${#alive[@]} == 0 )); then
+      break
+    fi
+    if (( ticks >= max_ticks )); then
+      echo "[server] Still running after ${SHUTDOWN_WAIT_SECONDS}s, force killing: ${alive[*]}"
+      kill -KILL "${alive[@]}" 2>/dev/null || true
+      rc=1
+      break
+    fi
+    sleep 0.2
+    ticks=$((ticks + 1))
+  done
+  rm -f "$SERVICE_PID_FILE" "$MCP_PID_FILE"
+  echo "[server] Shutdown complete"
+  exit "$rc"
+}
+
 status() {
   if is_running "$MCP_PID_FILE"; then
     echo "MCP server: running (pid $(cat "$MCP_PID_FILE")) on port ${MCP_PORT}"
@@ -219,6 +272,10 @@ while [[ $# -gt 0 ]]; do
 done
 case "$cmd" in
   start)
+    if [[ "$LOG_MODE" == "stdout" ]]; then
+      trap 'shutdown_foreground SIGTERM' TERM
+      trap 'shutdown_foreground SIGINT' INT
+    fi
     start_mcp_server
     start_llm_service
     status
@@ -235,7 +292,11 @@ case "$cmd" in
           status
           exit 1
         fi
-        sleep 10
+        # Sleep in the background and wait on it: bash runs a trap only after
+        # a foreground command returns, but `wait` returns on a signal at once.
+        sleep 10 &
+        MONITOR_SLEEP_PID=$!
+        wait "$MONITOR_SLEEP_PID" || true
       done
     fi
     ;;

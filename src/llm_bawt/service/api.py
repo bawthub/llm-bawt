@@ -375,6 +375,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        log.info("lifespan shutdown: started")
         await home_audio_worker.stop()
         # DEACTIVATED: history drain task (see above)
         # if history_drain_task:
@@ -415,6 +416,7 @@ async def lifespan(app):
             await redis_subscriber.close()
         await service.shutdown()
         set_service(None)
+        log.info("lifespan shutdown: complete")
 
 
 # Create FastAPI app
@@ -583,6 +585,10 @@ def main():
             reload=args.reload,
             reload_excludes=reload_excludes,
             log_level=uvicorn_log_level,
+            # Open SSE streams would otherwise hold shutdown open forever, and
+            # the lifespan teardown has to finish inside Docker's 10s stop
+            # window (server.sh gives the process 8s; TASK-1286).
+            timeout_graceful_shutdown=3,
         )
     except ImportError:
         print("Error: uvicorn not installed. Install with: pip install uvicorn")
