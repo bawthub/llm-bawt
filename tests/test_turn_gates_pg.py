@@ -136,7 +136,7 @@ def _members(store, gate_id):
         ), {"g": gate_id}).mappings()}
 
 
-def _claimed_delivery(ctx, bot):
+def _claimed_delivery(ctx, bot, **enqueue):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 
     deliveries = InterBotDeliveryStore(ctx.store.config)
@@ -146,6 +146,7 @@ def _claimed_delivery(ctx, bot):
         sender_bot_id=sender, target_bot_id=bot, message="callback",
         payload={"messages": [{"role": "user", "content": "callback"}],
                  "bot_id": bot, "user": "nick", "stream": True},
+        **enqueue,
     )
     claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=False)
     assert claimed and claimed.id == record.id and claimed.status == "DISPATCHING"
@@ -320,6 +321,26 @@ def test_b4_hold_before_acceptance_revokes_and_refunds(gated):
     assert store.get_turn(claimed.turn_id) is None  # reservation released
     with pytest.raises(AdmissionFenceLost):  # the stalled claimant can never start it
         _save(store, bot, turn_id=claimed.turn_id, admission="idle_only", claim=old_claim)
+
+
+@pytest.mark.integration
+def test_b4_held_reset_after_transport_accept_redispatches(gated):
+    """The dispatcher stamps transport_accepted_at before save_turn. A hold in
+    that window must clear it, or claim_next fails the reset as an ambiguous
+    accepted replay (Loopy P1 on e26e3cd)."""
+    store, bot = gated.store, gated.bot()
+    deliveries, claimed = _claimed_delivery(gated, bot, session_policy="reset_retain_history")
+    assert deliveries.mark_transport_accepted(claimed.id, claimed.claim_token)
+    owner_id = gated.owner()
+    gate = _activate(store, _spec(owner_id, GateScope.for_bots(bot)))
+
+    assert _members(store, gate.gate.id)[claimed.turn_id]["disposition"] == "revoked_unstarted"
+    held = deliveries.get(claimed.id)
+    assert (held.status, held.transport_accepted_at, held.delivery_mode) == ("QUEUED", None, None)
+    with store.engine.begin() as conn:
+        release_gates(conn, owner_id=owner_id)
+    reclaimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=False)
+    assert reclaimed is not None and (reclaimed.id, reclaimed.status) == (claimed.id, "DISPATCHING")
 
 
 @pytest.mark.integration

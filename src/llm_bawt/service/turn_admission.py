@@ -576,10 +576,13 @@ def _hold_producer(conn, turn_id: str, locked: _LockedReservation, *, reason: st
         ), {"id": locked.delivery_id, "turn_id": turn_id}).mappings().first()
         record = None
         if claim and claim["status"] == "DISPATCHING" and claim["claim_token"]:
-            # Releases the reservation by requeue's own rule.
+            # Releases the reservation by requeue's own rule. The dispatcher
+            # stamps transport_accepted_at before save_turn, but a still-reserved
+            # row was never admitted, so nothing reached the bridge: clear that
+            # stamp, or claim_next's refuse_accepted_replay fails a held reset.
             record = InterBotDeliveryStore.requeue_claim(
                 conn, locked.delivery_id, claim["claim_token"], reason,
-                delay_seconds=0, refund_attempt=True,
+                delay_seconds=0, refund_attempt=True, clear_delivery_mode=True,
             )
         elif claim is None or claim["reset_status"] not in RESERVATION_KEPT_RESET_STATUSES:
             _release_unstarted(conn, turn_id)
