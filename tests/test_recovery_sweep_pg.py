@@ -445,3 +445,90 @@ def test_a_pass_skipped_as_busy_leaves_a_trace(caplog):
     with caplog.at_level("INFO", logger="llm_bawt.service.recovery.sweep"):
         asyncio.run(SweepRecoveryHooks(Sweep()).periodic())
     assert "recovery periodic pass skipped" in caplog.text
+
+
+def _consume_inside_the_lock_window(monkeypatch, store, turn_id):
+    """Start the turn on another connection after the revoke's unlocked head
+    read and before its target lock: the window only the under-lock
+    re-check of ``_lock_open_reservation`` closes (Loopy S2)."""
+    from llm_bawt.service import turn_admission
+
+    real_lock_target = turn_admission.lock_target
+    consumed = []
+
+    def lock_target(conn, bot_id):
+        if not consumed:
+            with store.engine.begin() as other:
+                other.execute(sa_text("UPDATE turn_logs SET status='streaming', agent_session_key='k',"
+                                      " agent_request_id='r' WHERE id=:id"), {"id": turn_id})
+            consumed.append(turn_id)
+        real_lock_target(conn, bot_id)
+
+    monkeypatch.setattr(turn_admission, "lock_target", lock_target)
+    return consumed
+
+
+def _claim(approvals, request_id):
+    row = approvals.get_request(request_id)
+    return row.continuation_state, row.continuation_claim_token, row.continuation_last_error
+
+
+def test_a_sweep_revoke_racing_the_claimants_start_inside_the_lock_window_keeps_the_claim(
+        delivery_store, approvals, monkeypatch):  # noqa: F811
+    from datetime import datetime, timezone
+
+    from llm_bawt.service.turn_admission import requeue_stale_reservation
+
+    store, _, target = delivery_store
+    request_id, token = _dispatching(approvals)
+    turn_id = _reserved_for(store, target, token)
+    _lapse(store, request_id)
+    before = _claim(approvals, request_id)
+    consumed = _consume_inside_the_lock_window(monkeypatch, store, turn_id)
+    with store.engine.begin() as conn:
+        assert requeue_stale_reservation(
+            conn, turn_id, owner=token, approval_id=request_id,
+            stale_before=datetime.now(timezone.utc), reason="recovery: test") is False
+    assert consumed == [turn_id]  # the race ran inside the window
+    assert _claim(approvals, request_id) == before
+    assert TurnLogStore(store.config).get_turn(turn_id).status == "streaming"
+    assert approvals.renew_continuation_claim(request_id, token)
+
+
+def test_a_user_stop_racing_the_claimants_start_inside_the_lock_window_leaves_the_producer(
+        delivery_store, approvals, monkeypatch):  # noqa: F811
+    """Slice A's B1 on the user-Stop path: a reservation consumed after the
+    head read is no longer a reservation, so its producer keeps its claim."""
+    from llm_bawt.service.turn_admission import revoke_reservation
+
+    store, _, target = delivery_store
+    request_id, token = _dispatching(approvals)
+    turn_id = _reserved_for(store, target, token)
+    before = _claim(approvals, request_id)
+    consumed = _consume_inside_the_lock_window(monkeypatch, store, turn_id)
+    assert revoke_reservation(store.engine, turn_id, disposition="user_stop", audit={"source": "chat_stop"}) is None
+    assert consumed == [turn_id]
+    assert _claim(approvals, request_id) == before
+    turn = TurnLogStore(store.config).get_turn(turn_id)
+    assert (turn.status, turn.ended_at) == ("streaming", None)
+    assert approvals.renew_continuation_claim(request_id, token)
+
+
+def test_a_stale_claim_is_not_revoked_for_a_reservation_another_owner_holds(delivery_store, approvals):  # noqa: F811
+    """The ``owner=`` contract: the sweep observed ``token``, but the turn is
+    now reserved for another claimant, so nothing is written."""
+    from datetime import datetime, timezone
+
+    from llm_bawt.service.turn_admission import requeue_stale_reservation
+
+    store, _, target = delivery_store
+    request_id, token = _dispatching(approvals)
+    turn_id = _reserved_for(store, target, f"other-{uuid.uuid4().hex}")
+    _lapse(store, request_id)
+    before = _claim(approvals, request_id)
+    with store.engine.begin() as conn:
+        assert requeue_stale_reservation(
+            conn, turn_id, owner=token, approval_id=request_id,
+            stale_before=datetime.now(timezone.utc), reason="recovery: test") is False
+    assert _claim(approvals, request_id) == before
+    assert TurnLogStore(store.config).get_turn(turn_id).status == "reserved"

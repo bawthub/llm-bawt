@@ -115,7 +115,7 @@ class OrphanedReservationsStep(RecoveryStep):
                     # any write, and a reservation the claimant consumed since
                     # detect is left with its live claim.
                     released = requeue_stale_reservation(
-                        conn, turn_id, owner=owner,
+                        conn, turn_id, owner=owner, approval_id=candidate["approval_id"],
                         stale_before=scope.now - timedelta(seconds=CONTINUATION_LEASE_SECONDS),
                         reason=scope.stamp.text(
                             f"recovery: revoked a stale continuation claim (reservation {turn_id})"))

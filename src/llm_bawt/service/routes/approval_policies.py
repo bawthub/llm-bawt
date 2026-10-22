@@ -638,4 +638,3 @@ def _subscriber():
         return get_agent_subscriber()
     except Exception:  # noqa: BLE001
         return None
-

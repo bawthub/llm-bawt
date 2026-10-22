@@ -501,17 +501,19 @@ def _revoke_reservation_once(engine, turn_id: str, *, audit: Mapping[str, Any]):
 
 
 def requeue_stale_reservation(
-    conn, turn_id: str, *, owner: str, stale_before: datetime, reason: str,
+    conn, turn_id: str, *, owner: str, approval_id: str, stale_before: datetime, reason: str,
 ) -> bool:
     """Take a stalled continuation's claim back, then release its reservation.
 
     The recovery sweep's disposition (TASK-1232 C-B3), in the caller's
     transaction and through ``revoke_reservation``'s lock protocol. The claim
-    is taken back by a CAS on the observed token whose lease went stale before
-    ``stale_before``; ``requeued_continuation_state`` suppresses a cancelled
-    request (Vex S1). Only then is the row deleted. False, with nothing
-    written, when the row is no longer ``owner``'s open reservation (a
-    claimant that started the turn keeps its claim) or the claim was renewed.
+    is taken back by a CAS on the observed approval row and token whose lease
+    went stale before ``stale_before`` (the token column is not unique, so
+    the row id pins it); ``requeued_continuation_state`` suppresses a
+    cancelled request (Vex S1). Only then is the row deleted. False, with
+    nothing written, when the row is no longer ``owner``'s open reservation
+    (a claimant that started the turn keeps its claim) or the claim was
+    renewed.
     """
     with Session(bind=conn) as session:
         locked = _lock_open_reservation(conn, session, turn_id, owner=owner)
@@ -519,13 +521,14 @@ def requeue_stale_reservation(
             return False
         revoked = conn.execute(
             update(ToolApprovalRequest)
-            .where(ToolApprovalRequest.continuation_claim_token == owner,
+            .where(ToolApprovalRequest.id == approval_id,
+                   ToolApprovalRequest.continuation_claim_token == owner,
                    ToolApprovalRequest.continuation_state == CONT_DISPATCHING,
                    ToolApprovalRequest.continuation_next_attempt_at <= stale_before)
             .values(continuation_state=requeued_continuation_state(), continuation_claim_token=None,
                     continuation_last_error=reason)
         )
-        if not revoked.rowcount:
+        if revoked.rowcount != 1:
             return False  # renewed since detect; nothing written
         if not release_reservation(None, turn_id, owner=owner, connection=conn):
             # Unreachable while the row is held and re-checked. Raising rolls
