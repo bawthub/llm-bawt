@@ -9,6 +9,13 @@ import pytest
 from tests import conftest
 
 
+def _controller_config() -> Mock:
+    """A non-worker config: pytest-xdist marks workers with ``config.workerinput``."""
+    config = Mock()
+    del config.workerinput
+    return config
+
+
 @pytest.mark.parametrize("passed,skipped,expected", [
     ([], [], pytest.ExitCode.TESTS_FAILED),
     ([object()], [object()], pytest.ExitCode.TESTS_FAILED),
@@ -16,7 +23,7 @@ from tests import conftest
 ])
 def test_acceptance_exit_status_requires_passes_without_skips(monkeypatch, passed, skipped, expected):
     monkeypatch.setattr(conftest.pg_connection_guard, "uninstall", Mock())
-    config = Mock()
+    config = _controller_config()
     config.getoption.return_value = True
     config.pluginmanager.get_plugin.return_value.stats = {"passed": passed, "skipped": skipped}
     session = SimpleNamespace(config=config, exitstatus=None)
@@ -24,9 +31,23 @@ def test_acceptance_exit_status_requires_passes_without_skips(monkeypatch, passe
     assert session.exitstatus == expected
 
 
+def test_xdist_worker_leaves_whole_run_gates_to_the_controller(monkeypatch):
+    # A worker sees only its slice (and no terminal stats); judging there would fail
+    # every parallel run. The controller receives all reports and judges once.
+    uninstall = Mock()
+    monkeypatch.setattr(conftest.pg_connection_guard, "uninstall", uninstall)
+    config = Mock(workerinput={"workerid": "gw0"})
+    config.getoption.return_value = True
+    config.pluginmanager.get_plugin.return_value.stats = {}
+    session = SimpleNamespace(config=config, exitstatus=None)
+    conftest.pytest_sessionfinish(session, 0)
+    assert session.exitstatus is None
+    uninstall.assert_called_once()
+
+
 def test_unit_budget_includes_setup_call_and_teardown(monkeypatch):
     monkeypatch.setattr(conftest.pg_connection_guard, "uninstall", Mock())
-    config = Mock()
+    config = _controller_config()
     config.getoption.side_effect = lambda key: {
         "--require-pg-acceptance": False,
         "--require-no-skips": False,

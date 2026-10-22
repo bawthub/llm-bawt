@@ -7,6 +7,7 @@ Make and CI invoke this module rather than maintaining separate pytest recipes.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -29,6 +30,24 @@ def pytest_args(marker: str, *extra: str) -> list[str]:
             "--strict-markers", *extra]
 
 
+def worker_count() -> int:
+    """Parallel pytest-xdist workers for heavy suites; LLM_BAWT_TEST_WORKERS=1 runs serially."""
+    configured = os.environ.get("LLM_BAWT_TEST_WORKERS")
+    if configured:
+        if not configured.isdigit() or int(configured) < 1:
+            raise RuntimeError(f"LLM_BAWT_TEST_WORKERS must be a positive integer, got {configured!r}")
+        return int(configured)
+    # Leave headroom: the unit gate's 1s budget measures wall time per case.
+    return max(1, min(8, (os.cpu_count() or 2) // 2))
+
+
+def parallel(dist: str) -> tuple[str, ...]:
+    """xdist arguments. ``loadscope`` keeps a module on one worker so each private-PG
+    module database is created once; ``load`` balances independent unit cases."""
+    workers = worker_count()
+    return () if workers == 1 else ("-n", str(workers), "--dist", dist)
+
+
 def collect(marker: str, *selectors: str, allow_empty: bool = False) -> set[str]:
     command = pytest_args(marker, "--collect-only", "-q", *(selectors or ("tests",)))
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
@@ -42,10 +61,11 @@ def collect(marker: str, *selectors: str, allow_empty: bool = False) -> set[str]
 
 
 def verify_offline_partition() -> None:
-    all_nodes = collect(OFFLINE)
-    unit = collect(UNIT)
-    pg = collect(PG, *PG_SELECTORS)
-    local = collect(LOCAL)
+    # The four collections are independent read-only pytest processes; run them concurrently.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(collect, OFFLINE), pool.submit(collect, UNIT),
+                   pool.submit(collect, PG, *PG_SELECTORS), pool.submit(collect, LOCAL)]
+        all_nodes, unit, pg, local = (future.result() for future in futures)
     selections = (unit, pg, local)
     duplicate = (unit & pg) | (unit & local) | (pg & local)
     missing = all_nodes - set.union(*selections)
@@ -105,20 +125,20 @@ def main(argv: list[str] | None = None) -> int:
         with runner_lock():
             if args.suite == "offline":
                 verify_offline_partition()
-                run(UNIT, "--unit-time-budget=1", "--require-no-skips")
-                run(PG, "--require-pg-acceptance", *PG_SELECTORS)
-                run(LOCAL, "--require-no-skips")
+                run(UNIT, "--unit-time-budget=1", "--require-no-skips", *parallel("load"))
+                run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
+                run(LOCAL, "--require-no-skips", *parallel("load"))
             elif args.suite == "integration":
                 verify_offline_partition()
-                run(PG, "--require-pg-acceptance", *PG_SELECTORS)
-                run(LOCAL, "--require-no-skips")
+                run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
+                run(LOCAL, "--require-no-skips", *parallel("load"))
             elif args.suite == "unit":
-                run(UNIT, "--unit-time-budget=1", "--require-no-skips")
+                run(UNIT, "--unit-time-budget=1", "--require-no-skips", *parallel("load"))
             elif args.suite == "pg":
                 verify_offline_partition()
-                run(PG, "--require-pg-acceptance", *PG_SELECTORS)
+                run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
             elif args.suite == "offline-integration":
-                run(LOCAL, "--require-no-skips")
+                run(LOCAL, "--require-no-skips", *parallel("load"))
             elif args.suite == "sdk-probe":
                 os.environ.update({
                     "RUN_CLAUDE_OAUTH_SDK_PROBE": "1",

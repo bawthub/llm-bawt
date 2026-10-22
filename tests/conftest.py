@@ -99,7 +99,11 @@ def pytest_sessionfinish(session, exitstatus):
     config = session.config
     reporter = config.pluginmanager.get_plugin("terminalreporter")
     stats = reporter.stats if reporter is not None else {}
-    if exitstatus == 0:
+    # Under pytest-xdist the controller receives every worker's reports, so the
+    # whole-run gates (passes, skips, unit budget) are judged there exactly once;
+    # a worker only sees its own slice.
+    is_xdist_worker = hasattr(config, "workerinput")
+    if exitstatus == 0 and not is_xdist_worker:
         if _require_pg_acceptance(config) and not stats.get("passed"):
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
             print("PostgreSQL acceptance gate requires executed passes")
