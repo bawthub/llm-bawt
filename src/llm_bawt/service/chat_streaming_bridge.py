@@ -15,6 +15,8 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
+from agent_bridge.abort_contract import abort_cause_of
+
 from .logging import get_service_logger
 
 log = get_service_logger(__name__)
@@ -339,7 +341,9 @@ class ChatStreamingBridgeMixin(BridgeSessionResetMixin):
 
                 elif event.kind == AgentEventKind.ASSISTANT_DONE:
                     if isinstance(event.raw, dict) and event.raw.get("end_reason") == "aborted":
-                        self._update_turn_log(turn_id=turn_log_id, status="aborted", end_reason="aborted")
+                        # TASK-1231B: the cause is stamped by the same write that ends the row.
+                        self._update_turn_log(turn_id=turn_log_id, status="aborted", end_reason="aborted",
+                                              abort_cause=abort_cause_of(event.raw))
                     # ASSISTANT_DONE carries the complete response text.
                     # Yield any portion not already streamed as deltas.
                     # Capture token_usage from agent backends (bridge sends it

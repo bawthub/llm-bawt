@@ -15,7 +15,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from agent_bridge.tool_results import ToolResultPayload
 from llm_bawt.service.tool_call_store import ToolCallRecord, ToolCallResultPayloadRecord, ToolCallStore
 from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
-from llm_bawt.service.turn_termination import TurnAbortCoordinator
+from llm_bawt.service.turn_termination import TurnAbortCoordinator, settle_open_turn, turn_payload
 from llm_bawt.service.turn_stream_finalize import TurnStreamFinalizer
 from llm_bawt.service.routes.turn_logs import _records_to_calls
 
@@ -59,6 +59,31 @@ def test_abort_is_monotonic_and_settles_only_matching_tools(store, later_status)
     assert _records_to_calls([tool(store)])[0]["status"] == "interrupted"
     assert tool(store, 2).ended_at is None
     assert not coordinator.request("turn", source="bot_list_stop", peer="other")
+
+
+@pytest.mark.parametrize("request_json", [None, "", "not json", "[1]", "42", '"text"', "null"])
+def test_an_unreadable_or_non_object_request_payload_reads_as_empty(request_json):
+    """Loopy r2 should-fix: every request_json reader goes through turn_payload."""
+    assert turn_payload(request_json) == {}
+
+
+def test_a_turn_with_an_unreadable_request_payload_still_stops_and_settles(store):
+    from datetime import datetime, timezone
+
+    with Session(store.engine) as session:
+        session.get(TurnLog, "turn").request_json = "not json"
+        session.commit()
+    assert TurnAbortCoordinator(store).request("turn", source="chat_stop", peer=None)
+    assert json.loads(store.get_turn("turn").request_json)["abort_request"]["source"] == "chat_stop"
+    with Session(store.engine) as session:
+        row = session.get(TurnLog, "turn")
+        row.request_json = "[1]"
+        assert settle_open_turn(session, row, audit_key="user_stop", audit={"bridge_state": "cancelled"},
+                                now=datetime.now(timezone.utc))
+        session.commit()
+    row = store.get_turn("turn")
+    assert (row.status, row.end_reason) == ("aborted", "aborted")
+    assert json.loads(row.request_json)["user_stop"]["bridge_state"] == "cancelled"
 
 
 def test_completed_turn_cannot_be_aborted(store):
@@ -105,18 +130,25 @@ def test_abort_is_persisted_before_request_scoped_rpc(store, monkeypatch):
     rpc = AsyncMock(side_effect=send_rpc)
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
     service = SimpleNamespace(_turn_log_store=store, config=None)
-    assert asyncio.run(abort_turn(service, store.get_turn("turn"), source="chat_stop", peer="proxy")) == "aborted:task_cancelled"
+    assert asyncio.run(abort_turn(service, store.get_turn("turn"), source="chat_stop", peer="proxy")) == "aborted:cancelled"
     assert store.get_turn("turn").status == "aborted"
-    audit = json.loads(store.get_turn("turn").request_json)["abort_request"]
-    assert audit["outcome"] == "task_cancelled" and audit["actor"] is None
+    payload = json.loads(store.get_turn("turn").request_json)
+    assert payload["abort_request"]["outcome"] == "cancelled" and payload["abort_request"]["actor"] is None
+    # The worker's terminal stood; the bridge's answer is still recorded.
+    stop = payload["user_stop"]
+    assert (stop["bridge_state"], stop["confirmed"], stop["settled"]) == ("cancelled", True, False)
     asyncio.run(abort_turn(service, store.get_turn("turn"), source="unknown", peer=None))
     assert rpc.await_count == 1
     publish.assert_awaited_once()
 
 
-@pytest.mark.parametrize("rpc_reply", [None, {"ok": False, "error": "worker did not acknowledge"}])
-def test_unconfirmed_abort_stays_nonterminal_and_can_retry(store, monkeypatch, rpc_reply):
-    from fastapi import HTTPException
+@pytest.mark.parametrize(("rpc_reply", "bridge_state"), [
+    (None, "rpc_unconfirmed"),
+    ({"ok": False, "error": "worker did not acknowledge"}, "error"),
+])
+def test_unconfirmed_abort_still_stops_and_records_it_unconfirmed(store, monkeypatch, rpc_reply, bridge_state):
+    """TASK-1232 P4 replaces TASK-1015's 503-and-stay-cancelling for user Stop:
+    the row settles aborted/aborted and the audit says the bridge never confirmed."""
     from llm_bawt.service.turn_abort import abort_turn
     from llm_bawt.agent_backends import agent_bridge
     import llm_bawt.bots
@@ -126,18 +158,16 @@ def test_unconfirmed_abort_stays_nonterminal_and_can_retry(store, monkeypatch, r
     rpc = AsyncMock(side_effect=TimeoutError() if rpc_reply is None else None, return_value=rpc_reply)
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
     service = SimpleNamespace(_turn_log_store=store, config=None)
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(abort_turn(service, store.get_turn("turn"), source="chat_stop", peer=None))
-    assert error.value.status_code == 503
-    assert store.get_turn("turn").status == "cancelling"
-    assert store.get_turn("turn").ended_at is None and tool(store).ended_at is None
-    publish.assert_not_awaited()
-    rpc.side_effect = None
-    rpc.return_value = {"ok": True, "cancelled": True, "detail": "task_cancelled"}
-    asyncio.run(abort_turn(service, store.get_turn("turn"), source="chat_stop", peer=None))
-    assert store.get_turn("turn").status == "aborted"
+    assert asyncio.run(abort_turn(service, store.get_turn("turn"), source="chat_stop", peer=None)) == f"aborted:{bridge_state}"
+    row = store.get_turn("turn")
+    assert (row.status, row.end_reason) == ("aborted", "aborted") and row.ended_at is not None
     assert tool(store).result_text is None and tool(store).ended_at is not None
+    stop = json.loads(row.request_json)["user_stop"]
+    assert (stop["bridge_state"], stop["confirmed"]) == (bridge_state, False)
     publish.assert_awaited_once()
+    # A retry finds the row settled and sends no second RPC.
+    assert asyncio.run(abort_turn(service, store.get_turn("turn"), source="chat_stop", peer=None)) == "already_completed"
+    assert rpc.await_count == 1
 
 
 def finalizer_context(store, monkeypatch, *, partial="partial"):
@@ -214,3 +244,39 @@ def test_response_and_error_logging_treat_markup_as_literal(monkeypatch):
     service_log.error("failure: %s", "[/]")
     assert "[Continuity] [/] Message" in output.getvalue()
     assert "failure: [/]" in output.getvalue()
+
+
+# TASK-1231B: the bridge's machine cause reaches the turn row, and only there.
+def test_host_shutdown_cause_is_stamped_and_read_back_by_the_retry_predicate(store):
+    from agent_bridge.abort_contract import HOST_SHUTDOWN
+    from llm_bawt.inter_bot_delivery_retry import restart_abort_cause
+
+    store.update_turn(turn_id="turn", status="aborted", end_reason="aborted", abort_cause=HOST_SHUTDOWN)
+    row = store.get_turn("turn")
+    assert (row.status, row.end_reason) == ("aborted", "aborted")  # A1: the cause never moves end_reason
+    assert json.loads(row.request_json)["abort_cause"]["cause"] == HOST_SHUTDOWN
+    assert restart_abort_cause(row) == HOST_SHUTDOWN
+    # A late write within the same attempt keeps the per-attempt key.
+    store.update_turn(turn_id="turn", request_payload={"messages": []})
+    assert restart_abort_cause(store.get_turn("turn")) == HOST_SHUTDOWN
+
+
+def test_user_stop_owns_the_cause_of_a_cancelling_turn(store):
+    from agent_bridge.abort_contract import HOST_SHUTDOWN
+    from llm_bawt.inter_bot_delivery_retry import restart_abort_cause
+
+    assert TurnAbortCoordinator(store).request("turn", source="chat_stop", peer=None)
+    store.update_turn(turn_id="turn", status="aborted", end_reason="aborted", abort_cause=HOST_SHUTDOWN)
+    row = store.get_turn("turn")
+    assert "abort_cause" not in json.loads(row.request_json)
+    assert restart_abort_cause(row) is None
+
+
+def test_abort_cause_never_rewrites_an_ended_turn(store):
+    from agent_bridge.abort_contract import HOST_SHUTDOWN
+
+    store.update_turn(turn_id="turn", status="ok", end_reason="stop")
+    store.update_turn(turn_id="turn", status="aborted", end_reason="aborted", abort_cause=HOST_SHUTDOWN)
+    row = store.get_turn("turn")
+    assert (row.status, row.end_reason) == ("ok", "stop")
+    assert "abort_cause" not in json.loads(row.request_json or "{}")

@@ -319,17 +319,15 @@ def get_inter_bot_answer(
         raise HTTPException(status_code=404, detail="Delivery not found")
     answer_record = record
     if record.status == "FAILED":
-        # Manual Retry (TASK-1111) creates a distinct, idempotent delivery
-        # without another send tool call in the origin thread. Keep the original
-        # card as its single anchor and follow only the verified retry child.
-        retries = dispatcher.store.list(
-            sender_bot_id=sender_bot_id, target_bot_id=record.target_bot_id,
-            idempotency_key=f"manual-retry:{record.id}", limit=1,
-        )
-        if retries and retries[0].metadata.get("manual_retry_of") == record.id:
-            child = retries[0]
-            if (dispatcher.store.payload(child.id) or {}).get("user") == user_id:
-                answer_record = child
+        # A manual Retry (TASK-1111) or a restart retry (TASK-1231B) is a
+        # distinct, idempotent delivery with no send tool call in the origin
+        # thread. Keep the original card as its single anchor and follow only
+        # the verified retry child.
+        from ...inter_bot_delivery_retry import verified_retry_child
+
+        child = verified_retry_child(dispatcher.store, record)
+        if child is not None and (dispatcher.store.payload(child.id) or {}).get("user") == user_id:
+            answer_record = child
     try:
         view = inter_bot_reply_view(
             answer_record, sender_bot_id=sender_bot_id, user_id=user_id,

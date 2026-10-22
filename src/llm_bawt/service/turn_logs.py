@@ -206,6 +206,7 @@ class TurnLogStore:
                         # A reservation is not a started turn. Stamp admission
                         # time so the new unknown gauge supersedes turns that
                         # finished while this request was queued.
+                        from .turn_termination import request_payload_with_audit
                         conn.execute(
                             sa_text(
                                 "UPDATE turn_logs SET created_at=:created_at, request_id=:request_id, path=:path,"
@@ -231,7 +232,12 @@ class TurnLogStore:
                                 "status": status,
                                 "latency_ms": latency_ms,
                                 "user_prompt": user_prompt,
-                                "request_json": json.dumps(request_payload, ensure_ascii=False, default=str) if request_payload else None,
+                                # r2-M1: consuming the reservation keeps its audits
+                                # (row locked by fence_consumption above).
+                                "request_json": request_payload_with_audit(conn.execute(
+                                    sa_text("SELECT request_json FROM turn_logs WHERE id=:id"),
+                                    {"id": turn_id},
+                                ).scalar_one_or_none(), request_payload or None, rearm=True),
                                 "response_text": response_text,
                                 "error_text": error_text,
                                 "trigger_message_id": trigger_message_id,
@@ -386,6 +392,7 @@ class TurnLogStore:
         question_id: str | None = None,
         parent_turn_id: str | None = None,
         tts_scrubbed: bool | None = None,
+        abort_cause: str | None = None,
     ) -> None:
         """Update an existing turn log row with new data."""
         if self.engine is None:
@@ -397,6 +404,8 @@ class TurnLogStore:
                 return
             prior_status = row.status
             prior_end_reason = row.end_reason
+            from .turn_termination import stamp_abort_cause
+            stamp_abort_cause(row, abort_cause)  # TASK-1231B; judged on the prior state
             if prior_status == "cancelling":
                 if _is_terminal(status, end_reason):
                     status, end_reason = "aborted", "aborted"
@@ -588,27 +597,20 @@ class TurnLogStore:
             return False
         return release_reservation(self.engine, turn_id, owner=owner, fence=fence)
 
-    def active_turn_for_bot(
-        self, bot_id: str, *, within_seconds: int = 1800
-    ) -> TurnLog | None:
+    def active_turn_for_bot(self, bot_id: str) -> TurnLog | None:
         """Return the bot's most recent in-flight turn, or None if idle.
 
-        An open reservation is not an executing/steerable turn. ``within_seconds``
-        bounds the scan so a crashed/zombie turn stops blocking after a sane
-        window. Path-agnostic: matches streaming and non-streaming turns.
+        TASK-1231C: derived from the one busy predicate (``peek_target`` →
+        ``classify_target``), so this readout and admission can never disagree.
+        There is no age window: an open orphan blocks admission, so it is
+        reported busy until it is settled (TASK-1232), not silently aged out.
+        An open reservation is not an executing/steerable turn.
         """
-        if self.engine is None or not bot_id:
+        state = self.peek_target_state(bot_id)
+        if state is None:
             return None
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, within_seconds))
-        with Session(self.engine) as session:
-            return session.exec(
-                select(TurnLog)
-                .where(TurnLog.bot_id == bot_id)
-                .where(TurnLog.ended_at.is_(None))
-                .where(TurnLog.status != RESERVED)
-                .where(TurnLog.created_at > cutoff)
-                .order_by(TurnLog.created_at.desc())
-            ).first()
+        running = next((row for row in state.rows if row["status"] != RESERVED), None)
+        return self.get_turn(str(running["id"])) if running is not None else None
 
     def list_turns(
         self,

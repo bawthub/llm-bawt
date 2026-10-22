@@ -63,8 +63,11 @@ def test_async_delivery_note_names_the_sender_to_call_back() -> None:
     None,
     _record(author=AuthorReference.user("nick")),
     _record(author=AuthorReference.bot("unknown")),
+    # TASK-1231B: a reserved identity (an ops-blocked notice is sent as
+    # "system") cannot receive a reply, so it gets no reply-to-system note.
+    _record(author=AuthorReference.bot("system")),
     _record(message_kind="CONTEXT_MAINTENANCE"),
-])
+], ids=["none", "user", "unknown", "system-notice", "maintenance"])
 def test_no_note_without_a_bot_reply_channel_or_for_maintenance(record) -> None:
     assert delivery_reply_channel_note(record) is None
 

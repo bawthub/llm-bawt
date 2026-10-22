@@ -194,14 +194,16 @@ def test_stream_admission_refusal_is_reported_in_band(monkeypatch):
 def _stores(*, status="DELIVERED", turn_status="ok", text="the answer", error=None):
     record = SimpleNamespace(
         id="delivery-r", turn_id="turn-delivery-r", status=status, last_error=error,
-        target_bot_id="review-bot", author_entity_type="user", author_entity_id="review-user",
+        sender_bot_id="review-bot", target_bot_id="review-bot", author_entity_type="user", author_entity_id="review-user",
         user_message_id=MSG, metadata={"ordinary_chat": {"digest": "d"}},
     )
     turn = SimpleNamespace(
         ended_at=datetime.now(timezone.utc), status=turn_status, error_text=None,
         bot_id="review-bot", user_id="review-user", trigger_message_id=MSG, response_text=text,
     )
-    return SimpleNamespace(get=lambda _id: record), SimpleNamespace(get_turn=lambda _id: turn)
+    # ``list`` backs the FAILED-original retry-child lookup (TASK-1231B); none here.
+    deliveries = SimpleNamespace(get=lambda _id: record, list=lambda **_kw: [])
+    return deliveries, SimpleNamespace(get_turn=lambda _id: turn)
 
 
 def _botchat(monkeypatch, *, stream=False, **store_kw):

@@ -356,7 +356,12 @@ class AgentBridgeBackend(AgentBackend):
 
                             elif event.kind == AgentEventKind.ASSISTANT_DONE:
                                 if isinstance(event.raw, dict) and event.raw.get("end_reason") == "aborted":
-                                    result_queue.put({"event": "turn_cancelled"})
+                                    from agent_bridge.abort_contract import abort_cause_of
+
+                                    # TASK-1231B: carry the bridge's machine cause
+                                    # (host_shutdown) to the turn row; None otherwise.
+                                    result_queue.put({"event": "turn_cancelled",
+                                                      "abort_cause": abort_cause_of(event.raw)})
                                 if isinstance(event.raw, dict) and event.raw.get("new_session_ack"):
                                     from ..service.session_lifecycle.receipt import NewSessionReceipt
                                     from ..utils.db import get_shared_engine

@@ -24,12 +24,15 @@ pass through here.
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping
 
 from sqlalchemy import text as sa_text
+
+log = logging.getLogger(__name__)
 
 ADMISSION_KEY = "admission"
 RESERVED = "reserved"
@@ -259,6 +262,15 @@ def write_reservation(
         " WHERE turn_logs.status='reserved' AND turn_logs.ended_at IS NULL"
         if only_unstarted else ""
     )
+    # A re-arm starts a new attempt on the same row: carry the prior attempt's
+    # audits and history forward (TASK-1232 r2-M1, TASK-1234 Fix 2).
+    lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+    prior = conn.execute(sa_text(
+        "SELECT request_json, status, end_reason, error_text, created_at, ended_at"
+        " FROM turn_logs WHERE id=:id" + lock
+    ), {"id": turn_id}).mappings().first()
+    from .turn_termination import rearm_request_payload
+    merged_request_json = rearm_request_payload(prior, request_json)
     result = conn.execute(sa_text("""
         INSERT INTO turn_logs (
             id, created_at, path, stream, bot_id, user_id, status,
@@ -270,14 +282,14 @@ def write_reservation(
             '', :message_id, NULL
         )
         ON CONFLICT (id) DO UPDATE SET
-            status='reserved', ended_at=NULL, error_text=NULL,
+            status='reserved', ended_at=NULL, error_text=NULL, created_at=EXCLUDED.created_at,
             request_json=EXCLUDED.request_json, user_prompt=EXCLUDED.user_prompt
     """ + guard), {
         "turn_id": turn_id,
         "target": bot_id,
         "user_id": user_id,
         "message": user_prompt,
-        "request_json": json.dumps(request_json, ensure_ascii=False, default=str),
+        "request_json": merged_request_json,
         "message_id": trigger_message_id,
     })
     return bool(result.rowcount)
@@ -390,6 +402,108 @@ def release_reservation(
     return bool(result.rowcount)
 
 
+def revoke_reservation(
+    engine, turn_id: str, *, disposition: str, audit: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """End an open reservation by first revoking its producer's authority.
+
+    TASK-1232 Stop on a ``reserved`` row (``disposition="user_stop"``). One
+    transaction in the admission lock order (target lock → producer row → turn
+    row): the producer loses its claim (delivery CANCELLED, approval
+    continuation ``suppressed``), so a stalled claimant can never consume the
+    row — ``fence_consumption`` checks the claim before the row exists or not.
+    Only then does the row settle through the shared settle. Returns the
+    revoked producer, or None, with nothing written, when ``turn_id`` is not
+    (or is no longer) an open reservation.
+
+    Every lock is taken, and the turn row re-checked, BEFORE any write (Vex
+    B1): a claimant holding the target lock may consume the row between the
+    unlocked head read and our lock, and revoking a consumed row's producer
+    would cancel a live run's delivery.
+    """
+    if disposition != "user_stop":
+        raise ValueError(f"unsupported reservation disposition: {disposition!r}")
+    for _ in range(_REVOKE_ATTEMPTS):
+        outcome = _revoke_reservation_once(engine, turn_id, audit=audit)
+        if outcome is not _PRODUCER_CHANGED:
+            return outcome
+    log.warning("reservation %s changed producer on every revoke attempt; left open", turn_id)
+    return None
+
+
+# The head read is unlocked, so the row's producer can change before it is
+# locked (recover_expired re-arms without the target lock). Retry, bounded.
+_REVOKE_ATTEMPTS = 3
+_PRODUCER_CHANGED = object()
+
+
+def _revoke_reservation_once(engine, turn_id: str, *, audit: Mapping[str, Any]):
+    from datetime import datetime, timezone
+
+    from sqlmodel import Session, select
+
+    from .turn_logs import TurnLog
+    from .turn_termination import settle_open_turn
+
+    with engine.begin() as conn:
+        head = conn.execute(sa_text(
+            "SELECT bot_id, request_json FROM turn_logs"
+            " WHERE id=:id AND status='reserved' AND ended_at IS NULL"
+        ), {"id": turn_id}).mappings().first()
+        if head is None or not head["bot_id"]:
+            return None
+        lock_target(conn, head["bot_id"])
+        payload = _reservation_payload(head["request_json"])
+        delivery_id = payload.get("inter_bot_delivery_id")
+        owner = payload.get(RESERVATION_OWNER_KEY)
+        # Lock order: target → producer row → turn row, all before any write.
+        lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+        if delivery_id:
+            conn.execute(sa_text("SELECT 1 FROM inter_bot_deliveries WHERE id=:id" + lock), {"id": delivery_id})
+        elif owner:
+            conn.execute(sa_text(
+                "SELECT 1 FROM tool_approval_requests WHERE continuation_claim_token=:owner" + lock
+            ), {"owner": owner})
+        with Session(bind=conn) as session:
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            if row is None or row.status != RESERVED or row.ended_at is not None:
+                return None  # consumed or ended since the head read; nothing written
+            locked = _reservation_payload(row.request_json)
+            if (locked.get("inter_bot_delivery_id"), locked.get(RESERVATION_OWNER_KEY)) != (delivery_id, owner):
+                return _PRODUCER_CHANGED
+            producer = _revoke_producer(conn, turn_id, delivery_id=delivery_id, owner=owner)
+            settle_open_turn(session, row, audit_key="user_stop", now=datetime.now(timezone.utc),
+                             audit={**audit, "reservation_producer": producer})
+    return producer
+
+
+def _revoke_producer(conn, turn_id: str, *, delivery_id: str | None, owner: str | None) -> dict[str, Any]:
+    """Take the claim back from the reservation's producer (rows already locked)."""
+    producer: dict[str, Any] = {"kind": "ordinary", "revoked": False}
+    if delivery_id:
+        revoked = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='CANCELLED', claim_token=NULL,
+                claim_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL,
+                last_error='Stopped by user', updated_at=now()
+            WHERE id=:id AND turn_id=:turn_id AND status IN ('QUEUED','DISPATCHING')
+            RETURNING transport_accepted_at
+        """), {"id": delivery_id, "turn_id": turn_id}).mappings().first()
+        producer = {"kind": "delivery", "id": delivery_id, "revoked": revoked is not None,
+                    "accepted": bool(revoked and revoked["transport_accepted_at"])}
+    elif owner:
+        from ..approval_models import CONT_DISPATCHING, CONT_SUPPRESSED
+
+        revoked = conn.execute(sa_text("""
+            UPDATE tool_approval_requests SET continuation_state=:suppressed,
+                continuation_claim_token=NULL
+            WHERE continuation_claim_token=:owner AND continuation_state=:dispatching
+            RETURNING id
+        """), {"owner": owner, "suppressed": CONT_SUPPRESSED,
+               "dispatching": CONT_DISPATCHING}).scalar_one_or_none()
+        producer = {"kind": "approval", "id": revoked, "revoked": revoked is not None}
+    return producer
+
+
 def turn_request_extensions(request: Any) -> dict[str, Any]:
     """Request fields persisted on the turn row, shared by stream and nonstream."""
     continuation = getattr(request, "continuation_payload", None)
@@ -435,6 +549,7 @@ __all__ = [
     "lock_target",
     "release_reservation",
     "reserve_turn",
+    "revoke_reservation",
     "turn_request_extensions",
     "turn_start_extensions",
     "write_reservation",

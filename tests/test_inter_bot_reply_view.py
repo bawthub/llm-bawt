@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.inter_bot_reply_view import ReplyViewMismatch, inter_bot_reply_view
 from llm_bawt.service.routes import inter_bot_deliveries
 
@@ -192,7 +193,8 @@ def test_answer_route_requires_matching_stored_user_and_sender(monkeypatch):
 
 def test_manual_retry_uses_the_original_send_card_as_its_single_anchor(monkeypatch):
     original = delivery(status="FAILED", last_error="temporary failure")
-    child = delivery(id="delivery-retry", metadata={"manual_retry_of": original.id})
+    child = delivery(id="delivery-retry", metadata={"manual_retry_of": original.id,
+                                                    "_request_identity_producer": "retry"})
 
     class Store:
         def get(self, _id):
@@ -233,3 +235,62 @@ def test_unrelated_manual_retry_cannot_replace_original_failure(monkeypatch):
         "delivery-test", sender_bot_id="sender", user_id="owner")
     assert view["reply_status"] == "unavailable"
     assert "retry_delivery_id" not in view
+
+
+# --- TASK-1231B: a restart-retry child is system-authored ---------------------
+
+SYSTEM_INCOMING = dict(id="user-msg", role="user", author_entity_type="bot",
+                       author_entity_id="system", session_id="target-session")
+
+
+def restart_child(**metadata):
+    meta = {"restart_retry_of": "delivery-test", "_request_identity_producer": "retry",
+            "retry_original_author": AuthorReference.bot("sender").to_dict(), **metadata}
+    return delivery(id="delivery-restart", author=AuthorReference.bot("system"),
+                    author_entity_id="system", metadata=meta)
+
+
+def test_restart_child_answers_its_original_bot_sender():
+    view, _, _ = project(restart_child(), incoming_message=SYSTEM_INCOMING)
+    assert (view["reply_status"], view["reply_text"]) == ("answered", "Canonical reply")
+
+
+@pytest.mark.parametrize("metadata", [
+    {"retry_original_author": AuthorReference.bot("another-bot").to_dict()},  # someone else's request
+    {"retry_original_author": AuthorReference.user("owner").to_dict()},       # a user's request
+    {"_request_identity_producer": "forged"},                                 # not a server retry
+    {"retry_original_author": None},
+], ids=["other-bot", "user", "forged-producer", "no-original"])
+def test_system_row_is_not_the_senders_unless_it_is_its_verified_retry(metadata):
+    with pytest.raises(ReplyViewMismatch):
+        project(restart_child(**metadata), incoming_message=SYSTEM_INCOMING)
+
+
+def test_restart_child_incoming_message_must_carry_the_rows_own_author():
+    # The sender-authored incoming row is not what the system child persisted.
+    view, _, _ = project(restart_child())
+    assert view["reply_status"] == "unresolved"
+
+
+def test_answer_route_follows_a_verified_restart_retry_child(monkeypatch):
+    original = delivery(status="FAILED", last_error="streamed durable turn ended with status=aborted")
+    child = restart_child()
+    keys = []
+
+    class Store:
+        def get(self, _id):
+            return original
+        def payload(self, _id):
+            return {"user": "owner"}
+        def list(self, **filters):
+            keys.append(filters["idempotency_key"])
+            return [child] if filters["idempotency_key"] == "restart-retry:delivery-test" else []
+
+    monkeypatch.setattr(inter_bot_deliveries, "_dispatcher", lambda: SimpleNamespace(store=Store()))
+    monkeypatch.setattr(inter_bot_deliveries, "get_service", lambda: SimpleNamespace(
+        _turn_log_store=Turns(turn()), get_memory_client=lambda *_: Memory(message(), SYSTEM_INCOMING)))
+    view = inter_bot_deliveries.get_inter_bot_answer(
+        "delivery-test", sender_bot_id="sender", user_id="owner")
+    assert keys == ["manual-retry:delivery-test", "restart-retry:delivery-test"]
+    assert view["delivery_id"] == original.id and view["retry_delivery_id"] == child.id
+    assert (view["reply_status"], view["reply_text"]) == ("answered", "Canonical reply")

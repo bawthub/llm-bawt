@@ -13,11 +13,17 @@ from llm_bawt.service.delivery_reply import (
 
 
 class Store:
-    def __init__(self, record):
+    def __init__(self, record, children=()):
         self.record = record
+        self.children = list(children)
 
     def get(self, delivery_id):
         return self.record if delivery_id == "delivery-test" else None
+
+    def list(self, *, sender_bot_id, target_bot_id, idempotency_key, limit):
+        return [child for child in self.children
+                if child.sender_bot_id == sender_bot_id and child.target_bot_id == target_bot_id
+                and child.idempotency_key == idempotency_key][:limit]
 
 
 class Turns:
@@ -39,7 +45,7 @@ def lookup(record, turn=None, **overrides):
 
 
 def delivery(status="QUEUED", **overrides):
-    data = dict(id="delivery-test", status=status, target_bot_id="bot",
+    data = dict(id="delivery-test", status=status, target_bot_id="bot", sender_bot_id="owner",
                 author_entity_type="user", author_entity_id="owner",
                 user_message_id="message", turn_id="turn-test",
                 metadata={"ordinary_chat": {"digest": "test"}}, last_error=None)
@@ -155,3 +161,66 @@ async def test_direct_waiter_does_not_replay_in_flight_turn():
     )
     assert result["status"] == "IN_FLIGHT"
     assert "response_text" not in result
+
+
+# --- TASK-1231B: a FAILED original reports its verified restart-retry child ---
+
+class ChildTurns:
+    def __init__(self, turns):
+        self.turns = turns
+
+    def get_turn(self, turn_id):
+        return self.turns.get(turn_id)
+
+
+def restart_child(status="DELIVERED", **overrides):
+    data = dict(id="delivery-child", status=status, target_bot_id="bot", sender_bot_id="owner",
+                author_entity_type="bot", author_entity_id="system",
+                user_message_id="child-message", turn_id="turn-child",
+                idempotency_key="restart-retry:delivery-test",
+                metadata={"ordinary_chat": {}, "restart_retry_of": "delivery-test",
+                          "_request_identity_producer": "retry"},
+                last_error=None)
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def follow(child, child_turn=None):
+    original = delivery("FAILED", last_error="streamed durable turn ended with status=aborted")
+    return resolve_delivery_reply(
+        Store(original, [child] if child else []),
+        ChildTurns({"turn-child": child_turn}), "delivery-test",
+        bot_id="bot", user_id="owner", user_message_id="message",
+    )
+
+
+def test_failed_original_reports_delivered_restart_child_reply():
+    result = follow(restart_child(), turn(trigger_message_id="child-message",
+                                          response_text="Continued reply"))
+    assert result == {"delivery_id": "delivery-test", "retry_delivery_id": "delivery-child",
+                      "status": "DELIVERED", "turn_id": "turn-child",
+                      "user_message_id": "child-message", "response_text": "Continued reply"}
+
+
+def test_failed_original_with_queued_child_stays_pending():
+    result = follow(restart_child("QUEUED"))
+    assert result["status"] == "QUEUED" and "response_text" not in result
+
+
+@pytest.mark.parametrize("override", [
+    {"metadata": {"ordinary_chat": {}, "restart_retry_of": "other",
+                  "_request_identity_producer": "retry"}},
+    {"metadata": {"ordinary_chat": {}, "restart_retry_of": "delivery-test",
+                  "_request_identity_producer": "bot"}},   # forged by a sender
+    {"sender_bot_id": "someone-else"},
+    {"idempotency_key": "restart-retry:other"},
+], ids=["wrong-marker", "forged-producer", "other-sender", "other-key"])
+def test_unverified_child_is_ignored(override):
+    result = follow(restart_child(**override), turn(trigger_message_id="child-message"))
+    assert result["status"] == "FAILED" and result["delivery_id"] == "delivery-test"
+    assert "retry_delivery_id" not in result
+
+
+def test_failed_original_without_child_keeps_its_error():
+    result = follow(None)
+    assert result["status"] == "FAILED" and "aborted" in result["error"]

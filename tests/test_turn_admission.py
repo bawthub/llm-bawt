@@ -360,6 +360,25 @@ def test_owner_with_live_claim_consumes_its_reservation(sqlite_turns):
     assert turn.status == "streaming" and turn.ended_at is None
 
 
+def test_consuming_a_reservation_keeps_its_audits(sqlite_turns):
+    """TASK-1232 r2-M1: save_turn's reserved UPDATE is the second re-arm write."""
+    approvals, turns = sqlite_turns
+    row = _mcp_claim(approvals)
+    claim = _claimed_request(approvals, row)
+    _sqlite_row(turns, "turn-c", owner=claim.owner)
+    audits = {"recovery": {"cause": "orphaned_by_restart"}, "abort_request": {"source": "chat_stop"},
+              "attempts": [{"n": 1, "status": "error", "error": "429"}]}  # TASK-1234 Fix 2
+    with turns.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET request_json=:j WHERE id='turn-c'"), {"j": json.dumps({
+            "admission": "idle_only", "reservation_owner": claim.owner, **audits,
+            "abort_cause": {"cause": "host_shutdown"},
+        })})
+    _consume(turns, "turn-c", claim)
+    payload = json.loads(turns.get_turn("turn-c").request_json)
+    assert payload["messages"] == [] and {key: payload[key] for key in audits} == audits
+    assert "abort_cause" not in payload
+
+
 @pytest.mark.parametrize("successor_reserved", [False, True])
 def test_superseded_claim_cannot_consume_any_reservation(sqlite_turns, successor_reserved):
     approvals, turns = sqlite_turns
@@ -572,6 +591,25 @@ def test_reserved_turns_are_not_executing_steer_targets(sqlite_turns):
     rows, count = turns.list_turns(bot_id="snark", active_only=True)
     assert count == 1 and [row.id for row in rows] == ["turn-running"]
     assert turns.active_turn_for_bot("snark").id == "turn-running"
+
+
+def test_in_turn_readout_and_admission_share_one_unbounded_predicate(sqlite_turns, monkeypatch):
+    """TASK-1231C: an orphan older than the old 1800s window still blocks
+    admission, so the in-turn readout must report it instead of aging it out."""
+    from datetime import datetime, timedelta, timezone
+
+    from llm_bawt.service.routes import turn_logs as turn_log_routes
+
+    _, turns = sqlite_turns
+    _sqlite_row(turns, "turn-orphan", status="streaming")
+    with turns.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET created_at=:old WHERE id='turn-orphan'"),
+                     {"old": datetime.now(timezone.utc) - timedelta(hours=2)})
+    assert not turns.peek_target_state("snark").idle
+    assert turns.active_turn_for_bot("snark").id == "turn-orphan"
+    monkeypatch.setattr(turn_log_routes, "get_turn_log_store", lambda: turns)
+    readout = turn_log_routes.bot_in_turn("snark")
+    assert readout["in_turn"] is True and readout["turn_id"] == "turn-orphan"
 
 
 def test_admission_claim_fails_closed_without_a_fence_capable_store():

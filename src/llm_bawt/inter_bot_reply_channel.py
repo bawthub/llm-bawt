@@ -73,18 +73,32 @@ def delivery_reply_channel_note(record: Any) -> str | None:
     The note is instruction text for the recipient, not part of the message.
     Callers append it to the OUTBOUND copy only (agent ``context_suffix`` or the
     steer wire text); the stored payload, history row and timeline stay clean.
-    Only bot-authored conversational deliveries get one: a user/system author
-    has no reply channel, and context maintenance is a bare harness command
+    Only bot-authored conversational deliveries get one: a user or reserved
+    (``system``) author has no reply channel, and context maintenance is a bare harness command
     (``/compact``) that any trailing text would break.
     """
     if record is None or record.message_kind == "CONTEXT_MAINTENANCE":
         return None
+    from .bot_identities import RESERVED_JOB_BOT_IDS
+    from .inter_bot_delivery_retry import is_system_retry, retry_reply_to
+
     author = record.author
-    if author.entity_type != "bot" or author.entity_id == "unknown":
+    if is_system_retry(record):
+        # A system-authored retry (TASK-1231B) answers to the original bot
+        # sender; a retry of a user's request has no bot to reply to.
+        sender = retry_reply_to(record)
+    elif (author.entity_type == "bot" and author.entity_id != "unknown"
+          and author.entity_id not in RESERVED_JOB_BOT_IDS):
+        # Reserved identities (system notices such as ops-blocked) cannot
+        # receive a reply.
+        sender = author.entity_id
+    else:
+        sender = None
+    if sender is None:
         return None
     return resolve_reply_channel_note(
         record.reply_mode if record.reply_mode in _KEY_BY_MODE else "async",
-        sender_bot_id=author.entity_id, target_bot_id=record.target_bot_id,
+        sender_bot_id=sender, target_bot_id=record.target_bot_id,
     )
 
 

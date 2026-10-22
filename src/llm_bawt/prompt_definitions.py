@@ -31,6 +31,7 @@ from .prompt_default_loaders import (
     load_agents_task_spec,
     load_global_recall_guidance,
     load_inter_bot_reply_channel_async,
+    load_inter_bot_restart_retry_continue,
     load_inter_bot_reply_channel_waited,
     load_history_summarization_batch,
     load_history_summarization_single,
@@ -390,6 +391,19 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "any requested answer must be sent back with bots_send_message. "
             "{sender_bot_id} is substituted by plain replacement (never .format()). "
             "Resolved per delivery; target-bot overrides supported."
+        )},
+    ),
+    "inter_bot.restart_retry.continue": PromptDefinition(
+        key="inter_bot.restart_retry.continue",
+        title="Inter-Bot Restart Retry: Continue",
+        category="agent_execution",
+        loader=load_inter_bot_restart_retry_continue,
+        metadata={"notes": (
+            "Body of the system-created restart-retry delivery (TASK-1231B) that "
+            "resumes a turn killed by its bridge host shutting down. It is prefixed "
+            "to the original request, so it must tell the bot to check what it "
+            "already completed and not repeat side effects. Used verbatim; a blank "
+            "body falls back to the seed. Target-bot overrides supported."
         )},
     ),
     "media.prompt_expansion.video": PromptDefinition(

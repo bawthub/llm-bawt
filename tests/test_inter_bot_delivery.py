@@ -1331,3 +1331,285 @@ def test_list_chat_exclusion_drops_untagged_self_rows_before_limit(delivery_stor
 
     assert [r.id for r in store.list(bot_id=sender, limit=1, exclude_user_chat=True)] == [cross.id]
     assert [r.id for r in store.list(bot_id=sender, limit=1)] == [self_row.id]
+
+
+def test_fail_claim_joins_the_callers_transaction(delivery_store):
+    """TASK-1231B: failing a claim and inserting its restart retry is atomic."""
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "killed by a host shutdown")
+    claim = store.claim_next(target, claim_owner="owner", steer_capable=False)
+    assert claim and claim.id == original.id
+
+    class Abort(Exception):
+        pass
+
+    with pytest.raises(Abort):
+        with store.engine.begin() as conn:
+            failed = store.fail_claim(original.id, claim.claim_token or "", "host_shutdown", connection=conn)
+            assert failed and failed.status == FAILED
+            raise Abort  # the caller's later insert failed
+    assert store.get(original.id).status == DISPATCHING  # rolled back together
+
+    with store.engine.begin() as conn:
+        assert store.fail_claim(original.id, claim.claim_token or "", "host_shutdown", connection=conn)
+    assert store.get(original.id).status == FAILED
+
+
+# TASK-1232 P4. The 2026-10-21 Caid sequence: app restart → the run finishes
+# with no follower → user Stop → lease expiry. Stop used to answer 503,
+# recover_expired cancelled only the delivery, and the open turn blocked the queue.
+
+
+def _assert_turn_user_stopped(store, turn_id):
+    with store.engine.connect() as conn:
+        row = conn.execute(sa_text(
+            "SELECT status, end_reason, ended_at, request_json FROM turn_logs WHERE id=:id"
+        ), {"id": turn_id}).mappings().one()
+    assert (row["status"], row["end_reason"]) == ("aborted", "aborted")  # A1
+    assert row["ended_at"] is not None
+    return json.loads(row["request_json"])["user_stop"]
+
+
+def _expire_lease(store, delivery_id):
+    with store.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE inter_bot_deliveries SET lease_expires_at=now() - interval '1 second' WHERE id=:id"
+        ), {"id": delivery_id})
+
+
+def test_stop_on_finished_orphan_then_lease_expiry_settles_turn_and_drains(delivery_store, monkeypatch):
+    from llm_bawt import bots
+    from llm_bawt.agent_backends import agent_bridge
+    from llm_bawt.service.turn_abort import abort_turn
+
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "finished while the app was down")
+    following, _ = _enqueue(store, sender, target, "queued behind it")
+    claim = store.claim_next(target, claim_owner="dead-app", steer_capable=False, lease_seconds=60)
+    assert claim and claim.id == original.id
+    assert store.mark_transport_accepted(original.id, claim.claim_token or "")
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE turn_logs SET status='streaming', agent_session_key=:key, agent_request_id=:req
+            WHERE id=:id
+        """), {"id": original.turn_id, "key": f"{target}:nick", "req": f"req_{original.id}"})
+
+    # No in-process follower survives the restart; the bridge already finished.
+    rpc = AsyncMock(return_value={
+        "backend": "claude-code", "boot_id": "boot-2", "request_id": f"req_{original.id}",
+        "cancelled": False, "state": "not_found", "detail": "no_active_task",
+    })
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot_id: SimpleNamespace(agent_backend="claude-code")))
+    turns = TurnLogStore(store.config)
+    svc = SimpleNamespace(_turn_log_store=turns, config=store.config, _redis_subscriber=None)
+
+    result = asyncio.run(abort_turn(svc, turns.get_turn(original.turn_id), source="chat_stop", peer=None))
+    assert result.startswith("aborted:")
+    _assert_turn_user_stopped(store, original.turn_id)
+
+    _expire_lease(store, original.id)
+    store.recover_expired()
+    stopped = store.get(original.id)
+    assert (stopped.status, stopped.last_error) == ("CANCELLED", "Stopped by user")
+    _assert_turn_user_stopped(store, original.turn_id)
+    next_claim = store.claim_next(target, claim_owner="new-app", steer_capable=False)
+    assert next_claim and next_claim.id == following.id
+
+
+def test_lease_recovery_of_stopped_delivery_settles_its_open_turn(delivery_store):
+    """Stop intent recorded, but the app died before settling: recovery must not
+    cancel the delivery and leave the turn row open (the deadlock's last link)."""
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stopped, then the app died")
+    following, _ = _enqueue(store, sender, target, "must not deadlock")
+    claim = store.claim_next(target, claim_owner="dead-app", steer_capable=False, lease_seconds=60)
+    assert claim and claim.id == original.id
+    _request_stop_for_delivery(store, original.turn_id)
+
+    _expire_lease(store, original.id)
+    recovered = [row for row in store.recover_expired() if row.id == original.id]
+    assert recovered and recovered[0].status == "CANCELLED"
+    _assert_turn_user_stopped(store, original.turn_id)
+    next_claim = store.claim_next(target, claim_owner="new-app", steer_capable=False)
+    assert next_claim and next_claim.id == following.id
+
+
+def test_lease_recovery_settle_records_the_stop_audit(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stopped, then the app died")
+    assert store.claim_next(target, claim_owner="dead-app", steer_capable=False, lease_seconds=60)
+    _request_stop_for_delivery(store, original.turn_id)
+    _expire_lease(store, original.id)
+    store.recover_expired()
+    stop = _assert_turn_user_stopped(store, original.turn_id)
+    assert (stop["bridge_state"], stop["confirmed"], stop["by"]) == ("lease_expired", False, "recover_expired")
+    abort = json.loads(TurnLogStore(store.config).get_turn(original.turn_id).request_json)["abort_request"]
+    assert abort["source"] == "chat_stop"
+
+
+def test_stop_on_a_delivery_reservation_revokes_the_claim_and_drains(delivery_store):
+    """Stop on a ``reserved`` row used to return already_completed while the
+    reservation kept blocking admission (Codex S4)."""
+    from llm_bawt.service.turn_abort import abort_turn
+
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "reserved, never started")
+    following, _ = _enqueue(store, sender, target, "must not deadlock")
+    claim = store.claim_next(target, claim_owner="owner", steer_capable=False)
+    assert claim and claim.id == original.id
+    turns = TurnLogStore(store.config)
+    assert turns.get_turn(original.turn_id).status == "reserved"
+    svc = SimpleNamespace(_turn_log_store=turns, config=store.config, _redis_subscriber=None)
+
+    assert asyncio.run(abort_turn(svc, turns.get_turn(original.turn_id), source="chat_stop", peer=None)) == "aborted:reserved"
+    stop = _assert_turn_user_stopped(store, original.turn_id)
+    assert stop["reservation_producer"] == {"kind": "delivery", "id": original.id, "revoked": True, "accepted": False}
+    revoked = store.get(original.id)
+    assert (revoked.status, revoked.claim_token, revoked.last_error) == ("CANCELLED", None, "Stopped by user")
+
+    # The stalled claimant can no longer consume its reservation.
+    from llm_bawt.inter_bot_claim_validation import validate_delivery_claim
+    with store.engine.begin() as conn:
+        assert not validate_delivery_claim(
+            conn, delivery_id=original.id, claim_token=claim.claim_token or "", target_bot_id=target,
+            turn_id=original.turn_id, user_message_id=original.user_message_id,
+            bridge_request_id=store.payload(original.id)["inter_bot_bridge_request_id"], for_turn=True,
+        )
+    next_claim = store.claim_next(target, claim_owner="owner-2", steer_capable=False)
+    assert next_claim and next_claim.id == following.id
+
+
+def test_stop_racing_consumption_never_revokes_a_live_runs_delivery(delivery_store, monkeypatch):
+    """Vex B1: the reservation is consumed between Stop's unlocked read and its
+    target lock. Revoke must write nothing, and Stop must stop the started run
+    through the bridge instead of reporting already_completed."""
+    from llm_bawt import bots
+    from llm_bawt.agent_backends import agent_bridge
+    from llm_bawt.service import turn_admission
+    from llm_bawt.service.turn_abort import abort_turn
+
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "started at the moment Stop was clicked")
+    claim = store.claim_next(target, claim_owner="owner", steer_capable=False)
+    assert claim and claim.id == original.id
+    turns = TurnLogStore(store.config)
+    reserved = turns.get_turn(original.turn_id)
+    assert reserved.status == "reserved"
+
+    real_lock_target = turn_admission.lock_target
+    consumed = []
+
+    def consume_then_lock(conn, bot_id):
+        if not consumed:  # the claimant wins the target lock first and commits
+            with store.engine.begin() as other:
+                other.execute(sa_text("""
+                    UPDATE turn_logs SET status='streaming', agent_session_key=:key, agent_request_id=:req
+                    WHERE id=:id AND status='reserved'
+                """), {"id": original.turn_id, "key": f"{target}:nick", "req": f"req_{original.id}"})
+            consumed.append(True)
+        real_lock_target(conn, bot_id)
+
+    monkeypatch.setattr(turn_admission, "lock_target", consume_then_lock)
+    rpc = AsyncMock(return_value={
+        "backend": "claude-code", "boot_id": "boot-1", "request_id": f"req_{original.id}",
+        "cancelled": True, "state": "cancelled", "detail": "task_cancelled",
+    })
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: SimpleNamespace(send_rpc=rpc))
+    monkeypatch.setattr(bots, "BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot_id: SimpleNamespace(agent_backend="claude-code")))
+    svc = SimpleNamespace(_turn_log_store=turns, config=store.config, _redis_subscriber=None)
+
+    assert asyncio.run(abort_turn(svc, reserved, source="chat_stop", peer=None)) == "aborted:cancelled"
+    assert consumed
+    live = store.get(original.id)
+    assert (live.status, live.claim_token) == ("DISPATCHING", claim.claim_token)
+    assert rpc.await_args.args[1]["requestId"] == f"req_{original.id}"
+    stop = _assert_turn_user_stopped(store, original.turn_id)
+    assert stop["bridge_state"] == "cancelled" and "reservation_producer" not in stop
+
+
+def test_rearm_keeps_audits_but_drops_per_attempt_keys(delivery_store):
+    """TASK-1232 r2-M1: both re-arm writes keep AUDIT_KEYS; ATTEMPT_KEYS drop."""
+    from llm_bawt.service.turn_admission import write_reservation
+
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "retried after a recovery settle")
+    claim = store.claim_next(target, claim_owner="owner", steer_capable=False)
+    assert claim
+    audits = {"recovery": {"cause": "orphaned_by_restart"}, "manual_settle": {"by": "snark"},
+              "user_stop": {"bridge_state": "not_found"}}
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET request_json=:j, status='aborted', ended_at=now() WHERE id=:id"), {
+            "id": original.turn_id,
+            "j": json.dumps({"messages": [], **audits, "abort_cause": {"cause": "host_shutdown"}}),
+        })
+        write_reservation(conn, turn_id=original.turn_id, bot_id=target, user_id="nick",
+                          user_prompt=original.message, request_json={"messages": [], "attempt": 2},
+                          trigger_message_id=original.user_message_id)
+    rearmed = json.loads(TurnLogStore(store.config).get_turn(original.turn_id).request_json)
+    assert rearmed["attempt"] == 2
+    assert {key: rearmed[key] for key in audits} == audits
+    assert "abort_cause" not in rearmed
+
+
+# TASK-1234 Fix 2: a re-arm keeps a bounded history of the attempts it replaced,
+# and created_at means "when the current attempt was admitted".
+def _end_attempt(store, turn_id, *, status, error, started, ended, request_json=None):
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE turn_logs SET status=:status, end_reason=:status, error_text=:error,
+                created_at=:started, ended_at=:ended, request_json=COALESCE(:j, request_json)
+            WHERE id=:id
+        """), {"id": turn_id, "status": status, "error": error, "started": started, "ended": ended,
+               "j": json.dumps(request_json) if request_json is not None else None})
+
+
+def _rearm(store, original, attempt):
+    from llm_bawt.service.turn_admission import write_reservation
+
+    with store.engine.begin() as conn:
+        assert write_reservation(conn, turn_id=original.turn_id, bot_id=original.target_bot_id, user_id="nick",
+                                 user_prompt=original.message, request_json={"messages": [], "attempt": attempt},
+                                 trigger_message_id=original.user_message_id)
+    return TurnLogStore(store.config).get_turn(original.turn_id)
+
+
+def test_rearm_records_each_started_attempt_and_restamps_created_at(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "retried twice")
+    assert store.claim_next(target, claim_owner="owner", steer_capable=False)
+    first = datetime.now(timezone.utc) - timedelta(minutes=30)
+    _end_attempt(store, original.turn_id, status="error", error="HTTP 429 " + "x" * 600,
+                 started=first, ended=first + timedelta(minutes=7))
+    second = _rearm(store, original, 2)
+    assert second.status == "reserved" and second.ended_at is None
+    assert second.created_at.replace(tzinfo=second.created_at.tzinfo or timezone.utc) > first + timedelta(minutes=7)
+    history = json.loads(second.request_json)["attempts"]
+    assert len(history) == 1
+    assert (history[0]["n"], history[0]["status"], history[0]["end_reason"]) == (1, "error", "error")
+    assert datetime.fromisoformat(history[0]["started"]) == first
+    assert history[0]["error"].startswith("HTTP 429") and len(history[0]["error"]) == 500
+
+    # A re-arm of a reservation that never started records nothing.
+    assert json.loads(_rearm(store, original, 3).request_json)["attempts"] == history
+    _end_attempt(store, original.turn_id, status="aborted", error=None, started=first, ended=first)
+    third = json.loads(_rearm(store, original, 4).request_json)
+    assert [entry["n"] for entry in third["attempts"]] == [1, 2] and third["attempt"] == 4
+
+
+def test_rearm_history_is_bounded_to_the_newest_attempts(delivery_store):
+    from llm_bawt.service.turn_termination import ATTEMPT_HISTORY_LIMIT
+
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "retried many times")
+    assert store.claim_next(target, claim_owner="owner", steer_capable=False)
+    now = datetime.now(timezone.utc)
+    full = [{"n": n, "status": "error"} for n in range(1, ATTEMPT_HISTORY_LIMIT + 1)]
+    _end_attempt(store, original.turn_id, status="error", error="boom", started=now, ended=now,
+                 request_json={"messages": [], "attempts": full})
+    history = json.loads(_rearm(store, original, 2).request_json)["attempts"]
+    assert len(history) == ATTEMPT_HISTORY_LIMIT
+    assert [entry["n"] for entry in history] == list(range(2, ATTEMPT_HISTORY_LIMIT + 2))
+

@@ -594,7 +594,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                 yield {"_type": "reasoning_delta", "delta": _rtext}
                             continue
                         if evt == "turn_cancelled":
-                            self._update_turn_log(turn_id=turn_log_id, status="aborted", end_reason="aborted")
+                            self._update_turn_log(turn_id=turn_log_id, status="aborted", end_reason="aborted",
+                                                  abort_cause=item.get("abort_cause"))
                             continue
                         if evt == "metadata":
                             if item.get("upstream_model"):

@@ -12,12 +12,28 @@ class ReplyViewMismatch(ValueError):
     """The requested delivery is outside the originating bot/user scope."""
 
 
+def _requester(record: Any) -> tuple[str | None, str | None]:
+    """Who asked for this delivery: its author, or for a system-authored
+    restart-retry child (TASK-1231B) the verified author of the original."""
+    from ..inter_bot_delivery_retry import retry_original_author
+
+    original = retry_original_author(record)
+    if original is not None:
+        return original.entity_type, original.entity_id
+    return record.author_entity_type, record.author_entity_id
+
+
+def _authored_by_row(incoming: dict[str, Any], record: Any) -> bool:
+    """The persisted user message carries the delivery row's own author."""
+    return (incoming.get("author_entity_type") == record.author_entity_type
+            and incoming.get("author_entity_id") == record.author_entity_id)
+
+
 def inter_bot_reply_view(record: Any, *, sender_bot_id: str, user_id: str,
                          turns: Any, memory_client: Any) -> dict[str, Any]:
     """Project only the canonical assistant message of this delivery's own turn."""
     if (record.sender_bot_id != sender_bot_id
-            or record.author_entity_type != "bot"
-            or record.author_entity_id != sender_bot_id
+            or _requester(record) != ("bot", sender_bot_id)
             or not user_id
             or any(key in record.metadata for key in (
                 "ordinary_chat", "prompt_schedule", "maintenance_user_queue",
@@ -53,8 +69,7 @@ def inter_bot_reply_view(record: Any, *, sender_bot_id: str, user_id: str,
         incoming = memory_client.get_message_by_id(record.user_message_id) if memory_client else None
         if (incoming and incoming.get("id") == record.user_message_id
                 and incoming.get("role") == "user"
-                and incoming.get("author_entity_type") == "bot"
-                and incoming.get("author_entity_id") == sender_bot_id
+                and _authored_by_row(incoming, record)
                 and incoming.get("session_id")):
             view["target_message_id"] = record.user_message_id
             view["target_session_id"] = incoming["session_id"]
@@ -81,8 +96,7 @@ def inter_bot_reply_view(record: Any, *, sender_bot_id: str, user_id: str,
             or not message.get("session_id")
             or not incoming or incoming.get("id") != record.user_message_id
             or incoming.get("role") != "user"
-            or incoming.get("author_entity_type") != "bot"
-            or incoming.get("author_entity_id") != sender_bot_id
+            or not _authored_by_row(incoming, record)
             or incoming.get("session_id") != message["session_id"]):
         view["reply_status"] = "unresolved"
         return view

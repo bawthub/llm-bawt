@@ -109,6 +109,12 @@ def load_inter_bot_reply_channel_async() -> str:
     return DEFAULT_REPLY_CHANNEL_ASYNC
 
 
+def load_inter_bot_restart_retry_continue() -> str:
+    from .inter_bot_delivery_retry import DEFAULT_RESTART_RETRY_CONTINUE
+
+    return DEFAULT_RESTART_RETRY_CONTINUE
+
+
 def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 

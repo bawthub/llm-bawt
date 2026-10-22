@@ -292,6 +292,7 @@ class TurnLifecycleMixin:
         animation: str | None = None,
         token_usage: dict | None = None,
         end_reason: str | None = None,
+        abort_cause: str | None = None,
     ) -> None:
         """Update an existing turn log row with new data."""
         try:
@@ -314,6 +315,7 @@ class TurnLifecycleMixin:
                 animation=animation,
                 token_usage=token_usage,
                 end_reason=end_reason,
+                abort_cause=abort_cause,
             )
             if (status in {"ok", "completed", "error", "timeout", "cancelled", "aborted"} or end_reason is not None):
                 dispatcher = getattr(self, "_inter_bot_dispatcher", None)

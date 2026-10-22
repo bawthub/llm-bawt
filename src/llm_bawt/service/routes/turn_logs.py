@@ -461,23 +461,18 @@ def recent_turns_by_bot(
 
 
 @router.get("/v1/bots/{bot_id}/in-turn", tags=["Bots"])
-def bot_in_turn(
-    bot_id: str,
-    within_seconds: int = Query(
-        1800, ge=1, le=86400,
-        description="Only count in-flight turns started within this window (zombie guard).",
-    ),
-):
+def bot_in_turn(bot_id: str):
     """Report whether a bot is currently in a turn (path-agnostic).
 
-    ``in_turn`` is true for an accepted, unfinished turn inside the window;
-    an open admission reservation is not yet an executing turn.
+    ``in_turn`` is true for any accepted, unfinished turn: the same predicate
+    admission uses (TASK-1231C), with no age window. An open admission
+    reservation is not yet an executing turn.
     """
     store = get_turn_log_store()
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
 
-    turn = store.active_turn_for_bot(bot_id, within_seconds=within_seconds)
+    turn = store.active_turn_for_bot(bot_id)
     if turn is None:
         return {"bot_id": bot_id, "in_turn": False}
     return {

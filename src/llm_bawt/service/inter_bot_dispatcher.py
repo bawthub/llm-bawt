@@ -18,6 +18,7 @@ from ..inter_bot_delivery import (
     DeliveryRecord,
     InterBotDeliveryStore,
 )
+from ..inter_bot_delivery_retry import fail_claim_with_restart_retry, retry_original_author
 from ..inter_bot_delivery_user import resolve_delivery_user
 from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
@@ -487,9 +488,15 @@ class InterBotDeliveryDispatcher:
                     await self._emit(stopped)
                     return
                 if turn_status in {"aborted", "cancelled"}:
-                    failed = self.store.fail_claim(record.id, claim_token, error)
+                    # TASK-1231B: a turn its bridge host killed while shutting
+                    # down gets one restart-retry child, committed with FAILED.
+                    failed, child = fail_claim_with_restart_retry(
+                        self.store, record, claim_token, error,
+                    )
                     if failed:
                         await self._emit(failed)
+                    if child:
+                        await self._emit(child)
                     return
             from .session_lifecycle.recovery import NewSessionRecovery
 
@@ -751,18 +758,29 @@ class InterBotDeliveryDispatcher:
             "project_id": record.project_id,
             "task_id": record.task_id,
             "message_kind": record.message_kind,
-            "retry_of_delivery_id": record.metadata.get("manual_retry_of"),
+            "retry_of_delivery_id": (record.metadata.get("manual_retry_of")
+                                     or record.metadata.get("restart_retry_of")),
             "ts": time.time(),
         }
         if record.metadata.get("prompt_schedule"):
             event["user_id"] = record.author_entity_id
             event["bot_id"] = record.target_bot_id
             event["prompt_schedule"] = record.metadata["prompt_schedule"]
-        if record.metadata.get("ordinary_chat") and record.author_entity_type == "user":
+        chat_user = None
+        if record.metadata.get("ordinary_chat"):
             # Ordinary queued sends belong to the selected user, not the
-            # service's default user or the inter-bot sender namespace.
+            # service's default user or the inter-bot sender namespace. A
+            # system-authored restart child (TASK-1231B) belongs to the user
+            # whose request it carries.
+            if record.author_entity_type == "user":
+                chat_user = record.author_entity_id
+            else:
+                original = retry_original_author(record)
+                if original is not None and original.entity_type == "user":
+                    chat_user = original.entity_id
+        if chat_user:
             event.update(
-                bot_id=record.target_bot_id, user_id=record.author_entity_id,
+                bot_id=record.target_bot_id, user_id=chat_user,
                 ordinary_chat=True, user_message_id=record.user_message_id,
                 session_id=record.metadata["ordinary_chat"].get("session_id"),
             )

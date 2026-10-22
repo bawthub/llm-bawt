@@ -38,6 +38,10 @@ def resolve_delivery_reply(
 
     No partial output is exposed. A terminal delivery with missing or mismatched
     turn data remains explicitly unresolved instead of manufacturing a reply.
+    A FAILED original that was retried (a restart retry after its host shut
+    down, TASK-1231B) reports its verified child's progress and reply instead;
+    the child is system-authored, so it is matched to the original by
+    provenance rather than by author.
     """
     record = deliveries.get(delivery_id)
     if record is None:
@@ -50,6 +54,23 @@ def resolve_delivery_reply(
         or not (record.metadata or {}).get("ordinary_chat")
     ):
         raise DeliveryReplyMismatch("delivery receipt does not match the original request")
+    if record.status == "FAILED":
+        from ..inter_bot_delivery_retry import verified_retry_child
+
+        child = verified_retry_child(deliveries, record)
+        if child is not None and child.target_bot_id == bot_id:
+            receipt = _receipt(child, turns, bot_id=bot_id, user_id=user_id,
+                               user_message_id=child.user_message_id)
+            receipt["delivery_id"] = record.id  # the identity the caller waits on
+            receipt["retry_delivery_id"] = child.id
+            return receipt
+    return _receipt(record, turns, bot_id=bot_id, user_id=user_id,
+                    user_message_id=user_message_id)
+
+
+def _receipt(
+    record: Any, turns: Any, *, bot_id: str, user_id: str, user_message_id: str,
+) -> dict[str, Any]:
     receipt: dict[str, Any] = {
         "delivery_id": record.id,
         "status": record.status,

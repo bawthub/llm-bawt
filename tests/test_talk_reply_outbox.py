@@ -38,7 +38,7 @@ class Subscriptions:
 
 def source(status="DELIVERED", *, message_id="original", text="Exact answer"):
     return SimpleNamespace(
-        id="delivery-original", status=status, target_bot_id="nova",
+        id="delivery-original", status=status, sender_bot_id="nova", target_bot_id="nova",
         author_entity_type="user", author_entity_id="nick",
         user_message_id=message_id, turn_id="turn-original",
         metadata={"ordinary_chat": {"digest": "original"}}, last_error=None,
@@ -121,7 +121,8 @@ async def test_ambiguous_outbound_send_is_not_retried(monkeypatch):
 async def test_terminal_delivery_sends_truthful_status_once_not_fabricated_answer(monkeypatch, status):
     outbox, calls = setup(monkeypatch)
     record, turn = source(status=status)
-    deliveries = SimpleNamespace(get=lambda _id: record)
+    # ``list`` backs the FAILED-original retry-child lookup (TASK-1231B); none here.
+    deliveries = SimpleNamespace(get=lambda _id: record, list=lambda **_kw: [])
     turns = SimpleNamespace(get_turn=lambda _id: turn)
     await outbox.drain(deliveries, turns)
     await outbox.drain(deliveries, turns)

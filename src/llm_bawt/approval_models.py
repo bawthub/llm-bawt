@@ -166,6 +166,12 @@ CONT_PENDING = "pending"
 CONT_DISPATCHING = "dispatching"
 CONT_DELIVERED = "delivered"
 CONT_FAILED = "failed"
+# TASK-1232: an operator revoked the continuation (purge, or a Stop on its
+# reservation). Terminal: no worker claims it again and nothing delivers it.
+CONT_SUPPRESSED = "suppressed"
+# The continuation claim lease: a dispatching claim not renewed within it is
+# stale (reclaimable by the outbox, revocable by recovery). One source for both.
+CONTINUATION_LEASE_SECONDS = 120
 
 
 class ToolApprovalPolicy(SQLModel, table=True):

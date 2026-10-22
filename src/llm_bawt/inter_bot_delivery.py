@@ -663,10 +663,15 @@ class InterBotDeliveryStore:
             )
         return DeliveryRecord.from_mapping(row) if row else None
 
-    def fail_claim(self, delivery_id: str, claim_token: str, error: str) -> DeliveryRecord | None:
+    def fail_claim(
+        self, delivery_id: str, claim_token: str, error: str, *,
+        connection: Connection | None = None,
+    ) -> DeliveryRecord | None:
+        """Fail a claimed row; ``connection`` joins the caller's transaction
+        (TASK-1231B: fail the claim and insert its restart retry atomically)."""
         if self.engine is None or not claim_token:
             return None
-        with self.engine.begin() as conn:
+        with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
             row = conn.execute(sa_text("""
                 UPDATE inter_bot_deliveries SET status='FAILED',
                     lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
@@ -835,6 +840,21 @@ class InterBotDeliveryStore:
             ), values).mappings().first()
         return DeliveryRecord.from_mapping(row) if row else self.get(delivery_id)
 
+    @staticmethod
+    def _settle_stopped_turn(conn: Connection, turn_id: str) -> None:
+        """Settle a stopped delivery's open turn in the caller's transaction."""
+        from sqlmodel import Session, select
+
+        from .service.turn_logs import TurnLog
+        from .service.turn_termination import settle_open_turn
+
+        with Session(bind=conn) as session:
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            if row is not None:
+                settle_open_turn(session, row, audit_key="user_stop", now=datetime.now(timezone.utc), audit={
+                    "bridge_state": "lease_expired", "confirmed": False, "by": "recover_expired",
+                })
+
     def recover_expired(self) -> list[DeliveryRecord]:
         """Recover only expired claims; singleton fencing excludes live peers."""
         if self.engine is None:
@@ -893,6 +913,11 @@ class InterBotDeliveryStore:
                 updated = conn.execute(sa_text(
                     f"UPDATE inter_bot_deliveries SET {assignments}, updated_at=now() WHERE id=:id RETURNING *"
                 ), {"id": row["id"]}).mappings().one()
+                if updated["status"] == "CANCELLED" and is_turn:
+                    # TASK-1232 P4: a user Stop ends the turn too. Cancelling
+                    # only the delivery left the row open, and admission
+                    # blocked every later message (the 2026-10-21 deadlock).
+                    self._settle_stopped_turn(conn, row["turn_id"])
                 if updated["status"] == QUEUED and is_turn:
                     conn.execute(sa_text("""
                         UPDATE turn_logs SET status='reserved', ended_at=NULL,
