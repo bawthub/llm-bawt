@@ -147,6 +147,41 @@ def test_repeated_receipt_and_drain_publish_once_sequentially(pending_receipt):
     assert payload["receipt_message_id"] == first.receipt_message_id
 
 
+@pytest.mark.parametrize("drift,completes", [
+    ("message_content", False),
+    ("receipt_content", False),
+    ("legacy_receipt", True),
+    ("legacy_receipt_message_content", False),
+])
+def test_bare_receipt_replay_requires_the_committed_content(pending_receipt, drift, completes):
+    """TASK-1225: a bare /new or scheduler replay compares the committed bubble
+    with the receipt's recorded content; a legacy receipt means the plain text."""
+    state = pending_receipt
+    rig = state.rig
+    assert acknowledge(state) is True
+    first = finish(state)
+    assert first is not None
+    params = {"bot": rig.bot, "assistant": state.payload["assistant_message_id"],
+              "id": state.claim.id}
+    tamper_message = "UPDATE messages SET content='tampered bubble' WHERE bot_id=:bot AND id=:assistant"
+    drop_content = """UPDATE inter_bot_deliveries
+        SET metadata_json = metadata_json #- '{new_session_receipt,content}' WHERE id=:id"""
+    statements = {
+        "message_content": [tamper_message],
+        "receipt_content": ["""UPDATE inter_bot_deliveries
+            SET metadata_json = jsonb_set(metadata_json, '{new_session_receipt,content}',
+                                          '"tampered receipt"') WHERE id=:id"""],
+        "legacy_receipt": [drop_content],
+        "legacy_receipt_message_content": [drop_content, tamper_message],
+    }
+    with rig.engine.begin() as conn:
+        for statement in statements[drift]:
+            conn.execute(text(statement), params)
+    replay = NewSessionReceipt.ensure(rig.engine, state.lifecycle.store.get(state.claim.id),
+                                      state.intent)
+    assert (replay == first) if completes else (replay is None)
+
+
 def test_delayed_old_event_never_rewinds_a_newer_pointer(pending_receipt):
     state = pending_receipt
     assert acknowledge(state) is True

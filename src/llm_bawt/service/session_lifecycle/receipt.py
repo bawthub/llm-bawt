@@ -298,6 +298,15 @@ class NewSessionReceipt:
                         or prior_receipt.get("new_session_id") != new_id
                         or prior_receipt.get("provider_session_id") != provider_key):
                     return None
+                # Replay completes only against the exact committed bubble,
+                # as the follow-up and policy receipts already require.
+                committed = conn.execute(text("""
+                    SELECT content FROM messages WHERE bot_id=:storage_bot AND id=:assistant
+                      AND role='assistant' AND session_id=:session
+                """), {"storage_bot": storage_bot, "assistant": row["assistant_message_id"],
+                        "session": new_id}).scalar_one_or_none()
+                if committed != receipt_content(prior_receipt):
+                    return None
                 return NewSessionResult(
                     outcome=Outcome.COMPLETED, stage=Stage.RECEIPT,
                     delivery_id=record.id, turn_id=record.turn_id,
