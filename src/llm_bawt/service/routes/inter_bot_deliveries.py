@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ...agent_context import (
@@ -93,11 +93,35 @@ def _target_context_window(config: Any, target_bot: Any) -> int | None:
     return config.get_model_context_window(model_ref) if model_ref else None
 
 
+def _gate_disposition(request: Request | None, body: "DeliveryCreate", sender: str, target: str) -> str:
+    """``hold`` only for a trusted self-model continuation; every send is ``deny``.
+
+    Trust is the signed turn capability (minted server-side, forwarded only by
+    the self_model tool), never a body field: bots_send_message cannot set it.
+    A continuation is the signed bot's own follow-up turn (sender == target).
+    """
+    from ...task_turn_context import (
+        TASK_TURN_CONTEXT_HEADER, TaskTurnContextError, open_task_turn_context,
+    )
+    from ..system_gate_admission import ON_GATE_DENY, ON_GATE_HOLD
+
+    capability = request.headers.get(TASK_TURN_CONTEXT_HEADER) if request is not None else None
+    if not capability or (body.message_kind or "").upper() != "MODEL_SWITCH_CONTINUE":
+        return ON_GATE_DENY
+    try:
+        caller = open_task_turn_context(capability)
+    except TaskTurnContextError:
+        return ON_GATE_DENY
+    own = caller.bot_id.strip().lower() == sender == target
+    return ON_GATE_HOLD if own else ON_GATE_DENY
+
+
 @router.post("/v1/inter-bot-deliveries", tags=["Inter-Bot Deliveries"], status_code=202)
-async def create_delivery(body: DeliveryCreate):
+async def create_delivery(body: DeliveryCreate, request: Request = None):  # type: ignore[assignment]
     """Persist a callback and dispatch it through the target's next idle turn."""
     target = body.target_bot_id.strip().lower()
     sender = body.sender_bot_id.strip().lower() or "unknown"
+    on_gate = _gate_disposition(request, body, sender, target)
     try:
         explicit_author = normalize_author(
             body.author_entity_type,
@@ -231,6 +255,7 @@ async def create_delivery(body: DeliveryCreate):
                 sender_bot_id=sender, project_id=body.project_id, task_id=body.task_id,
                 message_kind=body.message_kind, max_attempts=body.max_attempts,
                 reset_reason=body.reset_reason or automatic_reason, producer="bot",
+                on_gate=on_gate,
             )
         else:
             record, duplicate = dispatcher.store.enqueue(
@@ -240,6 +265,7 @@ async def create_delivery(body: DeliveryCreate):
                 message_kind=body.message_kind, metadata=body.metadata,
                 max_attempts=body.max_attempts, session_policy=policy,
                 reset_reason=body.reset_reason or automatic_reason, producer="bot",
+                on_gate=on_gate,
             )
     except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

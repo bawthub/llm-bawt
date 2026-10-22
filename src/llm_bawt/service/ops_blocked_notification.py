@@ -39,6 +39,8 @@ class OpsBlockedNotifier:
             message=message,
             idempotency_key=f"ops-blocked:{row.id}:{job_id}:{hashlib.sha256(error.encode()).hexdigest()}",
             message_kind="OPS_BLOCKED",
+            # A system receipt for an already-approved job: held, never refused.
+            on_gate="hold",
             metadata={"approval_request_id": row.id, "ops_job_id": job_id},
             payload={
                 "bot_id": row.bot_id, "user": row.user_id,

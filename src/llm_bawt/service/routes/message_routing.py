@@ -6,6 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...request_identity import AdmissionUnavailable
 from ..dependencies import get_service
 from ..message_routing import MessageRouter, RouteConflict, RouteRequest
 
@@ -101,5 +102,7 @@ def route(body: RouteMessage, request: Request):
                                metadata=provenance, actor=actor)
     except RouteConflict as exc:
         raise HTTPException(409, str(exc)) from exc
+    except AdmissionUnavailable as exc:  # includes a system gate's refusal (TASK-1233)
+        raise HTTPException(exc.status_code, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

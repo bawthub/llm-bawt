@@ -311,7 +311,12 @@ class InterBotDeliveryStore:
         assistant_message_id: str | None = None,
         connection: Connection | None = None,
         producer: str = "bot",
+        on_gate: str = "deny",
     ) -> tuple[DeliveryRecord, bool]:
+        """``on_gate``: under a deny gate (freeze) a new ``deny`` row raises
+        ``SystemGateRefused``; ``hold`` rows are admitted and wait at the claim
+        (TASK-1233). A caller passing ``connection`` must let that refusal
+        propagate out of its transaction."""
         if self.engine is None:
             raise RuntimeError("Inter-bot delivery database unavailable")
         if connection is not None and connection.engine is not self.engine:
@@ -347,11 +352,19 @@ class InterBotDeliveryStore:
             # and its durable thread rotation.
             lock_target(conn, target)
             stamped = MaintenanceBarrier(conn, target).stamp_enqueue(metadata)
-            return RequestIdentityResolver(conn).admit(
+            record, duplicate = RequestIdentityResolver(conn).admit(
                 values=values, payload=payload, metadata=json.loads(stamped),
                 producer=producer, explicit_user=user_message_id,
                 explicit_assistant=assistant_message_id,
             )
+            if not duplicate:
+                # After the identity check, so a retried key already accepted
+                # before the gate still gets its receipt. A refusal raises out
+                # of this transaction, so the new row never commits.
+                from .service.system_gate_admission import admit_enqueue
+
+                admit_enqueue(conn, target, on_gate=on_gate)
+            return record, duplicate
 
     def get(self, delivery_id: str) -> DeliveryRecord | None:
         if self.engine is None:

@@ -67,6 +67,9 @@ class RetryPolicy:
     build: Callable[[DeliveryRecord, dict[str, Any]], tuple[str, dict[str, Any]]]
     # Who the child's message is attributed to; None keeps the original author.
     author: AuthorReference | None = None
+    # Under a live system gate: "deny" refuses the retry (an operator click
+    # under freeze); "hold" admits it to wait at the claim (TASK-1233).
+    on_gate: str = "deny"
 
     def key(self, original_id: str) -> str:
         return f"{self.key_prefix}:{original_id}"
@@ -202,6 +205,8 @@ RESTART_RETRY = RetryPolicy(
     }),
     build=_continue,
     author=AuthorReference.bot(SYSTEM_BOT_ID),
+    # The restart that interrupted the original may still hold the gate.
+    on_gate="hold",
 )
 
 
@@ -328,6 +333,7 @@ def _retry(
             session_policy=original.session_policy,
             connection=conn,
             producer=RETRY_PRODUCER,
+            on_gate=policy.on_gate,
         )
 
 

@@ -93,6 +93,12 @@ class PromptDeliveryWorker:
             # claim_next takes target -> schedule row. Match that order before
             # _rows locks the schedule; enqueue joins this same transaction.
             lock_target(session.connection(), snapshot["bot_id"])
+            from .system_gate_admission import schedule_held
+
+            if schedule_held(session.connection(), snapshot["bot_id"]):
+                # A live system gate: a held no-op. The occurrence stays pending
+                # (not an enqueue error) and the next sweep after release admits it.
+                return None
             rows = self._rows(session, run_id)
             if not rows or rows[2].state != "pending":
                 return None
@@ -141,6 +147,9 @@ class PromptDeliveryWorker:
                         "scheduled_for": snapshot["scheduled_for"],
                     }},
                     producer="schedule", connection=session.connection(),
+                    # schedule_held above already waited out any live gate; hold
+                    # keeps this enqueue from re-asking the same question.
+                    on_gate="hold",
                 )
             rows[2].delivery_id = record.id
             transition(session, *rows, "queued", now, evidence=self._evidence(record))

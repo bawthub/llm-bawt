@@ -199,7 +199,10 @@ async def _enqueue_durable(
     retain_history: bool | None,
     reset_reason: str | None,
     reply_mode: str = "async",
+    headers: dict[str, str] | None = None,
 ) -> dict:
+    """``headers`` is for first-party tool code only (the self-model continue
+    forwards its signed turn capability); bots_send_message never sets it."""
     body = {
         "reply_mode": reply_mode,
         "target_bot_id": target_bot_id,
@@ -224,6 +227,7 @@ async def _enqueue_durable(
             response = await client.post(
                 f"{_APP_BASE_URL}/v1/inter-bot-deliveries",
                 json=body,
+                headers=headers,
                 timeout=15.0,
             )
             response.raise_for_status()

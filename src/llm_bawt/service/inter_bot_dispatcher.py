@@ -352,6 +352,7 @@ class InterBotDeliveryDispatcher:
     async def _steer(self, record: DeliveryRecord) -> None:
         from ..inter_bot_reply_channel import delivery_reply_channel_note
         from .routes.chat import ChatSteerRequest, steer_active_turn
+        from .system_gate_admission import SteerGateRefused
 
         claim_token = record.claim_token or ""
         payload = self.store.payload(record.id) or {}
@@ -401,6 +402,20 @@ class InterBotDeliveryDispatcher:
                 )
                 if queued:
                     await self._emit(queued)
+        except SteerGateRefused as refused:
+            # A live system gate refused before any RPC (TASK-1233). Not an
+            # attempt, and the steer target is kept: the claim gate holds the
+            # row until release, then the same target is steered or, if its
+            # run ended meanwhile, the usual fallback applies.
+            queued = self.store.requeue(
+                record.id,
+                claim_token,
+                str(refused.detail),
+                delay_seconds=self.TARGET_BUSY_REQUEUE_SECONDS,
+                refund_attempt=True,
+            )
+            if queued:
+                await self._emit(queued)
         except Exception as exc:
             error = str(getattr(exc, "detail", None) or exc or exc.__class__.__name__)
             current = self.store.get(record.id) or record

@@ -122,10 +122,18 @@ async def _list_endpoints(harness: str) -> list[dict]:
 
 
 async def _enqueue_continue(**kwargs: Any) -> dict:
-    """Queue the follow-up turn through the shared durable-delivery client."""
-    from .inter_bot_tools import _enqueue_durable
+    """Queue the follow-up turn through the shared durable-delivery client.
 
-    return await _enqueue_durable(prefer_steer=False, **kwargs)
+    Forwards this turn's signed capability so the route can recognise a
+    trusted continuation (held, not refused, under a system gate; TASK-1233).
+    """
+    from ..task_turn_context import TASK_TURN_CONTEXT_HEADER
+    from .inter_bot_tools import _enqueue_durable
+    from .task_association import current_task_turn_capability
+
+    capability = current_task_turn_capability()
+    headers = {TASK_TURN_CONTEXT_HEADER: capability} if capability else None
+    return await _enqueue_durable(prefer_steer=False, headers=headers, **kwargs)
 
 
 def _model_summary(profile: dict) -> dict:

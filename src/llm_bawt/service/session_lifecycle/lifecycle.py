@@ -303,7 +303,7 @@ class NewSessionLifecycle:
                 message="/new", payload=payload, connection=conn,
                 idempotency_key=intent.idempotency_key,
                 metadata={"new_session_intent": self._encode(intent)},
-                producer="bot",
+                producer="bot", on_gate="hold",  # scheduled /new waits out a gate
             )
             return record, None
 
@@ -313,7 +313,7 @@ class NewSessionLifecycle:
         project_id: str | None = None, task_id: str | None = None,
         message_kind: str | None = None, max_attempts: int = 5,
         reset_reason: str | None = None, producer: str = "bot",
-        connection=None,
+        connection=None, on_gate: str = "deny",
     ) -> tuple[DeliveryRecord, bool]:
         """Public bot-send and internal callers share one policy admission.
 
@@ -350,7 +350,7 @@ class NewSessionLifecycle:
             payload=payload, project_id=project_id, task_id=task_id,
             message_kind=message_kind, max_attempts=max_attempts,
             reset_reason=reset_reason or intent.reason, producer=producer,
-            connection=connection,
+            connection=connection, on_gate=on_gate,
         )
         if record.metadata.get("new_session_intent") != self._encode(intent):
             raise ValueError("idempotency key belongs to another reset intent")

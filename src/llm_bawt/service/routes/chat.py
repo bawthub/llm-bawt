@@ -147,6 +147,9 @@ async def steer_active_turn(
     inter-bot reply-channel note). It is appended to what the bridge receives
     and never persisted or published: history and the timeline keep
     ``request.message``. The public steer route cannot set it.
+
+    Under a live system gate every steer is refused with ``SteerGateRefused``
+    before any bridge RPC (TASK-1233).
     """
     turn = service._turn_log_store.get_turn(request.turn_id)
     if turn is None:
@@ -171,6 +174,12 @@ async def steer_active_turn(
         turn.ended_at is not None or turn.status not in ("streaming", "pending")
     ) and not steer_request_id:
         raise HTTPException(status_code=409, detail="Turn is no longer active")
+    # A maintenance-time message above is an enqueue and asks the gate there.
+    from ..system_gate_admission import check_steer
+
+    await asyncio.to_thread(
+        check_steer, getattr(service._turn_log_store, "engine", None), bot_id, turn_id=turn.id,
+    )
     if not turn.agent_session_key:
         # A deterministic delivery retry may inspect the original target after it
         # ended. If the run never registered a bridge session, no steer RPC could
@@ -312,7 +321,12 @@ class ChatSteerEscalateRequest(BaseModel):
 
 @router.post("/v1/chat/steer/escalate", tags=["Agent Backends"])
 async def chat_steer_escalate(request: ChatSteerEscalateRequest) -> dict:
-    """Escalate a queued user message, only on its original active run."""
+    """Escalate a queued user message, only on its original active run.
+
+    Escalation interrupts the running tool, so a live system gate refuses it
+    like any steer (TASK-1233). ``/steer/cancel`` only withdraws a queued
+    steer and stays open.
+    """
     service = get_service()
     turn = service._turn_log_store.get_turn(request.turn_id)
     if turn is None:
@@ -321,6 +335,11 @@ async def chat_steer_escalate(request: ChatSteerEscalateRequest) -> dict:
             or turn.bot_id != request.bot_id.strip().lower()
             or (turn.user_id or "").lower() != request.user_id.strip().lower()):
         raise HTTPException(status_code=409, detail="Turn is no longer active or ownership mismatch")
+    from ..system_gate_admission import check_steer
+
+    await asyncio.to_thread(
+        check_steer, getattr(service._turn_log_store, "engine", None), turn.bot_id, turn_id=turn.id,
+    )
     if not turn.agent_session_key or not turn.agent_request_id:
         raise HTTPException(status_code=409, detail="Active bridge run is not ready")
     from ...agent_backends.agent_bridge import get_agent_subscriber
