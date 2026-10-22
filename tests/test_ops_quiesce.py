@@ -116,6 +116,32 @@ def test_store_rejects_bad_settings_and_round_trips_good_ones():
         True, 90, '{"bots": ["byte"]}')
 
 
+def test_patch_route_edits_quiesce_settings_as_a_revision(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from llm_bawt.service.routes import ops as routes
+    store = _store()
+    store.create_operation(_op_data(executor_kind="docker"))
+    monkeypatch.setattr(routes, "_store", lambda: store)
+    app = FastAPI()
+    app.include_router(routes.router)
+    url = "/v1/ops/operations/test.restart-thing"
+    scope = '{"backends": ["claude-code"]}'
+    with TestClient(app) as client:
+        edited = client.patch(url, json={"quiesce_timeout_seconds": 120, "quiesce_scope_json": scope,
+                                         "actor": "operator"})
+        assert edited.status_code == 200, edited.text
+        body = edited.json()
+        assert (body["quiesce_enabled"], body["quiesce_timeout_seconds"], body["quiesce_scope_json"]) == (
+            False, 120, scope)
+        revisions = client.get(f"{url}/revisions").json()
+        assert revisions["total"] == 2
+        assert client.patch(url, json={"quiesce_timeout_seconds": 0}).status_code == 400
+        assert client.patch(url, json={"quiesce_scope_json": None}).json()["quiesce_scope_json"] is None
+        assert client.get(url).json()["quiesce_timeout_seconds"] == 120
+
+
 # -- snapshot binding ----------------------------------------------------------
 
 def test_ordinary_snapshot_has_no_quiesce_entry():

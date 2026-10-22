@@ -62,6 +62,10 @@ class OperationUpsert(BaseModel):
     risk_level: str | None = None
     category: str | None = None
     approval_prompt_prefix: str | None = None
+    # TASK-1233 quiesce settings; the store validates them with the whole row.
+    quiesce_enabled: bool | None = None
+    quiesce_timeout_seconds: int | None = None
+    quiesce_scope_json: str | None = None
 
     actor: str | None = Field(default=None, max_length=128)
 
