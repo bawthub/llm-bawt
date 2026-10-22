@@ -10,8 +10,9 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote_plus
 
 from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, Text, text
@@ -111,6 +112,32 @@ class BotProfile(SQLModel, table=True):
     )
 
 
+@dataclass(frozen=True)
+class ProfileRuntime:
+    """The two profile fields that pick where a bot's turns run."""
+
+    bot_type: str | None
+    agent_backend: str | None
+
+    @classmethod
+    def of(cls, row: BotProfile) -> "ProfileRuntime":
+        return cls(row.bot_type, row.agent_backend)
+
+
+class ProfileWriteGuard(Protocol):
+    """Service-side admission hook for :meth:`BotProfileStore.upsert` (TASK-1233 S3).
+
+    ``lock`` runs first in the write's transaction, before the row is read;
+    ``check`` runs on the flushed row before commit (``previous`` is None for
+    a create) and refuses by raising, which rolls the write back. The store
+    stays free of service imports; the guard owns the policy.
+    """
+
+    def lock(self, conn: Any, slug: str) -> None: ...
+
+    def check(self, conn: Any, previous: ProfileRuntime | None, row: BotProfile) -> None: ...
+
+
 class BotProfileStore:
     """DB access for bot personality profiles."""
 
@@ -178,7 +205,10 @@ class BotProfileStore:
         with Session(self.engine) as session:
             return list(session.exec(select(BotProfile).order_by(BotProfile.slug)).all())
 
-    def upsert(self, profile: BotProfile | dict[str, Any]) -> BotProfile:
+    def upsert(self, profile: BotProfile | dict[str, Any], *,
+               guard: ProfileWriteGuard | None = None) -> BotProfile:
+        """Create or update one profile. ``guard`` (see :class:`ProfileWriteGuard`)
+        locks before the row is read and checks the staged row before commit."""
         if self.engine is None:
             raise RuntimeError("Bot profiles DB unavailable")
 
@@ -196,7 +226,10 @@ class BotProfileStore:
 
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
+            if guard is not None:
+                guard.lock(session.connection(), slug)
             row = session.exec(select(BotProfile).where(BotProfile.slug == slug)).first()
+            previous = ProfileRuntime.of(row) if row is not None else None
             payload_agent_backend = payload.get("agent_backend") if "agent_backend" in payload else None
             if isinstance(payload_agent_backend, str):
                 payload_agent_backend = payload_agent_backend.strip().lower() or None
@@ -300,6 +333,9 @@ class BotProfileStore:
                 )
 
             session.add(row)
+            if guard is not None:
+                session.flush()
+                guard.check(session.connection(), previous, row)
             session.commit()
             session.refresh(row)
             return row

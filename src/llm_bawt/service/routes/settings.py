@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
 from ...orphan_partitions import PartitionExecutionHalted
+from ..profile_switch_gate import ProfileSwitchGate
+from ..turn_admission import SystemGateRefused
 from ..runtime_switch_rotation import (
     RUNTIME_SWITCH_SOURCE,
     rotate_active_threads,
@@ -284,7 +286,9 @@ async def _persist_bot_profile(
             )
 
     try:
-        profile = store.upsert(payload)
+        profile = store.upsert(payload, guard=ProfileSwitchGate())
+    except SystemGateRefused as refused:  # a switch onto a held runtime; nothing written
+        raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except Exception as exc:  # surface DB constraint violations as 400s
         msg = _humanize_bot_constraint_error(exc)
         if msg is not None:

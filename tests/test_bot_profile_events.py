@@ -37,7 +37,7 @@ def test_profile_change_publishes_only_after_commit_and_cache_reload(monkeypatch
     lifecycle = []
     profile = SimpleNamespace(slug="al", agent_backend="claude-code")
     store = SimpleNamespace(engine=object(), get=lambda slug: None,
-                            upsert=lambda payload: (lifecycle.append("commit"), profile)[1])
+                            upsert=lambda payload, *, guard: (lifecycle.append("commit"), profile)[1])
     subscriber = SimpleNamespace(publish_global_config_event=AsyncMock(
         side_effect=lambda event: (lifecycle.append(("event", event)), "123-0")[1]
     ))
