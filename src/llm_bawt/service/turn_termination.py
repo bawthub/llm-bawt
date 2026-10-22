@@ -13,6 +13,7 @@ from sqlalchemy import update
 from sqlmodel import Session, select
 
 from .tool_call_store import ToolCallRecord
+from .turn_gates import EXECUTION_EXIT_KEY
 
 
 def interrupt_unresolved_tools(session: Session, turn_id: str, ended_at: datetime) -> None:
@@ -31,7 +32,7 @@ def interrupt_unresolved_tools(session: Session, turn_id: str, ended_at: datetim
 # save_turn's reserved UPDATE). ATTEMPT_KEYS describe a single attempt: they
 # survive late writes within it (update_turn) but never carry into the next.
 AUDIT_KEYS = ("abort_request", "ordinary_request_digest", "user_stop", "recovery", "manual_settle", "attempts")
-ATTEMPT_KEYS = ("abort_cause",)
+ATTEMPT_KEYS = ("abort_cause", EXECUTION_EXIT_KEY)
 # TASK-1234 Fix 2: how many earlier attempts ``attempts`` keeps (newest last).
 ATTEMPT_HISTORY_LIMIT = 10
 

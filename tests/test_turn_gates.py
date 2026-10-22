@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 
@@ -20,9 +21,11 @@ from llm_bawt.service.turn_gates import (
     GateScope,
     GateScopeError,
     GateSpec,
+    execution_exit_drains,
     gate_blocks,
     gate_is_live,
     has_execution_evidence,
+    initial_control_state,
 )
 from tests.test_nonstream_turn_execution import _service
 
@@ -77,6 +80,46 @@ def test_actor_kinds_are_a_closed_set_with_no_control():
 def test_execution_evidence_is_the_bound_request_id_only():
     assert has_execution_evidence({"agent_request_id": "req-1"})
     assert not has_execution_evidence({"agent_request_id": None, "agent_session_key": "s"})
+
+
+_EXIT = {"backend": "claude-code", "request_id": "req-1", "boot_id": "b", "source": "a",
+         "exited": True, "at": "2026-10-22T15:00:00+00:00"}
+
+
+@pytest.mark.parametrize(("record", "request_id", "backend", "expected"), [
+    (_EXIT, "req-1", "claude-code", (True, "execution_exit:a")),
+    ({**_EXIT, "source": "c"}, "req-1", None, (True, "execution_exit:c")),  # member without a backend
+    (_EXIT, "req-1", "Claude-Code", (True, "execution_exit:a")),
+    (_EXIT, None, "claude-code", (False, "no_request_id")),
+    ({**_EXIT, "request_id": None}, None, None, (False, "no_request_id")),  # null never matches null
+    (None, "req-1", "claude-code", (False, "no_execution_exit")),
+    ("exited", "req-1", "claude-code", (False, "no_execution_exit")),
+    (_EXIT, "req-2", "claude-code", (False, "request_mismatch")),
+    (_EXIT, "req-1", "codex", (False, "backend_mismatch")),
+    ({**_EXIT, "source": "d"}, "req-1", "claude-code", (False, "unknown_exit_source")),
+    ({**_EXIT, "exited": False}, "req-1", "claude-code", (False, "exit_unconfirmed")),
+    ({**_EXIT, "exited": None}, "req-1", "claude-code", (False, "exit_unconfirmed")),
+    ({**_EXIT, "exited": "true"}, "req-1", "claude-code", (False, "exit_unconfirmed")),
+])
+def test_execution_exit_drains_only_on_a_confirmed_exit_of_this_request(record, request_id, backend, expected):
+    assert execution_exit_drains(record, request_id=request_id, backend=backend) == expected
+
+
+def test_execution_exit_survives_late_turn_writes_and_drops_on_rearm():
+    """update_turn rewrites request_json through request_payload_with_audit: a
+    stamped exit must survive that, and a re-arm (new attempt) must drop it."""
+    from llm_bawt.service.turn_termination import request_payload_with_audit
+
+    previous = json.dumps({"messages": [], "execution_exit": _EXIT})
+    assert json.loads(request_payload_with_audit(previous, {"messages": ["late"]}))["execution_exit"] == _EXIT
+    assert "execution_exit" not in json.loads(request_payload_with_audit(previous, {"messages": []}, rearm=True))
+
+
+def test_only_a_job_gate_steers_and_never_a_revoked_member():
+    assert initial_control_state("job", "running") == "pending"
+    assert initial_control_state("job", "accepted") == "pending"
+    assert initial_control_state("job", "revoked_unstarted") == "not_needed"
+    assert initial_control_state("operator", "running") == "not_needed"
 
 
 @pytest.mark.parametrize(("mode", "code", "status"), [("hold", "system_held", 409),

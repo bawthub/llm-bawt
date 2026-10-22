@@ -40,7 +40,6 @@ from ..inter_bot_delivery import RESERVATION_KEPT_RESET_STATUSES, InterBotDelive
 from ..request_identity import AdmissionUnavailable as IdentityAdmissionUnavailable
 from .turn_gates import (
     ACCEPTED,
-    OWNER_JOB,
     REVOKED_UNSTARTED,
     RUNNING,
     GateActor,
@@ -48,8 +47,10 @@ from .turn_gates import (
     GateMember,
     GateSpec,
     bots_in_scope,
+    carry_forward,
     gate_blocks,
     has_execution_evidence,
+    initial_control_state,
     insert_gate,
     insert_member,
 )
@@ -631,7 +632,7 @@ _OPEN_ROWS = (
 )
 
 
-def activate_hold(conn, spec: GateSpec) -> ActivatedGate:
+def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> ActivatedGate:
     """Open a gate and capture its roster in the caller's transaction (TASK-1233 B2/B4).
 
     1. ``lock_target`` every in-scope agent bot, in sorted bot_id order.
@@ -652,9 +653,20 @@ def activate_hold(conn, spec: GateSpec) -> ActivatedGate:
     also locks in ordinal order, so no cycle forms. Only a job-owned gate's
     members are steered; an operator gate's roster exists for revocation and
     the C1 exemption (``control_state='not_needed'``).
+
+    ``predecessor`` (a rebuild after gate loss) names the same owner's earlier
+    generation: its undrained members are carried into this roster in this
+    transaction (``carry_forward``), so a rebuild is a union, never a drop.
+    Scope governs admission only: carried members are kept regardless of
+    ``spec.scope``, and are not target-locked (their admission isn't gated).
     """
     if conn.dialect.name != "postgresql":
         raise AdmissionUnavailable("system gates require PostgreSQL")
+    if predecessor is not None:
+        prior_owner = conn.execute(sa_text("SELECT owner_id FROM system_gates WHERE id=:id"),
+                                   {"id": predecessor}).scalar_one_or_none()
+        if prior_owner != spec.owner_id:
+            raise ValueError(f"gate {predecessor} is not a generation of owner {spec.owner_id!r}")
     bots = bots_in_scope(conn, spec.scope)
     for bot_id in bots:
         lock_target(conn, bot_id)
@@ -669,6 +681,8 @@ def activate_hold(conn, spec: GateSpec) -> ActivatedGate:
         if member is not None:
             insert_member(conn, member)
             members.append(member)
+    if predecessor is not None:
+        members.extend(carry_forward(conn, predecessor=predecessor, gate=gate))
     return ActivatedGate(gate, tuple(members))
 
 
@@ -724,14 +738,13 @@ def _capture_member(conn, gate: GateBlock, spec: GateSpec, bot_id: str, row) -> 
         producer["claim"] = conn.execute(sa_text(
             "SELECT claim_token FROM inter_bot_deliveries WHERE id=:id"
         ), {"id": delivery_id}).scalar_one_or_none()
-    steered = spec.owner_kind == OWNER_JOB and disposition != REVOKED_UNSTARTED
     return GateMember(
         gate_id=gate.id, bot_id=bot_id, turn_id=row["id"], turn_status=status,
         disposition=disposition, backend=row["agent_backend"],
         agent_session_key=row["agent_session_key"], agent_request_id=row["agent_request_id"],
         producer_kind=producer["kind"], producer_id=producer.get("id"),
         producer_claim=producer.get("claim"),
-        control_state="pending" if steered else "not_needed",
+        control_state=initial_control_state(spec.owner_kind, disposition),
     )
 
 

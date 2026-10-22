@@ -30,7 +30,9 @@ from llm_bawt.service.turn_gates import (
     GateSpec,
     extend_gate,
     gate_blocks,
+    gate_drain_status,
     gate_is_live,
+    member_drained,
     release_gates,
 )
 from tests.pg_isolation import isolated_pg_store
@@ -127,6 +129,19 @@ def _save(store, bot, *, turn_id=None, admission=None, claim=None):
         request_payload=payload, response_text="", tool_calls=None, admission_claim=claim,
     )
     return turn_id
+
+
+def _exit(store, turn_id, *, ended=False, **record):
+    """Stamp a turn's execution_exit (the writer's top-level ATTEMPT_KEY); optionally end the row."""
+    with store.engine.begin() as conn:
+        payload = json.loads(conn.execute(sa_text("SELECT request_json FROM turn_logs WHERE id=:id"),
+                                          {"id": turn_id}).scalar_one() or "{}")
+        if record:
+            payload["execution_exit"] = {"backend": None, "boot_id": "boot-1", "source": "a",
+                                         "at": "2026-10-22T15:00:00+00:00", **record}
+        conn.execute(sa_text(
+            "UPDATE turn_logs SET request_json=:json, ended_at=CASE WHEN :ended THEN now() END WHERE id=:id"
+        ), {"json": json.dumps(payload), "ended": ended, "id": turn_id})
 
 
 def _members(store, gate_id):
@@ -515,6 +530,116 @@ def test_b4_held_approval_refunds_and_reclaims_after_thaw(gated):
     finally:
         with store.engine.begin() as conn:
             conn.execute(sa_text("DELETE FROM tool_approval_requests WHERE id=:id"), {"id": request_id})
+
+
+# ---------------------------------------------------------------------------
+# B1 drain status and the gate-loss rebuild (a union, never a drop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_drain_status_reads_execution_exit_for_the_pinned_request(gated):
+    store, bot = gated.store, gated.bot()
+    _, claimed = _claimed_delivery(gated, bot)  # revoked at activation
+    exited = _open(store, bot, request_id="req-exited")
+    unconfirmed = _open(store, bot, request_id="req-unconfirmed")
+    other = _open(store, bot, request_id="req-other")
+    late = _open(store, bot)  # request bound only after capture
+    bare = _open(store, bot)
+    rebound = _open(store, bot, request_id="req-pinned")  # row later bound to another request
+    gate = _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate
+    _exit(store, exited, request_id="req-exited", exited=True)
+    _exit(store, unconfirmed, request_id="req-unconfirmed", exited=False)
+    _exit(store, other, request_id="req-someone-else", exited=True)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET agent_request_id='req-late' WHERE id=:id"), {"id": late})
+    _exit(store, late, request_id="req-late", exited=True, source="b")
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET agent_request_id='req-new' WHERE id=:id"), {"id": rebound})
+    _exit(store, rebound, request_id="req-new", exited=True)  # the pinned request decides
+
+    with store.engine.connect() as conn:
+        status = {s.turn_id: (s.drained, s.reason) for s in gate_drain_status(conn, gate.id)}
+        assert member_drained(conn, gate.id, exited).reason == "execution_exit:a"
+        assert member_drained(conn, gate.id, "turn-not-a-member") is None
+    assert status == {
+        claimed.turn_id: (True, "revoked_unstarted"),
+        exited: (True, "execution_exit:a"),
+        unconfirmed: (False, "exit_unconfirmed"),
+        other: (False, "request_mismatch"),
+        late: (True, "execution_exit:b"),
+        bare: (False, "no_request_id"),
+        rebound: (False, "request_mismatch"),
+    }
+
+
+@pytest.mark.integration
+def test_rebuild_carries_an_ended_member_with_a_live_run_and_drops_a_drained_one(gated):
+    store, bot = gated.store, gated.bot()
+    owner_id = gated.owner()
+    spec = _spec(owner_id, GateScope.for_bots(bot))
+    running = _open(store, bot, request_id="req-running")
+    live_run = _open(store, bot, request_id="req-live")  # row will end, run not confirmed exited
+    exited = _open(store, bot, request_id="req-exited")
+    accepted = _open(store, bot, "reserved", request_id="req-accepted")  # accepted, then ends
+    first = _activate(store, spec).gate
+    assert _members(store, first.id)[accepted]["disposition"] == "accepted"
+    with store.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE gate_members SET ack_status='stopping', ack_note=turn_id, acked_at=now()"
+            " WHERE gate_id=:g AND turn_id IN (:a, :b)"
+        ), {"g": first.id, "a": running, "b": live_run})
+        conn.execute(sa_text("UPDATE gate_members SET control_state='steered' WHERE gate_id=:g"),
+                     {"g": first.id})
+    _exit(store, live_run, ended=True, request_id="req-live", exited=False)  # abort_unconfirmed
+    _exit(store, exited, ended=True, request_id="req-exited", exited=True)
+    _exit(store, accepted, ended=True)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET status='error' WHERE id=:id"), {"id": accepted})
+    with store.engine.begin() as conn:  # gate loss
+        release_gates(conn, owner_id=owner_id, gate_id=first.id)
+
+    with store.engine.begin() as conn:
+        rebuilt = activate_hold(conn, spec, predecessor=first.id)
+    members = _members(store, rebuilt.gate.id)
+    assert set(members) == {running, live_run, accepted}  # the drained member is not carried
+    assert {m.turn_id for m in rebuilt.members} == {running, live_run, accepted}
+    assert members[live_run]["agent_request_id"] == "req-live"  # carried with its identity
+    # Carried rows are exit-tracked only: an ended "accepted" row loses the C1 exemption.
+    assert {members[t]["disposition"] for t in (live_run, accepted)} == {"running"}
+    assert members[accepted]["turn_status"] == "error"  # the row's current status, not the capture's
+    assert _blocks(store, bot, turn_id=accepted) is not None
+    for turn_id in (running, live_run):  # acks survive (fresh capture or carry); control restarts
+        assert (members[turn_id]["ack_status"], members[turn_id]["ack_note"]) == ("stopping", turn_id)
+        assert members[turn_id]["control_state"] == "pending"
+
+
+@pytest.mark.integration
+def test_rebuild_carries_a_member_whose_bot_left_the_scope(gated):
+    """The roster is pinned at activation (r2 S3): a bot outside the rebuilt
+    scope still has an undrained run, so the union keeps it."""
+    store = gated.store
+    kept_bot, left_bot = gated.bot(), gated.bot()
+    owner_id = gated.owner()
+    live = _open(store, left_bot, request_id="req-left")
+    first = _activate(store, _spec(owner_id, GateScope.for_bots(kept_bot, left_bot))).gate
+    _exit(store, live, ended=True, request_id="req-left", exited=False)
+    with store.engine.begin() as conn:
+        release_gates(conn, owner_id=owner_id, gate_id=first.id)
+        rebuilt = activate_hold(conn, _spec(owner_id, GateScope.for_bots(kept_bot)), predecessor=first.id)
+    member = _members(store, rebuilt.gate.id)[live]
+    assert (member["bot_id"], member["disposition"], member["control_state"]) == (left_bot, "running", "pending")
+    assert _blocks(store, left_bot) is None  # scope governs admission: the bot is admitted
+    assert _blocks(store, kept_bot) is not None
+
+
+@pytest.mark.integration
+def test_rebuild_refuses_another_owners_generation(gated):
+    store, bot = gated.store, gated.bot()
+    theirs = _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate
+    with store.engine.begin() as conn:
+        with pytest.raises(ValueError):
+            activate_hold(conn, _spec(gated.owner(), GateScope.for_bots(bot)), predecessor=theirs.id)
 
 
 # ---------------------------------------------------------------------------

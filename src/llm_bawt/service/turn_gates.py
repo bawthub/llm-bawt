@@ -24,7 +24,7 @@ them) never are. Gates are PostgreSQL-only, like the lock that linearizes them.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -357,6 +357,82 @@ def has_execution_evidence(turn: Mapping[str, Any]) -> bool:
     return bool(turn.get("agent_request_id"))
 
 
+# B1: the execution_exit record, a top-level per-attempt key of a turn's
+# request_json (turn_termination.ATTEMPT_KEYS): late writes keep it, a re-arm drops it.
+EXECUTION_EXIT_KEY = "execution_exit"
+EXIT_SOURCES = frozenset({"a", "b", "c"})
+
+
+@dataclass(frozen=True)
+class DrainStatus:
+    """Is one roster member drained? ``reason`` names the evidence or the blocker."""
+
+    member_id: int
+    turn_id: str
+    drained: bool
+    reason: str
+
+
+def execution_exit_drains(record: Any, *, request_id: str | None, backend: str | None) -> tuple[bool, str]:
+    """The one B1 drain rule for an ``execution_exit`` record.
+
+    Drained only on ``exited is True`` from a known source, for exactly this
+    request id (a null id never matches) and, when the member has one, its
+    backend. Everything else is a named blocker, never a guess.
+    """
+    if not request_id:
+        return False, "no_request_id"
+    if not isinstance(record, Mapping):
+        return False, "no_execution_exit"
+    if record.get("request_id") != request_id:
+        return False, "request_mismatch"
+    if backend and str(record.get("backend") or "").lower() != backend.lower():
+        return False, "backend_mismatch"
+    if record.get("source") not in EXIT_SOURCES:
+        return False, "unknown_exit_source"
+    if record.get("exited") is not True:
+        return False, "exit_unconfirmed"
+    return True, f"execution_exit:{record['source']}"
+
+
+def _drain_status(row: Mapping[str, Any]) -> DrainStatus:
+    from .turn_termination import turn_payload  # keeps this module's import closure DB-only
+
+    if row["disposition"] == REVOKED_UNSTARTED:
+        drained, reason = True, REVOKED_UNSTARTED
+    elif row["turn_present"] is None:
+        drained, reason = False, "turn_missing"
+    else:
+        drained, reason = execution_exit_drains(
+            turn_payload(row["request_json"]).get(EXECUTION_EXIT_KEY),
+            # The roster pins the request; one bound after capture is the same attempt.
+            request_id=row["agent_request_id"] or row["turn_request_id"],
+            backend=row["backend"],
+        )
+    return DrainStatus(int(row["id"]), row["turn_id"], drained, reason)
+
+
+_DRAIN_ROWS = """
+    SELECT m.id, m.turn_id, m.disposition, m.backend, m.agent_request_id,
+           t.id AS turn_present, t.agent_request_id AS turn_request_id, t.request_json
+    FROM gate_members m LEFT JOIN turn_logs t ON t.id = m.turn_id
+    WHERE m.gate_id = :gate {extra} ORDER BY m.id
+"""
+
+
+def gate_drain_status(conn, gate_id: int) -> list[DrainStatus]:
+    """Every member of generation ``gate_id`` with its drain verdict, in one query."""
+    rows = conn.execute(sa_text(_DRAIN_ROWS.format(extra="")), {"gate": gate_id}).mappings().all()
+    return [_drain_status(row) for row in rows]
+
+
+def member_drained(conn, gate_id: int, turn_id: str) -> DrainStatus | None:
+    """One member's drain verdict; None when ``turn_id`` is not a member of ``gate_id``."""
+    row = conn.execute(sa_text(_DRAIN_ROWS.format(extra="AND m.turn_id = :turn")),
+                       {"gate": gate_id, "turn": turn_id}).mappings().first()
+    return _drain_status(row) if row is not None else None
+
+
 def bots_in_scope(conn, scope: GateScope) -> list[str]:
     """Every agent bot the scope covers right now, in lock order (sorted)."""
     rows = conn.execute(sa_text("SELECT slug, bot_type, agent_backend FROM bot_profiles")).mappings().all()
@@ -405,15 +481,62 @@ class GateMember:
             raise ValueError(f"unknown control state {self.control_state!r}")
 
 
-def insert_member(conn, member: GateMember) -> None:
+def initial_control_state(owner_kind: str, disposition: str) -> str:
+    """Only a job-owned gate steers its members, and never a revoked one (nothing runs)."""
+    return "pending" if owner_kind == OWNER_JOB and disposition != REVOKED_UNSTARTED else "not_needed"
+
+
+_MEMBER_FIELDS = tuple(f.name for f in fields(GateMember))
+_MEMBER_COLUMNS = ", ".join(_MEMBER_FIELDS)
+
+
+def insert_member(conn, member: GateMember, *, skip_existing: bool = False) -> bool:
+    """Write one roster row. ``skip_existing`` (carry-forward only) yields to a fresh row."""
+    conflict = " ON CONFLICT (gate_id, turn_id) DO NOTHING" if skip_existing else ""
+    return bool(conn.execute(sa_text(
+        f"INSERT INTO gate_members ({_MEMBER_COLUMNS})"
+        f" VALUES ({', '.join(':' + name for name in _MEMBER_FIELDS)}){conflict}"
+    ), vars(member)).rowcount)
+
+
+def carry_forward(conn, *, predecessor: int, gate: GateBlock) -> list[GateMember]:
+    """Carry ``predecessor``'s undrained members into ``gate`` (fresh roster already written).
+
+    A fresh capture sees only open rows, but a member whose row ended without
+    a confirmed exit (B1) may still be running; dropping it on a rebuild would
+    let the action kill it. It is carried as ``running``, exit-tracked only.
+    Scope governs admission only (``gate_blocks``); the roster governs drain.
+    Carried members are kept regardless of current scope (r2 S3): a bot that
+    left the scope is admitted again, but its old run still sits on the held
+    backend and must drain. Over-waiting is bounded by the quiesce timeout. A turn the fresh capture already has keeps the
+    fresh row (UNIQUE(gate_id, turn_id)); acknowledgements carry onto it either
+    way, so a rebuild never erases a bot's ack. Runs in the caller's transaction.
+    """
+    undrained = [status.member_id for status in gate_drain_status(conn, predecessor) if not status.drained]
+    rows = conn.execute(sa_text(
+        f"SELECT {', '.join('m.' + name for name in _MEMBER_FIELDS)}, t.status AS current_status"
+        " FROM gate_members m LEFT JOIN turn_logs t ON t.id = m.turn_id"
+        " WHERE m.gate_id = :old AND m.id = ANY(:ids) ORDER BY m.id"
+    ), {"old": predecessor, "ids": undrained}).mappings().all() if undrained else []
+    carried: list[GateMember] = []
+    for row in rows:
+        # Never ``accepted``: its row is no longer an open reservation, and the
+        # C1 re-attach exemption must not let a re-armed retry start under hold.
+        member = GateMember(**{**{name: row[name] for name in _MEMBER_FIELDS}, "gate_id": gate.id,
+                               "turn_status": row["current_status"] or row["turn_status"],
+                               "disposition": RUNNING,
+                               "control_state": initial_control_state(gate.owner_kind, RUNNING)})
+        if insert_member(conn, member, skip_existing=True):
+            carried.append(member)
+    # One ack carry for the whole new roster, fresh rows and carried rows alike.
     conn.execute(sa_text("""
-        INSERT INTO gate_members (gate_id, bot_id, turn_id, turn_status, disposition, backend,
-            agent_session_key, agent_request_id, producer_kind, producer_id, producer_claim,
-            control_state)
-        VALUES (:gate_id, :bot_id, :turn_id, :turn_status, :disposition, :backend,
-            :agent_session_key, :agent_request_id, :producer_kind, :producer_id, :producer_claim,
-            :control_state)
-    """), vars(member))
+        UPDATE gate_members AS fresh
+        SET ack_status = prior.ack_status, ack_note = prior.ack_note, acked_at = prior.acked_at
+        FROM gate_members AS prior
+        WHERE fresh.gate_id = :new AND prior.gate_id = :old AND prior.turn_id = fresh.turn_id
+          AND prior.ack_status IS NOT NULL
+    """), {"new": gate.id, "old": predecessor})
+    return carried
 
 
 __all__ = [
@@ -421,6 +544,9 @@ __all__ = [
     "ACTOR_KINDS",
     "DENY",
     "DISPOSITIONS",
+    "DrainStatus",
+    "EXECUTION_EXIT_KEY",
+    "EXIT_SOURCES",
     "GateActor",
     "GateBlock",
     "GateMember",
@@ -433,12 +559,17 @@ __all__ = [
     "REVOKED_UNSTARTED",
     "RUNNING",
     "bots_in_scope",
+    "carry_forward",
     "ensure_gate_schema",
+    "execution_exit_drains",
     "extend_gate",
     "gate_blocks",
+    "gate_drain_status",
     "gate_is_live",
     "has_execution_evidence",
+    "initial_control_state",
     "insert_gate",
     "insert_member",
+    "member_drained",
     "release_gates",
 ]
