@@ -95,11 +95,32 @@ A steer uses stable `steer_delivery_*` RPC and user-message IDs. Redis publishes
 that RPC once and retains its result for seven days, so a timeout/restart replays
 the same acceptance rather than interrupting twice. The early active-turn race
 (`agent_session_key` not registered yet) requeues without consuming the delivery
-attempt budget. A definitive unaccepted result marks that exact target turn as
-rejected: the delivery waits for it to end, may steer a genuinely newer active
-turn, or starts exactly one idle fallback. Once steer acceptance is recorded,
-no error may convert the delivery into a fresh turn; retries only repair message
-persistence through the same cached RPC.
+attempt budget. Once steer acceptance is recorded, no error may convert the
+delivery into a fresh turn; retries only repair message persistence through the
+same cached RPC.
+
+Because the bridge replays a cached result, a definitively rejected RPC id can
+never succeed later. Each delivery therefore steers under a generation
+(TASK-1251): `steer_delivery_<id>` is generation 0 and generation k is
+`steer_delivery_<id>_g<k>`, kept in `metadata_json.steer_generation`. The
+generation advances only in the requeue that records its own definitive
+rejection before acceptance, so a fresh id can never deliver twice; an accepted
+or timed-out steer replays the same id.
+
+- `no_active_run` / `active_run_mismatch` while the target turn is still open
+  (`reserved`, `pending`, `streaming`, not ended) means its run has not
+  registered with the bridge yet. The delivery keeps its target and FIFO place
+  and steers the same turn again under the next generation, backing off 1, 2,
+  4, 8, then 15 s, without consuming attempts. After 20 such generations on
+  one target (`metadata_json.steer_not_ready`) it falls back as below.
+- Any other definitive unaccepted result, or that error against an ended turn,
+  marks that exact target turn as rejected: the delivery waits for it to end,
+  may steer a genuinely newer active turn (under the next generation), or
+  starts exactly one idle fallback.
+
+`steer_active_turn` sends a caller-chosen request id once; re-sending it would
+only re-read the cached result. Composer steers, which pass no id, keep their
+short retry loop unchanged.
 
 Ordinary target turn creation takes the same lock and refuses to pass a reserved
 fallback turn. If a normal turn wins first, the callback stays queued. If it

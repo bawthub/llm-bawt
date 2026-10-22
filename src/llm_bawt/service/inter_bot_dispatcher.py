@@ -21,6 +21,14 @@ from ..inter_bot_delivery import (
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry, retry_original_author
 from ..inter_bot_delivery_user import resolve_delivery_user
 from .inter_bot_dispatcher_recovery import StartupCheck, StartupRecoveryRunner
+from .inter_bot_dispatcher_steer import (
+    APP_RUN_NOT_READY,
+    BRIDGE_RUN_NOT_READY,
+    DEFINITIVE_NOT_ACCEPTED,
+    NOT_READY_BOUND,
+    OPEN_TURN_STATUSES,
+    SteerGeneration,
+)
 from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
 
@@ -347,6 +355,9 @@ class InterBotDeliveryDispatcher:
         payload = self.store.payload(record.id) or {}
         message = str((payload.get("messages") or [{}])[-1].get("content") or record.message)
         user_id = resolve_delivery_user(self.service.config, payload.get("user"))
+        # TASK-1251: the claimed row names the steer RPC this attempt uses.
+        steer = SteerGeneration.of(record)
+        target_turn_id = record.target_turn_id or ""
         heartbeat = asyncio.create_task(
             self._heartbeat(record.id, claim_token),
             name=f"inter-bot-steer-heartbeat:{record.id}",
@@ -355,7 +366,7 @@ class InterBotDeliveryDispatcher:
             response = await steer_active_turn(
                 self.service,
                 ChatSteerRequest(
-                    turn_id=record.target_turn_id or "",
+                    turn_id=target_turn_id,
                     message=message,
                     message_id=record.user_message_id,
                     bot_id=record.target_bot_id,
@@ -364,9 +375,7 @@ class InterBotDeliveryDispatcher:
                     # (TASK-934): queue for the next tool boundary.
                     priority="next",
                 ),
-                steer_request_id=(
-                    f"steer_delivery_{record.id.removeprefix('delivery-')}"
-                ),
+                steer_request_id=steer.request_id,
                 author=record.author,
                 wire_suffix=delivery_reply_channel_note(record),
             )
@@ -394,13 +403,39 @@ class InterBotDeliveryDispatcher:
             error = str(getattr(exc, "detail", None) or exc or exc.__class__.__name__)
             current = self.store.get(record.id) or record
             accepted = current.transport_accepted_at is not None
-            failure_action = self._steer_failure_action(error, accepted=accepted)
+            not_ready_count = steer.not_ready_count_for(target_turn_id)
+            failure_action = self._steer_failure_action(
+                error,
+                accepted=accepted,
+                target_open=(
+                    not accepted and error in BRIDGE_RUN_NOT_READY
+                    and self._steer_target_open(target_turn_id)
+                ),
+                not_ready_count=not_ready_count,
+            )
 
-            if failure_action == "fallback":
-                # The cached deterministic steer RPC proved it did not reach the
-                # old run. Clear that stale target exactly once; the next locked
-                # claim will steer whichever run is current or reserve one idle
-                # fallback turn. The failed steer probe is not a delivery attempt.
+            if failure_action == "wait_ready_next_generation":
+                # TASK-1251: the target turn is still open but its run has not
+                # registered with the bridge yet. Generation k definitively did
+                # not reach a run, so the next claim steers the same target
+                # under a fresh RPC id; retrying k would only re-read its
+                # cached rejection. Not a delivery attempt.
+                queued = self.store.requeue(
+                    record.id,
+                    claim_token,
+                    f"steer target not ready: {error} (generation {steer.generation})",
+                    delay_seconds=SteerGeneration.backoff_seconds(not_ready_count + 1),
+                    refund_attempt=True,
+                    metadata_merge=steer.advance(not_ready_target=target_turn_id),
+                )
+                if queued:
+                    await self._emit(queued)
+            elif failure_action == "fallback":
+                # Steer RPC k proved it did not reach the target's run. Clear
+                # that stale target exactly once; the next locked claim will
+                # steer whichever run is current (under generation k+1, so the
+                # bridge's cached rejection of k is never replayed) or reserve
+                # one idle fallback turn. The failed probe is not an attempt.
                 queued = self.store.requeue(
                     record.id,
                     claim_token,
@@ -408,6 +443,7 @@ class InterBotDeliveryDispatcher:
                     delay_seconds=1,
                     reject_steer_target=True,
                     refund_attempt=True,
+                    metadata_merge=steer.advance(),
                 )
                 if queued:
                     await self._emit(queued)
@@ -430,7 +466,8 @@ class InterBotDeliveryDispatcher:
                     await self._emit(failed)
             else:
                 # Timeouts and accepted-but-unpersisted steers retain the exact
-                # target turn + deterministic RPC ID. Replaying repairs message
+                # target turn + steer generation, so the replay reuses the RPC id
+                # the bridge may already have accepted. Replaying repairs message
                 # persistence without issuing a second interrupt or idle turn.
                 queued = self.store.requeue(
                     record.id,
@@ -680,28 +717,36 @@ class InterBotDeliveryDispatcher:
                 return
 
     @staticmethod
-    def _steer_failure_action(error: str, *, accepted: bool) -> str:
-        """Classify one deterministic steer failure without guessing acceptance.
+    def _steer_failure_action(
+        error: str, *, accepted: bool, target_open: bool = False, not_ready_count: int = 0,
+    ) -> str:
+        """Classify one steer failure without guessing acceptance.
 
         Once transport acceptance is recorded, no failure may convert the
         delivery into a fresh turn; retries must replay the same steer RPC and
-        repair persistence. Before acceptance, a definitive bridge rejection may
-        clear stale steer intent, while missing run metadata only waits.
+        repair persistence. Before acceptance, missing run metadata only waits
+        (no RPC was published). A bridge "no run" rejection while the target
+        turn is still open means its run has not registered yet: steer the same
+        target again under the next generation, up to ``NOT_READY_BOUND``
+        times (TASK-1251). Any other definitive rejection clears stale steer
+        intent.
         """
         if accepted:
             return "retry_same_steer"
-        if error == "Active bridge run is not ready":
+        if error == APP_RUN_NOT_READY:
             return "wait_ready"
-        if error in {
-            "no_active_run",
-            "active_run_mismatch",
-            "maintenance_active",
-            "maintenance_command_requires_turn",
-            "Turn is no longer active",
-            "Turn not found",
-        }:
+        if error in BRIDGE_RUN_NOT_READY and target_open and not_ready_count < NOT_READY_BOUND:
+            return "wait_ready_next_generation"
+        if error in DEFINITIVE_NOT_ACCEPTED:
             return "fallback"
         return "retry_same_steer"
+
+    def _steer_target_open(self, turn_id: str) -> bool:
+        """Whether ``turn_id`` may still register a bridge run (TASK-1251)."""
+        if not turn_id:
+            return False
+        turn = self.service._turn_log_store.get_turn(turn_id)
+        return bool(turn is not None and turn.ended_at is None and turn.status in OPEN_TURN_STATUSES)
 
     async def _await_turn_finalized(self, turn_id: str | None) -> None:
         """Wait (bounded) until the stream worker has finalized ``turn_id``.

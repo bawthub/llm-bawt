@@ -198,8 +198,14 @@ async def steer_active_turn(
         raise HTTPException(status_code=503, detail="Agent bridge unavailable")
 
     result: dict = {"ok": False, "error": "no_active_run"}
+    # The bridge dedupes a steer on its request id and replays the first
+    # result, so re-sending a caller-chosen id only re-reads that result. A
+    # caller that names the id owns its retry (TASK-1251: the durable
+    # dispatcher retries under a new steer generation). Composer steers pass
+    # no id and keep their retry loop unchanged.
+    attempts = 1 if steer_request_id else 8
     try:
-        for attempt in range(8):
+        for attempt in range(attempts):
             result = await subscriber.send_steer(
                 session_key=turn.agent_session_key,
                 message=wire_message,
@@ -212,7 +218,7 @@ async def steer_active_turn(
             )
             if result.get("ok") or result.get("error") != "no_active_run":
                 break
-            if attempt < 7:
+            if attempt < attempts - 1:
                 await asyncio.sleep(0.25)
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
