@@ -87,6 +87,11 @@ def _format_delivery_message(message: str, author: AuthorReference) -> str:
     return message
 
 
+def _is_real_bot(bots: BotManager, bot_id: str | None) -> bool:
+    slug = (bot_id or "").strip().lower()
+    return slug not in ("", "unknown") and bots.get_bot(slug) is not None
+
+
 def _target_context_window(config: Any, target_bot: Any) -> int | None:
     """Resolve context health from the bot's pinned catalog endpoint."""
     model_ref = bot_model_ref(config, target_bot)
@@ -140,7 +145,14 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
     # reset continuity trust its origin, so a caller must never supply one.
     if "new_session_intent" in body.metadata:
         raise HTTPException(status_code=422, detail="new_session_intent is server-owned delivery metadata")
-    target_bot = BotManager(get_service().config).get_bot(target)
+    bots = BotManager(get_service().config)
+    if author.entity_type == "bot" and not _is_real_bot(bots, author.entity_id):
+        # A bot-authored row renders as that bot; "unknown" is not one (TASK-1241).
+        raise HTTPException(
+            status_code=422,
+            detail=f"Bot-authored deliveries need a real sender bot, got {author.entity_id!r}",
+        )
+    target_bot = bots.get_bot(target)
     target_exists = target_bot is not None
     durable_capable = bool(target_bot and durable_agent_backend(target_bot))
     try:

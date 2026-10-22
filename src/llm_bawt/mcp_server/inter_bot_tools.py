@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .inter_bot_send_mode import SendModeError, resolve_send_mode
+from .inter_bot_sender import SenderIdentityError, resolve_sender_bot_id
 from .server import _get_storage, mcp
 from ..task_turn_context import TaskTurnContextError, is_delivery_turn_id
 
@@ -264,7 +265,7 @@ async def _enqueue_durable(
 async def send_message_to_bot(
     target_bot_id: str,
     message: str,
-    sender_bot_id: str = "unknown",
+    sender_bot_id: str = "",
     max_tokens: int | None = None,
     temperature: float = 0.7,
     fire_and_forget: bool | None = None,
@@ -308,7 +309,20 @@ async def send_message_to_bot(
     only for an intentional, distinct follow-up to the waiting sender.
     Results carry ``mode`` and ``dispatched`` so a caller can tell whether the
     target received anything.
+
+    ``sender_bot_id`` is optional: the sender is taken from your signed turn.
+    Passing a different bot id is rejected. Callers without a signed turn must
+    pass their own bot id.
     """
+    try:
+        sender_bot_id = resolve_sender_bot_id(sender_bot_id)
+    except SenderIdentityError as exc:
+        return {
+            "success": False,
+            "dispatched": False,
+            "error": str(exc),
+            "bot_id": target_bot_id,
+        }
     try:
         mode = resolve_send_mode(
             delivery=delivery,
@@ -388,7 +402,7 @@ async def send_message_to_bot(
     key = (idempotency_key or "").strip()
     if key:
         existing = await _compat_hook("_find_delivery_by_key", _find_delivery_by_key)(
-            sender_bot_id.strip().lower() or "unknown",
+            sender_bot_id,
             target_bot_id.strip().lower(),
             key,
         )
@@ -547,12 +561,20 @@ async def agent_context_reset(
 async def agent_context_compact(
     bot_id: str,
     idempotency_key: str,
-    sender_bot_id: str = "unknown",
+    sender_bot_id: str = "",
 ) -> dict:
-    """Queue one durable Claude /compact maintenance turn when the bot is idle."""
+    """Queue one durable Claude /compact maintenance turn when the bot is idle.
+
+    The sender comes from your signed turn; ``sender_bot_id`` is only needed
+    by callers without one and must match it otherwise.
+    """
     key = (idempotency_key or "").strip()
     if not key:
         return {"success": False, "error": "idempotency_key is required"}
+    try:
+        sender_bot_id = resolve_sender_bot_id(sender_bot_id)
+    except SenderIdentityError as exc:
+        return {"success": False, "error": str(exc)}
     health = await agent_context_health(bot_id)
     if not (health.get("capabilities") or {}).get("compact"):
         return {

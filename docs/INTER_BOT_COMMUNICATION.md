@@ -75,6 +75,16 @@ Rows retain sender, target, message/payload, timestamps, attempt count,
 `next_retry_at`, `last_error`, response metadata, optional project/task/kind
 correlation, and context lifecycle fields (`session_policy`, reset status/reason,
 old/new durable session IDs, reset time, overflow recovery count).
+**Sender identity (TASK-1241):** `bots_send_message` and `agent_context_compact`
+take the sender from the caller's signed turn capability (or, for an approved
+replay, the approval's original caller). `sender_bot_id` is optional for those
+callers, and a value that differs from the signed bot is rejected with no side
+effect. Callers with no signed turn must pass their own bot id. The
+`POST /v1/inter-bot-deliveries` route returns 422 for any bot-authored delivery
+whose author is not a real bot, so `unknown` can no longer appear as a bot.
+User-authored producers (BawtHub's repos workspace: author `user`, sender
+`unknown`) are unchanged.
+
 `idempotency_key` is unique within `(sender_bot_id, target_bot_id)`; a duplicate
 submission returns the original row and cannot create another turn or reset.
 Retrying one key with a different session policy is rejected.
