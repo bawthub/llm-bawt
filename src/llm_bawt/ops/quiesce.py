@@ -31,7 +31,14 @@ moves it forward one bounded step at a time:
 
 Any terminal job's gates are released, and their members' pending steers
 cancelled, by :meth:`QuiesceDriver.release_terminal` (reconciler sweep).
-PostgreSQL only.
+
+**Visibility (TASK-1233 (f)).** Each step that changes the job's phase
+records ``quiesce_json.phase = {name, since}`` (DB clock) and logs one INFO
+line: waiting_slot | preflight_blocked | draining | dispatch_pending (all
+drained, dispatch CAS not yet taken) | dispatched | failed | cancelled.
+:func:`cancel_quiesce_job` is the operator cancel before dispatch: same lock
+order as a step, a QUIESCING -> CANCELLED CAS, then every gate generation is
+released. PostgreSQL only.
 """
 from __future__ import annotations
 
@@ -39,6 +46,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta, timezone
 from typing import Any, Callable, Iterable
 
 from sqlalchemy import text
@@ -46,7 +54,8 @@ from sqlalchemy import text
 from ..service.turn_admission import activate_hold
 from ..service.turn_gates import (GateScope, GateSpec, _LIVE, ensure_gate_schema, extend_gate, gate_drain_status,
                                   release_gates)
-from .models import (JOB_DISPATCHING, JOB_FAILED, JOB_QUIESCING, JOB_TERMINAL_STATES)
+from .models import (JOB_CANCELLED, JOB_DISPATCHING, JOB_FAILED, JOB_QUIESCING, JOB_TERMINAL_STATES)
+from .quiesce_prompts import END_TURN_NEW_TURN_KEY, END_TURN_NO_RECEIPT_KEY, resolve
 from .store import slot_cap_reached, slot_holders
 
 logger = logging.getLogger(__name__)
@@ -86,8 +95,8 @@ def cancel_pending_controls(conn, *, gate_ids: Iterable[int]) -> int:
     if not ids:
         return 0
     return conn.execute(text(
-        "UPDATE gate_members SET control_state='cancelled', control_claim_token=NULL,"
-        " control_lease_expires_at=NULL"
+        "UPDATE gate_members SET control_state='cancelled', control_changed_at=now(),"
+        " control_claim_token=NULL, control_lease_expires_at=NULL"
         " WHERE gate_id = ANY(:ids) AND control_state IN ('pending','steering')"
     ), {"ids": ids}).rowcount
 
@@ -140,11 +149,17 @@ def caller_instruction(engine, job_id: str, bot_id: str | None) -> dict[str, Any
     The caller's running turn is in the hold roster like any other member
     (Snark ruling): the job dispatches only once that turn exits. Polling
     ops_job_status in the same turn keeps the turn alive until the quiesce
-    deadline fails the job, so the caller is told to end its turn. Its terminal
-    receipt always arrives as a new turn (TASK-1233 e): an approved job's
-    continuation delivers it, and a direct job carries the receipt callback
-    recorded at creation exactly when its scope covered the caller. ``None``
-    for any other state, any other bot, or a caller the job does not hold.
+    deadline fails the job, so the caller is told to end its turn.
+    ``result_delivery`` says truthfully how it learns the outcome:
+
+    * ``new_turn``: the terminal receipt arrives as a new turn (TASK-1233 e):
+      an approved job's continuation, or a direct job's receipt callback.
+    * ``none``: a direct job whose scope covers a caller that had no session to
+      bind a callback to (Vex r2 N2). Nothing is pushed; it checks
+      ops_job_status in a later turn.
+
+    ``None`` for any other state, any other bot, or a caller the job does not
+    hold. The message is prompt-registry text resolved for ``bot_id``.
     """
     if not bot_id or engine is None or engine.dialect.name != "postgresql":
         return None
@@ -155,22 +170,88 @@ def caller_instruction(engine, job_id: str, bot_id: str | None) -> dict[str, Any
         ), {"id": job_id}).mappings().first()
         if job is None or job["state"] != JOB_QUIESCING or job["caller_bot_id"] != bot_id:
             return None
-        if job["approval_request_id"]:
-            held = scope_covers_bot(conn, json.loads(job["invocation_snapshot_json"]), bot_id)
+        callback = json.loads(job["receipt_callback_json"]) if job["receipt_callback_json"] else {}
+        if not job["approval_request_id"] and callback.get("bot_id") == bot_id:
+            held, delivery = True, "new_turn"
         else:
-            callback = json.loads(job["receipt_callback_json"]) if job["receipt_callback_json"] else {}
-            held = callback.get("bot_id") == bot_id
+            held = scope_covers_bot(conn, json.loads(job["invocation_snapshot_json"]), bot_id)
+            delivery = "new_turn" if job["approval_request_id"] else "none"
     if not held:
         return None
-    return {
-        "action": "end_turn",
-        "held_bot": bot_id,
-        "result_delivery": "new_turn",
-        "message": ("This operation waits for your current turn to exit before it runs. End your turn "
-                    "now and do not poll in this turn: polling keeps the turn alive until "
-                    "quiesce_timeout fails the job with no action. The terminal receipt arrives "
-                    "as a new turn."),
-    }
+    key = END_TURN_NEW_TURN_KEY if delivery == "new_turn" else END_TURN_NO_RECEIPT_KEY
+    return {"action": "end_turn", "held_bot": bot_id, "result_delivery": delivery,
+            "message": resolve(key, bot_id)}
+
+
+def _utc_iso(value) -> str:
+    """UTC ISO text: pooled connections can carry different session TimeZones."""
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _log_phase(job_id: str, slug: str, prior: str | None, name: str, receipt: dict[str, Any],
+               deadline: Any, detail: str | None) -> None:
+    roster = receipt.get("roster") or []
+    generations = receipt.get("generations") or []
+    logger.info("quiesce job=%s op=%s phase %s->%s gate=%s drained=%d/%d deadline=%s%s",
+                job_id, slug, prior or "submitted", name, generations[-1] if generations else None,
+                sum(1 for member in roster if member.get("drained")), len(roster),
+                deadline.isoformat() if deadline is not None else None,
+                f" ({detail})" if detail else "")
+
+
+def set_phase(receipt: dict[str, Any], name: str, *, at: Any, job_id: str, slug: str,
+              deadline: Any, detail: str | None = None) -> None:
+    """Record the driver phase in the job's quiesce receipt, logging a change once."""
+    prior = (receipt.get("phase") or {}).get("name")
+    if prior == name:
+        return
+    receipt["phase"] = {"name": name, "since": _utc_iso(at)}
+    _log_phase(job_id, slug, prior, name, receipt, deadline, detail)
+
+
+CANCEL_OUTCOMES = ("cancelled", "already", "not_cancellable", "missing")
+
+
+def cancel_quiesce_job(engine, job_id: str, *, actor: str, reason: str | None = None) -> tuple[str, str | None]:
+    """Cancel a QUIESCING job before dispatch: ``(outcome, state)``.
+
+    One transaction in the driver's lock order: the operation row FOR UPDATE
+    (so an in-flight step finishes first), then a state CAS QUIESCING ->
+    CANCELLED on the job row (every later driver claim and note matches
+    nothing), then the job's gates are released and pending steers cancelled.
+    A job that already dispatched is ``not_cancellable``: its action may run.
+    ``actor`` is the operator's self-asserted label, recorded as claimed.
+    """
+    if engine is None or engine.dialect.name != "postgresql":
+        raise QuiesceUnavailable("quiesce requires PostgreSQL")
+    claimed = {"actor_claimed": actor, "reason": reason}
+    error = (f"cancelled by operator (claimed actor: {actor}) before dispatch; no action submitted"
+             + (f": {reason}" if reason else ""))
+    with engine.begin() as conn:
+        slug = conn.execute(text("SELECT operation_slug FROM ops_jobs WHERE id=:id"),
+                            {"id": job_id}).scalar()
+        if slug is None:
+            return "missing", None
+        conn.execute(text("SELECT 1 FROM ops_operations WHERE slug=:slug FOR UPDATE"), {"slug": slug})
+        row = conn.execute(text(
+            "UPDATE ops_jobs SET state=:cancelled, error_text=:error, finished_at=now(),"
+            " quiesce_driver_id=NULL, quiesce_driver_lease_expires_at=NULL"
+            " WHERE id=:id AND state=:quiescing"
+            " RETURNING quiesce_json, quiesce_deadline_at, now() AS db_now"
+        ), {"cancelled": JOB_CANCELLED, "error": error, "id": job_id,
+            "quiescing": JOB_QUIESCING}).mappings().first()
+        if row is None:
+            state = conn.execute(text("SELECT state FROM ops_jobs WHERE id=:id"), {"id": job_id}).scalar()
+            return ("already" if state == JOB_CANCELLED else "not_cancellable"), state
+        receipt = json.loads(row["quiesce_json"]) if row["quiesce_json"] else {"generations": []}
+        receipt["outcome"] = "cancelled"
+        receipt["cancelled_by"] = claimed
+        set_phase(receipt, "cancelled", at=row["db_now"], job_id=job_id, slug=slug,
+                  deadline=row["quiesce_deadline_at"], detail=f"claimed actor: {actor}")
+        conn.execute(text("UPDATE ops_jobs SET quiesce_json=:q WHERE id=:id"),
+                     {"q": json.dumps(receipt), "id": job_id})
+        release_job_gates(conn, job_id)
+    return "cancelled", JOB_CANCELLED
 
 
 def _status_row(status: Any) -> dict[str, Any]:
@@ -220,7 +301,8 @@ class QuiesceDriver:
             " WHERE id=:id AND state=:quiescing AND (quiesce_driver_id IS NULL"
             "   OR quiesce_driver_id=:me OR quiesce_driver_lease_expires_at <= now())"
             " RETURNING id, operation_slug, invocation_snapshot_json, quiesce_gate_id,"
-            "   quiesce_json, error_text, submitted_at, now() >= quiesce_deadline_at AS past_deadline"
+            "   quiesce_json, error_text, submitted_at, quiesce_deadline_at, now() AS db_now,"
+            "   now() >= quiesce_deadline_at AS past_deadline"
         ), {"me": self.driver_id, "lease": float(self.lease_seconds), "id": job_id,
             "quiescing": JOB_QUIESCING}).mappings().first()
 
@@ -231,6 +313,13 @@ class QuiesceDriver:
 
     def _receipt(self, job) -> dict[str, Any]:
         return json.loads(job["quiesce_json"]) if job["quiesce_json"] else {"generations": []}
+
+    @staticmethod
+    def _phase(job, receipt: dict[str, Any], name: str, *, deadline: Any = None,
+               detail: str | None = None) -> None:
+        set_phase(receipt, name, at=job["db_now"], job_id=job["id"], slug=job["operation_slug"],
+                  deadline=deadline if deadline is not None else job["quiesce_deadline_at"],
+                  detail=detail)
 
     def _write(self, conn, job_id: str, values: dict[str, Any], *, deadline_from: int | None = None):
         sets = [f"{key}=:{key}" for key in values]
@@ -266,7 +355,9 @@ class QuiesceDriver:
                 return StepResult("opened")
             if self._open_expired(conn, job, json.loads(job["invocation_snapshot_json"])):
                 return self._fail_unopened(conn, job, error)
-            self._write(conn, job["id"], {"error_text": error})
+            receipt = self._receipt(job)
+            self._phase(job, receipt, "preflight_blocked")
+            self._write(conn, job["id"], {"error_text": error, "quiesce_json": json.dumps(receipt)})
             return StepResult("preflight_blocked")
 
     def _open(self, conn, job, snapshot) -> StepResult:
@@ -274,16 +365,22 @@ class QuiesceDriver:
             return self._fail_unopened(conn, job, job["error_text"])
         holders = slot_holders(conn, job["operation_slug"], exclude_job_id=job["id"])
         if slot_cap_reached(holders, snapshot["execution"].get("max_concurrent")):
-            self._write(conn, job["id"], {"error_text": "waiting for a concurrency slot before quiescing"})
+            receipt = self._receipt(job)
+            self._phase(job, receipt, "waiting_slot")
+            self._write(conn, job["id"], {"error_text": "waiting for a concurrency slot before quiescing",
+                                          "quiesce_json": json.dumps(receipt)})
             return StepResult("waiting_slot")
         activated = self.gates.activate(conn, self._spec(job, snapshot), None)
         receipt = self._receipt(job)
         receipt["generations"].append(activated.gate.id)
         receipt["roster"] = [{"turn_id": m.turn_id, "drained": None, "reason": None}
                              for m in activated.members]
+        receipt["observed_at"] = _utc_iso(job["db_now"])
+        timeout = int(snapshot["quiesce"]["timeout_seconds"])
+        self._phase(job, receipt, "draining", deadline=job["db_now"] + timedelta(seconds=timeout))
         self._write(conn, job["id"], {"quiesce_gate_id": activated.gate.id, "error_text": None,
                                       "quiesce_json": json.dumps(receipt)},
-                    deadline_from=int(snapshot["quiesce"]["timeout_seconds"]))
+                    deadline_from=timeout)
         return StepResult("opened")
 
     def _hold(self, conn, job, snapshot) -> StepResult:
@@ -298,11 +395,13 @@ class QuiesceDriver:
             self._write(conn, job["id"], {"quiesce_gate_id": gate_id, "quiesce_json": json.dumps(receipt)})
         statuses = list(self.gates.drain_status(conn, gate_id))
         receipt["roster"] = [_status_row(s) for s in statuses]
+        receipt["observed_at"] = _utc_iso(job["db_now"])
         if all(s.drained for s in statuses):
             return self._dispatch(conn, job, snapshot, gate_id, receipt)
         if job["past_deadline"]:
             return self._fail(conn, job, "quiesce_timeout: held turns did not drain before the deadline",
                               receipt=receipt)
+        self._phase(job, receipt, "draining")
         self._write(conn, job["id"], {"quiesce_json": json.dumps(receipt)})
         return StepResult("holding")
 
@@ -319,10 +418,12 @@ class QuiesceDriver:
             "margin": float(self.margin_seconds), "timeout": float(timeout)}).first()
         if row is None:
             # Renewed above, so only a concurrent release lands here; retry next step.
+            self._phase(job, receipt, "dispatch_pending")
             self._write(conn, job["id"], {"quiesce_json": json.dumps(receipt)})
             return StepResult("cas_retry")
         fence = {"generation": gate_id, "start_not_after": row[0].isoformat()}
         receipt["outcome"] = "drained"
+        self._phase(job, receipt, "dispatched")
         self._write(conn, job["id"], {
             "state": JOB_DISPATCHING, "host_unit_name": f"llm-bawt-ops-{job['id']}",
             "quiesce_fence_json": json.dumps(fence, sort_keys=True),
@@ -334,6 +435,7 @@ class QuiesceDriver:
     def _fail(self, conn, job, error: str, *, receipt=None) -> StepResult:
         receipt = receipt or self._receipt(job)
         receipt["outcome"] = error.split(":", 1)[0] if ":" in error else "failed"
+        self._phase(job, receipt, "failed", detail=receipt["outcome"])
         self._write(conn, job["id"], {"state": JOB_FAILED, "error_text": error,
                                       "quiesce_json": json.dumps(receipt)})
         conn.execute(text("UPDATE ops_jobs SET finished_at=now() WHERE id=:id"), {"id": job["id"]})
@@ -368,6 +470,6 @@ def build_quiesce_driver(engine, *, factory: Callable[..., QuiesceDriver] = Quie
 __all__ = [
     "ACK_STATUSES", "GATE_TTL_SECONDS", "LEASE_SECONDS", "MARGIN_SECONDS", "QuiesceDriver",
     "QuiesceUnavailable", "StepResult", "TurnGates", "build_quiesce_driver",
-    "caller_instruction", "cancel_pending_controls", "record_ack", "release_job_gates",
-    "scope_covers_bot",
+    "caller_instruction", "cancel_pending_controls", "cancel_quiesce_job", "record_ack",
+    "release_job_gates", "scope_covers_bot", "set_phase",
 ]

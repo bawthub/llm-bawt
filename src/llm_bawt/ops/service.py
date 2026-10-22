@@ -17,7 +17,9 @@ from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVe
                       bind_image_invocation, binding_matches_args)
 from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, JOB_QUEUED,
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsOperation)
+from .quiesce import cancel_quiesce_job
 from .quiesce_settings import quiesce_binding
+from .quiesce_status import attach_members
 from .store import IdempotencyConflict, OpsStore
 from .validation import ArgValidationError, canonical_json, validate_args
 
@@ -396,10 +398,23 @@ class OpsService:
                         logger.warning("ops reconcile unavailable for %s: %s", job.id, exc)
                     self.store.touch_reconcile(job.id)
         fresh = self.store.get_job(job_id)
-        result = fresh.to_api(include_output=include_output)
+        result = attach_members(self.store.engine, [fresh.to_api(include_output=include_output)])[0]
         if include_output and result.get("output_tail"):
             result["output_tail"] = result["output_tail"].encode()[-min(output_tail_bytes, 1048576):].decode(errors="replace")
         return result
+
+    def cancel_quiesce_job(self, job_id: str, *, actor: str, reason: str | None = None):
+        """Operator cancel of a QUIESCING job before dispatch (TASK-1233 (f)).
+
+        Returns ``(outcome, job_api)``: outcome is cancelled | already |
+        not_cancellable | missing (job_api None). The cancelled job is terminal,
+        so its receipt goes out on the normal paths (approval continuation, or
+        the app's receipt loop for a direct job with a callback)."""
+        outcome, _state = cancel_quiesce_job(self.store.engine, job_id, actor=actor, reason=reason)
+        if outcome == "missing":
+            return outcome, None
+        job = self.store.get_job(job_id)
+        return outcome, attach_members(self.store.engine, [job.to_api(include_output=False)])[0]
 
     def reconcile_active_jobs(self, *, limit=100, offset=0):
         """Recovery pump for independent reconciler, safe for multiple processes.

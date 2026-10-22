@@ -341,7 +341,7 @@ def test_no_quiesce_approval_is_prepared_for_an_unfenced_worker():
     assert "quiesce" not in service.prepare_invocation("test.plain", {"target": "a"})
 
 
-# -- (e): a direct caller's receipt is pushed by the reconciler ----------------
+# -- (e)/(f) N1: receipts are pushed by the app, which announces them -----------
 
 class _Part:
     def __init__(self, error=None):
@@ -354,20 +354,71 @@ class _Part:
         return 0
 
 
-def test_the_reconciler_tick_sends_receipts_even_when_another_half_fails():
+def test_the_reconciler_tick_admits_even_when_reconcile_fails_and_sends_no_receipts():
     from llm_bawt.ops.reconciler import OpsReconciler
 
-    reconcile, admit, send = _Part(RuntimeError("reconcile down")), _Part(), _Part()
+    reconcile, admit = _Part(RuntimeError("reconcile down")), _Part()
     tick = OpsReconciler(SimpleNamespace(reconcile_active_jobs=reconcile),
-                         admission=SimpleNamespace(admit_due=admit),
-                         receipts=SimpleNamespace(deliver_due=send))
+                         admission=SimpleNamespace(admit_due=admit))
     with pytest.raises(RuntimeError, match="reconcile down"):
         tick.tick()
-    assert (reconcile.calls, admit.calls, send.calls) == (1, 1, 1)
-    tick.receipts = SimpleNamespace(deliver_due=_Part(RuntimeError("delivery down")))
-    reconcile.error = None
-    with pytest.raises(RuntimeError, match="delivery down"):
-        tick.tick()
+    assert (reconcile.calls, admit.calls) == (1, 1)
+    assert not hasattr(tick, "receipts")
+
+
+class _Dispatcher:
+    def __init__(self):
+        self.store, self.calls = SimpleNamespace(engine=object()), []
+
+    def announce_admitted(self, record):
+        self.calls.append(("announce", record.id))
+
+    def wake(self, target):
+        self.calls.append(("wake", target))
+
+
+def test_a_new_receipt_is_announced_and_a_duplicate_only_wakes():
+    from llm_bawt.service.ops_receipt_outbox import announce
+
+    dispatcher = _Dispatcher()
+    hook = announce(dispatcher)
+    hook(SimpleNamespace(id="d1", target_bot_id="byte"), False)
+    hook(SimpleNamespace(id="d1", target_bot_id="byte"), True)
+    assert dispatcher.calls == [("announce", "d1"), ("wake", "byte")]
+
+
+def test_the_receipt_outbox_is_off_without_a_dispatcher_or_a_postgres_ops_store(monkeypatch):
+    import llm_bawt.service.ops_receipt_outbox as outbox
+
+    assert outbox.build_receipt_sender(SimpleNamespace(_inter_bot_dispatcher=None)) is None
+    sqlite = SimpleNamespace(store=SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))))
+    monkeypatch.setattr(outbox, "get_ops_service", lambda _config: sqlite)
+    service = SimpleNamespace(_inter_bot_dispatcher=_Dispatcher(), config=None)
+    assert outbox.build_receipt_sender(service) is None
+    postgres = SimpleNamespace(store=SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))))
+    monkeypatch.setattr(outbox, "get_ops_service", lambda _config: postgres)
+    sender = outbox.build_receipt_sender(service)
+    assert sender.ops is postgres and sender.deliveries is service._inter_bot_dispatcher.store
+    assert sender.on_enqueued is not None
+
+
+def test_the_end_turn_instructions_are_registry_prompts_with_seed_fallbacks(monkeypatch):
+    from llm_bawt import prompt_registry
+    from llm_bawt.ops import quiesce_prompts as qp
+    from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
+
+    for key in (qp.END_TURN_NEW_TURN_KEY, qp.END_TURN_NO_RECEIPT_KEY):
+        assert DEFAULT_PROMPT_DEFINITIONS[key].default_body() == qp.SEEDS[key]
+        seen = []
+        resolved = SimpleNamespace(body="[custom]")
+        monkeypatch.setattr(prompt_registry, "get_prompt_resolver", lambda: SimpleNamespace(
+            resolve=lambda k, **kw: seen.append((k, kw)) or resolved))
+        assert qp.resolve(key, "byte") == "[custom]"
+        assert seen == [(key, {"scope_type": "bot", "scope_id": "byte"})]
+        resolved.body = ""
+        assert qp.resolve(key, "byte") == qp.SEEDS[key]
+    assert "new turn" in qp.DEFAULT_END_TURN_NEW_TURN
+    assert "new turn" not in qp.DEFAULT_END_TURN_NO_RECEIPT
 
 
 def test_the_receipt_prefix_is_a_registry_prompt_with_a_seed_fallback(monkeypatch):

@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ...ops.quiesce_status import attach_members, live_holds
 from ..dependencies import get_ops_service, get_ops_store, get_service
 
 log = logging.getLogger(__name__)
@@ -231,7 +232,8 @@ def list_jobs(operation: str | None = None, state: str | None = None,
     store = _store()
     filters = dict(operation_slug=operation, state=state)
     rows = store.list_jobs(**filters, limit=limit, offset=offset)
-    return {"jobs": [r.to_api(include_output=False) for r in rows],
+    jobs = attach_members(store.engine, [r.to_api(include_output=False) for r in rows])
+    return {"jobs": jobs,
             "total": store.count_jobs(**filters), "limit": limit, "offset": offset}
 
 
@@ -246,6 +248,43 @@ def get_job(job_id: str, output_tail_bytes: int | None = None):
     if result is None:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
     return result
+
+
+class CancelRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    actor: str = Field(..., min_length=1, max_length=128,
+                       description="Operator label; self-asserted, recorded as claimed")
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/v1/ops/jobs/{job_id}/cancel", tags=["Ops"])
+def cancel_job(job_id: str, body: CancelRequest):
+    """Cancel a quiesce job that has not dispatched (TASK-1233 (f)).
+
+    Releases the job's holds and records ``cancelled`` with no action
+    submitted. A job that already dispatched (or is not a quiesce job) is 409
+    ``not_cancellable``: its action may already be running."""
+    from ...ops.quiesce import QuiesceUnavailable
+
+    try:
+        outcome, job = _service().cancel_quiesce_job(job_id, actor=body.actor, reason=body.reason)
+    except QuiesceUnavailable as exc:
+        raise HTTPException(status_code=503, detail={"code": "quiesce_unavailable", "message": str(exc)}) from exc
+    if outcome == "missing":
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    if outcome == "not_cancellable":
+        raise HTTPException(status_code=409, detail={
+            "code": "not_cancellable", "state": job["state"],
+            "message": "only a quiescing job that has not dispatched can be cancelled"})
+    if outcome == "already":
+        return {"job": job, "cancelled": False, "already": True}
+    return {"job": job, "cancelled": True}
+
+
+@router.get("/v1/ops/holds", tags=["Ops"])
+def list_holds():
+    """Every live hold/deny gate. ``job`` is null for operator-owned gates."""
+    return {"holds": live_holds(_store().engine)}
 
 
 # ---------------------------------------------------------------------------

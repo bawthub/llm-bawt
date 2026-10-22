@@ -116,9 +116,21 @@ def load_inter_bot_restart_retry_continue() -> str:
 
 
 def load_ops_quiesce_receipt() -> str:
-    from .ops.receipt_callback import DEFAULT_QUIESCE_RECEIPT
+    from .ops.quiesce_prompts import DEFAULT_RECEIPT
 
-    return DEFAULT_QUIESCE_RECEIPT
+    return DEFAULT_RECEIPT
+
+
+def load_ops_quiesce_end_turn_new_turn() -> str:
+    from .ops.quiesce_prompts import DEFAULT_END_TURN_NEW_TURN
+
+    return DEFAULT_END_TURN_NEW_TURN
+
+
+def load_ops_quiesce_end_turn_no_receipt() -> str:
+    from .ops.quiesce_prompts import DEFAULT_END_TURN_NO_RECEIPT
+
+    return DEFAULT_END_TURN_NO_RECEIPT
 
 
 def load_media_prompt_expansion_video() -> str:

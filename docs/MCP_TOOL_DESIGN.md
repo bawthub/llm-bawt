@@ -125,13 +125,21 @@ caps updated. No existing warnings were removed.
 
 The `ops_run` and `ops_job_status` results also carry `caller_instruction`:
 `null`, or, while a quiescing job holds the calling bot's own scope,
-`{action: "end_turn", held_bot, result_delivery: "new_turn", message}`. The
-caller's running turn is in the hold roster, so polling in the same turn would
-keep the job held until `quiesce_timeout`. The terminal receipt always arrives
-as a new turn: an approved job's continuation delivers it, and a direct job
-pushes it through its receipt callback (`docs/OPERATIONS_RUNNER.md` § Quiesce
-receipt callback). This is a result field only; tool descriptions and schemas
-are unchanged.
+`{action: "end_turn", held_bot, result_delivery, message}`. The caller's
+running turn is in the hold roster, so polling in the same turn would keep the
+job held until `quiesce_timeout`. `result_delivery` says truthfully how the
+caller learns the outcome:
+
+- `new_turn`: the terminal receipt arrives as a new turn. An approved job's
+  continuation delivers it, and a direct job pushes it through its receipt
+  callback (`docs/OPERATIONS_RUNNER.md` § Quiesce receipt callback).
+- `none` (TASK-1233 (f)): a direct job holds the caller, but the caller's turn
+  had no session to bind a callback to. Nothing is pushed; the message tells it
+  to call `ops_job_status` with the job id in a later turn.
+
+`message` is prompt-registry text resolved for the caller's bot
+(`ops.quiesce_end_turn.new_turn`, `ops.quiesce_end_turn.no_receipt`). This is
+a result field only; tool descriptions and schemas are unchanged.
 
 ## Provider loading caveat
 

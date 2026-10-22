@@ -237,6 +237,12 @@ def _bootstrap(conn) -> None:
     conn.execute(sa_text("""
         CREATE INDEX IF NOT EXISTS ix_gate_members_turn ON gate_members (turn_id)
     """))
+    # TASK-1233 (f): when control_state last changed. Every UPDATE that changes
+    # control_state sets it in the same statement (no trigger). Nullable so the
+    # migration never stamps pre-existing rows with its own time; readers use
+    # COALESCE(control_changed_at, created_at).
+    conn.execute(sa_text("ALTER TABLE gate_members ADD COLUMN IF NOT EXISTS control_changed_at TIMESTAMPTZ"))
+    conn.execute(sa_text("ALTER TABLE gate_members ALTER COLUMN control_changed_at SET DEFAULT now()"))
 
 
 def _is_postgres(conn) -> bool:

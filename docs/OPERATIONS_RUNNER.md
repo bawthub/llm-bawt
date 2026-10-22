@@ -97,8 +97,11 @@ continuation. A direct `ops_run` job records `receipt_callback_json`
 creation, exactly when the scope covers the caller and the turn has a session.
 Out-of-scope callers and approved jobs record none.
 
-The ops reconciler's `QuiesceReceiptSender` (`ops/receipt_callback.py`) runs
-each tick. For every terminal job with a callback and no
+The app's receipt loop (`service/ops_receipt_outbox.py`, started in the app
+lifespan, 2 s idle) runs `QuiesceReceiptSender` (`ops/receipt_callback.py`).
+It runs in the app, not the ops reconciler, because the app owns the delivery
+dispatcher: each new receipt row is announced at once (QUEUED published, the
+dispatcher woken), and a duplicate only wakes it. For every terminal job with a callback and no
 `receipt_callback_delivery_id` it enqueues one durable inter-bot delivery from
 `system` to the caller (`message_kind=OPS_RECEIPT`, `on_gate="hold"`, a new
 turn bound to the caller's session, never a steer), framed by the
@@ -106,14 +109,67 @@ prompt-registry key `ops.quiesce_receipt`, then stamps the delivery id. The
 delivery's idempotency key is `ops-receipt:<job_id>`, so a crash before the
 stamp re-reads the same delivery. Pre-dispatch failures are terminal too, so
 the receipt also reports `quiesce_timeout`, `quiesce_lost` and a disabled
-operation. The app's dispatcher picks the row up on its periodic sweep; under
-a live hold it waits at the claim and is delivered after release.
+operation, and an operator cancel. Under a live hold the delivery waits at the
+claim and is delivered after release.
+
+*Rollout note.* Before TASK-1233 (f) the ops reconciler sent receipts itself.
+While an old reconciler image still runs beside a new app, whichever process
+enqueues first wins; the idempotency key keeps it to one delivery, but a
+receipt enqueued by the old reconciler is never announced and shows no QUEUED
+event (the dispatcher's recovery sweep still delivers it).
 
 **Open deadline.** A job that has not opened its hold within
 `quiesce_timeout_seconds` of `submitted_at` fails `quiesce_timeout` with no
 action submitted. This bounds a preflight that keeps failing (its error is kept
 in `error_text` meanwhile) and a concurrency slot that never frees. The drain
 deadline after the hold opens is unchanged.
+
+## Quiesce visibility and operator cancel (TASK-1233 (f))
+
+**Job reads.** Every job read (`GET /v1/ops/jobs`, `GET /v1/ops/jobs/{id}`,
+`ops_job_status`) carries, for a quiesce job, `quiesce.phase` =
+`{name, since, drained, total, observed_at}` and `quiesce.members`.
+
+- `phase.name` while QUIESCING is the driver's last recorded phase:
+  `opening` (no step yet), `waiting_slot`, `preflight_blocked`, `draining`
+  (some held turn not yet drained) or `dispatch_pending` (all drained, the
+  dispatch CAS not yet taken). After that it follows the job state:
+  `dispatched`, `running`, or the terminal state. `drained`/`total` count the
+  driver's last roster read at `observed_at`, so they can lag the live turns by
+  one reconciler interval.
+- `quiesce.open_deadline_at` is `submitted_at + quiesce_timeout_seconds` while
+  the hold is unopened (null once opened); `quiesce.deadline_at` is the drain
+  deadline once open.
+- `quiesce.members` is one row per turn in the job's current gate generation:
+  `bot_id, turn_id, backend, disposition, control_state, control_attempts,
+  control_error, control_changed_at, ack_status, ack_note, acked_at,
+  enrolled_at, drained, drain_reason`. `control_state` and `ack_status` are the
+  stored values, not inferred. `control_changed_at` is
+  `gate_members.control_changed_at`, stamped by every UPDATE that changes
+  `control_state` (rows that pre-date the column read `created_at`).
+  `drained` is the driver's last verdict (null for a turn not yet judged).
+
+Each phase change logs one INFO line from `llm_bawt.ops.quiesce`:
+`quiesce job=<id> op=<slug> phase <old>-><new> gate=<generation>
+drained=<n>/<m> deadline=<iso>`, with the failure outcome or the cancel's
+claimed actor in parentheses. Steady-state steps log nothing.
+
+**`GET /v1/ops/holds`.** Every live gate (`released_at IS NULL AND expires_at
+> now()`): `{gate_id, owner_kind, owner_id, mode, scope, reason, allow_actors,
+created_at, expires_at, members: {total, by_disposition, by_control_state},
+job}`. `job` is `{id, operation, state, phase}` for a job-owned gate and null
+for an operator-owned gate.
+
+**`POST /v1/ops/jobs/{job_id}/cancel`** with `{actor, reason?}` cancels a
+QUIESCING job before dispatch. `actor` is a self-asserted label and is
+recorded as claimed (`quiesce_json.cancelled_by.actor_claimed`, and in
+`error_text`). In one transaction, in a driver step's lock order, the job moves
+QUIESCING -> CANCELLED (state CAS), every gate generation is released and
+pending steers are cancelled; no action was submitted. 200 `{job, cancelled:
+true}`; an already-cancelled job is 200 `{cancelled: false, already: true}`;
+any other state (dispatched, running, terminal, or not a quiesce job) is 409
+`not_cancellable` with the state; unknown is 404. The cancelled job's receipt
+goes out on the normal paths (approval continuation, or the receipt loop above).
 
 ## Deployment setup checklist (original TASK-861 setup; installed on echo)
 

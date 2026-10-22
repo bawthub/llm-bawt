@@ -321,6 +321,10 @@ async def lifespan(app):
     service._mcp_continuation_task = asyncio.create_task(
         run_mcp_continuation_outbox(service, service._tool_approval_policy_store)
     )
+    # TASK-1233 (f) N1: direct quiesce receipts are enqueued here, beside the
+    # dispatcher, so each is announced (QUEUED) at once.
+    from .ops_receipt_outbox import run_ops_receipt_outbox
+    service._ops_receipt_task = asyncio.create_task(run_ops_receipt_outbox(service))
 
     # Log startup with rich formatting
     log.startup(
@@ -386,6 +390,7 @@ async def lifespan(app):
             "_group_cleanup_task",
             "_tool_persist_task",
             "_mcp_continuation_task",
+            "_ops_receipt_task",
             "_claude_refresh_task",
             "_codex_refresh_task",
         ):

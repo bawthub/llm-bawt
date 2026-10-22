@@ -466,11 +466,19 @@ def test_a_direct_caller_outside_the_scope_gets_no_callback(rig, monkeypatch):
         rig.sql("DELETE FROM bot_profiles WHERE slug=:s", s=other)
 
 
-def test_a_caller_without_a_session_gets_no_callback(rig, monkeypatch):
+def test_a_held_caller_without_a_session_is_told_nothing_will_be_pushed(rig, monkeypatch):
+    """Vex r2 N2: it is held (in scope), so it must end its turn, but with no
+    session there is no callback; the instruction says so and promises no turn."""
+    from llm_bawt.ops.quiesce_prompts import DEFAULT_END_TURN_NO_RECEIPT
+
     ops_tools = _as_caller(rig, monkeypatch, session=None)
     receipt = asyncio.run(ops_tools.ops_run(rig.slug, {"target": "a"}))
-    assert receipt["caller_instruction"] is None
     assert rig.row(receipt["job_id"])["receipt_callback_json"] is None
+    told = receipt["caller_instruction"]
+    assert (told["action"], told["held_bot"], told["result_delivery"]) == ("end_turn", rig.bot, "none")
+    assert told["message"] == DEFAULT_END_TURN_NO_RECEIPT
+    assert "new turn" not in told["message"] and "callback" not in told["message"]
+    assert "ops_job_status" in told["message"]
 
 
 def test_a_failing_caller_instruction_never_fails_ops_run(rig, monkeypatch):

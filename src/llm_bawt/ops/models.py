@@ -19,8 +19,9 @@ Both tables live in the same ``askllm`` DB served by the shared
 
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -489,9 +490,47 @@ class OpsJob(SQLModel, table=True):
         return row
 
 
+# TASK-1233 (f): the operator-facing phase of a quiesce job. While QUIESCING
+# it is the driver's last recorded phase (``quiesce_json.phase``): waiting_slot,
+# preflight_blocked, draining (some held turn not yet drained) or
+# dispatch_pending (all drained, dispatch not yet taken). After that it follows
+# the job state. ``drained``/``total`` count the driver's last roster read at
+# ``observed_at``; between steps they can lag the live turns by one interval.
+_STATE_PHASES = {JOB_DISPATCHING: "dispatched", JOB_ACCEPTED: "running", JOB_RUNNING: "running"}
+
+
+def _quiesce_phase(job: "OpsJob", receipt: dict[str, Any]) -> dict[str, Any]:
+    roster = receipt.get("roster") or []
+    stored = receipt.get("phase") if isinstance(receipt.get("phase"), dict) else {}
+    if job.state == JOB_QUIESCING:
+        fallback = "draining" if job.quiesce_gate_id is not None else "opening"
+        name, since = stored.get("name") or fallback, stored.get("since")
+    elif job.state in JOB_TERMINAL_STATES:
+        name, since = job.state, _iso_utc(job.finished_at)
+    else:
+        name = _STATE_PHASES.get(job.state, job.state)
+        since = _iso_utc(job.started_at if name == "running" and job.started_at else job.dispatched_at)
+    return {"name": name, "since": since,
+            "drained": sum(1 for member in roster if member.get("drained")),
+            "total": len(roster), "observed_at": receipt.get("observed_at")}
+
+
+def _open_deadline(job: "OpsJob") -> str | None:
+    """When a not-yet-opened QUIESCING job fails quiesce_timeout (null once opened)."""
+    if job.state != JOB_QUIESCING or job.quiesce_gate_id is not None or job.submitted_at is None:
+        return None
+    try:
+        timeout = int(json.loads(job.invocation_snapshot_json)["quiesce"]["timeout_seconds"])
+    except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+        return None  # no readable snapshot: the driver fails the job; nothing to count down
+    submitted = job.submitted_at if job.submitted_at.tzinfo else job.submitted_at.replace(tzinfo=timezone.utc)
+    return _iso_utc(submitted + timedelta(seconds=timeout))
+
+
 def _quiesce_api(job: "OpsJob") -> dict[str, Any] | None:
     import json
-    if job.quiesce_json is None and job.quiesce_gate_id is None and job.receipt_callback_json is None:
+    if (job.quiesce_json is None and job.quiesce_gate_id is None and job.receipt_callback_json is None
+            and job.state != JOB_QUIESCING):
         return None
     try:
         receipt = json.loads(job.quiesce_json) if job.quiesce_json else {}
@@ -508,6 +547,8 @@ def _quiesce_api(job: "OpsJob") -> dict[str, Any] | None:
     return {
         "gate_id": job.quiesce_gate_id,
         "deadline_at": _iso_utc(job.quiesce_deadline_at),
+        "open_deadline_at": _open_deadline(job),
+        "phase": _quiesce_phase(job, receipt),
         "fence": fence,
         "receipt": receipt,
         "receipt_callback": None if callback is None else {

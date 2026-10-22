@@ -41,6 +41,8 @@ from .prompt_default_loaders import (
     load_memory_extraction_update,
     load_memory_maintenance_intent_content_only,
     load_memory_maintenance_intent_with_context,
+    load_ops_quiesce_end_turn_new_turn,
+    load_ops_quiesce_end_turn_no_receipt,
     load_ops_quiesce_receipt,
     load_profile_consolidation,
     load_recall_synthesis_system,
@@ -419,6 +421,32 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "outcome. The receipt JSON is appended. It must say the operation "
             "already ran or failed and is not to be re-run. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_end_turn.new_turn": PromptDefinition(
+        key="ops.quiesce_end_turn.new_turn",
+        title="Ops Quiesce End Turn (receipt as a new turn)",
+        category="agent_execution",
+        loader=load_ops_quiesce_end_turn_new_turn,
+        metadata={"notes": (
+            "caller_instruction.message on ops_run / ops_job_status (TASK-1233) when a "
+            "quiesce job holds its own caller and the terminal receipt will arrive as a "
+            "new turn (approved job, or a direct job with a receipt callback). It must "
+            "tell the bot to end its turn and not poll. Used verbatim; a blank body "
+            "falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_end_turn.no_receipt": PromptDefinition(
+        key="ops.quiesce_end_turn.no_receipt",
+        title="Ops Quiesce End Turn (no receipt pushed)",
+        category="agent_execution",
+        loader=load_ops_quiesce_end_turn_no_receipt,
+        metadata={"notes": (
+            "caller_instruction.message (TASK-1233) when a direct quiesce job holds a "
+            "caller that had no session to bind a receipt callback to. It must tell the "
+            "bot to end its turn and must not promise a receipt, callback or new turn; "
+            "the bot checks ops_job_status in a later turn. Used verbatim; a blank body "
+            "falls back to the seed. Target-bot overrides supported."
         )},
     ),
     "media.prompt_expansion.video": PromptDefinition(

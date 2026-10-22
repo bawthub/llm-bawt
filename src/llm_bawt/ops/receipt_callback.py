@@ -5,7 +5,9 @@ turn (:func:`.quiesce.caller_instruction`). An approved job's continuation then
 delivers the terminal receipt as a new turn; a direct job has no approval row,
 so nothing would ever start the turn that reads its result. Such a job records
 a receipt callback at creation (:meth:`.service.OpsService.dispatch_job`), and
-this sender, run by the ops reconciler, delivers it once the job is terminal:
+this sender delivers it once the job is terminal. It runs in the app process
+(:mod:`llm_bawt.service.ops_receipt_outbox`), which owns the inter-bot
+dispatcher, so each new delivery is announced QUEUED at once (Vex r2 N1):
 
 * through the existing durable inter-bot delivery FIFO, from ``system``, as a
   new turn (never a steer) bound to the caller's session;
@@ -29,38 +31,29 @@ from sqlalchemy import text
 
 from ..bot_identities import SYSTEM_BOT_ID
 from .models import JOB_TERMINAL_STATES
+from .quiesce_prompts import DEFAULT_RECEIPT, RECEIPT_KEY, resolve
 
 logger = logging.getLogger(__name__)
 
-PROMPT_KEY = "ops.quiesce_receipt"
-DEFAULT_QUIESCE_RECEIPT = (
-    "[Ops job receipt: an operation you started finished while your turn was "
-    "ended for it. The JSON below is its final receipt. Do not re-run the "
-    "operation. Report the outcome, check the target's health if it ran, and "
-    "continue any work it was blocking.]"
-)
+PROMPT_KEY = RECEIPT_KEY
+DEFAULT_QUIESCE_RECEIPT = DEFAULT_RECEIPT
 OUTPUT_TAIL_BYTES = 4096
 
 
 def receipt_prompt(bot_id: str) -> str:
     """The live framing text for ``bot_id``, or the seed if the registry fails."""
-    try:
-        from ..prompt_registry import get_prompt_resolver
-
-        resolved = get_prompt_resolver().resolve(PROMPT_KEY, scope_type="bot", scope_id=bot_id)
-        if resolved and (resolved.body or "").strip():
-            return resolved.body
-    except Exception as error:  # registry/DB failure must not strand the receipt
-        logger.warning("ops receipt prompt resolve failed, using seed: %s", error)
-    return DEFAULT_QUIESCE_RECEIPT
+    return resolve(RECEIPT_KEY, bot_id)
 
 
 class QuiesceReceiptSender:
     """Deliver due receipt callbacks; one job's failure never stops the rest."""
 
-    def __init__(self, ops, deliveries):
+    def __init__(self, ops, deliveries, *, on_enqueued=None):
         self.ops = ops
         self.deliveries = deliveries
+        # ``on_enqueued(record, duplicate)``: the app announces a new row to its
+        # dispatcher (QUEUED event + wake) and only wakes it for a duplicate.
+        self.on_enqueued = on_enqueued
 
     @property
     def engine(self):
@@ -93,7 +86,7 @@ class QuiesceReceiptSender:
                                           reconcile_if_active=False)
         message = (receipt_prompt(bot_id) + "\n"
                    + json.dumps(receipt, ensure_ascii=False, sort_keys=True, default=str))
-        record, _duplicate = self.deliveries.enqueue(
+        record, duplicate = self.deliveries.enqueue(
             sender_bot_id=SYSTEM_BOT_ID, target_bot_id=bot_id, message=message,
             idempotency_key=f"ops-receipt:{job_id}", message_kind="OPS_RECEIPT",
             on_gate="hold",
@@ -106,6 +99,11 @@ class QuiesceReceiptSender:
                 "extract_memory": False, "augment_memory": False, "stream": True,
             },
         )
+        if self.on_enqueued is not None:
+            try:
+                self.on_enqueued(record, duplicate)
+            except Exception:  # the row is durable; the dispatcher sweep still finds it
+                logger.exception("ops receipt announce failed for job %s", job_id)
         with self.engine.begin() as conn:
             conn.execute(text(
                 "UPDATE ops_jobs SET receipt_callback_delivery_id=:delivery"
