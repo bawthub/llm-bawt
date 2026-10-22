@@ -101,6 +101,14 @@ class AgentEventKind(str, Enum):
     # The app persists it before forwarding a lightweight public file_changed
     # event, so abrupt turn termination cannot lose already-completed edits.
     FILE_CHANGED = "file_changed"
+    # TASK-1233 run contract (agent_bridge.run_contract). RUN_ACCEPTED is
+    # published on the run stream when a bridge admits a send; raw =
+    # {request_id, backend, boot_id}. RUN_TERMINAL is never published: the
+    # app's subscribe_run synthesizes it from the run's ``done`` sentinel just
+    # before it returns; raw = RunTerminal.to_dict(), or {} for a pre-contract
+    # bare sentinel. Older consumers degrade both to SYSTEM_NOTE (from_dict).
+    RUN_ACCEPTED = "run_accepted"
+    RUN_TERMINAL = "run_terminal"
 
 
 @dataclass

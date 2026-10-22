@@ -11,6 +11,7 @@ import asyncio
 from unittest.mock import Mock
 
 from agent_bridge.abort_contract import HOST_SHUTDOWN
+from agent_bridge.run_contract import UNATTEMPTED, TeardownReport
 from agent_bridge.session_queue import SessionQueue
 from claude_code_bridge.bridge import ClaudeCodeBridge
 from tests.test_claude_code_send_boundaries import (
@@ -23,9 +24,16 @@ from tests.test_claude_code_send_boundaries import (
 SHUTDOWN = {**CANCELLED, "abort_cause": HOST_SHUTDOWN}
 
 
-def _terminal_raw(harness, request_id):
+def _run_dones(harness, request_id):
+    return [call for call in harness._publisher.publish_run_done.call_args_list
+            if call.args[0] == request_id]
+
+
+def _terminal_raw(harness, request_id, *, teardown=None):
     terminal, = harness.terminal(request_id)
-    assert harness._publisher.publish_run_done.call_args_list.count(((request_id,),)) == 1
+    done, = _run_dones(harness, request_id)
+    if teardown is not None:
+        assert done.kwargs == {"teardown": teardown}
     return terminal
 
 
@@ -40,10 +48,14 @@ def test_shutdown_stamps_running_and_queued_sends(monkeypatch):
         await harness.queued.wait()
         assert len(harness._session_queue.cancel_all(cause=HOST_SHUTDOWN)) == 2
         await asyncio.gather(running, queued, return_exceptions=True)
-        active = _terminal_raw(harness, "turn-request")
+        # TASK-1233: a shutdown publishes before the teardown, so nothing is
+        # claimed about it.
+        active = _terminal_raw(harness, "turn-request", teardown=UNATTEMPTED)
         assert active.raw == SHUTDOWN
         assert active.text == "partial answer"  # partial kept, still aborted
-        assert _terminal_raw(harness, "queued").raw == SHUTDOWN
+        # Never ran, so nothing it started can still be running.
+        queued_terminal = _terminal_raw(harness, "queued", teardown=TeardownReport(exited=True))
+        assert queued_terminal.raw == SHUTDOWN
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
@@ -63,11 +75,17 @@ def test_user_abort_keeps_historical_shape_through_a_later_shutdown(monkeypatch)
                 await asyncio.sleep(0)
             # The terminal was published before the teardown; the send itself
             # keeps the session until its teardown ends (TASK-1232 P4, PE1).
-            assert _terminal_raw(harness, "turn-request").raw == CANCELLED
+            # A user Stop's done waits for that teardown (TASK-1233); the
+            # later shutdown does not move it earlier.
+            terminal, = harness.terminal("turn-request")
+            assert terminal.raw == CANCELLED
+            assert not _run_dones(harness, "turn-request")
             assert not send.done()
         finally:
             sdk.release_disconnect.set()
             await asyncio.gather(abort, send, return_exceptions=True)
+        assert _terminal_raw(harness, "turn-request",
+                             teardown=TeardownReport("ok", "none", False)).raw == CANCELLED
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
@@ -87,7 +105,7 @@ def test_shutdown_during_sdk_setup_is_stamped(monkeypatch):
         await connecting.wait()
         harness._session_queue.cancel_all(cause=HOST_SHUTDOWN)
         await asyncio.gather(send, return_exceptions=True)
-        assert _terminal_raw(harness, "turn-request").raw == SHUTDOWN
+        assert _terminal_raw(harness, "turn-request", teardown=UNATTEMPTED).raw == SHUTDOWN
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
@@ -97,6 +115,7 @@ def test_shutdown_during_sdk_setup_is_stamped(monkeypatch):
 def _bridge(order):
     bridge = ClaudeCodeBridge.__new__(ClaudeCodeBridge)
     bridge._session_queue = SessionQueue()
+    bridge._run_terminals = {}
     bridge._command_task = bridge._cleanup_task = bridge._approval_reload_task = None
     bridge._publisher = Mock()
     bridge._publisher.close.side_effect = lambda: order.append("publisher.close")

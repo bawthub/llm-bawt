@@ -43,6 +43,7 @@ from agent_bridge.approval import (
 )
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
+from agent_bridge.run_contract import TeardownReport
 from agent_bridge.session_queue import SessionQueue
 from claude_code_bridge.tool_events import normalize_tool_result
 from claude_code_bridge.tool_policy import effective_disallowed_tools
@@ -70,6 +71,7 @@ from .session_ops import ClaudeSessionMixin
 from .approval_ops import ClaudeApprovalMixin
 from .event_ops import ClaudeEventMixin
 from .command_ops import ClaudeCommandMixin
+from .run_terminal import RunTerminalLatch
 from .send_handler import ClaudeSendMixin
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,9 @@ class ClaudeCodeBridge(
         # request_id -> RunTeardown of its live SDK client (TASK-1232 P4), so
         # chat.abort can await the send-owned teardown instead of disconnecting.
         self._run_teardowns: dict[str, Any] = {}
+        # request_id -> RunTerminalLatch of each admitted send (TASK-1233), so
+        # host shutdown can publish a done a teardown is still holding back.
+        self._run_terminals: dict[str, RunTerminalLatch] = {}
         # Tool-use id -> Future for a live AskUserQuestion on this process.
         # Only the matching command may resolve it; cleaned up on timeout/abort.
         # Result: dict = native answers (allow), str = deny text (dismissal).
@@ -303,9 +308,13 @@ class ClaudeCodeBridge(
         )
 
     # Bounded wait for host-shutdown-cancelled sends to publish their
-    # terminal events. Each send publishes ASSISTANT_DONE + done before its
-    # bounded run teardown (run_teardown.py), so this only needs to cover that
-    # first step; it must stay well inside Docker's 10s stop grace.
+    # terminal events. Only a host-shutdown cancel publishes ASSISTANT_DONE +
+    # done before its bounded run teardown (run_teardown.py, run_terminal.py);
+    # every other end publishes done after it. So this only needs to cover
+    # that first step; it must stay well inside Docker's 10s stop grace. A
+    # send already past its stream (finished or user-Stopped, now tearing
+    # down) gets the same grace, then a done with exited=false if its
+    # teardown is still running.
     SHUTDOWN_SEND_GRACE_SECONDS = 5.0
 
     async def _cancel_sends_for_shutdown(self) -> None:
@@ -316,17 +325,31 @@ class ClaudeCodeBridge(
         sends are only cancelled by ``asyncio.run``'s teardown, after the
         publisher is closed, and are stamped like a user Stop.
         """
-        tasks = self._session_queue.cancel_all(cause=HOST_SHUTDOWN)
-        if not tasks:
-            return
-        _done, pending = await asyncio.wait(
-            tasks, timeout=self.SHUTDOWN_SEND_GRACE_SECONDS,
+        tasks = set(self._session_queue.cancel_all(cause=HOST_SHUTDOWN))
+        # cancel_all skips a send already being cancelled (a user Stop now in
+        # its teardown); its done is still owed, so the grace covers it too.
+        tasks.update(
+            terminal.owner for terminal in self._run_terminals.values()
+            if not terminal.published and terminal.owner is not None
         )
+        pending: set[asyncio.Task] = set()
+        if tasks:
+            _done, pending = await asyncio.wait(
+                tasks, timeout=self.SHUTDOWN_SEND_GRACE_SECONDS,
+            )
         if pending:
             logger.warning(
                 "%d send(s) still cleaning up after %.0fs shutdown grace",
                 len(pending), self.SHUTDOWN_SEND_GRACE_SECONDS,
             )
+        # A send whose stream had already ended (it finished or was Stopped)
+        # is now in its bounded teardown, which a shutdown cannot cut short
+        # (PE1). Its done must not wait on it past the publisher's close:
+        # teardown was attempted and has not proven an exit.
+        for request_id, terminal in list(self._run_terminals.items()):
+            if not terminal.published:
+                logger.warning("Publishing done for %s before its teardown finished", request_id)
+                terminal.publish(TeardownReport(exited=False))
 
     async def stop(self) -> None:
         # Single-flight: __main__ awaits stop() while run_forever's finally

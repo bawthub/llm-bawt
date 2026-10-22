@@ -6,13 +6,13 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.run_contract import TeardownReport
 from agent_bridge.session_queue import SessionQueue
 from claude_code_bridge.command_ops import ClaudeCommandMixin
 from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.send_handler import ClaudeSendMixin
 from claude_code_bridge.send_stream_events import StreamBlockState
 from claude_code_bridge.send_boundaries import (
-    publish_run_done_once,
     separator_before_new_block,
     should_read_native_context_usage,
 )
@@ -66,30 +66,6 @@ def test_direct_turn_keeps_native_context_control_request() -> None:
     assert should_read_native_context_usage(use_proxy=False) is True
 
 
-def test_run_done_is_published_exactly_once() -> None:
-    class Publisher:
-        def __init__(self) -> None:
-            self.request_ids: list[str] = []
-
-        def publish_run_done(self, request_id: str) -> None:
-            self.request_ids.append(request_id)
-
-    publisher = Publisher()
-    published = publish_run_done_once(
-        publisher,
-        "req-terminal",
-        already_published=False,
-    )
-    published = publish_run_done_once(
-        publisher,
-        "req-terminal",
-        already_published=published,
-    )
-
-    assert published is True
-    assert publisher.request_ids == ["req-terminal"]
-
-
 def test_abort_arms_proxy_gate_before_task_cancel_and_never_disconnects() -> None:
     # TASK-1232 P4: teardown belongs to the cancelled send, not the abort.
     async def run():
@@ -135,6 +111,7 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
         self._proxy_request_sessions = {}
         self._turn_phase_trackers = {}
         self._run_teardowns = {}
+        self._run_terminals = {}
         self._trigger_message_ids = {}
         self._backend_name = "claude-code"
         self._request_timeout = 5
@@ -225,7 +202,12 @@ class _SDKStream:
             await self.release_disconnect.wait()
 
 
-def _assert_cancelled(harness, request_id="turn-request", *, partial=True):
+def _run_dones(harness, request_id="turn-request"):
+    return [call for call in harness._publisher.publish_run_done.call_args_list
+            if call.args[0] == request_id]
+
+
+def _assert_cancelled(harness, request_id="turn-request", *, partial=True, done=True):
     terminal, = harness.terminal(request_id)
     assert terminal.raw == CANCELLED
     assert terminal.session_key == SESSION
@@ -235,7 +217,9 @@ def _assert_cancelled(harness, request_id="turn-request", *, partial=True):
     if partial:
         assert terminal.token_usage["input_tokens"] == 23
         assert terminal.token_usage["output_tokens"] >= 7
-    assert [call.args[0] for call in harness._publisher.publish_run_done.call_args_list].count(request_id) == 1
+    # TASK-1233: the run's done follows its teardown, so it can lag the
+    # cancelled ASSISTANT_DONE.
+    assert len(_run_dones(harness, request_id)) == (1 if done else 0)
     assert not [e for e in harness.events if e.kind == AgentEventKind.ERROR]
 
 
@@ -275,8 +259,9 @@ def test_delayed_abort_never_cancels_successor_or_repeats_done(monkeypatch):
         await harness.queued.wait()
         abort = asyncio.create_task(harness.abort())
         await first.disconnect_entered.wait()
-        # The cancelled terminal is out before the teardown (TASK-1232 P4).
-        _assert_cancelled(harness)
+        # The cancelled terminal is out before the teardown (TASK-1232 P4);
+        # the run's done waits for the teardown (TASK-1233).
+        _assert_cancelled(harness, done=False)
         # Repeat while the teardown is pending: no second task.cancel
         # injection, and both replies wait for the same teardown.
         repeat = asyncio.create_task(harness.abort())
@@ -288,6 +273,7 @@ def test_delayed_abort_never_cancels_successor_or_repeats_done(monkeypatch):
         first.release_disconnect.set()
         await asyncio.gather(first_send, abort, repeat, return_exceptions=True)
         assert first.disconnect_calls == 1
+        _assert_cancelled(harness)
         replies = [c.args[1] for c in harness._publisher.publish_rpc_result.call_args_list]
         assert [r["detail"] for r in replies] == [
             "task_cancelled,teardown:disconnect=ok;signal=none;exited=unknown"
@@ -417,7 +403,9 @@ def test_normal_completion_still_emits_one_success(monkeypatch, result):
         assert terminal.raw == {}
         assert terminal.text == "partial answer"
         assert terminal.trigger_message_id == "message-turn-request"
-        harness._publisher.publish_run_done.assert_called_once_with("turn-request")
+        # The fake SDK has no CLI process, so its reap is not proven.
+        harness._publisher.publish_run_done.assert_called_once_with(
+            "turn-request", teardown=TeardownReport("ok", "none", False))
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
@@ -466,7 +454,8 @@ def test_abort_after_terminal_during_cleanup_does_not_duplicate_done(monkeypatch
         await asyncio.gather(send, return_exceptions=True)
         assert sdk.disconnect_calls == 1
         assert harness.terminal() == [terminal]
-        harness._publisher.publish_run_done.assert_called_once_with("turn-request")
+        harness._publisher.publish_run_done.assert_called_once_with(
+            "turn-request", teardown=TeardownReport("ok", "none", False))
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 

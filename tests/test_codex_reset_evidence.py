@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.run_contract import TeardownReport
 from codex_bridge.bridge import CodexBridge
 
 TASK = "  /newspaper is literal task text.\nKeep these bytes.  "
@@ -87,7 +88,10 @@ def harness(monkeypatch):
 def send(state):
     asyncio.run(state.bridge._handle_send(state.fields, "redis-message", state.redis))
     state.redis.xack.assert_awaited_once()
-    state.publisher.publish_run_done.assert_called_once_with(state.fields["request_id"])
+    # No codex process was ledgered (the SDK is faked) and nothing was
+    # cancelled, so nothing the send started is known to be running.
+    state.publisher.publish_run_done.assert_called_once_with(
+        state.fields["request_id"], teardown=TeardownReport(exited=True))
     assert not state.bridge._trigger_message_ids
     assert not state.bridge._session_queue.is_busy(state.fields["session_key"])
     return state.events

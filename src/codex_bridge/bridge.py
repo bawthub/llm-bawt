@@ -101,7 +101,7 @@ class CodexBridge(
         # request_id → frontend user-message UUID, populated in _handle_send
         # and read by _publish_event so every emitted AgentEvent (tool_*,
         # assistant_*, etc.) carries the originating message id.  Cleared on
-        # publish_run_done.
+        # the end of the send.
         self._trigger_message_ids: dict[str, str] = {}
 
     # ----- Public properties (used by __main__ for log lines) -------------

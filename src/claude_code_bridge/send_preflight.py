@@ -69,7 +69,6 @@ async def prepare_parsed_send(
             kind=AgentEventKind.ERROR,
             text=error,
         )
-        bridge._publisher.publish_run_done(request.request_id)
         if scope is not None:
             scope.terminal_published = True
         await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)

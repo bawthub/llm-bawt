@@ -163,7 +163,6 @@ class ClaudeSessionMixin:
                 "clean_start": bool((seed_stats or {}).get("clean_start")),
             }},
         )
-        self._publisher.publish_run_done(request_id)
         if scope is not None:
             # TASK-1232 P2: a Stop landing on the xack must not add a second terminal.
             scope.terminal_published = True

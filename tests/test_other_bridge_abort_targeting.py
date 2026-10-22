@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.run_contract import TeardownReport
 from agent_bridge.session_queue import SessionQueue
 from codex_bridge.command_ops import CodexCommandMixin
 from local_model_bridge.bridge import LocalModelBridge
@@ -27,6 +28,7 @@ def make_bridge(kind, ws=None):
     elif kind == "local":
         bridge = LocalModelBridge.__new__(LocalModelBridge)
         bridge._publish_event = MagicMock()
+        bridge._run_workers = {}
     else:
         bridge = SessionBridge(ws or MagicMock(), EventIngestPipeline(), MagicMock(), MagicMock())
     bridge._session_queue = SessionQueue()
@@ -81,7 +83,9 @@ def test_queued_abort_is_exact_and_publishes_terminal(kind):
         assert (await abort(bridge, "queued", redis))["state"] == "cancelled"
         await abort(bridge, "queued", redis)  # repeated cancellation cannot cut off cleanup
         await asyncio.gather(queued, return_exceptions=True)
-        bridge._publisher.publish_run_done.assert_called_once_with("queued")
+        # TASK-1233: cancelled before it ran, so nothing it started is left.
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "queued", teardown=TeardownReport(exited=True))
         assert [call.args[-1] for call in redis.xack.call_args_list].count("queued") == 1
         assert not active.cancelling() and not sibling.cancelling()
         assert not bridge._session_queue.cancel_event("bot:user").is_set()
@@ -114,7 +118,10 @@ def test_codex_abort_interrupts_only_target_controller(monkeypatch):
         assert (await abort(bridge, "active", redis))["state"] == "cancelled"
         await asyncio.gather(task, return_exceptions=True)
         controller.abort.assert_called_once_with("task_cancelled")
-        bridge._publisher.publish_run_done.assert_called_once_with("active")
+        # No codex process was ledgered (the SDK stream is faked), so a
+        # cancelled running send cannot prove its exit.
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "active", teardown=TeardownReport(exited=False))
         assert not any(call.kwargs.get("kind") == AgentEventKind.ASSISTANT_DONE
                        for call in bridge._publish_event.call_args_list)
     asyncio.run(run())
@@ -135,7 +142,8 @@ def test_codex_cancel_during_setup_also_publishes_terminal():
         await started.wait()
         await abort(bridge, "active", redis)
         await asyncio.gather(task, return_exceptions=True)
-        bridge._publisher.publish_run_done.assert_called_once_with("active")
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "active", teardown=TeardownReport(exited=False))
         bridge._publish_event.assert_not_called()
         assert [call.args[-1] for call in redis.xack.call_args_list].count("active") == 1
     asyncio.run(run())
@@ -170,7 +178,9 @@ def test_local_abort_waits_for_worker_and_does_not_complete_successfully():
             release.set()
             await asyncio.gather(task, return_exceptions=True)
         assert stopped.is_set()
-        bridge._publisher.publish_run_done.assert_called_once_with("active")
+        # The worker thread had returned before done was published.
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "active", teardown=TeardownReport(exited=True))
         bridge._publish_event.assert_not_called()
     asyncio.run(run())
 
@@ -318,7 +328,9 @@ def test_openclaw_abort_waits_for_ack_but_not_first_event():
         assert result["detail"] == "run_aborted"
         assert ws.abort_calls == [("chat.abort", {"sessionKey": "bot:user", "runId": "gateway-run"})]
         await asyncio.gather(task, return_exceptions=True)
-        bridge._publisher.publish_run_done.assert_called_once_with("active")
+        # The gateway confirmed the abort, so the remote run is settled.
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "active", teardown=TeardownReport(exited=True))
         bridge._publisher.publish_run_event.assert_not_called()
     asyncio.run(run())
 
@@ -333,7 +345,8 @@ def test_openclaw_successful_abort_finishes_without_assistant_done():
         await until(lambda: bridge._request_runs.get(("bot:user", "active"), {}).get("run_id"))
         assert (await abort(bridge, "active", redis))["state"] == "cancelled"
         await asyncio.gather(task, return_exceptions=True)
-        bridge._publisher.publish_run_done.assert_called_once_with("active")
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "active", teardown=TeardownReport(exited=True))
         assert not any(call.args[1].kind == AgentEventKind.ASSISTANT_DONE
                        for call in bridge._publisher.publish_run_event.call_args_list)
     asyncio.run(run())

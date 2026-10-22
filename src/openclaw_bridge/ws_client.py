@@ -101,6 +101,22 @@ def _build_device_auth_payload_v3(
     ])
 
 
+def is_run_terminal(raw: dict) -> bool:
+    """True for the gateway event that ends a run (lifecycle end/error, final)."""
+    if raw.get("type") != "event":
+        return False
+    payload = raw.get("payload") or {}
+    if raw.get("event") == "agent":
+        stream = payload.get("stream")
+        data = payload.get("data") or {}
+        return stream == "error" or (
+            stream == "lifecycle" and data.get("phase") in ("end", "error")
+        )
+    if raw.get("event") == "chat":
+        return str(payload.get("state") or "").lower() == "final"
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Persistent device identity store
 # ---------------------------------------------------------------------------
@@ -631,20 +647,8 @@ class OpenClawWsClient:
 
                 yield raw
 
-                # Check if this is a lifecycle end/error -> run done
-                payload = raw.get("payload") or {}
-                if raw.get("type") == "event":
-                    if raw.get("event") == "agent":
-                        stream = payload.get("stream")
-                        data = payload.get("data") or {}
-                        if stream == "lifecycle" and data.get("phase") in ("end", "error"):
-                            return
-                        if stream == "error":
-                            return
-                    if raw.get("event") == "chat":
-                        state = str(payload.get("state") or "").lower()
-                        if state == "final":
-                            return
+                if is_run_terminal(raw):
+                    return
         finally:
             self._run_queues.pop(run_id, None)
 

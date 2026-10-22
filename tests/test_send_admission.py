@@ -19,6 +19,7 @@ from agent_bridge.command_publisher import (
 )
 from agent_bridge.events import AgentEventKind
 from agent_bridge.request_tombstones import RequestTombstones
+from agent_bridge.run_contract import UNATTEMPTED, TeardownReport
 from agent_bridge.session_queue import Admission, RequestPhase, SessionQueue
 from claude_code_bridge.session_ops import ClaudeSessionMixin
 from tests.test_claude_code_send_boundaries import CANCELLED, MODEL, SESSION, _SendHarness
@@ -55,8 +56,9 @@ def _assert_one_cancelled_terminal(harness, request_id):
     terminal, = harness.terminal(request_id)
     assert terminal.raw == CANCELLED
     assert terminal.trigger_message_id == f"message-{request_id}"
-    run_done = [c.args[0] for c in harness._publisher.publish_run_done.call_args_list]
-    assert run_done.count(request_id) == 1
+    # TASK-1233: refused or stopped before the SDK ran, so no teardown was
+    # attempted (a /new seed's CLI may have been in flight).
+    harness._publisher.publish_run_done.assert_called_once_with(request_id, teardown=UNATTEMPTED)
     assert _send_xacks(harness, f"send-{request_id}") == 1
     assert harness._session_queue.request_phase(SESSION, request_id) is None
     assert (SESSION, request_id) not in harness._session_queue._request_tasks
@@ -151,7 +153,8 @@ def test_claude_missing_model_exit_releases_registration():
         await harness._handle_send(_claude_fields("r1", model=""), "send-r1", harness.redis)
         errors = [e for e in harness.events if e.kind == AgentEventKind.ERROR]
         assert len(errors) == 1
-        harness._publisher.publish_run_done.assert_called_once_with("r1")
+        harness._publisher.publish_run_done.assert_called_once_with(
+            "r1", teardown=TeardownReport(exited=True))
         assert (SESSION, "r1") not in harness._session_queue._request_tasks
         harness._run_send.assert_not_awaited()
     asyncio.run(asyncio.wait_for(run(), timeout=5))
@@ -173,7 +176,7 @@ def test_claude_duplicate_live_send_is_dropped_without_publishing():
         harness = _claude_harness()
         release = asyncio.Event()
 
-        async def run_send(preflight, msg_id, redis):
+        async def run_send(preflight, msg_id, redis, terminal):
             await release.wait()
 
         harness._run_send = AsyncMock(side_effect=run_send)
@@ -206,7 +209,7 @@ def test_claude_host_shutdown_cancels_a_preflight_send():
         await asyncio.gather(task, return_exceptions=True)
         terminal, = harness.terminal("r1")
         assert terminal.raw == aborted_terminal_raw(HOST_SHUTDOWN)
-        harness._publisher.publish_run_done.assert_called_once_with("r1")
+        harness._publisher.publish_run_done.assert_called_once_with("r1", teardown=UNATTEMPTED)
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
@@ -229,7 +232,8 @@ def test_other_bridge_tombstoned_send_is_refused_without_side_effects(kind, mess
         redis = SimpleNamespace(xack=AsyncMock())
         assert (await abort(bridge, "r1", redis))["state"] == "tombstoned"
         await send(bridge, "r1", redis, message=message)
-        bridge._publisher.publish_run_done.assert_called_once_with("r1")
+        bridge._publisher.publish_run_done.assert_called_once_with("r1", teardown=UNATTEMPTED)
+        bridge._publisher.publish_run_accepted.assert_not_called()
         assert _xacks(redis, "r1") == 1
         bridge._publish_session_reset_unified.assert_not_called()
         bridge._reset_openclaw_session.assert_not_awaited()
@@ -260,7 +264,9 @@ def test_openclaw_stop_during_new_reset_publishes_one_terminal(message):
         assert (await abort(bridge, "r1", redis))["state"] == "cancelled"
         await asyncio.gather(task, return_exceptions=True)
         assert task.cancelled()
-        bridge._publisher.publish_run_done.assert_called_once_with("r1")
+        # Stopped in preflight: the gateway never started a run for it.
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "r1", teardown=TeardownReport(exited=True))
         assert _xacks(redis, "r1") == 1
         assert not bridge._publisher.publish_run_event.called
         assert ("bot:user", "r1") not in bridge._session_queue._request_tasks
@@ -308,6 +314,9 @@ def test_other_bridge_validation_exit_releases_registration(kind):
         redis = SimpleNamespace(xack=AsyncMock())
         await send(bridge, "r1", redis, message="")
         assert _xacks(redis, "r1") == 1
+        # TASK-1233: an invalid send still ends with exactly one done.
+        bridge._publisher.publish_run_done.assert_called_once_with(
+            "r1", teardown=TeardownReport(exited=True))
         assert ("bot:user", "r1") not in bridge._session_queue._request_tasks
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 

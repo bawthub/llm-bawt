@@ -6,6 +6,7 @@ import pytest
 from claude_agent_sdk import StreamEvent
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.run_contract import TeardownReport
 from claude_code_bridge.turn_watchdog import TurnWatchdogTimeout
 from tests.test_claude_code_send_boundaries import SESSION, _SendHarness, _SDKStream
 
@@ -48,7 +49,9 @@ def test_fresh_retry_only_before_model_progress(monkeypatch, progress, failure):
         assert len(attempts) == (1 if progress else 2)
         assert all(sdk.disconnect_calls == 1 for sdk in attempts)
         assert len([event for event in harness.events if event.kind == AgentEventKind.ERROR]) == 1
-        harness._publisher.publish_run_done.assert_called_once_with("turn-request")
+        # Fake SDK clients have no CLI process, so no exit is proven.
+        harness._publisher.publish_run_done.assert_called_once_with(
+            "turn-request", teardown=TeardownReport("ok", "none", False))
     asyncio.run(run())
 
 
@@ -95,5 +98,7 @@ def test_steering_without_any_model_output_blocks_original_prompt_replay(monkeyp
         release_error.set()
         await asyncio.wait_for(send, timeout=1)
         assert len(attempts) == 1, "steering must never become an original-prompt replay"
-        harness._publisher.publish_run_done.assert_called_once_with("turn-request")
+        # Fake SDK clients have no CLI process, so no exit is proven.
+        harness._publisher.publish_run_done.assert_called_once_with(
+            "turn-request", teardown=TeardownReport("ok", "none", False))
     asyncio.run(run())

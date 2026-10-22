@@ -257,7 +257,9 @@ class TestClaudeNewPreprocessing:
             "total_cost_usd": 0.0,
             "usage_status": "estimated",
         }
-        assert harness._publisher.done == ["req-1"]
+        # TASK-1233: the send's admission publishes the run's done, after
+        # preprocessing returns; preprocessing never does.
+        assert harness._publisher.done == []
         assert redis.acks == [("agent:commands", "claude-code-bridge", "redis-1")]
 
     def test_explicit_thread_treats_new_as_literal_text(self):

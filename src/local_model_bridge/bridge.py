@@ -25,7 +25,8 @@ from typing import Any
 
 from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
-from agent_bridge.send_admission import admit_send
+from agent_bridge.run_contract import TeardownReport
+from agent_bridge.send_admission import RunOutcome, admit_send
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
@@ -75,8 +76,11 @@ class LocalModelBridge:
         # local model is ever loaded, and only one generation runs at a time.
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="local-infer")
         # request_id -> originating frontend user-message UUID (stamped on every
-        # emitted event); cleared on publish_run_done.
+        # emitted event); cleared when the send finalizes.
         self._trigger_message_ids: dict[str, str] = {}
+        # TASK-1233: request_id -> the send's latest inference-worker future.
+        # Read and dropped by _exit_report when the send's done is published.
+        self._run_workers: dict[str, asyncio.Future] = {}
 
     # ----- Public properties ----------------------------------------------
 
@@ -200,11 +204,24 @@ class LocalModelBridge:
 
     async def _handle_send(self, fields: dict, msg_id: str, async_redis) -> None:
         # TASK-1232 P2: registered at receipt, before any await.
+        request_id = fields.get("request_id", "")
         await admit_send(
-            self._session_queue, fields.get("session_key", ""), fields.get("request_id", ""),
+            self._session_queue, fields.get("session_key", ""), request_id,
             msg_id, async_redis, consumer_group=CONSUMER_GROUP, publisher=self._publisher,
             run=lambda: self._run_send(fields, msg_id, async_redis),
+            exit_probe=lambda outcome: self._exit_report(request_id, outcome),
         )
+
+    def _exit_report(self, request_id: str, outcome: RunOutcome) -> TeardownReport:
+        """TASK-1233 ``teardown``: exited once the send's inference worker finished.
+
+        Native generation can't be interrupted mid-token, so a cancelled send
+        may leave its worker running; that is ``exited=False``.
+        """
+        worker = self._run_workers.pop(request_id, None)
+        if not outcome.reached_running or worker is None:
+            return outcome.default_report()
+        return TeardownReport(exited=worker.done())
 
     async def _run_send(self, fields: dict, msg_id: str, async_redis) -> None:
         request_id = fields.get("request_id", "")
@@ -238,7 +255,6 @@ class LocalModelBridge:
                 kind=AgentEventKind.ERROR,
                 text="Local model bridge: no model alias supplied.",
             )
-            self._publisher.publish_run_done(request_id)
             await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
             return
 
@@ -252,7 +268,6 @@ class LocalModelBridge:
             if finalized:
                 return
             finalized = True
-            self._publisher.publish_run_done(request_id)
             self._trigger_message_ids.pop(request_id, None)
             await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
 
@@ -285,6 +300,7 @@ class LocalModelBridge:
                         model_alias, fallback_definition=fallback_def
                     ),
                 )
+                self._run_workers[request_id] = worker
                 client = await asyncio.shield(worker)
 
                 messages = self._build_messages(system_prompt, message)
@@ -309,6 +325,7 @@ class LocalModelBridge:
                         loop.call_soon_threadsafe(chunk_queue.put_nowait, _SENTINEL)
 
                 worker = loop.run_in_executor(self._executor, _produce)
+                self._run_workers[request_id] = worker
 
                 aborted = False
                 while True:
@@ -375,6 +392,11 @@ class LocalModelBridge:
                 raise
             except Exception as e:
                 logger.exception("Local model send failed: %s", e)
+                # As on cancel: hold the session until the worker stops, so
+                # the next send doesn't queue behind a still-running token.
+                stop_generation.set()
+                if worker is not None:
+                    await asyncio.gather(asyncio.shield(worker), return_exceptions=True)
                 self._publish_event(
                     request_id, session_key, seq + 1,
                     kind=AgentEventKind.ERROR,

@@ -16,7 +16,8 @@ import redis.asyncio as aioredis
 from redis.asyncio import BlockingConnectionPool
 
 from .command_publisher import CommandPublisherMixin
-from .events import AgentEvent
+from .events import AgentEvent, AgentEventKind
+from .run_contract import DONE_FIELD, RunContractError, RunTerminal
 from .publisher import (
     COMMANDS_STREAM,
     EVENTS_STREAM_PREFIX,
@@ -39,6 +40,23 @@ def _rpc_reply_matches(fields: dict, backend: str | None) -> bool:
     """
     replier = (fields.get("backend") or "").strip()
     return not backend or not replier or replier == backend
+
+
+def _run_terminal_event(request_id: str, fields: dict) -> AgentEvent:
+    """``RUN_TERMINAL`` for a done sentinel; raw is ``{}`` when it proves nothing."""
+    raw: dict = {}
+    try:
+        terminal = RunTerminal.from_fields(fields)
+    except RunContractError:
+        logger.error("Malformed run terminal on request_id=%s: %r", request_id, fields)
+        terminal = None
+    if terminal is not None:
+        raw = terminal.to_dict()
+    return AgentEvent(
+        event_id=f"{request_id}:terminal", session_key="", run_id=request_id,
+        kind=AgentEventKind.RUN_TERMINAL, origin="system", raw=raw,
+        provider=raw.get("backend"),
+    )
 
 
 class RedisSubscriber(CommandPublisherMixin):
@@ -434,8 +452,10 @@ class RedisSubscriber(CommandPublisherMixin):
                     # Reset inactivity deadline on each event
                     deadline = loop_time() + timeout_s
 
-                    # Check for done sentinel
-                    if fields.get("done"):
+                    # The done sentinel is the run's one terminal: surface its
+                    # contract as RUN_TERMINAL, then stop (TASK-1233).
+                    if fields.get(DONE_FIELD):
+                        yield _run_terminal_event(request_id, fields)
                         return
 
                     payload_str = fields.get("payload", "{}")

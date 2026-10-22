@@ -4,14 +4,20 @@ A ``chat.send`` registers its task with the session queue at receipt,
 synchronously and before any await, so a ``chat.abort`` for the same request
 either cancels it or, if the abort was read first, leaves a tombstone that
 refuses the send here. Nothing a send does (``/new`` reset, seed, the run
-itself) happens outside that registration. Exactly one terminal is published
-per request:
+itself) happens outside that registration. Exactly one terminal event is
+published per request:
 
 * refused (tombstoned): the cancelled terminal, published here;
 * Stopped during preflight: the cancelled terminal, published here, unless
   preflight already published its own terminal;
 * Stopped or finished after preflight: :meth:`_run_send` owns the terminal,
   as before.
+
+Run contract (TASK-1233): an accepted send publishes ``RUN_ACCEPTED`` here,
+and its one ``done`` sentinel is published here too, through a
+:class:`~claude_code_bridge.run_terminal.RunTerminalLatch`, after
+:meth:`_run_send` (including its run teardown) has finished. Only a host
+shutdown publishes earlier, from inside :meth:`_run_send`.
 """
 
 from __future__ import annotations
@@ -23,8 +29,10 @@ from dataclasses import dataclass
 from agent_bridge.abort_contract import aborted_terminal_raw
 from agent_bridge.events import AgentEventKind
 from agent_bridge.publisher import COMMANDS_STREAM
+from agent_bridge.run_contract import UNATTEMPTED
 from agent_bridge.session_queue import Admission
 
+from .run_terminal import RunTerminalLatch
 from .send_preflight import prepare_parsed_send
 from .send_request import SendRequest
 
@@ -60,6 +68,7 @@ class ClaudeSendAdmissionMixin:
             await self._publish_request_cancelled(
                 request_id, session_key, 1, msg_id, async_redis,
             )
+            self._publisher.publish_run_done(request_id, teardown=UNATTEMPTED)
             return
         if admission is Admission.DUPLICATE:
             logger.warning(
@@ -68,6 +77,10 @@ class ClaudeSendAdmissionMixin:
             )
             await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
             return
+        self._publisher.publish_run_accepted(request_id, session_key)
+        terminal = RunTerminalLatch(self._publisher, request_id, owner=asyncio.current_task())
+        self._run_terminals[request_id] = terminal
+        cancelled = False
         try:
             scope = PreflightScope()
             try:
@@ -82,14 +95,27 @@ class ClaudeSendAdmissionMixin:
                 raise
             if preflight is None:
                 return
-            await self._run_send(preflight, msg_id, async_redis)
+            await self._run_send(preflight, msg_id, async_redis, terminal)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
+            report = terminal.report(
+                phase=self._session_queue.request_phase(session_key, request_id),
+                cancelled=cancelled,
+            )
             self._session_queue.release(session_key, request_id)
+            terminal.publish(report)
+            if self._run_terminals.get(request_id) is terminal:
+                del self._run_terminals[request_id]
 
     async def _publish_request_cancelled(
         self, request_id: str, session_key: str, seq: int, msg_id: str, async_redis,
     ) -> None:
-        """Publish the cancelled terminal and run_done, clean up, and xack."""
+        """Publish the cancelled terminal event, clean up, and xack.
+
+        The ``done`` sentinel is ``_handle_send``'s (TASK-1233).
+        """
         self._publish_event(
             request_id, session_key, seq,
             kind=AgentEventKind.ASSISTANT_DONE, text="",
@@ -99,7 +125,6 @@ class ClaudeSendAdmissionMixin:
                 self._session_queue.cancel_cause(session_key, request_id)
             ),
         )
-        self._publisher.publish_run_done(request_id)
         self._discard_changed_file_request(request_id)
         self._trigger_message_ids.pop(request_id, None)
         if request_id not in self._proxy_request_sessions:

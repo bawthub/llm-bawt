@@ -46,8 +46,9 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,9 @@ class TeardownOutcome:
     exited: bool | None
     pid: int | None = None
     survivors: tuple[int, ...] = ()
+    elapsed_ms: int | None = field(default=None, compare=False)
+    """Wall time of the whole teardown, set by :class:`RunTeardown`; a
+    measurement, so not compared."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +124,7 @@ class TeardownOutcome:
             "exited": self.exited,
             "pid": self.pid,
             "survivors": list(self.survivors),
+            "elapsed_ms": self.elapsed_ms,
         }
 
     def detail(self) -> str:
@@ -227,6 +232,11 @@ class RunTeardown:
     def started(self) -> bool:
         return self._task is not None
 
+    @property
+    def outcome(self) -> TeardownOutcome | None:
+        """The finished teardown's outcome, or ``None`` until it finishes."""
+        return self._outcome.result() if self._outcome.done() else None
+
     def start(self) -> asyncio.Task[TeardownOutcome]:
         """Start the teardown (idempotent); it runs to completion on its own."""
         if self._task is None:
@@ -263,6 +273,7 @@ class RunTeardown:
             return None
 
     async def _run(self) -> TeardownOutcome:
+        started = time.monotonic()
         try:
             outcome = await self._teardown()
         except Exception as exc:  # never leave an abort waiting on a crash
@@ -271,6 +282,9 @@ class RunTeardown:
                 disconnect=f"{DISCONNECT_ERROR}:{type(exc).__name__}",
                 signal=SIGNAL_NONE, exited=None,
             )
+        outcome = replace(outcome, elapsed_ms=round((time.monotonic() - started) * 1000))
+        log = logger.warning if outcome.survivors or outcome.signal != SIGNAL_NONE else logger.debug
+        log("Run teardown pid=%s %s elapsed_ms=%s", outcome.pid, outcome.detail(), outcome.elapsed_ms)
         if not self._outcome.done():
             self._outcome.set_result(outcome)
         return outcome
@@ -339,16 +353,13 @@ class RunTeardown:
         survivors = [child for child, start in tree.items() if self._procs.is_alive(child, start)]
         if proc.returncode is None and (cli_start is None or self._procs.is_alive(pid, cli_start)):
             survivors.insert(0, pid)
-        outcome = TeardownOutcome(
+        return TeardownOutcome(
             disconnect=disconnect,
             signal=sent,
             exited=not survivors,
             pid=pid,
             survivors=tuple(survivors),
         )
-        log = logger.warning if survivors or sent != SIGNAL_NONE else logger.debug
-        log("Run teardown pid=%s %s", pid, outcome.detail())
-        return outcome
 
 
 def _consume_result(task: asyncio.Future) -> None:

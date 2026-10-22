@@ -15,14 +15,6 @@ def should_read_native_context_usage(*, use_proxy: bool) -> bool:
     return not use_proxy
 
 
-def publish_run_done_once(publisher, request_id: str, *, already_published: bool) -> bool:
-    """Publish the per-run terminal sentinel at most once."""
-    if already_published:
-        return True
-    publisher.publish_run_done(request_id)
-    return True
-
-
 def separator_before_new_block(previous_tail: str) -> str:
     """Return a Markdown paragraph boundary between consecutive stream blocks.
 

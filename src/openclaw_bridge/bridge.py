@@ -8,7 +8,8 @@ from datetime import datetime
 from agent_bridge.abort_contract import AbortState
 from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
 from agent_bridge.run_status import RUN_STATUS_METHOD, RunState, answer_run_status, queue_run_state
-from agent_bridge.send_admission import admit_send
+from agent_bridge.run_contract import TeardownReport
+from agent_bridge.send_admission import RunOutcome, admit_send
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
 from agent_bridge.events import AgentEvent, AgentEventKind
 from agent_bridge.maintenance import is_new_command
@@ -16,7 +17,7 @@ from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 from agent_bridge.store import EventStore
 from .ingest import EventIngestPipeline
-from .ws_client import OpenClawWsClient
+from .ws_client import OpenClawWsClient, is_run_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ class SessionBridge(ChangedFileLifecycleMixin):
         # the session after awaiting a remote abort (a sibling may have begun).
         self._request_runs: dict[tuple[str, str], dict] = {}
         self._abort_run_id_timeout_s = 5.0
+        # TASK-1233: requests whose gateway run is known to have ended (its
+        # stream finished, or the gateway confirmed the abort). Read and
+        # dropped by _exit_report when the send's done is published.
+        self._gateway_settled: set[tuple[str, str]] = set()
         # When the live run stream ends without assistant text, poll history
         # briefly to recover replies produced by upstream provider fallback.
         self._history_reply_timeout_s = 45.0
@@ -164,11 +169,26 @@ class SessionBridge(ChangedFileLifecycleMixin):
         self, fields: dict, msg_id: str, async_redis
     ) -> None:
         """Admit a chat.send at receipt (TASK-1232 P2), then run it."""
+        key = (fields.get("session_key", "main"), fields.get("request_id", ""))
         await admit_send(
-            self._session_queue, fields.get("session_key", "main"), fields.get("request_id", ""),
-            msg_id, async_redis, consumer_group="bridge", publisher=self._publisher,
+            self._session_queue, *key, msg_id, async_redis,
+            consumer_group="bridge", publisher=self._publisher,
             run=lambda: self._run_send_command(fields, msg_id, async_redis),
+            exit_probe=lambda outcome: self._exit_report(key, outcome),
         )
+
+    def _exit_report(self, key: tuple[str, str], outcome: RunOutcome) -> TeardownReport:
+        """TASK-1233 ``teardown`` for an OpenClaw send.
+
+        The work runs on the gateway, so once a send held the session lock
+        only a finished gateway stream or a confirmed gateway abort proves it
+        stopped. An error or a bare local cancel leaves that unproven: false.
+        """
+        settled = key in self._gateway_settled
+        self._gateway_settled.discard(key)
+        if not outcome.reached_running:
+            return outcome.default_report()
+        return TeardownReport(exited=settled)
 
     async def _run_send_command(
         self, fields: dict, msg_id: str, async_redis
@@ -212,7 +232,6 @@ class SessionBridge(ChangedFileLifecycleMixin):
         request_key = (session_key, request_id)
 
         async def on_cancel() -> None:
-            self._publisher.publish_run_done(request_id)
             if not cleanup_complete:
                 self._discard_changed_file_request(request_id)
                 await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
@@ -260,7 +279,6 @@ class SessionBridge(ChangedFileLifecycleMixin):
                         trigger_message_id=trigger_message_id,
                     ),
                 )
-                self._publisher.publish_run_done(request_id)
                 await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
                 return
 
@@ -287,6 +305,9 @@ class SessionBridge(ChangedFileLifecycleMixin):
                     session_key, message, attachments=attachments,
                     on_run_started=on_run_started,
                 ):
+                    if is_run_terminal(raw_event):
+                        # The gateway ended this run (TASK-1233 teardown).
+                        self._gateway_settled.add(request_key)
                     # Parse through ingest pipeline to get structured event
                     event = self._ingest.parse(raw_event, session_key)
                     if event is not None:
@@ -357,7 +378,6 @@ class SessionBridge(ChangedFileLifecycleMixin):
                             ),
                         )
 
-                self._publisher.publish_run_done(request_id)
                 logger.info("Send command completed: request_id=%s", request_id)
 
             except Exception as e:
@@ -373,7 +393,6 @@ class SessionBridge(ChangedFileLifecycleMixin):
                     trigger_message_id=trigger_message_id,
                 )
                 self._publisher.publish_run_event(request_id, err_event)
-                self._publisher.publish_run_done(request_id)
             finally:
                 if self._request_runs.get(request_key) is run_state:
                     self._request_runs.pop(request_key, None)
@@ -531,6 +550,7 @@ class SessionBridge(ChangedFileLifecycleMixin):
             # The old run may have completed while the gateway RPC awaited.
             # Never cancel the new session owner or its stream cancel event.
             if self._request_runs.get(key) is state:
+                self._gateway_settled.add(key)
                 self._session_queue.cancel_request(session_key, target_request_id)
             return AbortState.CANCELLED, "run_aborted"
 

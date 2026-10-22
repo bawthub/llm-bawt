@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from openclaw_bridge.bridge import SessionBridge
 from agent_bridge.events import AgentEventKind
+from agent_bridge.run_contract import TeardownReport
 from openclaw_bridge.ingest import EventIngestPipeline
 
 
@@ -120,5 +121,6 @@ def test_handle_send_command_recovers_reply_from_history_after_empty_stream():
     ]
 
     assert recovered, "expected synthetic assistant delta recovered from chat history"
-    publisher.publish_run_done.assert_called_once_with("req_123")
+    publisher.publish_run_done.assert_called_once_with(
+        "req_123", teardown=TeardownReport(exited=True))
     async_redis.xack.assert_awaited_once()

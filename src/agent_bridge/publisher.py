@@ -18,7 +18,11 @@ from typing import Any
 import redis
 
 from .abort_contract import process_boot_id
-from .events import AgentEvent
+from .events import AgentEvent, AgentEventKind
+from .run_contract import (
+    DONE_FIELD, RUN_TERMINAL_RETENTION_S, RunAccepted, RunTerminal, TeardownReport,
+    run_terminal_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,8 +170,15 @@ class RedisPublisher:
         except Exception:
             logger.exception("Failed to publish RPC result to %s", stream_key)
 
-    def publish_run_done(self, request_id: str) -> None:
-        """Signal that a run is complete by writing a sentinel entry.
+    def publish_run_done(self, request_id: str, *, teardown: TeardownReport) -> None:
+        """Write the run's one terminal sentinel (TASK-1233 contract).
+
+        The sentinel carries :meth:`RunTerminal.to_fields`: this bridge's
+        backend and boot id plus what teardown did before publish. The same
+        fields go to the run's terminal record, which outlives the stream by
+        design (``run_contract.RUN_TERMINAL_RETENTION_S``). A publisher without
+        a backend (never a deployed bridge) writes only the bare legacy
+        sentinel, which readers treat as "no evidence".
 
         Durable inter-bot callbacks may need to reattach after an app restart,
         so their deterministic ``req_delivery_*`` run streams are retained for
@@ -176,12 +187,42 @@ class RedisPublisher:
         if not self._connected:
             return
         stream_key = f"{RUN_STREAM_PREFIX}{request_id}"
+        terminal = (
+            RunTerminal.here(request_id, self._default_provider, teardown)
+            if self._default_provider else None
+        )
+        fields = terminal.to_fields() if terminal else {DONE_FIELD: "1"}
+        ttl = 604800 if request_id.startswith("req_delivery_") else 300
         try:
-            self._redis.xadd(stream_key, {"done": "1"}, maxlen=RUN_STREAM_MAXLEN, approximate=True)
-            ttl = 604800 if request_id.startswith("req_delivery_") else 300
+            if terminal is not None:
+                # The compact record first: a reader that sees the stream's
+                # done can always find the record too.
+                record_key = run_terminal_key(request_id)
+                pipe = self._redis.pipeline(transaction=True)
+                pipe.delete(record_key)
+                pipe.hset(record_key, mapping=fields)
+                pipe.expire(record_key, max(ttl, RUN_TERMINAL_RETENTION_S))
+                pipe.execute()
+            self._redis.xadd(stream_key, fields, maxlen=RUN_STREAM_MAXLEN, approximate=True)
             self._redis.expire(stream_key, ttl)
         except Exception:
             logger.exception("Failed to publish run done to %s", stream_key)
+            return
+        logger.info(
+            "Run done request_id=%s exited=%s disconnect=%s signal=%s teardown_ms=%s",
+            request_id, teardown.exited, teardown.disconnect, teardown.signal,
+            teardown.elapsed_ms,
+        )
+
+    def publish_run_accepted(self, request_id: str, session_key: str) -> None:
+        """Publish ``RUN_ACCEPTED`` naming the boot that admitted this send."""
+        if not self._default_provider:
+            return
+        accepted = RunAccepted.here(request_id, self._default_provider)
+        self.publish_run_event(request_id, AgentEvent(
+            event_id=f"{request_id}:accepted", session_key=session_key, run_id=request_id,
+            kind=AgentEventKind.RUN_ACCEPTED, origin="system", raw=accepted.to_dict(),
+        ))
 
     def publish_unified_event(
         self,

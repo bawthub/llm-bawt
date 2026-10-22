@@ -23,6 +23,7 @@ from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 
 from .auth_broker import materialize_auth_from_broker
+from .process_ledger import ProcessLedger, bind_ledger
 from .transport import CodexTransport, auth_path, validate_auth_json
 from .mcp_context import codex_mcp_environment
 from .local_plugins import CodexMcpContextConfigError
@@ -134,10 +135,15 @@ class CodexCommandMixin:
         self, fields: dict, msg_id: str, async_redis,
     ) -> None:
         # TASK-1232 P2: registered at receipt, before any await.
+        # TASK-1233: admit_send publishes the run's one done, with the
+        # ledger's report on whether every codex subprocess was reaped.
+        ledger = ProcessLedger()
+        bind_ledger(ledger)
         await admit_send(
             self._session_queue, fields.get("session_key", ""), fields.get("request_id", ""),
             msg_id, async_redis, consumer_group=CONSUMER_GROUP, publisher=self._publisher,
             run=lambda: self._run_send(fields, msg_id, async_redis),
+            exit_probe=ledger.report,
         )
 
     async def _run_send(
@@ -190,7 +196,6 @@ class CodexCommandMixin:
         except ValueError as exc:
             self._publish_event(request_id, session_key, 1,
                                 kind=AgentEventKind.ERROR, text=str(exc), model=model)
-            self._publisher.publish_run_done(request_id)
             self._trigger_message_ids.pop(request_id, None)
             await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
             return
@@ -213,7 +218,6 @@ class CodexCommandMixin:
                     text="Session reset. Ready for a new conversation.",
                     model=model,
                 )
-                self._publisher.publish_run_done(request_id)
                 await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
                 return
 
@@ -227,7 +231,6 @@ class CodexCommandMixin:
 
         async def on_cancel() -> None:
             # Includes cancellation while queued or during pre-SDK setup.
-            self._publisher.publish_run_done(request_id)
             if not cleanup_complete:
                 self._discard_changed_file_request(request_id)
                 self._trigger_message_ids.pop(request_id, None)
@@ -262,7 +265,6 @@ class CodexCommandMixin:
                         model=model,
                         extra_raw={"new_session_ack": reset_evidence.acknowledgment()},
                     )
-                    self._publisher.publish_run_done(request_id)
                     return
 
                 # MCP context injection (matches claude bridge). Body from the
@@ -326,7 +328,6 @@ class CodexCommandMixin:
                             text=f"Codex MCP context setup failed — {context_error}",
                             model=model,
                         )
-                        self._publisher.publish_run_done(request_id)
                         return
                     except RuntimeError as auth_err:
                         # auth.json missing/invalid at startup — surface to user
@@ -337,7 +338,6 @@ class CodexCommandMixin:
                             text=f"Codex OAuth failed — {auth_err}",
                             model=model,
                         )
-                        self._publisher.publish_run_done(request_id)
                         return
 
                     # Build prompt input fresh each retry attempt — temp files
@@ -528,7 +528,6 @@ class CodexCommandMixin:
                                 ),
                                 model=model,
                             )
-                            self._publisher.publish_run_done(request_id)
                             return
 
                         # Recoverable session error → retry once with fresh thread.
@@ -553,7 +552,6 @@ class CodexCommandMixin:
                             if current is controller:
                                 self._session_queue.pop_active_client(session_key)
 
-                self._publisher.publish_run_done(request_id)
                 if aborted:
                     logger.info(
                         "Send aborted via chat.abort: request_id=%s session=%s",
@@ -576,7 +574,6 @@ class CodexCommandMixin:
                     text=str(e),
                     model=model,
                 )
-                self._publisher.publish_run_done(request_id)
             finally:
                 self._discard_changed_file_request(request_id)
                 self._cleanup_tmp_files(tmp_image_paths)

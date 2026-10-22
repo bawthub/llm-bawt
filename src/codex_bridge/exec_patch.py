@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import AsyncIterator
 
+from .process_ledger import register_process
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,8 @@ def install(*, stream_limit: int = 1024 * 1024) -> None:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        # TASK-1233: the send's teardown report checks this process was reaped.
+        register_process(proc)
 
         if proc.stdin is None or proc.stdout is None:
             try:

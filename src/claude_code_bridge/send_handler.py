@@ -13,10 +13,11 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from agent_bridge.abort_contract import aborted_terminal_raw
+from agent_bridge.abort_contract import HOST_SHUTDOWN, aborted_terminal_raw
 from agent_bridge.events import AgentEventKind
 from agent_bridge.maintenance import is_compact_command
 from agent_bridge.publisher import COMMANDS_STREAM
+from agent_bridge.run_contract import UNATTEMPTED
 from claude_code_bridge.tool_policy import effective_disallowed_tools
 
 from ._bridge_helpers import (
@@ -25,10 +26,7 @@ from ._bridge_helpers import (
     AgentSpawnIndex,
 )
 from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
-from .send_boundaries import (
-    publish_run_done_once,
-    should_read_native_context_usage,
-)
+from .send_boundaries import should_read_native_context_usage
 from .send_errors import (
     AuthRetryPolicy,
     TerminalSDKResultError,
@@ -37,6 +35,7 @@ from .send_errors import (
     retry_exhausted_text,
 )
 from .run_teardown import RunTeardown
+from .run_terminal import RunTerminalLatch
 from .send_admission import ClaudeSendAdmissionMixin
 from .send_preflight import SendPreflight
 from .send_result import ClaudeResultMixin
@@ -63,8 +62,14 @@ class ClaudeSendMixin(
 
     async def _run_send(
         self, preflight: SendPreflight, msg_id: str, async_redis,
+        terminal: RunTerminalLatch,
     ) -> None:
-        """Run one admitted, preflighted send (``_handle_send`` admits it)."""
+        """Run one admitted, preflighted send (``_handle_send`` admits it).
+
+        ``_handle_send`` publishes the run's ``done`` through ``terminal``
+        after this returns; this records each SDK client's teardown on it, and
+        publishes early only for a host shutdown (TASK-1233).
+        """
         req = preflight.request
         message = preflight.message
         reset_requested = preflight.reset_requested
@@ -86,7 +91,10 @@ class ClaudeSendMixin(
         task_turn_capability = req.task_turn_capability
 
         queue_seq = 0
-        run_done_published = False
+        early_cancel_published = False
+        # This send already published its terminal event (ASSISTANT_DONE or
+        # ERROR); a later cancel must not add a cancelled one.
+        terminal_event_published = False
 
         def _cancelled_raw() -> dict:
             # TASK-1231B: a host-shutdown cancel is stamped so the app can
@@ -96,10 +104,10 @@ class ClaudeSendMixin(
             )
 
         async def _publish_early_cancel() -> None:
-            nonlocal run_done_published
-            if run_done_published:
+            nonlocal early_cancel_published
+            if early_cancel_published or terminal_event_published:
                 return
-            run_done_published = True
+            early_cancel_published = True
             await self._publish_request_cancelled(
                 request_id, session_key, queue_seq + 1, msg_id, async_redis,
             )
@@ -769,13 +777,9 @@ class ClaudeSendMixin(
                                     ),
                                 )
                                 assistant_done_emitted = True
-                                # Publish the terminal sentinel before SDK cleanup;
+                                # The run's ``done`` follows teardown (run_terminal.py);
                                 # the session lock still prevents successor overlap.
-                                run_done_published = publish_run_done_once(
-                                    self._publisher,
-                                    request_id,
-                                    already_published=run_done_published,
-                                )
+                                terminal_event_published = True
                                 # Release input and stop at ResultMessage: waiting for
                                 # EOF after AskUserQuestion can deadlock (TASK-269).
                                 turn_done.set()
@@ -809,11 +813,7 @@ class ClaudeSendMixin(
                                 len(full_text), request_id, session_key,
                             )
                         if assistant_done_emitted:
-                            run_done_published = publish_run_done_once(
-                                self._publisher,
-                                request_id,
-                                already_published=run_done_published,
-                            )
+                            terminal_event_published = True
                         break
                     except asyncio.CancelledError:
                         aborted = True
@@ -825,14 +825,13 @@ class ClaudeSendMixin(
                             _publish_partial("".join(text_parts))
                         except Exception:
                             logger.debug("Failed to publish ASSISTANT_DONE on cancel", exc_info=True)
-                        try:
-                            run_done_published = publish_run_done_once(
-                                self._publisher,
-                                request_id,
-                                already_published=run_done_published,
-                            )
-                        except Exception:
-                            logger.debug("Failed to publish run_done on cancel", exc_info=True)
+                        terminal_event_published = True
+                        if self._session_queue.cancel_cause(
+                            session_key, request_id,
+                        ) == HOST_SHUTDOWN:
+                            # Publish before the teardown below: the bridge's
+                            # stop must fit its grace (run_terminal.py).
+                            terminal.publish(UNATTEMPTED)
                         raise
                     except Exception as e:
                         if cancel_event is not None and cancel_event.is_set():
@@ -842,11 +841,7 @@ class ClaudeSendMixin(
                             )
                             aborted = True
                             _publish_partial("".join(text_parts))
-                            run_done_published = publish_run_done_once(
-                                self._publisher,
-                                request_id,
-                                already_published=run_done_published,
-                            )
+                            terminal_event_published = True
                             break
 
                         interrupted_usage = self._compute_interrupted_usage(
@@ -933,14 +928,11 @@ class ClaudeSendMixin(
                             try:
                                 await teardown.run_owned()
                             finally:
+                                terminal.record(teardown)
                                 if self._run_teardowns.get(request_id) is teardown:
                                     del self._run_teardowns[request_id]
 
-                run_done_published = publish_run_done_once(
-                    self._publisher,
-                    request_id,
-                    already_published=run_done_published,
-                )
+                terminal_event_published = True
                 if aborted:
                     logger.info(
                         "Send aborted via chat.abort: request_id=%s session=%s",
@@ -971,7 +963,7 @@ class ClaudeSendMixin(
                     token_usage=interrupted_usage,
                     extra_raw=error_raw,
                 )
-                self._publisher.publish_run_done(request_id)
+                terminal_event_published = True
             finally:
                 self._clear_proxy_sampling_cancel(request_id)
                 self._discard_changed_file_request(request_id)
