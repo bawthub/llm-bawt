@@ -35,6 +35,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_turn_admission_pg.py::",
     "test_inter_bot_steer_generation_pg.py::",
     "test_turn_gates_pg.py::",
+    "test_execution_exit_pg.py::",
     "test_delivery_claim_gate_pg.py::",
     "test_ops_quiesce_pg.py::",
     "test_ops_quiesce_visibility_pg.py::",

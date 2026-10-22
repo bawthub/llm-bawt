@@ -682,6 +682,11 @@ class AgentBridgeBackend(AgentBackend):
                                         "trigger_message_id": event.trigger_message_id,
                                     })
 
+                            elif event.kind == AgentEventKind.RUN_TERMINAL:
+                                # The run's one terminal (TASK-1233 B1 source (a)).
+                                if execution is not None:
+                                    execution.record_exit(event.raw)
+
                             elif event.kind == AgentEventKind.ERROR:
                                 # Terminal failures can still carry a provider-reported
                                 # last-iteration usage snapshot (TASK-304). Preserve it

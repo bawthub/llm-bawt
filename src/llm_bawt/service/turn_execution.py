@@ -7,7 +7,30 @@ so Stop during setup cannot race ahead of chat.send and get lost.
 """
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from threading import Event, Lock
+from typing import Any
+
+from agent_bridge.run_contract import RunTerminal
+
+from .turn_gates import execution_exit_record, stamp_turn_exit
+
+log = logging.getLogger(__name__)
+
+
+def exit_record_from_terminal(raw: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """B1 source (a): the ``execution_exit`` record a ``RUN_TERMINAL`` proves.
+
+    ``raw`` is ``RunTerminal.to_dict()``, or ``{}`` for a pre-contract bridge
+    (never evidence). The record keeps the terminal's ``teardown.exited`` as
+    is: only ``True`` drains, and ``False``/``None`` are named blockers.
+    """
+    if not raw:
+        return None
+    terminal = RunTerminal.from_dict(raw)
+    return execution_exit_record(source="a", request_id=terminal.request_id, backend=terminal.backend,
+                                 boot_id=terminal.boot_id, exited=terminal.teardown.exited)
 
 
 class TurnExecutionCancelled(Exception):
@@ -39,6 +62,25 @@ class TurnExecution:
         with self._lock:
             self.backend, self.session_key, self.request_id = backend, session_key, request_id
         self.check_cancelled()
+
+    def record_exit(self, terminal: Mapping[str, Any] | None) -> bool:
+        """Stamp this run's terminal on the turn row (B1 source (a), at settle).
+
+        Never raises: a missing stamp only leaves a quiesce waiting, and the
+        (b)/(c) sweep can still prove the exit. Returns whether it stamped.
+        """
+        engine = getattr(self.store, "engine", None)
+        try:
+            record = exit_record_from_terminal(terminal)
+            if record is None or engine is None:
+                return False
+            with engine.begin() as conn:
+                return stamp_turn_exit(conn, self.turn_id, record)
+        except ValueError:  # RunContractError included: a malformed terminal or record
+            log.error("Unusable run terminal for turn %s: %r", self.turn_id, terminal)
+        except Exception:
+            log.exception("Could not stamp the run terminal for turn %s", self.turn_id)
+        return False
 
     def dispatched(self) -> bool:
         with self._lock:

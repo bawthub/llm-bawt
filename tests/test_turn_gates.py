@@ -205,3 +205,102 @@ def test_durable_stream_start_reraises_for_the_producer_to_defer(monkeypatch):
     _, collect = _stream(monkeypatch, claim=AdmissionClaim(owner="claim", fence=lambda _: True))
     with pytest.raises(SystemGateRefused):
         asyncio.run(collect())
+
+
+# ---------------------------------------------------------------------------
+# B1 source (a): the record constructor and the RUN_TERMINAL writer
+# ---------------------------------------------------------------------------
+
+
+def _terminal(exited=True, request_id="req-1", backend="claude-code"):
+    from agent_bridge.run_contract import RunTerminal, TeardownReport
+
+    return RunTerminal(request_id, backend, "boot-1", TeardownReport("ok", "none", exited, 12)).to_dict()
+
+
+def test_execution_exit_record_is_the_shape_the_drain_rule_reads():
+    from llm_bawt.service.turn_gates import execution_exit_record
+
+    at = datetime(2026, 10, 22, 18, 0, tzinfo=timezone.utc)
+    record = execution_exit_record(source="b", request_id="req-1", backend="claude-code",
+                                   boot_id="boot-2", exited=True, at=at)
+    assert record == {"backend": "claude-code", "request_id": "req-1", "boot_id": "boot-2",
+                      "source": "b", "exited": True, "at": "2026-10-22T18:00:00+00:00"}
+    assert execution_exit_drains(record, request_id="req-1", backend="claude-code") == (True, "execution_exit:b")
+    assert execution_exit_record(source="a", request_id="r", backend="b", boot_id="x", exited=None)["at"]
+
+
+@pytest.mark.parametrize("override", [
+    {"source": "d"}, {"request_id": ""}, {"backend": "  "}, {"boot_id": None}, {"exited": "true"},
+    {"exited": 1}, {"at": datetime(2026, 10, 22, 18, 0)},
+])
+def test_execution_exit_record_refuses_what_the_drain_rule_could_misread(override):
+    from llm_bawt.service.turn_gates import execution_exit_record
+
+    args = {"source": "a", "request_id": "req-1", "backend": "claude-code", "boot_id": "boot-1",
+            "exited": True, **override}
+    with pytest.raises(ValueError):
+        execution_exit_record(**args)
+
+
+@pytest.mark.parametrize(("existing", "record", "replaces"), [
+    (None, {"request_id": "req-1", "exited": False}, True),
+    ({"request_id": "req-1", "exited": False}, {"request_id": "req-1", "exited": True}, True),
+    ({"request_id": "req-1", "exited": True}, {"request_id": "req-1", "exited": False}, False),  # proof is final
+    ({"request_id": "req-1", "exited": True}, {"request_id": "req-1", "exited": True}, False),  # idempotent
+    ({"request_id": "req-0", "exited": True}, {"request_id": "req-1", "exited": False}, True),  # another request
+])
+def test_a_record_never_replaces_a_confirmed_exit_of_the_same_request(existing, record, replaces):
+    from llm_bawt.service.turn_gates import _replaces
+
+    assert _replaces(existing, record) is replaces
+
+
+@pytest.mark.parametrize("exited", [True, False, None])
+def test_a_run_terminal_becomes_a_source_a_record_with_its_exit_as_is(exited):
+    from llm_bawt.service.turn_execution import exit_record_from_terminal
+
+    record = exit_record_from_terminal(_terminal(exited))
+    assert {k: record[k] for k in ("source", "request_id", "backend", "boot_id", "exited")} == {
+        "source": "a", "request_id": "req-1", "backend": "claude-code", "boot_id": "boot-1", "exited": exited}
+    assert exit_record_from_terminal({}) is None  # a pre-contract bridge proves nothing
+
+
+def test_record_exit_never_raises(caplog):
+    from threading import Event
+
+    from llm_bawt.service.turn_execution import TurnExecution
+
+    no_db = TurnExecution("t", Event(), is_agent=True, store=Mock(engine=None))
+    assert no_db.record_exit(_terminal()) is False
+    broken = TurnExecution("t", Event(), is_agent=True, store=Mock(engine=Mock(begin=Mock(side_effect=OSError))))
+    assert broken.record_exit({"request_id": "req-1"}) is False  # malformed terminal
+    assert broken.record_exit(_terminal()) is False  # database failure
+    assert "Unusable run terminal" in caplog.text and "Could not stamp" in caplog.text
+
+
+def test_the_bridge_client_hands_the_run_terminal_to_its_execution(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_bridge.events import AgentEvent, AgentEventKind
+    from llm_bawt.agent_backends import agent_bridge
+
+    terminal = _terminal(request_id="req-A")
+    owner = Mock(dispatched=Mock(return_value=False), record_exit=Mock(return_value=True))
+
+    class Subscriber:
+        def __init__(self, url): pass
+        async def connect(self): pass
+        async def close(self): pass
+        async def send_command(self, **kwargs): pass
+        async def subscribe_run(self, request_id, **kwargs):
+            yield AgentEvent(event_id=f"{request_id}:terminal", session_key="", run_id=request_id,
+                             kind=AgentEventKind.RUN_TERMINAL, origin="system", raw=terminal)
+
+    root = SimpleNamespace(_redis=SimpleNamespace(connection_pool=SimpleNamespace(connection_kwargs={})))
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: root)
+    monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
+    list(agent_bridge.AgentBridgeBackend().stream_raw("hello", {
+        "session_key": "test:nick", "request_id": "req-A", "turn_execution": owner,
+    }))
+    owner.record_exit.assert_called_once_with(terminal)

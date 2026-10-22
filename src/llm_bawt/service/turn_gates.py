@@ -24,14 +24,17 @@ them) never are. Gates are PostgreSQL-only, like the lock that linearizes them.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import text as sa_text
 
 from ..bot_types import normalize_bot_type
 from ..utils.schema import SchemaBootstrapGuard, ensure_columns, ensure_relations
+
+logger = logging.getLogger(__name__)
 
 HOLD = "hold"
 DENY = "deny"
@@ -384,6 +387,68 @@ EXECUTION_EXIT_KEY = "execution_exit"
 EXIT_SOURCES = frozenset({"a", "b", "c"})
 
 
+def execution_exit_record(*, source: str, request_id: str, backend: str, boot_id: str,
+                          exited: bool | None, at: datetime | None = None) -> dict[str, Any]:
+    """The one constructor of a B1 ``execution_exit`` record, for every source and both homes.
+
+    ``boot_id`` names the bridge boot that produced the evidence. Anything the
+    drain rule could misread is refused here rather than stored.
+    """
+    if source not in EXIT_SOURCES:
+        raise ValueError(f"unknown exit source {source!r}")
+    for name, value in (("request_id", request_id), ("backend", backend), ("boot_id", boot_id)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    if exited is not None and not isinstance(exited, bool):
+        raise ValueError("exited must be a bool or None")
+    if at is not None and at.tzinfo is None:
+        raise ValueError("at must be timezone-aware")
+    return {"backend": backend, "request_id": request_id, "boot_id": boot_id, "source": source,
+            "exited": exited, "at": (at or datetime.now(timezone.utc)).isoformat()}
+
+
+def _replaces(existing: Any, record: Mapping[str, Any]) -> bool:
+    """A record never replaces a confirmed exit of the same request (idempotent per request_id).
+
+    A late ``exited=false`` cannot undo a proof, and a repeated stamp is a no-op.
+    """
+    return not (isinstance(existing, Mapping) and existing.get("exited") is True
+                and existing.get("request_id") == record.get("request_id"))
+
+
+def stamp_turn_exit(conn, turn_id: str, record: Mapping[str, Any]) -> bool:
+    """B1 source (a)'s writer: stamp ``record`` as the turn row's ``execution_exit``.
+
+    Only for the request the row is bound to, from its backend when the row
+    has one, and never over a confirmed exit (``_replaces``). Locks only the
+    turn row. The key is a per-attempt key: later turn writes keep it and a
+    re-arm drops it (``turn_termination.ATTEMPT_KEYS``). A refused stamp is
+    logged (a drifted backend name would otherwise disable every source (a)
+    stamp silently); the idempotent ``_replaces`` no-op is not.
+    """
+    if not _is_postgres(conn):
+        return False
+    from .turn_termination import dump_payload, turn_payload  # keeps this module's import closure DB-only
+
+    row = conn.execute(sa_text(
+        "SELECT request_json, agent_request_id, agent_backend FROM turn_logs WHERE id=:id FOR UPDATE"
+    ), {"id": turn_id}).mappings().first()
+    if row is None or not row["agent_request_id"] or row["agent_request_id"] != record.get("request_id") or (
+            row["agent_backend"] and str(record.get("backend") or "").lower() != row["agent_backend"].lower()):
+        logger.warning(
+            "execution_exit not stamped on turn %s: record request=%s backend=%s, row %s",
+            turn_id, record.get("request_id"), record.get("backend"),
+            "missing" if row is None else f"request={row['agent_request_id']} backend={row['agent_backend']}")
+        return False
+    payload = turn_payload(row["request_json"])
+    if not _replaces(payload.get(EXECUTION_EXIT_KEY), record):
+        return False
+    payload[EXECUTION_EXIT_KEY] = dict(record)
+    conn.execute(sa_text("UPDATE turn_logs SET request_json=:json WHERE id=:id"),
+                 {"json": dump_payload(payload), "id": turn_id})
+    return True
+
+
 @dataclass(frozen=True)
 class DrainStatus:
     """Is one roster member drained? ``reason`` names the evidence or the blocker."""
@@ -486,14 +551,20 @@ def pin_member_request(conn, turn_id: str, request_id: str) -> int:
 def stamp_member_exit(conn, member_id: int, record: Mapping[str, Any]) -> bool:
     """test_Z (b): stamp exit evidence on a member whose turn row is gone.
 
-    ``record`` has the turn-row ``execution_exit`` shape and is judged by the
-    same ``execution_exit_drains``. While the turn row exists it stays the one
-    evidence home, so this writes nothing and returns False.
+    ``record`` (``execution_exit_record``) is judged by the same
+    ``execution_exit_drains``. While the turn row exists it stays the one
+    evidence home, so this writes nothing and returns False; it never replaces
+    a confirmed exit either (``_replaces``).
     """
-    return bool(conn.execute(sa_text(
-        "UPDATE gate_members m SET execution_exit=CAST(:record AS jsonb) WHERE m.id=:id"
-        " AND NOT EXISTS (SELECT 1 FROM turn_logs t WHERE t.id = m.turn_id)"
-    ), {"id": member_id, "record": json.dumps(dict(record), default=str)}).rowcount)
+    existing = conn.execute(sa_text(
+        "SELECT m.execution_exit FROM gate_members m WHERE m.id=:id"
+        " AND NOT EXISTS (SELECT 1 FROM turn_logs t WHERE t.id = m.turn_id) FOR UPDATE OF m"
+    ), {"id": member_id}).first()
+    if existing is None or not _replaces(existing[0], record):
+        return False
+    conn.execute(sa_text("UPDATE gate_members SET execution_exit=CAST(:record AS jsonb) WHERE id=:id"),
+                 {"id": member_id, "record": json.dumps(dict(record), default=str)})
+    return True
 
 
 def bots_in_scope(conn, scope: GateScope) -> list[str]:
@@ -633,6 +704,7 @@ __all__ = [
     "carry_forward",
     "ensure_gate_schema",
     "execution_exit_drains",
+    "execution_exit_record",
     "extend_gate",
     "gate_blocks",
     "gate_drain_status",
@@ -645,4 +717,5 @@ __all__ = [
     "pin_member_request",
     "release_gates",
     "stamp_member_exit",
+    "stamp_turn_exit",
 ]
