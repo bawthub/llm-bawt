@@ -44,6 +44,7 @@ from .prompt_default_loaders import (
     load_ops_quiesce_end_turn_new_turn,
     load_ops_quiesce_end_turn_no_receipt,
     load_ops_quiesce_receipt,
+    load_ops_quiesce_request,
     load_profile_consolidation,
     load_recall_synthesis_system,
     load_self_recap_system,
@@ -421,6 +422,20 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "outcome. The receipt JSON is appended. It must say the operation "
             "already ran or failed and is not to be re-run. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_request": PromptDefinition(
+        key="ops.quiesce_request",
+        title="Ops Quiesce Request (control steer)",
+        category="agent_execution",
+        loader=load_ops_quiesce_request,
+        metadata={"notes": (
+            "The control steer (TASK-1233 B3) the app's quiesce control pump sends into "
+            "each running turn a quiesce ops job holds, at the next tool boundary "
+            "(priority next: running tools are never killed). It must ask the bot to "
+            "reach a safe stopping point and end its turn, not start new work or poll, "
+            "and may invite an ops_quiesce_ack. Sent once per held run, from system. "
+            "Used verbatim; a blank body falls back to the seed. Target-bot overrides supported."
         )},
     ),
     "ops.quiesce_end_turn.new_turn": PromptDefinition(

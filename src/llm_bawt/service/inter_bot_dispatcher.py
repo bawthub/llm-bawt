@@ -58,6 +58,9 @@ class InterBotDeliveryDispatcher:
         self.store = InterBotDeliveryStore(service.config)
         from .talk_reply_outbox import TalkReplyOutbox
         self.talk_replies = TalkReplyOutbox(self.store.engine) if self.store.engine is not None else None
+        from .quiesce_control import QuiesceControlRunner, build_pump
+        # TASK-1233 B3: ask each quiesce-held running turn to stop (leader-only).
+        self.quiesce_control = QuiesceControlRunner(lambda: build_pump(service, self.store.engine))
         self.recovery_interval_seconds = max(1.0, recovery_interval_seconds)
         self.leadership_retry_delay_seconds = max(0.0, leadership_retry_delay_seconds)
         self._wake_event = asyncio.Event()
@@ -139,6 +142,9 @@ class InterBotDeliveryDispatcher:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        quiesce_control = getattr(self, "quiesce_control", None)
+        if quiesce_control is not None:
+            await quiesce_control.stop()
         if self._task:
             await asyncio.gather(self._task, return_exceptions=True)
         if self._leader_task:
@@ -245,6 +251,9 @@ class InterBotDeliveryDispatcher:
                     )
                     reply_task.add_done_callback(self._talk_reply_done)
                     self._talk_reply_task = reply_task
+                quiesce_control = getattr(self, "quiesce_control", None)
+                if quiesce_control is not None:
+                    quiesce_control.maybe_start()
             except Exception:
                 consecutive_failures += 1
                 backoff = min(30.0, float(2 ** min(consecutive_failures - 1, 5)))

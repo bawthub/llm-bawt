@@ -260,6 +260,9 @@ _MEMBER_ADDED_COLUMNS = {
     # test_Z (b): the exit evidence home when the member's turn row is gone
     # (``stamp_member_exit``); the same record shape as the turn-row stamp.
     "execution_exit": ("JSONB", None),
+    # B3: the quiesce control pump's backoff. A pending member is not retried
+    # before it; NULL means now. Bookkeeping only: never stamps control_changed_at.
+    "control_next_attempt_at": ("TIMESTAMPTZ", None),
 }
 
 

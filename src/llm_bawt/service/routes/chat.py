@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -13,6 +13,9 @@ from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidI
 from ..dependencies import get_service
 from ..logging import get_service_logger
 from ..schemas import ChatCompletionRequest
+
+if TYPE_CHECKING:
+    from ..system_gate_admission import ControlGrant
 
 router = APIRouter()
 log = get_service_logger(__name__)
@@ -140,6 +143,7 @@ async def steer_active_turn(
     steer_request_id: str | None = None,
     author: AuthorReference | None = None,
     wire_suffix: str | None = None,
+    control: "ControlGrant | None" = None,
 ) -> ChatSteerResponse:
     """Shared steer implementation for public chat and durable inter-bot work.
 
@@ -149,8 +153,13 @@ async def steer_active_turn(
     ``request.message``. The public steer route cannot set it.
 
     Under a live system gate every steer is refused with ``SteerGateRefused``
-    before any bridge RPC (TASK-1233).
+    before any bridge RPC (TASK-1233). ``control`` (the quiesce control pump
+    only; the public route cannot set it) is admitted on its live member
+    claim, and then addresses only that member's pinned run: its request id,
+    backend and session, never the bot's current ones.
     """
+    if control is not None and not steer_request_id:
+        raise HTTPException(status_code=409, detail="control steer requires a steer_request_id")
     turn = service._turn_log_store.get_turn(request.turn_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="Turn not found")
@@ -177,10 +186,15 @@ async def steer_active_turn(
     # A maintenance-time message above is an enqueue and asks the gate there.
     from ..system_gate_admission import check_steer
 
-    await asyncio.to_thread(
-        check_steer, getattr(service._turn_log_store, "engine", None), bot_id, turn_id=turn.id,
-    )
-    if not turn.agent_session_key:
+    engine = getattr(service._turn_log_store, "engine", None)
+    target = None
+    if control is not None:
+        target = await asyncio.to_thread(check_steer, engine, bot_id, turn_id=turn.id, grant=control)
+        session_key, backend_name = target.session_key, (target.backend or "").strip()
+    else:
+        await asyncio.to_thread(check_steer, engine, bot_id, turn_id=turn.id)
+        session_key, backend_name = turn.agent_session_key, None
+    if not session_key:
         # A deterministic delivery retry may inspect the original target after it
         # ended. If the run never registered a bridge session, no steer RPC could
         # possibly have been submitted; report a definitive rejection so the
@@ -190,10 +204,12 @@ async def steer_active_turn(
         raise HTTPException(status_code=409, detail="Active bridge run is not ready")
 
     from ...agent_backends.agent_bridge import get_agent_subscriber
-    from ...bots import BotManager
 
-    bot = BotManager(service.config).get_bot(bot_id)
-    backend_name = (getattr(bot, "agent_backend", None) or "").strip()
+    if backend_name is None:
+        from ...bots import BotManager
+
+        bot = BotManager(service.config).get_bot(bot_id)
+        backend_name = (getattr(bot, "agent_backend", None) or "").strip()
     if backend_name != "claude-code":
         raise HTTPException(
             status_code=409,
@@ -216,14 +232,14 @@ async def steer_active_turn(
     try:
         for attempt in range(attempts):
             result = await subscriber.send_steer(
-                session_key=turn.agent_session_key,
+                session_key=session_key,
                 message=wire_message,
                 message_id=request.message_id,
                 backend=backend_name,
-                target_request_id=turn.agent_request_id,
+                target_request_id=target.request_id if target is not None else turn.agent_request_id,
                 request_id=steer_request_id,
                 priority=request.priority,
-                origin="user" if steer_request_id is None else "bot",
+                origin="user" if steer_request_id is None else "system" if control else "bot",
             )
             if result.get("ok") or result.get("error") != "no_active_run":
                 break

@@ -39,10 +39,24 @@ DEFAULT_END_TURN_NO_RECEIPT = (
     "later turn."
 )
 
+# The control steer (B3) the app's quiesce control pump sends into each held
+# running turn, at the next tool boundary.
+QUIESCE_REQUEST_KEY = "ops.quiesce_request"
+DEFAULT_QUIESCE_REQUEST = (
+    "[Ops quiesce request: an approved operation (for example a restart of the "
+    "service your turn runs on) is waiting for your current turn to end before it "
+    "runs. New work is held until it finishes. Bring the step you are on to a safe "
+    "stopping point, save or note anything that would be lost, and end your turn "
+    "now. Do not start new work and do not poll. If you can, first call "
+    "ops_quiesce_ack with status \"stopping\", or \"cannot_stop\" with a short note "
+    "saying what you are waiting on. You can pick the work up again in a later turn.]"
+)
+
 SEEDS = {
     RECEIPT_KEY: DEFAULT_RECEIPT,
     END_TURN_NEW_TURN_KEY: DEFAULT_END_TURN_NEW_TURN,
     END_TURN_NO_RECEIPT_KEY: DEFAULT_END_TURN_NO_RECEIPT,
+    QUIESCE_REQUEST_KEY: DEFAULT_QUIESCE_REQUEST,
 }
 
 
@@ -63,6 +77,6 @@ def resolve(key: str, bot_id: str | None) -> str:
 
 
 __all__ = [
-    "DEFAULT_END_TURN_NEW_TURN", "DEFAULT_END_TURN_NO_RECEIPT", "DEFAULT_RECEIPT",
-    "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY", "RECEIPT_KEY", "SEEDS", "resolve",
+    "DEFAULT_END_TURN_NEW_TURN", "DEFAULT_END_TURN_NO_RECEIPT", "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT",
+    "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY", "QUIESCE_REQUEST_KEY", "RECEIPT_KEY", "SEEDS", "resolve",
 ]
