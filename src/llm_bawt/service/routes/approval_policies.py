@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -21,6 +20,7 @@ from ...approval_validation import candidate_policy
 from ...agent_backends.agent_bridge import get_agent_subscriber
 from ...mcp_server import registry as mcp_registry
 from ...mcp_server.approval_interceptor import ApprovedCallerContext
+from ..approval_events import publish_approval_resolved
 from ..approval_execution import ApprovalExecutionLeaseLost, run_with_execution_lease
 from ..tool_call_store import ToolCallStore
 from ...approval_policies import ApprovalStoreUnavailable, CONT_DELIVERED, CONT_PENDING, CONT_DISPATCHING
@@ -521,7 +521,7 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Request disappeared during resolve")
-        await _fanout_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
+        await publish_approval_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
         return {
             "ok": True, "detail": "already_resolved" if already_resolved else row.status,
             "status": row.status, "request_id": request_id, "bot_id": bot_id,
@@ -566,7 +566,7 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
                 )
         except Exception:
             log.debug("Could not reconcile MCP approval tool card %s", request_id, exc_info=True)
-        await _fanout_resolved(
+        await publish_approval_resolved(
             _subscriber(), bot_id, user_id, request_id, row.turn_id, result["status"],
             tool_use_id=row.tool_use_id,
             result=result.get("result"),
@@ -617,7 +617,7 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
             row = store.get_request(request_id)
             if row.grant_state != "sent":
                 raise HTTPException(status_code=503, detail="Approval grant is dispatching or uncertain; do not dispatch continuation")
-    await _fanout_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
+    await publish_approval_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
     server_owned = row.continuation_owner == "server" and prompt is not None
     return {
         "ok": True, "detail": "already_resolved" if already_resolved else row.status,
@@ -639,50 +639,3 @@ def _subscriber():
     except Exception:  # noqa: BLE001
         return None
 
-
-async def _fanout_resolved(
-    subscriber,
-    bot_id,
-    user_id,
-    request_id,
-    turn_id,
-    status,
-    *,
-    tool_use_id=None,
-    result=None,
-    is_error=None,
-    execution_state=None,
-    has_result=True,
-) -> None:
-    """Fan out resolution and, for MCP, its terminal original-call result.
-
-    ``has_result=False`` (an approved ops_run awaiting admission) omits the
-    ``result`` key entirely: a client that sees ``result: null`` would
-    finalize the card as a null success (TASK-1220).
-    """
-    if subscriber is None:
-        return
-    event = {
-        "_type": "approval_resolved",
-        "bot_id": bot_id,
-        "user_id": user_id,
-        "request_id": request_id,
-        "turn_id": turn_id,
-        "status": status,
-        "tool_use_id": tool_use_id,
-        "result": result,
-        "is_error": is_error,
-        "execution_state": execution_state,
-        "ts": time.time(),
-    }
-    if not has_result:
-        del event["result"], event["is_error"]
-    try:
-        await subscriber._redis.xadd(
-            f"events:{bot_id}:{user_id}",
-            {"payload": json.dumps(event, ensure_ascii=False, default=str)},
-            maxlen=5000,
-            approximate=True,
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("failed to publish approval_resolved for %s", request_id, exc_info=True)

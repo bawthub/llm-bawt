@@ -192,7 +192,7 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
     async def capture_fanout(*args, **kwargs):
         fanout.append((args, kwargs))
 
-    monkeypatch.setattr(routes, "_fanout_resolved", capture_fanout)
+    monkeypatch.setattr(routes, "publish_approval_resolved", capture_fanout)
     monkeypatch.setattr(routes, "_subscriber", lambda: object())
     monkeypatch.setattr(routes, "_store", lambda: store)
 

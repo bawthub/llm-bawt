@@ -287,7 +287,8 @@ _PATH_FUNCTIONS = {
     "src/llm_bawt/ops/reconciler.py": {"tick", "run"},
     "src/llm_bawt/service/routes/approval_policies.py": {
         "resolve_approval", "_resolve_mcp_request", "_stored_mcp_resolution",
-        "_fanout_resolved", "_subscriber", "_mcp_result_is_error"},
+        "_subscriber", "_mcp_result_is_error"},
+    "src/llm_bawt/service/approval_events.py": {"publish_approval_resolved"},
     "src/llm_bawt/service/approval_continuations.py": {
         "dispatch_due_continuations_once", "_terminal_ops_result", "_admission_card_result",
         "_persist_terminal_ops_tool_result", "continuation_payload_from_row"},

@@ -33,6 +33,8 @@ PG_ACCEPTANCE_SUITES = (
     "test_message_routing.py::",
     "test_inter_bot_delivery_retry.py::",
     "test_turn_admission_pg.py::",
+    "test_purge_ops_pg.py::",
+    "test_recovery_sweep_pg.py::",
     "test_session_reset_lineage_pg.py::",
     "test_session_summaries.py::TestSummarizeThreadLive::",
     "test_session_summaries.py::TestResummarizeHeuristicSummaries::",

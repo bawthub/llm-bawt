@@ -23,6 +23,8 @@ from .approval_models import (
     CONT_FAILED,
     CONT_NOT_NEEDED,
     CONT_PENDING,
+    CONT_SUPPRESSED,
+    CONTINUATION_LEASE_SECONDS,
     EXEC_FAILED,
     EXEC_PENDING,
     EXEC_RUNNING,
@@ -53,6 +55,16 @@ def _unfinished_execution(request_id: str, *, state: str, claim_token: str | Non
     if claim_token is not None:
         conditions.append(ToolApprovalRequest.execution_claim_token == claim_token)
     return conditions
+
+
+def requeued_continuation_state():
+    """The state for every dispatching → pending writer (TASK-1232 S1).
+
+    Evaluated in the UPDATE against the current row, so a purge that committed
+    after the writer's read still wins: a cancelled request is suppressed,
+    never handed back to the outbox.
+    """
+    return case((ToolApprovalRequest.status == REQ_CANCELLED, CONT_SUPPRESSED), else_=CONT_PENDING)
 
 
 def _awaiting_execution(*, lease_seconds: int):
@@ -465,7 +477,9 @@ class McpApprovalStoreMixin:
         """
 
         def fence(session: Session) -> None:
-            held = _unfinished_execution(request_id, state=EXEC_RUNNING, claim_token=claim_token)
+            # A purged request (TASK-1232 B1) is cancelled: no work may start.
+            held = [*_unfinished_execution(request_id, state=EXEC_RUNNING, claim_token=claim_token),
+                    ToolApprovalRequest.status != REQ_CANCELLED]
             in_window = (
                 [func.coalesce(ToolApprovalRequest.resolved_at, ToolApprovalRequest.created_at)
                  >= clock() - approved_within]
@@ -514,7 +528,13 @@ class McpApprovalStoreMixin:
                 state=EXEC_PENDING if skipped else EXEC_RUNNING,
                 claim_token=claim_token,
             )
-            enqueue = bool(row.continuation_capable and row.status != REQ_CANCELLED)
+            # TASK-1232 B1: decided in the UPDATE from the current row, never
+            # from the snapshot above, so a purge between the two is not undone.
+            keep = or_(
+                ToolApprovalRequest.status == REQ_CANCELLED,
+                ToolApprovalRequest.continuation_state.in_([CONT_SUPPRESSED, CONT_DELIVERED, CONT_FAILED]),
+            )
+            enqueue = ToolApprovalRequest.continuation_capable.is_(True)
             result = session.exec(
                 update(ToolApprovalRequest)
                 .where(*conditions)
@@ -527,8 +547,16 @@ class McpApprovalStoreMixin:
                     result_is_error=bool(is_error),
                     execution_error=error,
                     execution_claim_token=None,
-                    continuation_state=CONT_PENDING if enqueue else CONT_NOT_NEEDED,
-                    continuation_next_attempt_at=now if enqueue else None,
+                    continuation_state=case(
+                        (keep, ToolApprovalRequest.continuation_state),
+                        (enqueue, CONT_PENDING),
+                        else_=CONT_NOT_NEEDED,
+                    ),
+                    continuation_next_attempt_at=case(
+                        (keep, ToolApprovalRequest.continuation_next_attempt_at),
+                        (enqueue, now),
+                        else_=None,
+                    ),
                     continuation_id=row.continuation_id or _continuation_id(request_id),
                 )
             )
@@ -552,29 +580,32 @@ class McpApprovalStoreMixin:
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         with Session(self.engine) as session:
-            row = session.get(ToolApprovalRequest, request_id)
-            if row is None:
-                return None
-            if not row.continuation_capable or row.status == REQ_CANCELLED:
-                return row
-            if row.execution_state not in (EXEC_SUCCEEDED, EXEC_FAILED, EXEC_SKIPPED):
-                return row
-            # Already enqueued / in-flight / delivered — no-op.
-            if row.continuation_state != CONT_NOT_NEEDED:
-                return row
-            row.continuation_id = row.continuation_id or _continuation_id(request_id)
-            row.continuation_state = CONT_PENDING
-            row.continuation_next_attempt_at = _utcnow()
-            session.add(row)
+            # One CAS on the current row (TASK-1232 B1): a read-then-write
+            # here could re-enqueue a request purged between the two.
+            session.exec(
+                update(ToolApprovalRequest)
+                .where(
+                    ToolApprovalRequest.id == request_id,
+                    ToolApprovalRequest.continuation_state == CONT_NOT_NEEDED,
+                    ToolApprovalRequest.status != REQ_CANCELLED,
+                    ToolApprovalRequest.continuation_capable.is_(True),
+                    ToolApprovalRequest.execution_state.in_([EXEC_SUCCEEDED, EXEC_FAILED, EXEC_SKIPPED]),
+                )
+                .values(
+                    continuation_id=func.coalesce(
+                        ToolApprovalRequest.continuation_id, _continuation_id(request_id)),
+                    continuation_state=CONT_PENDING,
+                    continuation_next_attempt_at=_utcnow(),
+                )
+            )
             session.commit()
-            session.refresh(row)
-            return row
+            return session.get(ToolApprovalRequest, request_id)
 
     def claim_continuation(
         self,
         request_id: str,
         *,
-        lease_seconds: int = 60,
+        lease_seconds: int = CONTINUATION_LEASE_SECONDS,
     ) -> ToolApprovalRequest | None:
         """Atomically transition CONT_PENDING → CONT_DISPATCHING for the worker.
 
@@ -589,6 +620,9 @@ class McpApprovalStoreMixin:
             claimable = and_(
                 ToolApprovalRequest.id == request_id,
                 ToolApprovalRequest.continuation_delivered_at.is_(None),
+                # Purged (TASK-1232 B1). ``suppressed`` is already excluded:
+                # only pending or dispatching rows are claimable.
+                ToolApprovalRequest.status != REQ_CANCELLED,
                 or_(
                     and_(
                         ToolApprovalRequest.continuation_state == CONT_PENDING,
@@ -668,7 +702,7 @@ class McpApprovalStoreMixin:
             failed = error is not None
             terminal_failure = failed and row.continuation_attempts >= max_attempts
             values = dict(
-                continuation_state=(CONT_FAILED if terminal_failure else CONT_PENDING)
+                continuation_state=(CONT_FAILED if terminal_failure else requeued_continuation_state())
                 if failed
                 else CONT_DELIVERED,
                 continuation_last_error=str(error)[:2000] if failed else None,
@@ -725,7 +759,7 @@ class McpApprovalStoreMixin:
                     ToolApprovalRequest.continuation_claim_token == claim_token,
                 )
                 .values(
-                    continuation_state=CONT_PENDING,
+                    continuation_state=requeued_continuation_state(),
                     continuation_claim_token=None,
                     continuation_last_error=str(reason)[:2000],
                     continuation_next_attempt_at=_utcnow()

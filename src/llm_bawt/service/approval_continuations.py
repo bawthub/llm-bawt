@@ -13,7 +13,7 @@ import logging
 from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 from ..approval_policies import KIND_MCP, REQ_APPROVED, REQ_DENIED, REQ_CANCELLED, REQ_RESPONDED, CONT_DISPATCHING
-from ..approval_models import OPS_RUN_TOOL, _as_aware_utc, _utcnow, is_approved_ops_run
+from ..approval_models import CONTINUATION_LEASE_SECONDS, OPS_RUN_TOOL, _as_aware_utc, _utcnow, is_approved_ops_run
 from ..ops.approved_admission import ops_receipt_is_error
 from typing import Any
 
@@ -410,7 +410,7 @@ async def dispatch_due_continuations_once(service, store, *, limit: int = 20) ->
                 card_result,
             )
         claimed = await asyncio.to_thread(
-            store.claim_continuation, pending.id, lease_seconds=120,
+            store.claim_continuation, pending.id, lease_seconds=CONTINUATION_LEASE_SECONDS,
         )
         if claimed is None:
             continue

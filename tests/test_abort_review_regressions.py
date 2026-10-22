@@ -671,7 +671,11 @@ def test_user_stop_keeps_the_workers_own_terminal_when_it_finalizes_in_time(stor
     execution(store, agent=False)
 
     def finalize_soon():
-        time.sleep(0.02)
+        # Finalize only after Stop recorded its request: a fixed sleep let a
+        # loaded run finalize first, and Stop then saw a completed turn.
+        deadline = time.monotonic() + 5
+        while store.get_turn("A").status != "cancelling" and time.monotonic() < deadline:
+            time.sleep(0.005)
         store.update_turn(turn_id="A", status="aborted", end_reason="aborted")
 
     worker = threading.Thread(target=finalize_soon)
