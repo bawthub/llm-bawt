@@ -70,15 +70,20 @@ class RecoveryStep(ABC):
     @abstractmethod
     async def plan(self, scope: SweepScope, candidate: dict[str, Any]) -> Plan: ...
 
+    async def plan_all(self, scope: SweepScope, candidates: list[dict[str, Any]]) -> list[Plan]:
+        """One plan per candidate, in order. A step whose planning waits on I/O
+        overrides this to plan concurrently; ``apply`` always runs serially."""
+        return [await self.plan(scope, candidate) for candidate in candidates]
+
     async def apply(self, scope: SweepScope, candidate: dict[str, Any], plan: Plan) -> dict[str, Any] | None:
         """Do ``plan``; return what was done, or None when the candidate raced away."""
         raise NotImplementedError(f"{self.name} plans no actions")
 
     async def run(self, scope: SweepScope) -> StepReport:
         report = StepReport(self.name)
-        for candidate in await self.detect(scope):
+        candidates = await self.detect(scope)
+        for candidate, plan in zip(candidates, await self.plan_all(scope, candidates), strict=True):
             report.found.append(candidate)
-            plan = await self.plan(scope, candidate)
             entry = {**candidate, **({"action": plan.action} if plan.action else {}), **plan.detail}
             if plan.action is None:
                 if plan.why:

@@ -34,6 +34,11 @@ def _is_tcp_listening(host: str, port: int) -> bool:
 @asynccontextmanager
 async def lifespan(app):
     """FastAPI lifespan handler for startup/shutdown."""
+    from datetime import datetime, timezone
+
+    # TASK-1232: the startup recovery check only touches turns created before
+    # this instant; anything newer belongs to this process's own workers.
+    process_started_at = datetime.now(timezone.utc)
     config = Config()
 
     # Prefer MCP tool-based memory retrieval for llm-service.
@@ -279,7 +284,18 @@ async def lifespan(app):
     # transport. Start recovery only after subscriber initialization; when Redis
     # is unavailable rows remain QUEUED and no retry attempt is consumed.
     from .inter_bot_dispatcher import InterBotDeliveryDispatcher
-    service._inter_bot_dispatcher = InterBotDeliveryDispatcher(service)
+    from .recovery.orphan_turns import BridgeRunProbe
+    from .recovery.sweep import RecoverySweep, StartupRecoveryCheck
+
+    # TASK-1232: the startup recovery check. It runs once, when this process
+    # takes dispatcher leadership, after the dispatcher's first
+    # recover_expired; never on a timer.
+    startup_recovery = StartupRecoveryCheck(RecoverySweep(
+        model_engine, probe=BridgeRunProbe(), started_at=process_started_at,
+    ))
+    service._inter_bot_dispatcher = InterBotDeliveryDispatcher(
+        service, startup_recovery=startup_recovery,
+    )
     service._inter_bot_dispatcher.start()
     if scheduler is not None:
         await scheduler.start()

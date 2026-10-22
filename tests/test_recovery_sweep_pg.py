@@ -5,12 +5,13 @@ import asyncio
 import json
 import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text as sa_text
 
-from llm_bawt.service.recovery.orphan_turns import ProbeResult
-from llm_bawt.service.recovery.sweep import RECOVERY_LOCK_KEY, RecoverySweep, SweepRecoveryHooks
+from llm_bawt.service.recovery.orphan_turns import BridgeRunProbe, ProbeResult
+from llm_bawt.service.recovery.sweep import RECOVERY_LOCK_KEY, RecoverySweep, StartupRecoveryCheck
 from llm_bawt.service.turn_logs import TurnLogStore
 from tests.test_inter_bot_delivery import _enqueue, delivery_store  # noqa: F401  (fixture)
 from tests.test_purge_ops_pg import _dispatching, _ops_run
@@ -43,15 +44,16 @@ class Probe:
         return self.result
 
 
-def _old_turn(store, bot, *, status="streaming", request_id="req-orphan", age_seconds=900, turn_id=None):
+def _old_turn(store, bot, *, status="streaming", request_id="req-orphan", age_seconds=900, turn_id=None,
+              backend=None):
     turn_id = turn_id or f"turn-{uuid.uuid4().hex}"
     with store.engine.begin() as conn:
         conn.execute(sa_text("""
             INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
-                                   response_text, agent_session_key, agent_request_id, ended_at)
+                                   response_text, agent_backend, agent_session_key, agent_request_id, ended_at)
             VALUES (:id, now() - make_interval(secs => :age), '/test', true, :bot, 'nick', :status, '', '',
-                    :key, :req, NULL)
-        """), {"id": turn_id, "age": age_seconds, "bot": bot, "status": status,
+                    :backend, :key, :req, NULL)
+        """), {"id": turn_id, "age": age_seconds, "bot": bot, "status": status, "backend": backend,
                "key": f"{bot}:nick" if request_id else None, "req": request_id})
     return turn_id
 
@@ -88,8 +90,8 @@ def test_a_not_found_orphan_settles_keeps_its_stranded_reply_and_a_rerun_is_a_no
     assert recovery["sweep_run_id"] == report["sweep_run_id"]
     assert recovery["stranded_result"] == NOT_FOUND.stranded_result
 
-    # N2: a re-entered leadership hook finds nothing left to do.
-    asyncio.run(SweepRecoveryHooks(sweep).on_leadership_acquired())
+    # Idempotent: a second check finds nothing left to do.
+    asyncio.run(StartupRecoveryCheck(sweep).run_at_startup())
     assert TurnLogStore(store.config).get_turn(turn_id).ended_at == row.ended_at
 
 
@@ -118,9 +120,10 @@ def test_a_turn_without_a_bridge_request_id_is_never_probed(delivery_store):  # 
     assert _ids(step["ambiguous"]) == [turn_id] and probe.calls == []
 
 
-def test_live_owners_and_young_turns_are_not_orphans(delivery_store, approvals):  # noqa: F811
+def test_live_owners_and_turns_newer_than_startup_are_not_orphans(delivery_store, approvals):  # noqa: F811
     """S5 + r2-M4: a live TurnExecution, a delivery claim, a freshly leased
-    approval continuation and a turn under the minimum age are all excluded."""
+    approval continuation and a turn created since this process started are
+    all excluded. A turn that died seconds before the restart is not."""
     from llm_bawt.service.turn_execution import TurnExecution, turn_executions
 
     store, sender, target = delivery_store
@@ -131,14 +134,14 @@ def test_live_owners_and_young_turns_are_not_orphans(delivery_store, approvals):
         conn.execute(sa_text(
             "UPDATE turn_logs SET status='streaming', created_at=now() - interval '15 minutes',"
             " agent_session_key='k', agent_request_id='r' WHERE id=:id"), {"id": delivery.turn_id})
-    young = _old_turn(store, target, age_seconds=10)
+    young = _old_turn(store, target, age_seconds=10)  # created after the process started
     owned = _old_turn(store, target)
     execution = TurnExecution(owned, threading.Event(), is_agent=True, store=TurnLogStore(store.config))
     turn_executions.register(execution)
     request_id, _ = _dispatching(approvals)
     continuation_turn = _old_turn(store, target, turn_id="turn-" + approvals.get_request(request_id).continuation_id)
     probe = Probe(NOT_FOUND)
-    sweep = RecoverySweep(store.engine, probe=probe)
+    sweep = RecoverySweep(store.engine, probe=probe, started_at=datetime.now(timezone.utc) - timedelta(seconds=60))
     try:
         report = asyncio.run(sweep.run(dry_run=True, bots=[target], steps=["orphan_turns"]))
         assert _step(report, "orphan_turns")["found"] == [] and probe.calls == []
@@ -150,7 +153,11 @@ def test_live_owners_and_young_turns_are_not_orphans(delivery_store, approvals):
         assert _ids(_step(report, "orphan_turns")["found"]) == [continuation_turn]
     finally:
         turn_executions.remove(owned)
-    assert young and owned
+    # The same young turn, seen by a process that started after it: an orphan.
+    later = RecoverySweep(store.engine, probe=probe)
+    found = _ids(_step(asyncio.run(later.run(dry_run=True, bots=[target], steps=["orphan_turns"])),
+                       "orphan_turns")["found"])
+    assert young in found and owned in found
 
 
 def _reserved_for(store, bot, owner):
@@ -421,30 +428,122 @@ def test_unknown_steps_are_refused(delivery_store):  # noqa: F811
         asyncio.run(RecoverySweep(store.engine).run(dry_run=True, steps=["purge_everything"]))
 
 
-def test_the_periodic_pass_skips_the_startup_only_tool_scan():
-    calls = []
-
-    class Sweep:
-        async def run(self, **kwargs):
-            calls.append(kwargs)
-            return {"dry_run": False, "busy": False, "steps": []}  # RecoverySweep.run's shape
-
-    hooks = SweepRecoveryHooks(Sweep())
-    asyncio.run(hooks.on_leadership_acquired())
-    asyncio.run(hooks.periodic())
-    assert "steps" not in calls[0]  # leadership: every default step
-    assert calls[1]["steps"] == list(RecoverySweep.PERIODIC_STEPS)
-    assert "unresolved_tools" in RecoverySweep.DEFAULT_STEPS and "unresolved_tools" not in calls[1]["steps"]
+def test_the_startup_check_logs_what_it_found_and_each_turn_it_left(delivery_store, caplog):  # noqa: F811
+    store, _, target = delivery_store
+    left = _old_turn(store, target, backend="claude-code")
+    sweep = RecoverySweep(store.engine, probe=Probe(ProbeResult("running", backend_matched=True)))
+    with caplog.at_level("INFO", logger="llm_bawt.service.recovery.sweep"):
+        result = asyncio.run(StartupRecoveryCheck(sweep).run_at_startup())
+    assert result["actor"] == "recovery_startup"
+    assert [step["step"] for step in result["steps"]] == list(RecoverySweep.DEFAULT_STEPS)
+    assert f"startup recovery check {result['sweep_run_id']}" in caplog.text
+    assert f"startup recovery left open turn {left} ({target}): run.status running" in caplog.text
+    assert TurnLogStore(store.config).get_turn(left).ended_at is None
 
 
-def test_a_pass_skipped_as_busy_leaves_a_trace(caplog):
+def test_a_check_skipped_as_busy_leaves_a_trace(caplog):
     class Sweep:
         async def run(self, **kwargs):
             return {"dry_run": False, "busy": True, "steps": []}
 
     with caplog.at_level("INFO", logger="llm_bawt.service.recovery.sweep"):
-        asyncio.run(SweepRecoveryHooks(Sweep()).periodic())
-    assert "recovery periodic pass skipped" in caplog.text
+        asyncio.run(StartupRecoveryCheck(Sweep()).run_at_startup())
+    assert "startup recovery check skipped" in caplog.text
+
+
+class _Subscriber:
+    """``send_rpc`` as the bridge addressed by ``backend`` would answer it."""
+
+    def __init__(self, state: str = "not_found", *, answering: str | None = None):
+        self.state, self.answering, self.calls = state, answering, []
+
+    async def send_rpc(self, method, params, request_id, *, timeout_s, backend):
+        self.calls.append({"method": method, "params": params, "backend": backend})
+        return {"backend": self.answering or backend, "boot_id": "boot-new", "request_id": params["requestId"],
+                "state": self.state, "detail": ""}
+
+
+def test_the_bridge_probe_settles_only_a_turn_its_recorded_bridge_reports_absent(delivery_store):  # noqa: F811
+    """End to end through the real probe: the turn's recorded backend is asked;
+    a turn bound before ``agent_backend`` existed is left, never guessed."""
+    store, _, target = delivery_store
+    recorded = _old_turn(store, target, backend="codex", request_id="req-recorded")
+    unrecorded = _old_turn(store, target, request_id="req-unrecorded")
+    subscriber = _Subscriber("not_found")
+    sweep = RecoverySweep(store.engine, probe=BridgeRunProbe(lambda: subscriber))
+
+    step = _step(asyncio.run(sweep.run(dry_run=False, bots=[target], steps=["orphan_turns"])), "orphan_turns")
+
+    assert _ids(step["done"]) == [recorded]
+    assert [(e["turn_id"], e["why"]) for e in step["ambiguous"]] == [(unrecorded, "run.status unaddressed")]
+    assert subscriber.calls == [{"method": "run.status", "backend": "codex",
+                                 "params": {"sessionKey": f"{target}:nick", "requestId": "req-recorded"}}]
+    recovery = json.loads(TurnLogStore(store.config).get_turn(recorded).request_json)["recovery"]
+    assert recovery["probe"] == {"state": "not_found", "backend": "codex", "boot_id": "boot-new", "detail": ""}
+    assert TurnLogStore(store.config).get_turn(unrecorded).ended_at is None
+
+
+@pytest.mark.parametrize("change", ["registered_live", "rearmed_reserved", "lease_renewed"])
+def test_an_orphan_that_gains_an_owner_inside_the_settle_lock_window_is_raced_and_untouched(
+        delivery_store, approvals, monkeypatch, change):  # noqa: F811
+    """Loopy S1: dispatch resumes after the startup wait while probes may still
+    be waiting, so a candidate can gain an owner between detect and settle.
+    Only ``_settle``'s re-check under the admission lock sees it: the live
+    execution set (registered_live) and the exclusion SQL (re-armed by
+    recover_expired, or its continuation lease renewed)."""
+    from llm_bawt.service.recovery import orphan_turns
+    from llm_bawt.service.turn_execution import TurnExecution, turn_executions
+
+    store, _, target = delivery_store
+    renew = None
+    if change == "lease_renewed":
+        request_id, token = _dispatching(approvals)
+        turn_id = _old_turn(store, target, turn_id="turn-" + approvals.get_request(request_id).continuation_id)
+        _lapse(store, request_id)
+        renew = (request_id, token)
+    else:
+        turn_id = _old_turn(store, target)
+    turns = TurnLogStore(store.config)
+    real_lock_target = orphan_turns.lock_target
+    changed = []
+
+    def lock_target(conn, bot_id):
+        if not changed:
+            if change == "registered_live":
+                turn_executions.register(TurnExecution(turn_id, threading.Event(), is_agent=True, store=turns))
+            elif change == "rearmed_reserved":
+                with store.engine.begin() as other:
+                    other.execute(sa_text("UPDATE turn_logs SET status='reserved' WHERE id=:id"), {"id": turn_id})
+            else:
+                assert approvals.renew_continuation_claim(*renew)
+            changed.append(change)
+        real_lock_target(conn, bot_id)
+
+    monkeypatch.setattr(orphan_turns, "lock_target", lock_target)
+    try:
+        step = _step(asyncio.run(RecoverySweep(store.engine, probe=Probe(NOT_FOUND)).run(
+            dry_run=False, bots=[target], steps=["orphan_turns"])), "orphan_turns")
+    finally:
+        if change == "registered_live":
+            turn_executions.remove(turn_id)
+    assert changed == [change]
+    assert step["done"] == [] and _ids(step["raced"]) == [turn_id]
+    row = turns.get_turn(turn_id)
+    assert row.ended_at is None and row.status == ("reserved" if change == "rearmed_reserved" else "streaming")
+    assert "recovery" not in json.loads(row.request_json or "{}")
+
+
+def test_binding_a_bridge_request_records_its_backend(delivery_store):  # noqa: F811
+    from llm_bawt.service.turn_execution import TurnExecution
+
+    store, _, target = delivery_store
+    turn_id = _old_turn(store, target, request_id=None, age_seconds=0)
+    turns = TurnLogStore(store.config)
+    TurnExecution(turn_id, threading.Event(), is_agent=True, store=turns).bind_bridge(
+        backend="codex", session_key=f"{target}:nick", request_id="req-bound")
+    row = turns.get_turn(turn_id)
+    assert (row.agent_backend, row.agent_session_key, row.agent_request_id) == (
+        "codex", f"{target}:nick", "req-bound")
 
 
 def _consume_inside_the_lock_window(monkeypatch, store, turn_id):

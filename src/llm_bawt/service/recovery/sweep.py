@@ -1,16 +1,16 @@
-"""The recovery sweep and its dispatcher hooks (TASK-1232 Phase 2).
+"""The startup recovery check (TASK-1232 Phase 2).
 
-One procedure, three triggers: leadership acquired, the dispatcher's periodic
-pass (both through ``SweepRecoveryHooks``, which satisfies the dispatcher's
-``RecoveryHooks``), and an explicit ``RecoverySweep.run`` call. No HTTP route
-calls it yet: the admin route lands with the dispatcher's ``is_leader`` (Al's
-binding commit). A mutating pass holds this process's
-``asyncio.Lock`` and a PostgreSQL advisory transaction lock for its whole run;
-a pass that finds either busy skips and reports ``busy``. A dry run takes no
-lock and changes nothing.
+One procedure, run once per process: when this process takes dispatcher
+leadership at startup, after the dispatcher's first ``recover_expired``
+(``StartupRecoveryCheck``, the dispatcher's ``StartupCheck``). It never runs
+on a timer. ``RecoverySweep.run`` is also callable directly; no HTTP route
+calls it yet. A mutating pass holds this process's ``asyncio.Lock`` and a
+PostgreSQL advisory transaction lock for its whole run; a pass that finds
+either busy skips and reports ``busy``. A dry run takes no lock and changes
+nothing.
 
 ``purge_ops`` is never a default step: only an explicit
-``run(purge_ops=True)`` runs it. Neither hook ever passes it.
+``run(purge_ops=True)`` runs it. The startup check never passes it.
 """
 from __future__ import annotations
 
@@ -59,16 +59,19 @@ class PurgeOpsStep(RecoveryStep):
 
 
 class RecoverySweep:
+    # ``orphan_turns`` first: a settled turn leaves its target idle, which a
+    # delivery reservation's release requires.
     DEFAULT_STEPS = ("orphan_turns", "reservations", "continuations", "unresolved_tools", "post_check")
-    # ``unresolved_tools`` scans tool_call_records (no index on ended_at), and
-    # every terminal writer already interrupts its own tools: startup only.
-    PERIODIC_STEPS = ("orphan_turns", "reservations", "continuations")
 
-    def __init__(self, engine, *, probe: RunProbe | None = None):
+    def __init__(self, engine, *, probe: RunProbe | None = None, started_at: datetime | None = None):
+        """``started_at``: when this process started. ``orphan_turns`` only
+        touches turns created before it and treats newer turns as this
+        process's own (limits: ``orphan_turns`` module docstring)."""
         self.engine = engine
+        self.started_at = started_at or datetime.now(timezone.utc)
         self._steps: dict[str, RecoveryStep] = {step.name: step for step in (
-            OrphanTurnsStep(probe), OrphanedReservationsStep(), CancelledContinuationsStep(),
-            UnresolvedToolsStep(), PostCheckStep(),
+            OrphanTurnsStep(probe, started_at=self.started_at), OrphanedReservationsStep(),
+            CancelledContinuationsStep(), UnresolvedToolsStep(), PostCheckStep(),
         )}
         self._lock = asyncio.Lock()
 
@@ -110,8 +113,9 @@ class RecoverySweep:
         result = {"dry_run": scope.dry_run, "busy": False, "at": scope.now.isoformat(),
                   **scope.stamp.as_dict(), "steps": reports}
         counts = {r["step"]: {k: len(r[k]) for k in ("done", "ambiguous", "raced")} for r in reports}
-        # Changes are worth a warning; standing ambiguity repeats every pass, so
-        # it stays at debug (the returned report carries it in full).
+        # Changes are worth a warning; anything else stays at debug (the
+        # returned report carries it in full, and the startup check logs its
+        # own summary).
         if not scope.dry_run and any(r["done"] or r.get("error") for r in reports):
             logger.warning("recovery sweep %s changed state: %s", scope.stamp.run_id, counts)
         else:
@@ -138,23 +142,30 @@ class RecoverySweep:
             conn.close()
 
 
-class SweepRecoveryHooks:
-    """The dispatcher's ``RecoveryHooks``. Both passes are idempotent: every
-    step re-checks under its own fence, so a re-entered ``run()`` finds only
-    what is still stuck."""
+class StartupRecoveryCheck:
+    """The dispatcher's ``StartupCheck``: every default step, once, at startup.
+
+    Idempotent: every step re-checks under its own fence, so a second run
+    finds only what is still stuck. It always leaves one INFO line, so every
+    boot shows what the check found and changed."""
+
+    ACTOR = "recovery_startup"
 
     def __init__(self, sweep: RecoverySweep):
         self.sweep = sweep
 
-    async def on_leadership_acquired(self) -> None:
-        self._note_busy(await self.sweep.run(dry_run=False, actor="recovery_on_leadership"), "on_leadership")
-
-    async def periodic(self) -> None:
-        self._note_busy(await self.sweep.run(
-            dry_run=False, steps=list(RecoverySweep.PERIODIC_STEPS), actor="recovery_periodic"), "periodic")
-
-    @staticmethod
-    def _note_busy(result: dict[str, Any], trigger: str) -> None:
-        # The cadence still advances, so a skipped pass would otherwise leave no trace.
+    async def run_at_startup(self) -> dict[str, Any]:
+        result = await self.sweep.run(dry_run=False, actor=self.ACTOR)
         if result.get("busy"):
-            logger.info("recovery %s pass skipped: another pass holds the sweep", trigger)
+            logger.info("startup recovery check skipped: another pass holds the sweep")
+            return result
+        summary = {step["step"]: {key: len(step[key]) for key in ("found", "done", "ambiguous", "raced")}
+                   | ({"error": step["error"]} if step.get("error") else {})
+                   for step in result["steps"]}
+        logger.info("startup recovery check %s: %s", result.get("sweep_run_id"), summary)
+        for step in result["steps"]:
+            if step["step"] == "orphan_turns":
+                for entry in step["ambiguous"]:
+                    logger.info("startup recovery left open turn %s (%s): %s",
+                                entry["turn_id"], entry["bot_id"], entry["why"])
+        return result

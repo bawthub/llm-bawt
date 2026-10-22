@@ -350,7 +350,7 @@ class TurnLogStore:
             session_id=session_id, claim=admission_claim,
         )
 
-    def bind_agent_bridge(self, *, turn_id: str, session_key: str, request_id: str) -> None:
+    def bind_agent_bridge(self, *, turn_id: str, backend: str, session_key: str, request_id: str) -> None:
         """Bind before publication, refusing a turn finalized by another owner.
 
         A worker may outlive its HTTP request or lose a race to cancellation.
@@ -368,6 +368,7 @@ class TurnLogStore:
                     or row.status not in {"pending", "streaming"}
                     or (row.agent_request_id is not None and row.agent_request_id != request_id)):
                 raise TurnExecutionCancelled(f"turn '{turn_id}' no longer permits bridge publication")
+            row.agent_backend = backend
             row.agent_session_key = session_key
             row.agent_request_id = request_id
             session.add(row)

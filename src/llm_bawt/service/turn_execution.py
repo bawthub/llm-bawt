@@ -34,7 +34,7 @@ class TurnExecution:
         # Persist the actual request-local identity before command publication,
         # never from the bot's shared _active_request_id or first model output.
         self.store.bind_agent_bridge(
-            turn_id=self.turn_id, request_id=request_id, session_key=session_key,
+            turn_id=self.turn_id, backend=backend, request_id=request_id, session_key=session_key,
         )
         with self._lock:
             self.backend, self.session_key, self.request_id = backend, session_key, request_id

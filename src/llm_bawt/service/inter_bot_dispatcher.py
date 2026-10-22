@@ -20,7 +20,7 @@ from ..inter_bot_delivery import (
 )
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry, retry_original_author
 from ..inter_bot_delivery_user import resolve_delivery_user
-from .inter_bot_dispatcher_recovery import RecoveryCadence, RecoveryHooks
+from .inter_bot_dispatcher_recovery import StartupCheck, StartupRecoveryRunner
 from .schemas import ChatCompletionRequest
 from .turn_logs import DeliveryTargetBusy
 
@@ -42,8 +42,7 @@ class InterBotDeliveryDispatcher:
     def __init__(
         self, service: Any, *, recovery_interval_seconds: float = 15.0,
         leadership_retry_delay_seconds: float = 1.0,
-        recovery: RecoveryHooks | None = None,
-        recovery_periodic_interval_seconds: float = 60.0,
+        startup_recovery: StartupCheck | None = None,
     ):
         self.service = service
         self.store = InterBotDeliveryStore(service.config)
@@ -51,16 +50,13 @@ class InterBotDeliveryDispatcher:
         self.talk_replies = TalkReplyOutbox(self.store.engine) if self.store.engine is not None else None
         self.recovery_interval_seconds = max(1.0, recovery_interval_seconds)
         self.leadership_retry_delay_seconds = max(0.0, leadership_retry_delay_seconds)
-        # TASK-1232 N2: periodic recovery has its own interval, decoupled from
-        # the 15s delivery sweep; the loop checks it on every wake.
-        self._recovery = (
-            RecoveryCadence(
-                recovery,
-                interval_seconds=max(1.0, recovery_periodic_interval_seconds),
-            )
-            if recovery is not None else None
-        )
         self._wake_event = asyncio.Event()
+        # TASK-1232: the startup recovery check, once per process, never on a
+        # timer. Its end wakes the loop: a settled turn frees its target.
+        self._recovery = (
+            StartupRecoveryRunner(startup_recovery, on_done=self._wake_event.set)
+            if startup_recovery is not None else None
+        )
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._leader_task: asyncio.Task | None = None
@@ -191,11 +187,11 @@ class InterBotDeliveryDispatcher:
         except Exception:
             logger.exception("initial recover_expired failed; continuing")
         if recovery is not None:
-            # TASK-1232 N1: every run() entry is under held leadership,
-            # including crash restarts, so the hook is idempotent by contract.
-            # After recover_expired: recovery steps defer claimed deliveries
-            # to it, so the pass must see the claims it released.
-            await recovery.on_leadership(stop=self._stop_event)
+            # TASK-1232: the first run() entry is this process's startup under
+            # held leadership; a crash re-entry never reruns the check. After
+            # recover_expired: recovery steps defer claimed deliveries to it,
+            # so the check must see the claims it released.
+            await recovery.run_once(stop=self._stop_event)
         self._wake_event.set()
         consecutive_failures = 0
         while not self._stop_event.is_set():
@@ -207,9 +203,6 @@ class InterBotDeliveryDispatcher:
                 pass
             self._wake_event.clear()
             try:
-                if recovery is not None:
-                    # TASK-1232 N2: elapsed-time gated, not per wake.
-                    recovery.maybe_start_periodic()
                 self.store.recover_expired()
                 self._schedule_eligible_targets()
                 if getattr(self.store, "engine", None) is not None:

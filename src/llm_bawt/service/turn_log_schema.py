@@ -94,6 +94,10 @@ class TurnLog(SQLModel, table=True):
     assistant_message_id: str | None = Field(default=None, index=True)
     agent_session_key: str | None = Field(default=None, max_length=128, index=True)
     agent_request_id: str | None = Field(default=None, max_length=128, index=True)
+    # TASK-1232: the bridge backend the request was published to, persisted
+    # with the ids above. Startup recovery's ``run.status`` asks only this
+    # bridge; a row without it is never settled as absent.
+    agent_backend: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     animation: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
     # Per-turn token accounting from the upstream SDK (claude_code, etc.).
     # Stored as JSON text so older rows without this column still load cleanly.
@@ -175,6 +179,9 @@ def bootstrap_turn_log_schema(conn) -> None:
         conn.execute(sa_text(
             "CREATE INDEX IF NOT EXISTS ix_turn_logs_agent_request_id"
             " ON turn_logs (agent_request_id)"
+        ))
+        conn.execute(sa_text(
+            "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS agent_backend VARCHAR(64)"
         ))
         conn.execute(sa_text(
             "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS animation VARCHAR(255)"
