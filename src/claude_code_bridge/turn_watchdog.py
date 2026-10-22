@@ -11,6 +11,14 @@ TASK-1148: a resumed worker (``SendMessage``) that exceeds that inactivity
 window is stopped on its own; its call returns an unsuccessful tool result and
 the parent continues. Only an unacknowledged stop, an SDK-idle CLI, or a
 non-containable tool still ends the parent turn.
+
+TASK-1148 R2: there is ONE deadline rule for every tool call at any depth
+(``ActiveTool.deadline``). A sub-agent host stays alive while its own
+inactivity window OR any live descendant's own deadline is open
+(``_subtree_deadline``), so a helper running a Bash call with a declared
+600s timeout is judged exactly like the parent running it. Depth only
+decides what happens on expiry: a top-level containable host is stopped on
+its own; everything else keeps the parent-terminal behaviour.
 """
 
 from __future__ import annotations
@@ -74,6 +82,14 @@ class ActiveTool:
     # The CLI reported the stopped task terminal; its tool result may still be
     # buffered behind siblings like any other result.
     stop_acknowledged: bool = False
+    # TASK-1148 R2: the host this call ran under, resolved ONCE at
+    # registration (host_parent is rewritten on every resume; re-resolving
+    # later would re-home leftovers onto the current attempt). None for
+    # top-level calls and for orphans whose host is already gone.
+    parent_tool_use_id: str | None = None
+    # The SDK reported this call inside a sub-agent. Set even for orphans, so
+    # a nested call never passes as top-level (never containable).
+    nested: bool = False
 
     @property
     def stop_outstanding(self) -> bool:
@@ -169,6 +185,8 @@ class TurnWatchdog:
                 )
 
         if isinstance(message, AssistantMessage):
+            nested = bool(getattr(message, "parent_tool_use_id", None))
+            host = self._link_host(parent_tool_use_id)
             for block in message.content:
                 if not isinstance(block, ToolUseBlock):
                     continue
@@ -178,11 +196,63 @@ class TurnWatchdog:
                     started_at=now,
                     timeout_seconds=self._tool_timeout(block.name, block.input),
                     last_activity_at=now,
+                    parent_tool_use_id=host,
+                    nested=nested,
                 )
         elif isinstance(message, UserMessage) and isinstance(message.content, list):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
+                    self._purge_descendants(block.tool_use_id)
                     self._active_tools.pop(block.tool_use_id, None)
+
+    def _link_host(self, parent_tool_use_id: str | None) -> str | None:
+        """The host a new call belongs to, or None (top-level / host gone).
+
+        A late child of a stopped host still links to it: it is purged with
+        the host's result and cannot extend the stop window
+        (``_subtree_deadline``). Known bounded residual: a late child of
+        resume 1 that arrives after resume 2 started resolves to resume 2
+        (host_parent already moved), and can hold it open at most until that
+        child's own deadline.
+        """
+        host = self._active_tools.get(parent_tool_use_id or "")
+        return host.tool_use_id if host is not None else None
+
+    def _ancestors(self, tool: ActiveTool) -> list[str]:
+        """Host chain of ``tool``, nearest first; cycle-safe."""
+        chain: list[str] = []
+        seen = {tool.tool_use_id}
+        parent_id = tool.parent_tool_use_id
+        while parent_id and parent_id not in seen:
+            seen.add(parent_id)
+            chain.append(parent_id)
+            parent = self._active_tools.get(parent_id)
+            parent_id = parent.parent_tool_use_id if parent is not None else None
+        return chain
+
+    def _descendants(self, host_id: str) -> list[ActiveTool]:
+        return [
+            tool for tool in self._active_tools.values()
+            if host_id in self._ancestors(tool)
+        ]
+
+    def _purge_descendants(self, host_id: str) -> None:
+        """A finished or stopped host's leftovers cannot keep anything alive."""
+        for tool in self._descendants(host_id):
+            self._active_tools.pop(tool.tool_use_id, None)
+
+    def _binding(self, host: ActiveTool) -> ActiveTool:
+        """The call whose deadline bounds ``host``'s liveness: itself or a descendant."""
+        return max(
+            [host, *self._descendants(host.tool_use_id)],
+            key=lambda tool: tool.deadline(self._tool_grace),
+        )
+
+    def _subtree_deadline(self, host: ActiveTool) -> float:
+        """THE liveness rule for a host: its own window or any live descendant's."""
+        if host.stop_requested_at is not None:
+            return host.deadline(self._tool_grace)  # the absolute stop window
+        return self._binding(host).deadline(self._tool_grace)
 
     async def receive_next(
         self,
@@ -246,14 +316,24 @@ class TurnWatchdog:
                 await asyncio.gather(receive_task, return_exceptions=True)
 
     def _containable(self, tool: ActiveTool) -> str | None:
-        if self._stop_task is None or tool.stop_requested_at is not None:
+        # Top-level hosts only: a nested stop_task/ack is unproven on the real
+        # CLI, and an unacknowledged nested stop would become parent-terminal.
+        if (
+            self._stop_task is None
+            or tool.stop_requested_at is not None
+            or tool.nested
+        ):
             return None
         return self._liveness.containable(tool.tool_use_id, tool.name)
 
     def _next_containment_in(self, now: float) -> float:
-        """Seconds until the earliest containable worker expires."""
+        """Seconds until the earliest containable worker expires.
+
+        Must use the same rule as ``_contain_expired_workers``; a mismatch
+        returns 0 for a host that is not actually due and hot-spins the loop.
+        """
         pending = [
-            tool.deadline(self._tool_grace) - now
+            self._subtree_deadline(tool) - now
             for tool in self._active_tools.values()
             if self._containable(tool)
         ]
@@ -264,25 +344,31 @@ class TurnWatchdog:
         for tool in list(self._active_tools.values()):
             task_id = self._containable(tool)
             now = self._clock()
-            if task_id is None or now < tool.deadline(self._tool_grace):
+            if task_id is None or now < self._subtree_deadline(tool):
                 continue
+            binding = self._binding(tool)
             stop = WorkerStop(
                 tool_use_id=tool.tool_use_id,
                 task_id=task_id,
                 tool_name=tool.name,
                 idle_seconds=now - tool.last_activity_at,
-                limit_seconds=tool.timeout_seconds,
+                limit_seconds=binding.timeout_seconds,
                 requested_at=now,
+                limit_tool_name=binding.name,
+                limit_tool_use_id=binding.tool_use_id,
             )
             # Record first: the PostToolUse hook and task events triggered by
             # the stop must already see why the worker ended.
             self._liveness.record_stop(stop)
             self._active_tools[tool.tool_use_id] = replace(tool, stop_requested_at=now)
+            self._purge_descendants(tool.tool_use_id)
             logger.warning(
                 "worker_liveness_stop request_id=%s session=%s tool=%s tool_use_id=%s "
-                "task_id=%s idle_s=%.0f limit_s=%.0f runtime_s=%.0f",
+                "task_id=%s idle_s=%.0f limit_s=%.0f limit_tool=%s limit_tool_use_id=%s "
+                "runtime_s=%.0f",
                 request_id, session_key, tool.name, tool.tool_use_id, task_id,
-                stop.idle_seconds, stop.limit_seconds, now - tool.started_at,
+                stop.idle_seconds, stop.limit_seconds, binding.name, binding.tool_use_id,
+                now - tool.started_at,
             )
             try:
                 await asyncio.wait_for(
@@ -349,7 +435,8 @@ class TurnWatchdog:
             details = ",".join(
                 f"{tool.name}:runtime={now - tool.started_at:.0f}s/"
                 f"idle={now - tool.last_activity_at:.0f}s/"
-                f"limit={tool.timeout_seconds:.0f}s"
+                f"limit={tool.timeout_seconds:.0f}s/"
+                f"deadline_in={self._subtree_deadline(tool) - now:.0f}s"
                 for tool in self._active_tools.values()
             )
         else:
@@ -379,6 +466,10 @@ class TurnWatchdog:
                                     self._clock() - tool.last_activity_at, 1
                                 ),
                                 "timeout_seconds": tool.timeout_seconds,
+                                # Effective, after descendants (TASK-1148 R2).
+                                "deadline_in_seconds": round(
+                                    self._subtree_deadline(tool) - self._clock(), 1
+                                ),
                             }
                             for tool in self._active_tools.values()
                         ],

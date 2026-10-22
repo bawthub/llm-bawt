@@ -119,3 +119,64 @@ def test_lifecycle_publishes_measured_total_even_when_final_usage_is_missing():
         )
         assert emitter._publish_event.call_args.kwargs["extra_raw"]["usage"]["cumulative_tokens"] == 145
     assert "total_tokens" not in emitter._publish_event.call_args.kwargs["extra_raw"]["usage"]
+
+
+def test_earlier_turn_spawn_is_rehomed_via_lookup_once():
+    """TASK-1148 R2: a spawn from an earlier turn is found in the transcript."""
+    calls = []
+
+    def lookup(task_id):
+        calls.append(task_id)
+        return "toolu_old_spawn" if task_id == "agent_a" else None
+
+    usage = SubagentUsage(spawn_lookup=lookup)
+    usage.register_task("toolu_resume", "agent_a", "worker")
+    assert usage.host_parent("toolu_old_spawn") == "toolu_resume"
+    usage.register_task("toolu_resume2", "agent_a", "worker")  # known now: no second read
+    assert calls == ["agent_a"]
+    assert usage.host_parent("toolu_old_spawn") == "toolu_resume2"
+    # A fresh spawn this turn (lookup finds nothing) keeps today's behaviour.
+    usage.register_task("toolu_spawn_b", "agent_b", "worker")
+    assert usage.host_parent("toolu_spawn_b") == "toolu_spawn_b"
+
+
+def test_agent_spawn_index_scans_the_transcript_once_per_request(tmp_path, monkeypatch):
+    import json
+
+    from claude_code_bridge import _bridge_helpers
+    from claude_code_bridge._bridge_helpers import AgentSpawnIndex
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / ".claude" / "projects" / "-work"
+    project.mkdir(parents=True)
+
+    def tool_result(tool_use_id, tool_use_result):
+        return json.dumps({"type": "user", "toolUseResult": tool_use_result, "message": {
+            "role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id}]}})
+
+    (project / "sess.jsonl").write_text("\n".join([
+        'not json "agentId" "toolUseResult"',
+        tool_result("toolu_spawn", {"status": "completed", "agentId": "agent_a"}),
+        tool_result("toolu_resume", {"success": True, "message": "agent_a resumed"}),
+        tool_result("toolu_respawn", {"status": "completed", "agentId": "agent_a"}),
+        tool_result("toolu_spawn_c", {"status": "completed", "agentId": "agent_c"}),
+    ]) + "\n")
+    reads = []
+    real = _bridge_helpers._read_agent_spawns
+    monkeypatch.setattr(_bridge_helpers, "_read_agent_spawns",
+                        lambda sid: reads.append(sid) or real(sid))
+    session = ["sess"]
+    index = AgentSpawnIndex(lambda: session[0])
+    usage = SubagentUsage(spawn_lookup=index)
+    # Fresh spawns, an earlier-turn resume and an unknown task: ONE scan.
+    usage.register_task("toolu_new_1", "agent_new_1", "w")
+    usage.register_task("toolu_new_2", "agent_new_2", "w")
+    usage.register_task("toolu_resume_now", "agent_a", "w")
+    usage.register_task("toolu_resume_c", "agent_c", "w")
+    assert reads == ["sess"] and index.scans == 1
+    assert usage.host_parent("toolu_spawn") == "toolu_resume_now"  # first spawn wins
+    assert usage.host_parent("toolu_spawn_c") == "toolu_resume_c"
+    assert index("agent_zzz") is None and index.scans == 1
+    session[0] = None  # fresh-session retry: nothing earlier, no scan
+    assert index("agent_a") is None and reads == ["sess"]
+    assert AgentSpawnIndex(lambda: "missing")("agent_a") is None

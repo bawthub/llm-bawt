@@ -13,6 +13,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -255,6 +256,76 @@ def _read_latest_compact_metadata(session_id: str | None) -> dict | None:
     except Exception:
         logger.debug("compact metadata read failed for %s", session_id, exc_info=True)
         return None
+
+
+def _read_agent_spawns(session_id: str | None) -> dict[str, str]:
+    """agentId → tool_use_id of the Agent call that originally spawned it.
+
+    TASK-1148 R2: the CLI stamps a resumed agent's messages with its ORIGINAL
+    spawn id, and a spawn from an earlier turn (or before a bridge restart) is
+    unknown to this turn's ledger. The parent transcript records the spawn's
+    tool result with ``toolUseResult.agentId``; the first such record per agent
+    is the spawn (resume results carry no agentId). One pass over the file.
+    Best-effort: an empty map on any failure.
+    """
+    spawns: dict[str, str] = {}
+    try:
+        path = _session_transcript_path(session_id)
+        if path is None:
+            return spawns
+        with open(path, "r") as fh:
+            for line in fh:
+                if '"agentId"' not in line or '"toolUseResult"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                result = entry.get("toolUseResult") if isinstance(entry, dict) else None
+                agent_id = result.get("agentId") if isinstance(result, dict) else None
+                if not isinstance(agent_id, str) or agent_id in spawns:
+                    continue
+                content = (entry.get("message") or {}).get("content")
+                for block in content if isinstance(content, list) else ():
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        if block.get("tool_use_id"):
+                            spawns[agent_id] = block["tool_use_id"]
+                        break
+    except Exception:
+        logger.debug("agent spawn read failed for %s", session_id, exc_info=True)
+    return spawns
+
+
+class AgentSpawnIndex:
+    """Request-local ``SubagentUsage`` spawn lookup over the CLI transcript.
+
+    The transcript is scanned at most once per session id, on the first lookup
+    (Snark r2 S1: never one full scan per task). ``session_id`` is read at
+    lookup time: a fresh-session retry clears the resume id, and then there
+    is nothing earlier to find.
+    """
+
+    def __init__(self, session_id: Callable[[], str | None]) -> None:
+        self._session_id = session_id
+        self._indexed: tuple[str | None, dict[str, str]] | None = None
+        self.scans = 0
+
+    def __call__(self, agent_id: str) -> str | None:
+        session_id = self._session_id()
+        if not session_id:
+            return None
+        scan_ms = 0.0
+        if self._indexed is None or self._indexed[0] != session_id:
+            started = time.monotonic()
+            self._indexed = (session_id, _read_agent_spawns(session_id))
+            self.scans += 1
+            scan_ms = (time.monotonic() - started) * 1000
+        spawn = self._indexed[1].get(agent_id)
+        logger.info(
+            "agent_spawn_lookup task_id=%s found=%s indexed=%d scan_ms=%.1f",
+            agent_id, spawn is not None, len(self._indexed[1]), scan_ms,
+        )
+        return spawn
 
 
 # TASK-635: the bridge is a READ-ONLY consumer of the app-owned Claude

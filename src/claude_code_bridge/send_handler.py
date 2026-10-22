@@ -21,6 +21,7 @@ from claude_code_bridge.tool_policy import effective_disallowed_tools
 from ._bridge_helpers import (
     _is_cli_crash,
     _is_auth_failure,
+    AgentSpawnIndex,
 )
 from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
 from .send_boundaries import (
@@ -391,7 +392,11 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
                     # AssistantMessage's usage reflects the actual final API
                     # call's view of the context.
                     latest_assistant_usage: dict | None = None
-                    subagent_usage = SubagentUsage()
+                    # Late-bound on purpose: resume_id is None after a fresh-
+                    # session retry, and then no earlier spawn can exist.
+                    subagent_usage = SubagentUsage(
+                        spawn_lookup=AgentSpawnIndex(lambda: resume_id),
+                    )
                     # One request-local publisher merges sparse message_delta
                     # frames and de-duplicates AssistantMessage echoes.
                     live_usage = LiveUsagePublisher(

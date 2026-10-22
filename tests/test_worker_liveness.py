@@ -26,6 +26,7 @@ from claude_agent_sdk.types import (
 
 from agent_bridge.events import AgentEventKind
 from claude_code_bridge.send_stream import ClaudeStreamMixin
+from claude_code_bridge.subagent_usage import SubagentUsage
 from claude_code_bridge.turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
 from claude_code_bridge.worker_liveness import WorkerLiveness, WorkerStop
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
@@ -391,3 +392,158 @@ def test_named_old_user_stop_never_borrows_the_current_attempt_timeout():
     assert liveness.stop_status(TASK_A, "killed")[1]["tool_use_id"] == resume2  # task-only event
     # An unknown host id (not an attempt of this task) resolves like a task-only event.
     assert liveness.stop_status(TASK_A, "stopped", "toolu_unknown")[1]["tool_use_id"] == resume2
+
+
+# ---------------------------------------------------------------------------
+# TASK-1148 R2: one liveness rule at every depth.
+# A resumed helper spawned in an EARLIER turn: the CLI stamps its children with
+# the original spawn id, which only the transcript lookup can re-home.
+# ---------------------------------------------------------------------------
+
+
+OLD_SPAWN = "toolu_spawn_prev_turn"
+CHILD = "toolu_child_bash"
+
+
+def _bash(tool_id, timeout_ms=None, parent=None, name="Bash"):
+    tool_input = {"command": "sleep"} if timeout_ms is None else {"command": "sleep",
+                                                                   "timeout": timeout_ms}
+    return AssistantMessage(content=[ToolUseBlock(id=tool_id, name=name, input=tool_input)],
+                            model="m", parent_tool_use_id=parent)
+
+
+def _tree(depth, timeout_ms):
+    """A Bash call at parent level, or inside a cross-turn resumed helper."""
+    clock = Clock()
+    liveness = WorkerLiveness()
+    usage = SubagentUsage(spawn_lookup=lambda task_id: OLD_SPAWN if task_id == TASK_A else None)
+    stopped: list[str] = []
+
+    async def stop_task(task_id):
+        stopped.append(task_id)
+
+    watchdog = TurnWatchdog(idle_timeout=300, health_interval=1, tool_grace=30,
+                            max_tool_timeout=600, clock=clock, resolve_parent=usage.host_parent,
+                            liveness=liveness, stop_task=stop_task)
+    if depth == "parent":
+        watchdog.observe(_bash(CHILD, timeout_ms))
+    else:
+        watchdog.observe(calls((SEND_A, "SendMessage")))
+        watchdog.observe(started(SEND_A, TASK_A))
+        usage.register_task(SEND_A, TASK_A, "worker")  # send_stream order: after observe
+        watchdog.observe(_bash(CHILD, timeout_ms, parent=OLD_SPAWN))
+
+    def alive(at):
+        clock.now = at
+        if depth == "parent":
+            return at < watchdog._deadline(wait_started_at=0.0)[0]
+        asyncio.run(watchdog._contain_expired_workers(request_id="r", session_key="s"))
+        return not stopped
+
+    return SimpleNamespace(watchdog=watchdog, liveness=liveness, usage=usage, clock=clock,
+                           stopped=stopped, alive=alive)
+
+
+@pytest.mark.parametrize("depth", ["parent", "helper"])
+@pytest.mark.parametrize(("timeout_ms", "at", "expected_alive"), [
+    (None, 329, True),          # undeclared: the ordinary 300s + grace
+    (None, 331, False),
+    (600_000, 420, True),       # the live-check case: sleep 420 with timeout=600000
+    (600_000, 629, True),
+    (600_000, 631, False),
+    (3_600_000, 629, True),     # declared beyond the cap: still 600s + grace
+    (3_600_000, 631, False),
+])
+def test_same_liveness_rule_at_parent_level_and_inside_a_helper(depth, timeout_ms, at,
+                                                                 expected_alive):
+    assert _tree(depth, timeout_ms).alive(at) is expected_alive
+
+
+def test_cross_turn_resume_children_link_to_the_resuming_call():
+    tree = _tree("helper", 600_000)
+    child = next(t for t in tree.watchdog.active_tools if t.tool_use_id == CHILD)
+    assert child.parent_tool_use_id == SEND_A
+    assert tree.usage.host_parent(OLD_SPAWN) == SEND_A
+
+
+def test_containment_wakeup_uses_the_same_rule_no_hot_spin():
+    tree = _tree("helper", 600_000)
+    tree.clock.now = 420.0
+    assert tree.watchdog._next_containment_in(420.0) == pytest.approx(210.0)
+
+
+def test_stop_names_the_binding_child_limit():
+    tree = _tree("helper", 600_000)
+    assert tree.alive(631) is False
+    stop = tree.liveness.stop_for_tool(SEND_A)
+    assert (stop.limit_tool_name, stop.limit_tool_use_id, stop.limit_seconds) == ("Bash", CHILD, 600)
+    assert "its Bash call passed its 600s limit" in stop.reason
+    assert stop.diagnostic()["limit_tool_use_id"] == CHILD
+    assert "The resumed agent (task task_a) had no sub-agent activity" in stop.parent_note()
+
+
+def test_host_inactivity_stop_names_the_host_limit():
+    tree = _tree("helper", None)
+    assert tree.alive(331) is False
+    stop = tree.liveness.stop_for_tool(SEND_A)
+    assert stop.diagnostic()["limit_tool_name"] == "SendMessage"
+    assert "(liveness limit 300s)" in stop.reason and stop.reason.startswith("had no")
+
+
+def test_finished_child_stops_extending_its_host():
+    tree = _tree("helper", 600_000)
+    tree.clock.now = 10.0
+    tree.watchdog.observe(UserMessage(content=[ToolResultBlock(tool_use_id=CHILD, content="ok")],
+                                      parent_tool_use_id=OLD_SPAWN))
+    assert tree.alive(339) is True   # refreshed by the child's result at t=10
+    assert tree.alive(341) is False
+
+
+def test_stop_purges_descendants_and_late_children_stay_with_the_stopped_host():
+    tree = _tree("helper", None)
+    assert tree.alive(331) is False
+    assert [t.tool_use_id for t in tree.watchdog.active_tools] == [SEND_A]
+    tree.watchdog.observe(_bash("toolu_late", 600_000, parent=OLD_SPAWN))
+    late = next(t for t in tree.watchdog.active_tools if t.tool_use_id == "toolu_late")
+    assert (late.parent_tool_use_id, late.nested) == (SEND_A, True)
+    # The stop window stays absolute: the late call cannot extend it.
+    assert tree.watchdog._deadline(wait_started_at=331.0)[0] == pytest.approx(361.0)
+    tree.watchdog.observe(result(SEND_A, "stopped"))
+    assert tree.watchdog.active_tools == ()
+
+
+def test_late_nested_resume_after_host_stop_is_never_contained_and_purged_with_host():
+    """Loopy r2 blocker: a nested SendMessage arriving after its host's stop."""
+    tree = _tree("helper", None)
+    assert tree.alive(331) is False and tree.stopped == [TASK_A]
+    tree.watchdog.observe(_bash("toolu_late_send", parent=OLD_SPAWN, name="SendMessage"))
+    tree.watchdog.observe(started("toolu_late_send", TASK_B))
+    tree.watchdog.observe(notified(SEND_A, TASK_A, "stopped"))
+    assert tree.alive(1000) is False and tree.stopped == [TASK_A]  # TASK_B never stopped
+    tree.watchdog.observe(result(SEND_A, "stopped"))
+    assert tree.watchdog.active_tools == ()
+
+
+def test_orphaned_nested_resume_is_never_contained():
+    """A nested call whose host is already gone is still not top-level."""
+    tree = _tree("helper", None)
+    tree.watchdog.observe(result(SEND_A, '{"success":true}'))
+    tree.watchdog.observe(_bash("toolu_orphan_send", parent=OLD_SPAWN, name="SendMessage"))
+    tree.watchdog.observe(started("toolu_orphan_send", TASK_B))
+    orphan = next(t for t in tree.watchdog.active_tools if t.tool_use_id == "toolu_orphan_send")
+    assert (orphan.parent_tool_use_id, orphan.nested) == (None, True)
+    assert tree.alive(1000) is True and tree.stopped == []
+
+
+def test_host_result_purges_its_descendants():
+    tree = _tree("helper", 600_000)
+    tree.watchdog.observe(result(SEND_A, '{"success":true}'))
+    assert tree.watchdog.active_tools == ()
+
+
+def test_nested_resume_is_never_contained_only_the_top_level_host():
+    tree = _tree("helper", None)
+    tree.watchdog.observe(_bash("toolu_nested_send", parent=OLD_SPAWN, name="SendMessage"))
+    tree.watchdog.observe(started("toolu_nested_send", TASK_B))
+    assert tree.alive(331) is False
+    assert tree.stopped == [TASK_A]

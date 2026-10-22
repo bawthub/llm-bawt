@@ -39,11 +39,26 @@ class WorkerStop:
     idle_seconds: float
     limit_seconds: float
     requested_at: float
+    # The call whose limit was binding (TASK-1148 R2): the host itself when
+    # its inactivity window ran out, or a descendant (e.g. a Bash call with a
+    # declared timeout) that outlived it. None = the host itself.
+    limit_tool_name: str | None = None
+    limit_tool_use_id: str | None = None
+
+    @property
+    def _limit_is_descendant(self) -> bool:
+        return bool(self.limit_tool_use_id) and self.limit_tool_use_id != self.tool_use_id
 
     @property
     def reason(self) -> str:
+        if self._limit_is_descendant:
+            return (
+                f"had no sub-agent activity for {self.idle_seconds:.0f}s and its "
+                f"{self.limit_tool_name} call passed its {self.limit_seconds:.0f}s "
+                "limit; stopped by the bridge"
+            )
         return (
-            f"no sub-agent activity for {self.idle_seconds:.0f}s "
+            f"had no sub-agent activity for {self.idle_seconds:.0f}s "
             f"(liveness limit {self.limit_seconds:.0f}s); stopped by the bridge"
         )
 
@@ -56,6 +71,8 @@ class WorkerStop:
             "task_id": self.task_id,
             "idle_seconds": round(self.idle_seconds, 1),
             "limit_seconds": round(self.limit_seconds, 1),
+            "limit_tool_name": self.limit_tool_name or self.tool_name,
+            "limit_tool_use_id": self.limit_tool_use_id or self.tool_use_id,
         }
 
     def parent_note(self) -> str:

@@ -7,6 +7,7 @@ ID, scoped to the spawning tool (a Workflow may have several child tasks).
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 
@@ -18,7 +19,11 @@ class SubagentUsage:
         "cache_read_input_tokens",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, spawn_lookup: Callable[[str], str | None] | None = None) -> None:
+        # TASK-1148 R2: durable task → original-spawn lookup (the CLI session
+        # transcript) for agents spawned in an earlier turn or bridge process.
+        self._spawn_lookup = spawn_lookup
+        self._single_agent_spawns: set[str] = set()  # Agent spawns found in the transcript
         self._responses: dict[str, dict[str, dict[str, int]]] = {}
         self._tasks: dict[str, dict[str, str]] = {}
         self._last_live_total: dict[str, int] = {}
@@ -33,13 +38,23 @@ class SubagentUsage:
         if not (parent and task_id):
             return
         self._tasks.setdefault(parent, {})[task_id] = description
+        earlier = (
+            self._spawn_lookup(task_id)
+            if task_id not in self._spawn_of_task and self._spawn_lookup is not None
+            else None
+        )
+        if earlier and earlier != parent:
+            # An Agent result names exactly one agentId, so a transcript spawn
+            # is unambiguous (unlike a multi-task Workflow seen this turn).
+            self._spawn_of_task[task_id] = earlier
+            self._single_agent_spawns.add(earlier)
         spawn = self._spawn_of_task.setdefault(task_id, parent)
         if spawn == parent:
             return
         # A Workflow spawn hosts several tasks under ONE parent id; children of
         # different siblings are indistinguishable by parent, so re-homing the
         # whole spawn would mis-file the siblings. Only remap unambiguous spawns.
-        if len(self._tasks.get(spawn, {})) == 1:
+        if spawn in self._single_agent_spawns or len(self._tasks.get(spawn, {})) == 1:
             self._host_of_spawn[spawn] = parent
 
     def host_parent(self, parent: str | None) -> str | None:

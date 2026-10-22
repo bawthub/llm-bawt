@@ -34,6 +34,7 @@ from claude_agent_sdk.types import (
     ToolResultBlock,
     UserMessage,
 )
+from claude_code_bridge._bridge_helpers import AgentSpawnIndex
 from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.subagent_usage import SubagentUsage
 from claude_code_bridge.turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
@@ -44,6 +45,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.sdk_probe, pytest.mark.skipif
 )]
 
 MARK = "PARENT_MARKER_1148"
+# idle_timeout=4 + grace=2: the worker window closes at ~6s; the child Bash
+# declares 12s, so it must outlive that window without a stop.
+LONG_BASH_SECONDS = 8
+LONG_BASH_TIMEOUT_MS = 12_000
 MODEL = "claude-sonnet-4-6"
 
 
@@ -92,7 +97,7 @@ def _flat(content):
     )
 
 
-def _provider(*, stall_spawn: bool, parent_requests: list[str]):
+def _provider(*, stall_spawn: bool, parent_requests: list[str], long_bash: bool = False):
     app = FastAPI()
 
     @app.post("/v1/messages")
@@ -116,6 +121,14 @@ def _provider(*, stall_spawn: bool, parent_requests: list[str]):
                     "to": agent, "message": f"PING_{x}", "summary": f"ping {x}"}}
                     for x, agent in zip("AB", ids[:2])], "tool_use")
             return _sse([{"type": "text", "text": "PARENT_DONE"}])
+        if long_bash and "SLEPT_OK" in last:
+            return _sse([{"type": "text", "text": "A_PONG"}])
+        if long_bash and "PING_A" in last:
+            # A legitimately long child command with a declared timeout longer
+            # than the worker inactivity window (TASK-1148 R2).
+            return _sse([{"type": "tool_use", "id": "toolu_longbash", "name": "Bash", "input": {
+                "command": f"sleep {LONG_BASH_SECONDS}; echo SLEPT_OK",
+                "timeout": LONG_BASH_TIMEOUT_MS, "description": "long child"}}], "tool_use")
         if "PING_A" in last or (stall_spawn and last.endswith("WORKER_A")):
             return _stall()
         return _sse([{"type": "text", "text": "B_PONG" if "PING_B" in last else "worker ready"}])
@@ -123,12 +136,13 @@ def _provider(*, stall_spawn: bool, parent_requests: list[str]):
     return app
 
 
-async def _session(tmp_path: Path, *, stall_spawn: bool):
+async def _session(tmp_path: Path, *, stall_spawn: bool, long_bash: bool = False):
     parent_requests: list[str] = []
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(
-        _provider(stall_spawn=stall_spawn, parent_requests=parent_requests),
+        _provider(stall_spawn=stall_spawn, parent_requests=parent_requests,
+                  long_bash=long_bash),
         log_level="error", lifespan="off",
     ))
     serve = asyncio.create_task(server.serve(sockets=[sock]))
@@ -158,13 +172,16 @@ async def _session(tmp_path: Path, *, stall_spawn: bool):
         hooks={"PostToolUse": [HookMatcher(hooks=[hook])]},
     ))
     stopped: list[str] = []
+    cli_session: list[str] = []  # the CLI session id, as the bridge's resume_id
 
     async def stop_task(task_id: str) -> None:
         stopped.append(task_id)
         await client.stop_task(task_id)
 
     async def turn(prompt: str) -> list:
-        usage = SubagentUsage()
+        # Same wiring as send_handler: earlier-turn spawns come from the transcript.
+        usage = SubagentUsage(spawn_lookup=AgentSpawnIndex(
+            lambda: cli_session[-1] if cli_session else None))
         watchdog = TurnWatchdog(
             idle_timeout=4.0, health_interval=0.5, tool_grace=2.0,
             resolve_parent=usage.host_parent, liveness=liveness, stop_task=stop_task,
@@ -179,6 +196,8 @@ async def _session(tmp_path: Path, *, stall_spawn: bool):
                 return seen
             if isinstance(msg, TaskStartedMessage):
                 usage.register_task(msg.tool_use_id, msg.task_id, msg.description or "")
+            if isinstance(msg, ResultMessage) and msg.session_id:
+                cli_session.append(msg.session_id)
             seen.append(msg)
 
     async def close():
@@ -242,3 +261,31 @@ def test_stalled_spawned_agent_is_still_a_parent_terminal_failure(tmp_path):
     probe, error = asyncio.run(run())
     assert error.phase == "tool_running"
     assert probe.stopped == []
+
+
+def test_resumed_worker_running_a_declared_long_command_is_not_stopped(tmp_path, monkeypatch):
+    """TASK-1148 R2: inside a helper, a child's declared timeout counts like the parent's.
+
+    The spawn happens in an earlier turn, so the resumed child's original-spawn
+    parent id is only resolvable through the CLI transcript (as in the bridge).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # where the probe CLI writes
+
+    async def run():
+        probe = await _session(tmp_path, stall_spawn=False, long_bash=True)
+        try:
+            assert isinstance((await probe.turn("SPAWN"))[-1], ResultMessage)
+            seen = await asyncio.wait_for(probe.turn("RESUME"), timeout=90)
+        finally:
+            await probe.close()
+        return probe, seen
+
+    probe, seen = asyncio.run(run())
+    assert probe.stopped == []
+    results = _results(seen)
+    assert "SLEPT_OK" in str(results["toolu_longbash"].content)
+    assert "A_PONG" in str(results["toolu_sendA"].content)
+    assert "B_PONG" in str(results["toolu_sendB"].content)
+    final = seen[-1]
+    assert isinstance(final, ResultMessage) and not final.is_error
+    assert final.result == "PARENT_DONE"
