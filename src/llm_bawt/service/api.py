@@ -182,7 +182,10 @@ async def lifespan(app):
             # TASK-360 (P4): accumulate per-turn reasoning ("thinking") the
             # same way, flushed to turn_logs.reasoning so a COLD reload
             # mid-turn recovers already-produced reasoning, not just text.
-            _partial_reasoning: dict[str, str] = {}
+            # TASK-1273: placed by reasoning_offset like text (TASK-957); the
+            # unified publish reorders deltas, so arrival-order appends stored
+            # a permutation that the live drawer seeded from on resume.
+            _partial_reasoning: dict[str, PartialText] = {}
 
             def _tool_event_sink(event_data: dict) -> None:
                 """Persist tool_start/tool_end + text_delta + reasoning_delta events to Postgres."""
@@ -194,8 +197,8 @@ async def lifespan(app):
                     if not turn_id:
                         return
                     delta = event_data.get("delta", "") or ""
-                    rbuf = _partial_reasoning.get(turn_id, "") + delta
-                    _partial_reasoning[turn_id] = rbuf
+                    offset = event_data.get("reasoning_offset")
+                    rbuf = _partial_reasoning.setdefault(turn_id, PartialText()).add(delta, offset)
                     # Pass the current text buffer too so the write never
                     # clobbers already-flushed partial text (reasoning
                     # usually precedes text, so the buffer is often "").
