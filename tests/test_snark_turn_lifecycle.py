@@ -98,13 +98,14 @@ def test_request_cancel_rpc_never_uses_session_wide_abort():
     scope = {"asyncio": asyncio, "logger": Mock(), "COMMANDS_STREAM": "agent:commands"}
     exec(compile(module, str(source), "exec"), scope)
     owner = SimpleNamespace(_session_queue=Mock(), _publisher=Mock())
-    owner._session_queue.cancel_request.return_value = True
+    # TASK-1232 P2: chat.cancel stops exactly this request (tombstone + cancel).
+    owner._session_queue.stop_request.return_value = True
     redis = SimpleNamespace(xack=AsyncMock())
     asyncio.run(scope["_handle_rpc"](owner, {
         "method": "chat.cancel", "request_id": "rpc-1",
         "params": {"sessionKey": "snark:nick", "requestId": "doomed"},
     }, "entry", redis))
-    owner._session_queue.cancel_request.assert_called_once_with("snark:nick", "doomed")
+    owner._session_queue.stop_request.assert_called_once_with("snark:nick", "doomed")
     owner._session_queue.cancel_active.assert_not_called()
     owner._session_queue.signal_cancel.assert_not_called()
     owner._publisher.publish_rpc_result.assert_called_once_with("rpc-1", {

@@ -15,9 +15,34 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from enum import Enum
 from typing import Any
 
+from .request_tombstones import RequestTombstones
+
 logger = logging.getLogger(__name__)
+
+
+class Admission(str, Enum):
+    """What :meth:`SessionQueue.accept` decided for one received send."""
+
+    ACCEPTED = "accepted"
+    """Registered; the caller now owns the request until :meth:`~SessionQueue.release`."""
+    TOMBSTONED = "tombstoned"
+    """Stopped before it arrived. Refuse it: publish the cancelled terminal, nothing else."""
+    DUPLICATE = "duplicate"
+    """Another live send already owns this request id. Drop this copy without publishing."""
+
+
+class RequestPhase(str, Enum):
+    """Where a registered send is (TASK-1232 P2; read by ``run.status``)."""
+
+    PREFLIGHT = "preflight"
+    """Accepted, running its one-time preparation (``/new`` reset, seed)."""
+    QUEUED = "queued"
+    """Waiting for the session lock behind another send."""
+    RUNNING = "running"
+    """Holds the session lock."""
 
 
 class SessionQueue:
@@ -48,6 +73,9 @@ class SessionQueue:
         self._locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._request_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._request_phases: dict[tuple[str, str], RequestPhase] = {}
+        # Stopped request ids; a send for one is refused at accept().
+        self._tombstones = RequestTombstones()
         # Why a registered send was cancelled, when the canceller knows
         # (TASK-1231B: host shutdown). Read by the send's terminal publication;
         # dropped with the request registration.
@@ -110,6 +138,71 @@ class SessionQueue:
         self._active_tasks.pop(session_key, None)
         return True
 
+    # -- Request scope (TASK-1232 P2) --------------------------------------
+
+    def accept(self, session_key: str, request_id: str) -> Admission:
+        """Register the calling task as this request's owner, at receipt.
+
+        Must run synchronously as the send handler's first step, before any
+        await: the command listener starts tasks in stream order, so a
+        ``chat.abort`` read after this send then either finds the
+        registration (and cancels the task) or ran first and left a
+        tombstone. On ACCEPTED the caller must call :meth:`release` in a
+        ``finally`` covering every later exit.
+        """
+        key = (session_key, request_id)
+        if self._tombstones.contains(session_key, request_id):
+            return Admission.TOMBSTONED
+        existing = self._request_tasks.get(key)
+        if existing is not None and not existing.done():
+            return Admission.DUPLICATE
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("accept() must be called from the send's own task")
+        self._request_tasks[key] = owner
+        self._request_phases[key] = RequestPhase.PREFLIGHT
+        return Admission.ACCEPTED
+
+    def release(self, session_key: str, request_id: str) -> None:
+        """Drop the calling task's registration for this request, if it owns it."""
+        key = (session_key, request_id)
+        if self._request_tasks.get(key) is asyncio.current_task():
+            self._forget_request(key)
+
+    def _forget_request(self, key: tuple[str, str]) -> None:
+        self._request_tasks.pop(key, None)
+        self._request_phases.pop(key, None)
+        self._cancel_causes.pop(key, None)
+
+    def request_phase(self, session_key: str, request_id: str) -> RequestPhase | None:
+        """The phase of a registered, unfinished send, or None."""
+        key = (session_key, request_id)
+        task = self._request_tasks.get(key)
+        if task is None or task.done():
+            return None
+        return self._request_phases.get(key)
+
+    def stop_request(self, session_key: str, request_id: str) -> bool:
+        """Stop one request: tombstone it, then cancel it if it is registered.
+
+        The tombstone is written first and unconditionally, so a send for this
+        id that hasn't been received yet is refused when it arrives. Returns
+        True when a registered send was cancelled now.
+        """
+        self.tombstone(session_key, request_id)
+        return self.cancel_request(session_key, request_id)
+
+    def tombstone(self, session_key: str, request_id: str) -> None:
+        """Record a Stop for this request without cancelling anything.
+
+        For a bridge whose stop must first be confirmed elsewhere (OpenClaw's
+        gateway abort) before the local task may be cancelled.
+        """
+        self._tombstones.add(session_key, request_id)
+
+    def is_tombstoned(self, session_key: str, request_id: str) -> bool:
+        return self._tombstones.contains(session_key, request_id)
+
     @asynccontextmanager
     async def active(
         self,
@@ -141,8 +234,15 @@ class SessionQueue:
         task: asyncio.Task | None = None
         owner = asyncio.current_task()
         request_key = (session_key, request_id) if request_id else None
+        # A send registered by accept() keeps its registration across this
+        # block (released by the caller's request scope); otherwise this block
+        # registers and drops it itself.
+        registered_here = False
         if request_key is not None and owner is not None:
-            self._request_tasks[request_key] = owner
+            if self._request_tasks.get(request_key) is not owner:
+                self._request_tasks[request_key] = owner
+                registered_here = True
+            self._request_phases[request_key] = RequestPhase.QUEUED
         try:
             while True:
                 done, _ = await asyncio.wait(
@@ -156,6 +256,8 @@ class SessionQueue:
                     on_wait()
 
             task = asyncio.current_task()
+            if request_key is not None and self._request_tasks.get(request_key) is owner:
+                self._request_phases[request_key] = RequestPhase.RUNNING
             if task is not None:
                 self.clear_cancel_event(session_key)
                 self.set_active_task(session_key, task)
@@ -182,9 +284,12 @@ class SessionQueue:
                 self.clear_active_task(session_key, task)
             if acquired:
                 lock.release()
-            if request_key is not None and self._request_tasks.get(request_key) is owner:
-                self._request_tasks.pop(request_key, None)
-                self._cancel_causes.pop(request_key, None)
+            if (
+                registered_here
+                and request_key is not None
+                and self._request_tasks.get(request_key) is owner
+            ):
+                self._forget_request(request_key)
 
     def cancel_request(self, session_key: str, request_id: str) -> bool:
         """Cancel exactly one queued/running send, never its session siblings."""

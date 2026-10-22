@@ -23,6 +23,8 @@ from threading import Event
 from datetime import datetime, timezone
 from typing import Any
 
+from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
+from agent_bridge.send_admission import admit_send
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
@@ -196,6 +198,14 @@ class LocalModelBridge:
     # ----- chat.send handler ----------------------------------------------
 
     async def _handle_send(self, fields: dict, msg_id: str, async_redis) -> None:
+        # TASK-1232 P2: registered at receipt, before any await.
+        await admit_send(
+            self._session_queue, fields.get("session_key", ""), fields.get("request_id", ""),
+            msg_id, async_redis, consumer_group=CONSUMER_GROUP, publisher=self._publisher,
+            run=lambda: self._run_send(fields, msg_id, async_redis),
+        )
+
+    async def _run_send(self, fields: dict, msg_id: str, async_redis) -> None:
         request_id = fields.get("request_id", "")
         session_key = fields.get("session_key", "")
         message = fields.get("message", "")
@@ -396,18 +406,10 @@ class LocalModelBridge:
 
         try:
             if method == "chat.abort":
-                session_key = params.get("sessionKey", "")
-                target_request_id = params.get("requestId", "")
-                if (
-                    not isinstance(session_key, str) or not session_key.strip()
-                    or not isinstance(target_request_id, str) or not target_request_id.strip()
-                ):
-                    raise ValueError("chat.abort requires sessionKey and requestId")
-                cancelled = self._session_queue.cancel_request(session_key, target_request_id)
                 self._publisher.publish_rpc_result(
                     request_id,
-                    {"ok": True, "aborted": cancelled, "requestId": target_request_id,
-                     "detail": "task_cancelled" if cancelled else "no_matching_request"},
+                    await answer_abort(self._backend_name, params,
+                                       cancel_request_handler(self._session_queue)),
                 )
             else:
                 # Not a method this bridge handles — only ack legacy/no-backend

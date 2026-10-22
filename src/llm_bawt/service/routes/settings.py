@@ -79,6 +79,7 @@ async def _push_soul_background(slug: str, agent_id: str, system_prompt: str) ->
             params={"agentId": agent_id, "name": "SOUL.md", "content": system_prompt},
             request_id=f"rpc_{uuid.uuid4().hex}",
             timeout_s=10,
+            backend="openclaw",
         )
         if result.get("ok"):
             logger.info("Auto-pushed SOUL.md for bot '%s' (agent=%s)", slug, agent_id)
@@ -806,6 +807,7 @@ async def sync_soul(slug: str):
             params={"agentId": agent_id, "name": "SOUL.md"},
             request_id=request_id,
             timeout_s=15,
+            backend="openclaw",
         )
     except TimeoutError:
         raise HTTPException(status_code=504, detail="Bridge RPC timed out")
@@ -880,6 +882,7 @@ async def push_soul(slug: str):
             params={"agentId": agent_id, "name": "SOUL.md", "content": content},
             request_id=request_id,
             timeout_s=15,
+            backend="openclaw",
         )
     except TimeoutError:
         raise HTTPException(status_code=504, detail="Bridge RPC timed out")

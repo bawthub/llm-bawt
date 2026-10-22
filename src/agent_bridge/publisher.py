@@ -17,6 +17,7 @@ from typing import Any
 
 import redis
 
+from .abort_contract import process_boot_id
 from .events import AgentEvent
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,12 @@ class RedisPublisher:
         stream_key = f"agent:rpc:{request_id}"
         try:
             fields = {"payload": json.dumps(result, ensure_ascii=False, default=str)}
+            # Reply identity (TASK-1232 P1): send_rpc ignores a reply stamped
+            # by a backend other than the one it addressed. Stream fields, not
+            # payload keys, so every existing payload shape is unchanged.
+            if self._default_provider:
+                fields["backend"] = self._default_provider
+                fields["boot_id"] = process_boot_id()
             self._redis.xadd(stream_key, fields, maxlen=10)
             ttl = 604800 if request_id.startswith("steer_delivery_") else 60
             self._redis.expire(stream_key, ttl)

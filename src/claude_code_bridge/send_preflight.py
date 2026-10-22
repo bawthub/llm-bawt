@@ -37,7 +37,23 @@ async def prepare_send(
         logger.warning("Invalid send command: missing request_id or message")
         await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
         return None
+    return await prepare_parsed_send(bridge, request, msg_id, async_redis)
 
+
+async def prepare_parsed_send(
+    bridge: Any,
+    request: SendRequest,
+    msg_id: str,
+    async_redis: Any,
+    *,
+    scope: Any = None,
+) -> SendPreflight | None:
+    """Preflight an already-parsed send that has a request id and message.
+
+    ``scope`` (a :class:`~claude_code_bridge.send_admission.PreflightScope`)
+    is marked once preflight has published this request's terminal events, so
+    a Stop landing on a later await doesn't publish a second terminal.
+    """
     if not request.model:
         error = (
             "Claude Code bridge: missing 'model' field for "
@@ -54,6 +70,8 @@ async def prepare_send(
             text=error,
         )
         bridge._publisher.publish_run_done(request.request_id)
+        if scope is not None:
+            scope.terminal_published = True
         await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
         return None
 
@@ -80,6 +98,7 @@ async def prepare_send(
         thread_session_id=request.thread_session_id,
         msg_id=msg_id,
         async_redis=async_redis,
+        scope=scope,
     )
     if message is None:
         return None

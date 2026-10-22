@@ -10,6 +10,20 @@ from .publisher import COMMANDS_STREAM
 
 logger = logging.getLogger(__name__)
 
+# How long a request id stays published-once (the dedupe key's TTL). A bridge's
+# request tombstone lives exactly as long, since that is the window in which the
+# same request id can't be published again (TASK-1232 P2).
+COMMAND_DEDUPE_TTL_S = 86400
+DELIVERY_REQUEST_PREFIX = "req_delivery_"
+DELIVERY_COMMAND_DEDUPE_TTL_S = 604800
+
+
+def command_dedupe_ttl_s(request_id: str) -> int:
+    """The dedupe TTL that :meth:`CommandPublisherMixin.send_command` applies."""
+    if request_id.startswith(DELIVERY_REQUEST_PREFIX):
+        return DELIVERY_COMMAND_DEDUPE_TTL_S
+    return COMMAND_DEDUPE_TTL_S
+
 
 class CommandPublisherMixin:
     """Publish normalized bridge commands through a subscriber's write client."""
@@ -110,18 +124,18 @@ class CommandPublisherMixin:
         flat_fields: list[str] = []
         for key, value in fields.items():
             flat_fields.extend((str(key), str(value)))
-        script = """
+        script = f"""
             local prior = redis.call('GET', KEYS[1])
-            if prior then return {0, prior} end
-            local args = {}
+            if prior then return {{0, prior}} end
+            local args = {{}}
             for i = 3, #ARGV do table.insert(args, ARGV[i]) end
             local stream_id = redis.call(
                 'XADD', KEYS[2], 'MAXLEN', '~', ARGV[1], '*', unpack(args)
             )
-            local ttl = 86400
-            if string.sub(ARGV[2], 1, 13) == 'req_delivery_' then ttl = 604800 end
+            local ttl = {COMMAND_DEDUPE_TTL_S}
+            if string.sub(ARGV[2], 1, {len(DELIVERY_REQUEST_PREFIX)}) == '{DELIVERY_REQUEST_PREFIX}' then ttl = {DELIVERY_COMMAND_DEDUPE_TTL_S} end
             redis.call('SET', KEYS[1], stream_id, 'EX', ttl)
-            return {1, stream_id}
+            return {{1, stream_id}}
         """
         eval_fn = getattr(self._pub_redis, "eval", None)
         if callable(eval_fn):

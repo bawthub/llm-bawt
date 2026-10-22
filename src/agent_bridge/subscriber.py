@@ -30,6 +30,17 @@ from .publisher import (
 logger = logging.getLogger(__name__)
 
 
+def _rpc_reply_matches(fields: dict, backend: str | None) -> bool:
+    """Whether an RPC reply may answer a call addressed to *backend*.
+
+    A reply stamped by another backend is never the answer (TASK-1232 P1). An
+    unstamped reply comes from a bridge predating reply identity and is
+    accepted for mixed-version rollout, as is any reply to an unaddressed call.
+    """
+    replier = (fields.get("backend") or "").strip()
+    return not backend or not replier or replier == backend
+
+
 class RedisSubscriber(CommandPublisherMixin):
     def __init__(self, redis_url: str) -> None:
         # socket_timeout=None: redis-py 8.0 changed the default to 5s, which
@@ -352,19 +363,25 @@ class RedisSubscriber(CommandPublisherMixin):
 
         # Wait for result on agent:rpc:{request_id}
         stream_key = f"agent:rpc:{request_id}"
+        last_id = "0-0"
         deadline = asyncio.get_event_loop().time() + timeout_s
         while asyncio.get_event_loop().time() < deadline:
             remaining_ms = int((deadline - asyncio.get_event_loop().time()) * 1000)
             if remaining_ms <= 0:
                 break
             results = await self._redis.xread(
-                {stream_key: "0-0"}, count=1, block=min(remaining_ms, 2000),
+                {stream_key: last_id}, count=10, block=min(remaining_ms, 2000),
             )
-            if results:
-                for _stream, messages in results:
-                    for _msg_id, fields in messages:
-                        payload_raw = fields.get("payload", "{}")
-                        return _json.loads(payload_raw)
+            for _stream, messages in results or ():
+                for msg_id, fields in messages:
+                    last_id = msg_id
+                    if not _rpc_reply_matches(fields, backend):
+                        logger.warning(
+                            "Ignoring RPC %s reply from backend=%s (addressed %s)",
+                            method, fields.get("backend"), backend,
+                        )
+                        continue
+                    return _json.loads(fields.get("payload", "{}"))
         raise TimeoutError(f"RPC {method} timed out after {timeout_s}s")
 
     async def subscribe_run(

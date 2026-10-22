@@ -117,6 +117,7 @@ class ClaudeSessionMixin:
         thread_session_id: str | None,
         msg_id: str,
         async_redis,
+        scope=None,
     ) -> str | None:
         """Handle bridge-owned ``/new`` setup and return the remaining prompt.
 
@@ -163,6 +164,9 @@ class ClaudeSessionMixin:
             }},
         )
         self._publisher.publish_run_done(request_id)
+        if scope is not None:
+            # TASK-1232 P2: a Stop landing on the xack must not add a second terminal.
+            scope.terminal_published = True
         await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
         return None
 

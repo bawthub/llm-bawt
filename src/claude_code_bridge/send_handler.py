@@ -36,7 +36,8 @@ from .send_errors import (
     result_message_error,
     retry_exhausted_text,
 )
-from .send_preflight import prepare_send
+from .send_admission import ClaudeSendAdmissionMixin
+from .send_preflight import SendPreflight
 from .send_result import ClaudeResultMixin
 from .send_stream import ClaudeStreamMixin
 from .send_stream_events import StreamBlockState
@@ -49,7 +50,9 @@ from .turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
 logger = logging.getLogger("claude_code_bridge.bridge")
 
 
-class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
+class ClaudeSendMixin(
+    ClaudeSendAdmissionMixin, ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin,
+):
     """Claude agent send-path (TASK-555 quarantine; see TASK-622-style follow-up).
 
     Split out of ``ClaudeCodeBridge`` (TASK-555); composed back via
@@ -57,12 +60,10 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
     on the assembled instance.
     """
 
-    async def _handle_send(
-        self, fields: dict, msg_id: str, async_redis,
+    async def _run_send(
+        self, preflight: SendPreflight, msg_id: str, async_redis,
     ) -> None:
-        preflight = await prepare_send(self, fields, msg_id, async_redis)
-        if preflight is None:
-            return
+        """Run one admitted, preflighted send (``_handle_send`` admits it)."""
         req = preflight.request
         message = preflight.message
         reset_requested = preflight.reset_requested
@@ -97,20 +98,10 @@ class ClaudeSendMixin(ClaudeStreamMixin, ClaudeUsageMixin, ClaudeResultMixin):
             nonlocal run_done_published
             if run_done_published:
                 return
-            self._publish_event(
-                request_id, session_key, queue_seq + 1,
-                kind=AgentEventKind.ASSISTANT_DONE, text="",
-                extra_raw=_cancelled_raw(),
+            run_done_published = True
+            await self._publish_request_cancelled(
+                request_id, session_key, queue_seq + 1, msg_id, async_redis,
             )
-            run_done_published = publish_run_done_once(
-                self._publisher, request_id, already_published=run_done_published,
-            )
-            self._discard_changed_file_request(request_id)
-            self._trigger_message_ids.pop(request_id, None)
-            if request_id not in self._proxy_request_sessions:
-                self._clear_proxy_sampling_cancel(request_id)
-            self._proxy_request_sessions.pop(request_id, None)
-            await async_redis.xack(COMMANDS_STREAM, "claude-code-bridge", msg_id)
         def _publish_queue_heartbeat() -> None:
             nonlocal queue_seq
             queue_seq += 1

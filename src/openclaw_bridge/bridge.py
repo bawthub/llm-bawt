@@ -5,6 +5,9 @@ import json
 import logging
 from datetime import datetime
 
+from agent_bridge.abort_contract import AbortState
+from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
+from agent_bridge.send_admission import admit_send
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
 from agent_bridge.events import AgentEvent, AgentEventKind
 from agent_bridge.maintenance import is_new_command
@@ -159,6 +162,16 @@ class SessionBridge(ChangedFileLifecycleMixin):
     async def _handle_send_command(
         self, fields: dict, msg_id: str, async_redis
     ) -> None:
+        """Admit a chat.send at receipt (TASK-1232 P2), then run it."""
+        await admit_send(
+            self._session_queue, fields.get("session_key", "main"), fields.get("request_id", ""),
+            msg_id, async_redis, consumer_group="bridge", publisher=self._publisher,
+            run=lambda: self._run_send_command(fields, msg_id, async_redis),
+        )
+
+    async def _run_send_command(
+        self, fields: dict, msg_id: str, async_redis
+    ) -> None:
         """Handle a chat.send command: send via WS, stream events back via Redis."""
         request_id = fields.get("request_id", "")
         session_key = fields.get("session_key", "main")
@@ -194,9 +207,23 @@ class SessionBridge(ChangedFileLifecycleMixin):
         # is also pushed on the run stream so the originating
         # /v1/chat/completions request finishes with assistant content,
         # mirroring the claude-code / codex bridges.
+        cleanup_complete = False
+        request_key = (session_key, request_id)
+
+        async def on_cancel() -> None:
+            self._publisher.publish_run_done(request_id)
+            if not cleanup_complete:
+                self._discard_changed_file_request(request_id)
+                await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
+
         if is_new_command(message):
             bot_id_for_reset = self._resolve_bot_id(session_key) or session_key
-            cleared = await self._reset_openclaw_session(session_key)
+            try:
+                cleared = await self._reset_openclaw_session(session_key)
+            except asyncio.CancelledError:
+                # TASK-1232 P2: Stopped during the /new preflight.
+                await on_cancel()
+                raise
             logger.info(
                 "Session reset via /new: session=%s bot=%s gateway_cleared=%s",
                 session_key, bot_id_for_reset, cleared,
@@ -235,15 +262,6 @@ class SessionBridge(ChangedFileLifecycleMixin):
                 self._publisher.publish_run_done(request_id)
                 await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
                 return
-
-        cleanup_complete = False
-        request_key = (session_key, request_id)
-
-        async def on_cancel() -> None:
-            self._publisher.publish_run_done(request_id)
-            if not cleanup_complete:
-                self._discard_changed_file_request(request_id)
-                await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
 
         async with self._session_queue.active(
             session_key, request_id=request_id, on_cancel=on_cancel,
@@ -387,8 +405,10 @@ class SessionBridge(ChangedFileLifecycleMixin):
 
         try:
             if method == "chat.abort":
-                payload = await self._abort_request(params)
-                self._publisher.publish_rpc_result(request_id, {"ok": True, **payload})
+                self._publisher.publish_rpc_result(
+                    request_id,
+                    await answer_abort(self._backend_name, params, self._abort_request),
+                )
                 return
 
             # session.reset doesn't exist as a gateway-side RPC.  Intercept
@@ -448,21 +468,20 @@ class SessionBridge(ChangedFileLifecycleMixin):
         finally:
             await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
 
-    async def _abort_request(self, params: dict) -> dict:
-        session_key = params.get("sessionKey", "")
-        target_request_id = params.get("requestId", "")
-        if (
-            not isinstance(session_key, str) or not session_key.strip()
-            or not isinstance(target_request_id, str) or not target_request_id.strip()
-        ):
-            raise ValueError("chat.abort requires sessionKey and requestId")
+    async def _abort_request(self, session_key: str, target_request_id: str) -> tuple[AbortState, str]:
+        """Abort exactly one request; a raise is answered as ``error``.
+
+        A failed or unconfirmed gateway abort raises, so the stream keeps
+        running and the caller can retry; it is never reported as cancelled.
+        """
         key = (session_key, target_request_id)
+        # TASK-1232 P2: record the Stop first, whatever the outcome below, so
+        # a send for this id that hasn't arrived yet is refused at receipt.
+        self._session_queue.tombstone(session_key, target_request_id)
         state = self._request_runs.get(key)
         if state is None:
             # Only queued requests are cancellable without a gateway runId.
-            cancelled = self._session_queue.cancel_request(session_key, target_request_id)
-            return {"aborted": cancelled, "requestId": target_request_id,
-                    "detail": "task_cancelled" if cancelled else "no_matching_request"}
+            return await cancel_request_handler(self._session_queue)(session_key, target_request_id)
         if not state["run_id"]:
             # chat.send may still be awaiting its ack. Never kill the local
             # task while the gateway might have accepted an unidentified run.
@@ -475,12 +494,11 @@ class SessionBridge(ChangedFileLifecycleMixin):
                     "Gateway send acknowledgement is pending; retry request-scoped abort"
                 ) from None
             if self._request_runs.get(key) is not state:
-                return {"aborted": False, "requestId": target_request_id,
-                        "detail": "no_matching_request"}
+                return AbortState.TOMBSTONED, "request_tombstoned"
             if not state["run_id"]:
                 raise RuntimeError("Gateway runId is unavailable; retry request-scoped abort")
 
-        async def abort_remote() -> dict:
+        async def abort_remote() -> tuple[AbortState, str]:
             response = await self._ws_client._request(
                 "chat.abort", {"sessionKey": session_key, "runId": state["run_id"]},
             )
@@ -493,8 +511,7 @@ class SessionBridge(ChangedFileLifecycleMixin):
             # Never cancel the new session owner or its stream cancel event.
             if self._request_runs.get(key) is state:
                 self._session_queue.cancel_request(session_key, target_request_id)
-            return {"aborted": True, "requestId": target_request_id,
-                    "detail": "run_aborted", "payload": payload}
+            return AbortState.CANCELLED, "run_aborted"
 
         if state["abort_task"] is None:
             state["abort_task"] = asyncio.create_task(abort_remote())

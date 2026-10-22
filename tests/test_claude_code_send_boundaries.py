@@ -477,7 +477,8 @@ def test_session_only_abort_is_rejected(monkeypatch):
         await harness._handle_rpc({
             "request_id": "rpc", "method": "chat.abort", "params": {"sessionKey": SESSION},
         }, "abort", harness.redis)
-        assert harness._publisher.publish_rpc_result.call_args.args[1]["ok"] is False
+        reply = harness._publisher.publish_rpc_result.call_args.args[1]
+        assert (reply["state"], reply["request_id"]) == ("error", "unknown")
         assert not send.done()
         assert sdk.disconnect_calls == 0
         sdk.release_stream.set()

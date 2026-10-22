@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
+from agent_bridge.send_admission import admit_send
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
@@ -128,6 +130,16 @@ class CodexCommandMixin:
                 await asyncio.sleep(2)
 
     async def _handle_send(
+        self, fields: dict, msg_id: str, async_redis,
+    ) -> None:
+        # TASK-1232 P2: registered at receipt, before any await.
+        await admit_send(
+            self._session_queue, fields.get("session_key", ""), fields.get("request_id", ""),
+            msg_id, async_redis, consumer_group=CONSUMER_GROUP, publisher=self._publisher,
+            run=lambda: self._run_send(fields, msg_id, async_redis),
+        )
+
+    async def _run_send(
         self, fields: dict, msg_id: str, async_redis,
     ) -> None:
         request_id = fields.get("request_id", "")
@@ -623,22 +635,17 @@ class CodexCommandMixin:
                         request_id, {"ok": False, "error": "missing sessionKey"},
                     )
             elif method == "chat.abort":
-                session_key = params.get("sessionKey", "")
-                target_request_id = params.get("requestId", "")
-                if (
-                    not isinstance(session_key, str) or not session_key.strip()
-                    or not isinstance(target_request_id, str) or not target_request_id.strip()
-                ):
-                    raise ValueError("chat.abort requires sessionKey and requestId")
                 # The targeted send owns its AbortController and interrupts it
                 # in its cancellation handler; never take a sibling's handle.
-                cancelled = self._session_queue.cancel_request(session_key, target_request_id)
                 self._publisher.publish_rpc_result(
                     request_id,
-                    {"ok": True, "aborted": cancelled, "requestId": target_request_id,
-                     "detail": "task_cancelled" if cancelled else "no_matching_request"},
+                    await answer_abort(self._backend_name, params,
+                                       cancel_request_handler(self._session_queue)),
                 )
-            else:
+            elif message_backend == self._backend_name:
+                # Unknown RPC addressed to us. A backend-less unknown method
+                # may belong to another bridge (OpenClaw's agents.files.*);
+                # answering it would race the owner's reply.
                 self._publisher.publish_rpc_result(
                     request_id, {"ok": False, "error": f"unknown method: {method}"},
                 )

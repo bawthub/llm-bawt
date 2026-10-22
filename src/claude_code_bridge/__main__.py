@@ -62,7 +62,9 @@ def main() -> None:
     bootstrap_claude_home()
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    publisher = RedisPublisher(redis_url, default_provider="claude-code")
+    # One name for event provider, RPC reply identity and command filtering.
+    backend_name = os.getenv("CLAUDE_CODE_BACKEND_NAME", "claude-code")
+    publisher = RedisPublisher(redis_url, default_provider=backend_name)
     if not publisher.connected:
         logger.error("Cannot connect to Redis at %s", redis_url)
         sys.exit(1)
@@ -106,7 +108,7 @@ def main() -> None:
 
     bridge = ClaudeCodeBridge(
         publisher=publisher,
-        backend_name=os.getenv("CLAUDE_CODE_BACKEND_NAME", "claude-code"),
+        backend_name=backend_name,
         app_api_url=os.getenv("LLM_BAWT_API_URL", ""),
         cwd=os.getenv("CLAUDE_CODE_CWD", "/app"),
         permission_mode=os.getenv("CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions"),

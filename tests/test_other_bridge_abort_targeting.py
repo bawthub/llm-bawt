@@ -72,11 +72,13 @@ def test_queued_abort_is_exact_and_publishes_terminal(kind):
         await until(lambda: ("bot:user", "queued") in bridge._session_queue._request_tasks)
         sibling = asyncio.create_task(send(bridge, "sibling", redis))
         await until(lambda: ("bot:user", "sibling") in bridge._session_queue._request_tasks)
-        for target, session in [("missing", "bot:user"), ("queued", "other:user"), ("", "bot:user")]:
+        for target, session, state in [("missing", "bot:user", "tombstoned"),
+                                       ("queued", "other:user", "tombstoned"),
+                                       ("", "bot:user", "error")]:
             result = await abort(bridge, target, redis, session)
-            assert not result.get("aborted")
+            assert result["state"] == state and result["cancelled"] is False
             assert not active.cancelling() and not queued.cancelling() and not sibling.cancelling()
-        assert (await abort(bridge, "queued", redis))["aborted"] is True
+        assert (await abort(bridge, "queued", redis))["state"] == "cancelled"
         await abort(bridge, "queued", redis)  # repeated cancellation cannot cut off cleanup
         await asyncio.gather(queued, return_exceptions=True)
         bridge._publisher.publish_run_done.assert_called_once_with("queued")
@@ -107,9 +109,9 @@ def test_codex_abort_interrupts_only_target_controller(monkeypatch):
         bridge._build_prompt_input = lambda *args, **kwargs: ("hello", [])
         task = asyncio.create_task(send(bridge, "active", redis))
         await started.wait()
-        assert not (await abort(bridge, "stale", redis))["aborted"]
+        assert (await abort(bridge, "stale", redis))["state"] == "tombstoned"
         controller.abort.assert_not_called()
-        assert (await abort(bridge, "active", redis))["aborted"]
+        assert (await abort(bridge, "active", redis))["state"] == "cancelled"
         await asyncio.gather(task, return_exceptions=True)
         controller.abort.assert_called_once_with("task_cancelled")
         bridge._publisher.publish_run_done.assert_called_once_with("active")
@@ -257,7 +259,7 @@ def test_openclaw_failed_abort_keeps_remote_stream_running(unavailable_run_id):
         task = asyncio.create_task(send(bridge, "active", redis))
         await ws.started.wait()
         result = await abort(bridge, "active", redis)
-        assert result["ok"] is False
+        assert result["state"] == "error" and result["request_id"] == "active"
         assert not task.done() and not task.cancelling()
         bridge._publisher.publish_run_done.assert_not_called()
         if unavailable_run_id:
@@ -311,8 +313,8 @@ def test_openclaw_abort_waits_for_ack_but_not_first_event():
         assert not task.cancelling()
         ws.send_ack.set()
         result = await asyncio.wait_for(rpc, timeout=1)
-        assert result["ok"] and result["aborted"]
-        assert result["requestId"] == "active"
+        assert result["state"] == "cancelled" and result["cancelled"] is True
+        assert result["request_id"] == "active"
         assert result["detail"] == "run_aborted"
         assert ws.abort_calls == [("chat.abort", {"sessionKey": "bot:user", "runId": "gateway-run"})]
         await asyncio.gather(task, return_exceptions=True)
@@ -329,7 +331,7 @@ def test_openclaw_successful_abort_finishes_without_assistant_done():
         redis = SimpleNamespace(xack=AsyncMock())
         task = asyncio.create_task(send(bridge, "active", redis))
         await until(lambda: bridge._request_runs.get(("bot:user", "active"), {}).get("run_id"))
-        assert (await abort(bridge, "active", redis))["aborted"]
+        assert (await abort(bridge, "active", redis))["state"] == "cancelled"
         await asyncio.gather(task, return_exceptions=True)
         bridge._publisher.publish_run_done.assert_called_once_with("active")
         assert not any(call.args[1].kind == AgentEventKind.ASSISTANT_DONE
