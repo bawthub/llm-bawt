@@ -257,6 +257,16 @@ async def dispatch_mcp_result_continuation(
             raise RuntimeError("Previous continuation turn failed; manual reconciliation required")
         # A bare reservation wrote no messages; only a started turn pins identity.
         started = prior is not None and prior.status != RESERVED
+        if not started:
+            # Waiting behind a running turn is the common case; skip the
+            # session-lineage reads (MCP round trips) until the target looks
+            # idle. Advisory only: reserve_idle_turn below stays the authority.
+            peek = getattr(turn_store, "peek_target_state", None)
+            state = await asyncio.to_thread(
+                peek, row.bot_id, exclude_turn_id=identity["inter_bot_turn_id"],
+            ) if peek is not None else None
+            if state is not None and not state.idle:
+                raise TargetBusy(f"target '{row.bot_id}' is {state.describe()}")
         target_session = await asyncio.to_thread(approval_delivery_session, service, row)
         if target_session != request.session_id:
             if started:

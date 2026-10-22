@@ -33,6 +33,7 @@ from .turn_admission import (
     classify_target,
     fence_consumption,
     lock_target,
+    peek_target,
     release_reservation,
     reserve_turn,
 )
@@ -575,6 +576,12 @@ class TurnLogStore:
             return False
         reserve_turn(self.engine, **kwargs)
         return True
+
+    def peek_target_state(self, bot_id: str, *, exclude_turn_id: str | None = None):
+        """Advisory unlocked target state (``turn_admission.peek_target``), or None."""
+        if self.engine is None or not bot_id:
+            return None
+        return peek_target(self.engine, bot_id, exclude_turn_id=exclude_turn_id)
 
     def release_reservation(self, turn_id: str, *, owner: str, fence=None) -> bool:
         if self.engine is None or not turn_id or not owner:

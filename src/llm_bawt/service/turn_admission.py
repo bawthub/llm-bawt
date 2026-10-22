@@ -167,6 +167,17 @@ def classify_target(conn, bot_id: str, *, exclude_turn_id: str | None) -> Target
     return TargetState(tuple(dict(row) for row in rows))
 
 
+def peek_target(engine, bot_id: str, *, exclude_turn_id: str | None) -> TargetState:
+    """Unlocked, read-only ``classify_target`` for cheap pre-checks.
+
+    Advisory only: it lets a producer skip expensive preparation while the
+    target is plainly busy. It never admits anything — ``reserve_turn`` stays
+    the authority and re-classifies under the per-bot lock.
+    """
+    with engine.connect() as conn:
+        return classify_target(conn, bot_id, exclude_turn_id=exclude_turn_id)
+
+
 def _reservation_payload(request_json: Any) -> Mapping[str, Any]:
     if not request_json:
         return {}

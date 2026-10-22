@@ -742,6 +742,83 @@ def test_bare_reservation_may_still_follow_new(grants):
     assert turn_store.reservations[0]["request_json"]["session_id"] == "session-2"
 
 
+class PeekingTurnStore(FakeTurnStore):
+    """Turn store exposing the advisory unlocked peek, like ``TurnLogStore``."""
+
+    def __init__(self, peek_rows, busy=None):
+        super().__init__(busy=busy)
+        self.peek_rows = peek_rows
+        self.peeks = []
+
+    def peek_target_state(self, bot_id, *, exclude_turn_id=None):
+        from llm_bawt.service.turn_admission import TargetState
+
+        self.peeks.append((bot_id, exclude_turn_id))
+        return TargetState(tuple(self.peek_rows))
+
+
+def _counting_sessions(service):
+    reads = []
+
+    def get_memory_client(bot_id, user_id):
+        def get_session(session_id):
+            reads.append(session_id)
+            return {"id": session_id, "bot_id": bot_id, "user_id": user_id,
+                    "status": "active", "session_metadata": {}}
+        return SimpleNamespace(get_session=get_session)
+
+    service.get_memory_client = get_memory_client
+    return reads
+
+
+@pytest.mark.parametrize("make_row", [_mcp_claim, lambda s: _harness_claim(s, REQ_APPROVED)])
+def test_busy_peek_defers_before_any_session_lineage_read(grants, make_row):
+    """TASK-1236: a waiting continuation must not hammer sessions_get every poll."""
+    store = _store()
+    row = make_row(store)
+    turn_store = PeekingTurnStore([{"id": "turn-parent", "status": "streaming"}])
+    service = FakeService(store, turn_store)
+    reads = _counting_sessions(service)
+
+    _run(service, store, row)
+
+    assert reads == []
+    assert turn_store.peeks == [("snark", _continuation_identity(row)["inter_bot_turn_id"])]
+    assert turn_store.reservations == [] and service.requests == [] and grants.sent == []
+    saved = store.get_request(row.id)
+    assert saved.continuation_state == CONT_PENDING
+    assert saved.continuation_claim_token is None
+    assert "waiting for idle target" in saved.continuation_last_error
+    assert "executing (turn-parent)" in saved.continuation_last_error
+
+
+def test_idle_peek_still_defers_to_locked_reservation_authority(grants):
+    """The peek is advisory: a target that turns busy before the lock still defers."""
+    store = _store()
+    row = _mcp_claim(store)
+    turn_store = PeekingTurnStore([], busy="target 'snark' is executing (turn-raced)")
+    service = FakeService(store, turn_store)
+    reads = _counting_sessions(service)
+
+    _run(service, store, row)
+
+    assert reads  # idle-looking target proceeds to resolve its delivery session
+    assert turn_store.reservations == [] and service.requests == []
+    saved = store.get_request(row.id)
+    assert saved.continuation_state == CONT_PENDING
+    assert "turn-raced" in saved.continuation_last_error
+
+
+def test_turn_log_store_peek_reports_open_rows_excluding_own_turn(sqlite_turns):
+    _approvals, turns = sqlite_turns
+    assert turns.peek_target_state("snark", exclude_turn_id="turn-c").idle
+    _sqlite_row(turns, "turn-c", owner="me")
+    assert turns.peek_target_state("snark", exclude_turn_id="turn-c").idle
+    _sqlite_row(turns, "turn-running", status="cancelling")
+    state = turns.peek_target_state("snark", exclude_turn_id="turn-c")
+    assert not state.idle and state.describe() == "executing (turn-running)"
+
+
 def test_long_wait_backs_off_instead_of_hot_looping():
     from datetime import datetime, timedelta, timezone
 
