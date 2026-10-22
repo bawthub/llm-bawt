@@ -52,6 +52,12 @@ RUN_STREAM_MAXLEN = 100_000
 # Sliding TTL refreshed on every run event so an abandoned/crashed run stream
 # self-cleans even if run_done never fires.
 RUN_STREAM_TTL_SECONDS = 900
+# Steer RPCs whose caller retries under the same request id: the subscriber's
+# dedupe key lives 7 days, so the result must too, or a retry after 60s can
+# neither re-send nor read the first answer (TASK-1251 deliveries, TASK-1233
+# quiesce control). Every other RPC result is read once, within seconds.
+DURABLE_RPC_RESULT_PREFIXES = ("steer_delivery_", "steer_quiesce_")
+DURABLE_RPC_RESULT_TTL_S = 604800
 
 
 class RedisPublisher:
@@ -165,7 +171,7 @@ class RedisPublisher:
                 fields["backend"] = self._default_provider
                 fields["boot_id"] = process_boot_id()
             self._redis.xadd(stream_key, fields, maxlen=10)
-            ttl = 604800 if request_id.startswith("steer_delivery_") else 60
+            ttl = DURABLE_RPC_RESULT_TTL_S if request_id.startswith(DURABLE_RPC_RESULT_PREFIXES) else 60
             self._redis.expire(stream_key, ttl)
         except Exception:
             logger.exception("Failed to publish RPC result to %s", stream_key)

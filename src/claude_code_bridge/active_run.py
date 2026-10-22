@@ -61,6 +61,26 @@ def _command_uuid(message_id: str | None) -> str:
     return str(uuid_mod.uuid4())
 
 
+def next_steer_prompt(text: str, origin: str) -> str:
+    """Frame a ``next`` steer for the model.
+
+    A user or bot message is an aside: handle it, then resume the task. A
+    ``system`` steer (only the quiesce control pump's stop request, TASK-1233
+    B3) is delivered verbatim: its text is the registry-owned
+    ``ops.quiesce_request`` body, complete as written, and any wrapper added
+    here (above all "continue the unfinished task") would be model-facing text
+    the registry cannot edit.
+    """
+    if origin == "system":
+        return text
+    return (
+        "[Mid-turn message — delivered at a tool boundary; your running "
+        "work was not interrupted]\n"
+        f"{text}\n\n"
+        "Address it as needed, then continue the unfinished task."
+    )
+
+
 def _sdk_query_handle(client: Any) -> Any | None:
     """Return the SDK's raw frame ``Query`` for a real ``ClaudeSDKClient``."""
     try:
@@ -143,12 +163,7 @@ class ClaudeActiveRun:
             # delivery retry instead of risking a silently dropped message.
             raise RuntimeError("next_unsupported")
         command_uuid = _command_uuid(message_id)
-        prompt = (
-            "[Mid-turn message — delivered at a tool boundary; your running "
-            "work was not interrupted]\n"
-            f"{text}\n\n"
-            "Address it as needed, then continue the unfinished task."
-        )
+        prompt = next_steer_prompt(text, origin)
         async with self._steer_lock:
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")

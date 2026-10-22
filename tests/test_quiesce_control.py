@@ -159,9 +159,9 @@ def test_the_control_target_is_the_pinned_request_binding(member, expected):
 # --- the production RPC adapter ------------------------------------------
 
 
-def _claim():
+def _claim(generation=0):
     return qc.ControlClaim(member_id=1, grant=GRANT, request_id="steer_quiesce_turn_req", user_id="user",
-                           attempts=1)
+                           attempts=1, generation=generation)
 
 
 def _adapter(monkeypatch, result):
@@ -198,10 +198,31 @@ def test_the_adapter_steers_from_system_with_the_registry_text_and_a_stable_mess
     assert (kwargs["author"].entity_type, kwargs["author"].entity_id) == ("bot", SYSTEM_BOT_ID)
 
 
+def test_a_later_generation_is_a_fresh_rpc_id_for_the_same_timeline_message(monkeypatch):
+    from llm_bawt.service.routes.chat import ChatSteerResponse
+
+    calls = _adapter(monkeypatch, ChatSteerResponse(ok=True, detail="steered", turn_id="turn", message_id="m"))
+    asyncio.run(qc.service_steer(object())(_claim(generation=2)))
+    [(_, request, kwargs)] = calls
+    assert kwargs["steer_request_id"] == "steer_quiesce_turn_req_g2"
+    assert request.message_id == str(uuid.uuid5(uuid.NAMESPACE_URL, "steer_quiesce_turn_req"))
+
+
+def test_every_control_rpc_id_keeps_its_bridge_result_as_long_as_its_dedupe_key():
+    """A retry re-reads the first result only while the publisher still holds it."""
+    from agent_bridge.publisher import DURABLE_RPC_RESULT_PREFIXES
+
+    run = qc.control_request_id("turn", "req")
+    for generation in (0, 1, 7):
+        assert _claim(generation).rpc_request_id.startswith(DURABLE_RPC_RESULT_PREFIXES)
+    assert run.startswith(DURABLE_RPC_RESULT_PREFIXES)
+
+
 @pytest.mark.parametrize("error,kind", [
     (HTTPException(404, "Turn not found"), qc.GONE),
-    (HTTPException(409, "no_active_run"), qc.GONE),
-    (HTTPException(409, "active_run_mismatch"), qc.GONE),
+    # Not registered at the bridge (yet): retried; an ended turn settles on the next claim.
+    (HTTPException(409, "no_active_run"), qc.RETRY),
+    (HTTPException(409, "active_run_mismatch"), qc.RETRY),
     (HTTPException(409, "Active bridge run is not ready"), qc.RETRY),
     (HTTPException(502, "steer failed"), qc.RETRY),
     (HTTPException(504, "timed out"), qc.RETRY),
@@ -209,7 +230,7 @@ def test_the_adapter_steers_from_system_with_the_registry_text_and_a_stable_mess
     (gates.SteerGateRefused(gates.GateBlock(id=1, mode="deny", owner_kind="operator", owner_id="o",
                                             reason="r", expires_at=UNTIL)), qc.RETRY),
 ])
-def test_the_adapter_settles_a_gone_run_and_retries_everything_else(monkeypatch, error, kind):
+def test_the_adapter_settles_a_gone_turn_and_retries_everything_else(monkeypatch, error, kind):
     _adapter(monkeypatch, error)
     assert asyncio.run(qc.service_steer(object())(_claim())).kind == kind
 

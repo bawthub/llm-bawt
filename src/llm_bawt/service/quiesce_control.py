@@ -33,14 +33,25 @@ Per due member of a live generation (``LIVE_MEMBER_SQL``):
 * the RPC: ``steer_active_turn`` with ``control=ControlGrant``, priority
   ``next`` (never kills running tools, TASK-934), text from the prompt
   registry (``ops.quiesce_request``), addressed only to the member's pinned
-  run. The request id ``steer_quiesce_<turn>_<request>`` is the bridge's dedupe
-  key, so a retry re-reads the first result instead of steering twice.
+  run. ``control_request_id`` = ``steer_quiesce_<turn>_<request>`` names the
+  run (the sibling dedupe key); the RPC id is that plus the member's steer
+  generation (``ControlClaim.rpc_request_id``). The bridge dedupes on the RPC
+  id and replays its first result, so a retry of one generation re-reads it
+  instead of steering twice (the publisher keeps ``steer_quiesce_`` results as
+  long as the dedupe key). The generation advances only on a definitive
+  rejection before the bridge accepted it (TASK-1251's rule), which proves it
+  never reached a run; otherwise every replay of a cached ``no_active_run``
+  or ``maintenance_active`` would come back the same forever. The timeline
+  message id stays one per run.
 
 * txn2 (``settle``): a compare-and-set on the claim token. ok -> ``steered``;
-  the pinned run gone -> ``not_needed``; anything ambiguous -> ``pending``
-  with backoff and the same id, or ``unconfirmed`` once attempts run out. A
-  claim cancelled meanwhile (``cancel_pending_controls`` on release) is left
-  as it is.
+  the turn row gone -> ``not_needed``; anything else -> ``pending`` with
+  backoff, or ``unconfirmed`` once attempts run out. A run that isn't
+  registered at the bridge (``no_active_run`` / ``active_run_mismatch``) is
+  retried, not settled: it may still be starting or queued in its session,
+  and once its turn ends the next claim settles it ``not_needed``. A claim
+  cancelled meanwhile (``cancel_pending_controls`` on release) is left as it
+  is.
 
 Every UPDATE that changes ``control_state`` stamps ``control_changed_at`` in
 the same statement; backoff bookkeeping does not.
@@ -56,6 +67,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from sqlalchemy import text as sa_text
 
+from .inter_bot_dispatcher_steer import DEFINITIVE_NOT_ACCEPTED
 from .system_gate_admission import LIVE_MEMBER_SQL, ControlGrant, control_target
 from .turn_admission import lock_target
 from .turn_gates import REVOKED_UNSTARTED, ensure_gate_schema
@@ -72,13 +84,19 @@ RETRY = "retry"  # not ready or ambiguous: same id, later
 
 @dataclass(frozen=True)
 class ControlClaim:
-    """One claimed member: the grant the steer carries and its fixed request id."""
+    """One claimed member: the grant the steer carries, its run's id and the RPC generation."""
 
     member_id: int
     grant: ControlGrant
-    request_id: str
+    request_id: str  # the run: control_request_id
     user_id: str
     attempts: int
+    generation: int = 0
+
+    @property
+    def rpc_request_id(self) -> str:
+        """The bridge RPC id: the run's id for generation 0, then ``_g<k>``."""
+        return self.request_id if self.generation == 0 else f"{self.request_id}_g{self.generation}"
 
 
 @dataclass(frozen=True)
@@ -91,15 +109,20 @@ Steer = Callable[[ControlClaim], Awaitable[SteerOutcome]]
 
 
 def control_request_id(turn_id: str, agent_request_id: str) -> str:
-    """The steer id for one pinned run: the same for every job and generation (Caid)."""
+    """The id of one pinned run: the same for every job and gate generation (Caid).
+
+    It is the sibling dedupe key and the RPC id of steer generation 0.
+    """
     return f"steer_quiesce_{turn_id}_{agent_request_id}"
 
 
+# Lease and gate expiry are compared on clock_timestamp(), never now(): the
+# reads run after a lock_target wait, and now() is the transaction's start.
 _DUE = (
     "((m.control_state = 'pending' AND (m.control_next_attempt_at IS NULL"
     " OR m.control_next_attempt_at <= now()))"
     " OR (m.control_state = 'steering' AND (m.control_lease_expires_at IS NULL"
-    " OR m.control_lease_expires_at <= now())))"
+    " OR m.control_lease_expires_at <= clock_timestamp())))"
 )
 _OPEN = "m.control_state IN ('pending', 'steering')"
 _TABLES = "SELECT to_regclass('ops_jobs') IS NOT NULL AND to_regclass('gate_members') IS NOT NULL"
@@ -182,7 +205,8 @@ class QuiesceControlPump:
         request_id = control_request_id(row["turn_id"], target.request_id)
         sibling = conn.execute(sa_text("""
             SELECT bool_or(control_state = 'steered') AS steered,
-                   bool_or(control_state = 'steering' AND control_lease_expires_at > now()) AS steering
+                   bool_or(control_state = 'steering' AND control_lease_expires_at > clock_timestamp()) AS steering,
+                   max(COALESCE(control_generation, 0)) AS generation
             FROM gate_members WHERE control_request_id = :rid AND id <> :id
         """), {"rid": request_id, "id": row["id"]}).mappings().one()
         if sibling["steered"]:
@@ -191,20 +215,24 @@ class QuiesceControlPump:
         if sibling["steering"]:
             self._defer(conn, row, self.SIBLING_RETRY_SECONDS)
             return None
+        # A sibling's generation k means every earlier one was definitively
+        # rejected, so starting there skips replays that could only say so again.
+        generation = max(int(row["control_generation"] or 0), int(sibling["generation"] or 0))
         token = uuid.uuid4().hex
         conn.execute(sa_text("""
             UPDATE gate_members SET control_state = 'steering', control_changed_at = now(),
-                control_request_id = :rid, control_claim_token = :token,
-                control_lease_expires_at = now() + (:lease * interval '1 second'),
+                control_request_id = :rid, control_claim_token = :token, control_generation = :gen,
+                control_lease_expires_at = clock_timestamp() + (:lease * interval '1 second'),
                 control_attempts = control_attempts + 1, control_next_attempt_at = NULL
             WHERE id = :id
-        """), {"id": row["id"], "rid": request_id, "token": token, "lease": self.LEASE_SECONDS})
+        """), {"id": row["id"], "rid": request_id, "token": token, "gen": generation,
+               "lease": self.LEASE_SECONDS})
         return ControlClaim(
             member_id=int(row["id"]),
             grant=ControlGrant(gate_id=int(row["gate_id"]), bot_id=row["bot_id"],
                                turn_id=row["turn_id"], claim_token=token),
             request_id=request_id, user_id=row["turn_user_id"] or "nick",
-            attempts=int(row["control_attempts"]) + 1,
+            attempts=int(row["control_attempts"]) + 1, generation=generation,
         )
 
     @staticmethod
@@ -242,23 +270,27 @@ class QuiesceControlPump:
     def settle(self, claim: ControlClaim, outcome: SteerOutcome) -> bool:
         """CAS the claim to its result; False when the claim was cancelled or reclaimed meanwhile."""
         delay: float | None = None
+        generation = claim.generation
         if outcome.kind == STEERED:
             state, error = "steered", None
         elif outcome.kind == GONE:
-            state, error = "not_needed", outcome.detail or "no_active_run"
+            state, error = "not_needed", outcome.detail or "turn_not_found"
         else:
             exhausted = claim.attempts >= self.MAX_ATTEMPTS
             state, error = ("unconfirmed" if exhausted else "pending"), outcome.detail or "steer_failed"
             delay = None if exhausted else self.backoff(claim.attempts)
+            if outcome.detail in DEFINITIVE_NOT_ACCEPTED:
+                generation += 1  # this generation never reached a run: the next one is fresh
         with self.engine.begin() as conn:
             return bool(conn.execute(sa_text("""
                 UPDATE gate_members SET control_state = :state, control_changed_at = now(),
                     control_claim_token = NULL, control_lease_expires_at = NULL, control_error = :error,
+                    control_generation = :gen,
                     control_next_attempt_at = CASE WHEN CAST(:delay AS double precision) IS NULL THEN NULL
                         ELSE now() + (CAST(:delay AS double precision) * interval '1 second') END
                 WHERE id = :id AND control_state = 'steering' AND control_claim_token = :token
             """), {"id": claim.member_id, "token": claim.grant.claim_token, "state": state,
-                   "error": error, "delay": delay}).rowcount)
+                   "error": error, "delay": delay, "gen": generation}).rowcount)
 
     # --- one pass ----------------------------------------------------------
 
@@ -304,7 +336,7 @@ def service_steer(service) -> Steer:
         )
         try:
             response = await steer_active_turn(
-                service, request, steer_request_id=claim.request_id,
+                service, request, steer_request_id=claim.rpc_request_id,
                 author=AuthorReference.bot(SYSTEM_BOT_ID), control=grant,
             )
         except HTTPException as exc:
@@ -314,13 +346,15 @@ def service_steer(service) -> Steer:
     return steer
 
 
-_GONE_DETAILS = frozenset({"no_active_run", "active_run_mismatch"})
-
-
 def classify_refusal(exc: Any) -> SteerOutcome:
-    """A refused steer: the pinned run gone is final, everything else is retried."""
+    """A refused steer: only the turn row gone is final, everything else is retried.
+
+    ``no_active_run`` / ``active_run_mismatch`` are retried too: the bridge
+    hasn't registered the pinned run (yet), and the next claim settles the
+    member ``not_needed`` once its turn has ended.
+    """
     detail = str(getattr(exc, "detail", "") or "")
-    if getattr(exc, "status_code", None) == 404 or detail in _GONE_DETAILS:
+    if getattr(exc, "status_code", None) == 404:
         return SteerOutcome(GONE, detail or "turn_not_found")
     return SteerOutcome(RETRY, detail or exc.__class__.__name__)
 

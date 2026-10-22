@@ -120,9 +120,12 @@ def control_target(member: Mapping[str, Any]) -> ControlTarget | None:
 
 # The live-member join (agreed with Byte): a member of its job's current
 # generation, the gate unreleased and unexpired, the job still quiescing.
+# Expiry is read with clock_timestamp(), not now(): every caller evaluates this
+# after waiting on lock_target, and now() is frozen at transaction start, so a
+# gate that expired during the wait would still read as live.
 LIVE_MEMBER_SQL = """
     SELECT m.id, m.gate_id, m.bot_id, m.turn_id, m.disposition, m.control_state,
-           m.control_attempts, m.backend, m.agent_session_key, m.agent_request_id,
+           m.control_attempts, m.control_generation, m.backend, m.agent_session_key, m.agent_request_id,
            j.caller_turn_id, t.id AS turn_present, t.ended_at IS NOT NULL AS turn_ended,
            t.user_id AS turn_user_id, t.agent_request_id AS turn_request_id,
            t.agent_backend AS turn_backend, t.agent_session_key AS turn_session_key
@@ -130,7 +133,7 @@ LIVE_MEMBER_SQL = """
     JOIN system_gates g ON g.id = m.gate_id
     JOIN ops_jobs j ON j.id = g.owner_id AND j.quiesce_gate_id = m.gate_id
     LEFT JOIN turn_logs t ON t.id = m.turn_id
-    WHERE g.owner_kind = 'job' AND g.released_at IS NULL AND g.expires_at > now()
+    WHERE g.owner_kind = 'job' AND g.released_at IS NULL AND g.expires_at > clock_timestamp()
       AND j.state = 'quiescing' AND {where}
 """
 
@@ -148,13 +151,14 @@ def _admit_grant(conn, grant: ControlGrant) -> ControlTarget:
 
     Admits only when the gate is its job's live generation, the member row is
     (gate, turn, bot), it is ``steering`` under this exact claim token, and
-    the control lease is unexpired. Reads only: the member row is not locked,
+    the control lease is unexpired. Both expiries are read on the current
+    clock, after the lock wait. Reads only: the member row is not locked,
     and no turn row is ever locked here.
     """
     row = conn.execute(sa_text(LIVE_MEMBER_SQL.format(where=(
         "m.gate_id = :gate AND m.turn_id = :turn AND m.bot_id = :bot"
         " AND m.control_state = 'steering' AND m.control_claim_token = :token"
-        " AND m.control_lease_expires_at > now()"
+        " AND m.control_lease_expires_at > clock_timestamp()"
     ))), {"gate": grant.gate_id, "turn": grant.turn_id, "bot": grant.bot_id,
           "token": grant.claim_token}).mappings().first()
     target = control_target(row) if row is not None else None

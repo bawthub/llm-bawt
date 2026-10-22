@@ -8,6 +8,8 @@ a recorder that asks ``check_steer`` with the claim's grant, exactly as
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import time
 import uuid
 
 import pytest
@@ -29,6 +31,7 @@ from llm_bawt.service.system_gate_admission import (
     SteerGateRefused,
     check_steer,
 )
+from llm_bawt.service.turn_admission import lock_target
 from tests.test_ops_quiesce_pg import rig  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -202,13 +205,61 @@ def test_an_ambiguous_result_retries_with_the_same_id(rig):
     assert [claim.request_id for claim, _ in steers.calls] == [second["control_request_id"]] * 2
 
 
-def test_a_gone_run_is_not_needed(rig):
+def test_a_gone_turn_is_not_needed(rig):
     turn_id = _turn(rig)
     _open(rig)
-    pump, _ = _pump(rig, SteerOutcome(GONE, "no_active_run"))
+    pump, _ = _pump(rig, SteerOutcome(GONE, "Turn not found"))
     assert _pass(pump) == 1
     member = _member(rig, turn_id)
-    assert (member["control_state"], member["control_error"]) == ("not_needed", "no_active_run")
+    assert (member["control_state"], member["control_error"]) == ("not_needed", "Turn not found")
+
+
+def test_only_a_definitive_rejection_advances_the_steer_generation(rig):
+    """The bridge replays a generation's first result, so only a proven non-delivery gets a fresh id."""
+    turn_id = _turn(rig)
+    _open(rig)
+    pump, steers = _pump(rig, SteerOutcome(RETRY, "no_active_run"), SteerOutcome(RETRY, "bridge timeout"),
+                         SteerOutcome(RETRY, "maintenance_active"))
+    for expected_generation in (1, 1, 2):
+        assert _pass(pump) == 1
+        member = _member(rig, turn_id)
+        assert (member["control_state"], member["control_generation"]) == ("pending", expected_generation)
+        _due_now(rig, turn_id)
+    assert _pass(pump) == 1
+    assert _member(rig, turn_id)["control_state"] == "steered"
+    run = control_request_id(turn_id, f"req-{turn_id}")
+    assert [claim.rpc_request_id for claim, _ in steers.calls] == [run, f"{run}_g1", f"{run}_g1", f"{run}_g2"]
+    assert {claim.request_id for claim, _ in steers.calls} == {run}
+
+
+def test_a_run_not_registered_is_retried_until_its_turn_ends(rig):
+    turn_id = _turn(rig)
+    _open(rig)
+    pump, steers = _pump(rig, SteerOutcome(RETRY, "active_run_mismatch"))
+    assert _pass(pump) == 1
+    assert _member(rig, turn_id)["control_state"] == "pending"
+    rig.end(turn_id)
+    _due_now(rig, turn_id)
+    assert _pass(pump) == 0 and len(steers.calls) == 1
+    member = _member(rig, turn_id)
+    assert (member["control_state"], member["control_error"]) == ("not_needed", "turn_not_running")
+
+
+def test_a_later_gate_generation_starts_at_its_siblings_steer_generation(rig):
+    turn_id = _turn(rig)
+    job_id = _open(rig)
+    pump, steers = _pump(rig, SteerOutcome(RETRY, "no_active_run"))
+    first_gate = rig.row(job_id)["quiesce_gate_id"]
+    assert _pass(pump) == 1
+    assert _member(rig, turn_id, first_gate)["control_generation"] == 1
+    rig.sql("UPDATE system_gates SET expires_at = now() - interval '1 second' WHERE id=:g", g=first_gate)
+    assert rig.driver.step(job_id).outcome == "holding"
+    second_gate = rig.row(job_id)["quiesce_gate_id"]
+
+    assert _pass(pump) == 1
+    run = control_request_id(turn_id, f"req-{turn_id}")
+    assert steers.calls[-1][0].rpc_request_id == f"{run}_g1"
+    assert _member(rig, turn_id, second_gate)["control_state"] == "steered"
 
 
 def test_attempts_run_out_to_unconfirmed(rig):
@@ -456,3 +507,88 @@ def test_a_job_that_left_quiescing_steers_no_more(rig):
     pump, steers = _pump(rig)
     assert pump.due() == [] and _pass(pump) == 0 and steers.calls == []
     assert _member(rig, turn_id)["control_state"] == "pending" and not pump.has_open_work()
+
+
+def _wait_until_blocked_by(rig, holder_pid: int, future, timeout: float = 5.0) -> None:
+    """Return once some backend is waiting on a lock ``holder_pid`` holds.
+
+    Polled from its own autocommit connection: pg_stat_activity is a
+    per-transaction snapshot, so a backend that connects later would never
+    appear to a poller inside one long transaction.
+    """
+    deadline = time.monotonic() + timeout
+    with rig.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as probe:
+        while True:
+            waiting = probe.execute(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE :holder = ANY(pg_blocking_pids(pid))"
+            ), {"holder": holder_pid}).scalar_one()
+            if waiting:
+                return
+            if future.done():
+                future.result()  # surface the call's error
+                raise AssertionError("the call finished without waiting on the bot lock")
+            if time.monotonic() > deadline:
+                raise AssertionError("the call never blocked on the bot lock")
+            time.sleep(0.01)
+
+
+def _behind_the_bot_lock(rig, call, during=None):
+    """Run ``call`` while another transaction holds lock_target(bot).
+
+    Returns ``call``'s result and the database clock at the moment the lock
+    was released. ``during(conn)`` runs inside the holding transaction once
+    PostgreSQL shows ``call``'s backend blocked on that lock, so ``call``'s
+    transaction (and its frozen now()) began before the release.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        with rig.engine.begin() as conn:
+            lock_target(conn, rig.bot)
+            holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            future = pool.submit(call)
+            _wait_until_blocked_by(rig, holder_pid, future)
+            if during is not None:
+                during(conn)
+            # Hold past the 100ms expiries ``during`` sets, and open a gap
+            # between the waiter's transaction start and the release.
+            time.sleep(0.25)
+            released_at = conn.execute(text("SELECT clock_timestamp()")).scalar_one()
+        return future.result(timeout=5), released_at
+
+
+def _refusal(call):
+    try:
+        call()
+    except ControlGrantRefused as exc:
+        return exc
+    return None
+
+
+@pytest.mark.parametrize("expiry", [
+    "UPDATE gate_members SET control_lease_expires_at = clock_timestamp() + interval '100 milliseconds'"
+    " WHERE id = :member",
+    "UPDATE system_gates SET expires_at = clock_timestamp() + interval '100 milliseconds' WHERE id = :gate",
+], ids=["lease", "gate"])
+def test_a_grant_that_expires_while_waiting_on_the_bot_lock_is_refused(rig, expiry):
+    turn_id = _turn(rig)
+    _open(rig)
+    pump, _ = _pump(rig)
+    claim = pump.claim(_member(rig, turn_id)["id"], rig.bot)
+
+    def admit():
+        return _refusal(lambda: check_steer(rig.engine, rig.bot, turn_id=turn_id, grant=claim.grant))
+
+    refused, _ = _behind_the_bot_lock(
+        rig, admit,
+        during=lambda conn: conn.execute(text(expiry),
+                                         {"member": claim.member_id, "gate": claim.grant.gate_id}))
+    assert isinstance(refused, ControlGrantRefused)
+
+
+def test_a_claim_taken_after_a_lock_wait_gets_its_whole_lease(rig):
+    turn_id = _turn(rig)
+    _open(rig)
+    pump, _ = _pump(rig)
+    claim, released_at = _behind_the_bot_lock(rig, lambda: pump.claim(_member(rig, turn_id)["id"], rig.bot))
+    assert claim is not None
+    lease_end = _member(rig, turn_id)["control_lease_expires_at"]
+    assert (lease_end - released_at).total_seconds() >= QuiesceControlPump.LEASE_SECONDS

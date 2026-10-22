@@ -73,6 +73,18 @@ def test_rpc_reply_is_stamped_with_backend_and_boot_id_outside_the_payload():
                       "boot_id": process_boot_id()}
 
 
+@pytest.mark.parametrize("request_id,ttl", [
+    ("rpc-1", 60),
+    ("steer_delivery_d1_g2", 604800),
+    ("steer_quiesce_turn-1_req-1", 604800),
+    ("steer_quiesce_turn-1_req-1_g3", 604800),
+])
+def test_retried_steer_results_live_as_long_as_their_dedupe_key(request_id, ttl):
+    publisher = _publisher("claude-code")
+    publisher.publish_rpc_result(request_id, {"ok": False, "error": "no_active_run"})
+    publisher._redis.expire.assert_called_once_with(f"agent:rpc:{request_id}", ttl)
+
+
 def test_publisher_without_identity_publishes_the_historical_shape():
     publisher = _publisher(None)
     publisher.publish_rpc_result("rpc-1", {"ok": True})

@@ -23,6 +23,7 @@ from claude_code_bridge.active_run import (
     STEER_INTERRUPTED_TOOL_RESULT,
     ClaudeActiveRun,
 )
+from llm_bawt.ops.quiesce_prompts import DEFAULT_QUIESCE_REQUEST
 
 CMD = "736a3206-0000-4000-8000-000000000001"
 
@@ -271,6 +272,34 @@ async def test_bot_origin_next_has_no_user_lifecycle_and_rejected_user_id_is_not
     assert len(client.written) == 1
     assert events == []
     assert yielded == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("origin", ["user", "bot"])
+async def test_message_next_frame_asks_the_run_to_continue(origin):
+    client = _FakeClient()
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    yielded, task = await _start(run)
+    await run.steer("a note", priority="next", message_id=CMD, origin=origin)
+    await _finish(client, task)
+    [frame] = client.written
+    assert "a note" in frame["message"]["content"]
+    assert "continue the unfinished task" in frame["message"]["content"]
+
+
+@pytest.mark.anyio
+async def test_system_next_steer_is_delivered_verbatim():
+    # TASK-1233: the quiesce control pump's stop request travels as a system
+    # steer. Its text is the registry-owned ops.quiesce_request body; the
+    # bridge adds nothing (a trailing "continue the unfinished task" would
+    # undo it, and any wrapper would be prompt text the registry can't edit).
+    client = _FakeClient()
+    run = ClaudeActiveRun(client=client, request_id="req-1")
+    yielded, task = await _start(run)
+    await run.steer(DEFAULT_QUIESCE_REQUEST, priority="next", message_id=CMD, origin="system")
+    await _finish(client, task)
+    [frame] = client.written
+    assert frame["message"]["content"] == DEFAULT_QUIESCE_REQUEST
 
 
 @pytest.mark.anyio

@@ -263,6 +263,9 @@ _MEMBER_ADDED_COLUMNS = {
     # B3: the quiesce control pump's backoff. A pending member is not retried
     # before it; NULL means now. Bookkeeping only: never stamps control_changed_at.
     "control_next_attempt_at": ("TIMESTAMPTZ", None),
+    # B3: the steer RPC generation (NULL = 0). It advances only when the
+    # bridge definitively rejected that generation before accepting it.
+    "control_generation": ("INTEGER", None),
 }
 
 
