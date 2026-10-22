@@ -159,7 +159,22 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=time.sleep) -> int:
+def fence_expired(request: dict, now: datetime) -> bool:
+    """Has a quiesced job's protected interval closed before it started?
+
+    ``request["fence"]["start_not_after"]`` (TASK-1233) is the last instant the
+    action may begin and still finish inside the hold the quiesce driver
+    extended for it. Absent for every other job.
+    """
+    fence = request.get("fence")
+    if not fence:
+        return False
+    limit = datetime.fromisoformat(fence["start_not_after"].replace("Z", "+00:00"))
+    return now > limit
+
+
+def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=time.sleep,
+        clock=lambda: datetime.now(timezone.utc)) -> int:
     raw = request_path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_hash:
         raise ValueError("immutable request hash mismatch")
@@ -188,6 +203,13 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         atomic_json(status_path, receipt)
         # Delay is owned by this container, not by an app daemon thread.
         sleep(execution["start_delay_seconds"])
+        if fence_expired(request, clock()):
+            # Nothing was handed to Docker: a known, visible refusal.
+            receipt.update(state="failed", exit_code=None, side_effect_unknown=False,
+                           error="protected interval expired before start; no action submitted",
+                           finished_at=utcnow())
+            atomic_json(status_path, receipt)
+            return 1
         receipt.update(state="running", started_at=utcnow())
         atomic_json(status_path, receipt)
         api = api_factory(execution["timeout_seconds"])

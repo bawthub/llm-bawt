@@ -22,8 +22,10 @@ from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
 from .executor import validate_spec
 from .release_spec import is_release_spec
-from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUEUED, JOB_RUNNING,
-                     JOB_TERMINAL_STATES, OpsJob, OpsOperation, OpsOperationRevision)
+from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUEUED,
+                     JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
+                     OpsOperationRevision)
+from .quiesce_settings import validate_quiesce_settings
 from .validation import canonical_json, validate_catalog
 
 logger = logging.getLogger(__name__)
@@ -40,8 +42,55 @@ def _script_hash(script):
 _OP_WRITABLE = {"slug", "title", "description", "enabled", "executor_kind", "target_host",
                 "run_as_user", "working_directory", "command_script", "args_schema_json",
                 "args_defaults_json", "timeout_seconds", "start_delay_seconds", "max_output_bytes",
-                "max_concurrent", "risk_level", "category", "approval_prompt_prefix"}
+                "max_concurrent", "risk_level", "category", "approval_prompt_prefix",
+                "quiesce_enabled", "quiesce_timeout_seconds", "quiesce_scope_json"}
 _ACTIVE_CLAIMED = (JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING)
+# Non-terminal states a terminal write may leave (QUIESCING: TASK-1233).
+_OPEN_STATES = (JOB_QUEUED, JOB_QUIESCING, *_ACTIVE_CLAIMED)
+
+_JOB_QUIESCE_COLUMNS = (
+    ("quiesce_gate_id", "BIGINT"), ("quiesce_driver_id", "VARCHAR(64)"),
+    ("quiesce_driver_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
+    ("quiesce_deadline_at", "TIMESTAMP WITH TIME ZONE"),
+    ("quiesce_fence_json", "TEXT"), ("quiesce_json", "TEXT"),
+)
+_OP_QUIESCE_COLUMNS = (
+    ("quiesce_enabled", "BOOLEAN NOT NULL DEFAULT false"),
+    ("quiesce_timeout_seconds", "INTEGER NOT NULL DEFAULT 600"),
+    ("quiesce_scope_json", "TEXT"),
+)
+
+
+def slot_holders(conn, operation_slug, *, exclude_job_id=None):
+    """Snapshots of the jobs holding one of ``operation_slug``'s concurrency slots.
+
+    A claimed job holds a slot, and so does a quiescing job once its gate is
+    open (TASK-1233 C5): its hold is already in effect. Run under the
+    operation-row lock, like every slot claim.
+    """
+    rows = conn.execute(text(
+        "SELECT id, invocation_snapshot_json FROM ops_jobs WHERE operation_slug=:slug"
+        " AND (state IN (:dispatching, :accepted, :running)"
+        "      OR (state=:quiescing AND quiesce_gate_id IS NOT NULL))"
+    ), {"slug": operation_slug, "dispatching": JOB_DISPATCHING, "accepted": JOB_ACCEPTED,
+        "running": JOB_RUNNING, "quiescing": JOB_QUIESCING}).all()
+    return [row[1] for row in rows if row[0] != exclude_job_id]
+
+
+def slot_cap_reached(holders, own_cap):
+    """Is the strictest cap among this job's and every holder's snapshot reached?"""
+    limits = [own_cap] if own_cap is not None else []
+    for raw in holders:
+        if raw:
+            cap = json.loads(raw)["execution"].get("max_concurrent")
+            if cap is not None:
+                limits.append(cap)
+    return bool(limits) and len(holders) >= min(limits)
+
+
+def is_quiesce_snapshot(raw):
+    """Does this persisted invocation snapshot require a quiesce (TASK-1233)?"""
+    return bool(raw) and bool((json.loads(raw).get("quiesce") or {}).get("enabled"))
 
 
 class OpsStoreUnavailable(RuntimeError):
@@ -88,11 +137,16 @@ class OpsStore:
         self._schema_guard.run(self.engine, "ops-store-task861-v1", bootstrap)
 
     def _migrate_add_columns(self, conn):
-        existing = {c["name"] for c in inspect(conn).get_columns("ops_jobs")}
-        for name, kind in (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"), ("caller_actor", "VARCHAR(128)")):
-            if name not in existing:
-                clause = " IF NOT EXISTS" if conn.dialect.name == "postgresql" else ""
-                conn.execute(text(f"ALTER TABLE ops_jobs ADD COLUMN{clause} {name} {kind}"))
+        clause = " IF NOT EXISTS" if conn.dialect.name == "postgresql" else ""
+        for table, columns in (
+            ("ops_jobs", (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"),
+                          ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS)),
+            ("ops_operations", _OP_QUIESCE_COLUMNS),
+        ):
+            existing = {c["name"] for c in inspect(conn).get_columns(table)}
+            for name, kind in columns:
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN{clause} {name} {kind}"))
 
     def _require(self):
         if self.engine is None:
@@ -170,6 +224,7 @@ class OpsStore:
         for field in ("title", "description", "risk_level"):
             if not isinstance(getattr(op, field), str):
                 raise ValueError(f"{field} must be a string")
+        validate_quiesce_settings(op, schema)
 
     @staticmethod
     def _record_revision(session, row):
@@ -265,10 +320,15 @@ class OpsStore:
                    invocation_snapshot_json=None, request_payload_json=None, caller_actor=None,
                    caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
                    caller_session_key=None, caller_backend=None, approval_request_id=None,
-                   fence=None):
+                   fence=None, state=JOB_QUEUED):
         """Insert a queued job. ``fence(session)``, when given, runs in the same
         transaction first and raises to refuse creation (an admission claim
-        that is no longer held)."""
+        that is no longer held). A quiesce invocation is created directly in
+        QUIESCING (TASK-1233 C5) and is never claimable from QUEUED."""
+        if state not in (JOB_QUEUED, JOB_QUIESCING):
+            raise ValueError(f"a job is created queued or quiescing, not {state!r}")
+        if (state == JOB_QUIESCING) != is_quiesce_snapshot(invocation_snapshot_json):
+            raise ValueError("only a quiesce snapshot is created quiescing, and it always is")
         self._require()
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
             raise ValueError("idempotency_key must be 1..128 characters")
@@ -280,7 +340,7 @@ class OpsStore:
             invocation_snapshot_json=invocation_snapshot_json, request_payload_json=payload,
             idempotency_key=idempotency_key, caller_actor=caller_actor, caller_bot_id=caller_bot_id,
             caller_user_id=caller_user_id, caller_turn_id=caller_turn_id, caller_session_key=caller_session_key,
-            caller_backend=caller_backend, approval_request_id=approval_request_id)
+            caller_backend=caller_backend, approval_request_id=approval_request_id, state=state)
         with Session(self.engine) as session:
             if fence is not None:
                 fence(session)
@@ -321,23 +381,20 @@ class OpsStore:
             return session.exec(select(func.count()).select_from(OpsJob).where(*self._job_filters(operation_slug, state))).one()
 
     def claim_job(self, job_id, *, max_concurrent=None):
-        """QUEUED -> DISPATCHING atomically, reserving a per-operation slot."""
+        """QUEUED -> DISPATCHING atomically, reserving a per-operation slot.
+
+        Never for a quiesce snapshot (TASK-1233 C5): only the quiesce driver
+        may dispatch one, after its drain, through its own fenced CAS.
+        """
         self._require()
         job = self.get_job(job_id)
-        if job is None:
+        if job is None or is_quiesce_snapshot(job.invocation_snapshot_json):
             return False
         with Session(self.engine) as session:
             op = self._lock_operation(session, job.operation_slug)
             if op is None or not op.enabled or op.soft_deleted_at is not None:
                 return False
-            active = session.exec(select(OpsJob).where(OpsJob.operation_slug == job.operation_slug, OpsJob.state.in_(_ACTIVE_CLAIMED))).all()
-            limits = [max_concurrent] if max_concurrent is not None else []
-            for other in active:
-                if other.invocation_snapshot_json:
-                    cap = json.loads(other.invocation_snapshot_json)["execution"].get("max_concurrent")
-                    if cap is not None:
-                        limits.append(cap)
-            if limits and len(active) >= min(limits):
+            if slot_cap_reached(slot_holders(session.connection(), job.operation_slug), max_concurrent):
                 return False
             result = session.execute(update(OpsJob).where(OpsJob.id == job_id, OpsJob.state == JOB_QUEUED)
                 .values(state=JOB_DISPATCHING, dispatched_at=_utcnow(), host_unit_name=f"llm-bawt-ops-{job_id}", error_text=None)
@@ -377,13 +434,16 @@ class OpsStore:
                       error_text=error_text, finished_at=finished_at or _utcnow())
         if started_at is not None:
             values["started_at"] = started_at
-        return self._transition(job_id, (JOB_QUEUED, *_ACTIVE_CLAIMED), values)
+        return self._transition(job_id, _OPEN_STATES, values)
 
     def note_queued_error(self, job_id, error):
         return self._transition(job_id, (JOB_QUEUED,), {"error_text": error})
 
+    def note_quiescing_error(self, job_id, error):
+        return self._transition(job_id, (JOB_QUIESCING,), {"error_text": error})
+
     def touch_reconcile(self, job_id):
-        self._transition(job_id, (JOB_QUEUED, *_ACTIVE_CLAIMED), {"last_reconcile_at": _utcnow()})
+        self._transition(job_id, _OPEN_STATES, {"last_reconcile_at": _utcnow()})
 
     def find_active_jobs(self, *, limit=100, offset=0):
         if self.engine is None:

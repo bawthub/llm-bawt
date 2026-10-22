@@ -169,6 +169,15 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         "risk_level": RISK_HIGH,
         "category": "restart",
         "approval_prompt_prefix": "Restart bridge (KILLS ACTIVE AGENTS)",
+        # TASK-1233: off until an operator enables it. When on, the restart
+        # holds the named bridge's agent turns and waits for them to drain.
+        "quiesce_enabled": False,
+        "quiesce_timeout_seconds": 600,
+        "quiesce_scope_json": json.dumps({
+            "backend_from_arg": "bridge",
+            "map": {"claude-code-bridge": "claude-code", "openclaw-bridge": "openclaw",
+                    "codex-bridge": "codex"},
+        }, sort_keys=True),
     },
     {
         "slug": "llm-bawt.restart-redis",

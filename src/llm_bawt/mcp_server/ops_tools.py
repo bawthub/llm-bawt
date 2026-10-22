@@ -7,6 +7,7 @@ catalog grows:
 * :func:`ops_run` — invoke one by slug with validated args. Never accepts a
   raw command string; the executable command comes from the DB row.
 * :func:`ops_job_status` — poll a running/terminal job.
+* :func:`ops_quiesce_ack` — a held turn answers a quiesce steer (TASK-1233).
 
 These tools do NOT own their own approval gating — the approval-aware
 FastMCP interceptor (Slice E) evaluates a policy against every call before
@@ -27,7 +28,7 @@ from ..ops.service import OpsDispatchError
 from ..task_turn_context import open_task_turn_context
 from .approval_interceptor import current_approved_caller_context
 from .registry import mcp
-from .task_association import current_task_turn_capability
+from .task_association import current_task_turn_capability, current_task_turn_context
 
 logger = logging.getLogger(__name__)
 
@@ -192,4 +193,42 @@ async def ops_job_status(
     return result
 
 
-__all__ = ["ops_list_operations", "ops_run", "ops_job_status"]
+# ---------------------------------------------------------------------------
+# ops_quiesce_ack
+# ---------------------------------------------------------------------------
+
+def _record_quiesce_ack(bot_id: str, turn_id: str, status: str, note: str | None) -> int | None:
+    from ..ops.quiesce import record_ack
+
+    return record_ack(_get_ops_service().store.engine, bot_id=bot_id, turn_id=turn_id,
+                      status=status, note=note)
+
+
+@mcp.tool(name="ops_quiesce_ack")
+async def ops_quiesce_ack(status: str, note: str | None = None) -> dict:
+    """Answer a quiesce request for your current turn.
+
+    An operation is waiting for your turn to finish before it runs. Say
+    whether you are wrapping up (``"stopping"``) or cannot stop safely
+    (``"cannot_stop"``, with a short ``note`` saying why).
+
+    Args:
+        status: ``"stopping"`` or ``"cannot_stop"``.
+        note: Optional short explanation shown to the operator.
+
+    Returns:
+        ``{"recorded": true, "gate_id": ...}``.
+    """
+    from ..ops.quiesce import ACK_STATUSES
+
+    if status not in ACK_STATUSES:
+        raise ValueError(f"status must be one of {list(ACK_STATUSES)}")
+    # Identity comes only from the signed per-turn capability, never from args.
+    turn = await asyncio.to_thread(current_task_turn_context)
+    gate_id = await asyncio.to_thread(_record_quiesce_ack, turn.bot_id, turn.turn_id, status, note)
+    if gate_id is None:
+        raise LookupError("this turn is not held by an active quiesce")
+    return {"recorded": True, "gate_id": gate_id}
+
+
+__all__ = ["ops_list_operations", "ops_run", "ops_job_status", "ops_quiesce_ack"]

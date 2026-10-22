@@ -122,6 +122,16 @@ def validate_image_spec(spec: dict) -> dict:
     return spec
 
 
+def worker_request(job_id: str, snapshot: dict, fence: dict | None = None) -> dict:
+    """The immutable worker request. ``fence`` (TASK-1233 quiesce:
+    ``{generation, start_not_after}``) is present only for a quiesced job, so
+    every other job's request, and its digest, is unchanged."""
+    request = {"job_id": job_id, "snapshot": snapshot}
+    if fence is not None:
+        request["fence"] = fence
+    return request
+
+
 def validate_spec(command_script: str) -> dict:
     try:
         spec = json.loads(command_script)
@@ -334,7 +344,7 @@ class DockerExecutor(Executor):
                 return None
             raise
 
-    def dispatch(self, *, job_id: str, snapshot: dict, **_kwargs):
+    def dispatch(self, *, job_id: str, snapshot: dict, fence: dict | None = None, **_kwargs):
         self.worker_name(job_id)
         self.preflight(snapshot)
         directory = Path(snapshot["execution"]["receipt_root"]) / job_id
@@ -343,15 +353,15 @@ class DockerExecutor(Executor):
             fcntl.flock(lock, fcntl.LOCK_EX)
             if (directory / "abandoned.json").exists():
                 raise ExecutorError("submission abandoned by recovery; never replay")
-            return self._dispatch_locked(job_id=job_id, snapshot=snapshot)
+            return self._dispatch_locked(job_id=job_id, snapshot=snapshot, fence=fence)
 
-    def _dispatch_locked(self, *, job_id: str, snapshot: dict):
+    def _dispatch_locked(self, *, job_id: str, snapshot: dict, fence: dict | None = None):
         settings = snapshot["execution"]
         try:
             self._check_settings(settings)
             directory = Path(settings["receipt_root"]) / job_id
             directory.mkdir(mode=0o700, exist_ok=True)
-            request = {"job_id": job_id, "snapshot": snapshot}
+            request = worker_request(job_id, snapshot, fence)
             raw = canonical_json(request).encode()
             path = directory / "request.json"
             # Create immutable request using hard-link publication (no overwrite
@@ -438,7 +448,8 @@ class DockerExecutor(Executor):
         if labels.get("llm-bawt.ops.job") != job_id or labels.get("llm-bawt.ops.request") != digest:
             raise ExecutorError("deterministic worker identity conflict")
 
-    def reconcile(self, *, job_id: str, snapshot: dict, output_tail_bytes=4096, **_kwargs):
+    def reconcile(self, *, job_id: str, snapshot: dict, output_tail_bytes=4096,
+                  fence: dict | None = None, **_kwargs):
         self.worker_name(job_id)
         root = Path(snapshot["execution"]["receipt_root"])
         if not root.is_dir():
@@ -450,11 +461,13 @@ class DockerExecutor(Executor):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return ReconcileResult(None)
-            return self._reconcile_locked(job_id=job_id, snapshot=snapshot, output_tail_bytes=output_tail_bytes)
+            return self._reconcile_locked(job_id=job_id, snapshot=snapshot,
+                                          output_tail_bytes=output_tail_bytes, fence=fence)
 
-    def _reconcile_locked(self, *, job_id: str, snapshot: dict, output_tail_bytes=4096):
+    def _reconcile_locked(self, *, job_id: str, snapshot: dict, output_tail_bytes=4096,
+                          fence: dict | None = None):
         directory = Path(snapshot["execution"]["receipt_root"]) / job_id
-        digest = hashlib.sha256(canonical_json({"job_id": job_id, "snapshot": snapshot}).encode()).hexdigest()
+        digest = hashlib.sha256(canonical_json(worker_request(job_id, snapshot, fence)).encode()).hexdigest()
         try:
             receipt = None
             path = directory / "receipt.json"
@@ -496,7 +509,7 @@ class DockerExecutor(Executor):
                         raise ExecutorError("worker receipt identity conflict")
                     if final.get("state") in {"succeeded", "failed", "lost", "timed_out"}:
                         return self._reconcile_locked(job_id=job_id, snapshot=snapshot,
-                                                      output_tail_bytes=output_tail_bytes)
+                                                      output_tail_bytes=output_tail_bytes, fence=fence)
                 return ReconcileResult("lost", error="worker exited without terminal receipt; side effects unknown")
             if receipt and receipt.get("state") == "running":
                 return ReconcileResult("running", started_at=receipt.get("started_at"))

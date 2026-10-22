@@ -16,7 +16,8 @@ from .release_store import ReleaseStore
 from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                       bind_image_invocation, binding_matches_args)
 from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, JOB_QUEUED,
-                     JOB_RUNNING, JOB_TERMINAL_STATES, OpsOperation)
+                     JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsOperation)
+from .quiesce_settings import quiesce_binding
 from .store import IdempotencyConflict, OpsStore
 from .validation import ArgValidationError, canonical_json, validate_args
 
@@ -48,8 +49,11 @@ def _timestamp(raw):
 class OpsService:
     def __init__(self, store: OpsStore, *, executor: Executor | None = None,
                  release_verifier: ReleaseVerifier | None = None,
-                 release_store: ReleaseStore | None = None):
+                 release_store: ReleaseStore | None = None, quiesce_driver=None):
         self.store = store
+        # Only the reconciler process drives quiesce jobs (TASK-1233); every
+        # other OpsService just reports them.
+        self.quiesce_driver = quiesce_driver
         self.releases = release_store or ReleaseStore(None, engine=store.engine)
         self._release_verifier = release_verifier or GitHubReleaseVerifier()
         default = executor or DockerExecutor()
@@ -127,6 +131,12 @@ class OpsService:
                     snapshot["release_source"] = executor.approval_source(spec, merged)
             except ExecutorError as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
+        try:
+            binding = quiesce_binding(snapshot["operation"], merged)
+        except ValueError as exc:
+            raise OpsDispatchError("args_invalid", str(exc)) from exc
+        if binding is not None:
+            snapshot["quiesce"] = binding
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
         return json.loads(canonical_json(snapshot))
 
@@ -150,6 +160,8 @@ class OpsService:
                         "start_delay_seconds", "max_output_bytes", "max_concurrent"):
                 if detached["execution"][key] != op[key]:
                     raise ValueError(f"snapshot execution {key} mismatch")
+            if detached.get("quiesce") != quiesce_binding(op, detached["resolved_args"]):
+                raise ValueError("snapshot quiesce binding mismatch")
             if not valid_routing_binding(detached):
                 raise ValueError("snapshot routing binding mismatch")
             if not binding_matches_args(detached):
@@ -224,15 +236,21 @@ class OpsService:
             raise OpsDispatchError("snapshot_invalid", "operation identity changed")
         op = OpsOperation(**{k: v for k, v in snapshot["operation"].items()
                              if k not in {"created_at", "updated_at", "soft_deleted_at"}})
+        quiesce = bool(snapshot.get("quiesce"))
+        if quiesce and getattr(getattr(self.store.engine, "dialect", None), "name", None) != "postgresql":
+            raise OpsDispatchError("quiesce_unavailable", "quiesce operations require the PostgreSQL ops store")
         try:
             job = self.store.create_job(operation=op, args_json=canonical_json(snapshot["resolved_args"]),
                 display_args_json=canonical_json(_display_args(snapshot["resolved_args"], op.args_schema_json)),
                 idempotency_key=key, invocation_snapshot_json=canonical_json(snapshot), request_payload_json=payload,
                 caller_actor=caller_actor, caller_bot_id=caller_bot_id, caller_user_id=caller_user_id,
                 caller_turn_id=caller_turn_id, caller_session_key=caller_session_key, caller_backend=caller_backend,
-                approval_request_id=approval_request_id, fence=create_fence)
+                approval_request_id=approval_request_id, fence=create_fence,
+                state=JOB_QUIESCING if quiesce else JOB_QUEUED)
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
+        # A quiescing job returns at once; the reconciler's driver holds,
+        # drains and dispatches it.
         self._dispatch_queued(job)
         result = self.store.get_job(job.id).to_api()
         if op.executor_kind == "release":
@@ -247,6 +265,11 @@ class OpsService:
             self.store.mark_terminal(job.id, state=JOB_LOST, error_text="legacy job has no immutable execution snapshot; not replayed")
             return
         snapshot = json.loads(job.invocation_snapshot_json)
+        if snapshot.get("quiesce"):
+            # create_job never queues one; refuse visibly rather than run it unheld.
+            self.store.mark_terminal(job.id, state=JOB_FAILED,
+                error_text="quiesce job found queued; no action submitted")
+            return
         current = self.store.get_operation_by_slug(job.operation_slug)
         if current is None or not current.enabled or current.soft_deleted_at is not None:
             self.store.mark_terminal(job.id, state=JOB_FAILED, error_text="operation disabled before claim; no action submitted")
@@ -261,10 +284,14 @@ class OpsService:
             return
         if not self.store.claim_job(job.id, max_concurrent=snapshot["execution"].get("max_concurrent")):
             return
+        self._submit(job, snapshot, executor)
+
+    def _submit(self, job, snapshot, executor, fence=None):
+        """Submit a job already moved to DISPATCHING (claim or quiesce CAS)."""
         try:
             # No available() against *current* executor config here: execution
             # settings come exclusively from the persisted snapshot.
-            result = executor.dispatch(job_id=job.id, snapshot=snapshot,
+            result = executor.dispatch(job_id=job.id, snapshot=snapshot, fence=fence,
                 operation_slug=job.operation_slug, command_script=snapshot["operation"]["command_script"],
                 env_args=snapshot["resolved_args"], **{k: snapshot["execution"].get(k) for k in
                 ("target_host", "run_as_user", "working_directory", "timeout_seconds", "start_delay_seconds", "max_output_bytes")})
@@ -278,6 +305,23 @@ class OpsService:
         # terminal_state from dispatch is intentionally ignored. Only reconcile
         # of a persisted receipt can report successful completion.
 
+    def _drive_quiesce(self, job):
+        """One quiesce driver step (reconciler only); submit when it dispatches."""
+        if self.quiesce_driver is None:
+            return
+        snapshot = json.loads(job.invocation_snapshot_json)
+        executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
+        if job.quiesce_gate_id is None:
+            try:
+                executor.preflight(snapshot)
+            except ExecutorError as exc:
+                # Before any hold: nothing is held while prerequisites are fixed.
+                self.store.note_quiescing_error(job.id, str(exc))
+                return
+        if self.quiesce_driver.step(job.id).dispatch:
+            fresh = self.store.get_job(job.id)
+            self._submit(fresh, snapshot, executor, fence=json.loads(fresh.quiesce_fence_json))
+
     def get_job_status(self, job_id, *, output_tail_bytes=None, reconcile_if_active=True):
         job = self.store.get_job(job_id)
         if job is None:
@@ -287,6 +331,8 @@ class OpsService:
             if job.state == JOB_QUEUED:
                 self._dispatch_queued(job)
                 job = self.store.get_job(job_id)
+            elif job.state == JOB_QUIESCING:
+                self._drive_quiesce(job)
             elif not job.invocation_snapshot_json:
                 self.store.mark_terminal(job.id, state=JOB_LOST, error_text="legacy active job has no immutable snapshot; side effects unknown")
             else:
@@ -298,7 +344,8 @@ class OpsService:
                 age = (datetime.now(timezone.utc) - submitted.replace(tzinfo=timezone.utc)).total_seconds() if submitted else 0
                 if job.state != JOB_DISPATCHING or age >= 30:
                     try:
-                        rec = executor.reconcile(job_id=job.id, snapshot=snapshot,
+                        fence = json.loads(job.quiesce_fence_json) if job.quiesce_fence_json else None
+                        rec = executor.reconcile(job_id=job.id, snapshot=snapshot, fence=fence,
                             target_host=snapshot["execution"].get("target_host", ""),
                             status_file_path=job.status_file_path or "", log_file_path=job.log_file_path or "",
                             output_tail_bytes=snapshot["execution"]["max_output_bytes"])
@@ -328,4 +375,6 @@ class OpsService:
         jobs = self.store.find_active_jobs(limit=limit, offset=offset)
         for job in jobs:
             self.get_job_status(job.id)
+        if self.quiesce_driver is not None:
+            self.quiesce_driver.release_terminal()
         return len(jobs)

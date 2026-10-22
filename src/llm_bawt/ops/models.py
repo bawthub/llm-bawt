@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -61,6 +62,10 @@ EXECUTOR_RELEASE = "release"
 # The catalog validation + row commit landed but the executor hasn't been
 # invoked yet. Only transient — held for a few ms.
 JOB_QUEUED = "queued"
+# TASK-1233: a quiesce operation's job holds its scope's agent turns and waits
+# for them to drain before dispatch (:mod:`.quiesce`). Never claimed from
+# QUEUED: the quiesce driver moves it straight to DISPATCHING.
+JOB_QUIESCING = "quiescing"
 # Executor invoked; host unit has not yet been confirmed accepted.
 JOB_DISPATCHING = "dispatching"
 # Docker worker wrote a running receipt immediately before execution.
@@ -213,6 +218,20 @@ class OpsOperation(SQLModel, table=True):
     soft_deleted_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # TASK-1233 quiesce: hold the scope's agent turns and wait for them to
+    # drain before the action runs. Docker executor only. Scope is a JSON
+    # object (see :mod:`.quiesce_settings`); null = every agent.
+    quiesce_enabled: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default="false"),
+    )
+    quiesce_timeout_seconds: int = Field(
+        default=600,
+        sa_column=Column(Integer, nullable=False, server_default="600"),
+    )
+    quiesce_scope_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
 
     def to_api(self, *, include_script: bool = True) -> dict[str, Any]:
         return {
@@ -244,6 +263,9 @@ class OpsOperation(SQLModel, table=True):
             "soft_deleted_at": (
                 _iso_utc(self.soft_deleted_at)
             ),
+            "quiesce_enabled": bool(self.quiesce_enabled),
+            "quiesce_timeout_seconds": int(self.quiesce_timeout_seconds or 0),
+            "quiesce_scope_json": self.quiesce_scope_json,
         }
 
     def to_agent_summary(self) -> dict[str, Any]:
@@ -385,6 +407,30 @@ class OpsJob(SQLModel, table=True):
     last_reconcile_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # TASK-1233 quiesce (null for ordinary jobs). The gate id IS the
+    # generation (``system_gates.id``); a rebuild swaps it. The driver owns the
+    # job while its lease (DB clock) is live and fences every write on it.
+    quiesce_gate_id: int | None = Field(
+        default=None, sa_column=Column(BigInteger, nullable=True)
+    )
+    quiesce_driver_id: str | None = Field(
+        default=None, sa_column=Column(String(64), nullable=True)
+    )
+    quiesce_driver_lease_expires_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    quiesce_deadline_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    # {generation, start_not_after}: written at the quiescing→dispatching CAS
+    # and carried in the worker request (the worker refuses a late start).
+    quiesce_fence_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    # Receipt: generations, roster drain status, outcome.
+    quiesce_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
 
     def to_api(self, *, include_output: bool = False) -> dict[str, Any]:
         import json
@@ -423,6 +469,7 @@ class OpsJob(SQLModel, table=True):
                 _iso_utc(self.last_reconcile_at)
             ),
         }
+        row["quiesce"] = _quiesce_api(self)
         # TASK-997: structured deploy/rollback record (None for ordinary ops),
         # so the UI never has to parse raw output for release state.
         row["deployment"] = parse_deployment(self.output_tail)
@@ -431,6 +478,26 @@ class OpsJob(SQLModel, table=True):
             row["status_file_path"] = self.status_file_path
             row["log_file_path"] = self.log_file_path
         return row
+
+
+def _quiesce_api(job: "OpsJob") -> dict[str, Any] | None:
+    import json
+    if job.quiesce_json is None and job.quiesce_gate_id is None:
+        return None
+    try:
+        receipt = json.loads(job.quiesce_json) if job.quiesce_json else {}
+    except (json.JSONDecodeError, TypeError):
+        receipt = {"unreadable": True}
+    try:
+        fence = json.loads(job.quiesce_fence_json) if job.quiesce_fence_json else None
+    except (json.JSONDecodeError, TypeError):
+        fence = None
+    return {
+        "gate_id": job.quiesce_gate_id,
+        "deadline_at": _iso_utc(job.quiesce_deadline_at),
+        "fence": fence,
+        "receipt": receipt,
+    }
 
 
 class OpsOperationRevision(SQLModel, table=True):
@@ -465,6 +532,7 @@ __all__ = [
     "EXECUTOR_DOCKER",
     "EXECUTOR_RELEASE",
     "JOB_QUEUED",
+    "JOB_QUIESCING",
     "JOB_DISPATCHING",
     "JOB_RUNNING",
     "JOB_SUCCEEDED",

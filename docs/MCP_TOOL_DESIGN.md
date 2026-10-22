@@ -117,6 +117,12 @@ full-definition tokens** (+32 / +116 over 3,482 / 12,404); caps updated. The
 growth is the filter schema that lets one call replace two unfiltered list
 calls that measured ~10k and ~8.6k result tokens.
 
+TASK-1233 adds `ops_quiesce_ack(status, note=None)`: a turn held by an ops
+quiesce answers its steer with `stopping` or `cannot_stop`. Identity comes from
+the signed per-turn capability, never from arguments. Measured: **3,545
+description / 12,611 full-definition tokens** (+31 / +91 over 3,514 / 12,520);
+caps updated. No existing warnings were removed.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied

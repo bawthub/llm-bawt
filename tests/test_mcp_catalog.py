@@ -98,7 +98,8 @@ async def test_catalog_token_budgets():
     # TASK-1210: isolated recall + missing TASK-1202 routing contract reconciled.
     # Measured 100 tools, 3,482 description tokens (warnings retained).
     # TASK-1239: compact bots_deliveries_list filter contract: 3,514 (+32).
-    assert sum(descriptions) <= 3514
+    # TASK-1233: ops_quiesce_ack (held turns answer a quiesce): 3,545 (+31).
+    assert sum(descriptions) <= 3545
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -115,7 +116,8 @@ async def test_catalog_token_budgets():
     # TASK-1239: bots_deliveries_list bot_id/active_only/task_id/since_minutes/
     # include_chat filters: 12,520 (+116). One filtered call replaces paired
     # ~10k-token full-receipt calls, so the schema growth pays for itself.
-    assert total <= 12520, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1233: ops_quiesce_ack (status + optional note): 12,611 (+91).
+    assert total <= 12611, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
