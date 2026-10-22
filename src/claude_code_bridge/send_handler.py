@@ -481,6 +481,7 @@ class ClaudeSendMixin(
                             client=sdk_client,
                             request_id=request_id,
                             maintenance=is_compact_command(message),
+                            teardown=teardown,
                             on_user_lifecycle=lambda mid, state: _publish_run_signal(
                                 AgentEventKind.STEER_LIFECYCLE, {"message_id": mid, "state": state},
                             ),
@@ -500,9 +501,10 @@ class ClaudeSendMixin(
                             liveness=worker_liveness,
                             stop_task=getattr(sdk_client, "stop_task", None),
                         )
-                        # Register one live run controller for both control paths:
-                        # chat.abort calls disconnect(), while chat.steer performs
-                        # SDK interrupt -> replacement query on this same client.
+                        # Register the live run controller for chat.steer (SDK
+                        # interrupt -> replacement query on this same client).
+                        # chat.abort only cancels this task; both paths end the
+                        # client through the one RunTeardown (TASK-1232 P4/S1).
                         # A single response consumer remains here in _handle_send.
                         if session_key:
                             self._session_queue.set_active_client(session_key, active_run)

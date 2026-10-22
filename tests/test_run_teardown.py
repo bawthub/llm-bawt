@@ -359,3 +359,59 @@ def test_real_proc_table_finds_a_live_grandchild():
         os.kill(grandchild, signal.SIGKILL)
         child.kill()
         child.wait()
+
+
+# -- steer escalation shares the run's teardown (Vex S1) ----------------------
+
+
+def test_a_failed_steer_escalation_tears_down_through_the_runs_one_teardown():
+    # A direct disconnect() here nulled the transport before anything looked
+    # at it, so the send's teardown reported exited=unknown, never killed the
+    # CLI's descendants, and the disconnect itself was unbounded.
+    from claude_code_bridge.active_run import ClaudeActiveRun
+    from tests.test_claude_active_run_next_steer import CMD, _FakeClient, _finish, _start
+
+    async def go():
+        os_ = FakeOS({CLI: [CHILD], CHILD: [GRANDCHILD]})
+        process = FakeProcess()
+        os_.on_cli_kill = lambda: process.finish(-signal.SIGKILL)
+        client = _FakeClient()
+        client._query.receipt = {"still_queued": [], "cancelled": []}
+        sdk = FakeClient(process, hang=True)  # the SDK's close() hangs
+        client._transport, client.disconnect = sdk._transport, sdk.disconnect
+        teardown = _teardown(client, os_)
+        await client._query.frames.put({
+            "type": "system", "subtype": "init", "capabilities": ["interrupt_cancel_queued_v1"],
+        })
+        active = ClaudeActiveRun(client=client, request_id="req-1", teardown=teardown)
+        _, consumer = await _start(active)
+        await active.steer("user note", priority="next", message_id=CMD, origin="user")
+        with pytest.raises(RuntimeError, match="escalation_not_cancelled"):
+            await asyncio.wait_for(active.escalate(CMD), 2)
+        assert teardown.started
+        # The send's finally reuses the same teardown and its outcome.
+        outcome = await bounded(teardown)
+        assert outcome == await teardown.run_owned()
+        assert (outcome.pid, outcome.signal, outcome.exited) == (CLI, "sigkill", True)
+        assert sorted(os_.kills) == [CLI, CHILD, GRANDCHILD]
+        assert sdk.disconnect_calls == 1
+        await _finish(client, consumer)
+
+    run(go())
+
+
+def test_the_send_hands_its_teardown_to_the_steer_controller(monkeypatch):
+    from tests.test_claude_code_send_boundaries import SESSION, _SDKStream, _SendHarness
+
+    async def go():
+        harness = _SendHarness()
+        sdk = _SDKStream()
+        monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", lambda **kw: sdk)
+        send = harness.send()
+        await sdk.waiting.wait()
+        active = harness._session_queue.get_active_client(SESSION)
+        assert active.teardown is harness._run_teardowns["turn-request"]
+        await harness.abort()
+        await asyncio.gather(send, return_exceptions=True)
+
+    run(go())

@@ -84,9 +84,9 @@ class SessionQueue:
         # messages so an abort takes effect without waiting for the next
         # `await` point to fire CancelledError.
         self._cancel_events: dict[str, asyncio.Event] = {}
-        # Opaque per-session abort handles.
-        # - Claude Code bridge stores a ClaudeSDKClient and abort calls
-        #   `disconnect()` to tear down the subprocess.
+        # Opaque per-session run handles.
+        # - Claude Code bridge stores its ClaudeActiveRun for chat.steer; abort
+        #   cancels the send task, which owns the subprocess teardown.
         # - Codex bridge stores an AbortController and abort calls `.abort()`.
         # Keep this registry duck-typed so shared agent_bridge code does not
         # import SDK-specific classes.
@@ -397,9 +397,10 @@ class SessionQueue:
     def set_active_client(self, session_key: str, client: Any) -> None:
         """Register the active per-session abort handle for *session_key*.
 
-        The handle is bridge-specific: Claude Code stores a
-        ``ClaudeSDKClient`` and abort calls ``disconnect()``; Codex stores
-        an ``AbortController`` and abort calls ``abort()``.
+        The handle is bridge-specific: Claude Code stores its
+        ``ClaudeActiveRun`` (steer target; abort cancels the send task, which
+        owns the teardown); Codex stores an ``AbortController`` and abort
+        calls ``abort()``.
         """
         self._active_clients[session_key] = client
 

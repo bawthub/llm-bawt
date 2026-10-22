@@ -306,7 +306,7 @@ class AgentBridgeBackend(AgentBackend):
                                 f"abort_{uuid.uuid4().hex}", timeout_s=ABORT_RPC_TIMEOUT_S,
                                 backend=self.name,
                             )
-                            if not (result.get("cancelled") is True or result.get("aborted") is True):
+                            if result.get("cancelled") is not True:
                                 logger.warning("Dispatch-time abort unconfirmed request=%s", request_id)
                         logger.info(
                             "%s request via bridge: session=%s request_id=%s",

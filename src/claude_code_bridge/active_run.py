@@ -31,6 +31,8 @@ from typing import Any
 
 from agent_bridge.maintenance import is_compact_command
 
+from .run_teardown import RunTeardown
+
 logger = logging.getLogger(__name__)
 
 STEER_PRIORITIES = frozenset({"now", "next"})
@@ -103,6 +105,8 @@ class ClaudeActiveRun:
     # Once steering may have reached the CLI, replaying the original prompt
     # loses user input even if no model text/tool block ever arrived.
     steering_attempted: bool = False
+    # The run's one bounded teardown, shared with the send (TASK-1232 S1).
+    teardown: RunTeardown | None = None
 
     async def steer(
         self,
@@ -308,7 +312,7 @@ class ClaudeActiveRun:
                 self._expected_interrupt_results = max(0, self._expected_interrupt_results - 1)
                 if interrupted:
                     try:
-                        await self.client.disconnect()
+                        await self._tear_down()
                     except BaseException:
                         pass
                 raise
@@ -465,7 +469,7 @@ class ClaudeActiveRun:
                 )
                 if interrupted:
                     try:
-                        await self.client.disconnect()
+                        await self._tear_down()
                     except BaseException:
                         pass
                 raise
@@ -499,9 +503,17 @@ class ClaudeActiveRun:
         self._expected_interrupt_results -= 1
         return True
 
-    async def disconnect(self) -> None:
-        """Preserve SessionQueue's duck-typed abort-handle contract."""
-        await self.client.disconnect()
+    async def _tear_down(self) -> None:
+        """End a run whose interrupted task can't continue.
+
+        Goes through the run's one bounded ``RunTeardown`` (TASK-1232 S1): a
+        direct ``disconnect()`` would null the transport, so the send's own
+        teardown could no longer see the CLI pid or kill its descendants.
+        Shielded, so a cancelled steer can't cut the teardown short.
+        """
+        if self.teardown is None:
+            self.teardown = RunTeardown(self.client)
+        await asyncio.shield(self.teardown.start())
 
 
 def _replacement_prompt(text: str) -> str:
