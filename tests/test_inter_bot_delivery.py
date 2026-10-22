@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -1266,3 +1267,67 @@ def test_submission_result_reports_requested_durable_mode(delivery_store):
     assert "steer an active Claude turn" in default_result["note"]
     assert idle_result["delivery"] == "when_idle"
     assert "when that bot is idle" in idle_result["note"]
+
+
+def test_list_filters_run_in_sql_before_limit(delivery_store):
+    """TASK-1239: chat exclusion, either-direction, multi-status, task, since."""
+    store, sender, target = delivery_store
+    bot_row, _ = _enqueue(store, sender, target, "bot to bot")
+    reverse, _ = store.enqueue(
+        sender_bot_id=target, target_bot_id=sender, message="reply", task_id="TASK-1239",
+        payload={"messages": [{"role": "user", "content": "reply"}], "bot_id": sender, "stream": False},
+    )
+    chat_rows = [
+        store.enqueue(
+            sender_bot_id=sender, target_bot_id=target, message=f"nick chat {i}",
+            payload={"messages": [{"role": "user", "content": "hi"}], "bot_id": target, "stream": False},
+            metadata={"ordinary_chat": {"session_id": "s"}},
+        )[0]
+        for i in range(3)
+    ]
+    try:
+        with store.engine.begin() as conn:
+            conn.execute(sa_text(
+                "UPDATE inter_bot_deliveries SET status='DELIVERED', created_at=now() - interval '2 hours' WHERE id=:id"
+            ), {"id": bot_row.id})
+
+        # Chat rows are newest; excluding them in SQL keeps the page full.
+        page = store.list(sender_bot_id=sender, limit=1, exclude_user_chat=True)
+        assert [row.id for row in page] == [bot_row.id]
+        assert {row.id for row in store.list(sender_bot_id=sender)} >= {r.id for r in chat_rows}
+
+        either = store.list(bot_id=sender.upper(), exclude_user_chat=True)
+        assert {row.id for row in either} == {bot_row.id, reverse.id}
+
+        active = store.list(bot_id=sender, status=("QUEUED", "STEERING", "DISPATCHING"), exclude_user_chat=True)
+        assert [row.id for row in active] == [reverse.id]
+        assert [row.id for row in store.list(bot_id=sender, status="delivered,failed")] == [bot_row.id]
+
+        assert [row.id for row in store.list(bot_id=sender, task_id="TASK-1239")] == [reverse.id]
+        recent = store.list(
+            bot_id=sender, since=datetime.now(timezone.utc) - timedelta(hours=1), exclude_user_chat=True,
+        )
+        assert [row.id for row in recent] == [reverse.id]
+    finally:
+        with store.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM inter_bot_deliveries WHERE id=:id"), {"id": reverse.id})
+            conn.execute(sa_text("DELETE FROM turn_logs WHERE id=:id"), {"id": reverse.turn_id})
+
+
+def test_list_chat_exclusion_drops_untagged_self_rows_before_limit(delivery_store):
+    """TASK-1239 r1: a self_model continuation is self-addressed without chat
+    metadata; it must not crowd an older cross-bot row out of a limit=1 page."""
+    store, sender, target = delivery_store
+    cross, _ = _enqueue(store, sender, target, "bot to bot")
+    self_row, _ = store.enqueue(
+        sender_bot_id=sender, target_bot_id=sender, message="continue on new model",
+        payload={"messages": [{"role": "user", "content": "go"}], "bot_id": sender, "stream": False},
+        metadata={"self_model": {"changed_by": sender}},
+    )
+    with store.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE inter_bot_deliveries SET created_at=now() - interval '1 hour' WHERE id=:id"
+        ), {"id": cross.id})
+
+    assert [r.id for r in store.list(bot_id=sender, limit=1, exclude_user_chat=True)] == [cross.id]
+    assert [r.id for r in store.list(bot_id=sender, limit=1)] == [self_row.id]

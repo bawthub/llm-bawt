@@ -114,6 +114,41 @@ class DeliveryRecord:
             raise ValueError("delivery author is required")
         return author
 
+    COMPACT_PREVIEW_CHARS = 120
+    COMPACT_ERROR_CHARS = 200
+
+    def to_compact(self) -> dict[str, Any]:
+        """Bounded list row (TASK-1239): ~15 scalar fields, no metadata.
+
+        Full receipt detail stays behind ``GET /v1/inter-bot-deliveries/{id}``.
+        Null fields are dropped so idle rows stay short.
+        """
+        def clip(value: str | None, size: int) -> str | None:
+            if not value:
+                return None
+            flat = " ".join(value.split())
+            return flat if len(flat) <= size else flat[: size - 1] + "…"
+
+        row = {
+            "delivery_id": self.id,
+            "status": self.status,
+            "sender_bot_id": self.sender_bot_id,
+            "target_bot_id": self.target_bot_id,
+            "author": None if self.author_entity_type == "bot" else self.author_entity_id,
+            "message_kind": self.message_kind,
+            "delivery_mode": self.delivery_mode,
+            "task_id": self.task_id,
+            "idempotency_key": self.idempotency_key,
+            "attempts": f"{self.attempt_count}/{self.max_attempts}",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "delivered_at": self.delivered_at.isoformat() if self.delivered_at else None,
+            "target_turn_id": self.target_turn_id,
+            "last_error": clip(self.last_error, self.COMPACT_ERROR_CHARS),
+            "preview": clip(self.message, self.COMPACT_PREVIEW_CHARS),
+        }
+        return {key: value for key, value in row.items() if value is not None}
+
     def to_api(self, *, duplicate: bool = False) -> dict[str, Any]:
         def iso(value: datetime | None) -> str | None:
             return value.isoformat() if value else None

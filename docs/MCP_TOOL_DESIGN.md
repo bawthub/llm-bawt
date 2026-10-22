@@ -105,6 +105,18 @@ expiry and utility-model warnings. No existing warnings were removed. This is
 local discovery, not live activation, and is not a provider billing measurement.
 See `docs/ISOLATED_RECALL.md` for source/output budgets and failure contracts.
 
+TASK-1239 makes `bots_deliveries_list` a bounded diagnostic list: compact rows
+(`to_compact()`: ~15 scalar fields, clipped `preview`/`last_error`, no metadata),
+default limit 10 (max 50), user chat queue rows and self-addressed
+(sender == target) rows excluded unless `include_chat`,
+plus `bot_id` (either direction), `active_only`, comma-separated `status`,
+`task_id` and `since_minutes` filters applied in SQL before LIMIT. The HTTP
+route keeps its full default shape (`view=full`, chat included) for BawtHub.
+Measured against the live catalog snapshot: **3,514 description / 12,520
+full-definition tokens** (+32 / +116 over 3,482 / 12,404); caps updated. The
+growth is the filter schema that lets one call replace two unfiltered list
+calls that measured ~10k and ~8.6k result tokens.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied

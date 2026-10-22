@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from ...agent_context import (
 from ...bot_types import durable_agent_backend
 from ...bots import BotManager
 from ...inter_bot_delivery import submission_result
+from ...inter_bot_delivery_query import IN_FLIGHT_STATUSES, parse_statuses
 from ...inter_bot_delivery_user import resolve_delivery_user
 from ...inter_bot_delivery_retry import DeliveryRetryConflict, retry_failed_delivery
 from ...message_authorship import AuthorReference, normalize_author
@@ -346,19 +348,36 @@ def get_inter_bot_answer(
 def list_deliveries(
     sender_bot_id: str | None = None,
     target_bot_id: str | None = None,
-    status: str | None = None,
+    bot_id: str | None = Query(None, description="Sender OR target"),
+    status: str | None = Query(None, description="One status or comma-separated list"),
+    active_only: bool = Query(False, description="Only QUEUED, STEERING, DISPATCHING"),
     idempotency_key: str | None = Query(None, max_length=256),
+    task_id: str | None = Query(None, max_length=128),
+    since: datetime | None = Query(None, description="Only rows created at/after this ISO time"),
+    include_chat: bool = Query(True, description="Include users' chat queue rows and self-addressed rows"),
+    view: Literal["full", "compact"] = "full",
     limit: int = Query(50, ge=1, le=200),
 ):
+    if active_only and status:
+        raise HTTPException(status_code=422, detail="Use either active_only or status, not both")
+    try:
+        statuses = IN_FLIGHT_STATUSES if active_only else parse_statuses(status)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     rows = _dispatcher().store.list(
         sender_bot_id=sender_bot_id,
         target_bot_id=target_bot_id,
-        status=status,
+        bot_id=bot_id,
+        status=statuses,
         idempotency_key=idempotency_key,
+        task_id=task_id,
+        since=since,
         limit=limit,
         exclude_prompt_origin=True,
+        exclude_user_chat=not include_chat,
     )
-    return {"deliveries": [row.to_api() for row in rows], "total": len(rows)}
+    project = (lambda row: row.to_compact()) if view == "compact" else (lambda row: row.to_api())
+    return {"deliveries": [project(row) for row in rows], "total": len(rows)}
 
 
 @router.post("/v1/inter-bot-deliveries/{delivery_id}/retry", tags=["Inter-Bot Deliveries"], status_code=202)

@@ -78,7 +78,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "bots_send_message": "Durable async message: steer a busy capable bot or start one idle turn. delivery=when_idle skips steering; wait_for_reply blocks. force never permits concurrent turns.",
     "bots_route_message": "Queue a separate routed bot turn using trusted caller identity; never steer or broaden opt-in. Reuse idempotency_key for retries.",
     "bots_delivery_get": "Read durable delivery status/error by delivery_id; accepted or queued is not completed.",
-    "bots_deliveries_list": "Read durable deliveries filtered by sender, target, or status.",
+    "bots_deliveries_list": "Compact delivery rows, newest first; bots_delivery_get reads one full receipt. bot_id matches either side; active_only=in flight; status takes a comma list; chat/self rows hidden unless include_chat. Limit ≤50.",
     "bots_delivery_cancel": "Cancel a durable delivery only while QUEUED; cannot abort an active turn.",
     "agent_context_health": "Read context headroom, estimates, and supported reset/compaction capabilities for a bot.",
     "agent_context_reset": "Reset an idle provider session, preserving durable history. session_policy: reset_retain_history|reset_without_history; inspect capabilities first.",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -15,6 +16,9 @@ from ..task_turn_context import TaskTurnContextError, is_delivery_turn_id
 
 logger = logging.getLogger(__name__)
 _APP_BASE_URL = "http://localhost:8642"
+# bots_deliveries_list is a bounded diagnostic list (TASK-1239).
+_DELIVERY_LIST_DEFAULT_LIMIT = 10
+_DELIVERY_LIST_MAX_LIMIT = 50
 
 
 def _compat_hook(name: str, default):
@@ -434,25 +438,44 @@ async def get_delivery(delivery_id: str) -> dict:
 
 @mcp.tool(name="bots_deliveries_list")
 async def list_deliveries(
+    bot_id: str | None = None,
     sender_bot_id: str | None = None,
     target_bot_id: str | None = None,
     status: str | None = None,
-    limit: int = 50,
+    active_only: bool = False,
+    task_id: str | None = None,
+    since_minutes: int | None = None,
+    include_chat: bool = False,
+    limit: int = _DELIVERY_LIST_DEFAULT_LIMIT,
 ) -> dict:
-    """List durable inter-bot deliveries and lifecycle/error state."""
+    """List compact delivery rows; full receipts via bots_delivery_get."""
+    params: dict[str, Any] = {
+        key: value for key, value in {
+            "bot_id": bot_id,
+            "sender_bot_id": sender_bot_id,
+            "target_bot_id": target_bot_id,
+            "status": status,
+            "task_id": task_id,
+        }.items() if value
+    }
+    if active_only:
+        params["active_only"] = "true"
+    if since_minutes is not None and since_minutes > 0:
+        since = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
+        params["since"] = since.isoformat()
+    params["include_chat"] = "true" if include_chat else "false"
+    params["view"] = "compact"
+    params["limit"] = min(max(int(limit), 1), _DELIVERY_LIST_MAX_LIMIT)
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"{_APP_BASE_URL}/v1/inter-bot-deliveries",
-            params={
-                key: value for key, value in {
-                    "sender_bot_id": sender_bot_id,
-                    "target_bot_id": target_bot_id,
-                    "status": status,
-                    "limit": min(max(limit, 1), 200),
-                }.items() if value is not None
-            },
-            timeout=10.0,
+            f"{_APP_BASE_URL}/v1/inter-bot-deliveries", params=params, timeout=10.0,
         )
+        if response.status_code == 422:
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = response.text
+            return {"error": detail}
         response.raise_for_status()
         return response.json()
 

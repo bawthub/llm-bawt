@@ -14,6 +14,7 @@ import logging
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import text as sa_text
@@ -22,6 +23,7 @@ from sqlalchemy.engine import Connection
 from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference
 from .maintenance_delivery import MaintenanceBarrier
+from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_user import resolve_delivery_user
 from .utils.config import Config
@@ -370,35 +372,36 @@ class InterBotDeliveryStore:
         *,
         sender_bot_id: str | None = None,
         target_bot_id: str | None = None,
-        status: str | None = None,
+        bot_id: str | None = None,
+        status: str | Iterable[str] | None = None,
         idempotency_key: str | None = None,
+        task_id: str | None = None,
+        since: datetime | None = None,
         limit: int = 50,
         exclude_prompt_origin: bool = False,
+        exclude_user_chat: bool = False,
     ) -> list[DeliveryRecord]:
+        """List newest-first; ``status`` accepts one, comma-separated, or many.
+
+        Filters run in SQL before LIMIT so private receipts neither leak nor
+        crowd out selected deliveries. Internal scheduling/transport reads
+        leave the exclusion flags off.
+        """
         if self.engine is None:
             return []
-        where = ["1=1"]
-        # Filter before LIMIT so private receipts neither leak nor crowd out
-        # ordinary deliveries. Internal scheduling/transport reads stay intact.
-        if exclude_prompt_origin:
-            if self.engine.dialect.name == "postgresql":
-                where.append("NOT (COALESCE(metadata_json, '{}'::jsonb) ? 'prompt_schedule')")
-            else:
-                where.append("json_type(metadata_json, '$.prompt_schedule') IS NULL")
-        params: dict[str, Any] = {"limit": max(1, min(int(limit), 200))}
-        if sender_bot_id:
-            where.append("sender_bot_id=:sender")
-            params["sender"] = sender_bot_id.strip().lower()
-        if target_bot_id:
-            where.append("target_bot_id=:target")
-            params["target"] = target_bot_id.strip().lower()
-        if status:
-            where.append("status=:status")
-            params["status"] = status.strip().upper()
-        if idempotency_key and idempotency_key.strip():
-            where.append("idempotency_key=:idem")
-            params["idem"] = idempotency_key.strip()
-        sql = "SELECT * FROM inter_bot_deliveries WHERE " + " AND ".join(where) + " ORDER BY ordinal DESC LIMIT :limit"
+        where, params = DeliveryListFilter(
+            sender_bot_id=sender_bot_id,
+            target_bot_id=target_bot_id,
+            bot_id=bot_id,
+            statuses=parse_statuses(status),
+            idempotency_key=idempotency_key,
+            task_id=task_id,
+            since=since,
+            exclude_prompt_origin=exclude_prompt_origin,
+            exclude_user_chat=exclude_user_chat,
+        ).where(self.engine.dialect.name)
+        params["limit"] = max(1, min(int(limit), 200))
+        sql = "SELECT * FROM inter_bot_deliveries WHERE " + where + " ORDER BY ordinal DESC LIMIT :limit"
         with self.engine.connect() as conn:
             rows = conn.execute(sa_text(sql), params).mappings().all()
         return [DeliveryRecord.from_mapping(row) for row in rows]
