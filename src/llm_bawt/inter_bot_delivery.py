@@ -914,26 +914,38 @@ class InterBotDeliveryStore:
                     "bridge_state": "lease_expired", "confirmed": False, "by": "recover_expired",
                 })
 
-    def recover_expired(self) -> list[DeliveryRecord]:
-        """Recover only expired claims; singleton fencing excludes live peers."""
+    def recover_expired(self, *, live_owner: str | None = None) -> list[DeliveryRecord]:
+        """Recover expired claims; singleton fencing excludes live peers.
+
+        TASK-1286 #2: a user-stopped ordinary turn whose claim no live
+        dispatcher owns (claim_owner != live_owner, so no in-process _dispatch
+        settles it) is cancelled now. Other foreign claims, accepted resets
+        included (their ambiguity check precedes Stop), wait out the lease.
+        """
         if self.engine is None:
             return []
+        from .service.session_lifecycle.recovery import NewSessionRecovery
         recovered: list[DeliveryRecord] = []
+        orphan = (" OR (d.delivery_mode='turn' AND t.ended_at IS NOT NULL"
+                  " AND d.claim_owner IS DISTINCT FROM :live_owner)") if live_owner else ""
         with self.engine.begin() as conn:
-            rows = conn.execute(sa_text("""
+            rows = conn.execute(sa_text(f"""
                 SELECT d.*, t.status AS turn_status, t.ended_at AS turn_ended_at,
-                       t.error_text AS turn_error_text
+                       t.error_text AS turn_error_text,
+                       d.lease_expires_at < now() AS lease_expired
                 FROM inter_bot_deliveries d
                 LEFT JOIN turn_logs t ON t.id=d.turn_id
                 WHERE d.status IN ('STEERING','DISPATCHING')
-                  AND d.lease_expires_at < now()
+                  AND (d.lease_expires_at < now(){orphan})
                 ORDER BY d.ordinal FOR UPDATE OF d
-            """)).mappings().all()
+            """), {"live_owner": live_owner} if orphan else {}).mappings().all()
             for row in rows:
                 is_turn = row.get("delivery_mode") != "steer"
-                if is_turn and row.get("transport_accepted_at") is not None:
-                    from .service.session_lifecycle.recovery import NewSessionRecovery
-
+                accepted = row.get("transport_accepted_at") is not None
+                if not row["lease_expired"] and ((accepted and NewSessionRecovery.is_reset(row))
+                                                 or not self._explicit_stop_requested(conn, row["turn_id"])):
+                    continue
+                if is_turn and accepted:
                     if NewSessionRecovery.is_reset(row) and (
                         row.get("turn_ended_at") is None
                         or row.get("turn_status") not in ("ok", "completed")

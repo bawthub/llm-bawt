@@ -36,7 +36,7 @@ class _FakeStore:
         self.eligible_targets_calls = 0
         self.recover_raises: list[Exception] = []
 
-    def recover_expired(self):  # noqa: D401 — mirror store API
+    def recover_expired(self, *, live_owner=None):  # noqa: D401 — mirror store API
         self.recover_expired_calls += 1
         if self.recover_raises:
             raise self.recover_raises.pop(0)

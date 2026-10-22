@@ -1449,6 +1449,89 @@ def test_lease_recovery_settle_records_the_stop_audit(delivery_store):
     assert abort["source"] == "chat_stop"
 
 
+def _claim_state(store, delivery_id):
+    with store.engine.connect() as conn:
+        return tuple(conn.execute(sa_text(
+            "SELECT claim_owner, lease_expires_at FROM inter_bot_deliveries WHERE id=:id"
+        ), {"id": delivery_id}).one())
+
+
+def _orphaned_claim(store, sender, target, *, stopped=True, ended=True, policy=SessionPolicy.CONTINUE):
+    """A claim held by a dispatcher that died (TASK-1286): lease still live."""
+    original, _ = store.enqueue(
+        sender_bot_id=sender, target_bot_id=target, message="claimed by the old app",
+        payload={"messages": [{"role": "user", "content": "claimed by the old app"}],
+                 "bot_id": target, "user": "nick", "stream": False},
+        session_policy=policy, reset_reason="test" if policy != SessionPolicy.CONTINUE else None,
+    )
+    following, _ = _enqueue(store, sender, target, "must not wait out the lease")
+    claim = store.claim_next(target, claim_owner="dead-app", steer_capable=False, lease_seconds=300)
+    assert claim and claim.id == original.id
+    assert _claim_state(store, original.id)[0] == "dead-app"
+    if stopped:
+        _request_stop_for_delivery(store, original.turn_id)
+    if ended:  # what abort_turn does once the bridge confirms the cancel
+        from llm_bawt.service.turn_termination import TurnAbortCoordinator
+        assert TurnAbortCoordinator(TurnLogStore(store.config)).settle(
+            original.turn_id, {"bridge_state": "cancelled", "confirmed": True, "source": "chat_stop"},
+        )
+    return original, following
+
+
+def test_user_stop_on_orphaned_claim_settles_without_waiting_for_the_lease(delivery_store):
+    """2026-10-22: Stop ended the turn at 18:33, but the delivery (claimed by
+    the app that restarted) held Snark's FIFO until its lease ran out at 18:37."""
+    store, sender, target = delivery_store
+    original, following = _orphaned_claim(store, sender, target)
+
+    recovered = [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == original.id]
+    assert recovered and (recovered[0].status, recovered[0].last_error) == ("CANCELLED", "Stopped by user")
+    assert recovered[0].claim_token is None and _claim_state(store, original.id) == (None, None)
+    assert _assert_turn_user_stopped(store, original.turn_id)["confirmed"] is True  # Stop's own audit kept
+    next_claim = store.claim_next(target, claim_owner="dispatcher-new", steer_capable=False)
+    assert next_claim and next_claim.id == following.id
+
+
+def test_orphan_recovery_never_preempts_a_live_owner_or_an_open_turn(delivery_store):
+    store, sender, target = delivery_store
+    # The claim's own dispatcher is alive: its _dispatch settles the claim.
+    live, _ = _orphaned_claim(store, sender, target)
+    assert not [row for row in store.recover_expired(live_owner="dead-app") if row.id == live.id]
+    assert store.get(live.id).status == "DISPATCHING"
+    # Legacy callers (no live owner) keep lease-only recovery.
+    assert not [row for row in store.recover_expired() if row.id == live.id]
+    assert store.get(live.id).status == "DISPATCHING"
+
+
+def test_orphan_recovery_waits_for_the_turn_to_end_and_for_a_user_stop(delivery_store):
+    store, sender, target = delivery_store
+    stopping, _ = _orphaned_claim(store, sender, target, ended=False)
+    assert not [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == stopping.id]
+    assert store.get(stopping.id).status == "DISPATCHING"
+
+    with store.engine.begin() as conn:  # ended by a *different* abort: host shutdown, no user Stop
+        conn.execute(sa_text("""
+            UPDATE turn_logs SET status='aborted', end_reason='aborted', ended_at=now(),
+                request_json='{"abort_cause": "host_shutdown"}' WHERE id=:id
+        """), {"id": stopping.turn_id})
+    assert not [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == stopping.id]
+    assert store.get(stopping.id).status == "DISPATCHING"  # the lease path (and TASK-1258) owns it
+
+
+def test_orphan_recovery_leaves_an_accepted_reset_to_lease_recovery(delivery_store):
+    """Codex r1 blocker: the accepted-reset ambiguity branch precedes the Stop
+    check, so an early sweep must not reach it; the lease path owns that row."""
+    store, sender, target = delivery_store
+    reset, _ = _orphaned_claim(store, sender, target, policy=SessionPolicy.RESET_WITHOUT_HISTORY)
+    assert store.mark_transport_accepted(reset.id, store.get(reset.id).claim_token or "")
+    assert not [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == reset.id]
+    assert store.get(reset.id).status == "DISPATCHING"
+
+    _expire_lease(store, reset.id)  # unchanged lease-expiry behavior for an accepted reset
+    recovered = [row for row in store.recover_expired(live_owner="dispatcher-new") if row.id == reset.id]
+    assert recovered and recovered[0].status == "FAILED" and "ambiguous" in (recovered[0].last_error or "")
+
+
 def test_stop_on_a_delivery_reservation_revokes_the_claim_and_drains(delivery_store):
     """Stop on a ``reserved`` row used to return already_completed while the
     reservation kept blocking admission (Codex S4)."""

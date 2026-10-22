@@ -199,7 +199,7 @@ class InterBotDeliveryDispatcher:
         # exponential backoff instead of hot-looping.
         recovery = getattr(self, "_recovery", None)
         try:
-            self.store.recover_expired()
+            self.store.recover_expired(live_owner=self.claim_owner)
         except Exception:
             logger.exception("initial recover_expired failed; continuing")
         if recovery is not None:
@@ -219,7 +219,7 @@ class InterBotDeliveryDispatcher:
                 pass
             self._wake_event.clear()
             try:
-                self.store.recover_expired()
+                self.store.recover_expired(live_owner=self.claim_owner)
                 self._schedule_eligible_targets()
                 if getattr(self.store, "engine", None) is not None:
                     from .session_lifecycle.outbox import NewSessionOutbox

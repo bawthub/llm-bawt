@@ -47,7 +47,7 @@ class _Store:
         self.released_with_check_running: bool | None = None
         self.check: _Check | None = None
 
-    def recover_expired(self):
+    def recover_expired(self, *, live_owner=None):
         self.recover_expired_calls += 1
         self.events.append("recover_expired")
 
