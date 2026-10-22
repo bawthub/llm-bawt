@@ -7,6 +7,7 @@ from datetime import datetime
 
 from agent_bridge.abort_contract import AbortState
 from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
+from agent_bridge.run_status import RUN_STATUS_METHOD, RunState, answer_run_status, queue_run_state
 from agent_bridge.send_admission import admit_send
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
 from agent_bridge.events import AgentEvent, AgentEventKind
@@ -411,6 +412,16 @@ class SessionBridge(ChangedFileLifecycleMixin):
                 )
                 return
 
+            if method == RUN_STATUS_METHOD:
+                # Bridge-local, never a gateway RPC; answered only when
+                # addressed to us (see agent_bridge.run_status).
+                if (fields.get("backend") or "").strip() == self._backend_name:
+                    self._publisher.publish_rpc_result(
+                        request_id,
+                        answer_run_status(self._backend_name, params, self._run_state),
+                    )
+                return
+
             # session.reset doesn't exist as a gateway-side RPC.  Intercept
             # it here so the frontend gets a deterministic SESSION_RESET
             # unified event instead of an "rpc method not found" error.
@@ -467,6 +478,16 @@ class SessionBridge(ChangedFileLifecycleMixin):
             self._publisher.publish_rpc_result(request_id, {"ok": False, "error": str(e)})
         finally:
             await async_redis.xack(COMMANDS_STREAM, "bridge", msg_id)
+
+    def _run_state(self, session_key: str, request_id: str) -> RunState:
+        """Queue state, plus ``stopping`` while a gateway abort is in flight."""
+        state = queue_run_state(self._session_queue, session_key, request_id)
+        if state in (RunState.PREFLIGHT, RunState.QUEUED, RunState.RUNNING):
+            run = self._request_runs.get((session_key, request_id))
+            abort_task = run.get("abort_task") if run else None
+            if abort_task is not None and not abort_task.done():
+                return RunState.STOPPING
+        return state
 
     async def _abort_request(self, session_key: str, target_request_id: str) -> tuple[AbortState, str]:
         """Abort exactly one request; a raise is answered as ``error``.

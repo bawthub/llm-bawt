@@ -33,6 +33,7 @@ from claude_agent_sdk.types import (
 
 from agent_bridge.abort_contract import AbortState
 from agent_bridge.abort_rpc import answer_abort
+from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.approval import (
     ApprovalDecision,
     PolicyAction,
@@ -366,6 +367,15 @@ class ClaudeCommandMixin:
                 self._publisher.publish_rpc_result(
                     request_id,
                     await answer_abort(self._backend_name, params, self._abort_request),
+                )
+            elif method == RUN_STATUS_METHOD and backend == self._backend_name:
+                # Answered only when addressed to us: see agent_bridge.run_status.
+                self._publisher.publish_rpc_result(
+                    request_id,
+                    answer_run_status(
+                        self._backend_name, params,
+                        lambda sk, rid: queue_run_state(self._session_queue, sk, rid),
+                    ),
                 )
             elif backend == self._backend_name:
                 # Unknown RPC addressed to us: fail fast so the caller doesn't

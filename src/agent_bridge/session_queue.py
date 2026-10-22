@@ -182,6 +182,11 @@ class SessionQueue:
             return None
         return self._request_phases.get(key)
 
+    def is_stopping(self, session_key: str, request_id: str) -> bool:
+        """True while a registered send has been cancelled but hasn't exited."""
+        task = self._request_tasks.get((session_key, request_id))
+        return task is not None and not task.done() and task.cancelling() > 0
+
     def stop_request(self, session_key: str, request_id: str) -> bool:
         """Stop one request: tombstone it, then cancel it if it is registered.
 
