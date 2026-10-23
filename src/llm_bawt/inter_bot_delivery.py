@@ -18,11 +18,18 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sqlalchemy import text as sa_text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 
 from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference
 from .maintenance_delivery import MaintenanceBarrier
+from .service.dispatcher_leadership import (
+    LOCK_NAME_INFO_KEY,
+    build_lock_engine,
+    close_quietly,
+    probe_lock_session,
+    release_lock_session,
+)
 from .service.turn_gates import ensure_gate_schema
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
 from .inter_bot_delivery_record import DeliveryRecord
@@ -86,6 +93,9 @@ class InterBotDeliveryStore:
     def __init__(self, config: Config):
         self.config = config
         self.engine = get_shared_engine(config)
+        # TASK-1311: the leadership session gets its own one-connection engine
+        # (libpq keepalives, bounded probes) instead of pinning a pool slot.
+        self._lock_engine: Engine | None = None
         if self.engine is not None:
             self._ensure_schema()
 
@@ -277,35 +287,50 @@ class InterBotDeliveryStore:
         """
         if self.engine is None:
             return None
-        conn = self.engine.connect()
-        acquired = conn.execute(
-            sa_text("SELECT pg_try_advisory_lock(hashtext(:lock_name))"),
-            {"lock_name": lock_name},
-        ).scalar_one()
-        # Session-level advisory locks survive COMMIT. End SQLAlchemy's
-        # autobegun transaction so the leadership connection is not idle-in-tx.
-        conn.commit()
+        if self._lock_engine is None:
+            self._lock_engine = build_lock_engine(self.config)
+        if self._lock_engine is None:
+            return None
+        # DB errors here (PostgreSQL down or restarting) propagate: the
+        # dispatcher's leadership loop retries them on its passive cadence.
+        conn = self._lock_engine.connect()
+        try:
+            acquired = conn.execute(
+                sa_text("SELECT pg_try_advisory_lock(hashtext(:lock_name))"),
+                {"lock_name": lock_name},
+            ).scalar_one()
+            # Session-level advisory locks survive COMMIT. End SQLAlchemy's
+            # autobegun transaction so the leadership connection is not idle-in-tx.
+            conn.commit()
+        except Exception:
+            close_quietly(conn)
+            raise
         if not acquired:
             conn.close()
             return None
-        conn.info["inter_bot_dispatcher_lock_name"] = lock_name
+        conn.info[LOCK_NAME_INFO_KEY] = lock_name
         return conn
 
     @staticmethod
+    def probe_dispatcher_lock(conn: Connection) -> bool:
+        """Whether the leadership session still answers (TASK-1311).
+
+        False means the session, and the lock with it, is gone; the
+        connection is closed. Runs a round trip: call it off the event loop.
+        """
+        return probe_lock_session(conn)
+
+    @staticmethod
     def release_dispatcher_lock(conn: Connection | None) -> None:
+        """Unlock and close the leadership session.
+
+        TASK-1311: a session that died (PostgreSQL restarted under it) has
+        already released its lock; that case logs a WARNING and never raises,
+        so shutdown continues past it.
+        """
         if conn is None:
             return
-        try:
-            lock_name = conn.info.get(
-                "inter_bot_dispatcher_lock_name", "inter-bot-dispatcher"
-            )
-            conn.execute(
-                sa_text("SELECT pg_advisory_unlock(hashtext(:lock_name))"),
-                {"lock_name": lock_name},
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        release_lock_session(conn)
 
     @staticmethod
     def stable_ids() -> tuple[str, str, str]:

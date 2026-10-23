@@ -1,10 +1,11 @@
 """The dispatcher's startup recovery check (TASK-1232).
 
-The check runs once per process: at the first ``run()`` entry, after the
-initial ``recover_expired``. A crash re-entry of ``run()`` never reruns it and
-nothing reruns it on a timer. Dispatch waits for it only up to a bound; a slow
-check is never cancelled for being slow, only ``stop()`` cancels it, and its
-end wakes the dispatcher.
+The check runs once per leadership term: at the first ``run()`` entry, after
+the initial ``recover_expired``. A crash re-entry of ``run()`` never reruns it
+and nothing reruns it on a timer; only a re-acquired leadership term does
+(TASK-1311, ``tests/test_dispatcher_leadership.py``). Dispatch waits for it
+only up to a bound; a slow check is never cancelled for being slow, only
+``stop()`` cancels it, and its end wakes the dispatcher.
 """
 
 from __future__ import annotations
@@ -53,6 +54,9 @@ class _Store:
 
     def eligible_targets(self):
         return []
+
+    def probe_dispatcher_lock(self, _conn):
+        return True  # the leadership session stays alive in these tests
 
     def release_dispatcher_lock(self, *_a, **_k):
         check = self.check

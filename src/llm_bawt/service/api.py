@@ -11,6 +11,7 @@ from .dependencies import (
     get_profile_manager,
     set_service,
 )
+from .lifespan_shutdown import cancel_tasks, run_shutdown_phases
 from .logging import get_service_logger, setup_service_logging
 from .partial_text import PartialText
 
@@ -376,49 +377,59 @@ async def lifespan(app):
         yield
     finally:
         log.info("lifespan shutdown: started")
-        await home_audio_worker.stop()
-        # DEACTIVATED: history drain task (see above)
-        # if history_drain_task:
-        #     history_drain_task.cancel()
-        #     try:
-        #         await history_drain_task
-        #     except (asyncio.CancelledError, Exception):
-        #         pass
-        # Stop the producer before its consumer/Redis transport.
-        if scheduler:
-            await scheduler.stop()
-        # Stop durable claims first while Redis is still available. stop()
-        # detaches every streaming agent worker (TASK-1286): a claim whose
-        # worker provably exited has its lease expired so the next dispatcher
-        # reattaches at once; any other claim stays leased until it expires.
-        # Orderly shutdown is never counted as a delivery failure.
-        if service._inter_bot_dispatcher is not None:
-            await service._inter_bot_dispatcher.stop()
+        # TASK-1311: every phase runs even when an earlier one raises (a dead
+        # leadership lock session once aborted the whole teardown here).
+        failed = await run_shutdown_phases(
+            shutdown_phases(
+                service, scheduler=scheduler, redis_subscriber=redis_subscriber,
+                home_audio_worker=home_audio_worker,
+            ),
+            log=log,
+        )
+        set_service(None)
+        if failed:
+            log.warning("lifespan shutdown: complete with failed phase(s): %s", ", ".join(failed))
+        else:
+            log.info("lifespan shutdown: complete")
 
-        # Cancel background tasks
-        for task_attr in (
-            "_group_cleanup_task",
-            "_tool_persist_task",
-            "_mcp_continuation_task",
-            "_ops_receipt_task",
-            "_quiesce_exit_task",
-            "_claude_refresh_task",
-            "_codex_refresh_task",
-        ):
-            task = getattr(service, task_attr, None)
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        if redis_subscriber:
+
+BACKGROUND_TASK_ATTRIBUTES = (
+    "_group_cleanup_task",
+    "_tool_persist_task",
+    "_mcp_continuation_task",
+    "_ops_receipt_task",
+    "_quiesce_exit_task",
+    "_claude_refresh_task",
+    "_codex_refresh_task",
+)
+
+
+def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) -> list:
+    """The lifespan teardown, in order, as independent phases (TASK-1311).
+
+    Order matters: the scheduler (a producer) stops before its consumer and
+    the Redis transport; the dispatcher stops while Redis is still up, since
+    stop() detaches every streaming agent worker (TASK-1286) and a claim
+    whose worker provably exited has its lease expired for the next
+    dispatcher, while any other claim stays leased until it expires. Orderly
+    shutdown is never counted as a delivery failure.
+    """
+    phases: list = [("home audio worker", home_audio_worker.stop)]
+    if scheduler:
+        phases.append(("scheduler", scheduler.stop))
+    dispatcher = service._inter_bot_dispatcher
+    if dispatcher is not None:
+        phases.append(("inter-bot dispatcher", dispatcher.stop))
+    phases.append(("background tasks", lambda: cancel_tasks(service, BACKGROUND_TASK_ATTRIBUTES)))
+    if redis_subscriber:
+        async def close_redis() -> None:
             from ..agent_backends.agent_bridge import set_agent_subscriber
             set_agent_subscriber(None)
             await redis_subscriber.close()
-        await service.shutdown()
-        set_service(None)
-        log.info("lifespan shutdown: complete")
+
+        phases.append(("redis subscriber", close_redis))
+    phases.append(("service", service.shutdown))
+    return phases
 
 
 # Create FastAPI app

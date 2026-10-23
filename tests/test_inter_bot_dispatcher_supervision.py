@@ -48,6 +48,9 @@ class _FakeStore:
     def acquire_dispatcher_lock(self, *_args, **_kwargs):  # pragma: no cover
         return object()
 
+    def probe_dispatcher_lock(self, _conn):
+        return True  # the leadership session stays alive in these tests
+
     def release_dispatcher_lock(self, *_args, **_kwargs):  # pragma: no cover
         return None
 
@@ -71,7 +74,9 @@ def _make_dispatcher(subscriber_connected: bool = True) -> InterBotDeliveryDispa
     dispatcher._target_tasks = {}
     dispatcher._dispatch_tasks = set()
     dispatcher.claim_owner = "test-dispatcher"
-    dispatcher._dispatcher_lock = None
+    # run() is driven directly here, which is only ever done under held
+    # leadership; without a lock the sweep is skipped (TASK-1311).
+    dispatcher._dispatcher_lock = object()
     dispatcher._subscriber_gap_logged = False
     return dispatcher
 

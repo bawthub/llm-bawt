@@ -21,6 +21,12 @@ from ..inter_bot_delivery import (
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry, retry_original_author
 from ..inter_bot_delivery_steer_fence import steer_uncertain
 from ..inter_bot_delivery_user import resolve_delivery_user
+from .dispatcher_leadership import (
+    PROBE_TIMEOUT_SECONDS,
+    SESSION_GONE_ERRORS,
+    close_quietly,
+    probe_within,
+)
 from .inter_bot_dispatcher_recovery import StartupCheck, StartupRecoveryRunner
 from .inter_bot_dispatcher_steer import (
     APP_RUN_NOT_READY,
@@ -52,6 +58,19 @@ class InterBotDeliveryDispatcher:
     # TASK-1286: how long stop() waits for detached workers to prove they
     # exited. One bridge XREAD block is 2s; server.sh allows the process 8s.
     DETACH_CONFIRM_SECONDS = 3.0
+    # TASK-1311: the leadership session is probed at most this often, on the
+    # sweep that follows. With the 15s sweep cadence a dead session is seen
+    # within about 30s of the next pass; acquisition then retries every
+    # LEADERSHIP_RETRY_SECONDS, so leadership is back within that of
+    # PostgreSQL returning.
+    LOCK_PROBE_INTERVAL_SECONDS = 15.0
+    LOCK_PROBE_TIMEOUT_SECONDS = PROBE_TIMEOUT_SECONDS
+    # Passive wait between acquisition attempts (lock held elsewhere, or
+    # PostgreSQL unreachable). Never a hot loop.
+    LEADERSHIP_RETRY_SECONDS = 5.0
+    # stop() waits this long for the unlock; a hung socket must not hold the
+    # process past server.sh's budget.
+    RELEASE_TIMEOUT_SECONDS = 2.0
 
     def __init__(
         self, service: Any, *, recovery_interval_seconds: float = 15.0,
@@ -71,7 +90,10 @@ class InterBotDeliveryDispatcher:
         # TASK-1232: the startup recovery check, once per process, never on a
         # timer. Its end wakes the loop: a settled turn frees its target.
         self._recovery = (
-            StartupRecoveryRunner(startup_recovery, on_done=self._wake_event.set)
+            StartupRecoveryRunner(
+                startup_recovery, on_done=self._wake_event.set,
+                is_leader=lambda: self.is_leader,
+            )
             if startup_recovery is not None else None
         )
         self._stop_event = asyncio.Event()
@@ -85,12 +107,65 @@ class InterBotDeliveryDispatcher:
         self._new_session_outbox = None
         self.claim_owner = f"dispatcher-{uuid.uuid4().hex}"
         self._dispatcher_lock = None
+        self._lock_probed_at: float | None = None
         self._subscriber_gap_logged = False
 
     @property
     def is_leader(self) -> bool:
         """Whether this process holds the dispatcher leadership lock now."""
         return self._dispatcher_lock is not None
+
+    async def _acquire_leadership(self) -> bool | None:
+        """One acquisition attempt, off the loop.
+
+        True: acquired. False: another process holds the lock (passive).
+        None: PostgreSQL unreachable (down or restarting); the caller retries
+        on the passive cadence, so a DB outage never becomes a hot loop.
+        """
+        try:
+            self._dispatcher_lock = await asyncio.to_thread(self.store.acquire_dispatcher_lock)
+        except SESSION_GONE_ERRORS as exc:
+            logger.warning(
+                "inter-bot dispatcher cannot reach PostgreSQL for leadership (%s); "
+                "retrying in %.0fs", type(exc).__name__, self.LEADERSHIP_RETRY_SECONDS,
+            )
+            return None
+        if self._dispatcher_lock is None:
+            return False
+        self._lock_probed_at = asyncio.get_running_loop().time()
+        return True
+
+    async def _leadership_confirmed(self) -> bool:
+        """Whether the lock session still answers; drops leadership when it doesn't.
+
+        Probed at most every LOCK_PROBE_INTERVAL_SECONDS, off the loop and
+        bounded (TASK-1311). A lost session is logged once; ``run()`` then
+        returns so the leadership loop re-enters acquisition. In-flight
+        dispatch tasks are left alone: their claims are fenced by
+        ``claim_owner`` + lease, not by this lock.
+        """
+        conn = self._dispatcher_lock
+        if conn is None:
+            return False
+        loop = asyncio.get_running_loop()
+        probed_at = getattr(self, "_lock_probed_at", None)
+        if probed_at is not None and loop.time() - probed_at < self.LOCK_PROBE_INTERVAL_SECONDS:
+            return True
+        alive = await probe_within(
+            lambda: self.store.probe_dispatcher_lock(conn),
+            timeout=self.LOCK_PROBE_TIMEOUT_SECONDS,
+            abandon=lambda: close_quietly(conn),
+        )
+        self._lock_probed_at = loop.time()
+        if alive:
+            return True
+        if self._dispatcher_lock is conn:
+            self._dispatcher_lock = None
+        logger.error(
+            "inter-bot dispatcher lost its leadership lock session; claiming no new "
+            "work until it is re-acquired"
+        )
+        return False
 
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -103,20 +178,26 @@ class InterBotDeliveryDispatcher:
         passive_logged = False
         while not self._stop_event.is_set():
             if self._dispatcher_lock is None:
-                self._dispatcher_lock = self.store.acquire_dispatcher_lock()
-                if self._dispatcher_lock is None:
-                    if not passive_logged:
+                acquired = await self._acquire_leadership()
+                if acquired is not True:
+                    if acquired is False and not passive_logged:
                         logger.info(
                             "inter-bot dispatcher is passive; another process owns the lock"
                         )
                         passive_logged = True
                     try:
-                        await asyncio.wait_for(self._stop_event.wait(), timeout=5.0)
+                        await asyncio.wait_for(
+                            self._stop_event.wait(), timeout=self.LEADERSHIP_RETRY_SECONDS
+                        )
                     except asyncio.TimeoutError:
                         pass
                     continue
                 passive_logged = False
                 logger.info("inter-bot dispatcher acquired singleton leadership")
+                recovery = getattr(self, "_recovery", None)
+                if recovery is not None:
+                    # TASK-1311: a new leadership term starts like a startup.
+                    recovery.rearm()
             if self._task is None or self._task.done():
                 self._task = asyncio.create_task(
                     self.run(), name="inter-bot-delivery-dispatcher"
@@ -130,9 +211,15 @@ class InterBotDeliveryDispatcher:
                 logger.exception(
                     "inter-bot dispatcher loop crashed; restarting under leadership"
                 )
-            if not self._stop_event.is_set():
-                logger.warning("inter-bot dispatcher loop exited; restarting under leadership")
-                await asyncio.sleep(self.leadership_retry_delay_seconds)
+            if self._stop_event.is_set():
+                break
+            if self._dispatcher_lock is None:
+                # TASK-1311: run() returned because the lock session died.
+                # Acquisition retries on the passive cadence; no sleep here.
+                logger.warning("inter-bot dispatcher leadership lost; re-entering acquisition")
+                continue
+            logger.warning("inter-bot dispatcher loop exited; restarting under leadership")
+            await asyncio.sleep(self.leadership_retry_delay_seconds)
 
     async def stop(self) -> None:
         from .turn_execution import turn_executions
@@ -166,8 +253,23 @@ class InterBotDeliveryDispatcher:
             # Leader-only work: stop it before the lock is released.
             await recovery.stop()
         await self._release_detached_claims(detached)
-        self.store.release_dispatcher_lock(self._dispatcher_lock)
-        self._dispatcher_lock = None
+        await self._release_leadership()
+
+    async def _release_leadership(self) -> None:
+        """Unlock off the loop, bounded. A dead session only logs (TASK-1311)."""
+        conn, self._dispatcher_lock = self._dispatcher_lock, None
+        if conn is None:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.to_thread(self.store.release_dispatcher_lock, conn)),
+                timeout=self.RELEASE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "leadership lock release still pending after %.0fs; the lock ends with "
+                "this process's session", self.RELEASE_TIMEOUT_SECONDS,
+            )
 
     async def _release_detached_claims(self, detached: list) -> None:
         """Expire our claims whose detached worker has provably exited (TASK-1286).
@@ -264,7 +366,8 @@ class InterBotDeliveryDispatcher:
             # TASK-1232: the first run() entry is this process's startup under
             # held leadership; a crash re-entry never reruns the check. After
             # recover_expired: recovery steps defer claimed deliveries to it,
-            # so the check must see the claims it released.
+            # so the check must see the claims it released. TASK-1311: a new
+            # leadership term re-arms it (see _leadership_loop).
             await recovery.run_once(stop=self._stop_event)
         self._wake_event.set()
         consecutive_failures = 0
@@ -276,6 +379,17 @@ class InterBotDeliveryDispatcher:
             except asyncio.TimeoutError:
                 pass
             self._wake_event.clear()
+            if self._stop_event.is_set():
+                break
+            if not await self._leadership_confirmed():
+                # TASK-1311: leaderless. No sweep, no new claims; in-flight
+                # tasks run on under their own claim leases. The leadership
+                # loop re-acquires and starts a fresh run().
+                return
+            if self._stop_event.is_set():
+                # stop() ran while the probe was out: it has already cancelled
+                # the workers, so no sweep may claim anything after it.
+                break
             try:
                 self.store.recover_expired(live_owner=self.claim_owner)
                 self._schedule_eligible_targets()
