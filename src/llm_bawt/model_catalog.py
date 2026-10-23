@@ -330,6 +330,9 @@ class ModelCatalog:
                 "endpoint_id": endpoint.id,
                 "model_key": endpoint.model.key,
                 "access_path": endpoint.access_path.key,
+                # TASK-1295: the bridge checks a proxy turn's model prefix
+                # against this, the same rule that built ``model_id``.
+                "access_path_provider": cls._provider_prefix(endpoint.access_path),
                 "protocol": endpoint.access_path.protocol,
                 "base_url": endpoint.access_path.base_url,
                 "auth_mechanism": endpoint.access_path.auth_mechanism,

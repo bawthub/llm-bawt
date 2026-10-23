@@ -117,9 +117,17 @@ class ServiceLLMBawt(BaseLLMBawt):
                     and model_def.get("model_id")
                 ):
                     self.client._bot_config["model"] = model_def["model_id"]
-                for field in ("endpoint_id", "harness", "access_path"):
+                for field in ("endpoint_id", "harness"):
                     if model_def.get(field) is not None:
                         self.client._bot_config[field] = model_def[field]
+                # TASK-1295: the access path and its proxy provider are one
+                # catalog-issued pair (claude_code_bridge.native_auth). Only the
+                # catalog writes the provider, and always with its own path.
+                self.client._bot_config.pop("access_path_provider", None)
+                if model_def.get("access_path") is not None:
+                    self.client._bot_config["access_path"] = model_def["access_path"]
+                    if model_def.get("access_path_provider") is not None:
+                        self.client._bot_config["access_path_provider"] = model_def["access_path_provider"]
                 # Per-endpoint reasoning policy belongs to the normalized model
                 # catalog, not provider/model-name branches in bridge transport.
                 # Preserve an explicit per-bot override when present; otherwise

@@ -47,6 +47,10 @@ STANDARD_ACCESS_PATHS = (
     AccessPathSeed("zai-anthropic", "zai", "anthropic-messages", "https://api.z.ai/api/anthropic", "api-key"),
     AccessPathSeed("moonshot-anthropic", "moonshot", "anthropic-messages", "https://api.moonshot.ai/anthropic", "api-key"),
     AccessPathSeed("kimi-coding-chat", "kimi", "chat-completions", "https://api.kimi.com/coding/v1", "api-key"),
+    # OpenRouter's Anthropic-compatible surface (proxy prefix "openrouter",
+    # chosen by vendor). Same key as the hand-created echo row, so the
+    # ON CONFLICT seed never adds a second identical path there.
+    AccessPathSeed("openrouter-anthropic", "openrouter", "anthropic-messages", "https://openrouter.ai/api", "api-key"),
     AccessPathSeed("local-llamacpp", "local", "chat-completions", None, "none", "llama-cpp"),
     AccessPathSeed("local-vllm", "local", "chat-completions", None, "none", "vllm"),
     AccessPathSeed("ollama", "local", "chat-completions", None, "none", "ollama"),

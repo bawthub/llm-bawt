@@ -18,19 +18,27 @@ default Responses path in ``ProviderAdapter`` handles the whole round-trip.
 All it supplies is credentials: ``authorize()`` returns
 ``(bearer, base_url)`` and the shared base class does the rest.
 
-Auth: a standard xAI API key. Read from ``XAI_API_KEY``
-(``LLM_BAWT_XAI_API_KEY`` accepted as an alias so a single key in ``.env``
-serves both the app and this bridge). Models are namespaced ``xai/<model>``
+Auth: a standard xAI API key, read on every call from the app's API-key
+broker (``/v1/providers/xai/token``, the DB-connected key). Only when the
+broker says no key is connected (503) does the legacy bridge env apply:
+``XAI_API_KEY`` (``LLM_BAWT_XAI_API_KEY``/``GROK_API_KEY`` as aliases), with
+a warning. Models are namespaced ``xai/<model>``
 (e.g. ``xai/grok-4.5``, ``xai/grok-4.3``); the proxy strips the ``xai/``
 prefix before handing the bare upstream model to ``call``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import ClassVar
 
+from ...provider_key_broker import (
+    BrokerKeyError,
+    BrokerKeyNotInstalled,
+    fetch_provider_api_key,
+)
 from .base import ProviderAdapter
 from ..request_context import ProxyRequestContext
 
@@ -54,14 +62,29 @@ class XaiAdapter(ProviderAdapter):
     name: ClassVar[str] = "xai"
 
     def _api_key(self) -> str:
-        for env in API_KEY_ENVS:
-            key = os.getenv(env)
-            if key:
-                return key
-        raise RuntimeError(
-            "xAI API key required: set XAI_API_KEY (or LLM_BAWT_XAI_API_KEY) "
-            "on the claude-code-bridge container."
-        )
+        """The DB-connected key from the app broker (TASK-1295 B1b).
+
+        Only an explicit "nothing connected" answer (503) may fall back to the
+        legacy bridge-environment key; any other broker failure surfaces so a
+        stale env key never masks a broken or rotated connection.
+        """
+        try:
+            return fetch_provider_api_key("xai")
+        except BrokerKeyNotInstalled:
+            for env in API_KEY_ENVS:
+                key = os.getenv(env)
+                if key:
+                    logger.warning(
+                        "Using %s from the bridge environment because no "
+                        "DB-connected xAI key is installed (legacy)", env,
+                    )
+                    return key
+            raise RuntimeError(
+                "xAI API key required: connect an xAI API key in Settings → "
+                "Providers."
+            ) from None
+        except BrokerKeyError as exc:
+            raise RuntimeError(f"xAI API key unavailable: {exc}") from exc
 
     @staticmethod
     def _base_url() -> str:
@@ -71,10 +94,11 @@ class XaiAdapter(ProviderAdapter):
         """Return ``(bearer, base_url)`` for the shared Responses-API path.
 
         xAI keys are static — no refresh, no OAuth bundle — so this just
-        reads the key and hands back the API root the ``openai`` client
-        appends ``/responses`` to.
+        reads the key (off the event loop: the broker read is blocking I/O)
+        and hands back the API root the ``openai`` client appends
+        ``/responses`` to.
         """
-        return self._api_key(), self._base_url()
+        return await asyncio.to_thread(self._api_key), self._base_url()
 
     def prepare_request(
         self,

@@ -55,8 +55,19 @@ class CommandPublisherMixin:
         explicit_thread: bool = False,
         task_turn_capability: str | None = None,
         skill_bundle: str | None = None,
+        access_path: str | None = None,
+        access_path_provider: str | None = None,
     ) -> None:
-        """Publish one idempotent ``chat.send`` command to the bridge stream."""
+        """Publish one idempotent ``chat.send`` command to the bridge stream.
+
+        ``access_path`` is the resolved catalog endpoint's access-path key
+        (TASK-1295). It is published whenever it is not None, so a blank or
+        unknown value reaches the bridge and is rejected there rather than
+        being dropped into legacy credential selection.
+        ``access_path_provider`` is the proxy provider the catalog derives
+        from that path; the bridge refuses a proxy turn whose model prefix
+        differs from it.
+        """
         fields: dict = {
             "action": "chat.send",
             "session_key": session_key,
@@ -119,6 +130,10 @@ class CommandPublisherMixin:
                 fields["explicit_thread"] = "1"
         if task_turn_capability:
             fields["task_turn_capability"] = task_turn_capability
+        if access_path is not None:
+            fields["access_path"] = access_path
+        if access_path_provider:
+            fields["access_path_provider"] = access_path_provider
 
         dedupe_key = f"agent:command:request:{request_id}"
         flat_fields: list[str] = []

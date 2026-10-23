@@ -298,6 +298,17 @@ class AgentBridgeBackend(AgentBackend):
                                 str(config.get("task_turn_capability") or "").strip()
                                 or None
                             ),
+                            # TASK-1295: the resolved endpoint's access path
+                            # picks the bridge credential. Passed through as-is
+                            # (None only when the catalog supplied none).
+                            access_path=(
+                                str(config["access_path"])
+                                if config.get("access_path") is not None else None
+                            ),
+                            access_path_provider=(
+                                str(config.get("access_path_provider") or "").strip()
+                                or None
+                            ),
                         )
                         if execution is not None and execution.dispatched():
                             # Stop won while send_command was in flight. Publish

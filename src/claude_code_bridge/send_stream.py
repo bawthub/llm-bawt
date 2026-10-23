@@ -39,8 +39,8 @@ from claude_agent_sdk.types import (
 
 from claude_code_bridge.tool_events import normalize_tool_result
 
-from ._bridge_helpers import _get_fresh_oauth_token
 from .context_env import compact_window_env, proxy_context_window_env
+from .native_auth import LegacyNativeRoute, NativeAuthRoute
 from .proxy.request_context import (
     ProxyRequestContext,
     custom_header_env,
@@ -114,6 +114,12 @@ class ClaudeStreamMixin:
         """Keep standalone env/file credentials on the legacy direct path."""
         return bool(self._proxy_base_url and os.environ.get("LLM_BAWT_API_URL"))
 
+    def _oauth_gateway_base_url(self, route: NativeAuthRoute) -> str | None:
+        """The gateway URL when this bridge runs one and ``route`` may use it."""
+        if route.oauth_gateway_eligible and self._uses_claude_oauth_gateway():
+            return f"{self._proxy_base_url}/claude-oauth"
+        return None
+
     def _build_sdk_env(
         self,
         *,
@@ -129,8 +135,13 @@ class ClaudeStreamMixin:
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
         skill_bundle: str | None = None,
+        native_route: NativeAuthRoute | None = None,
     ) -> dict:
-        """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``."""
+        """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``.
+
+        ``native_route`` is the turn's resolved endpoint route; None on a
+        native turn means a legacy command with no ``access_path``.
+        """
         sdk_env = {}
         # Force Task/Agent subagents to run SYNCHRONOUSLY. CLI 2.1.x
         # backgrounds agents by default: the tool returns immediately,
@@ -202,14 +213,18 @@ class ClaudeStreamMixin:
                 model, self._proxy_base_url, effective_subagent_model,
             )
         else:
-            # Keep the CLI in native OAuth mode (models, beta headers, signed
-            # thinking, tools unchanged). The loopback transport replaces this
-            # bootstrap bearer on EVERY HTTP request, including after tools.
-            fresh_token = _get_fresh_oauth_token(force_refresh=force_refresh)
-            if fresh_token:
-                sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = fresh_token
-            if self._uses_claude_oauth_gateway():
-                sdk_env["ANTHROPIC_BASE_URL"] = f"{self._proxy_base_url}/claude-oauth"
+            # Native Anthropic: the endpoint's access path picks the credential
+            # (TASK-1295). Under OAuth the CLI stays in native OAuth mode
+            # (models, beta headers, signed thinking, tools unchanged), and the
+            # gateway's loopback transport replaces the bootstrap bearer on
+            # EVERY HTTP request, including after tools.
+            route = native_route or LegacyNativeRoute()
+            sdk_env.update(
+                route.env(
+                    force_refresh=force_refresh,
+                    gateway_base_url=self._oauth_gateway_base_url(route),
+                )
+            )
         # Both paths: the app-resolved compact threshold drives when the CLI
         # auto-compacts (the CLI caps it at the model's window).
         sdk_env.update(compact_window_env(compact_threshold))

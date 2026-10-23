@@ -632,34 +632,68 @@ def test_xai_registered_under_xai_prefix() -> None:
     assert adapter.name == "xai"
 
 
-def test_xai_authorize_returns_key_and_responses_base_url(monkeypatch) -> None:
+def _xai_broker(monkeypatch, status: int, payload: dict | None = None) -> list:
+    """Serve the app's /v1/providers/xai/token broker from a fake httpx.get."""
+    import httpx
+
+    seen: list = []
+
+    def fake_get(url, *, headers, timeout):
+        seen.append((url, headers))
+        return httpx.Response(status, json=payload or {"detail": "no xai credential installed"},
+                              request=httpx.Request("GET", url))
+
+    monkeypatch.setenv("LLM_BAWT_API_URL", "http://app-fixture")
+    monkeypatch.setenv("BRIDGE_CLAUDE_TOKEN_SECRET", "bridge-secret")
+    monkeypatch.setattr("claude_code_bridge.provider_key_broker.httpx.get", fake_get)
+    return seen
+
+
+def _xai_env(monkeypatch, **keys) -> None:
+    for name in ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY", "XAI_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in keys.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_xai_authorize_prefers_broker_key_over_env(monkeypatch) -> None:
     from claude_code_bridge.proxy.adapters.xai import XaiAdapter
 
-    monkeypatch.delenv("LLM_BAWT_XAI_API_KEY", raising=False)
-    monkeypatch.delenv("GROK_API_KEY", raising=False)
-    monkeypatch.delenv("XAI_BASE_URL", raising=False)
-    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    _xai_env(monkeypatch, XAI_API_KEY="env-stale-key")
+    seen = _xai_broker(monkeypatch, 200, {"access_token": "broker-xai-key", "expires_at": None})
 
     bearer, base_url = __import__("asyncio").run(XaiAdapter().authorize())
-    assert bearer == "xai-test-key"
+    assert bearer == "broker-xai-key"
     assert base_url == "https://api.x.ai/v1"
+    assert seen == [("http://app-fixture/v1/providers/xai/token", {"X-Bridge-Token": "bridge-secret"})]
 
 
-def test_xai_api_key_alias_and_missing(monkeypatch) -> None:
+def test_xai_falls_back_to_env_only_when_broker_has_no_key(monkeypatch, caplog) -> None:
     from claude_code_bridge.proxy.adapters.xai import XaiAdapter
 
-    # Alias resolves when the primary env is unset.
-    monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.delenv("GROK_API_KEY", raising=False)
-    monkeypatch.setenv("LLM_BAWT_XAI_API_KEY", "alias-key")
-    bearer, _ = __import__("asyncio").run(XaiAdapter().authorize())
+    _xai_broker(monkeypatch, 503)
+    _xai_env(monkeypatch, LLM_BAWT_XAI_API_KEY="alias-key")
+    with caplog.at_level("WARNING", logger="claude_code_bridge.proxy.adapters.xai"):
+        bearer, _ = __import__("asyncio").run(XaiAdapter().authorize())
     assert bearer == "alias-key"
+    assert "LLM_BAWT_XAI_API_KEY" in caplog.text and "legacy" in caplog.text
 
-    # No key anywhere → clear RuntimeError.
-    monkeypatch.delenv("LLM_BAWT_XAI_API_KEY", raising=False)
-    import pytest
-
+    # 503 and no env key → the connect hint.
+    _xai_env(monkeypatch)
     with pytest.raises(RuntimeError, match="xAI API key required"):
+        __import__("asyncio").run(XaiAdapter().authorize())
+
+
+import pytest  # noqa: E402  (module has no top-level pytest import)
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_xai_broker_failure_never_falls_back_to_env(monkeypatch, status) -> None:
+    from claude_code_bridge.proxy.adapters.xai import XaiAdapter
+
+    _xai_broker(monkeypatch, status)
+    _xai_env(monkeypatch, XAI_API_KEY="env-stale-key")
+    with pytest.raises(RuntimeError, match=f"xAI API key unavailable: .*{status}"):
         __import__("asyncio").run(XaiAdapter().authorize())
 
 

@@ -160,7 +160,7 @@ def test_proxy_turn_without_window_sets_no_hints() -> None:
 def test_direct_turn_never_sets_hints(monkeypatch) -> None:
     """Anthropic-direct models are recognised by the CLI; don't second-guess it."""
     monkeypatch.setattr(
-        "claude_code_bridge.send_stream._get_fresh_oauth_token", lambda **_: None
+        "claude_code_bridge.native_auth._get_fresh_oauth_token", lambda **_: None
     )
     env = _env(use_proxy=False, context_window=65_536)
     assert MAX_CONTEXT_TOKENS_ENV not in env
@@ -184,7 +184,7 @@ def test_unset_compact_threshold_defers_to_cli(threshold) -> None:
 @pytest.mark.parametrize("use_proxy", [True, False])
 def test_compact_threshold_applies_on_both_paths(monkeypatch, use_proxy) -> None:
     monkeypatch.setattr(
-        "claude_code_bridge.send_stream._get_fresh_oauth_token", lambda **_: None
+        "claude_code_bridge.native_auth._get_fresh_oauth_token", lambda **_: None
     )
     env = _env(use_proxy=use_proxy, context_window=1_000_000, compact_threshold=400_000)
     assert env[AUTO_COMPACT_WINDOW_ENV] == "400000"

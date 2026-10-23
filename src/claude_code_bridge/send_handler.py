@@ -26,6 +26,7 @@ from ._bridge_helpers import (
     AgentSpawnIndex,
 )
 from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
+from .native_auth import resolve_native_route
 from .send_boundaries import should_read_native_context_usage
 from .send_errors import (
     AuthRetryPolicy,
@@ -175,14 +176,28 @@ class ClaudeSendMixin(
             # curlable Garage URLs; the later UserMessage observer reuses the same
             # upload for TOOL_END/history instead of uploading duplicate bytes.
             screenshot_artifacts_by_tool_use_id: dict[str, list[dict]] = {}
-            direct_anthropic = not (
-                self._proxy_base_url is not None
-                and self._model_provider_prefix(model) is not None
+            # The proxy adapter this turn routes to; None = Anthropic-direct.
+            proxy_provider = (
+                self._model_provider_prefix(model) if self._proxy_base_url is not None else None
             )
+            direct_anthropic = proxy_provider is None
             if not direct_anthropic:
                 self._proxy_request_sessions[request_id] = session_key
             interrupted_usage: dict | None = None
+            # Credential failures map to the Claude reconnect only when the
+            # turn actually authenticates with the Claude subscription.
+            claude_subscription_auth = direct_anthropic
             try:
+                # TASK-1295: the endpoint's access path picks the native
+                # credential, once per turn so every retry uses the same route.
+                # Unknown/inconsistent paths fail here, before any SDK work.
+                native_route = resolve_native_route(
+                    req.access_path, proxy_provider=proxy_provider,
+                    access_path_provider=req.access_path_provider,
+                )
+                claude_subscription_auth = (
+                    native_route is not None and native_route.claude_subscription
+                )
                 # Inject MCP tool context so Claude passes the right identifiers.
                 # Body comes from the registry (TASK-490) with a byte-identical
                 # local fallback; separator added here.
@@ -316,6 +331,7 @@ class ClaudeSendMixin(
                         thread_session_id=thread_session_id,
                         request_id=request_id,
                         skill_bundle=req.skill_bundle,
+                        native_route=native_route,
                     )
                     if mcp_tool_timeout_ms:
                         # TASK-618: DB-backed app policy, delivered per turn so
@@ -866,7 +882,10 @@ class ClaudeSendMixin(
                         )
                         if auth_retry.claim(
                             is_auth_failure=auth_failure,
-                            direct_anthropic=not use_proxy and not self._uses_claude_oauth_gateway(),
+                            direct_anthropic=(
+                                not use_proxy
+                                and self._oauth_gateway_base_url(native_route) is None
+                            ),
                             model_side_effects=model_side_effects,
                         ):
                             logger.warning(
@@ -949,11 +968,8 @@ class ClaudeSendMixin(
                 logger.exception("Send failed: request_id=%s", request_id)
                 error_text, error_raw = classify_terminal_error(
                     e,
-                    direct_anthropic=direct_anthropic,
-                    proxy_provider=(
-                        None if direct_anthropic
-                        else self._model_provider_prefix(model)
-                    ),
+                    direct_anthropic=claude_subscription_auth,
+                    proxy_provider=proxy_provider,
                 )
                 seq += 1
                 self._publish_event(

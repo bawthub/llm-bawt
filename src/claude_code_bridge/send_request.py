@@ -58,6 +58,13 @@ class SendRequest:
     # App-resolved Claude Code auto-compact window (None = CLI default).
     compact_threshold: int | None = None
     bridge_reset_action: str | None = None
+    # TASK-1295: the app-resolved catalog endpoint's access-path key. None only
+    # when the field is absent (a legacy producer); a present-but-blank value
+    # is kept as "" so it is rejected, never mistaken for legacy.
+    access_path: str | None = None
+    # The proxy provider the app derived from that access path (None for a
+    # native or non-proxy path); a proxy turn must match the model's prefix.
+    access_path_provider: str | None = None
 
     @classmethod
     def from_fields(cls, fields: dict) -> "SendRequest":
@@ -236,4 +243,9 @@ class SendRequest:
             explicit_thread=explicit_thread,
             task_turn_capability=task_turn_capability,
             skill_bundle=fields.get("skill_bundle"),
+            access_path=(
+                str(fields["access_path"]).strip()
+                if fields.get("access_path") is not None else None
+            ),
+            access_path_provider=str(fields.get("access_path_provider") or "").strip() or None,
         )

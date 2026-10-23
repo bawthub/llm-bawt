@@ -208,7 +208,7 @@ def test_native_sdk_env_retains_oauth_and_model_semantics(monkeypatch, base, bro
         monkeypatch.setenv("LLM_BAWT_API_URL", "http://app-fixture")
     else:
         monkeypatch.delenv("LLM_BAWT_API_URL", raising=False)
-    monkeypatch.setattr("claude_code_bridge.send_stream._get_fresh_oauth_token", lambda **_: "a")
+    monkeypatch.setattr("claude_code_bridge.native_auth._get_fresh_oauth_token", lambda **_: "a")
     harness = ClaudeStreamMixin()
     harness._proxy_base_url = base
     env = harness._build_sdk_env(
