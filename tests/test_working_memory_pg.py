@@ -5,16 +5,23 @@ real schema. Protected-bot cases use a synthetic slug, never Mira's data.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from llm_bawt import task_turn_context as codec
+from llm_bawt.mcp_server import task_association
+from llm_bawt.mcp_server import working_memory_tools as tools
 from llm_bawt.runtime_settings import BotProfileStore, RuntimeSettingsStore
 from llm_bawt.service.routes import settings as settings_routes
 from llm_bawt.service.routes import working_memory as wm_routes
@@ -76,8 +83,11 @@ def wm(private_app_pg, monkeypatch):
                 "SELECT * FROM working_memory_changes WHERE item_id=:i ORDER BY seq"
             ), {"i": item_id}).mappings()]
 
+    service = WorkingMemoryService(engine)
+    # Create the tables up front: a test that never touches the store still runs teardown.
+    service.store.ensure_schema()
     yield SimpleNamespace(
-        engine=engine, service=WorkingMemoryService(engine), settings=settings, bots=bots,
+        engine=engine, service=service, settings=settings, bots=bots,
         user=f"user-{tag}", context=context, version=version, changes=changes,
     )
     with engine.begin() as conn:
@@ -374,3 +384,106 @@ def test_owner_rest_routes(wm, monkeypatch):
     assert listing["items"] == [] and [p["id"] for p in listing["purged"]] == [item["id"]]
     assert client.get(f"/v1/working-memory/{wm.bots['protected']}/{wm.user}").status_code == 403
     assert client.delete(f"{base}/not-a-uuid").status_code == 404
+
+
+# Signed-capability, concurrency and stored-setting cases contributed by Loopy
+# during the TASK-1281 r1 implementation review.
+
+def _signer(monkeypatch) -> Fernet:
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(codec, "_get_fernet", lambda: signer)
+    return signer
+
+
+def _tool_as(token: str, call) -> dict:
+    """Run one tool coroutine factory under ``token`` as the turn capability."""
+    binding = task_association.set_current_task_turn_capability(token)
+    try:
+        return json.loads(asyncio.run(call()))
+    finally:
+        task_association.reset_current_task_turn_capability(binding)
+
+
+def _mint(ctx: TaskTurnContext) -> str:
+    return codec.mint_task_turn_context(
+        session_id=ctx.session_id, turn_id=ctx.turn_id, trigger_message_id=ctx.trigger_message_id,
+        bot_id=ctx.bot_id, user_id=ctx.user_id,
+    )
+
+
+def test_tools_bind_signed_identity_and_refuse_other_users_items(wm, monkeypatch):
+    _signer(monkeypatch)
+    monkeypatch.setattr(tools, "_service", lambda: wm.service)
+    ctx = wm.context()
+    token = _mint(ctx)
+
+    item = _tool_as(token, lambda: tools.working_memory_create(objective="signed fixture", idempotency_key=_key()))["item"]
+    listing = _tool_as(token, lambda: tools.working_memory_list())
+    assert [row["id"] for row in listing["items"]] == [item["id"]]
+    changed = _tool_as(token, lambda: tools.working_memory_update(item_id=item["id"], expected_revision=1, checkpoint="proof"))
+    assert changed["item"]["revision"] == 2
+    row = wm.changes(item["id"])[-1]
+    assert (row["bot_id"], row["user_id"], row["session_id"], row["turn_id"]) == (
+        ctx.bot_id, ctx.user_id, ctx.session_id, ctx.turn_id,
+    )
+
+    other = _mint(wm.context(user="other-user"))
+    refused = _tool_as(other, lambda: tools.working_memory_update(
+        item_id=item["id"], expected_revision=2, objective="intrusion"))
+    assert refused["error"] == "not_found"
+    assert _tool_as(other, lambda: tools.working_memory_list())["items"] == []
+    assert wm.service.bot_list(ctx)["items"][0]["objective"] == "signed fixture"
+
+
+class _RecordingService:
+    """Stands in for the service so a test sees exactly which calls got through."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        def record(*_args, **_kwargs):
+            self.calls.append(name)
+            return {"reached": name}
+        return record
+
+
+def test_invalid_or_expired_capability_never_reaches_the_service(wm, monkeypatch):
+    signer = _signer(monkeypatch)
+    service = _RecordingService()
+    monkeypatch.setattr(tools, "_service", lambda: service)
+    # A structurally valid payload, so only the Fernet TTL can refuse the expired copy.
+    payload = signer.decrypt(_mint(wm.context()).encode())
+    expired = signer.encrypt_at_time(payload, int(time.time()) - codec.TASK_TURN_CONTEXT_TTL_SECONDS - 1).decode()
+    current = signer.encrypt_at_time(payload, int(time.time())).decode()
+    calls = (
+        lambda: tools.working_memory_list(),
+        lambda: tools.working_memory_create(objective="x", idempotency_key=_key()),
+        lambda: tools.working_memory_update(item_id=_key(), expected_revision=1),
+    )
+    for token in ("invalid", signer.encrypt(b"not-json").decode(), expired):
+        for call in calls:
+            assert _tool_as(token, call)["error"] == "unauthorized"
+    assert service.calls == []
+
+    # Positive control: the same payload signed now reaches the service.
+    for call in calls:
+        assert "reached" in _tool_as(current, call)
+    assert service.calls == ["bot_list", "bot_create", "bot_update"]
+
+
+def test_same_key_concurrent_creates_make_one_write(wm):
+    ctx, key = wm.context(), _key()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: wm.service.bot_create(ctx, {"objective": "one"}, key), range(16)))
+    assert sum(not result["replayed"] for result in results) == 1
+    assert len({result["item"]["id"] for result in results}) == 1
+    assert wm.version() == 1
+    assert len(wm.changes(results[0]["item"]["id"])) == 1
+
+
+@pytest.mark.parametrize("value", [1, "true", "false", {}, None])
+def test_non_boolean_stored_setting_fails_closed(wm, value):
+    wm.settings.set_value("bot", wm.bots["on"], KEY, value)
+    assert _code(lambda: wm.service.bot_create(wm.context(), {"objective": "refuse"}, _key())) == "not_enabled"
+    assert wm.version() is None
