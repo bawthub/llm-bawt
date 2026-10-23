@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from ...agent_context import AgentContextStore, normalize_session_policy
 from ...bots import BotManager
+from ...model_catalog import bot_model_ref
 from ..dependencies import get_service
 
 router = APIRouter()
@@ -32,8 +33,8 @@ def _resolve(bot_id: str, user: str | None):
         raise HTTPException(status_code=404, detail="Bot not found")
     user_id = (user or getattr(service.config, "DEFAULT_USER", "nick") or "nick").strip()
     backend = bot.agent_backend or bot.harness
-    model_alias = bot.default_model
-    ceiling = service.config.get_model_context_window(model_alias) if model_alias else None
+    model_ref = bot_model_ref(service.config, bot)
+    ceiling = service.config.get_model_context_window(model_ref) if model_ref else None
     return service, bot, user_id, backend, ceiling
 
 

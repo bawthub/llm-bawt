@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from llm_bawt.model_catalog import AccessPath, ModelCatalog, ModelEndpoint, ModelIdentity
 from llm_bawt.service.session_lifecycle.intent import (
     Continuity, NewSessionResult, Origin, Outcome, Stage,
 )
@@ -135,3 +136,40 @@ def test_context_continue_is_not_a_reset(api):
     response = post(api, "context", policy="continue")
     assert response.status_code == 422
     api.submit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("endpoint_id, expected_ceiling", [(18, 372000), (19, 200000)])
+def test_agent_context_routes_use_bot_endpoint_when_model_key_is_ambiguous(
+    api, monkeypatch, endpoint_id, expected_ceiling,
+):
+    from llm_bawt.agent_context import AgentContextStore
+
+    model = ModelIdentity(
+        12, "claude-opus-5-5", "anthropic", "Opus 5.5", default_context_window=200000,
+    )
+    oauth = AccessPath(1, "anthropic-oauth", "anthropic", "anthropic-messages", None, "oauth")
+    api_key = AccessPath(2, "anthropic-api", "anthropic", "anthropic-messages", None, "api-key")
+    catalog = ModelCatalog([
+        ModelEndpoint(18, model, oauth, model.key, context_window_override=372000),
+        ModelEndpoint(19, model, api_key, model.key),
+    ])
+    api.bot.default_model = model.key
+    api.bot.endpoint_id = endpoint_id
+    api.service.config.ensure_model_catalog = lambda: catalog
+
+    def context_window(ref):
+        endpoint = catalog.resolve_endpoint(ref)
+        return endpoint.context_window_override or endpoint.model.default_context_window
+
+    api.service.config.get_model_context_window = context_window
+    monkeypatch.setattr(AgentContextStore, "health", lambda self, **kwargs: kwargs)
+
+    health = api.client.get("/v1/agent-context/health?bot_id=review-bot&user=caller-owner")
+    assert health.status_code == 200, health.text
+    assert health.json()["configured_ceiling"] == expected_ceiling
+    assert health.json()["user_id"] == "caller-owner"
+
+    reset = post(api, "context")
+    assert reset.status_code == 200, reset.text
+    api.submit.assert_awaited_once()
+    no_adapter_side_effects(api)
