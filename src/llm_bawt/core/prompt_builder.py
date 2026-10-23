@@ -58,6 +58,7 @@ class SectionPosition:
     TOOLS = 4
     CLIENT_CONTEXT = 5  # System context passed by the calling client
     GLOBAL_INSTRUCTIONS = 6  # Global behavioral instructions for all bots
+    WORKING_MEMORY = 7  # TASK-1281: the agent's working-memory list, late in the prompt
     CUSTOM = 50  # For bot-specific additions
 
 

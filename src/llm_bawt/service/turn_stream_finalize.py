@@ -9,6 +9,7 @@ from typing import Any
 from .chat_stream_worker import put_queue_item_threadsafe
 from .logging import get_service_logger
 from .turn_stream_context import TurnStreamContext
+from ..working_memory.session_state import bump_after_finalize
 
 log = get_service_logger(__name__)
 
@@ -329,6 +330,11 @@ class TurnStreamFinalizer:
                 ctx.turn_log_id,
                 end_reason_err,
             )
+
+        # TASK-1281 (WORKING_MEMORY.md 9.4): after the turn row holds the
+        # final usage, a successful compaction bumps the session's
+        # compaction_gen in its own transaction. Never raises.
+        bump_after_finalize(ctx, self._usage_so_far())
 
         # Cancellation may win while response persistence is running. Publish
         # the outcome that won the row lock, never a stale local success guess.

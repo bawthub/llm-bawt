@@ -1,11 +1,13 @@
-"""Private PostgreSQL proof for working memory slice 1 (TASK-1281, docs/WORKING_MEMORY.md).
+"""Private PostgreSQL proof for working memory slices 1 and 2a (TASK-1281, docs/WORKING_MEMORY.md).
 
 Store, trusted bot path, owner REST path and setting validation against the
-real schema. Protected-bot cases use a synthetic slug, never Mira's data.
+real schema; then the section render, change notice, session state and health
+report. Protected-bot cases use a synthetic slug, never Mira's data.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import threading
 import time
@@ -32,8 +34,13 @@ from llm_bawt.service.schemas import (
 )
 from llm_bawt.task_turn_context import TaskTurnContext
 from llm_bawt.utils.db import get_shared_engine
+from llm_bawt.working_memory import health as wm_health
+from llm_bawt.working_memory import metrics, prompts, session_state
+from llm_bawt.working_memory import notice as notice_module
 from llm_bawt.working_memory import policy as policy_module
 from llm_bawt.working_memory.contracts import WorkingMemoryError
+from llm_bawt.working_memory.notice import prepare_notice
+from llm_bawt.working_memory.render import render_section
 from llm_bawt.working_memory.service import WorkingMemoryService
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -487,3 +494,365 @@ def test_non_boolean_stored_setting_fails_closed(wm, value):
     wm.settings.set_value("bot", wm.bots["on"], KEY, value)
     assert _code(lambda: wm.service.bot_create(wm.context(), {"objective": "refuse"}, _key())) == "not_enabled"
     assert wm.version() is None
+
+
+# -- slice 2a: section, notice, session state, health (8.1, 9, 13, 14) ---------
+
+@pytest.fixture
+def ses(wm):
+    """Synthetic session rows for the slice-2a bots, removed afterwards."""
+    made: list[str] = []
+
+    def new(*, bot: str = wm.bots["on"], status: str = "archived", metadata: dict | None = None) -> str:
+        sid = str(uuid.uuid4())
+        with wm.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO sessions (id, bot_id, user_id, status, session_metadata)"
+                " VALUES (:id, :bot, :user, :status, CAST(:meta AS jsonb))"
+            ), {"id": sid, "bot": bot, "user": wm.user, "status": status,
+                "meta": json.dumps(metadata) if metadata is not None else None})
+        made.append(sid)
+        return sid
+
+    def metadata(sid: str) -> dict:
+        with wm.engine.connect() as conn:
+            return conn.execute(text("SELECT session_metadata FROM sessions WHERE id=:s"), {"s": sid}).scalar() or {}
+
+    def ctx(sid: str):
+        return dataclasses.replace(wm.context(), session_id=sid)
+
+    metrics.reset()
+    yield SimpleNamespace(new=new, metadata=metadata, ctx=ctx)
+    metrics.reset()
+    with wm.engine.begin() as conn:
+        conn.execute(text("DELETE FROM sessions WHERE id = ANY(:ids)"), {"ids": made})
+
+
+def _pin(version, state="ok"):
+    return {"working_memory": {"v": 1, "version": version, "state": state}}
+
+
+def _decision(*, pin="pin-1", boundary=False, unverified=False, pinned=None, candidate=None):
+    return SimpleNamespace(pin_turn_id=pin, is_boundary=boundary, snapshot_unverified=unverified,
+                           pinned_sections=pinned, candidate_sections=candidate)
+
+
+def _notice(wm, sid, decision, *, eligible=True, bot=None):
+    return prepare_notice(wm.engine, bot_id=bot or wm.bots["on"], user_id=wm.user, session_id=sid,
+                          decision=decision, eligible=eligible)
+
+
+def test_session_state_writes_merge_siblings_under_the_row_lock(wm, ses):
+    pin = {"turn_id": "t-pin", "sha256": "abc"}
+    sid = ses.new(metadata={"system_prompt_pin": pin, "other": 1,
+                            "working_memory": {"mode": "pinned", "notice": {"version": 2}}})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: session_state.bump_compaction_gen(wm.engine, sid), range(20)))
+    meta = ses.metadata(sid)
+    assert meta["system_prompt_pin"] == pin and meta["other"] == 1
+    assert meta["working_memory"] == {"mode": "pinned", "notice": {"version": 2}, "compaction_gen": 20}
+    assert session_state.bump_compaction_gen(wm.engine, str(uuid.uuid4())) is None  # no row, no write
+
+
+def test_concurrent_notice_marks_and_bumps_keep_each_others_keys(wm, ses):
+    sid = ses.new(metadata={"keep": True})
+    item = wm.service.bot_create(wm.context(), {"objective": "x"}, _key())["item"]
+    pending = threading.Barrier(2)
+
+    def mark(n):
+        wm.service.owner_update(wm.bots["on"], wm.user, item["id"], n + 1, {"priority": n})
+        pending.wait()
+        return _notice(wm, sid, _decision(pin=f"pin-{n}", pinned=_pin(0)))
+
+    def bump(_):
+        pending.wait()
+        return session_state.bump_compaction_gen(wm.engine, sid)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for n in range(6):
+            list(pool.map(lambda f: f(n), (mark, bump)))
+    state = ses.metadata(sid)
+    assert state["keep"] is True
+    assert state["working_memory"]["compaction_gen"] == 6
+    assert state["working_memory"]["notice"]["pin_turn_id"] == "pin-5"
+
+
+def test_floor_only_write_leaves_the_notice_bytes_alone(wm, ses):
+    marked = {"version": 5, "compaction_gen": 0, "pin_turn_id": "pin-1", "at": "2026-10-23T00:00:00+00:00"}
+    sid = ses.new(metadata={"working_memory": {"notice": marked}})
+    # Unverified re-pin: the floor changes, nothing external -> no notice.
+    assert _notice(wm, sid, _decision(unverified=True, pinned=_pin(3), candidate=_pin(5))) is None
+    state = ses.metadata(sid)["working_memory"]
+    assert state["unverified_floor"] == {"min_version": 3, "may_be_missing": False}
+    assert state["notice"] == marked
+    # Ineligible and boundary turns fold too, without touching the notice.
+    assert _notice(wm, sid, _decision(boundary=True, unverified=True, pinned=_pin(1), candidate=_pin(5))) is None
+    state = ses.metadata(sid)["working_memory"]
+    assert state["unverified_floor"]["min_version"] == 1 and state["notice"] == marked
+    # A verified kept turn clears the floor; still no notice write.
+    assert _notice(wm, sid, _decision(pinned=_pin(5)), eligible=False) is None
+    state = ses.metadata(sid)["working_memory"]
+    assert "unverified_floor" not in state and state["notice"] == marked
+
+
+def test_render_states_and_order(wm, ses):
+    sid = ses.new()
+    on = wm.bots["on"]
+    empty = render_section(wm.engine, bot_id=on, user_id=wm.user, session_id=sid)
+    assert (empty.state, empty.version) == ("empty", 0)
+
+    ctx = ses.ctx(sid)
+    planned = wm.service.bot_create(ctx, {"objective": "planned one"}, _key())["item"]
+    blocked = wm.service.bot_create(ctx, {"objective": "blocked one", "status": "blocked"}, _key())["item"]
+    active = wm.service.bot_create(ctx, {"objective": "active one", "status": "active",
+                                         "next_action": "do it"}, _key())["item"]
+    wm.service.owner_update(on, wm.user, blocked["id"], 1, {"blockers": ["review"]})
+    done = wm.service.bot_create(ctx, {"objective": "finished"}, _key())["item"]
+    wm.service.bot_update(ctx, done["id"], 1, {"status": "done"})
+
+    out = render_section(wm.engine, bot_id=on, user_id=wm.user, session_id=sid)
+    assert (out.state, out.version) == ("ok", wm.version())
+    lines = [json.loads(line) for line in out.text.split("\n") if line.startswith("{")]
+    assert [line["id"] for line in lines] == [active["id"], blocked["id"], planned["id"]]
+    assert lines[0]["next_action"] == "do it" and "other_session" not in lines[0]
+    assert lines[1]["other_session"] is True  # last changed by the owner, outside this session
+    assert "revision" not in lines[2]  # planned renders as a title
+
+    # Same state, same bytes.
+    again = render_section(wm.engine, bot_id=on, user_id=wm.user, session_id=sid)
+    assert again.text == out.text
+
+    suppressed = ses.new(metadata={"working_memory": {"mode": "suppressed"}})
+    s = render_section(wm.engine, bot_id=on, user_id=wm.user, session_id=suppressed)
+    assert (s.text, s.version, s.state) == (None, None, "suppressed")
+    for bot in (wm.bots["off"], wm.bots["codex"], wm.bots["protected"]):
+        assert render_section(wm.engine, bot_id=bot, user_id=wm.user, session_id=sid) is None
+
+
+def test_notice_fires_on_external_changes_once(wm, ses):
+    sid, other = ses.new(), ses.new()
+    on = wm.bots["on"]
+    item = wm.service.bot_create(ses.ctx(sid), {"objective": "x"}, _key())["item"]
+    pinned = render_section(wm.engine, bot_id=on, user_id=wm.user, session_id=sid)
+    kept = _decision(pinned={"working_memory": pinned.meta})
+
+    assert _notice(wm, sid, kept) is None  # nothing external
+    wm.service.bot_update(ses.ctx(sid), item["id"], 1, {"priority": 1})
+    assert _notice(wm, sid, kept) is None  # own write
+    assert "notice" not in ses.metadata(sid).get("working_memory", {})
+
+    wm.service.owner_update(on, wm.user, item["id"], 2, {"priority": 2})  # REST edit
+    assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+    assert _notice(wm, sid, kept) is None  # not the one after
+    assert ses.metadata(sid)["working_memory"]["notice"]["version"] == wm.version()
+
+    wm.service.bot_update(ses.ctx(other), item["id"], 3, {"priority": 3})  # another session
+    assert _notice(wm, sid, kept, eligible=False) is None  # maintenance/scheduler: stays pending
+    assert _notice(wm, sid, _decision(boundary=True, pinned=kept.pinned_sections)) is None
+    assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+    assert metrics.snapshot(on)["notices_fired"] == 2
+
+
+def test_notice_mark_is_best_effort_and_the_loss_window_holds(wm, ses):
+    # 9.3/OI-R2: marked at prepare; if the turn dies, the notice is not re-sent
+    # until the next external change (or a boundary/compaction).
+    sid = ses.new()
+    on = wm.bots["on"]
+    item = wm.service.bot_create(wm.context(), {"objective": "x"}, _key())["item"]
+    kept = _decision(pinned=_pin(0))
+    assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+    # The turn carrying it is lost before the model sees it: nothing re-sends.
+    assert _notice(wm, sid, kept) is None
+    assert _notice(wm, sid, kept) is None
+    wm.service.owner_update(on, wm.user, item["id"], 1, {"priority": 1})
+    assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+
+
+def test_compaction_rearms_but_an_earlier_one_does_not(wm, ses):
+    sid = ses.new()
+    wm.service.bot_create(wm.context(), {"objective": "x"}, _key())
+    kept = _decision(pinned=_pin(0))
+    session_state.bump_compaction_gen(wm.engine, sid)  # finalized before the mark: counted in g
+    assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+    assert ses.metadata(sid)["working_memory"]["notice"]["compaction_gen"] == 1
+    assert _notice(wm, sid, kept) is None
+    session_state.bump_compaction_gen(wm.engine, sid)  # compacted after the mark
+    assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+    assert _notice(wm, sid, kept) is None
+    # A new pin episode also starts over.
+    assert _notice(wm, sid, _decision(pin="pin-2", pinned=_pin(0))) == prompts.DEFAULT_NOTICE
+
+
+def test_missing_section_notices_once_per_episode(wm, ses):
+    # Enable mid-session / legacy pin / unavailable at the boundary: one notice, no writes needed.
+    sid = ses.new()
+    for pinned in (None, _pin(None, "unavailable")):
+        decision = _decision(pin=f"pin-{uuid.uuid4().hex[:6]}", pinned=pinned)
+        assert _notice(wm, sid, decision) == prompts.DEFAULT_NOTICE
+        assert _notice(wm, sid, decision) is None
+
+
+def test_unverified_floor_counterexample_across_turns(wm, ses):
+    # r12 S1: S absent, C1 v3, auto-compaction, C2 v5 -> P = 3, so a change at v4 notices.
+    sid = ses.new()
+    ctx = ses.ctx(sid)
+    item = wm.service.bot_create(ctx, {"objective": "x"}, _key())["item"]  # v1, own
+    wm.service.bot_update(ctx, item["id"], 1, {"priority": 1})              # v2, own
+    wm.service.bot_update(ctx, item["id"], 2, {"priority": 2})              # v3, own
+    first = _decision(pin="p1", unverified=True, pinned=None, candidate=_pin(3))
+    assert _notice(wm, sid, first) == prompts.DEFAULT_NOTICE  # missing S -> one notice
+    wm.service.owner_update(wm.bots["on"], wm.user, item["id"], 3, {"priority": 4})  # v4, external
+    wm.service.bot_update(ctx, item["id"], 4, {"priority": 5})                      # v5, own
+    # Same episode, N = 3: only the folded floor (3, not C2's 5) makes v4 count.
+    second = _decision(pin="p1", unverified=True, pinned=None, candidate=_pin(5))
+    assert _notice(wm, sid, second) == prompts.DEFAULT_NOTICE
+    assert _notice(wm, sid, second) is None
+    assert ses.metadata(sid)["working_memory"]["unverified_floor"] == {"min_version": 3, "may_be_missing": True}
+
+
+def test_excluded_bots_and_suppressed_sessions_get_no_notice_and_no_write(wm, ses):
+    for bot in (wm.bots["off"], wm.bots["codex"], wm.bots["protected"]):
+        sid = ses.new(bot=bot, metadata={"x": 1})
+        assert _notice(wm, sid, _decision(pinned=None), bot=bot) is None
+        assert ses.metadata(sid) == {"x": 1}
+    sid = ses.new(metadata={"working_memory": {"mode": "suppressed"}})
+    assert _notice(wm, sid, _decision(pinned=None)) is None
+    assert ses.metadata(sid) == {"working_memory": {"mode": "suppressed"}}
+    assert _notice(wm, str(uuid.uuid4()), _decision(pinned=None)) is None  # no session row
+
+
+def test_notice_storage_failure_logs_and_counts(wm, ses, monkeypatch):
+    sid = ses.new()
+
+    def down(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(notice_module, "read_state", down)
+    assert _notice(wm, sid, _decision(pinned=None)) is None
+    assert metrics.snapshot(wm.bots["on"])["notice_failures"] == 1
+
+
+def test_health_report_counts_without_item_text(wm, ses, monkeypatch):
+    on = wm.bots["on"]
+    ctx = wm.context()
+    keep = wm.service.bot_create(ctx, {"objective": "secret objective"}, _key())["item"]
+    gone = wm.service.bot_create(ctx, {"objective": "finished"}, _key())["item"]
+    wm.service.bot_update(ctx, gone["id"], 1, {"status": "done"})
+    soft = wm.service.bot_create(ctx, {"objective": "soft"}, _key())["item"]
+    wm.service.owner_delete(on, wm.user, soft["id"], hard=False)
+    version = wm.version()
+    ses.new(status="active", metadata={"system_prompt_pin": {"sections": _pin(version - 2)}})
+    ses.new(metadata={"system_prompt_pin": {"sections": _pin(0)}})  # archived: not counted
+    metrics.record_notice(on)
+
+    report = wm_health.health_report(wm.engine)
+    assert "secret objective" not in json.dumps(report) and keep["id"] not in json.dumps(report)
+    mine = {bot["bot_id"]: bot for bot in report["bots"] if bot["bot_id"] in set(wm.bots.values())}
+    assert set(mine) == {on, wm.bots["codex"]}  # stored true; never the protected or off bot
+    assert mine[on]["allowed"] is True and mine[wm.bots["codex"]]["allowed"] is False
+    assert mine[on]["items"] == {"open": 1, "archived": 1, "removed": 1}
+    assert mine[on]["max_namespace_version"] == version
+    assert mine[on]["sessions"] == {"pinned_sessions": 1, "behind": 1, "oldest_lag": 2,
+                                    "without_section_version": 0}
+    assert mine[on]["since_start"]["notices_fired"] == 1
+
+    monkeypatch.setattr(wm_routes, "get_service", lambda: SimpleNamespace(config=wm.settings.config))
+    app = FastAPI()
+    app.include_router(wm_routes.router)
+    client = TestClient(app)
+    served = client.get("/v1/working-memory/health").json()
+    assert {bot["bot_id"] for bot in served["bots"]} >= {on, wm.bots["codex"]}
+
+    monkeypatch.setattr(wm_health, "health_report", lambda engine: 1 / 0)
+    response = client.get("/v1/working-memory/health")
+    assert (response.status_code, response.json()) == (503, {"status": "unavailable", "bots": []})
+
+
+# -- Loopy 2a r1 regressions (written by Loopy, adapted) -----------------------
+
+def test_disabled_fallback_then_compaction_notices_on_reenable(wm, ses):
+    """B1: a sectionless fallback leaves no candidate_sections, yet the harness may adopt it."""
+    from llm_bawt.service.system_prompt_pin import SystemPromptPinStore
+    from llm_bawt.service.turn_logs import TurnLogStore
+    from llm_bawt.working_memory.turn import WorkingMemoryTurn
+
+    TurnLogStore(wm.settings.config)
+    sid = ses.new()
+    store = SystemPromptPinStore(wm.engine)
+    turns: list[str] = []
+
+    def resolve(body, sections, cold=False):
+        tid = "turn-" + uuid.uuid4().hex
+        turns.append(tid)
+        with wm.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt)"
+                " VALUES (:id, now(), '/test', true, :bot, :user, 'ok', 'hi')"
+            ), {"id": tid, "bot": wm.bots["on"], "user": wm.user})
+        decision = store.resolve(session_id=sid, turn_id=tid, storage_bot=wm.bots["on"],
+                                 rendered=body, cold_start=cold, sections=sections)
+        if decision.is_boundary:
+            store.confirm(session_id=sid, turn_id=tid)
+        return decision
+
+    try:
+        original = resolve("WITH WORKING MEMORY", _pin(0, "empty"), cold=True)
+        wm.settings.set_value("bot", wm.bots["on"], KEY, False)
+        with wm.engine.begin() as conn:
+            conn.execute(text("UPDATE turn_logs SET request_json='{}' WHERE id=:id"), {"id": original.pin_turn_id})
+        ctx = SimpleNamespace(
+            is_agent_backend=True, bridge_reset_action=None, bot_id=wm.bots["on"], user_id=wm.user,
+            thread_binding={"thread_session_id": sid}, request=SimpleNamespace(), user_prompt="hi",
+            llm_bawt=SimpleNamespace(client=SimpleNamespace(_backend=SimpleNamespace(pins_system_prompt=True))),
+            svc=SimpleNamespace(_turn_log_store=SimpleNamespace(engine=wm.engine)),
+        )
+        disabled = WorkingMemoryTurn.begin(ctx)
+        assert disabled.sections is None
+        fallback = resolve("NO WORKING MEMORY", disabled.sections)
+        assert fallback.snapshot_unverified
+        # The CLI's auto-compaction adopts the fallback text, which has no section.
+        session_state.bump_compaction_gen(wm.engine, sid)
+        wm.settings.set_value("bot", wm.bots["on"], KEY, True)
+        kept = resolve("WITH WORKING MEMORY AGAIN", _pin(0, "empty"))
+        assert not kept.is_boundary and kept.text == "NO WORKING MEMORY"
+        assert _notice(wm, sid, kept) == prompts.DEFAULT_NOTICE
+    finally:
+        wm.settings.set_value("bot", wm.bots["on"], KEY, True)
+        with wm.engine.begin() as conn:
+            conn.execute(text("DELETE FROM turn_logs WHERE id = ANY(:ids)"), {"ids": turns})
+
+
+def test_concurrent_marks_do_not_exhaust_the_connection_pool(wm, ses, monkeypatch):
+    """S1: a mark holding its session row reads external changes on its own connection."""
+    from sqlalchemy import create_engine
+
+    from llm_bawt.utils.db import DEFAULT_MAX_OVERFLOW, DEFAULT_POOL_SIZE
+    from llm_bawt.working_memory.store import WorkingMemoryStore
+
+    count = DEFAULT_POOL_SIZE + DEFAULT_MAX_OVERFLOW
+    engine = create_engine(wm.engine.url, pool_size=DEFAULT_POOL_SIZE,
+                           max_overflow=DEFAULT_MAX_OVERFLOW, pool_timeout=0.3)
+    WorkingMemoryStore(engine).ensure_schema()
+    sessions = [ses.new() for _ in range(count)]
+    wm.service.bot_create(wm.context(), {"objective": "external change"}, _key())
+    original = WorkingMemoryStore.external_changes
+    all_locked = threading.Barrier(count)
+    local = threading.local()
+
+    def synchronized_read(self, *args, **kwargs):
+        local.calls = getattr(local, "calls", 0) + 1
+        if local.calls == 2:  # pre-check done; every worker now holds its session row
+            all_locked.wait(timeout=5)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(WorkingMemoryStore, "external_changes", synchronized_read)
+    monkeypatch.setattr(notice_module, "notice_text", lambda bot: prompts.DEFAULT_NOTICE)
+    try:
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(lambda sid: prepare_notice(
+                engine, bot_id=wm.bots["on"], user_id=wm.user, session_id=sid,
+                decision=_decision(pinned=_pin(0)), eligible=True), sessions))
+        assert results == [prompts.DEFAULT_NOTICE] * count
+        assert metrics.snapshot(wm.bots["on"])["notice_failures"] == 0
+    finally:
+        engine.dispose()

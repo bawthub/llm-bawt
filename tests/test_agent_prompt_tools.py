@@ -24,6 +24,8 @@ class _PromptProbe:
     _prompt_bot_type = BaseLLMBawt._prompt_bot_type
     _walk_manifest = BaseLLMBawt._walk_manifest
     _assemble_system_builder = BaseLLMBawt._assemble_system_builder
+    _sec_working_memory = BaseLLMBawt._sec_working_memory
+    _working_memory_section = None
 
     def __init__(self, *, model_type: str, harness: str):
         self.model_definition = {"type": model_type, "harness": harness}

@@ -11,3 +11,9 @@ def is_new_command(message: str | None) -> bool:
     """Recognize /new as a complete leading token, not /newspaper or mentions."""
     parts = (message or "").lstrip().split(maxsplit=1)
     return bool(parts and parts[0] == "/new")
+
+
+def is_clear_command(message: str | None) -> bool:
+    """Recognize /clear as a complete leading token, not /clearly or mentions."""
+    parts = (message or "").lstrip().split(maxsplit=1)
+    return bool(parts and parts[0] == "/clear")

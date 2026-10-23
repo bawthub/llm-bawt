@@ -116,7 +116,7 @@ An append-only, content-free event log: `seq` bigserial, `bot_id`, `user_id`, `n
 - **Unverified floor** [r12, Loopy r11 S1]. `sessions.session_metadata.working_memory.unverified_floor` = `{min_version, may_be_missing}` while the session's pin is unverified (section 9.2).
 - **The pinned section's version.** Stored on TASK-1318's pin pointer as `sections.working_memory`, plus `candidate_sections.working_memory` while the pin is unverified (section 8.2). Accepted and implemented by Byte: OI-R1.
 - **Runtime settings** (`setting_definitions.py` SETTING_DEFINITIONS): `working_memory_enabled`, bot scope only, default false (section 7).
-- **Prompt registry keys:** `agents.working_memory.section` (header, usage framing, empty and unavailable lines), `agents.working_memory.notice` (the notice line), `agents.working_memory.scheduled_note` (OI-R5). No hardcoded prompt text. None exist at `9e874dc`.
+- **Prompt registry keys:** `agents.working_memory.section` (header, usage framing, empty and unavailable lines), `agents.working_memory.notice` (the notice line), `agents.working_memory.scheduled_note` (OI-R5). No hardcoded prompt text. None exist at `9e874dc`. *Implementation (slice 2a):* the section key is split three ways, `agents.working_memory.section` (header and framing, with an `{items}` slot), `agents.working_memory.section_empty` and `agents.working_memory.section_unavailable`, so each line is edited on its own and a section override can't drop the empty/unavailable distinction (section 14). Five keys in all, each with a seed in `working_memory/prompts.py` and a registry definition.
 
 ## 6. Tool and REST contract
 
@@ -224,12 +224,13 @@ An ineligible turn leaves the notice pending for the next eligible one.
 - `F` = the session's `unverified_floor`, if any (below).
 - `P` = the lowest version among the present entries of `S`, `C` and `F.min_version`, or −1 if none is present.
 - `missing` = true when `S` is missing, or a candidate exists and `C` is missing, or `F.may_be_missing` is true.
+- [2a, Loopy 2a r1 B1] Every `snapshot_unverified` decision has a candidate, even when the pointer stored no `candidate_sections`. A fallback rendered without the section (working memory disabled or refused for the bot on that turn) stores none, and an auto-compaction can still adopt those bytes. Its `C` is missing.
 
 With a verified pin this is just `S`. With an unverified one it is the conservative reading of every snapshot the harness might hold.
 
 **Unverified floor** [r12, Loopy r11 S1]. One fixed-size record, not a history. On every turn with a decision, boundary turns included:
 
-- if the decision has `candidate_sections`, fold `S` and `C` into `F`: `min_version` = the lowest present version among `F.min_version`, `S` and `C`; `may_be_missing` = `F.may_be_missing`, or `S` missing, or `C` missing;
+- if the decision has a candidate (above), fold `S` and `C` into `F`: `min_version` = the lowest present version among `F.min_version`, `S` and `C`; `may_be_missing` = `F.may_be_missing`, or `S` missing, or `C` missing;
 - if the decision is a kept turn (`is_boundary` False) and not `snapshot_unverified`, the confirmed pin is verified: delete `F`.
 
 A boundary turn's decision is a staged move that may never be confirmed. Folding it anyway only lowers the floor or sets the flag, so the error is an extra notice, never a lost one. Clearing happens only on a kept turn, which reads the confirmed pointer. `P` and `missing` use `F` after this turn's fold or clear. The fold and the clear are written in the notice-mark session-row transaction (9.3), which runs when the notice fires or `F` changes. If that write fails, the turn logs it and the session falls back to the pointer's own reading, which is the limit stated in 8.2.
@@ -243,7 +244,7 @@ Threshold `T = max(P, N)`, treating NULL as −1. The notice fires when either h
 1. a change exists with `ns_version > T` and `session_id IS DISTINCT FROM` this session (an external change; own writes in this session don't count);
 2. `missing` is true, the policy currently allows the section, and `N` is NULL. This covers an enable mid-session, a legacy pin, a boundary render that hit a storage failure, and Loopy's disable → cold boundary → re-enable sequence.
 
-The check is one indexed query on `(bot_id, user_id, ns_version)`. A storage failure skips the notice and logs; it never blocks the turn.
+The check is one indexed query on `(bot_id, user_id, ns_version)`. A storage failure skips the notice and logs; it never blocks the turn. [2a, Loopy 2a r1 S1] It is one statement returning the external maximum and the namespace version, so both come from one snapshot. Inside the notice mark (9.3) it runs on the mark's own connection and transaction, so a mark that holds its session row never checks out a second pooled connection.
 
 ### 9.3 Recording it [r10]
 
@@ -349,7 +350,7 @@ Test: concurrent writers in one namespace get consecutive `ns_version`s in commi
 ## 14. Observability and health
 
 - Tools return "working memory unavailable" on storage failure, distinct from empty.
-- `/health` `working_memory`, per enabled non-protected bot: open, archived and removed counts; namespace version; render failures since start; notices fired since start; the number of active sessions whose pinned version is behind the store, with the oldest lag; and the count of turns where the pin store returned no decision. No item text [L9 OI-19].
+- `/health` `working_memory`, per enabled non-protected bot: open, archived and removed counts; namespace version; render failures since start; notices fired since start; the number of active sessions whose pinned version is behind the store, with the oldest lag; and the count of turns where the pin store returned no decision. No item text [L9 OI-19]. *Implementation (slice 2a):* served at `GET /v1/working-memory/health`, not inside `/health`, which stays the cheap liveness probe. It lists every bot with `working_memory_enabled` stored true (protected bots never), with `allowed` false plus a warning when the read-time policy refuses it; adds notice-write failures to the counters; and counts pinned active sessions without a section version separately. A storage failure returns 503 `unavailable`.
 - Logs: a warning when an enabled bot isn't on claude-code; a warning on a render failure; debug on every notice decision with `P`, `N`, threshold and result.
 
 ## 15. Rollout and rollback
@@ -362,6 +363,8 @@ Test: concurrent writers in one namespace get consecutive `ns_version`s in commi
 - Rollback: unregister tools and routes. Tables stay.
 
 **Slice 2: section, notice, rotate mode.**
+
+*Implementation:* delivered in two commits, 2a (section, notice, compaction-generation bump, health, registry prompts) and 2b (the required `working_memory_mode` on `SessionResetLineage.rotate` and its callers, section 10.1). Until 2b lands every successor is `pinned`, so `include_working_memory=false` has no effect yet.
 
 - Requires TASK-1318 deployed with the `sections` extension (OI-R1) and its B2 stamp fix live (bridge restart, Nick).
 - App only. Working memory itself needs no bridge change, so no bridge restart of its own and no mixed app/bridge version problem (Loopy r9 S2 does not apply).

@@ -98,6 +98,10 @@ class OrchestratorInitializationMixin:
         # history. Set fresh on every turn by the dispatch paths — never
         # sticky across turns on a cached instance.
         self._session_id_override: str | None = None
+        # TASK-1281: this turn's working-memory section text (agent bots the
+        # policy allows; None otherwise). Set fresh every turn by the dispatch
+        # paths, like the session override above.
+        self._working_memory_section: str | None = None
 
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for: '{resolved_model_alias}'")

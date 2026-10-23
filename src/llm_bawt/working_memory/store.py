@@ -125,6 +125,13 @@ _ORDER = (
     " ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'blocked' THEN 1 WHEN 'planned' THEN 2"
     " WHEN 'done' THEN 3 ELSE 4 END, priority ASC NULLS LAST, updated_at DESC, id"
 )
+# One statement is one snapshot, so the two values agree at any isolation level.
+_EXTERNAL_CHANGES = text(
+    "SELECT (SELECT max(ns_version) FROM working_memory_changes"
+    " WHERE bot_id = :bot AND user_id = :user AND ns_version > :after"
+    " AND session_id IS DISTINCT FROM :session),"
+    " (SELECT version FROM working_memory_namespaces WHERE bot_id = :bot AND user_id = :user)"
+)
 
 _schema_guard = SchemaBootstrapGuard()
 
@@ -253,6 +260,58 @@ class WorkingMemoryStore:
                     if authorize is not None:
                         authorize(conn)
                     return self._snapshot(conn, bot, user, where, include_removed)
+
+    def render_snapshot(self, bot_id: str, user_id: str) -> dict[str, Any]:
+        """Open items for the prompt section, from one REPEATABLE READ snapshot (8.1).
+
+        Like :meth:`list_items` for open items, plus each item's
+        ``last_session_id``: the session of its latest change, None for an
+        owner edit. Read-only; takes no lock.
+        """
+        bot, user = normalize_identity(bot_id, user_id)
+        where = ["bot_id = :bot", "user_id = :user", "removed_at IS NULL",
+                 "status IN ('planned', 'active', 'blocked')"]
+        with _storage_errors():
+            self.ensure_schema()
+            with self.engine.connect() as conn:
+                conn = conn.execution_options(isolation_level="REPEATABLE READ")
+                with conn.begin():
+                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                    out = self._snapshot(conn, bot, user, where, False)
+                    ids = [item["id"] for item in out["items"]]
+                    last = {} if not ids else {
+                        str(r["item_id"]): r["session_id"] for r in conn.execute(text(
+                            "SELECT DISTINCT ON (item_id) item_id, session_id FROM working_memory_changes"
+                            " WHERE bot_id = :bot AND user_id = :user AND item_id = ANY(CAST(:ids AS uuid[]))"
+                            " ORDER BY item_id, seq DESC"
+                        ), {"bot": bot, "user": user, "ids": ids}).mappings()
+                    }
+        for item in out["items"]:
+            item["last_session_id"] = last.get(item["id"])
+        return out
+
+    def external_changes(self, bot_id: str, user_id: str, *, after: int, session_id: str,
+                         conn: Connection | None = None) -> tuple[int | None, int]:
+        """``(highest external ns_version above after, namespace version)`` from one snapshot (9.2).
+
+        External means not written in ``session_id``: another session of the
+        bot, or the owner over REST. One statement, so both values come from
+        one snapshot; it takes no lock. With ``conn`` it runs on the caller's
+        connection and transaction (the notice mark, which already holds its
+        session row and must not check out a second pooled connection);
+        without it, on a connection of its own.
+        """
+        bot, user = normalize_identity(bot_id, user_id)
+        params = {"bot": bot, "user": user, "after": int(after), "session": session_id}
+        with _storage_errors():
+            if conn is not None:
+                row = conn.execute(_EXTERNAL_CHANGES, params).one()
+            else:
+                self.ensure_schema()
+                with self.engine.connect() as own:
+                    row = own.execute(_EXTERNAL_CHANGES, params).one()
+        external, version = row
+        return (None if external is None else int(external)), int(version or 0)
 
     @staticmethod
     def _snapshot(conn: Connection, bot: str, user: str, where: list[str], include_removed: bool) -> dict[str, Any]:

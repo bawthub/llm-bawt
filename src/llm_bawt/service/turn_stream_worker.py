@@ -24,6 +24,7 @@ from .turn_stream_finalize import TurnStreamFinalizer
 from .turn_stream_publish import TurnStreamPublishMixin
 from .turn_usage import TurnUsageCoordinator
 from .upstream_status import upstream_status_sse_payload
+from ..working_memory.turn import WorkingMemoryTurn
 
 log = get_service_logger(__name__)
 
@@ -194,6 +195,10 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 agent_context_suffix = append_request_reply_channel_note(
                     ctx.svc, request, agent_context_suffix,
                 )
+            # TASK-1281: this turn's working-memory section (set fresh; None
+            # unless the policy allows the bot) and a scheduler turn's note.
+            working_memory = WorkingMemoryTurn.begin(ctx)
+            agent_context_suffix = working_memory.extend_suffix(agent_context_suffix)
 
             messages = llm_bawt.prepare_messages_for_query(
                 user_prompt,
@@ -219,7 +224,10 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             if is_agent_backend:
                 messages, system_prompt_pin = apply_session_pin(
                     ctx, llm_bawt.client, messages, turn_id=turn_log_id,
+                    sections=working_memory.sections,
                 )
+                # TASK-1281: floor + notice, committed before the command publishes.
+                messages = working_memory.after_pin(messages, system_prompt_pin)
 
             # TASK-215: the "AVATAR ANIMATION: You MUST call trigger_animation"
             # prompt-injection hack has been removed. Animation selection

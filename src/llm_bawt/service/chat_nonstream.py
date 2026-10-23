@@ -377,6 +377,9 @@ class ChatNonStreamMixin:
                 llm_bawt._session_id_override = (
                     _sid.strip() if isinstance(_sid, str) and _sid.strip() else None
                 )
+                # TASK-1281: the section rides stream turns only (where the pin
+                # and notice run); clear any render a stream turn left behind.
+                llm_bawt._working_memory_section = None
 
                 # Resolve the request-local thread binding before seed
                 # assembly. Explicit selection wins; otherwise bind the current

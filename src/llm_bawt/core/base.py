@@ -503,6 +503,16 @@ class BaseLLMBawt(OrchestratorInitializationMixin, ABC):
                     },
                 )
 
+    def _sec_working_memory(self, builder: PromptBuilder, prompt: str) -> None:
+        """TASK-1281 working-memory section, rendered per turn by the dispatch path."""
+        if self._working_memory_section:
+            builder.add_section(
+                "working_memory",
+                self._working_memory_section,
+                position=SectionPosition.WORKING_MEMORY,
+                metadata={"source": "working_memory.render", "gate": "agent_backend & working_memory policy"},
+            )
+
     def describe_effective_config(self, prompt: str = "") -> dict[str, Any]:
         """Inspect the same effective prompt/config path a live turn uses."""
         from .effective_config import describe_effective_config

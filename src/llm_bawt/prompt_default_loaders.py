@@ -157,6 +157,36 @@ def load_media_prompt_expansion_video() -> str:
     return VIDEO_PROMPT_EXPANSION_TEMPLATE
 
 
+def load_working_memory_section() -> str:
+    from .working_memory.prompts import DEFAULT_SECTION
+
+    return DEFAULT_SECTION
+
+
+def load_working_memory_section_empty() -> str:
+    from .working_memory.prompts import DEFAULT_SECTION_EMPTY
+
+    return DEFAULT_SECTION_EMPTY
+
+
+def load_working_memory_section_unavailable() -> str:
+    from .working_memory.prompts import DEFAULT_SECTION_UNAVAILABLE
+
+    return DEFAULT_SECTION_UNAVAILABLE
+
+
+def load_working_memory_notice() -> str:
+    from .working_memory.prompts import DEFAULT_NOTICE
+
+    return DEFAULT_NOTICE
+
+
+def load_working_memory_scheduled_note() -> str:
+    from .working_memory.prompts import DEFAULT_SCHEDULED_NOTE
+
+    return DEFAULT_SCHEDULED_NOTE
+
+
 def load_setup_first_agent_prompt() -> str:
     from .seeding.data import FIRST_AGENT_PROMPT_SEED
 

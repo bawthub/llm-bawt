@@ -5,6 +5,7 @@ editable here, so Nick can clean up after disabling it (7). There is no create.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
@@ -17,6 +18,7 @@ from ...working_memory.service import WorkingMemoryService
 from ..dependencies import get_service
 
 router = APIRouter(prefix="/v1/working-memory", tags=["Working memory"])
+logger = logging.getLogger(__name__)
 
 _STATUS = {
     "invalid_request": 422,
@@ -60,6 +62,20 @@ def _run(operation) -> Any:
         return operation(WorkingMemoryService(get_shared_engine(get_service().config)))
     except WorkingMemoryError as error:
         return JSONResponse(error.as_dict(), status_code=_STATUS.get(error.code, 400))
+
+
+@router.get("/health")
+def health():
+    """Per opted-in bot: counts, versions, counters and behind-pin sessions; no item text (14)."""
+    from ...working_memory.health import health_report
+
+    try:
+        return health_report(get_shared_engine(get_service().config))
+    except WorkingMemoryError as error:
+        return JSONResponse(error.as_dict(), status_code=_STATUS.get(error.code, 400))
+    except Exception:
+        logger.warning("working memory health report failed", exc_info=True)
+        return JSONResponse({"status": "unavailable", "bots": []}, status_code=503)
 
 
 @router.get("/{bot_id}/{user_id}")

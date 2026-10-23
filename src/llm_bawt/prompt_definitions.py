@@ -51,6 +51,11 @@ from .prompt_default_loaders import (
     load_recall_synthesis_system,
     load_self_recap_system,
     load_setup_first_agent_prompt,
+    load_working_memory_notice,
+    load_working_memory_scheduled_note,
+    load_working_memory_section,
+    load_working_memory_section_empty,
+    load_working_memory_section_unavailable,
 )
 
 COMPACT_SUMMARY_KEY = "agents.compaction_summary"
@@ -497,6 +502,64 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "no longer renders {messages} falls back to this prompt's default body; if "
             "that can't render either, the interrupt is refused. Target-bot overrides "
             "supported."
+        )},
+    ),
+    "agents.working_memory.section": PromptDefinition(
+        key="agents.working_memory.section",
+        title="Working Memory: Section",
+        category="agent_execution",
+        required_vars=("items",),
+        loader=load_working_memory_section,
+        metadata={"notes": (
+            "System-prompt section listing a bot's open working-memory items "
+            "(TASK-1281, docs/WORKING_MEMORY.md 8.1). Rendered only for opted-in "
+            "claude-code bots in a pinned session, and frozen into the session's pinned "
+            "prompt until its next boundary. {items} is one JSON line per item, filled by "
+            "plain replacement; a body without {items} falls back to this default. "
+            "Bot overrides supported."
+        )},
+    ),
+    "agents.working_memory.section_empty": PromptDefinition(
+        key="agents.working_memory.section_empty",
+        title="Working Memory: Empty Section",
+        category="agent_execution",
+        loader=load_working_memory_section_empty,
+        metadata={"notes": (
+            "Working-memory section used when the bot has no open items (TASK-1281, 8.1). "
+            "Bot overrides supported."
+        )},
+    ),
+    "agents.working_memory.section_unavailable": PromptDefinition(
+        key="agents.working_memory.section_unavailable",
+        title="Working Memory: Unavailable Section",
+        category="agent_execution",
+        loader=load_working_memory_section_unavailable,
+        metadata={"notes": (
+            "Working-memory section used when storage failed at render time (TASK-1281, "
+            "8.1). It must say the list could not be loaded, never that it is empty. "
+            "Bot overrides supported."
+        )},
+    ),
+    "agents.working_memory.notice": PromptDefinition(
+        key="agents.working_memory.notice",
+        title="Working Memory: Change Notice",
+        category="agent_execution",
+        loader=load_working_memory_notice,
+        metadata={"notes": (
+            "One line appended to the outbound user message of the next started turn "
+            "after working memory changed outside this session (TASK-1281, 9). Never "
+            "stored in chat history. No item content. Bot overrides supported."
+        )},
+    ),
+    "agents.working_memory.scheduled_note": PromptDefinition(
+        key="agents.working_memory.scheduled_note",
+        title="Working Memory: Scheduled Turn Note",
+        category="agent_execution",
+        loader=load_working_memory_scheduled_note,
+        metadata={"notes": (
+            "Added to the outbound message of a scheduler turn for an opted-in bot "
+            "(TASK-1281, OI-R5): scheduled automation should not act on working memory. "
+            "An instruction, not an execution ban. Bot overrides supported."
         )},
     ),
     "setup.first_agent_prompt": PromptDefinition(
