@@ -182,10 +182,60 @@ def test_hook_skips_backends_that_do_not_pin():
     assert out is messages and decision is None
 
 
-def test_hook_skips_bare_reset_and_unbound_turns():
+def test_hook_skips_bare_reset_and_unbound_turns(monkeypatch):
+    marks = []
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary",
+                        lambda self, **kw: marks.append(kw))
+    messages = _messages()
+    assert apply_session_pin(_ctx(binding={}), _Client(), messages, turn_id="t") == (messages, None)
+    assert apply_session_pin(_ctx(binding={}, reset="reset_only"), _Client(), messages, turn_id="t") == (messages, None)
+    assert marks == []  # no session, nothing to mark
+
+
+def test_bare_reset_marks_the_bound_session_and_pins_nothing(monkeypatch):
+    marks = []
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary",
+                        lambda self, **kw: marks.append(kw))
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve",
+                        lambda self, **kw: pytest.fail("a bare reset never reaches a model"))
+    messages = _messages()
+    successor = {"thread_session_id": "successor"}  # /new binds the rotated successor
+    out = apply_session_pin(_ctx(binding=successor, reset="reset_only", prompt="/new"),
+                            _Client(), messages, turn_id="turn-new")
+    assert out == (messages, None)
+    assert marks == [{"session_id": "successor", "turn_id": "turn-new", "resume_id": None}]
+    # Non-pinning backends do nothing at all.
+    apply_session_pin(_ctx(reset="reset_only"), _Client(pins=False), messages, turn_id="t")
+    assert len(marks) == 1
+
+
+def test_bare_reset_marker_failure_fails_open(monkeypatch):
+    def boom(self, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary", boom)
     messages = _messages()
     assert apply_session_pin(_ctx(reset="reset_only"), _Client(), messages, turn_id="t") == (messages, None)
-    assert apply_session_pin(_ctx(binding={}), _Client(), messages, turn_id="t") == (messages, None)
+
+
+def test_hook_passes_the_resume_id_to_resolve(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve",
+                        lambda self, **kw: captured.update(kw))
+    apply_session_pin(_ctx(), _Client(), _messages(), turn_id="t")
+    assert captured["resume_id"] == "resume"
+
+
+@pytest.mark.parametrize("marker, resume, expected", [
+    ({"turn_id": "r", "resume_id": None}, "seeded", True),   # bare /new seeded a new session
+    ({"turn_id": "r", "resume_id": "old"}, "seeded", True),  # same-session reset re-keyed it
+    ({"turn_id": "r", "resume_id": "old"}, "old", False),    # the reset never ran
+    ({"turn_id": "r", "resume_id": None}, None, False),       # no resume id: cold anyway
+    ({"resume_id": None}, "seeded", False),                   # malformed marker
+    ("junk", "seeded", False),
+])
+def test_reset_boundary_needs_a_new_resume_id(marker, resume, expected):
+    assert pin_mod._reset_boundary_applies(marker, resume) is expected
 
 
 def test_hook_replaces_system_messages_with_pinned_bytes(monkeypatch):

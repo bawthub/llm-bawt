@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from llm_bawt.memory.postgresql import MESSAGES_PARENT, PARENT_TABLES, ensure_bot_partitions, partition_name
 from llm_bawt.service.system_prompt_pin import (
+    BOUNDARY_KEY,
     COLD_START,
     COMPACTION,
     LEGACY_ADOPT,
@@ -68,11 +69,11 @@ class Rig:
             })
         return turn_id
 
-    def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True):
+    def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True, resume=None):
         """Resolve a turn; ``dispatched`` models the bridge's first output confirming it."""
         decision = self.store.resolve(
             session_id=self.session_id, turn_id=turn_id, storage_bot=self.bot,
-            rendered=rendered, cold_start=cold, sections=sections,
+            rendered=rendered, cold_start=cold, sections=sections, resume_id=resume,
         )
         if dispatched and decision is not None and decision.is_boundary:
             assert self.store.confirm(session_id=self.session_id, turn_id=turn_id)
@@ -369,3 +370,97 @@ def test_missing_turn_or_session_records_nothing(rig):
     ) is None
     with rig.engine.connect() as conn:
         assert conn.execute(text("SELECT request_json FROM turn_logs WHERE id=:id"), {"id": turn}).scalar_one() is None
+
+
+# ── bare reset boundary (Snark live finding on /new) ────────────────────────
+
+WM = {"working_memory": {"v": 1, "version": 6, "state": "ok"}}
+
+
+def _rotate_to_successor(rig):
+    """A bare /new archives the thread and binds a fresh successor session."""
+    predecessor, successor = rig.session_id, str(uuid.uuid4())
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE sessions SET status='archived' WHERE id=:id"), {"id": predecessor})
+        conn.execute(text("""
+            INSERT INTO sessions (id, bot_id, user_id, status, started_at)
+            VALUES (:id, :bot, :user, 'active', now())
+        """), {"id": successor, "bot": rig.bot, "user": rig.user})
+    rig.session_id = successor
+    return predecessor, successor
+
+
+def _bare_new(rig, resume=None):
+    """The reset_only turn: marks the bound session, pins and audits nothing."""
+    turn = rig.add_turn("/new")
+    assert rig.store.mark_reset_boundary(session_id=rig.session_id, turn_id=turn, resume_id=resume)
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT request_json FROM turn_logs WHERE id=:id"),
+                            {"id": turn}).scalar_one() is None
+    return turn
+
+
+def test_bare_new_then_seeded_resume_pins_cold_start_on_the_successor(rig):
+    rig.resolve(rig.add_turn(), "V1", cold=True)
+    predecessor, successor = _rotate_to_successor(rig)
+    reset_turn = _bare_new(rig)
+    assert rig.metadata()[BOUNDARY_KEY]["turn_id"] == reset_turn
+    with rig.engine.connect() as conn:  # the marker is on the successor, never the archived thread
+        old = conn.execute(text("SELECT session_metadata FROM sessions WHERE id=:id"),
+                           {"id": predecessor}).scalar_one() or {}
+    assert BOUNDARY_KEY not in old and old[PIN_KEY]["sha256"] == prompt_sha256("V1")
+
+    # The bridge bound a seed transcript; the first real turn resumes it.
+    first = rig.add_turn("whats in your todo")
+    decision = rig.resolve(first, "V2", sections=WM, resume="seed-41a1")
+    assert (decision.reason, decision.is_boundary, decision.snapshot_unverified) == (COLD_START, True, False)
+    assert (decision.pinned_sections, decision.candidate_sections) == (WM, None)
+    pointer = rig.store.get(successor)
+    assert pointer["turn_id"] == first and pointer["sections"] == WM
+    assert "candidate_sections" not in pointer and pointer["snapshot_unverified"] is False
+    assert BOUNDARY_KEY not in rig.metadata()  # consumed by the confirm
+    kept = rig.resolve(rig.add_turn(), "V3", resume="seed-41a1")
+    assert (kept.action, kept.text) == ("kept", "V2")
+
+
+def test_unconfirmed_first_turn_after_bare_new_is_decided_again(rig):
+    _rotate_to_successor(rig)
+    _bare_new(rig)
+    cancelled = rig.add_turn()
+    assert rig.resolve(cancelled, "V2", resume="seed", dispatched=False).reason == COLD_START
+    assert BOUNDARY_KEY in rig.metadata() and rig.store.get(rig.session_id) is None
+    retried = rig.resolve(rig.add_turn(), "V3", sections=WM, resume="seed")
+    assert (retried.reason, retried.text, retried.snapshot_unverified) == (COLD_START, "V3", False)
+    assert BOUNDARY_KEY not in rig.metadata()
+
+
+def test_same_session_bare_reset_moves_an_existing_pin(rig):
+    first = rig.add_turn()
+    rig.resolve(first, "V1", cold=True, resume="old")
+    _bare_new(rig, resume="old")  # inter_bot_reset_only: no rotation, same session
+    moved = rig.resolve(rig.add_turn(), "V2", sections=WM, resume="reseeded")
+    assert (moved.action, moved.reason, moved.text, moved.snapshot_unverified) == ("pinned", COLD_START, "V2", False)
+    assert rig.store.get(rig.session_id)["sections"] == WM
+
+
+def test_reset_that_never_ran_keeps_the_pin_and_drops_the_marker(rig):
+    first = rig.add_turn()
+    rig.resolve(first, "V1", cold=True, resume="old")
+    _bare_new(rig, resume="old")
+    kept = rig.resolve(rig.add_turn(), "V2", resume="old")  # still the old SDK session
+    assert (kept.action, kept.text, kept.pin_turn_id) == ("kept", "V1", first)
+    assert BOUNDARY_KEY not in rig.metadata()
+
+
+def test_bare_reset_marker_beats_a_proven_compaction(rig):
+    rig.resolve(rig.add_turn(), "V1", cold=True, resume="old")
+    rig.add_turn("/compact", usage=COMPACT_OK)
+    _bare_new(rig, resume="old")
+    moved = rig.resolve(rig.add_turn(), "V2", sections=WM, resume="reseeded")
+    assert (moved.reason, moved.snapshot_unverified) == (COLD_START, False)
+    assert (moved.pinned_sections, moved.candidate_sections) == (WM, None)
+
+
+def test_bare_reset_marker_needs_a_session(rig):
+    turn = rig.add_turn("/new")
+    assert rig.store.mark_reset_boundary(session_id=str(uuid.uuid4()), turn_id=turn, resume_id=None) is False

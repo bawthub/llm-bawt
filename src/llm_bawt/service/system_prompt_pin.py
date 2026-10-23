@@ -13,7 +13,13 @@ Every turn sends the pinned bytes and records the pin it used. The pin moves
 only at a session boundary:
 
 * cold SDK session — no resume id, a structured reset, or a non-explicit
-  ``/new`` (``/new``, reset policies, model switch, first run);
+  ``/new`` (``/new``, reset policies, model switch, first run). A bare reset
+  (``reset_only``) never reaches a model, so it leaves a
+  :data:`BOUNDARY_KEY` marker instead: the Claude bridge answers it by
+  binding a seed transcript that carries no prompt snapshot, so the next
+  turn resumes a session whose first snapshot is that turn's bytes. The
+  marker counts only once the resume id differs from the one the reset
+  turn saw, so a reset that never ran cannot pass as a boundary;
 * the first turn after a successful *manual* ``/compact`` llm-bawt ran.
   Auto-compaction inside a turn is deliberately not a boundary: the CLI
   re-records that turn's bytes, which are already the pinned bytes;
@@ -56,6 +62,9 @@ logger = logging.getLogger(__name__)
 PIN_KEY = "system_prompt_pin"
 #: Key on ``sessions.session_metadata`` for a staged move awaiting confirmation.
 PENDING_KEY = "system_prompt_pin_pending"
+#: Key on ``sessions.session_metadata`` left by a bare reset turn: the next
+#: turn that resumes a new SDK session is a cold start.
+BOUNDARY_KEY = "system_prompt_pin_boundary"
 PIN_VERSION = 1
 
 #: Pin-move reasons. Boundaries the harness itself observes are verified;
@@ -209,6 +218,22 @@ def _manual_compaction_succeeded(user_prompt: str | None, token_usage_json: str 
     )
 
 
+def _resume_id(binding: Mapping[str, Any] | None) -> str | None:
+    return str((binding or {}).get("thread_resume_id") or "").strip() or None
+
+
+def _reset_boundary_applies(marker: Any, resume_id: str | None) -> bool:
+    """Whether a bare reset's marker proves this turn opens a new snapshot.
+
+    Only a resume id the reset turn did not see proves the reset installed a
+    new SDK session. With no resume id the turn is cold anyway; with the same
+    one the reset never ran and the harness still holds its old snapshot.
+    """
+    if not isinstance(marker, Mapping) or not marker.get("turn_id"):
+        return False
+    return resume_id is not None and resume_id != (marker.get("resume_id") or None)
+
+
 def _iso(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -232,10 +257,21 @@ def apply_session_pin(
     backend = getattr(client, "_backend", None)
     if not getattr(backend, "pins_system_prompt", False):
         return messages, None
-    if ctx.bridge_reset_action == "reset_only":
-        return messages, None
     binding = ctx.thread_binding or {}
     session_id = str(binding.get("thread_session_id") or "").strip()
+    resume_id = _resume_id(binding)
+    if ctx.bridge_reset_action == "reset_only":
+        if session_id:
+            try:
+                SystemPromptPinStore(ctx.svc._turn_log_store.engine).mark_reset_boundary(
+                    session_id=session_id, turn_id=turn_id, resume_id=resume_id,
+                )
+            except Exception:
+                logger.warning(
+                    "system prompt pin reset marker failed for session %s turn %s",
+                    session_id, turn_id, exc_info=True,
+                )
+        return messages, None
     if not session_id:
         return messages, None
     from ..memory.postgresql import _sanitize_table_name
@@ -255,6 +291,7 @@ def apply_session_pin(
                 user_prompt=ctx.user_prompt,
             ),
             sections=sections,
+            resume_id=resume_id,
         )
     except Exception:
         logger.warning(
@@ -371,6 +408,7 @@ class SystemPromptPinStore:
         rendered: str,
         cold_start: bool,
         sections: Mapping[str, dict] | None = None,
+        resume_id: str | None = None,
     ) -> PinDecision | None:
         """Decide this turn's prompt, stage a pin move if needed, record the audit.
 
@@ -389,9 +427,16 @@ class SystemPromptPinStore:
         sections as ``candidate_sections``: the harness adopts them at its
         next compaction, which may be automatic and invisible here. Kept
         turns carry both until a verified boundary clears the candidate.
+
+        ``resume_id`` is the SDK session this turn resumes. A
+        :data:`BOUNDARY_KEY` marker makes the turn a cold start once the
+        resume id differs from the reset turn's; it stays until
+        :meth:`confirm`, so an unconfirmed boundary is decided again. A
+        marker whose reset never installed a new session is dropped.
         """
         if self.engine is None or not session_id or not turn_id:
             return None
+        resume_id = (resume_id or "").strip() or None
         rendered_sha = prompt_sha256(rendered)
         with self.engine.begin() as conn:
             turn = conn.execute(
@@ -409,6 +454,11 @@ class SystemPromptPinStore:
             session_metadata = metadata[0] if isinstance(metadata[0], dict) else {}
             turn_request = turn_payload(turn[0])
             pin = _valid_pin(session_metadata.get(PIN_KEY))
+            if BOUNDARY_KEY in session_metadata:
+                if _reset_boundary_applies(session_metadata[BOUNDARY_KEY], resume_id):
+                    cold_start = True
+                elif resume_id is not None:  # same SDK session: the reset never ran
+                    self._drop_keys(conn, session_id, BOUNDARY_KEY)
 
             pin_row_found = False
             pinned_text: str | None = None
@@ -524,10 +574,12 @@ class SystemPromptPinStore:
             staged = _valid_pin(metadata.get(PENDING_KEY)) if isinstance(metadata, dict) else None
             if staged is None or staged["turn_id"] != turn_id:
                 return False
+            # A confirmed move consumes any bare-reset marker: turns serialize
+            # per session, so a staged move after the marker is its boundary.
             conn.execute(
                 text("""
                     UPDATE sessions SET session_metadata=jsonb_set(
-                        session_metadata - 'system_prompt_pin_pending',
+                        session_metadata - 'system_prompt_pin_pending' - 'system_prompt_pin_boundary',
                         '{system_prompt_pin}', CAST(:pin AS jsonb)
                     ) WHERE id=:sid
                 """),
@@ -543,15 +595,48 @@ class SystemPromptPinStore:
                     )
         return True
 
+    def mark_reset_boundary(self, *, session_id: str, turn_id: str, resume_id: str | None) -> bool:
+        """Record that a bare reset turn handed this session to a new SDK session.
+
+        The turn never reaches a model, so nothing is pinned or audited.
+        ``resume_id`` is the SDK session the reset turn saw; the next turn
+        counts as a cold start only once its resume id differs from it.
+        Returns False when the session row is missing.
+        """
+        if self.engine is None or not session_id or not turn_id:
+            return False
+        marker = {"v": PIN_VERSION, "turn_id": turn_id, "resume_id": (resume_id or "").strip() or None}
+        with self.engine.begin() as conn:
+            conn.execute(  # lock order: turn row, then session row
+                text("SELECT 1 FROM turn_logs WHERE id=:id FOR UPDATE"), {"id": turn_id},
+            )
+            found = conn.execute(
+                text("SELECT 1 FROM sessions WHERE id=:sid FOR UPDATE"), {"sid": session_id},
+            ).first()
+            if found is None:
+                return False
+            conn.execute(
+                text("""
+                    UPDATE sessions SET session_metadata=jsonb_set(
+                        COALESCE(session_metadata, '{}'::jsonb),
+                        '{system_prompt_pin_boundary}', CAST(:marker AS jsonb)
+                    ) WHERE id=:sid
+                """),
+                {"marker": json.dumps(marker), "sid": session_id},
+            )
+        return True
+
     @staticmethod
     def _drop_pending(conn, session_id: str) -> None:
-        conn.execute(
-            text("""
-                UPDATE sessions SET session_metadata=session_metadata - 'system_prompt_pin_pending'
-                WHERE id=:sid
-            """),
-            {"sid": session_id},
-        )
+        SystemPromptPinStore._drop_keys(conn, session_id, PENDING_KEY)
+
+    @staticmethod
+    def _drop_keys(conn, session_id: str, *keys: str) -> None:
+        for key in keys:
+            conn.execute(
+                text("UPDATE sessions SET session_metadata=session_metadata - CAST(:key AS text) WHERE id=:sid"),
+                {"key": key, "sid": session_id},
+            )
 
     @staticmethod
     def _compacted_since(conn, *, session_id: str, storage_bot: str, pinned_at: str, turn_id: str) -> bool:
