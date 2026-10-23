@@ -8,15 +8,63 @@ from .process_ledger import register_process
 
 logger = logging.getLogger(__name__)
 
+#: Hard ceiling for one JSONL event line from ``codex exec``. Lines are no
+#: longer bounded by the StreamReader buffer limit (see ``read_event_line``);
+#: this only stops a runaway child from growing bridge memory without bound.
+#: A full-viewport Playwright screenshot event is a few MiB of base64.
+MAX_EVENT_LINE_BYTES = 64 * 1024 * 1024
+
+
+async def read_event_line(
+    stream: asyncio.StreamReader, *, max_bytes: int = MAX_EVENT_LINE_BYTES,
+) -> bytes:
+    """Read one newline-terminated line of any length up to ``max_bytes``.
+
+    ``StreamReader.readline()`` raises once a line outgrows the reader's
+    buffer limit, which killed whole turns whenever a tool result carried a
+    screenshot. This drains the over-limit line in buffer-sized pieces
+    instead. Returns ``b""`` at EOF, or the trailing partial line if the
+    stream ends without a newline (same contract as ``readline``).
+    """
+    parts: list[bytes] = []
+    total = 0
+    while True:
+        try:
+            chunk = await stream.readuntil(b"\n")
+        except asyncio.IncompleteReadError as exc:
+            chunk = exc.partial
+            done = True
+        except asyncio.LimitOverrunError as exc:
+            # The buffer holds ``exc.consumed`` bytes that contain no complete
+            # line yet; take them and keep scanning for the separator.
+            chunk = await stream.readexactly(exc.consumed)
+            done = False
+        else:
+            done = True
+        total += len(chunk)
+        if total > max_bytes:
+            from openai_codex_sdk.errors import CodexExecError
+
+            raise CodexExecError(
+                f"Codex event line exceeded {max_bytes} bytes; aborting turn"
+            )
+        parts.append(chunk)
+        if done:
+            if total > stream._limit:
+                logger.info("Read oversized Codex event line (%d bytes)", total)
+            return b"".join(parts)
+
 
 def install(*, stream_limit: int = 1024 * 1024) -> None:
-    """Raise the SDK subprocess StreamReader limit to tolerate large JSON events.
+    """Make the SDK subprocess reader tolerate arbitrarily large JSON events.
 
-    The upstream SDK uses StreamReader.readline() with asyncio's default
-    64 KiB limit. Large Codex JSON event lines can exceed that and trigger
-    LimitOverrunError/ValueError, which then looks like an idle timeout from
-    the bridge. We patch CodexExec.run once at startup and bump stdout/stderr
-    reader limits before reading.
+    The upstream SDK uses StreamReader.readline(), which raises
+    LimitOverrunError/ValueError once a line outgrows the reader limit
+    (asyncio's default is 64 KiB). Codex then looks dead to the bridge and the
+    turn is killed. Screenshot tool results routinely exceed even a raised
+    limit, so we patch CodexExec.run once at startup to read lines with
+    ``read_event_line`` (no buffer-limit ceiling) and keep ``stream_limit`` as
+    the buffer size for the ordinary small-line case.
     """
     from openai_codex_sdk import exec as exec_mod
     from openai_codex_sdk.abort import AbortError, _format_abort_reason
@@ -70,7 +118,7 @@ def install(*, stream_limit: int = 1024 * 1024) -> None:
             proc.stdin.close()
 
             while True:
-                line_task = asyncio.create_task(proc.stdout.readline())
+                line_task = asyncio.create_task(read_event_line(proc.stdout))
 
                 if abort_waiter is None:
                     done, _pending = await asyncio.wait(
