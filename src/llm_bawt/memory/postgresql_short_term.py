@@ -174,7 +174,7 @@ class PostgreSQLShortTermManager:
     # so query methods default `bot_id` to `self.bot_id` for ergonomic in-process
     # calls while still accepting an override for cross-bot lookups.
 
-    def close_session(self, session_id: str | None = None) -> bool:
+    def close_session(self, session_id: str | None = None, *, bot_id: str | None = None, user_id: str | None = None) -> bool:
         """Close a session: set `ended_at=now()` and `status='archived'`.
 
         If `session_id` is None, closes this manager's current session and
@@ -195,16 +195,18 @@ class PostgreSQLShortTermManager:
                         archived_at = CURRENT_TIMESTAMP,
                         status = 'archived'
                     WHERE id = :id AND ended_at IS NULL
+                      AND (:owner_bot IS NULL OR bot_id = :owner_bot)
+                      AND (:owner_user IS NULL OR user_id = :owner_user)
                     RETURNING id
                 """)
-                result = conn.execute(stmt, {"id": target}).fetchone()
+                result = conn.execute(stmt, {"id": target, "owner_bot": bot_id, "owner_user": user_id}).fetchone()
                 conn.commit()
                 return result is not None
         except Exception as e:
             logger.warning(f"close_session({target}) failed: {e}")
             return False
 
-    def get_session(self, session_id: str) -> dict | None:
+    def get_session(self, session_id: str, *, bot_id: str | None = None, user_id: str | None = None) -> dict | None:
         """Return a session row as a dict, or None if not found."""
         if not session_id:
             return None
@@ -215,8 +217,10 @@ class PostgreSQLShortTermManager:
                            status, session_metadata
                     FROM sessions
                     WHERE id = :id
+                      AND (:owner_bot IS NULL OR bot_id = :owner_bot)
+                      AND (:owner_user IS NULL OR user_id = :owner_user)
                 """)
-                row = conn.execute(stmt, {"id": session_id}).fetchone()
+                row = conn.execute(stmt, {"id": session_id, "owner_bot": bot_id, "owner_user": user_id}).fetchone()
                 return self._row_to_session_dict(row) if row else None
         except Exception as e:
             logger.warning(f"get_session({session_id}) failed: {e}")
@@ -230,6 +234,7 @@ class PostgreSQLShortTermManager:
         limit: int = 50,
         user_id: str | None = None,
         include_deleted: bool = False,
+        allowed_bot_ids: frozenset[str] | None = None,
     ) -> list[dict]:
         """List sessions, newest first.
 
@@ -254,6 +259,9 @@ class PostgreSQLShortTermManager:
         target_bot = self.bot_id if bot_id is None else bot_id
         clauses: list[str] = []
         params: dict = {"limit": int(limit)}
+        if allowed_bot_ids is not None:
+            clauses.append("bot_id = ANY(CAST(:allowed AS text[]))")
+            params["allowed"] = sorted(allowed_bot_ids)
 
         if target_bot:
             clauses.append("bot_id = :bot_id")

@@ -4,6 +4,7 @@ These are extraction/dispatch tests, not proof of protected-bot enforcement.
 """
 
 import asyncio
+from inspect import getattr_static
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -22,7 +23,7 @@ def test_facade_exposes_each_mixin_method_without_shadowing():
                 continue
             assert name not in seen
             seen.add(name)
-            assert getattr(MemoryStorage, name) is method
+            assert getattr_static(MemoryStorage, name) is method
 
 
 def test_result_types_keep_their_public_import_and_serialization():

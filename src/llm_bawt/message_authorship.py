@@ -66,6 +66,30 @@ def normalize_author(
     )
 
 
+class EffectiveAuthorRule:
+    """Retrieval authority, deliberately separate from legacy display hydration.
+
+    Callers bind the canonical partition bot, trusted session user, and CURRENT
+    public author set. SQL aliases are fixed so no model input is SQL syntax.
+    The surrounding scope compiler supplies the canonical session/user join.
+    """
+
+    sql_case = """
+        CASE
+          WHEN m.role = 'assistant' AND (
+            (COALESCE(m.author_entity_type, '') = ''
+             AND COALESCE(m.author_entity_id, '') = '')
+            OR (m.author_entity_type = 'bot' AND m.author_entity_id = :authority_bot)
+          ) THEN 'bot'
+          WHEN m.role = 'user' AND m.author_entity_type = 'user'
+            AND m.author_entity_id = s.user_id
+            AND m.author_entity_id = :authority_user THEN 'user'
+          WHEN m.role = 'user' AND m.author_entity_type = 'bot'
+            AND m.author_entity_id = ANY(CAST(:authority_authors AS text[])) THEN 'delivery'
+        END
+    """
+
+
 class LegacyAuthorResolver:
     """Batch-resolve missing authors without parsing message content."""
 

@@ -6,6 +6,14 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from cryptography.fernet import Fernet
+from llm_bawt.bot_access import service as service_codec
+
+
+@pytest.fixture(autouse=True)
+def service_signer(monkeypatch):
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(service_codec, "_get_fernet", lambda: signer)
 
 from llm_bawt.mcp_server.client import MemoryClient
 from llm_bawt.service.approval_continuations import _continuation_identity
@@ -50,10 +58,8 @@ def test_streaming_client_preserves_grant_bound_request_without_leaking():
 
 
 def client():
-    result = object.__new__(MemoryClient)
-    result.server_url = "http://unused.test"
-    result.bot_id = "loopy"
-    result.user_id = "nick"
+    result = MemoryClient(SimpleNamespace(), server_url="http://unused.test",
+                          bot_id="loopy", user_id="nick")
     result._ensure_initialized = lambda: None
     return result
 

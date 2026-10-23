@@ -37,6 +37,7 @@ class CrossBotMessageSearcher:
         until: float | None,
         bot_id: str | None,
         excluded_bot_ids: set[str],
+        allowed_bot_ids: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         or_query = build_fts_query(query)
         if not or_query:
@@ -54,6 +55,9 @@ class CrossBotMessageSearcher:
         else:
             bot_clause = ""
 
+        if allowed_bot_ids is not None:
+            bot_clause += " AND bot_id = ANY(CAST(:allowed AS text[]))"
+            params["allowed"] = sorted(allowed_bot_ids)
         time_lower = "AND timestamp >= :since" if since is not None else ""
         time_upper = "AND timestamp <= :until" if until is not None else ""
         role_clause = "AND role = :role_filter" if role_filter else ""
@@ -97,6 +101,7 @@ class CrossBotMessageSearcher:
         since: float | None,
         until: float | None,
         excluded_bot_ids: set[str],
+        allowed_bot_ids: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         query = (query or "").strip()
         if not query:
@@ -112,6 +117,9 @@ class CrossBotMessageSearcher:
             params["excluded"] = sorted(excluded_bot_ids)
         else:
             bot_clause = ""
+        if allowed_bot_ids is not None:
+            bot_clause += " AND bot_id = ANY(CAST(:allowed AS text[]))"
+            params["allowed"] = sorted(allowed_bot_ids)
         time_lower = "AND timestamp >= :since" if since is not None else ""
         time_upper = "AND timestamp <= :until" if until is not None else ""
         role_clause = "AND role = :role_filter" if role_filter else ""

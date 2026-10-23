@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
+from llm_bawt.bot_access import BotAccessError
+from llm_bawt.bot_access.provenance import MemoryProvenance
+
 logger = logging.getLogger(__name__)
 
 
@@ -260,8 +263,7 @@ class PostgreSQLSemanticMemoryMixin:
                 # Build the query with optional filters
                 tag_filter = ""
                 if tags:
-                    tag_list = ",".join(f"'" + t + "'" for t in tags)
-                    tag_filter = f"AND tags ?| ARRAY[{tag_list}]"
+                    tag_filter = "AND tags ?| CAST(:filter_tags AS text[])"
                 
                 # Use PostgreSQL full-text search
                 sql = text(f"""
@@ -281,6 +283,7 @@ class PostgreSQLSemanticMemoryMixin:
                     "query": query,
                     "min_importance": min_importance,
                     "limit": n_results,
+                    "filter_tags": tags,
                 }).fetchall()
                 
                 results = []
@@ -316,6 +319,8 @@ class PostgreSQLSemanticMemoryMixin:
         tags: list[str] | None = None,
         meaning_embedding: list[float] | None = None,
         meaning_weight: float | None = None,
+        *,
+        eligibility: MemoryProvenance | None = None,
     ) -> list[dict]:
         """Search memories using vector similarity with temporal decay and diversity.
         
@@ -352,8 +357,7 @@ class PostgreSQLSemanticMemoryMixin:
             try:
                 tag_filter = ""
                 if tags:
-                    tag_list = ",".join(f"'" + t + "'" for t in tags)
-                    tag_filter = f"AND tags ?| ARRAY[{tag_list}]"
+                    tag_filter = "AND tags ?| CAST(:filter_tags AS text[])"
                 
                 if decay_enabled:
                     # Fetch more candidates for post-processing with decay + diversity
@@ -366,9 +370,10 @@ class PostgreSQLSemanticMemoryMixin:
                                1 - (embedding <=> :embedding) AS similarity,
                                CASE WHEN :use_meaning THEN 1 - (meaning_embedding <=> :meaning_embedding) ELSE NULL END AS meaning_similarity,
                                EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at)) / 86400.0 AS age_days
-                        FROM {self._memories_table_name}
+                        FROM {self._memories_table_name} mem
                         WHERE embedding IS NOT NULL
                         AND importance >= :min_importance
+                        {f'AND ({eligibility.predicate})' if eligibility is not None else ''}
                         {tag_filter}
                         ORDER BY embedding <=> :embedding
                         LIMIT :limit
@@ -382,9 +387,10 @@ class PostgreSQLSemanticMemoryMixin:
                                1 - (embedding <=> :embedding) AS similarity,
                                CASE WHEN :use_meaning THEN 1 - (meaning_embedding <=> :meaning_embedding) ELSE NULL END AS meaning_similarity,
                                0 AS age_days
-                        FROM {self._memories_table_name}
+                        FROM {self._memories_table_name} mem
                         WHERE embedding IS NOT NULL
                         AND importance >= :min_importance
+                        {f'AND ({eligibility.predicate})' if eligibility is not None else ''}
                         {tag_filter}
                         ORDER BY embedding <=> :embedding
                         LIMIT :limit
@@ -397,6 +403,8 @@ class PostgreSQLSemanticMemoryMixin:
                     "use_meaning": bool(meaning_embedding),
                     "min_importance": min_importance,
                     "limit": fetch_limit,
+                    "filter_tags": tags,
+                    **(eligibility.params if eligibility is not None else {}),
                 }).fetchall()
                 
                 if not rows:
@@ -486,6 +494,8 @@ class PostgreSQLSemanticMemoryMixin:
                 return results
                 
             except Exception as e:
+                if eligibility is not None:
+                    raise BotAccessError("source_unavailable") from None
                 logger.error(f"Failed to search by embedding: {e}")
                 return []
 

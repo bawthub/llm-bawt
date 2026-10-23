@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from llm_bawt.bot_access.context import current_bot_access
+from .bot_access_deliveries import ScopedDeliveryReader
 from .inter_bot_send_mode import SendModeError, resolve_send_mode
 from .inter_bot_sender import SenderIdentityError, resolve_sender_bot_id
 from .server import _get_storage, mcp
@@ -444,6 +446,8 @@ async def send_message_to_bot(
 @mcp.tool(name="bots_delivery_get")
 async def get_delivery(delivery_id: str) -> dict:
     """Inspect one durable inter-bot delivery by stable delivery ID."""
+    if access := current_bot_access():
+        return await ScopedDeliveryReader(access).get(delivery_id)
     async with httpx.AsyncClient() as client:
         response = await client.get(
             f"{_APP_BASE_URL}/v1/inter-bot-deliveries/{delivery_id}", timeout=10.0
@@ -467,6 +471,13 @@ async def list_deliveries(
     limit: int = _DELIVERY_LIST_DEFAULT_LIMIT,
 ) -> dict:
     """List compact delivery rows; full receipts via bots_delivery_get."""
+    if access := current_bot_access():
+        return await ScopedDeliveryReader(access).list(
+            bot_id=bot_id, sender_bot_id=sender_bot_id, target_bot_id=target_bot_id,
+            status=status, active_only=active_only, task_id=task_id,
+            since_minutes=since_minutes, include_chat=include_chat,
+            limit=min(max(int(limit), 1), _DELIVERY_LIST_MAX_LIMIT),
+        )
     params: dict[str, Any] = {
         key: value for key, value in {
             "bot_id": bot_id,

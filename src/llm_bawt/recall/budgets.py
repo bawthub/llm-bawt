@@ -1,11 +1,10 @@
 """Exact reference-token accounting and cancellation-safe bounded workers."""
 from __future__ import annotations
 
-import asyncio
 import json
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+
+from llm_bawt.utils.bounded_worker import BoundedWorker as _BoundedWorker
 
 import tiktoken
 
@@ -34,31 +33,10 @@ def clip(text: str, budget: int) -> str:
     return encoder().decode_bytes(encoded[:budget]).decode("utf-8", errors="ignore")
 
 
-class BoundedWorker:
-    """No queued jobs. Timed-out synchronous work retains its slot until done.
+class BoundedWorker(_BoundedWorker):
+    """Recall-compatible errors over the shared cancellation-safe worker."""
 
-    Python cannot cancel an in-flight DB/API call. Shielding and releasing from
-    the concurrent Future (not the cancelled asyncio waiter) prevents unbounded
-    orphan workers. Provider client timeouts remain the underlying deadman.
-    """
-
-    def __init__(self, count: int, name: str):
-        self._slots = threading.BoundedSemaphore(count)
-        self._pool = ThreadPoolExecutor(max_workers=count, thread_name_prefix=name)
-
-    async def run(self, function, *args):
-        if not self._slots.acquire(blocking=False):
-            raise RecallError("busy")
-        try:
-            future = self._pool.submit(function, *args)
-        except BaseException:
-            self._slots.release()
-            raise
-        future.add_done_callback(lambda _: self._slots.release())
-        wrapped = asyncio.wrap_future(future)
-        # Retrieve late exceptions even when the caller has timed out.
-        wrapped.add_done_callback(lambda f: None if f.cancelled() else f.exception())
-        return await asyncio.shield(wrapped)
+    busy_error = RecallError
 
 
 DATABASE_WORKER = BoundedWorker(4, "recall-db")

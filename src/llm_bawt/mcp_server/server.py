@@ -34,6 +34,7 @@ from llm_bawt.shared.logging import LogConfig
 # re-export ``mcp`` here so existing ``from .server import mcp`` imports
 # across the tool_modules keep working byte-compatibly.
 from .registry import mcp  # noqa: F401 — re-exported for downstream tool modules
+from .bot_access_identity import BotAccessMiddleware
 
 if TYPE_CHECKING:
     pass
@@ -929,7 +930,7 @@ def run_server(
 
         mcp.settings.host = final_host
         mcp.settings.port = final_port
-        app = TaskTurnCapabilityMiddleware(mcp.streamable_http_app())
+        app = BotAccessMiddleware(TaskTurnCapabilityMiddleware(mcp.streamable_http_app()))
         config = uvicorn.Config(
             app,
             host=final_host,

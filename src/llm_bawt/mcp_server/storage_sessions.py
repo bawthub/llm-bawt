@@ -5,9 +5,29 @@ Behavior-preserving extraction; the facade owns manager caching and configuratio
 
 from __future__ import annotations
 
+from llm_bawt.bot_access import BotAccessError
+from llm_bawt.bot_access.context import current_bot_access
+from llm_bawt.bot_access.service import SERVICE_SELF_STORAGE_OPS, is_service_self
+
 
 class StorageSessionsMixin:
     """Shared-session operations using the facade's short-term manager."""
+
+    @staticmethod
+    def _session_owner_scope(bot_id: str, operation: str) -> dict:
+        access = current_bot_access()
+        if access is None:
+            return {}
+        target = access.require_target(bot_id)
+        service_filter = operation in SERVICE_SELF_STORAGE_OPS and is_service_self(access, target)
+        if access.caller is not None and access.caller.user_id is None and not service_filter:
+            raise BotAccessError("access_denied")
+        user = None
+        if target in access.protected_bots and not service_filter:
+            user = access.caller.user_id
+            if not user:
+                raise BotAccessError("caller_unavailable")
+        return {"bot_id": target, "user_id": user}
 
     async def close_session(
         self,
@@ -19,20 +39,19 @@ class StorageSessionsMixin:
         Returns True iff a row was updated. Idempotent: closing an already-
         closed session returns False without error.
         """
+        owner = self._session_owner_scope(bot_id, "close_session")
         manager = self.get_short_term_manager(bot_id, provision_schema=True)
-        return manager.close_session(session_id)
+        return manager.close_session(session_id, **owner)
 
     async def get_session(
         self,
         session_id: str,
         bot_id: str = "default",
     ) -> dict | None:
-        """Return a session row by id (or None). The `sessions` table is
-        shared, so `bot_id` only selects which engine to use — any bot
-        works.
-        """
+        """Read one session; guarded calls bind bot and applicable user in SQL."""
+        owner = self._session_owner_scope(bot_id, "get_session")
         manager = self.get_short_term_manager(bot_id)
-        return manager.get_session(session_id)
+        return manager.get_session(session_id, **owner)
 
     async def list_sessions(
         self,
@@ -53,7 +72,25 @@ class StorageSessionsMixin:
         """
         # Use a default manager engine, but pass the requested bot through
         # to the query (manager is bot-scoped, the table is not).
-        engine_manager = self.get_short_term_manager(bot_id or "default")
+        access = current_bot_access()
+        scoped = {}
+        manager_bot = bot_id or "default"
+        if access is not None:
+            service_filter = "list_sessions" in SERVICE_SELF_STORAGE_OPS and is_service_self(access, bot_id)
+            if access.caller is not None and access.caller.user_id is None and not service_filter:
+                raise BotAccessError("access_denied")
+            scope = access.aggregate_scope(bot_id or None)
+            if not scope.partitions:
+                return []
+            scoped["allowed_bot_ids"] = frozenset(p.bot_id for p in scope.partitions)
+            manager_bot = scope.partitions[0].bot_id
+            if not service_filter and any(p.authority == "caller" for p in scope.partitions):
+                if not scope.user_id:
+                    raise BotAccessError("caller_unavailable")
+                if user_id is not None and user_id != scope.user_id:
+                    raise BotAccessError("access_denied")
+                user_id = scope.user_id
+        engine_manager = self.get_short_term_manager(manager_bot)
         return engine_manager.list_sessions(
             bot_id=bot_id,
             since=since,
@@ -61,6 +98,7 @@ class StorageSessionsMixin:
             limit=limit,
             user_id=user_id,
             include_deleted=include_deleted,
+            **scoped,
         )
 
     async def get_active_session(

@@ -12,6 +12,10 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+from cryptography.fernet import Fernet
+from llm_bawt.bot_access import service as service_codec
+
 from llm_bawt.mcp_server import client as client_module
 from llm_bawt.mcp_server import client_transport
 from llm_bawt.mcp_server.client import (
@@ -25,6 +29,12 @@ from llm_bawt.mcp_server.client import (
 from llm_bawt.mcp_server.client_admin import MemoryClientAdminMixin
 from llm_bawt.mcp_server.client_crossbot import MemoryClientCrossBotMixin
 from llm_bawt.mcp_server.client_transport import MemoryClientTransportMixin
+
+
+@pytest.fixture(autouse=True)
+def isolated_service_signer(monkeypatch):
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(service_codec, "_get_fernet", lambda: signer)
 
 
 def test_facade_exposes_each_mixin_method_without_shadowing():

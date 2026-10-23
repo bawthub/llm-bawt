@@ -61,10 +61,23 @@ class DeliveryListFilter:
     since: datetime | None = None
     exclude_prompt_origin: bool = False
     exclude_user_chat: bool = False
+    allowed_bot_ids: frozenset[str] | None = None
 
     def where(self, dialect: str) -> tuple[str, dict[str, Any]]:
         clauses: list[str] = []
         params: dict[str, Any] = {}
+
+        if self.allowed_bot_ids is not None:
+            names = []
+            for index, bot in enumerate(sorted(self.allowed_bot_ids)):
+                name = f"allowed_bot{index}"
+                names.append(f":{name}")
+                params[name] = bot
+            allowed = ", ".join(names)
+            clauses.append(
+                f"sender_bot_id IN ({allowed}) AND target_bot_id IN ({allowed})"
+                if names else "1=0"
+            )
 
         excluded = []
         if self.exclude_prompt_origin:

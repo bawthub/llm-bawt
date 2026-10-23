@@ -12,6 +12,8 @@ from mcp.types import Tool
 
 from .approval_interceptor import ApprovalAwareFastMCP
 from .catalog_contracts import TOOL_SUMMARIES, tool_description
+from .bot_access import ToolBotAccess, invocation_context
+from agent_bridge.mcp_call_context import MCP_CALL_CONTEXT_KEY
 
 # JSON Schema locations that hold schemas (not arbitrary user data/defaults).
 _SCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
@@ -54,6 +56,27 @@ def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 class CatalogFastMCP(ApprovalAwareFastMCP):
     """Approval-aware server with a compact, skill-linked discovery catalog."""
+
+    def __init__(self, *args, bot_policy_resolver=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bot_access = ToolBotAccess(bot_policy_resolver)
+
+    def add_tool(self, fn, name=None, *args, **kwargs):
+        wrapped = self.bot_access.register(name or fn.__name__, fn)
+        return super().add_tool(wrapped, name, *args, **kwargs)
+
+    async def call_tool(self, name, arguments):
+        public = dict(arguments or {})
+        public.pop(MCP_CALL_CONTEXT_KEY, None)
+        with invocation_context(name, public):
+            # Avoid doomed ASK cards. The registered callable checks again at
+            # execution, including approved execution's bypass of call_tool.
+            await self.bot_access.preflight(name, public)
+            return await super().call_tool(name, arguments)
+
+    async def call_approved_tool(self, name, arguments, **kwargs):
+        with invocation_context(name, arguments):
+            return await super().call_approved_tool(name, arguments, **kwargs)
 
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()

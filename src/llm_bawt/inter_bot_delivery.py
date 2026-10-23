@@ -90,13 +90,13 @@ class InterBotDeliveryStore:
 
     _schema_guard = SchemaBootstrapGuard()
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, provision_schema: bool = True):
         self.config = config
         self.engine = get_shared_engine(config)
         # TASK-1311: the leadership session gets its own one-connection engine
         # (libpq keepalives, bounded probes) instead of pinning a pool slot.
         self._lock_engine: Engine | None = None
-        if self.engine is not None:
+        if self.engine is not None and provision_schema:
             self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -413,13 +413,14 @@ class InterBotDeliveryStore:
                 admit_enqueue(conn, target, on_gate=on_gate)
             return record, duplicate
 
-    def get(self, delivery_id: str) -> DeliveryRecord | None:
+    def get(self, delivery_id: str, *, allowed_bot_ids: frozenset[str] | None = None) -> DeliveryRecord | None:
         if self.engine is None:
             return None
+        where, params = DeliveryListFilter(allowed_bot_ids=allowed_bot_ids).where(self.engine.dialect.name)
         with self.engine.connect() as conn:
             row = conn.execute(
-                sa_text("SELECT * FROM inter_bot_deliveries WHERE id=:id"),
-                {"id": delivery_id},
+                sa_text(f"SELECT * FROM inter_bot_deliveries WHERE id=:id AND ({where})"),
+                {"id": delivery_id, **params},
             ).mappings().first()
         return DeliveryRecord.from_mapping(row) if row else None
 
@@ -446,6 +447,7 @@ class InterBotDeliveryStore:
         limit: int = 50,
         exclude_prompt_origin: bool = False,
         exclude_user_chat: bool = False,
+        allowed_bot_ids: frozenset[str] | None = None,
     ) -> list[DeliveryRecord]:
         """List newest-first; ``status`` accepts one, comma-separated, or many.
 
@@ -465,6 +467,7 @@ class InterBotDeliveryStore:
             since=since,
             exclude_prompt_origin=exclude_prompt_origin,
             exclude_user_chat=exclude_user_chat,
+            allowed_bot_ids=allowed_bot_ids,
         ).where(self.engine.dialect.name)
         params["limit"] = max(1, min(int(limit), 200))
         sql = "SELECT * FROM inter_bot_deliveries WHERE " + where + " ORDER BY ordinal DESC LIMIT :limit"

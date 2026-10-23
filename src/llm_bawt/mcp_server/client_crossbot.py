@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from typing import Any
 
+from llm_bawt.bot_access import BotPolicyResolver
+from llm_bawt.bot_access.context import bind_bot_access
+
 from .client_results import MemoryResult
 from .client_runtime import _run_async
 
 
 class MemoryClientCrossBotMixin:
     """Read-only memory/message search across bot namespaces."""
+
+    def _embedded_crossbot(self, method: str, *, target: str | None = None, **kwargs):
+        storage = self._get_storage()
+
+        async def invoke():
+            access = await BotPolicyResolver(storage._require_engine()).resolve(self._service_principal.caller())
+            if target is not None:
+                kwargs["bot_id"] = access.require_target(target)
+            with bind_bot_access(access):
+                return await getattr(storage, method)(**kwargs)
+
+        return _run_async(invoke())
 
     # -------------------------------------------------------------------------
     # Cross-bot Source Discovery & Search
@@ -26,8 +41,7 @@ class MemoryClientCrossBotMixin:
         if self.server_url:
             return self._call_server("memory_list_sources", {})
 
-        storage = self._get_storage()
-        return _run_async(storage.list_memory_sources())
+        return self._embedded_crossbot("list_memory_sources")
 
     def search_memory_source(
         self,
@@ -61,15 +75,9 @@ class MemoryClientCrossBotMixin:
             })
             return [MemoryResult.from_dict(r) for r in results]
 
-        storage = self._get_storage()
-        results = _run_async(
-            storage.search_memories(
-                query=query,
-                bot_id=source,
-                n_results=n_results,
-                min_relevance=min_relevance,
-                tags=tags,
-            )
+        results = self._embedded_crossbot(
+            "search_memories", target=source, query=query, n_results=n_results,
+            min_relevance=min_relevance, tags=tags,
         )
         return [MemoryResult.from_dict(r.to_dict()) for r in results]
 
@@ -96,12 +104,9 @@ class MemoryClientCrossBotMixin:
                 "role_filter": role_filter,
             })
 
-        storage = self._get_storage()
-        return _run_async(storage.search_all_messages(
-            query=query,
-            n_results=n_results,
-            role_filter=role_filter,
-        ))
+        return self._embedded_crossbot(
+            "search_all_messages", query=query, n_results=n_results, role_filter=role_filter,
+        )
 
     def search_all_memories(
         self,
@@ -122,9 +127,6 @@ class MemoryClientCrossBotMixin:
                 "min_relevance": min_relevance,
             })
 
-        storage = self._get_storage()
-        return _run_async(storage.search_all_memories(
-            query=query,
-            n_results=n_results,
-            min_relevance=min_relevance,
-        ))
+        return self._embedded_crossbot(
+            "search_all_memories", query=query, n_results=n_results, min_relevance=min_relevance,
+        )

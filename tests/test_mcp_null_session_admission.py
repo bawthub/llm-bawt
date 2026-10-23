@@ -7,6 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from cryptography.fernet import Fernet
+from llm_bawt.bot_access import service as service_codec
+
+
+@pytest.fixture(autouse=True)
+def service_signer(monkeypatch):
+    signer = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(service_codec, "_get_fernet", lambda: signer)
 
 from llm_bawt.mcp_server.client import MemoryClient
 from llm_bawt.service.agent_new_rotation import (

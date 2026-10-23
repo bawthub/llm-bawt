@@ -14,6 +14,7 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 from llm_bawt.utils.config import Config
+from llm_bawt.bot_access.service import ServicePrincipal
 
 # Responsibility split (TASK-1222): the facade composes these mixins. The
 # result types, ``_run_async`` and ``_MCPShortTermManager`` are re-exported so
@@ -75,6 +76,7 @@ class MemoryClient(
         self.config = config
         self.bot_id = bot_id
         self.user_id = user_id
+        self._service_principal = ServicePrincipal(bot_id.strip().lower(), user_id)
         self.server_url = server_url
         self._storage: MemoryStorage | None = None
         self._initialized = False

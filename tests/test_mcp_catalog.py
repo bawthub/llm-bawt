@@ -33,8 +33,30 @@ async def test_catalog_covers_every_registered_tool_without_changing_validation(
         assert after.description.endswith(f"Details: {tool_reference(after.name)}.")
     # Reading discovery must not mutate FastMCP's actual validator schemas.
     assert original == await FastMCP.list_tools(mcp)
-    assert CatalogFastMCP.call_tool is ApprovalAwareFastMCP.call_tool
-    assert CatalogFastMCP.call_approved_tool is ApprovalAwareFastMCP.call_approved_tool
+    # TASK-1222 intentionally wraps both entry points. Preserve the approval
+    # superclass, and prove delegation below rather than requiring method identity.
+    assert CatalogFastMCP.__bases__ == (ApprovalAwareFastMCP,)
+
+
+@pytest.mark.anyio
+async def test_authorization_adapters_still_delegate_both_approval_entry_points(monkeypatch):
+    calls = []
+
+    async def ordinary(self, name, arguments):
+        calls.append(("ordinary", name, arguments))
+        return "ordinary-result"
+
+    async def approved(self, name, arguments, **kwargs):
+        calls.append(("approved", name, arguments, kwargs))
+        return "approved-result"
+
+    monkeypatch.setattr(ApprovalAwareFastMCP, "call_tool", ordinary)
+    monkeypatch.setattr(ApprovalAwareFastMCP, "call_approved_tool", approved)
+    server = CatalogFastMCP("contract")
+    assert await server.call_tool("unregistered", {"x": 1}) == "ordinary-result"
+    assert await server.call_approved_tool("unregistered", {"x": 2}, expected_invocation_hash="h") == "approved-result"
+    assert calls == [("ordinary", "unregistered", {"x": 1}),
+                     ("approved", "unregistered", {"x": 2}, {"expected_invocation_hash": "h"})]
 
 
 def test_schema_compaction_preserves_title_fields_and_arbitrary_data():

@@ -47,23 +47,14 @@ from .message_store import (
     message_parent_indexes,
 )
 from ..utils.schema import SchemaBootstrapGuard
+# Compatibility export; policy and storage must use exactly the same mapping.
+from ..utils.bot_partition import sanitize_table_name as _sanitize_table_name
 
 logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _sanitize_table_name(bot_id: str) -> str:
-    """Sanitize bot_id for use in table names.
-
-    Only allows alphanumeric and underscore, lowercase.
-    """
-    sanitized = re.sub(r'[^a-z0-9_]', '', bot_id.lower())
-    if not sanitized:
-        sanitized = "default"
-    return sanitized
 
 
 # ---------------------------------------------------------------------------

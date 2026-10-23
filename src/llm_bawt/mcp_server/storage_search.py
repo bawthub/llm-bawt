@@ -9,6 +9,10 @@ import asyncio
 import logging
 from typing import Any
 
+from llm_bawt.bot_access import BotAccessError
+from llm_bawt.bot_access.context import current_bot_access
+from llm_bawt.bot_access.provenance import MemoryProvenance, ScopedMessageAuthority
+
 # Preserve the original logging namespace for existing filters and diagnostics.
 logger = logging.getLogger("llm_bawt.mcp_server.storage")
 
@@ -90,21 +94,29 @@ class StorageSearchMixin:
 
         from llm_bawt.memory.postgresql import MEMORIES_PARENT
 
-        bots = self._global_search_bots(MEMORIES_PARENT)
+        access = current_bot_access()
+        scope = access.aggregate_scope() if access is not None else None
+        bots = ([p.partition for p in scope.partitions] if scope is not None
+                else self._global_search_bots(MEMORIES_PARENT))
         if not bots:
             return []
 
         try:
             with self._require_engine().connect() as conn:
                 rows = conn.execute(text(
-                    f"SELECT bot_id, COUNT(*) FROM {MEMORIES_PARENT} GROUP BY bot_id"
-                )).fetchall()
+                    f"SELECT bot_id, COUNT(*) FROM {MEMORIES_PARENT} "
+                    "WHERE bot_id = ANY(CAST(:partitions AS text[])) GROUP BY bot_id"
+                ), {"partitions": bots}).fetchall()
             counts = {bot_id: int(n) for bot_id, n in rows}
+            names = ({p.partition: p.bot_id for p in scope.partitions}
+                     if scope is not None else {})
             return [
-                {"source": bot_id, "memory_count": counts.get(bot_id, 0)}
+                {"source": names.get(bot_id, bot_id), "memory_count": counts.get(bot_id, 0)}
                 for bot_id in bots
             ]
         except Exception as e:
+            if access is not None:
+                raise BotAccessError("source_unavailable") from None
             logger.error("Failed to list memory sources: %s", e)
             return []
 
@@ -148,8 +160,10 @@ class StorageSearchMixin:
             self._require_engine(),
             lambda rows, source: self.hydrate_message_authors(rows, bot_id=source),
         )
+        access = current_bot_access()
+        scope = access.aggregate_scope(bot_id or None) if access is not None else None
         try:
-            return await asyncio.to_thread(
+            rows = await asyncio.to_thread(
                 searcher.search_fts,
                 query,
                 n_results=n_results,
@@ -157,10 +171,20 @@ class StorageSearchMixin:
                 sort_by=sort_by,
                 since=since,
                 until=until,
-                bot_id=bot_id,
-                excluded_bot_ids=self._global_search_excluded_bot_ids(),
+                bot_id=(access.partitions[access.require_target(bot_id)]
+                        if access is not None and bot_id else bot_id),
+                excluded_bot_ids=set() if access is not None else self._global_search_excluded_bot_ids(),
+                **({"allowed_bot_ids": frozenset(p.partition for p in scope.partitions)}
+                   if scope is not None else {}),
             )
+            if scope is not None:
+                names = {p.partition: p.bot_id for p in scope.partitions}
+                for row in rows:
+                    row["source"] = names[row["source"]]
+            return rows
         except Exception as e:
+            if access is not None:
+                raise BotAccessError("source_unavailable") from None
             logger.error("search_all_messages failed: %s", e)
             return []
 
@@ -238,20 +262,31 @@ class StorageSearchMixin:
         """
         from llm_bawt.memory.embeddings import generate_embedding
 
-        query_embedding = generate_embedding(
-            query, self.config.MEMORY_EMBEDDING_MODEL, verbose=self.config.VERBOSE,
-        )
+        access = current_bot_access()
+        scope = (access.aggregate_scope(bot_id or None, require_user=True)
+                 if access is not None else None)
+        try:
+            query_embedding = generate_embedding(
+                query, self.config.MEMORY_EMBEDDING_MODEL, verbose=self.config.VERBOSE,
+            )
+        except Exception:
+            if access is not None:
+                raise BotAccessError("source_unavailable") from None
+            raise
         if not query_embedding:
+            if access is not None:
+                raise BotAccessError("source_unavailable")
             return []
 
         from llm_bawt.memory.postgresql import MEMORIES_PARENT
 
-        bots = self._global_search_bots(MEMORIES_PARENT)
+        bots = ([p.bot_id for p in scope.partitions] if scope is not None
+                else self._global_search_bots(MEMORIES_PARENT))
         if not bots:
             return []
 
-        # Filter to a single bot if requested.
-        if bot_id:
+        # Operator storage callers retain their separate legacy filter semantics.
+        if bot_id and scope is None:
             bots = [bid for bid in bots if bid == bot_id]
             if not bots:
                 return []
@@ -264,6 +299,9 @@ class StorageSearchMixin:
                     embedding=query_embedding,
                     n_results=n_results,
                     min_importance=0.0,
+                    **({"eligibility": MemoryProvenance(
+                        ScopedMessageAuthority.for_partition(scope, bot_id)
+                    )} if scope is not None else {}),
                 )
                 for r in results:
                     relevance = r.get("similarity") or r.get("relevance", 0.0)
@@ -272,7 +310,11 @@ class StorageSearchMixin:
                     r["source"] = bot_id
                     r["relevance"] = relevance
                     all_results.append(r)
+            except BotAccessError:
+                raise
             except Exception as e:
+                if access is not None:
+                    raise BotAccessError("source_unavailable") from None
                 logger.warning("search_all_memories skipped %s: %s", bot_id, e)
 
         # Time-range post-filter on created_at (ISO string or Unix float).
