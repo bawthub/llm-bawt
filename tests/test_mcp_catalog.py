@@ -99,7 +99,9 @@ async def test_catalog_token_budgets():
     # Measured 100 tools, 3,482 description tokens (warnings retained).
     # TASK-1239: compact bots_deliveries_list filter contract: 3,514 (+32).
     # TASK-1233: ops_quiesce_ack (held turns answer a quiesce): 3,545 (+31).
-    assert sum(descriptions) <= 3545
+    # TASK-1281: working_memory_list/create/update (CAS, idempotency and cap
+    # contract stated in-band so agents don't need the reference): 3,680 (+135).
+    assert sum(descriptions) <= 3680
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -120,7 +122,10 @@ async def test_catalog_token_budgets():
     # TASK-1313: step status enum on steps_add/steps_set/tasks_create step
     # objects and steps_update.status: 12,683 (+72, ~18 per enum). Invalid
     # statuses used to reach BawtHub as HTTP 500s.
-    assert total <= 12683, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1281: working_memory_list/create/update with the design §6.1 typed
+    # fields (status/clear enums, typed Ref objects, CAS revision): 13,451
+    # (+768). Typed enums and Ref reject bad writes at the schema boundary.
+    assert total <= 13451, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

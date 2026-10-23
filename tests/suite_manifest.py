@@ -60,6 +60,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_schema_convergence_pg.py::",
     "test_schema_full_store_pg.py::",
     "test_talk_reply_outbox_pg.py::",
+    "test_working_memory_pg.py::",
     "test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB::",
 )
 

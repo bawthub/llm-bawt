@@ -38,6 +38,7 @@ from .usage import router as usage_router
 # bawthub's /api/avatar/animation-triggers now.
 from .media import router as media_router
 from .uploads import router as uploads_router
+from .working_memory import router as working_memory_router
 
 all_routers = [
     health_router,
@@ -75,6 +76,7 @@ all_routers = [
     llm_router,
     media_router,
     uploads_router,
+    working_memory_router,
 ]
 
 __all__ = ["all_routers"]

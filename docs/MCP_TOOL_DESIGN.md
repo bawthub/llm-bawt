@@ -130,6 +130,16 @@ DONE and BLOCKED used to reach BawtHub and come back as HTTP 500s. Measured:
 **3,545 description / 12,683 full-definition tokens** (+0 / +72 over 3,545 /
 12,611, about 18 per enum); the total cap is updated. Descriptions are unchanged.
 
+TASK-1281 adds `working_memory_list`, `working_memory_create` and
+`working_memory_update` (docs/WORKING_MEMORY.md §6.1). Identity comes only from
+the signed per-turn capability. The summaries state the idempotency-key, cap
+and CAS contract in-band. The schemas carry the typed status/kind/clear enums
+and a strict `Ref` object, so malformed writes fail at the schema boundary.
+Measured: **3,680 description / 13,451 full-definition tokens** (+135 / +768
+over 3,545 / 12,683); caps updated. Every tool is gated per bot by
+`working_memory_enabled`, so the schema cost buys a refusal path on bots
+without it, not new behavior.
+
 The `ops_run` and `ops_job_status` results also carry `caller_instruction`:
 `null`, or, while a quiescing job holds the calling bot's own scope,
 `{action: "end_turn", held_bot, result_delivery, message}`. The caller's

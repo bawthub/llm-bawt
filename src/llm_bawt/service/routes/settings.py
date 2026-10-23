@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
 from ...orphan_partitions import PartitionExecutionHalted
+from ...working_memory.contracts import WorkingMemoryError
+from ...working_memory.policy import WorkingMemoryPolicy
 from ..profile_route_gate import ProfileRouteGate, ProfileSaveGuard, RouteIneligible
 from ..profile_switch_gate import ProfileSwitchGate
 from ..turn_admission import SystemGateRefused
@@ -62,6 +64,20 @@ def _normalize_scope(scope_type: str, scope_id: str | None, default_bot: str) ->
     if not sid:
         raise HTTPException(status_code=400, detail="scope_id is required for bot scope")
     return "bot", sid
+
+
+def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]]) -> None:
+    """Refuse a setting write that a feature gate forbids, before anything is stored.
+
+    ``working_memory_enabled`` (TASK-1281, docs/WORKING_MEMORY.md 7) is bot-scoped;
+    true needs a non-protected claude-code bot.
+    """
+    policy = WorkingMemoryPolicy(engine)
+    for scope_type, scope_id, key, value in writes:
+        try:
+            policy.validate_setting_write(scope_type, scope_id, key, value)
+        except WorkingMemoryError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from exc
 
 
 async def _push_soul_background(slug: str, agent_id: str, system_prompt: str) -> None:
@@ -460,6 +476,7 @@ def upsert_runtime_setting(request: RuntimeSettingUpsertRequest):
     store = get_runtime_settings_store(service.config)
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
+    _validate_setting_writes(store.engine, [(st, sid, request.key, request.value)])
     store.set_value(st, sid, request.key, request.value)
     if st == "bot":
         _invalidate_bot_instance_cache(service, sid)
@@ -508,11 +525,16 @@ def batch_upsert_runtime_settings(request: RuntimeSettingBatchUpsertRequest):
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
 
+    scoped = [
+        (*_normalize_scope(item.scope_type, item.scope_id, service._default_bot), item)
+        for item in request.items
+    ]
+    # Every item is validated before any is applied.
+    _validate_setting_writes(store.engine, [(st, sid, item.key, item.value) for st, sid, item in scoped])
     applied: list[dict] = []
     touched_bots: set[str] = set()
     touched_global = False
-    for item in request.items:
-        st, sid = _normalize_scope(item.scope_type, item.scope_id, service._default_bot)
+    for st, sid, item in scoped:
         store.set_value(st, sid, item.key, item.value)
         if st == "bot":
             touched_bots.add(sid)

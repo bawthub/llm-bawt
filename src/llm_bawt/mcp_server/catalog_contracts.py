@@ -38,6 +38,9 @@ TOOL_SUMMARIES: dict[str, str] = {
     "messages_remove_last_partial": "Delete bot_id's latest message if role matches. Despite the name, it does NOT verify partial status; use only for an explicitly authorized cleanup.",
     "context_get_recent": "Read recent messages plus relevant memories for bot_id; query optionally guides memory retrieval.",
     "context_recall": "Read-only isolated recall; trusted caller required. Returns bounded cited quotes, not transcripts. tasks opts into shared-task search; tool evidence is metadata only. Expiring handles refresh evidence; repeat sources/task_ids. Uses configured utility model.",
+    "working_memory_list": "Read your own working-memory items for the current user from trusted turn identity; open only unless include_archived.",
+    "working_memory_create": "Add an item. idempotency_key: a fresh UUID per create, reused only to retry it. Open-item cap 20. initiative_link points at a task; no next_action/blockers.",
+    "working_memory_update": "CAS edit: stale expected_revision returns the current item, writes nothing. Omitted fields stay; clear nulls listed fields. done|cancelled archives.",
     "facts_extract": "Extract facts from supplied role/content messages; store=true persists them. bot_id and user_id are required scopes.",
     "system_stats": "Read bot_id's memory and message statistics.",
     "system_run_maintenance": "Run selected memory maintenance operations for bot_id; dry_run=false applies changes.",
@@ -113,7 +116,7 @@ TOOL_SUMMARIES: dict[str, str] = {
 # Group references are loaded on demand, not injected with the whole catalog.
 REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
     "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_"),
-    "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile"),
+    "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_"),
     "sessions-delivery": ("sessions_", "bots_", "agent_", "self_"),
     "ops-media": ("ops_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_"),
 }

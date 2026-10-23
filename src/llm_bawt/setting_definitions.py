@@ -209,6 +209,20 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "unless a bot overrides it. Chat bots never see it (manifest-gated)."
         ),
     ),
+    "working_memory_enabled": SettingDefinition(
+        key="working_memory_enabled",
+        type="bool",
+        default=False,
+        applies_to=("agent",),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Working memory",
+        help=(
+            "Bot scope only (TASK-1281): enables the working_memory_* tools for "
+            "this bot. A global value is refused, and true is refused for a "
+            "protected bot or one not on the claude-code backend. "
+            "See docs/WORKING_MEMORY.md."
+        ),
+    ),
     "claude_code_disallowed_tools": SettingDefinition(
         key="claude_code_disallowed_tools",
         type="string_list",
