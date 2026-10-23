@@ -175,7 +175,9 @@ def test_chatgpt_models_request_shape():
 def test_codex_bridge_fallback_version_is_the_shared_floor():
     from agent_bridge.chatgpt_models import CHATGPT_MODELS_CLIENT_VERSION
 
-    assert codex_bridge_main._CODEX_CLIENT_VERSION_FALLBACK == CHATGPT_MODELS_CLIENT_VERSION == "0.144.1"
+    # Pinned value: the codex CLI the agent-bridge image ships. 0.144.1 listed
+    # only gpt-5.6-* and hid the gpt-6 family (TASK-1296 live check).
+    assert codex_bridge_main._CODEX_CLIENT_VERSION_FALLBACK == CHATGPT_MODELS_CLIENT_VERSION == "0.157.1"
 
 
 def test_service_bot_init_applies_codex_default_model(monkeypatch):

@@ -14,11 +14,14 @@ from typing import Any
 
 #: ``client_version`` the ChatGPT backend's ``/models`` gate is told. The
 #: backend hides models whose ``minimal_client_version`` exceeds it (gpt-5.6
-#: needs >= 0.144.0), so this is the floor a listing may claim, not a
-#: statement about any installed binary. The app pins it as
+#: needs >= 0.144.0; at 0.144.1 the listing stopped at gpt-5.6 and omitted
+#: the gpt-6 family bots already run), so this is the floor a listing may
+#: claim, not a statement about any installed binary. Keep it at the codex
+#: CLI the agent-bridge image ships (``codex --version`` in the codex-bridge
+#: container; 0.157.1 on 2026-10-23). The app pins it as
 #: ``Config.CODEX_CLIENT_VERSION`` (env ``LLM_BAWT_CODEX_CLIENT_VERSION``);
 #: the Codex bridge uses it only when the real binary can't be probed.
-CHATGPT_MODELS_CLIENT_VERSION = "0.144.1"
+CHATGPT_MODELS_CLIENT_VERSION = "0.157.1"
 
 #: Upstream visibility value for models the backend lists but does not offer.
 CHATGPT_MODEL_HIDDEN = "hide"
