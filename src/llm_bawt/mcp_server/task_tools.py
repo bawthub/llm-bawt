@@ -29,7 +29,7 @@ from .task_api import (
 
 logger = logging.getLogger(__name__)
 
-async def list_projects() -> list[dict]:
+async def list_projects() -> list[dict] | dict:
     """Compatibility wrapper; the registered tool lives in project_tools."""
     try:
         return _compact_project_list_payload(await _api_get("/projects"))

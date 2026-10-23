@@ -26,7 +26,7 @@ from .task_api import (
 logger = logging.getLogger(__name__)
 
 @mcp.tool(name="projects_list")
-async def list_projects() -> list[dict]:
+async def list_projects() -> list[dict] | dict:
     """List all agent projects with task counts.
 
     Returns projects sorted by most recently updated.

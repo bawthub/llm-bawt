@@ -123,6 +123,13 @@ the signed per-turn capability, never from arguments. Measured: **3,545
 description / 12,611 full-definition tokens** (+31 / +91 over 3,514 / 12,520);
 caps updated. No existing warnings were removed.
 
+TASK-1313 types step `status` as the `StepStatus` enum (PENDING, RUNNING,
+COMPLETED, FAILED, SKIPPED) on the `steps_add`/`steps_set`/`tasks_create` step
+objects and on `steps_update.status`. Free-string statuses such as IN_PROGRESS,
+DONE and BLOCKED used to reach BawtHub and come back as HTTP 500s. Measured:
+**3,545 description / 12,683 full-definition tokens** (+0 / +72 over 3,545 /
+12,611, about 18 per enum); the total cap is updated. Descriptions are unchanged.
+
 The `ops_run` and `ops_job_status` results also carry `caller_instruction`:
 `null`, or, while a quiescing job holds the calling bot's own scope,
 `{action: "end_turn", held_bot, result_delivery, message}`. The caller's

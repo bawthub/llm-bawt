@@ -117,7 +117,10 @@ async def test_catalog_token_budgets():
     # include_chat filters: 12,520 (+116). One filtered call replaces paired
     # ~10k-token full-receipt calls, so the schema growth pays for itself.
     # TASK-1233: ops_quiesce_ack (status + optional note): 12,611 (+91).
-    assert total <= 12611, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1313: step status enum on steps_add/steps_set/tasks_create step
+    # objects and steps_update.status: 12,683 (+72, ~18 per enum). Invalid
+    # statuses used to reach BawtHub as HTTP 500s.
+    assert total <= 12683, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

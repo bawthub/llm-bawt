@@ -11,7 +11,13 @@ from typing import Any
 import httpx
 
 from .server import mcp
-from .task_step_types import TaskStepInput, validate_step_inputs
+from .task_step_types import (
+    StepStatus,
+    TaskStepInput,
+    step_status_error,
+    validate_step_inputs,
+    validate_step_updates,
+)
 from .task_api import (
     api_delete as _api_delete,
     api_patch as _api_patch,
@@ -27,7 +33,7 @@ logger = logging.getLogger(__name__)
 async def update_step(
     task_id: str,
     step_id: str | None = None,
-    status: str | None = None,
+    status: StepStatus | None = None,
     output: str | None = None,
     updates: list[dict] | None = None,
     bot_id: str | None = None,
@@ -46,6 +52,10 @@ async def update_step(
     ``step_id`` plus any of ``status``/``output``/``title``/``type``/
     ``file_path``. Steps not belonging to ``task_id`` are ignored.
 
+    Valid statuses are exactly PENDING, RUNNING, COMPLETED, FAILED, SKIPPED
+    (not IN_PROGRESS, DONE or BLOCKED); anything else is rejected before
+    BawtHub is called.
+
     Args:
         task_id: Parent task ID (cuid) or shortId (e.g. "TASK-42").
         step_id: Step ID (cuid) (single-update mode).
@@ -61,12 +71,12 @@ async def update_step(
     """
     if updates:
         logger.debug("MCP tool invoked: tools/update_step task=%s batch=%d", task_id, len(updates))
+        validation_error = validate_step_updates(updates)
+        if validation_error:
+            return {"error": validation_error}
         norm: list[dict[str, Any]] = []
         for u in updates:
-            sid = u.get("step_id") or u.get("stepId")
-            if not sid:
-                return {"error": "each update needs a step_id"}
-            entry: dict[str, Any] = {"stepId": sid}
+            entry: dict[str, Any] = {"stepId": u.get("step_id") or u.get("stepId")}
             for key in ("status", "output", "title", "type"):
                 if u.get(key) is not None:
                     entry[key] = u[key]
@@ -87,6 +97,9 @@ async def update_step(
         return {"error": "Provide step_id (single) or updates (batch)"}
 
     logger.debug("MCP tool invoked: tools/update_step task=%s step=%s status=%s", task_id, step_id, status)
+    status_error = step_status_error(status, "status")
+    if status_error:
+        return {"error": status_error}
     body: dict[str, Any] = {}
     if status is not None:
         body["status"] = status
@@ -166,7 +179,7 @@ async def add_steps(
     task_id: str,
     steps: list[TaskStepInput],
     bot_id: str | None = None,
-) -> list[dict]:
+) -> list[dict] | dict:
     """Add new steps to a task.
 
     Steps are appended after existing steps. Use when planning work
@@ -179,10 +192,13 @@ async def add_steps(
                (default "PENDING").
                Types: PLAN, READ_FILE, EDIT_FILE, CREATE_FILE,
                DELETE_FILE, RUN_COMMAND, SEARCH, ASK_USER, REVIEW.
+               Statuses: PENDING, RUNNING, COMPLETED, FAILED, SKIPPED.
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        List of created step objects.
+        List of created step objects, or an error dict. The return type
+        admits the dict so FastMCP's output validation cannot replace the
+        real error with a "valid list" message (TASK-1313).
     """
     logger.debug("MCP tool invoked: tools/add_steps task=%s count=%d", task_id, len(steps))
     validation_error = validate_step_inputs(steps)
@@ -203,7 +219,7 @@ async def set_steps(
     task_id: str,
     steps: list[TaskStepInput],
     bot_id: str | None = None,
-) -> list[dict]:
+) -> list[dict] | dict:
     """Replace a task's ENTIRE step list in one atomic call.
 
     Deletes all existing steps and recreates them from ``steps``, reindexed
@@ -218,10 +234,12 @@ async def set_steps(
                "output", "filePath". Pass [] to clear all steps.
                Types: PLAN, READ_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE,
                RUN_COMMAND, SEARCH, ASK_USER, REVIEW.
+               Statuses: PENDING, RUNNING, COMPLETED, FAILED, SKIPPED.
         bot_id: Your bot ID for activity attribution.
 
     Returns:
-        The task's steps in order after the replace.
+        The task's steps in order after the replace, or an error dict. A
+        rejected replace leaves the existing steps untouched.
     """
     logger.debug("MCP tool invoked: tools/set_steps task=%s count=%d", task_id, len(steps))
     validation_error = validate_step_inputs(steps)
