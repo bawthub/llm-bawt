@@ -5,14 +5,19 @@ seeded.** A bot is dead weight until a provider credential exists, so the
 setup wizard walks the operator through connecting a provider FIRST and then
 creates the first bot against a model discovered live from that provider.
 
+Since TASK-1297 the wizard adds that model through the same admin catalog
+routes Settings uses, and lists routes from the admin access-paths list
+(``agent_backend=claude-code``); none of that is seed data.
+
 What remains seed data:
 
-- the ``ModelSeed`` / ``EndpointSeed`` shapes the engine uses to register the
-  operator's chosen model (insert-if-missing);
-- ``FIRST_BOT_PROVIDERS`` — which provider connections can back the first
-  (``chat``-harness) bot, and how they map to the standard access paths;
-- ``DEFAULT_FIRST_BOT_PROMPT`` — the editable starting prompt the wizard
-  offers. Deliberately generic: no owner, no personal traits.
+- the ``ModelSeed`` / ``EndpointSeed`` shapes the engine uses to register
+  models (insert-if-missing);
+- ``FIRST_BOT_AGENT_BACKEND`` — the first bot is always a ``claude-code``
+  agent (TASK-1293);
+- ``FIRST_AGENT_PROMPT_SEED`` — seed body for the registered prompt key
+  ``setup.first_agent_prompt``. Seed data only: callers resolve the live text
+  through the prompt registry. Deliberately generic: no owner, no personal traits.
 
 Standard ``access_paths`` rows (``xai-chat``, ``openai-api``, ...) are owned by
 :data:`llm_bawt.memory.model_catalog_migration.STANDARD_ACCESS_PATHS`, which
@@ -54,57 +59,22 @@ class EndpointSeed:
     pricing: dict[str, Any] | None = None
 
 
-@dataclass(frozen=True)
-class FirstBotProvider:
-    """A provider connection that can back the tenant's first ``chat`` bot.
-
-    ``provider_id`` is the adapter id (``/v1/providers/{id}``);
-    ``access_path_key`` is the standard access path the bot's endpoint is
-    registered on; ``discovery`` is the alias ``/v1/models/upstream`` accepts.
-    """
-
-    provider_id: str
-    vendor: str
-    access_path_key: str
-    discovery: str
+#: Agent backend every first bot runs on: one Claude bridge, native for
+#: Anthropic access paths and through its Anthropic-compat proxy otherwise.
+FIRST_BOT_AGENT_BACKEND = "claude-code"
 
 
-#: Providers the wizard offers for the first bot. The first bot is a ``chat``
-#: harness bot, which speaks chat-completions only — so Anthropic API keys
-#: (anthropic-messages protocol → claude-code harness → agent bridge) are a
-#: Phase-2 addition, not a first-bot option.
-FIRST_BOT_PROVIDERS: tuple[FirstBotProvider, ...] = (
-    FirstBotProvider(
-        provider_id="xai",
-        vendor="xai",
-        access_path_key="xai-chat",
-        discovery="xai",
-    ),
-    FirstBotProvider(
-        provider_id="openai-api",
-        vendor="openai",
-        access_path_key="openai-api",
-        discovery="openai",
-    ),
-)
+#: Seed body for ``setup.first_agent_prompt`` (see ``prompt_definitions``).
+#: Never sent anywhere directly; resolve the key through the prompt registry.
+FIRST_AGENT_PROMPT_SEED = """\
+You are an agent running on this BawtHub instance. You can use tools, work in \
+your own workspace, and carry tasks through several steps on your own.
 
-
-#: Context window used when the provider's catalog doesn't report one. The
-#: ``models`` table requires a positive window; the wizard lets the operator
-#: override it.
-DEFAULT_CONTEXT_WINDOW = 128_000
-
-
-DEFAULT_FIRST_BOT_PROMPT = """\
-You are a helpful assistant running on this BawtHub instance.
-
-- Lead with the answer. Keep replies tight and in plain language.
-- Use the tools you have (memory, web search) when they make the answer better.
-- Remember what the user tells you about themselves and their preferences.
-- Be honest about uncertainty instead of guessing."""
-
-
-def first_bot_provider(provider_id: str) -> FirstBotProvider | None:
-    """Look up a first-bot provider route by adapter id."""
-    wanted = (provider_id or "").strip().lower()
-    return next((p for p in FIRST_BOT_PROVIDERS if p.provider_id == wanted), None)
+- Lead with the result. Keep replies tight and in plain language.
+- When a request needs action, take it: use your tools, check the outcome, and \
+report what changed. Ask first only when a choice is genuinely the user's.
+- Before anything destructive or irreversible, say what you are about to do and \
+wait for approval.
+- Remember what the user tells you about themselves and their preferences, and \
+use your memory tools to recall it.
+- Be honest about uncertainty and about anything you could not verify."""

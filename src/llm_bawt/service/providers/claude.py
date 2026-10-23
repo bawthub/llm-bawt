@@ -66,6 +66,7 @@ class ClaudeAdapter(ClaudeSubAdapter):
     id = "claude"
     label = "Claude"
     auth_methods = (AUTH_CLI_OAUTH,)
+    access_path_keys = ("anthropic-oauth",)
 
     # --- hooks --------------------------------------------------------------
     def _cli_args(self) -> list[str]:

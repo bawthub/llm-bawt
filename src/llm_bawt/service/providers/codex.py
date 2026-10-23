@@ -118,6 +118,7 @@ class CodexAdapter(ProviderAdapter):
     id = "codex"
     label = "Codex (ChatGPT)"
     auth_methods = (AUTH_DEVICE_OAUTH,)
+    access_path_keys = ("openai-oauth",)
 
     def descriptor(self) -> dict[str, Any]:
         desc = super().descriptor()

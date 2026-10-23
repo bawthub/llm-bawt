@@ -48,6 +48,7 @@ from .prompt_default_loaders import (
     load_profile_consolidation,
     load_recall_synthesis_system,
     load_self_recap_system,
+    load_setup_first_agent_prompt,
 )
 
 COMPACT_SUMMARY_KEY = "agents.compaction_summary"
@@ -462,6 +463,18 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "bot to end its turn and must not promise a receipt, callback or new turn; "
             "the bot checks ops_job_status in a later turn. Used verbatim; a blank body "
             "falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "setup.first_agent_prompt": PromptDefinition(
+        key="setup.first_agent_prompt",
+        title="Setup: First Agent Prompt",
+        category="setup",
+        loader=load_setup_first_agent_prompt,
+        metadata={"notes": (
+            "Starting system prompt the setup wizard offers for the tenant's first "
+            "bot, a claude-code agent (TASK-1293/1297). Served by GET /v1/setup/first-bot "
+            "as default_system_prompt; the operator can edit it before creating the bot, "
+            "and the bot then owns its own copy. Keep it owner-neutral."
         )},
     ),
     "media.prompt_expansion.video": PromptDefinition(

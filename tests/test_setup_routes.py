@@ -1,12 +1,37 @@
-"""HTTP contract tests for the first-run setup routes (TASK-355)."""
+"""HTTP contract tests for the first-run setup routes (TASK-355, TASK-1297)."""
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from agent_bridge.ping import BridgeReadiness
+from llm_bawt.model_catalog import AccessPath, ModelCatalog, ModelEndpoint, ModelIdentity
+from llm_bawt.service.routes import bot_profile_validation
 from llm_bawt.service.routes import setup as setup_routes
+
+#: TASK-1293 routes, stated independently of the code under test:
+#: access path -> (vendor, protocol, harness the admin writer must settle on).
+ROUTES = {
+    "anthropic-oauth": ("anthropic", "anthropic-messages", "claude-code"),
+    "anthropic-api": ("anthropic", "anthropic-messages", "claude-code"),
+    "openai-oauth": ("openai", "responses", "claude-proxy"),
+    "openai-responses": ("openai", "responses", "claude-proxy"),
+    "xai-responses": ("xai", "responses", "claude-proxy"),
+    "openrouter-anthropic": ("openrouter", "anthropic-messages", "claude-proxy"),
+}
+
+_READY = BridgeReadiness(ready=True, backend="claude-code", instance="boot-1", detail="claude-code bridge answered ping v1")
+
+_FIRST_BOT = {
+    "endpoint_id": 7,
+    "slug": "helper",
+    "name": "Helper",
+    "system_prompt": "You are helpful.",
+}
 
 
 def _client() -> TestClient:
@@ -21,65 +46,102 @@ def _service() -> MagicMock:
     return service
 
 
-def _adapter(state: str = "ok", label: str = "xAI") -> MagicMock:
-    adapter = MagicMock()
-    adapter.id = "xai"
-    adapter.label = label
-    adapter.health.return_value = {"state": state, "detail": None}
-    return adapter
+def _resolver(body: str = "Registry prompt body"):
+    resolver = MagicMock()
+    resolver.resolve.return_value = SimpleNamespace(body=body)
+    return resolver
 
 
-_FIRST_BOT = {
-    "provider_id": "xai",
-    "model_id": "grok-4.3",
-    "context_window": 131072,
-    "slug": "helper",
-    "name": "Helper",
-    "system_prompt": "You are helpful.",
-}
+def _catalog(access_path_key: str, *, vendor: str, protocol: str, endpoint_id: int = 7) -> ModelCatalog:
+    return ModelCatalog([
+        ModelEndpoint(
+            id=endpoint_id,
+            model=ModelIdentity(id=3, key="m", vendor=vendor, display_name="M"),
+            access_path=AccessPath(id=5, key=access_path_key, vendor=vendor, protocol=protocol,
+                                   base_url=None, auth_mechanism="api-key"),
+            upstream_model_id="m",
+        ),
+    ])
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/setup/providers
+# GET /v1/setup/first-bot (defaults)
 # ---------------------------------------------------------------------------
 
 
-def test_setup_providers_reports_connection_state_and_defaults():
-    adapters = {"xai": _adapter("ok"), "openai-api": _adapter("unconfigured", "OpenAI")}
-
+def test_first_bot_defaults_prompt_comes_from_the_registry():
+    resolver = _resolver("Operator-edited agent prompt")
+    service = _service()
     with (
-        patch.object(setup_routes, "get_service", return_value=_service()),
-        patch.object(setup_routes, "get_adapter", side_effect=lambda _c, pid: adapters.get(pid)),
+        patch.object(setup_routes, "get_service", return_value=service),
+        patch.object(setup_routes, "get_prompt_resolver", return_value=resolver) as get_resolver,
     ):
-        response = _client().get("/v1/setup/providers")
+        response = _client().get("/v1/setup/first-bot")
 
     assert response.status_code == 200
-    payload = response.json()
-    by_id = {row["id"]: row for row in payload["providers"]}
-    assert by_id["xai"]["connected"] is True
-    assert by_id["xai"]["access_path"] == "xai-chat"
-    assert by_id["xai"]["discovery"] == "xai"
-    assert by_id["openai-api"]["connected"] is False
-    assert by_id["openai-api"]["state"] == "unconfigured"
-    assert payload["default_system_prompt"] == setup_routes.DEFAULT_FIRST_BOT_PROMPT
-    assert payload["default_context_window"] == setup_routes.DEFAULT_CONTEXT_WINDOW
+    assert response.json() == {
+        "default_system_prompt": "Operator-edited agent prompt",
+        "bot_type": "agent",
+        "agent_backend": "claude-code",
+    }
+    get_resolver.assert_called_once_with(service.config)
+    resolver.resolve.assert_called_once_with("setup.first_agent_prompt")
 
 
-def test_setup_providers_survives_one_failing_adapter():
-    broken = _adapter()
-    broken.health.side_effect = RuntimeError("boom")
-    adapters = {"xai": broken, "openai-api": _adapter("ok", "OpenAI")}
-
+def test_first_bot_defaults_report_unregistered_prompt_as_503():
+    resolver = MagicMock()
+    resolver.resolve.return_value = None
     with (
         patch.object(setup_routes, "get_service", return_value=_service()),
-        patch.object(setup_routes, "get_adapter", side_effect=lambda _c, pid: adapters.get(pid)),
+        patch.object(setup_routes, "get_prompt_resolver", return_value=resolver),
     ):
-        payload = _client().get("/v1/setup/providers").json()
+        response = _client().get("/v1/setup/first-bot")
+    assert response.status_code == 503
+    assert "setup.first_agent_prompt" in response.json()["detail"]
 
-    by_id = {row["id"]: row for row in payload["providers"]}
-    assert by_id["xai"]["connected"] is False
-    assert by_id["xai"]["state"] == "unknown"
-    assert by_id["openai-api"]["connected"] is True
+
+def test_wizard_keeps_no_route_table_or_model_writer_of_its_own():
+    """Nick, TASK-1297: the wizard uses the admin code paths, not a parallel copy."""
+    for name in ("FIRST_BOT_PROVIDERS", "first_bot_provider", "TenantSeeder", "get_adapter",
+                 "_tool_eligibility", "_require_tool_capable", "_agent_profile_fields",
+                 "DEFAULT_FIRST_BOT_PROMPT"):
+        assert not hasattr(setup_routes, name), name
+    paths = {route.path for route in setup_routes.router.routes}
+    assert "/v1/setup/providers" not in paths
+
+
+def test_first_agent_prompt_is_registered_with_an_owner_neutral_agent_default():
+    from llm_bawt.prompt_registry import PromptResolver
+
+    definition = PromptResolver.definition_for("setup.first_agent_prompt")
+    assert definition is not None and definition.category == "setup"
+    body = definition.default_body()
+    assert body.strip() and "agent" in body.lower()
+    for forbidden in ("nick", "nova", "mira", "vex", "personal ai assistant"):
+        assert forbidden not in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/setup/agent-runtime
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("readiness", [
+    _READY,
+    BridgeReadiness(ready=False, backend="claude-code", instance=None, detail="no reply from the claude-code bridge within 5.0s"),
+])
+def test_agent_runtime_reports_probe_outcome_as_200(readiness):
+    service = _service()
+    probe = AsyncMock(return_value=readiness)
+    with (
+        patch.object(setup_routes, "get_service", return_value=service),
+        patch.object(setup_routes, "check_agent_runtime", probe),
+    ):
+        response = _client().get("/v1/setup/agent-runtime")
+
+    assert response.status_code == 200
+    assert response.json() == readiness.to_dict()
+    probe.assert_awaited_once_with(service.config)
 
 
 # ---------------------------------------------------------------------------
@@ -170,132 +232,142 @@ def test_setup_seed_hides_unexpected_internal_error():
 
 
 @contextmanager
-def _first_bot_env(adapter, *, seeder=None, persist=None):
-    """Patch every collaborator of ``/v1/setup/first-bot``; yield the mocks."""
-    seeder = seeder or MagicMock()
-    if not isinstance(seeder.apply.side_effect, Exception) and seeder.apply.side_effect is None:
-        seeder.apply.return_value = {"catalog_migration": {"ok": True}, "prompts": {"created": []}}
-    if seeder.register_model.side_effect is None:
-        seeder.register_model.return_value = {
-            "models": {"created": ["grok-4.3"], "existing": []},
-            "endpoints": {"created": ["grok-4.3@xai-chat"], "existing": []},
-            "endpoint_id": 7,
-        }
+def _first_bot_env(*, persist=None, runtime: BridgeReadiness = _READY):
+    """Patch the route's collaborators; yield the mocks."""
     persist = persist or AsyncMock(return_value={"slug": "helper", "name": "Helper"})
+    service = _service()
+    probe = AsyncMock(return_value=runtime)
     with (
-        patch.object(setup_routes, "get_service", return_value=_service()),
-        patch.object(setup_routes, "get_adapter", return_value=adapter),
-        patch.object(setup_routes, "TenantSeeder", return_value=seeder),
-        patch.object(setup_routes, "reload_models_catalog") as reload,
+        patch.object(setup_routes, "get_service", return_value=service),
+        patch.object(setup_routes, "check_agent_runtime", probe),
         patch.object(setup_routes, "_persist_bot_profile", persist),
     ):
-        yield seeder, persist, reload
+        yield SimpleNamespace(persist=persist, probe=probe, service=service)
 
 
-def test_first_bot_happy_path_orders_infra_model_reload_then_bot():
-    order: list[str] = []
-    seeder = MagicMock()
-    seeder.apply.side_effect = lambda: order.append("infra") or {"catalog_migration": {}, "prompts": {}}
-    seeder.register_model.side_effect = lambda **kw: order.append("model") or {
-        "models": {"created": ["grok-4.3"], "existing": []},
-        "endpoints": {"created": ["grok-4.3@xai-chat"], "existing": []},
-        "endpoint_id": 7,
-    }
-
-    async def _persist(payload, *, create_only):
-        order.append("bot")
-        return {"slug": payload["slug"], "endpoint_id": payload["endpoint_id"]}
-
-    with _first_bot_env(_adapter("ok"), seeder=seeder, persist=AsyncMock(side_effect=_persist)) as (_, persist, reload):
-        reload.side_effect = lambda: order.append("reload")
+def test_first_bot_happy_path_creates_agent_through_the_admin_writer():
+    with _first_bot_env() as env:
         response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
 
     assert response.status_code == 200, response.text
-    assert order == ["infra", "model", "reload", "bot"]
-    seeder.register_model.assert_called_once_with(
-        vendor="xai",
-        model_id="grok-4.3",
-        access_path_key="xai-chat",
-        display_name=None,
-        context_window=131072,
-    )
-    payload = persist.call_args.args[0]
-    assert persist.call_args.kwargs == {"create_only": True}
+    env.probe.assert_awaited_once_with(env.service.config)
+    payload = env.persist.call_args.args[0]
+    assert env.persist.call_args.kwargs == {"create_only": True}
     assert payload["slug"] == "helper"
-    assert payload["harness"] == "chat"
-    assert payload["bot_type"] == "chat"
     assert payload["endpoint_id"] == 7
+    assert (payload["bot_type"], payload["agent_backend"]) == ("agent", "claude-code")
     assert payload["uses_tools"] is True and payload["uses_search"] is True
     body = response.json()
-    assert body["ok"] is True
-    assert body["bot"] == {"slug": "helper", "endpoint_id": 7}
-    assert body["report"]["models"]["created"] == ["grok-4.3"]
+    assert body == {
+        "ok": True,
+        "bot": {"slug": "helper", "name": "Helper"},
+        "runtime": _READY.to_dict(),
+        "preferences": {},
+    }
 
 
-def test_first_bot_refuses_when_provider_not_connected():
-    with _first_bot_env(_adapter("unconfigured")) as (seeder, persist, _):
+@pytest.mark.parametrize("access_path_key", list(ROUTES))
+def test_admin_writer_settles_first_bot_harness_on_every_route(access_path_key):
+    """The payload first-bot builds, run through the real profile validation."""
+    vendor, protocol, harness = ROUTES[access_path_key]
+    service = _service()
+    service.config.ensure_model_catalog.return_value = _catalog(access_path_key, vendor=vendor, protocol=protocol)
+    seen: dict = {}
+
+    async def _persist(payload, *, create_only):
+        bot_profile_validation._validate_profile_payload(payload)
+        seen.update(payload)
+        return {"slug": payload["slug"]}
+
+    with (
+        _first_bot_env(persist=AsyncMock(side_effect=_persist)),
+        patch.object(bot_profile_validation, "get_service", return_value=service),
+    ):
         response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Connect xAI before creating the first bot"
-    seeder.apply.assert_not_called()
-    persist.assert_not_called()
+    assert response.status_code == 200, response.text
+    assert (seen["harness"], seen["agent_backend"], seen["endpoint_id"]) == (harness, "claude-code", 7)
+    assert seen["default_model"] == "m"
 
 
-def test_first_bot_warning_state_still_counts_as_connected():
-    with _first_bot_env(_adapter("warning")) as (seeder, _, _):
+@pytest.mark.parametrize(("catalog", "detail"), [
+    (_catalog("openai-api", vendor="openai", protocol="chat-completions"),
+     "endpoint_id=7 is incompatible with harness=claude-code"),
+    (_catalog("xai-responses", vendor="xai", protocol="responses", endpoint_id=8),
+     "Unknown model endpoint id: 7"),
+])
+def test_admin_writer_refusals_reach_the_wizard_as_422(catalog, detail):
+    service = _service()
+    service.config.ensure_model_catalog.return_value = catalog
+
+    async def _persist(payload, *, create_only):
+        bot_profile_validation._validate_profile_payload(payload)
+        raise AssertionError("validation should have refused")
+
+    with (
+        _first_bot_env(persist=AsyncMock(side_effect=_persist)),
+        patch.object(bot_profile_validation, "get_service", return_value=service),
+    ):
         response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
 
-    assert response.status_code == 200
-    seeder.apply.assert_called_once()
+    assert response.status_code == 422
+    assert response.json()["detail"] == detail
 
 
-def test_first_bot_rejects_provider_that_cannot_back_a_chat_bot():
-    with _first_bot_env(_adapter("ok")) as (seeder, _, _):
-        response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "provider_id": "anthropic-api"})
+def test_first_bot_refuses_when_agent_runtime_not_ready():
+    down = BridgeReadiness(ready=False, backend="claude-code", instance=None,
+                           detail="no reply from the claude-code bridge within 5.0s")
+    with _first_bot_env(runtime=down) as env:
+        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
 
-    assert response.status_code == 400
-    assert "cannot back the first bot" in response.json()["detail"]
-    seeder.apply.assert_not_called()
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Agent runtime not ready: no reply from the claude-code bridge within 5.0s"
+    env.persist.assert_not_called()
 
 
-def test_first_bot_validates_slug_and_prompt_shape():
-    client = _client()
-    assert client.post("/v1/setup/first-bot", json={**_FIRST_BOT, "slug": "Bad Slug"}).status_code == 422
-    assert client.post("/v1/setup/first-bot", json={**_FIRST_BOT, "system_prompt": ""}).status_code == 422
-    assert client.post("/v1/setup/first-bot", json={**_FIRST_BOT, "context_window": 0}).status_code == 422
+@pytest.mark.parametrize("override", [
+    {"slug": "Bad Slug"},
+    {"system_prompt": ""},
+    {"endpoint_id": 0},
+    {"endpoint_id": None},
+])
+def test_first_bot_validates_request_shape(override):
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, **override})
+    assert response.status_code == 422
+    env.probe.assert_not_awaited()
+
+
+def test_first_bot_ignores_legacy_route_fields_and_client_harness():
+    with _first_bot_env() as env:
+        response = _client().post("/v1/setup/first-bot", json={
+            **_FIRST_BOT, "provider_id": "xai", "model_id": "grok-4.3", "harness": "chat",
+        })
+    assert response.status_code == 200, response.text
+    assert env.persist.call_args.args[0]["harness"] == "claude-code"
 
 
 def test_first_bot_passes_through_duplicate_slug_conflict():
     persist = AsyncMock(side_effect=HTTPException(status_code=409, detail="Bot 'helper' already exists"))
-    with _first_bot_env(_adapter("ok"), persist=persist):
+    with _first_bot_env(persist=persist):
         response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Bot 'helper' already exists"
 
 
-def test_first_bot_maps_engine_errors():
-    seeder = MagicMock()
-    seeder.apply.side_effect = RuntimeError("Tenant seed requires database credentials")
-    with _first_bot_env(_adapter("ok"), seeder=seeder):
-        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
-    assert response.status_code == 503
-
-    seeder.apply.side_effect = None
-    seeder.apply.return_value = {}
-    seeder.register_model.side_effect = ValueError("model_id is required")
-    with _first_bot_env(_adapter("ok"), seeder=seeder):
-        response = _client().post("/v1/setup/first-bot", json=_FIRST_BOT)
-    assert response.status_code == 400
-    assert response.json()["detail"] == "model_id is required"
-
-
 def test_first_bot_persists_preferences_after_bot_create():
+    order: list[str] = []
     store = MagicMock()
     store.engine = MagicMock()
+    store.set_value.side_effect = lambda *a: order.append("pref")
+
+    async def _persist(payload, *, create_only):
+        order.append("bot")
+        return {"slug": payload["slug"]}
+
     with (
-        _first_bot_env(_adapter("ok")),
+        _first_bot_env(persist=AsyncMock(side_effect=_persist)),
         patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
     ):
         response = _client().post(
@@ -305,3 +377,17 @@ def test_first_bot_persists_preferences_after_bot_create():
 
     assert response.status_code == 200
     assert response.json()["preferences"] == {"tenant.exposure": "private", "tenant.voice_enabled": True}
+    assert order == ["bot", "pref", "pref"]
+
+
+def test_failed_bot_create_stores_no_preferences():
+    store = MagicMock()
+    store.engine = MagicMock()
+    persist = AsyncMock(side_effect=HTTPException(status_code=422, detail="nope"))
+    with (
+        _first_bot_env(persist=persist),
+        patch.object(setup_routes, "get_runtime_settings_store", return_value=store),
+    ):
+        response = _client().post("/v1/setup/first-bot", json={**_FIRST_BOT, "exposure": "private"})
+    assert response.status_code == 422
+    store.set_value.assert_not_called()

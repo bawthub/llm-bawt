@@ -13,11 +13,9 @@ import pytest
 
 from llm_bawt.memory.model_catalog_migration import STANDARD_ACCESS_PATHS
 from llm_bawt.seeding.data import (
-    DEFAULT_FIRST_BOT_PROMPT,
-    FIRST_BOT_PROVIDERS,
+    FIRST_AGENT_PROMPT_SEED,
     EndpointSeed,
     ModelSeed,
-    first_bot_provider,
 )
 from llm_bawt.seeding.engine import TenantSeeder
 
@@ -25,17 +23,6 @@ from llm_bawt.seeding.engine import TenantSeeder
 # ---------------------------------------------------------------------------
 # Seed data integrity
 # ---------------------------------------------------------------------------
-
-
-def test_first_bot_providers_use_standard_chat_completions_access_paths():
-    """The first bot is a ``chat`` harness bot → chat-completions only."""
-    by_key = {p.key: p for p in STANDARD_ACCESS_PATHS}
-    assert FIRST_BOT_PROVIDERS, "at least one provider must be able to back the first bot"
-    for route in FIRST_BOT_PROVIDERS:
-        path = by_key[route.access_path_key]
-        assert path.vendor == route.vendor
-        assert path.protocol == "chat-completions"
-        assert path.auth_mechanism == "api-key"
 
 
 def test_standard_paths_include_openai_platform_responses_route():
@@ -48,19 +35,12 @@ def test_standard_paths_include_openai_platform_responses_route():
     assert path.auth_mechanism == "api-key"
 
 
-def test_first_bot_provider_lookup_is_case_insensitive_and_strict():
-    assert first_bot_provider("XAI") is FIRST_BOT_PROVIDERS[0]
-    assert first_bot_provider("  openai-api ") is not None
-    assert first_bot_provider("anthropic-api") is None  # anthropic-messages ≠ chat harness
-    assert first_bot_provider("") is None
-
-
-def test_default_prompt_is_generic():
+def test_first_agent_prompt_seed_is_generic():
     """No owner name, no personal traits — it's a tenant starter, not Nick's bot."""
-    lowered = DEFAULT_FIRST_BOT_PROMPT.lower()
+    lowered = FIRST_AGENT_PROMPT_SEED.lower()
     for forbidden in ("nick", "nova", "mira", "personal ai assistant"):
         assert forbidden not in lowered
-    assert DEFAULT_FIRST_BOT_PROMPT.strip()
+    assert FIRST_AGENT_PROMPT_SEED.strip()
 
 
 def test_seed_data_carries_no_credentials():

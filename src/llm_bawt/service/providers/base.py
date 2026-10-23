@@ -44,6 +44,9 @@ HEALTH_BROKEN = "broken"
 HEALTH_UNCONFIGURED = "unconfigured"
 HEALTH_UNKNOWN = "unknown"
 
+#: Health states under which a credential is usable right now.
+CONNECTED_HEALTH_STATES = frozenset({HEALTH_OK, HEALTH_WARNING})
+
 
 def health_block(
     state: str,
@@ -225,6 +228,10 @@ class ProviderAdapter:
     id: str = ""
     label: str = ""
     auth_methods: tuple[str, ...] = ()
+    #: ``access_paths.key`` values whose requests authenticate with this
+    #: adapter's credential. The registry is the only place this mapping is
+    #: read, and a key may have at most one owner.
+    access_path_keys: tuple[str, ...] = ()
 
     def __init__(self, config: Config):
         self.config = config

@@ -33,6 +33,7 @@ from claude_agent_sdk.types import (
 
 from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.abort_rpc import answer_abort
+from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.approval import (
     ApprovalDecision,
@@ -368,6 +369,13 @@ class ClaudeCommandMixin:
                     request_id,
                     await answer_abort(self._backend_name, params, self._abort_request),
                 )
+            elif method == PING_METHOD and backend == self._backend_name:
+                # Readiness probe (TASK-1297). Answered on this live command
+                # consumer, outside every session lock: it proves the consumer
+                # that receives chat.send is reading, nothing more.
+                reply = answer_ping(self._backend_name, request_id, params)
+                if reply is not None:
+                    self._publisher.publish_rpc_result(request_id, reply)
             elif method == RUN_STATUS_METHOD and backend == self._backend_name:
                 # Answered only when addressed to us: see agent_bridge.run_status.
                 self._publisher.publish_rpc_result(

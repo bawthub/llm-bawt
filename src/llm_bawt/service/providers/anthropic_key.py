@@ -26,6 +26,7 @@ class AnthropicKeyAdapter(ApiKeyAdapter):
 
     id = "anthropic-api"
     label = "Anthropic API"
+    access_path_keys = ("anthropic-api",)
 
     @staticmethod
     def _probe(key: str) -> tuple[str | None, str | None]:

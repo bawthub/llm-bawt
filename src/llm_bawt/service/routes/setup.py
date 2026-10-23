@@ -1,21 +1,26 @@
-"""First-run tenant setup surface (TASK-355).
+"""First-run tenant setup surface (TASK-355, agent-first since TASK-1293/1297).
 
-The installer and the BawtHub wizard share one idempotent seed engine; these
-routes are thin HTTP adapters around it. Seed policy and data stay in
-:mod:`llm_bawt.seeding`.
+The wizard uses the same code paths admins do; these routes only add what
+the admin surface has no equivalent for. Flow the wizard drives:
 
-Flow the wizard drives:
+1. ``POST /v1/setup/seed``: idempotent infrastructure seed (catalog schema,
+   standard access paths, prompt defaults). Must run before anything that
+   reads the catalog on a fresh tenant. Also the installer / operator
+   fallback (``tenant.sh seed``).
+2. ``GET  /v1/models/catalog/access-paths?agent_backend=claude-code``: the
+   admin list of routes a ``claude-code`` agent can run on, each with its
+   provider ``connection``.
+3. The admin Add Model flow (catalog ``PUT`` routes) adds the chosen model and
+   endpoint. It is the only writer of model rows.
+4. ``GET  /v1/setup/agent-runtime``: whether the ``claude-code`` bridge's
+   command consumer answers a strict ping right now (:mod:`agent_bridge.ping`).
+5. ``GET  /v1/setup/first-bot``: wizard defaults, including the starting
+   prompt from the registry (``setup.first_agent_prompt``).
+6. ``POST /v1/setup/first-bot``: refuse unless the runtime is ready, then
+   create a ``claude-code`` agent on the chosen endpoint through the admin
+   bot-profile writer, which resolves the endpoint and derives the harness.
 
-1. ``GET  /v1/setup/providers`` — which connections can back the first bot,
-   and whether each is connected (health from the provider adapters).
-2. ``GET  /v1/models/upstream?provider=…`` — live model list for a connected
-   provider (existing route; discovery reads the stored key).
-3. ``POST /v1/setup/first-bot`` — provision infrastructure, register the
-   chosen model + endpoint, create the bot. Refuses when the provider isn't
-   connected: a bot without a credential is broken on arrival.
-
-``POST /v1/setup/seed`` remains the infrastructure-only apply for the
-installer / operator fallback (``tenant.sh seed``).
+Chat bots stay creatable from Settings; the wizard creates agents only.
 """
 
 from __future__ import annotations
@@ -27,29 +32,19 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
-from ...seeding import (
-    DEFAULT_CONTEXT_WINDOW,
-    DEFAULT_FIRST_BOT_PROMPT,
-    FIRST_BOT_PROVIDERS,
-    TenantSeeder,
-    first_bot_provider,
-    seed_tenant,
-)
+from ...prompt_registry import get_prompt_resolver
+from ...seeding import FIRST_BOT_AGENT_BACKEND, seed_tenant
+from ..agent_runtime import check_agent_runtime
 from ..dependencies import get_runtime_settings_store, get_service
-from ..providers.base import HEALTH_OK, HEALTH_WARNING
-from ..providers.registry import get_adapter
-from .models import reload_models_catalog
 from .settings import _persist_bot_profile
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
+FIRST_AGENT_PROMPT_KEY = "setup.first_agent_prompt"
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _SLUG_RE = r"^[a-z0-9][a-z0-9_-]{1,63}$"
-
-#: Health states under which a provider credential is usable right now.
-_USABLE_STATES = frozenset({HEALTH_OK, HEALTH_WARNING})
 
 
 class TenantPreferences(BaseModel):
@@ -74,12 +69,13 @@ class TenantSeedRequest(TenantPreferences):
 
 
 class FirstBotRequest(TenantPreferences):
-    """Create the tenant's first bot against a connected provider."""
+    """Create the tenant's first agent on an existing catalog endpoint.
 
-    provider_id: str = Field(min_length=1, max_length=64)
-    model_id: str = Field(min_length=1, max_length=255)
-    display_name: str | None = Field(default=None, max_length=255)
-    context_window: int = Field(default=DEFAULT_CONTEXT_WINDOW, gt=0)
+    The harness is never accepted from the client: the bot-profile writer
+    derives it from the endpoint's access path.
+    """
+
+    endpoint_id: int = Field(gt=0)
     slug: str = Field(pattern=_SLUG_RE)
     name: str = Field(min_length=1, max_length=255)
     description: str = Field(default="", max_length=2000)
@@ -105,44 +101,11 @@ def _store_setup_preferences(service, body: TenantPreferences | None) -> dict[st
     return selected
 
 
-def _provider_rows(service) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for route in FIRST_BOT_PROVIDERS:
-        adapter = get_adapter(service.config, route.provider_id)
-        if adapter is None:  # registry drift — surface, don't hide
-            log.warning("First-bot provider %s has no adapter", route.provider_id)
-            continue
-        try:
-            health = adapter.health()
-        except Exception as exc:  # noqa: BLE001 — one bad adapter must not hide the rest
-            log.warning("health probe failed for %s: %s", adapter.id, exc)
-            health = {"state": "unknown", "detail": str(exc)[:200]}
-        state = str(health.get("state") or "unknown")
-        rows.append(
-            {
-                "id": route.provider_id,
-                "label": adapter.label,
-                "vendor": route.vendor,
-                "access_path": route.access_path_key,
-                "discovery": route.discovery,
-                "state": state,
-                "detail": health.get("detail"),
-                "connected": state in _USABLE_STATES,
-            }
-        )
-    return rows
-
-
-@router.get("/v1/setup/providers", tags=["Setup"])
-async def list_first_bot_providers():
-    """Providers that can back the first bot, with live connection state."""
-    service = get_service()
-    providers = await run_in_threadpool(_provider_rows, service)
-    return {
-        "providers": providers,
-        "default_system_prompt": DEFAULT_FIRST_BOT_PROMPT,
-        "default_context_window": DEFAULT_CONTEXT_WINDOW,
-    }
+def _first_agent_prompt(service) -> str:
+    resolved = get_prompt_resolver(service.config).resolve(FIRST_AGENT_PROMPT_KEY)
+    if resolved is None:  # the key is a built-in definition; absence is a code bug
+        raise RuntimeError(f"Prompt '{FIRST_AGENT_PROMPT_KEY}' is not registered")
+    return resolved.body
 
 
 def _http_error(exc: Exception, *, what: str) -> HTTPException:
@@ -169,45 +132,42 @@ async def apply_tenant_seed(body: TenantSeedRequest | None = None):
     return {"ok": True, "report": report, "preferences": preferences}
 
 
+@router.get("/v1/setup/agent-runtime", tags=["Setup"])
+async def get_agent_runtime():
+    """Whether the agent bridge answers a strict ping now. Always 200; see ``ready``."""
+    service = get_service()
+    return (await check_agent_runtime(service.config)).to_dict()
+
+
+@router.get("/v1/setup/first-bot", tags=["Setup"])
+async def get_first_bot_defaults():
+    """What the wizard pre-fills for the first agent."""
+    service = get_service()
+    try:
+        prompt = await run_in_threadpool(_first_agent_prompt, service)
+    except Exception as exc:  # noqa: BLE001 — mapped to HTTP below
+        raise _http_error(exc, what="First bot defaults") from exc
+    return {
+        "default_system_prompt": prompt,
+        "bot_type": "agent",
+        "agent_backend": FIRST_BOT_AGENT_BACKEND,
+    }
+
+
 @router.post("/v1/setup/first-bot", tags=["Setup"])
 async def create_first_bot(body: FirstBotRequest):
-    """Provision infrastructure, register the chosen model, create the bot.
+    """Create the tenant's first agent.
 
-    Order: provider must be connected → infra seed → model + endpoint
-    (insert-if-missing) → catalog reload so the new endpoint resolves →
-    bot create (409 if the slug exists) → preferences.
+    Refuses with 503 unless the agent runtime answers a ping. Then the admin
+    bot-profile writer validates and creates the bot: 409 if the slug exists,
+    422 if the endpoint is unknown or can't run a ``claude-code`` agent.
+    Preferences are stored last.
     """
     service = get_service()
-    route = first_bot_provider(body.provider_id)
-    if route is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Provider '{body.provider_id}' cannot back the first bot",
-        )
-    adapter = get_adapter(service.config, route.provider_id)
-    if adapter is None:
-        raise HTTPException(status_code=500, detail=f"Provider '{route.provider_id}' has no adapter")
-
     try:
-        health = await run_in_threadpool(adapter.health)
-        if str(health.get("state")) not in _USABLE_STATES:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Connect {adapter.label} before creating the first bot",
-            )
-
-        seeder = TenantSeeder(service.config)
-        infra = await run_in_threadpool(seeder.apply)
-        registered = await run_in_threadpool(
-            seeder.register_model,
-            vendor=route.vendor,
-            model_id=body.model_id,
-            access_path_key=route.access_path_key,
-            display_name=body.display_name,
-            context_window=body.context_window,
-        )
-        await run_in_threadpool(reload_models_catalog)
-
+        runtime = await check_agent_runtime(service.config)
+        if not runtime.ready:
+            raise HTTPException(status_code=503, detail=f"Agent runtime not ready: {runtime.detail}")
         bot = await _persist_bot_profile(
             {
                 "slug": body.slug,
@@ -222,9 +182,11 @@ async def create_first_bot(body: FirstBotRequest):
                 "uses_tools": True,
                 "uses_search": True,
                 "uses_home_assistant": False,
-                "harness": "chat",
-                "bot_type": "chat",
-                "endpoint_id": registered["endpoint_id"],
+                "bot_type": "agent",
+                "agent_backend": FIRST_BOT_AGENT_BACKEND,
+                # The writer heals this to ``claude-proxy`` for non-Anthropic endpoints.
+                "harness": FIRST_BOT_AGENT_BACKEND,
+                "endpoint_id": body.endpoint_id,
             },
             create_only=True,
         )
@@ -234,7 +196,7 @@ async def create_first_bot(body: FirstBotRequest):
 
     return {
         "ok": True,
-        "report": {**infra, "models": registered["models"], "endpoints": registered["endpoints"]},
         "bot": bot,
+        "runtime": runtime.to_dict(),
         "preferences": preferences,
     }

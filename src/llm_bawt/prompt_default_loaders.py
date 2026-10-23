@@ -143,3 +143,9 @@ def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 
     return VIDEO_PROMPT_EXPANSION_TEMPLATE
+
+
+def load_setup_first_agent_prompt() -> str:
+    from .seeding.data import FIRST_AGENT_PROMPT_SEED
+
+    return FIRST_AGENT_PROMPT_SEED

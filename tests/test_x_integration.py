@@ -167,9 +167,10 @@ def test_mcp_error_is_structured(monkeypatch):
 
 
 def test_x_not_a_first_bot_provider_or_automatic_search_target(store):
-    from llm_bawt.seeding import FIRST_BOT_PROVIDERS
     from llm_bawt.search.multi import available_providers
-    assert "x" not in [p.provider_id for p in FIRST_BOT_PROVIDERS]
+    from llm_bawt.service.providers.x import XAdapter
+    # The first bot runs on an access path; X authorizes none, so it can't back one.
+    assert XAdapter.access_path_keys == ()
     assert "x" not in [p.value for p in available_providers(SimpleNamespace())]
 
 

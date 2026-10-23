@@ -14,8 +14,10 @@ from claude_code_bridge.proxy.transport_policy import (
     normalize_responses_transport,
 )
 
+from ...memory.model_catalog_migration import _derive_harness
 from ...model_catalog import AccessPath, ProtocolCompatibility
 from ..dependencies import get_model_catalog_engine, get_service
+from ..providers.registry import access_path_connections
 
 router = APIRouter(prefix="/v1/models/catalog", tags=["Models"])
 
@@ -125,6 +127,41 @@ def _normalized_harness(harness: str | None) -> str | None:
     return normalized
 
 
+#: Agent backends whose harness is derived from the access path it runs on.
+_DERIVED_HARNESS_BACKENDS = frozenset({"claude-code", "codex"})
+
+
+def harness_for_agent_backend(agent_backend: str, access_path: AccessPath) -> str | None:
+    """The harness an *agent_backend* bot would run on *access_path*, or None if it can't.
+
+    The same derivation bot profiles use, so a path listed for a backend is a
+    path a bot on that backend can be saved against.
+    """
+    harness = _derive_harness(agent_backend, access_path.vendor, access_path.protocol)
+    return harness if ProtocolCompatibility.is_compatible(harness, access_path) else None
+
+
+def _normalized_agent_backend(agent_backend: str | None) -> str | None:
+    value = (agent_backend or "").strip().lower() or None
+    if value is not None and value not in _DERIVED_HARNESS_BACKENDS:
+        choices = ", ".join(sorted(_DERIVED_HARNESS_BACKENDS))
+        raise HTTPException(status_code=400, detail=f"Unknown agent_backend '{agent_backend}'. Use {choices}.")
+    return value
+
+
+def _path_filter(harness: str | None, agent_backend: str | None):
+    """Predicate over AccessPath for the list routes' ``harness`` / ``agent_backend`` filters."""
+    normalized = _normalized_harness(harness)
+    backend = _normalized_agent_backend(agent_backend)
+    if normalized and backend:
+        raise HTTPException(status_code=400, detail="Filter by harness or agent_backend, not both")
+    if normalized:
+        return lambda path: ProtocolCompatibility.is_compatible(normalized, path)
+    if backend:
+        return lambda path: harness_for_agent_backend(backend, path) is not None
+    return None
+
+
 def _check_endpoint_cas(existing_id: int | None, expected_id: int | None) -> None:
     if expected_id is None:
         return
@@ -227,22 +264,32 @@ def delete_catalog_model(model_key: str):
 
 
 @router.get("/access-paths")
-def list_access_paths(harness: str | None = Query(default=None)):
-    normalized = _normalized_harness(harness)
+def list_access_paths(
+    harness: str | None = Query(default=None),
+    agent_backend: str | None = Query(default=None),
+):
+    """Access paths, optionally filtered, each with its provider ``connection``.
+
+    ``connection`` is ``None`` when no provider connection authorizes the path;
+    otherwise ``{provider_id, label, state, detail, connected}``.
+    """
+    keep = _path_filter(harness, agent_backend)
     with _engine().connect() as conn:
         rows = _dict_rows(conn.execute(text("SELECT * FROM access_paths ORDER BY key")))
-    if normalized:
+    if keep:
         rows = [
             row
             for row in rows
-            if ProtocolCompatibility.is_compatible(
-                normalized,
+            if keep(
                 AccessPath(
                     row["id"], row["key"], row["vendor"], row["protocol"],
                     row["base_url"], row["auth_mechanism"], row["engine_kind"],
                 ),
             )
         ]
+    connections = access_path_connections(get_service().config, [row["key"] for row in rows])
+    for row in rows:
+        row["connection"] = connections[row["key"]]
     return {"access_paths": rows}
 
 
@@ -299,8 +346,9 @@ def list_endpoints(
     harness: str | None = None,
     access_path: str | None = None,
     model: str | None = None,
+    agent_backend: str | None = None,
 ):
-    normalized = _normalized_harness(harness)
+    keep = _path_filter(harness, agent_backend)
     sql = """
         SELECT e.*, m.key AS model_key, m.vendor AS model_vendor,
                m.display_name, m.description,
@@ -317,11 +365,10 @@ def list_endpoints(
     """
     with _engine().connect() as conn:
         rows = _dict_rows(conn.execute(text(sql), {"access_path": access_path, "model": model}))
-    if normalized:
+    if keep:
         rows = [
             row for row in rows
-            if ProtocolCompatibility.is_compatible(
-                normalized,
+            if keep(
                 AccessPath(
                     row["access_path_id"], row["access_path_key"], row["access_vendor"],
                     row["protocol"], row["base_url"], row["auth_mechanism"],
