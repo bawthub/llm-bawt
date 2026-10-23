@@ -26,6 +26,7 @@ from .maintenance_delivery import MaintenanceBarrier
 from .service.turn_gates import ensure_gate_schema
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
 from .inter_bot_delivery_record import DeliveryRecord
+from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 from .inter_bot_delivery_user import resolve_delivery_user
 from .utils.config import Config
 from .utils.db import get_shared_engine
@@ -196,6 +197,27 @@ class InterBotDeliveryStore:
             conn.execute(sa_text(
                 "ALTER TABLE inter_bot_deliveries ADD COLUMN IF NOT EXISTS overflow_recovery_count INTEGER NOT NULL DEFAULT 0"
             ))
+            # TASK-1300: a per-row revision, bumped by the database on every
+            # UPDATE. Row locks serialize the updates, so it follows commit
+            # order. Lifecycle events carry it and consumers drop any event
+            # older than one they've already shown; publishing is async and
+            # can't otherwise promise that order.
+            conn.execute(sa_text(
+                "ALTER TABLE inter_bot_deliveries ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0"
+            ))
+            conn.execute(sa_text("""
+                CREATE OR REPLACE FUNCTION inter_bot_deliveries_bump_revision() RETURNS trigger AS $$
+                BEGIN
+                    NEW.revision := OLD.revision + 1;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+            """))
+            conn.execute(sa_text("""
+                CREATE OR REPLACE TRIGGER inter_bot_deliveries_revision
+                BEFORE UPDATE ON inter_bot_deliveries
+                FOR EACH ROW EXECUTE FUNCTION inter_bot_deliveries_bump_revision()
+            """))
             conn.execute(sa_text(
                 "ALTER TABLE inter_bot_deliveries DROP CONSTRAINT IF EXISTS inter_bot_deliveries_status_check"
             ))
@@ -572,11 +594,37 @@ class InterBotDeliveryStore:
         response_model: str | None,
         response_chars: int,
     ) -> DeliveryRecord | None:
-        return self._claim_transition(delivery_id, claim_token, """
-            status='DELIVERED', delivered_at=now(), lease_expires_at=NULL,
-            claim_token=NULL, claim_owner=NULL, next_retry_at=NULL, last_error=NULL,
-            response_model=:model, response_chars=:chars, updated_at=now()
-        """, {"model": response_model, "chars": response_chars})
+        """Settle a claim DELIVERED, fenced by its claim token.
+
+        TASK-1300: a steer claim whose own command was already reported
+        rejected (``steer_rejected_pending``) settles as a re-queue instead.
+        The marker check and the DELIVERED write share one transaction and row
+        lock, so a rejection either lands first (re-queue here) or waits for
+        DELIVERED and reopens it; it can never fall between them.
+        """
+        if self.engine is None or not claim_token:
+            return None
+        values = {"id": delivery_id, "claim_token": claim_token,
+                  "model": response_model, "chars": response_chars}
+        with self.engine.begin() as conn:
+            claim = conn.execute(sa_text("""
+                SELECT * FROM inter_bot_deliveries
+                WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
+                FOR UPDATE
+            """), values).mappings().first()
+            if claim is None:
+                return None
+            if claim["status"] == "STEERING" and pending_rejection(claim) is not None:
+                return self.requeue_claim(conn, delivery_id, claim_token, "", delay_seconds=1)
+            row = conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries SET
+                    status='DELIVERED', delivered_at=now(), lease_expires_at=NULL,
+                    claim_token=NULL, claim_owner=NULL, next_retry_at=NULL, last_error=NULL,
+                    response_model=:model, response_chars=:chars, updated_at=now()
+                WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
+                RETURNING *
+            """), values).mappings().first()
+        return DeliveryRecord.from_mapping(row) if row else None
 
     def requeue(
         self,
@@ -636,6 +684,20 @@ class InterBotDeliveryStore:
         }
         if clear_delivery_mode and reject_steer_target:
             raise ValueError("clear_delivery_mode and reject_steer_target are mutually exclusive")
+        steering = conn.execute(sa_text("""
+            SELECT * FROM inter_bot_deliveries
+            WHERE id=:id AND status='STEERING' AND claim_token=:claim_token FOR UPDATE
+        """), values).mappings().first()
+        proof = pending_rejection(steering) if steering is not None else None
+        if proof is not None:
+            # TASK-1300: this claim's own command is proven not to have run, so
+            # whatever the caller saw, the row leaves its target at k+1 rather
+            # than replaying the frozen k.
+            metadata = steering.get("metadata_json") or {}
+            clear_delivery_mode, reject_steer_target, refund_attempt = False, True, True
+            metadata_merge = {**dict(metadata_merge or {}), **rejection_merge(metadata, proof)}
+            values["metadata_merge"] = json.dumps(metadata_merge)
+            values["error"] = rejection_error(proof, int(metadata.get("steer_generation") or 0))
         claim = conn.execute(sa_text("""
             SELECT turn_id, delivery_mode FROM inter_bot_deliveries
             WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token FOR UPDATE
@@ -761,23 +823,6 @@ class InterBotDeliveryStore:
                     last_error=:error, updated_at=now()
                 WHERE id=:id AND status != 'DELIVERED' RETURNING *
             """), {"id": delivery_id, "error": error[:4000]}).mappings().first()
-        return DeliveryRecord.from_mapping(row) if row else None
-
-    def _claim_transition(
-        self,
-        delivery_id: str,
-        claim_token: str,
-        assignments: str,
-        params: dict[str, Any],
-    ) -> DeliveryRecord | None:
-        if self.engine is None or not claim_token:
-            return None
-        values = {"id": delivery_id, "claim_token": claim_token, **params}
-        with self.engine.begin() as conn:
-            row = conn.execute(sa_text(
-                f"UPDATE inter_bot_deliveries SET {assignments} "
-                "WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token RETURNING *"
-            ), values).mappings().first()
         return DeliveryRecord.from_mapping(row) if row else None
 
     @staticmethod

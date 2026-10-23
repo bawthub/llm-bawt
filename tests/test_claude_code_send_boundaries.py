@@ -326,6 +326,7 @@ def test_steer_defaults_to_next_and_requires_origin_for_user_lifecycle():
         }, "command-1", harness.redis)
         active.steer.assert_awaited_once_with(
             "note", priority="next", message_id="id-1", origin="user",
+            framed_message=None, interrupt_item=None, steer_rpc_id="steer-1",
         )
         harness._publisher.publish_rpc_result.assert_called_once_with(
             "steer-1", {"ok": True, "detail": "steered", "active_request_id": "target-run", "can_escalate": False, "can_cancel": True},
@@ -344,11 +345,38 @@ def test_escalation_calls_active_run_without_resending_message():
             "target_request_id": "target-run", "message_id": "id-1", "escalate": "1",
         }
         await harness._handle_steer(fields, "command-1", harness.redis)
-        active.escalate.assert_awaited_once_with("id-1")
+        active.escalate.assert_awaited_once_with("id-1", interrupt_frame=None)
         active.steer.assert_not_awaited()
         harness._publisher.publish_rpc_result.assert_called_once_with(
             "escalate-1", {"ok": True, "detail": "escalated", "active_request_id": "target-run", "can_escalate": False, "can_cancel": False},
         )
+    asyncio.run(run())
+
+
+def test_steer_rpc_passes_app_rendered_framing_through():
+    """TASK-1300: the bridge forwards registry text and the RPC id verbatim."""
+    async def run():
+        harness = _SendHarness()
+        active = SimpleNamespace(request_id="target-run", steer=AsyncMock(),
+                                 escalate=AsyncMock(return_value="escalated"))
+        harness._session_queue.set_active_client(SESSION, active)
+        await harness._handle_steer({
+            "session_key": SESSION, "request_id": "steer_delivery_d1_g2",
+            "target_request_id": "target-run", "message_id": "id-1",
+            "message": "note", "origin": "bot",
+            "framed_message": "FRAMED note", "interrupt_item": "ITEM note",
+        }, "command-1", harness.redis)
+        active.steer.assert_awaited_once_with(
+            "note", priority="next", message_id="id-1", origin="bot",
+            framed_message="FRAMED note", interrupt_item="ITEM note",
+            steer_rpc_id="steer_delivery_d1_g2",
+        )
+        await harness._handle_steer({
+            "session_key": SESSION, "request_id": "escalate-1", "escalate": "1",
+            "target_request_id": "target-run", "message_id": "id-1",
+            "interrupt_frame": "FRAME <<steer_items>>",
+        }, "command-2", harness.redis)
+        active.escalate.assert_awaited_once_with("id-1", interrupt_frame="FRAME <<steer_items>>")
     asyncio.run(run())
 
 

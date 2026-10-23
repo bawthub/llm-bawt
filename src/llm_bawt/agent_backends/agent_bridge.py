@@ -44,6 +44,30 @@ def get_agent_subscriber():
     return _subscriber
 
 
+async def _settle_bot_steer(payload: dict[str, Any], execution: Any) -> None:
+    """Apply a bot steer's lifecycle to its delivery row (TASK-1300).
+
+    The run's turn is the steer's target turn. Never raises: a failure here
+    leaves the row where it is (``recover_expired`` and the claim's own
+    settlement still run), and must not break the run's event stream.
+    """
+    from ..service.inter_bot_steer_lifecycle import apply_bot_steer_lifecycle
+
+    try:
+        from ..service.dependencies import get_service
+
+        dispatcher = getattr(get_service(), "_inter_bot_dispatcher", None)
+        if dispatcher is None:
+            logger.warning("bot steer lifecycle %s: no delivery dispatcher", payload.get("steer_rpc_id"))
+            return
+        await asyncio.to_thread(
+            apply_bot_steer_lifecycle, dispatcher, payload,
+            target_turn_id=getattr(execution, "turn_id", None),
+        )
+    except Exception:
+        logger.exception("Could not settle bot steer lifecycle %s", payload.get("steer_rpc_id"))
+
+
 # ---------------------------------------------------------------------------
 # Structured result returned by chat_full()
 # ---------------------------------------------------------------------------
@@ -359,12 +383,16 @@ class AgentBridgeBackend(AgentBackend):
                                 meta = event.raw if isinstance(event.raw, dict) else {}
                                 message_id, state = meta.get("message_id"), meta.get("state")
                                 bot_id, user_id = config.get("bot_id"), config.get("user_id")
+                                if meta.get("origin") == "bot":
+                                    # TASK-1300: settle the steered delivery row.
+                                    await _settle_bot_steer(meta, execution)
                                 if message_id and state and bot_id and user_id:
                                     try:
                                         await local_sub.publish_tool_event(bot_id, user_id, {
                                             "_type": "steer_lifecycle", "bot_id": bot_id,
                                             "user_id": user_id, "message_id": message_id,
-                                            "state": state, "ts": time.time(),
+                                            "state": state, "origin": meta.get("origin"),
+                                            "proof": meta.get("proof"), "ts": time.time(),
                                         })
                                     except Exception:
                                         logger.warning("Could not publish user steer lifecycle", exc_info=True)

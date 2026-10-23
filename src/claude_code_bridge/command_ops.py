@@ -35,6 +35,11 @@ from agent_bridge.abort_contract import ABORT_TEARDOWN_BOUND_S, AbortState
 from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
+from agent_bridge.steer_contract import (
+    FRAMED_MESSAGE_FIELD,
+    INTERRUPT_FRAME_FIELD,
+    INTERRUPT_ITEM_FIELD,
+)
 from agent_bridge.approval import (
     ApprovalDecision,
     PolicyAction,
@@ -229,11 +234,23 @@ class ClaudeCommandMixin:
                 method = "escalate" if escalate else "cancel_queued"
                 if not hasattr(active_run, method):
                     raise RuntimeError(f"{action}_unsupported_sdk")
-                detail = await getattr(active_run, method)(message_id)
+                if escalate:
+                    # TASK-1300: the app-rendered interruption frame; the run
+                    # fills in every command the sweep removes.
+                    detail = await active_run.escalate(
+                        message_id, interrupt_frame=fields.get(INTERRUPT_FRAME_FIELD) or None,
+                    )
+                else:
+                    detail = await active_run.cancel_queued(message_id)
             else:
+                # TASK-1300: app-rendered registry text, plus this RPC's id so
+                # a lifecycle event names the delivery generation it settles.
                 await active_run.steer(
                     message, priority=priority, message_id=message_id or None,
                     origin=(fields.get("origin") or "system").strip().lower(),
+                    framed_message=fields.get(FRAMED_MESSAGE_FIELD) or None,
+                    interrupt_item=fields.get(INTERRUPT_ITEM_FIELD) or None,
+                    steer_rpc_id=request_id or None,
                 )
                 detail = "steered"
             # A steer adds a separate user message to this run; it does not

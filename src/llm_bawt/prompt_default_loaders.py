@@ -139,6 +139,18 @@ def load_ops_quiesce_end_turn_no_receipt() -> str:
     return DEFAULT_END_TURN_NO_RECEIPT
 
 
+def load_chat_steer_next_aside() -> str:
+    from .steer_prompts import DEFAULT_NEXT_ASIDE
+
+    return DEFAULT_NEXT_ASIDE
+
+
+def load_chat_steer_interrupt_replacement() -> str:
+    from .steer_prompts import DEFAULT_INTERRUPT_REPLACEMENT
+
+    return DEFAULT_INTERRUPT_REPLACEMENT
+
+
 def load_media_prompt_expansion_video() -> str:
     from .media.prompt_expansion import VIDEO_PROMPT_EXPANSION_TEMPLATE
 

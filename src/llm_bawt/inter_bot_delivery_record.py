@@ -10,6 +10,13 @@ from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference, normalize_author
 
 
+def _steer_uncertain(record: "DeliveryRecord") -> dict[str, Any] | None:
+    # Deferred: the steer fence imports DeliveryRecord from this module.
+    from .inter_bot_delivery_steer_fence import steer_uncertain
+
+    return steer_uncertain(record)
+
+
 @dataclass(frozen=True)
 class DeliveryRecord:
     id: str
@@ -50,6 +57,8 @@ class DeliveryRecord:
     reset_at: datetime | None
     overflow_recovery_count: int
     assistant_message_id: str | None = None
+    # TASK-1300: bumped by the database on every UPDATE (commit order).
+    revision: int = 0
 
     @classmethod
     def from_mapping(cls, row: Any) -> "DeliveryRecord":
@@ -105,6 +114,7 @@ class DeliveryRecord:
             reset_at=row.get("reset_at"),
             overflow_recovery_count=int(row.get("overflow_recovery_count") or 0),
             assistant_message_id=payload.get("assistant_message_id") if isinstance(payload, dict) else None,
+            revision=int(row.get("revision") or 0),
         )
 
     @property
@@ -195,6 +205,9 @@ class DeliveryRecord:
             "last_error": self.last_error,
             "response_model": self.response_model,
             "response_chars": self.response_chars,
+            # TASK-1300: a DELIVERED steer whose command may not have run.
+            "steer_uncertain": _steer_uncertain(self),
+            "revision": self.revision,
             "duplicate": duplicate,
         }
 

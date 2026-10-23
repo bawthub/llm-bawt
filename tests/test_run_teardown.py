@@ -369,7 +369,7 @@ def test_a_failed_steer_escalation_tears_down_through_the_runs_one_teardown():
     # at it, so the send's teardown reported exited=unknown, never killed the
     # CLI's descendants, and the disconnect itself was unbounded.
     from claude_code_bridge.active_run import ClaudeActiveRun
-    from tests.test_claude_active_run_next_steer import CMD, _FakeClient, _finish, _start
+    from tests.test_claude_active_run_next_steer import CMD, FRAME, _FakeClient, _finish, _start
 
     async def go():
         os_ = FakeOS({CLI: [CHILD], CHILD: [GRANDCHILD]})
@@ -385,9 +385,11 @@ def test_a_failed_steer_escalation_tears_down_through_the_runs_one_teardown():
         })
         active = ClaudeActiveRun(client=client, request_id="req-1", teardown=teardown)
         _, consumer = await _start(active)
-        await active.steer("user note", priority="next", message_id=CMD, origin="user")
+        # TASK-1300: steers and escalations carry the app's registry framing.
+        await active.steer("user note", priority="next", message_id=CMD, origin="user",
+                           framed_message="NEXT[user note]", interrupt_item="ITEM[user note]")
         with pytest.raises(RuntimeError, match="escalation_not_cancelled"):
-            await asyncio.wait_for(active.escalate(CMD), 2)
+            await asyncio.wait_for(active.escalate(CMD, interrupt_frame=FRAME), 2)
         assert teardown.started
         # The send's finally reuses the same teardown and its outcome.
         outcome = await bounded(teardown)

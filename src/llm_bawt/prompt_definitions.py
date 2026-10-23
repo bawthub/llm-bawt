@@ -29,6 +29,8 @@ from .prompt_default_loaders import (
     load_agents_review,
     load_agents_task_execution,
     load_agents_task_spec,
+    load_chat_steer_interrupt_replacement,
+    load_chat_steer_next_aside,
     load_global_recall_guidance,
     load_inter_bot_reply_channel_async,
     load_inter_bot_restart_retry_continue,
@@ -463,6 +465,38 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "bot to end its turn and must not promise a receipt, callback or new turn; "
             "the bot checks ops_job_status in a later turn. Used verbatim; a blank body "
             "falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "chat.steer.next_aside": PromptDefinition(
+        key="chat.steer.next_aside",
+        title="Mid-turn Message (next tool boundary)",
+        category="agent_execution",
+        required_vars=("message",),
+        loader=load_chat_steer_next_aside,
+        metadata={"notes": (
+            "Frames a priority=next steer (TASK-1300): a user or bot message delivered "
+            "into a running claude-code turn at its next tool boundary, without "
+            "interrupting it. {message} is the message text. It must say the running "
+            "work was not interrupted and ask the bot to continue the task. A body "
+            "that is blank or no longer renders {message} falls back to this prompt's "
+            "default body; if that can't render either, the steer is refused. Not used for system control steers. Target-bot overrides supported."
+        )},
+    ),
+    "chat.steer.interrupt_replacement": PromptDefinition(
+        key="chat.steer.interrupt_replacement",
+        title="Mid-turn Interruption (replacement query)",
+        category="agent_execution",
+        required_vars=("messages",),
+        loader=load_chat_steer_interrupt_replacement,
+        metadata={"notes": (
+            "The query that replaces an interrupted claude-code turn (TASK-1300): a "
+            "priority=now steer, or 'Interrupt now' on held messages. {messages} is "
+            "every interrupting message in send order, each attributed to its sender "
+            "and separated by a blank line. It must ask the bot to continue the "
+            "interrupted task unless a message says to stop. A body that is blank or "
+            "no longer renders {messages} falls back to this prompt's default body; if "
+            "that can't render either, the interrupt is refused. Target-bot overrides "
+            "supported."
         )},
     ),
     "setup.first_agent_prompt": PromptDefinition(

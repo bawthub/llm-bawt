@@ -136,6 +136,25 @@ def _persist_interrupt_anchor(
     return bool(result.rowcount)
 
 
+def _steer_framing(
+    message: str, *, origin: str, priority: str, bot_id: str, user_id: str,
+) -> dict[str, str]:
+    """The registry-rendered ``chat.steer`` framing fields for this steer (TASK-1300).
+
+    A ``system`` steer is already final registry text and goes verbatim. A
+    ``next`` steer also carries its interruption item, which the bridge replays
+    if "Interrupt now" later sweeps it.
+    """
+    if origin == "system":
+        return {}
+    from ...steer_prompts import interrupt_item, render_next, render_now
+
+    item = interrupt_item(message, origin=origin, user_id=user_id)
+    if priority == "next":
+        return {"framed_message": render_next(message, bot_id=bot_id), "interrupt_item": item}
+    return {"framed_message": render_now(item, bot_id=bot_id)}
+
+
 async def steer_active_turn(
     service,
     request: ChatSteerRequest,
@@ -218,6 +237,17 @@ async def steer_active_turn(
 
     message = request.message.strip()
     wire_message = f"{message}\n\n{wire_suffix}" if wire_suffix else message
+    origin = "user" if steer_request_id is None else "system" if control else "bot"
+    from ...steer_prompts import SteerPromptUnavailable
+
+    try:
+        framing = await asyncio.to_thread(
+            _steer_framing, wire_message, origin=origin, priority=request.priority,
+            bot_id=bot_id, user_id=user_id,
+        )
+    except SteerPromptUnavailable as exc:
+        # Never sent unframed: refuse before any bridge RPC.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     subscriber = get_agent_subscriber()
     if subscriber is None:
         raise HTTPException(status_code=503, detail="Agent bridge unavailable")
@@ -239,7 +269,8 @@ async def steer_active_turn(
                 target_request_id=target.request_id if target is not None else turn.agent_request_id,
                 request_id=steer_request_id,
                 priority=request.priority,
-                origin="user" if steer_request_id is None else "system" if control else "bot",
+                origin=origin,
+                **framing,
             )
             if result.get("ok") or result.get("error") != "no_active_run":
                 break
@@ -367,12 +398,19 @@ async def chat_steer_escalate(request: ChatSteerEscalateRequest) -> dict:
     subscriber = get_agent_subscriber()
     if subscriber is None:
         raise HTTPException(status_code=503, detail="Agent bridge unavailable")
+    from ...steer_prompts import SteerPromptUnavailable, render_interrupt_frame
+
+    # TASK-1300: the bridge fills this frame with every command the sweep removes.
+    try:
+        interrupt_frame = await asyncio.to_thread(render_interrupt_frame, turn.bot_id)
+    except SteerPromptUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         result = await subscriber.send_steer(
             session_key=turn.agent_session_key, message="", message_id=request.message_id,
             backend=backend, target_request_id=turn.agent_request_id,
             request_id=f"escalate_{request.turn_id}_{request.message_id}",
-            origin="user", escalate=True,
+            origin="user", escalate=True, interrupt_frame=interrupt_frame,
         )
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc

@@ -98,6 +98,7 @@ def test_bridge_no_run_falls_back_once_the_target_closed_or_the_bound_is_spent(e
 @pytest.mark.parametrize("error", [
     "maintenance_active", "maintenance_command_requires_turn",
     "Turn is no longer active", "Turn not found",
+    "steer_unframed",  # TASK-1300: refused before the CLI, so it never ran
 ])
 def test_other_definitive_rejections_fall_back_even_with_an_open_target(error):
     assert classify(error, accepted=False, target_open=True) == "fallback"

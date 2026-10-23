@@ -18,6 +18,7 @@ from redis.asyncio import BlockingConnectionPool
 from .command_publisher import CommandPublisherMixin
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
+from .steer_contract import FRAMED_MESSAGE_FIELD, INTERRUPT_FRAME_FIELD, INTERRUPT_ITEM_FIELD
 from .publisher import (
     COMMANDS_STREAM,
     EVENTS_STREAM_PREFIX,
@@ -183,11 +184,15 @@ class RedisSubscriber(CommandPublisherMixin):
         origin: str = "system",
         escalate: bool = False,
         cancel: bool = False,
+        framed_message: str | None = None,
+        interrupt_item: str | None = None,
+        interrupt_frame: str | None = None,
     ) -> dict:
         """Steer, escalate, or cancel an active run message and await its RPC result.
 
         ``priority="now"`` interrupts running tools; ``"next"`` delivers at the
-        next tool boundary (claude-code-bridge only).
+        next tool boundary (claude-code-bridge only). The framing arguments are
+        app-rendered registry text (TASK-1300, :mod:`agent_bridge.steer_contract`).
         """
         if not request_id and origin == "user" and priority == "now" and not (escalate or cancel):
             # NOW has no CLI command-UUID lifecycle. Reuse the existing durable
@@ -212,6 +217,13 @@ class RedisSubscriber(CommandPublisherMixin):
             fields["steer_action"] = "escalate" if escalate else "cancel"
         if target_request_id:
             fields["target_request_id"] = target_request_id
+        for name, value in (
+            (FRAMED_MESSAGE_FIELD, framed_message),
+            (INTERRUPT_ITEM_FIELD, interrupt_item),
+            (INTERRUPT_FRAME_FIELD, interrupt_frame),
+        ):
+            if value:
+                fields[name] = value
 
         dedupe_key = f"agent:steer:request:{request_id}"
         flat_fields: list[str] = []

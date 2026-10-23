@@ -21,6 +21,9 @@ async def test_escalate_uses_same_message_id_without_resending_text(monkeypatch)
     monkeypatch.setattr("llm_bawt.bots.BotManager", lambda config: SimpleNamespace(
         get_bot=lambda bot: SimpleNamespace(agent_backend="claude-code")))
     monkeypatch.setattr("llm_bawt.agent_backends.agent_bridge.get_agent_subscriber", lambda: subscriber)
+    # TASK-1300: the escalation carries the bot's registry-rendered frame.
+    monkeypatch.setattr("llm_bawt.steer_prompts.render_interrupt_frame",
+                        lambda bot_id: f"[frame for {bot_id}] <<steer_items>>")
     request = chat.ChatSteerEscalateRequest(
         turn_id="turn-1", message_id="message-1", bot_id="caid", user_id="nick",
     )
@@ -30,7 +33,35 @@ async def test_escalate_uses_same_message_id_without_resending_text(monkeypatch)
         session_key="caid:nick", message="", message_id="message-1",
         backend="claude-code", target_request_id="req-1",
         request_id="escalate_turn-1_message-1", origin="user", escalate=True,
+        interrupt_frame="[frame for caid] <<steer_items>>",
     )
+
+
+@pytest.mark.anyio
+async def test_escalate_without_a_renderable_frame_is_refused_before_bridge(monkeypatch):
+    from llm_bawt.steer_prompts import INTERRUPT_REPLACEMENT_KEY, SteerPromptUnavailable
+
+    turn = SimpleNamespace(
+        id="turn-1", bot_id="caid", user_id="nick", status="streaming",
+        ended_at=None, agent_session_key="caid:nick", agent_request_id="req-1",
+    )
+    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda _id: turn))
+    subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(chat, "get_service", lambda: service)
+    monkeypatch.setattr("llm_bawt.bots.BotManager", lambda config: SimpleNamespace(
+        get_bot=lambda bot: SimpleNamespace(agent_backend="claude-code")))
+    monkeypatch.setattr("llm_bawt.agent_backends.agent_bridge.get_agent_subscriber", lambda: subscriber)
+
+    def unavailable(bot_id):
+        raise SteerPromptUnavailable(INTERRUPT_REPLACEMENT_KEY, "no body renders {messages}")
+
+    monkeypatch.setattr("llm_bawt.steer_prompts.render_interrupt_frame", unavailable)
+    with pytest.raises(HTTPException) as caught:
+        await chat.chat_steer_escalate(chat.ChatSteerEscalateRequest(
+            turn_id="turn-1", message_id="message-1", bot_id="caid", user_id="nick"))
+    assert caught.value.status_code == 503
+    assert caught.value.detail.startswith(f"steer_prompt_unavailable: {INTERRUPT_REPLACEMENT_KEY}")
+    subscriber.send_steer.assert_not_awaited()
 
 
 @pytest.mark.anyio

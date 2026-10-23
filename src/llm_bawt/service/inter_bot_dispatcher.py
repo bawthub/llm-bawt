@@ -19,6 +19,7 @@ from ..inter_bot_delivery import (
     InterBotDeliveryStore,
 )
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry, retry_original_author
+from ..inter_bot_delivery_steer_fence import steer_uncertain
 from ..inter_bot_delivery_user import resolve_delivery_user
 from .inter_bot_dispatcher_recovery import StartupCheck, StartupRecoveryRunner
 from .inter_bot_dispatcher_steer import (
@@ -216,19 +217,32 @@ class InterBotDeliveryDispatcher:
         QUEUED ahead of this process's DISPATCHING for the same row, so every
         tab (not just the submitting one) shows the queued state and Cancel.
         """
+        self._announce(record, wake=True)
+
+    def announce_lifecycle(self, record: DeliveryRecord) -> None:
+        """Publish a row's changed lifecycle without waking the dispatcher.
+
+        Sync-safe. TASK-1300: a steer whose outcome is uncertain stays
+        DELIVERED, so only this event tells the sender it may not have run.
+        """
+        self._announce(record, wake=False)
+
+    def _announce(self, record: DeliveryRecord, *, wake: bool) -> None:
         loop = self._loop
         if loop is None or not loop.is_running():
-            self.wake(record.target_bot_id)
+            if wake:
+                self.wake(record.target_bot_id)
             return
 
-        async def publish_then_wake() -> None:
+        async def publish() -> None:
             try:
                 await self._emit(record)
             finally:
-                self._wake_event.set()
+                if wake:
+                    self._wake_event.set()
 
         def schedule() -> None:
-            task = loop.create_task(publish_then_wake(), name=f"inter-bot-announce:{record.id}")
+            task = loop.create_task(publish(), name=f"inter-bot-announce:{record.id}")
             self._announce_tasks.add(task)
             task.add_done_callback(self._announce_tasks.discard)
 
@@ -908,6 +922,10 @@ class InterBotDeliveryDispatcher:
             "message_kind": record.message_kind,
             "retry_of_delivery_id": (record.metadata.get("manual_retry_of")
                                      or record.metadata.get("restart_retry_of")),
+            "steer_uncertain": steer_uncertain(record),
+            # TASK-1300: publishing is async, so two events for one row can
+            # arrive out of order; consumers drop a lower revision.
+            "revision": record.revision,
             "ts": time.time(),
         }
         if record.metadata.get("prompt_schedule"):

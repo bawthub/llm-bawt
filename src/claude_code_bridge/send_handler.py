@@ -506,8 +506,10 @@ class ClaudeSendMixin(
                             request_id=request_id,
                             maintenance=is_compact_command(message),
                             teardown=teardown,
-                            on_user_lifecycle=lambda mid, state: _publish_run_signal(
-                                AgentEventKind.STEER_LIFECYCLE, {"message_id": mid, "state": state},
+                            # TASK-1300: every origin, with the proof the app
+                            # needs to re-queue or fence a bot delivery.
+                            on_command_lifecycle=lambda payload: _publish_run_signal(
+                                AgentEventKind.STEER_LIFECYCLE, payload,
                             ),
                         )
                         msg_stream = active_run.messages()
@@ -947,6 +949,11 @@ class ClaudeSendMixin(
                             try:
                                 await teardown.run_owned()
                             finally:
+                                if active_run is not None:
+                                    # TASK-1300: a held steer the run never
+                                    # settled is published uncertain, before
+                                    # the run's ``done``.
+                                    active_run.release_unstarted(teardown.outcome)
                                 terminal.record(teardown)
                                 if self._run_teardowns.get(request_id) is teardown:
                                     del self._run_teardowns[request_id]

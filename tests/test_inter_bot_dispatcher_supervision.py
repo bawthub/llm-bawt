@@ -254,7 +254,7 @@ async def test_ordinary_queue_lifecycle_routes_to_requesting_user():
         reset_reason=None, old_session_id=None, new_session_id=None, reset_at=None,
         overflow_recovery_count=0, attempt_count=1, next_retry_at=None,
         last_error=None, project_id=None, task_id=None, message_kind=None,
-        metadata={"ordinary_chat": {"session_id": "session-1"}},
+        metadata={"ordinary_chat": {"session_id": "session-1"}}, revision=3,
     )
     await dispatcher._emit(record)
     publish.assert_awaited_once()

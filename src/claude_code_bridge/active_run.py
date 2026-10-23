@@ -18,6 +18,24 @@ Python SDK's parser drops that frame type, so :meth:`ClaudeActiveRun.messages`
 reads the raw frame stream, tracks our commands, and withholds a ResultMessage
 while an injected command has not started yet — the follow-up turn's own
 result then ends the llm-bawt request.
+
+Every model-facing word is app-rendered prompt-registry text
+(:mod:`agent_bridge.steer_contract`); this module only joins it.
+
+Lifecycle publication (TASK-1300). Every held command, whatever its origin,
+publishes its CLI lifecycle through ``on_command_lifecycle``. A rejection
+carries a ``proof`` only when the bridge knows the command can never run:
+
+``cli_terminal``
+    The CLI's own cancelled/discarded/refused frame, with no started frame
+    before it on the ordered stream.
+``sweep_receipt``
+    An escalation's interrupt receipt listed the command as cancelled, the
+    ordered receipt barrier completed with no started frame for it, and no
+    replacement query was ever written.
+
+When the bridge cannot know, it publishes ``uncertain`` and never a
+rejection. The app fences an uncertain command and never re-queues it.
 """
 
 from __future__ import annotations
@@ -30,6 +48,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_bridge.maintenance import is_compact_command
+from agent_bridge.steer_contract import (
+    LIFECYCLE_REJECTED,
+    LIFECYCLE_STARTED,
+    PROOF_CLI_TERMINAL,
+    PROOF_SWEEP_RECEIPT,
+    STEER_ITEMS_SLOT,
+    STEER_UNFRAMED,
+    render_interrupt,
+)
 
 from .run_teardown import RunTeardown
 
@@ -40,7 +67,17 @@ STEER_PRIORITIES = frozenset({"now", "next"})
 # Lifecycle states (Claude Code CLI ``command_lifecycle`` frames).
 _UNSTARTED = frozenset({"sent", "queued"})
 _ACCEPTED = frozenset({"queued", "started", "completed"})
-_REJECTED = frozenset({"cancelled", "discarded", "refused"})
+_REJECTED = LIFECYCLE_REJECTED
+_STARTED = LIFECYCLE_STARTED
+
+# ``proof`` values on a published lifecycle (see the module docstring); the
+# two proven-not-run proofs are shared with the app (steer_contract).
+PROOF_REPLAYED = "replayed"
+PROOF_BARRIER_TIMEOUT = "barrier_timeout"
+PROOF_MISSING_RECEIPT = "missing_receipt"
+PROOF_STARTED_IN_SWEEP = "started_in_sweep"
+PROOF_REPLACEMENT_WRITE_UNCERTAIN = "replacement_write_uncertain"
+PROOF_TEARDOWN = "teardown"
 
 # The CLI's canned tool_result for tools killed by an interrupt. Recording it
 # verbatim made steer interruptions look like user permission denials.
@@ -61,26 +98,6 @@ def _command_uuid(message_id: str | None) -> str:
     return str(uuid_mod.uuid4())
 
 
-def next_steer_prompt(text: str, origin: str) -> str:
-    """Frame a ``next`` steer for the model.
-
-    A user or bot message is an aside: handle it, then resume the task. A
-    ``system`` steer (only the quiesce control pump's stop request, TASK-1233
-    B3) is delivered verbatim: its text is the registry-owned
-    ``ops.quiesce_request`` body, complete as written, and any wrapper added
-    here (above all "continue the unfinished task") would be model-facing text
-    the registry cannot edit.
-    """
-    if origin == "system":
-        return text
-    return (
-        "[Mid-turn message — delivered at a tool boundary; your running "
-        "work was not interrupted]\n"
-        f"{text}\n\n"
-        "Address it as needed, then continue the unfinished task."
-    )
-
-
 def _sdk_query_handle(client: Any) -> Any | None:
     """Return the SDK's raw frame ``Query`` for a real ``ClaudeSDKClient``."""
     try:
@@ -89,6 +106,38 @@ def _sdk_query_handle(client: Any) -> Any | None:
         return None
     handle = getattr(client, "_query", None)
     return handle if isinstance(handle, Query) else None
+
+
+def _buffered_frames(handle: Any) -> int | None:
+    """Frames the SDK reader has queued but ``messages()`` has not taken yet.
+
+    The SDK has one stdout reader. It awaits every non-control frame into this
+    memory stream before it reads the next line, and a ``control_response``
+    only wakes its waiter. So when a control receipt resolves, every frame the
+    CLI wrote before it has either been taken or is counted here.
+    """
+    try:
+        return int(handle._message_receive.statistics().current_buffer_used)
+    except Exception:
+        return None
+
+
+@dataclass(frozen=True)
+class HeldCommand:
+    """A ``next`` command written to the CLI, kept so a sweep can replay it."""
+
+    uuid: str
+    origin: str
+    item: str
+    steer_rpc_id: str | None = None
+
+
+@dataclass
+class _SweepWindow:
+    """Frames for the escalation's eligible commands, held until it settles."""
+
+    eligible: frozenset[str]
+    buffered: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -112,12 +161,24 @@ class ClaudeActiveRun:
     _commands: dict[str, str] = field(default_factory=dict)
     _command_events: dict[str, asyncio.Event] = field(default_factory=dict)
     _user_commands: set[str] = field(default_factory=set)
-    _user_prompts: dict[str, str] = field(default_factory=dict)
+    # Every ``next`` command, in send order (dict insertion order).
+    _held: dict[str, HeldCommand] = field(default_factory=dict)
+    # Permanent started evidence for the current send of each uuid.
+    _started_ever: set[str] = field(default_factory=set)
+    # Swept commands carried by an accepted replacement query.
+    _replayed: set[str] = field(default_factory=set)
+    # Commands the bridge itself settled (cancelled/uncertain); later CLI
+    # frames for them are not republished.
+    _settled: dict[str, str] = field(default_factory=dict)
+    _sweep: _SweepWindow | None = None
+    _frames_taken: int = 0
+    _frame_progress: asyncio.Event = field(default_factory=asyncio.Event)
     _escalations: dict[str, str] = field(default_factory=dict)
     _cancellations: dict[str, str] = field(default_factory=dict)
-    _escalated_pending: set[str] = field(default_factory=set)
+    # Replayed commands awaiting the replacement's completion, in send order.
+    _escalated_pending: dict[str, None] = field(default_factory=dict)
     _cli_capabilities: set[str] = field(default_factory=set)
-    on_user_lifecycle: Callable[[str, str], None] | None = None
+    on_command_lifecycle: Callable[[dict[str, Any]], None] | None = None
     _deferred_result: Any = None
     _pending_user_result: Any = None
     lifecycle_supported: bool = False
@@ -135,8 +196,17 @@ class ClaudeActiveRun:
         priority: str = "now",
         message_id: str | None = None,
         origin: str = "system",
+        framed_message: str | None = None,
+        interrupt_item: str | None = None,
+        steer_rpc_id: str | None = None,
     ) -> None:
-        """Deliver ``message`` into the live run at ``priority``."""
+        """Deliver ``message`` into the live run at ``priority``.
+
+        ``framed_message`` is the exact model-facing text and
+        ``interrupt_item`` is this message's replay item. Both are rendered by
+        the app (:mod:`agent_bridge.steer_contract`). A ``system`` steer is
+        already final registry text and goes verbatim.
+        """
         # The app retains these as durable, separate turns. Never inject them
         # into compaction or reinterpret a new command as ordinary steering.
         if self.maintenance:
@@ -148,22 +218,39 @@ class ClaudeActiveRun:
             raise ValueError("Steering message must not be empty")
         if priority not in STEER_PRIORITIES:
             raise ValueError(f"Unknown steer priority: {priority!r}")
+        if origin == "system":
+            framed = framed_message if (framed_message or "").strip() else text
+            item = interrupt_item if (interrupt_item or "").strip() else text
+        else:
+            framed = framed_message or ""
+            item = interrupt_item or ""
+            if not framed.strip() or (priority == "next" and not item.strip()):
+                raise RuntimeError(STEER_UNFRAMED)
         if priority == "next":
             if origin == "user" and (not message_id or _command_uuid(message_id) != message_id):
                 raise ValueError("User next steer requires a UUID message_id")
-            await self._steer_next(text, message_id, origin=origin)
+            await self._steer_next(
+                framed, item, message_id, origin=origin, steer_rpc_id=steer_rpc_id,
+            )
             return
-        await self._steer_now(text)
+        await self._steer_now(framed)
 
-    async def _steer_next(self, text: str, message_id: str | None, *, origin: str) -> None:
-        """Queue ``text`` for the next tool boundary without interrupting."""
+    async def _steer_next(
+        self,
+        framed: str,
+        item: str,
+        message_id: str | None,
+        *,
+        origin: str,
+        steer_rpc_id: str | None,
+    ) -> None:
+        """Queue ``framed`` for the next tool boundary without interrupting."""
         if not self.lifecycle_supported:
             # Without lifecycle frames the consumer cannot tell a folded message
             # from one that needs a follow-up turn; refusing lets the durable
             # delivery retry instead of risking a silently dropped message.
             raise RuntimeError("next_unsupported")
         command_uuid = _command_uuid(message_id)
-        prompt = next_steer_prompt(text, origin)
         async with self._steer_lock:
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
@@ -175,14 +262,21 @@ class ClaudeActiveRun:
             if state is None or state in _REJECTED:
                 self._commands[command_uuid] = "sent"
                 event = self._command_events[command_uuid] = asyncio.Event()
+                # A re-send is a new CLI command: drop the old send's evidence.
+                self._held.pop(command_uuid, None)
+                self._held[command_uuid] = HeldCommand(
+                    uuid=command_uuid, origin=origin, item=item, steer_rpc_id=steer_rpc_id,
+                )
+                self._started_ever.discard(command_uuid)
+                self._replayed.discard(command_uuid)
+                self._settled.pop(command_uuid, None)
                 if origin == "user":
                     self._user_commands.add(command_uuid)
-                    self._user_prompts[command_uuid] = text
 
                 async def _frames():
                     yield {
                         "type": "user",
-                        "message": {"role": "user", "content": prompt},
+                        "message": {"role": "user", "content": framed},
                         "parent_tool_use_id": None,
                         "uuid": command_uuid,
                         "priority": "next",
@@ -201,9 +295,10 @@ class ClaudeActiveRun:
                 # in order, and the consumer keeps the run open while the command
                 # is unstarted, so treat it as accepted rather than re-sending.
                 logger.warning(
-                    "next steer not yet acknowledged by CLI: request=%s uuid=%s",
+                    "next steer not yet acknowledged by CLI: request=%s uuid=%s origin=%s",
                     self.request_id,
                     command_uuid,
+                    origin,
                 )
                 return
             final = self._commands.get(command_uuid)
@@ -251,14 +346,20 @@ class ClaudeActiveRun:
             self.note_lifecycle(message_id, "cancelled")
             return "cancelled"
 
-    async def escalate(self, message_id: str) -> str:
-        """Atomically replace one queued user steer with an interrupt-now turn.
+    async def escalate(self, message_id: str, *, interrupt_frame: str | None = None) -> str:
+        """Interrupt now, replaying every queued command the sweep removed.
 
-        The CLI's ``interrupt(cancel_queued=True)`` sweeps even a message
-        mid-fold. We only use it when this is the sole unstarted bridge command:
-        the sweep is session-wide, not scoped to a uuid. An unconfirmed receipt
-        is never replayed. Retried escalation requests cannot send a second
-        replacement query, even when the first control request times out.
+        ``interrupt(cancel_queued=True)`` sweeps the CLI's whole queue, not one
+        uuid, so one replacement query carries every swept command we hold, in
+        send order (TASK-1300). The rules that keep this exactly-once:
+
+        * eligible commands are frozen before the interrupt;
+        * the replay set is computed only after the ordered receipt barrier,
+          and never includes a command with started evidence;
+        * a failure before any replacement write releases the swept commands
+          as provably cancelled only when the barrier completed and none
+          started; every other failure publishes them ``uncertain``;
+        * an unconfirmed outcome is never retried.
         """
         async with self._steer_lock:
             prior = self._escalations.get(message_id)
@@ -268,21 +369,28 @@ class ClaudeActiveRun:
                 raise RuntimeError(prior)
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
-            if message_id not in self._user_prompts:
+            held = self._held.get(message_id)
+            if held is None or held.origin != "user":
                 raise RuntimeError("unknown_user_steer")
-            if self._commands.get(message_id) not in _UNSTARTED:
+            if self._commands.get(message_id) not in _UNSTARTED or message_id in self._started_ever:
                 raise RuntimeError("steer_already_started")
-            if any(
-                uuid != message_id and state in _UNSTARTED
-                for uuid, state in self._commands.items()
-            ):
-                raise RuntimeError("escalation_other_queued_commands")
+            if not interrupt_frame or STEER_ITEMS_SLOT not in interrupt_frame:
+                raise RuntimeError(STEER_UNFRAMED)
             if "interrupt_cancel_queued_v1" not in self._cli_capabilities:
                 raise RuntimeError("escalation_unsupported_cli")
             handle = _sdk_query_handle(self.client)
-            if handle is None:
+            if handle is None or _buffered_frames(handle) is None:
                 raise RuntimeError("escalation_unsupported_sdk")
 
+            eligible = tuple(
+                uuid for uuid in self._held
+                if self._commands.get(uuid) in _UNSTARTED
+                and uuid not in self._started_ever
+                and uuid not in self._settled
+                and uuid not in self._replayed
+            )
+            window = _SweepWindow(eligible=frozenset(eligible))
+            self._sweep = window
             # The old turn's result must not end the send handler while the
             # interrupt is in flight. This is a one-shot attempt: a timeout may
             # mean the CLI processed the request without delivering its receipt.
@@ -290,6 +398,10 @@ class ClaudeActiveRun:
             self.steering_attempted = True
             self._expected_interrupt_results += 1
             interrupted = False
+            barrier_done = False
+            replacement_attempted = False
+            receipt_valid = False
+            swept: list[str] = []
             try:
                 receipt = await asyncio.wait_for(
                     handle._send_control_request(
@@ -303,57 +415,230 @@ class ClaudeActiveRun:
                 survivors = receipt.get("still_queued")
                 if not isinstance(cancelled, list) or not isinstance(survivors, list):
                     raise RuntimeError("escalation_missing_receipt")
-                if message_id not in cancelled:
+                receipt_valid = True
+                swept_ids = {str(uuid) for uuid in cancelled}
+                swept = [uuid for uuid in eligible if uuid in swept_ids]
+                foreign = sorted(swept_ids - set(self._held))
+                logger.info(
+                    "escalation receipt: request=%s clicked=%s cancelled=%s still_queued=%s",
+                    self.request_id, message_id,
+                    self._describe(swept), [str(uuid) for uuid in survivors],
+                )
+                if foreign:
+                    logger.warning(
+                        "escalation swept commands the bridge does not hold: request=%s uuids=%s",
+                        self.request_id, foreign,
+                    )
+                await self._await_frames(self._frames_taken + (_buffered_frames(handle) or 0))
+                barrier_done = True
+                started = [uuid for uuid in swept if uuid in self._started_ever]
+                if started:
+                    # The receipt says these were still queued, but the ordered
+                    # stream says they started: never replay or release them.
+                    raise RuntimeError(f"escalation_started_in_sweep: {self._describe(started)}")
+                if message_id not in swept_ids:
                     # A command that already started can have its content in
                     # the interrupted turn. Never replay it speculatively.
                     raise RuntimeError("escalation_not_cancelled")
                 if survivors:
                     # A hosted CLI can retain in-flight sends. Do not add an
                     # identical turn while their delivery remains uncertain.
-                    raise RuntimeError("escalation_survivors")
+                    raise RuntimeError(
+                        "escalation_survivors: "
+                        + self._describe([str(uuid) for uuid in survivors])
+                    )
                 if self._completed.is_set():
                     raise RuntimeError("no_active_run")
-                await asyncio.wait_for(
-                    self.client.query(_replacement_prompt(self._user_prompts[message_id])),
-                    timeout=self._steer_timeout_s,
+                prompt = render_interrupt(
+                    interrupt_frame, [self._held[uuid].item for uuid in swept]
                 )
+                # Set before the write: ``client.query`` only awaits the
+                # transport write, so once it is attempted the CLI may have the
+                # text even if the await fails.
+                replacement_attempted = True
+                await asyncio.wait_for(self.client.query(prompt), timeout=self._steer_timeout_s)
+                self._replayed.update(swept)
                 self._escalations[message_id] = "escalated"
-                self._escalated_pending.add(message_id)
-                self._publish_user_lifecycle(message_id, "started")
+                self._escalated_pending.update(dict.fromkeys(swept))
+                for uuid in swept:
+                    self._publish(uuid, "started", proof=PROOF_REPLAYED)
+                logger.info(
+                    "escalation replayed: request=%s commands=%s",
+                    self.request_id, self._describe(swept),
+                )
                 return "escalated"
-            except BaseException:
+            except BaseException as exc:
                 # If no replacement was accepted, do not wait indefinitely for
                 # one after consuming the aborted turn's ResultMessage.
                 self._expected_interrupt_results = max(0, self._expected_interrupt_results - 1)
                 if interrupted:
+                    self._settle_failed_sweep(
+                        exc,
+                        eligible=eligible,
+                        swept=swept,
+                        receipt_valid=receipt_valid,
+                        barrier_done=barrier_done,
+                        replacement_attempted=replacement_attempted,
+                    )
                     try:
                         await self._tear_down()
                     except BaseException:
                         pass
                 raise
+            finally:
+                self._close_sweep(window)
+
+    def _settle_failed_sweep(
+        self,
+        exc: BaseException,
+        *,
+        eligible: tuple[str, ...],
+        swept: list[str],
+        receipt_valid: bool,
+        barrier_done: bool,
+        replacement_attempted: bool,
+    ) -> None:
+        """Publish the fate of commands a failed escalation may have swept.
+
+        The run is torn down next, so anything the CLI swept will not run
+        unless the replacement carried it. A command is released as provably
+        cancelled only when all four hold: the barrier completed, the receipt
+        is valid and lists it, it has no started evidence, and no replacement
+        write was attempted. Anything else is ``uncertain``.
+        """
+        if replacement_attempted:
+            targets, state, proof = swept, "uncertain", PROOF_REPLACEMENT_WRITE_UNCERTAIN
+        elif not receipt_valid:
+            targets, state, proof = list(eligible), "uncertain", PROOF_MISSING_RECEIPT
+        elif not barrier_done:
+            targets, state, proof = swept, "uncertain", PROOF_BARRIER_TIMEOUT
+        elif any(uuid in self._started_ever for uuid in swept):
+            targets, state, proof = swept, "uncertain", PROOF_STARTED_IN_SWEEP
+        else:
+            targets, state, proof = swept, "cancelled", PROOF_SWEEP_RECEIPT
+        targets = [uuid for uuid in targets if uuid not in self._started_ever]
+        log = logger.info if state == "cancelled" else logger.warning
+        log(
+            "escalation failed after interrupt: request=%s error=%s %s=%s proof=%s",
+            self.request_id, exc, state, self._describe(targets), proof,
+        )
+        for uuid in targets:
+            self._settled[uuid] = state
+            self._publish(uuid, state, proof=proof)
+
+    def _close_sweep(self, window: _SweepWindow) -> None:
+        """Publish the frames held during the escalation, in arrival order."""
+        if self._sweep is window:
+            self._sweep = None
+        for uuid, state in window.buffered:
+            self._publish_frame(uuid, state)
+
+    async def _await_frames(self, target: int) -> None:
+        """Wait until ``messages()`` has taken ``target`` frames (the barrier)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._steer_timeout_s
+        while self._frames_taken < target:
+            self._frame_progress.clear()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RuntimeError("escalation_barrier_timeout")
+            try:
+                await asyncio.wait_for(self._frame_progress.wait(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("escalation_barrier_timeout") from exc
+
+    def release_unstarted(self, outcome: Any = None) -> list[str]:
+        """Publish ``uncertain`` for held commands a finished run never settled.
+
+        Runs once the run's teardown has finished. A confirmed CLI exit does
+        not prove a command never started (its frame may be unread), so this
+        never publishes a rejection.
+        """
+        released: list[str] = []
+        for uuid in self._held:
+            if (
+                uuid in self._started_ever
+                or uuid in self._settled
+                or uuid in self._replayed
+                or self._commands.get(uuid) not in _UNSTARTED
+            ):
+                continue
+            self._settled[uuid] = "uncertain"
+            released.append(uuid)
+            self._publish(
+                uuid, "uncertain", proof=PROOF_TEARDOWN,
+                exited=getattr(outcome, "exited", None),
+            )
+        if released:
+            logger.warning(
+                "run ended with unsettled steers: request=%s uncertain=%s",
+                self.request_id, self._describe(released),
+            )
+        return released
 
     def note_lifecycle(self, command_uuid: str, state: str) -> None:
         """Record a CLI ``command_lifecycle`` frame for our injected commands."""
         if command_uuid not in self._commands:
+            logger.debug(
+                "command_lifecycle for unknown uuid: request=%s uuid=%s state=%s",
+                self.request_id, command_uuid, state,
+            )
             return
         previous = self._commands[command_uuid]
         if previous == state:
             return
         self._commands[command_uuid] = state
-        if command_uuid in self._user_commands and not (
-            state == "cancelled" and command_uuid in self._escalations
-        ):
-            self._publish_user_lifecycle(command_uuid, state)
+        held = self._held.get(command_uuid)
+        logger.info(
+            "command_lifecycle: request=%s uuid=%s origin=%s %s->%s",
+            self.request_id, command_uuid, held.origin if held else "?", previous, state,
+        )
+        if state in _STARTED:
+            self._started_ever.add(command_uuid)
+        window = self._sweep
+        if window is not None and command_uuid in window.eligible:
+            window.buffered.append((command_uuid, state))
+        else:
+            self._publish_frame(command_uuid, state)
         event = self._command_events.get(command_uuid)
         if event is not None and (state in _ACCEPTED or state in _REJECTED):
             event.set()
 
-    def _publish_user_lifecycle(self, command_uuid: str, state: str) -> None:
-        if self.on_user_lifecycle is not None:
-            try:
-                self.on_user_lifecycle(command_uuid, state)
-            except Exception:
-                logger.exception("Failed to publish user steer lifecycle for %s", command_uuid)
+    def _publish_frame(self, command_uuid: str, state: str) -> None:
+        """Publish one CLI lifecycle state unless the bridge already settled it."""
+        if command_uuid in self._replayed or command_uuid in self._settled:
+            return
+        proof = None
+        if state in _REJECTED and command_uuid not in self._started_ever:
+            proof = PROOF_CLI_TERMINAL
+        self._publish(command_uuid, state, proof=proof)
+
+    def _publish(self, command_uuid: str, state: str, *, proof: str | None = None, **extra: Any) -> None:
+        if self.on_command_lifecycle is None:
+            return
+        held = self._held.get(command_uuid)
+        payload: dict[str, Any] = {
+            "message_id": command_uuid,
+            "state": state,
+            "origin": held.origin if held else None,
+            "steer_rpc_id": held.steer_rpc_id if held else None,
+            "run_request_id": self.request_id,
+        }
+        if proof is not None:
+            payload["proof"] = proof
+        payload.update(extra)
+        try:
+            self.on_command_lifecycle(payload)
+        except Exception:
+            logger.exception("Failed to publish steer lifecycle for %s", command_uuid)
+
+    def _describe(self, uuids: list[str]) -> str:
+        """``uuid(origin), …`` for logs and refusal details."""
+        parts = []
+        for uuid in uuids:
+            held = self._held.get(uuid)
+            parts.append(f"{uuid}({held.origin if held else 'unknown'})")
+        return ", ".join(parts) or "none"
 
     def has_unstarted_command(self) -> bool:
         """True while an injected ``next`` command has not drained into a turn."""
@@ -376,6 +661,10 @@ class ClaudeActiveRun:
 
         self.lifecycle_supported = True
         async for data in handle.receive_messages():
+            # Counted before anything awaits: the escalation barrier relies on
+            # a taken lifecycle frame having been recorded already.
+            self._frames_taken += 1
+            self._frame_progress.set()
             if isinstance(data, dict) and data.get("type") == "system" and data.get("subtype") == "init":
                 capabilities = data.get("capabilities")
                 self._cli_capabilities = set(capabilities) if isinstance(capabilities, list) else set()
@@ -429,16 +718,14 @@ class ClaudeActiveRun:
             yield self._pending_user_result
             self._pending_user_result = None
 
-    async def _steer_now(self, text: str) -> None:
-        """Interrupt current work and inject ``text`` into the same SDK run."""
-        # ``interrupt()`` terminates the SDK's current task; ``query()`` starts a
-        # replacement task on the same session. The session retains all prior
-        # context, but a bare status question ("how's it going?") naturally gets
-        # answered and then ends. Frame the replacement as an interruption of
-        # unfinished work so it resumes by default. Explicit stop/pause/abandon
-        # requests remain authoritative — the model must honor them instead.
-        replacement_prompt = _replacement_prompt(text)
+    async def _steer_now(self, replacement_prompt: str) -> None:
+        """Interrupt current work and inject ``replacement_prompt`` into the run.
 
+        ``interrupt()`` terminates the SDK's current task; ``query()`` starts a
+        replacement task on the same session. The app-rendered prompt
+        (``chat.steer.interrupt_replacement``) frames it as an interruption of
+        unfinished work, so the run resumes by default.
+        """
         async with self._steer_lock:
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
@@ -512,8 +799,8 @@ class ClaudeActiveRun:
         """
         if self._expected_interrupt_results <= 0:
             for command_uuid in tuple(self._escalated_pending):
-                self._publish_user_lifecycle(command_uuid, "completed")
-                self._escalated_pending.remove(command_uuid)
+                self._publish(command_uuid, "completed", proof=PROOF_REPLAYED)
+                del self._escalated_pending[command_uuid]
             return False
         self._expected_interrupt_results -= 1
         return True
@@ -529,18 +816,6 @@ class ClaudeActiveRun:
         if self.teardown is None:
             self.teardown = RunTeardown(self.client)
         await asyncio.shield(self.teardown.start())
-
-
-def _replacement_prompt(text: str) -> str:
-    return (
-        "[Mid-turn user interruption]\n"
-        f"{text}\n\n"
-        "Respond to this interruption as needed, then continue the unfinished "
-        "task from the interrupted turn, incorporating the user's new direction. "
-        "Do not conclude the turn merely because this was a status question. "
-        "If the user explicitly asks you to stop, pause, abandon, or only report "
-        "status without continuing, honor that instruction instead."
-    )
 
 
 def _relabel_interrupted_tool_results(msg: Any) -> None:

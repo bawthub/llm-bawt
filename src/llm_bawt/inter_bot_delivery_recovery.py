@@ -5,6 +5,7 @@ behavior change; ``InterBotDeliveryStore.recover_expired`` delegates here.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text as sa_text
@@ -12,6 +13,7 @@ from sqlalchemy.engine import Connection
 
 from .inter_bot_delivery_claim import QUEUED
 from .inter_bot_delivery_record import DeliveryRecord
+from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 
 
 class DeliveryLeaseRecovery:
@@ -113,6 +115,25 @@ class DeliveryLeaseRecovery:
                         if success else
                         "status='FAILED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, last_error=COALESCE(last_error, 'target turn ended unsuccessfully')"
                     )
+                elif not is_turn and (proof := pending_rejection(row)) is not None:
+                    # TASK-1300: this claim's command is proven not to have run;
+                    # leave its target at k+1 instead of replaying the frozen k.
+                    metadata = row.get("metadata_json") or {}
+                    updated = conn.execute(sa_text("""
+                        UPDATE inter_bot_deliveries SET status='QUEUED',
+                            delivery_mode='steer_rejected', transport_accepted_at=NULL,
+                            claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL,
+                            available_at=now(), next_retry_at=now(),
+                            attempt_count=GREATEST(attempt_count - 1, 0), last_error=:error,
+                            metadata_json=metadata_json || CAST(:merge AS jsonb), updated_at=now()
+                        WHERE id=:id RETURNING *
+                    """), {
+                        "id": row["id"],
+                        "error": rejection_error(proof, int(metadata.get("steer_generation") or 0)),
+                        "merge": json.dumps(rejection_merge(metadata, proof)),
+                    }).mappings().one()
+                    recovered.append(DeliveryRecord.from_mapping(updated))
+                    continue
                 elif (
                     row.get("transport_accepted_at") is not None
                     and row["transport_accepted_at"]

@@ -56,14 +56,12 @@ class TestClaudeActiveRun:
         client = AsyncMock()
         run = ClaudeActiveRun(client=client, request_id="req-1")
 
-        await run.steer("change direction")
+        # TASK-1300: the replacement is app-rendered registry text, sent as is.
+        framed = "[app-rendered chat.steer.interrupt_replacement]\nchange direction"
+        await run.steer("change direction", origin="user", framed_message=framed)
 
         client.interrupt.assert_awaited_once_with()
-        replacement = client.query.await_args.args[0]
-        assert "[Mid-turn user interruption]" in replacement
-        assert "change direction" in replacement
-        assert "continue the unfinished task" in replacement
-        assert "explicitly asks you to stop" in replacement
+        assert client.query.await_args.args[0] == framed
         interrupted = MagicMock(subtype="error_during_execution")
         assert run.consume_replaced_result(interrupted) is True
         assert run.consume_replaced_result(interrupted) is False
