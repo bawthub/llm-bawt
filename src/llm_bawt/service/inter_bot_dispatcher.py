@@ -48,6 +48,9 @@ class InterBotDeliveryDispatcher:
     FINALIZE_POLL_SECONDS = 0.05
     # A fallback turn refused at admission is deferred, never spun at delay 0.
     TARGET_BUSY_REQUEUE_SECONDS = 1.0
+    # TASK-1286: how long stop() waits for detached workers to prove they
+    # exited. One bridge XREAD block is 2s; server.sh allows the process 8s.
+    DETACH_CONFIRM_SECONDS = 3.0
 
     def __init__(
         self, service: Any, *, recovery_interval_seconds: float = 15.0,
@@ -131,8 +134,16 @@ class InterBotDeliveryDispatcher:
                 await asyncio.sleep(self.leadership_retry_delay_seconds)
 
     async def stop(self) -> None:
+        from .turn_execution import turn_executions
+
         self._stop_event.set()
         self._wake_event.set()
+        # TASK-1286: let go of every streaming agent run before cancelling the
+        # tasks that drive them. Detached workers exit without a terminal write,
+        # which lets the interpreter exit and lets a confirmed-stopped claim go
+        # to the next process now instead of after its lease. No await between
+        # here and the cancels below, so no new worker can start in between.
+        detached = turn_executions.detach_agents()
         tasks = [
             task for task in (*self._target_tasks.values(), *self._dispatch_tasks,
                               getattr(self, "_talk_reply_task", None))
@@ -153,8 +164,41 @@ class InterBotDeliveryDispatcher:
         if recovery is not None:
             # Leader-only work: stop it before the lock is released.
             await recovery.stop()
+        await self._release_detached_claims(detached)
         self.store.release_dispatcher_lock(self._dispatcher_lock)
         self._dispatcher_lock = None
+
+    async def _release_detached_claims(self, detached: list) -> None:
+        """Expire our claims whose detached worker has provably exited (TASK-1286).
+
+        Bounded by DETACH_CONFIRM_SECONDS. Each execution's own exit proof is
+        polled; no worker future is cancelled or timed out, so a timeout can
+        never pass for completion (I1). A claim whose worker didn't confirm
+        keeps its lease, which is the pre-TASK-1286 fallback.
+        """
+        if not detached:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.DETACH_CONFIRM_SECONDS
+        while loop.time() < deadline and not all(e.confirmed_stopped() for e in detached):
+            await asyncio.sleep(0.05)
+        confirmed = {e.turn_id: e.confirmed_stopped() for e in detached}
+        unconfirmed = sorted(turn for turn, done in confirmed.items() if not done)
+        if unconfirmed:
+            logger.warning("Detached turn workers still running after %.0fs; their claims keep "
+                           "their lease: %s", self.DETACH_CONFIRM_SECONDS, unconfirmed)
+        stopped = sorted(turn for turn, done in confirmed.items() if done)
+        if not stopped:
+            return
+        try:
+            released = await asyncio.to_thread(
+                self.store.expire_own_claims, claim_owner=self.claim_owner, turn_ids=stopped,
+            )
+        except Exception:
+            logger.exception("Could not release confirmed-stopped delivery claims; they keep their lease")
+            return
+        if released:
+            logger.info("Released %d delivery claim(s) to the next dispatcher: %s", len(released), released)
 
     def wake(self, target_bot_id: str | None = None) -> None:
         # target_bot_id is accepted for callers/documentation; eligible targets

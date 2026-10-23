@@ -187,6 +187,7 @@ class AgentBridgeBackend(AgentBackend):
 
         request_started = time.time()
         first_delta_at: float | None = None
+        run_terminal_seen = False  # the run finished on its own (TASK-1286 detach)
         tool_calls: list[AgentToolCall] = []
         text_parts: list[str] = []
         upstream_model: str = ""
@@ -235,6 +236,8 @@ class AgentBridgeBackend(AgentBackend):
                     try:
                         if execution is not None:
                             execution.check_cancelled()
+                            # A worker detached before publication never starts the run.
+                            execution.check_detached()
                         await local_sub.send_command(
                             session_key=session_key,
                             message=prompt,
@@ -314,9 +317,10 @@ class AgentBridgeBackend(AgentBackend):
                             session_key, request_id,
                         )
 
-                        nonlocal first_delta_at
+                        nonlocal first_delta_at, run_terminal_seen
                         async for event in local_sub.subscribe_run(
                             request_id, timeout_s=timeout,
+                            should_stop=execution.detach_requested if execution is not None else None,
                         ):
                             if event.kind == AgentEventKind.ASSISTANT_DELTA:
                                 delta = event.text or ""
@@ -689,6 +693,7 @@ class AgentBridgeBackend(AgentBackend):
 
                             elif event.kind == AgentEventKind.RUN_TERMINAL:
                                 # The run's one terminal (TASK-1233 B1 source (a)).
+                                run_terminal_seen = True
                                 if execution is not None:
                                     execution.record_exit(event.raw)
 
@@ -710,7 +715,10 @@ class AgentBridgeBackend(AgentBackend):
                                     f"{self.name} error: {event.text}"
                                 )
                     except TimeoutError:
-                        if self.name == "claude-code":
+                        # Never cancel a run this process is handing to its
+                        # successor on shutdown (TASK-1286).
+                        detached = execution is not None and execution.detach_requested()
+                        if self.name == "claude-code" and not detached:
                             try:
                                 receipt = await local_sub.send_rpc(
                                     "chat.cancel",
@@ -740,6 +748,8 @@ class AgentBridgeBackend(AgentBackend):
 
             t = threading.Thread(target=_run_in_thread, daemon=True)
             t.start()
+            if execution is not None:
+                execution.attach_stream_thread(t)
 
             # Drain the queue, yielding items to the caller
             while True:
@@ -753,6 +763,15 @@ class AgentBridgeBackend(AgentBackend):
                     break
                 yield item
 
+            if execution is not None and execution.detach_requested() and not run_terminal_seen:
+                # TASK-1286: the stream ended because of detach (its subscriber
+                # stops within one XREAD block), not because the run finished.
+                # Join the thread with no timeout so the worker returns only
+                # once nothing is left reading the run the next process will
+                # reattach to. A run whose terminal arrived first ends normally.
+                termination_reason = "detached"
+                t.join()
+                execution.check_detached()
             t.join(timeout=5.0)
 
             if error_holder:
@@ -760,7 +779,8 @@ class AgentBridgeBackend(AgentBackend):
                 raise error_holder[0]
 
         except Exception as exc:
-            termination_reason = "error"
+            if termination_reason != "detached":
+                termination_reason = "error"
             raise exc
         finally:
             end_time = time.time()

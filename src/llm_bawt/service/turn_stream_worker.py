@@ -933,6 +933,15 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             timing_holder[1] = time.time()
 
         except Exception as e:
+            execution = ctx.execution
+            if execution is not None and execution.detach_requested():
+                # TASK-1286: process shutdown detached this worker. The bridge
+                # run is still going and the next process reattaches to it, so
+                # write no error and queue nothing; the finalizer skips terminals.
+                execution.mark_detached_exit()
+                log.info("Turn %s detached for shutdown (%s); left open for reattach",
+                         turn_log_id, type(e).__name__)
+                return
             externally_aborted = _turn_was_aborted()
             if externally_aborted:
                 cancelled_holder[0] = True

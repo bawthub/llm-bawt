@@ -619,7 +619,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             # standalone local_model_bridge, TASK-276/278), so every model
             # streams on the default thread pool — multiple bots run
             # concurrently and nothing is serialized on a single GPU thread.
-            loop.run_in_executor(None, _turn_worker._stream_to_queue)
+            _turn_ctx.execution.launch_worker(loop, _turn_worker._stream_to_queue)
 
             # Yield SSE chunks (with keepalive to prevent client timeout
             # during slow backends like vLLM first-inference)

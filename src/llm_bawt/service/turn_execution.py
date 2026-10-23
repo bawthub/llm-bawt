@@ -8,8 +8,8 @@ so Stop during setup cannot race ahead of chat.send and get lost.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from threading import Event, Lock
+from collections.abc import Callable, Mapping
+from threading import Event, Lock, Thread
 from typing import Any
 
 from agent_bridge.run_contract import RunTerminal
@@ -37,6 +37,10 @@ class TurnExecutionCancelled(Exception):
     """The owning worker observed its request's cancellation."""
 
 
+class TurnExecutionDetached(Exception):
+    """The worker let go of a still-running bridge run for process shutdown."""
+
+
 class TurnExecution:
     def __init__(self, turn_id: str, cancel_event: Event, *, is_agent: bool, store):
         self.turn_id = turn_id
@@ -48,10 +52,63 @@ class TurnExecution:
         self.request_id: str | None = None
         self._dispatched = False
         self._lock = Lock()
+        # TASK-1286: detach is a shutdown signal, separate from cancel_event
+        # (which agent streams ignore by design). A detached worker stops
+        # reading its bridge run and exits without any terminal write, so the
+        # next process can reattach to the same run.
+        self._detach = Event()
+        self._detached_exit = False
+        self._worker_exited = Event()
+        self._stream_thread: Thread | None = None
 
     def check_cancelled(self) -> None:
         if self.cancel_event.is_set():
             raise TurnExecutionCancelled()
+
+    # ── Shutdown detach (TASK-1286) ──────────────────────────────────────
+
+    def launch_worker(self, loop, worker: Callable[[], None]):
+        """Run ``worker`` on the default executor; record when it has returned.
+
+        ``_worker_exited`` is set only after ``worker`` itself returns or
+        raises, so no asyncio-side cancel or timeout can fake an exit.
+        """
+        def run() -> None:
+            try:
+                worker()
+            finally:
+                self._worker_exited.set()
+
+        return loop.run_in_executor(None, run)
+
+    def attach_stream_thread(self, thread: Thread) -> None:
+        """The bridge stream thread reading this run's Redis stream."""
+        with self._lock:
+            self._stream_thread = thread
+
+    def detach(self) -> None:
+        self._detach.set()
+
+    def detach_requested(self) -> bool:
+        return self._detach.is_set()
+
+    def check_detached(self) -> None:
+        if self._detach.is_set():
+            raise TurnExecutionDetached()
+
+    def mark_detached_exit(self) -> None:
+        """The worker abandoned its stream because of detach; skip terminal writes."""
+        self._detached_exit = True
+
+    @property
+    def detached_exit(self) -> bool:
+        return self._detached_exit
+
+    def confirmed_stopped(self) -> bool:
+        """The worker has returned and the stream thread is dead, both checked directly."""
+        with self._lock:
+            thread = self._stream_thread
+        return self._worker_exited.is_set() and (thread is None or not thread.is_alive())
 
     def bind_bridge(self, *, backend: str, session_key: str, request_id: str) -> None:
         # Persist the actual request-local identity before command publication,
@@ -133,6 +190,21 @@ class TurnExecutions:
     def active_ids(self) -> list[str]:
         with self._lock:
             return list(self._turns)
+
+    def detach_agents(self) -> list[TurnExecution]:
+        """Detach every registered agent turn so the process can exit (TASK-1286).
+
+        A turn is registered before its worker launches (the turn_start work
+        in between awaits), so an agent turn in that window is detached too:
+        its worker then sees the detach before publishing anything. Returns
+        every detached execution; only those whose exit is later confirmed
+        may have their claim released.
+        """
+        with self._lock:
+            executions = [e for e in self._turns.values() if e.is_agent]
+        for execution in executions:
+            execution.detach()
+        return executions
 
 
 turn_executions = TurnExecutions()

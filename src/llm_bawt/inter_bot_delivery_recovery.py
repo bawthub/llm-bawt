@@ -18,6 +18,29 @@ class DeliveryLeaseRecovery:
     """Settle or re-arm expired and orphaned claims against a store."""
 
     @staticmethod
+    def expire_own_claims(store, *, claim_owner: str, turn_ids: list[str]) -> list[str]:
+        """Hand this process's confirmed-stopped turn claims to its successor (TASK-1286).
+
+        Only ``lease_expires_at`` changes, so the next leader's first
+        ``recover_expired`` sends each row down the unchanged lease-expired
+        branch. The caller passes only turns whose worker and stream thread
+        have provably exited. Steer rows never qualify: nothing proves a steer
+        RPC has gone quiet, so they keep their lease.
+        """
+        if store.engine is None or not turn_ids:
+            return []
+        with store.engine.begin() as conn:
+            conn.exec_driver_sql("SET LOCAL lock_timeout = '2s'")
+            conn.exec_driver_sql("SET LOCAL statement_timeout = '2s'")
+            released = conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries SET lease_expires_at=now(), updated_at=now()
+                WHERE claim_owner=:owner AND status='DISPATCHING'
+                  AND delivery_mode='turn' AND turn_id = ANY(:turn_ids)
+                RETURNING id
+            """), {"owner": claim_owner, "turn_ids": list(turn_ids)}).scalars().all()
+        return list(released)
+
+    @staticmethod
     def _settle_stopped_turn(conn: Connection, turn_id: str) -> None:
         """Settle a stopped delivery's open turn in the caller's transaction."""
         from sqlmodel import Session, select

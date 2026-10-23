@@ -907,3 +907,9 @@ class InterBotDeliveryStore:
         from .inter_bot_delivery_recovery import DeliveryLeaseRecovery
 
         return DeliveryLeaseRecovery.recover_expired(self, live_owner=live_owner)
+
+    def expire_own_claims(self, *, claim_owner: str, turn_ids: list[str]) -> list[str]:
+        """Release confirmed-stopped turn claims at shutdown (TASK-1286)."""
+        from .inter_bot_delivery_recovery import DeliveryLeaseRecovery
+
+        return DeliveryLeaseRecovery.expire_own_claims(self, claim_owner=claim_owner, turn_ids=turn_ids)

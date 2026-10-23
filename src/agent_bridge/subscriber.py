@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import redis.asyncio as aioredis
 from redis.asyncio import BlockingConnectionPool
@@ -420,12 +420,18 @@ class RedisSubscriber(CommandPublisherMixin):
         request_id: str,
         *,
         timeout_s: float = 600,
+        should_stop: Callable[[], bool] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Subscribe to the per-run response stream published by the bridge.
 
         Yields events until the bridge signals 'done' or inactivity timeout.
         The timeout resets on each received event, so long-running tasks
         (e.g. backups) that continue producing events won't time out.
+
+        ``should_stop`` (TASK-1286 detach) is checked before every XREAD,
+        including after empty ones (block <= 2s), and before every event.
+        When it returns true the iterator ends normally: no terminal event and
+        no TimeoutError, so the caller never cancels a run it is letting go of.
         """
         stream_key = f"{RUN_STREAM_PREFIX}{request_id}"
         last_id = "0"  # read from beginning (stream is created fresh per run)
@@ -437,6 +443,9 @@ class RedisSubscriber(CommandPublisherMixin):
         )
 
         while True:
+            if should_stop is not None and should_stop():
+                logger.info("subscribe_run detached: request_id=%s", request_id)
+                return
             remaining = deadline - loop_time()
             if remaining <= 0:
                 logger.warning("subscribe_run inactivity timeout for request_id=%s", request_id)
@@ -461,6 +470,9 @@ class RedisSubscriber(CommandPublisherMixin):
 
             for _stream_name, messages in results:
                 for msg_id, fields in messages:
+                    if should_stop is not None and should_stop():
+                        logger.info("subscribe_run detached: request_id=%s", request_id)
+                        return
                     last_id = msg_id
                     # Reset inactivity deadline on each event
                     deadline = loop_time() + timeout_s

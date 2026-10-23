@@ -387,9 +387,11 @@ async def lifespan(app):
         # Stop the producer before its consumer/Redis transport.
         if scheduler:
             await scheduler.stop()
-        # Stop durable claims first while Redis is still available. Cancellation
-        # leaves the claim leased; the next singleton dispatcher recovers it
-        # after the short lease rather than counting orderly shutdown as failure.
+        # Stop durable claims first while Redis is still available. stop()
+        # detaches every streaming agent worker (TASK-1286): a claim whose
+        # worker provably exited has its lease expired so the next dispatcher
+        # reattaches at once; any other claim stays leased until it expires.
+        # Orderly shutdown is never counted as a delivery failure.
         if service._inter_bot_dispatcher is not None:
             await service._inter_bot_dispatcher.stop()
 

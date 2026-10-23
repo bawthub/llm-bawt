@@ -86,7 +86,14 @@ class TurnStreamFinalizer:
         """No logger, publisher or persistence failure may strand the HTTP stream."""
         ctx = self.ctx
         try:
-            self._finalize(prepared_messages=prepared_messages)
+            execution = getattr(ctx, "execution", None)
+            if execution is not None and execution.detached_exit:
+                # TASK-1286 detached mode: no status, response, ended_at or
+                # turn_complete. The turn row stays open for the process that
+                # reattaches to the still-running bridge run.
+                log.info("Turn %s detached; skipping terminal persistence", ctx.turn_log_id)
+            else:
+                self._finalize(prepared_messages=prepared_messages)
         finally:
             try:
                 put_queue_item_threadsafe(ctx.loop, ctx.chunk_queue, None)
