@@ -114,14 +114,24 @@ class BotProfile(SQLModel, table=True):
 
 @dataclass(frozen=True)
 class ProfileRuntime:
-    """The two profile fields that pick where a bot's turns run."""
+    """The profile fields that pick where a bot's turns run.
+
+    ``bot_type`` and ``agent_backend`` pick the runtime (what the system gates
+    hold, see :meth:`backend`); ``endpoint_id`` picks the model route, and so the
+    credential, the route gate checks (TASK-1302 A1′).
+    """
 
     bot_type: str | None
     agent_backend: str | None
+    endpoint_id: int | None = None
 
     @classmethod
     def of(cls, row: BotProfile) -> "ProfileRuntime":
-        return cls(row.bot_type, row.agent_backend)
+        return cls(row.bot_type, row.agent_backend, row.endpoint_id)
+
+    def backend(self) -> tuple[str | None, str | None]:
+        """The runtime alone, ``(bot_type, agent_backend)``."""
+        return (self.bot_type, self.agent_backend)
 
 
 class ProfileWriteGuard(Protocol):
@@ -357,6 +367,12 @@ class BotProfileStore:
             return True
 
     def seed_from_yaml(self, bots_dict: dict[str, Any]) -> int:
+        """Inactive: nothing calls this (pinned by test_route_eligibility).
+
+        It writes ``endpoint_id`` through an unguarded :meth:`upsert`, so it
+        bypasses the bot-save route gate (TASK-1302 A1′). Reactivating it means
+        passing the route save's ``guard=`` first.
+        """
         if self.engine is None:
             raise RuntimeError("Bot profiles DB unavailable")
         if not isinstance(bots_dict, dict):

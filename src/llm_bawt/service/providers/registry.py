@@ -12,7 +12,13 @@ from typing import Any
 
 from ...utils.config import Config
 from .anthropic_key import AnthropicKeyAdapter
-from .base import CONNECTED_HEALTH_STATES, HEALTH_UNKNOWN, ProviderAdapter
+from .base import (
+    CONNECTED_HEALTH_STATES,
+    HEALTH_BROKEN,
+    HEALTH_UNCONFIGURED,
+    HEALTH_UNKNOWN,
+    ProviderAdapter,
+)
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .github import GitHubAdapter
@@ -111,3 +117,48 @@ def access_path_connections(config: Config, access_path_keys: Iterable[str]) -> 
             "connected": state in CONNECTED_HEALTH_STATES,
         }
     return result
+
+
+#: Synthesized route states beyond the provider health states (TASK-1302 A0).
+ROUTE_LOCAL = "local"
+ROUTE_UNTRACKED = "untracked"
+
+
+def route_eligibility(
+    access_path_key: str,
+    auth_mechanism: str | None,
+    connection: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Whether a bot may be newly assigned to a route, and why not (TASK-1302 A0).
+
+    The one rule behind the bot-save gate and every route list. A route is
+    eligible only when it needs no credential (``auth_mechanism == "none"``) or
+    its owning provider is connected now (health ok or warning). An owned path
+    in any other health state, and a remote path no provider owns (BawtHub
+    doesn't manage its credential), is not. ``connection`` is the
+    :func:`access_path_connections` entry for the path.
+    """
+    if (auth_mechanism or "").strip().lower() == "none":
+        return {"eligible": True, "state": ROUTE_LOCAL, "reason": None}
+    if connection is None:
+        return {
+            "eligible": False,
+            "state": ROUTE_UNTRACKED,
+            "reason": (
+                f"BawtHub doesn't manage the credential for {access_path_key}; "
+                "this route can't be assigned yet."
+            ),
+        }
+    state = str(connection.get("state") or HEALTH_UNKNOWN)
+    if state in CONNECTED_HEALTH_STATES:
+        return {"eligible": True, "state": state, "reason": None}
+    label = connection.get("label") or access_path_key
+    detail = connection.get("detail")
+    suffix = f" ({detail})" if detail else ""
+    if state == HEALTH_UNCONFIGURED:
+        reason = f"{label} is not connected. Connect it in Integrations or pick a connected route."
+    elif state == HEALTH_BROKEN:
+        reason = f"{label} needs reconnecting{suffix}."
+    else:
+        reason = f"{label} status couldn't be checked{suffix}."
+    return {"eligible": False, "state": state, "reason": reason}

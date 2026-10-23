@@ -53,6 +53,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_session_threads.py::TestRegistryInvariantsLiveDB::",
     "test_session_unique_index_pg.py::",
     "test_profile_backend_switch_gate_pg.py::",
+    "test_profile_route_gate_pg.py::",
     "test_orphan_partitions_pg.py::",
     "test_schema_convergence_pg.py::",
     "test_schema_full_store_pg.py::",

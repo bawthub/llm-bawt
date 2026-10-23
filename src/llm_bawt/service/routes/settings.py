@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
 from ...orphan_partitions import PartitionExecutionHalted
+from ..profile_route_gate import ProfileRouteGate, ProfileSaveGuard, RouteIneligible
 from ..profile_switch_gate import ProfileSwitchGate
 from ..turn_admission import SystemGateRefused
 from ..runtime_switch_rotation import (
@@ -285,10 +286,15 @@ async def _persist_bot_profile(
                 new_avatar if isinstance(new_avatar, str) else None,
             )
 
+    # Provider health is probed here, before the save's transaction, so no
+    # network call runs under the bot's admission lock (TASK-1302 A1′).
+    route_gate = ProfileRouteGate.for_payload(service.config, store.engine, payload)
     try:
-        profile = store.upsert(payload, guard=ProfileSwitchGate())
+        profile = store.upsert(payload, guard=ProfileSaveGuard(ProfileSwitchGate(), route_gate))
     except SystemGateRefused as refused:  # a switch onto a held runtime; nothing written
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
+    except RouteIneligible as refused:  # a new route with no usable credential; nothing written
+        raise HTTPException(status_code=refused.status_code, detail=refused.reason)
     except Exception as exc:  # surface DB constraint violations as 400s
         msg = _humanize_bot_constraint_error(exc)
         if msg is not None:

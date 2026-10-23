@@ -45,6 +45,9 @@ def test_profile_change_publishes_only_after_commit_and_cache_reload(monkeypatch
     monkeypatch.setattr(settings, "get_service", lambda: service)
     monkeypatch.setattr(settings, "get_bot_profile_store", lambda _config: store)
     monkeypatch.setattr(settings, "_validate_profile_payload", lambda _payload: None)
+    # The route gate's pre-transaction health probe needs a real catalog DB.
+    monkeypatch.setattr(settings.ProfileRouteGate, "for_payload",
+                        classmethod(lambda cls, *_args: cls({})))
     monkeypatch.setattr(settings, "_reload_bot_registry", lambda: lifecycle.append("reload"))
     monkeypatch.setattr(settings, "_reload_service_model_catalog", lambda _service: None)
     monkeypatch.setattr(settings, "_invalidate_bot_instance_cache", lambda *_args: None)

@@ -17,7 +17,7 @@ from claude_code_bridge.proxy.transport_policy import (
 from ...memory.model_catalog_migration import _derive_harness
 from ...model_catalog import AccessPath, ProtocolCompatibility
 from ..dependencies import get_model_catalog_engine, get_service
-from ..providers.registry import access_path_connections
+from ..providers.registry import access_path_connections, route_eligibility
 
 router = APIRouter(prefix="/v1/models/catalog", tags=["Models"])
 
@@ -290,6 +290,7 @@ def list_access_paths(
     connections = access_path_connections(get_service().config, [row["key"] for row in rows])
     for row in rows:
         row["connection"] = connections[row["key"]]
+        row["eligibility"] = route_eligibility(row["key"], row["auth_mechanism"], row["connection"])
     return {"access_paths": rows}
 
 
@@ -366,17 +367,30 @@ def list_endpoints(
     with _engine().connect() as conn:
         rows = _dict_rows(conn.execute(text(sql), {"access_path": access_path, "model": model}))
     if keep:
-        rows = [
-            row for row in rows
-            if keep(
-                AccessPath(
-                    row["access_path_id"], row["access_path_key"], row["access_vendor"],
-                    row["protocol"], row["base_url"], row["auth_mechanism"],
-                    row["engine_kind"],
-                ),
-            )
-        ]
+        rows = [row for row in rows if keep(_endpoint_row_path(row))]
+    backend = _normalized_agent_backend(agent_backend)
+    connections = access_path_connections(
+        get_service().config, sorted({row["access_path_key"] for row in rows}),
+    )
+    for row in rows:
+        # TASK-1302 A3: the picker's eligibility authority. ``harness`` is what a
+        # bot on ``agent_backend`` would save with on this endpoint (B′), so the
+        # client never derives it.
+        row["connection"] = connections[row["access_path_key"]]
+        row["eligibility"] = route_eligibility(
+            row["access_path_key"], row["auth_mechanism"], row["connection"],
+        )
+        if backend:
+            row["harness"] = harness_for_agent_backend(backend, _endpoint_row_path(row))
     return {"endpoints": rows}
+
+
+def _endpoint_row_path(row: dict[str, Any]) -> AccessPath:
+    return AccessPath(
+        row["access_path_id"], row["access_path_key"], row["access_vendor"],
+        row["protocol"], row["base_url"], row["auth_mechanism"],
+        row["engine_kind"],
+    )
 
 
 @router.put("/endpoints/{model_key}/{access_key}")

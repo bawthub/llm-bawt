@@ -26,8 +26,19 @@ class ModelPricing(BaseModel):
     cache_read: float | None = None
     cache_write: float | None = None
 
+class RouteEligibility(BaseModel):
+    """Whether a bot may be newly assigned to a route (``route_eligibility``)."""
+    eligible: bool
+    state: str
+    reason: str | None = None
+
 class ModelInfo(BaseModel):
-    """Model information for /v1/models endpoint."""
+    """Model information for /v1/models endpoint.
+
+    ``endpoint_id``/``access_path``/``eligibility`` label which route an alias
+    rides and whether that route is usable now (TASK-1302 A3). They are absent
+    for an alias with no catalog endpoint behind it.
+    """
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -36,6 +47,9 @@ class ModelInfo(BaseModel):
     model_id: str | None = None
     description: str | None = None
     pricing: ModelPricing | None = None
+    endpoint_id: int | None = None
+    access_path: str | None = None
+    eligibility: RouteEligibility | None = None
 
 class ModelsResponse(BaseModel):
     """Response for /v1/models endpoint."""

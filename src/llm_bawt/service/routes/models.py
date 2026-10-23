@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...bots import BotManager
 from ..dependencies import get_service
+from ..providers.registry import access_path_connections, route_eligibility
 from ..schemas import (
     BotInfo,
     BotsResponse,
@@ -69,15 +70,29 @@ def list_models():
     """List available models (OpenAI-compatible)."""
     service = get_service()
     defined = service.config.defined_models.get("models", {})
+    infos = {alias: defined.get(alias, {}) for alias in service._available_models}
+    # TASK-1302 A3: each alias names the route it rides and that route's
+    # eligibility, so alias-valued pickers show API key vs subscription and
+    # connection state from the same rule the bot save enforces.
+    connections = access_path_connections(
+        service.config,
+        sorted({info["access_path"] for info in infos.values() if info.get("access_path")}),
+    )
     models = []
-    for alias in service._available_models:
-        info = defined.get(alias, {})
+    for alias, info in infos.items():
+        path_key = info.get("access_path")
         models.append(ModelInfo(
             id=alias,
             type=_public_model_type(info),
             model_id=info.get("model_id"),
             description=info.get("description"),
             pricing=_coerce_pricing(info.get("pricing")),
+            endpoint_id=info.get("endpoint_id"),
+            access_path=path_key,
+            eligibility=(
+                route_eligibility(path_key, info.get("auth_mechanism"), connections[path_key])
+                if path_key else None
+            ),
         ))
     return ModelsResponse(data=models)
 

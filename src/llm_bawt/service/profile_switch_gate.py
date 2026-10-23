@@ -30,6 +30,6 @@ class ProfileSwitchGate:
 
     def check(self, conn, previous: ProfileRuntime | None, row: BotProfile) -> None:
         """Raise ``SystemGateRefused`` when this save moves ``row`` onto a gated runtime."""
-        if previous == ProfileRuntime.of(row):
+        if previous is not None and previous.backend() == ProfileRuntime.of(row).backend():
             return
         refuse_if_gated(conn, row.slug, PROFILE_SWITCH_ACTOR)
