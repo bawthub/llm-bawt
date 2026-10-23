@@ -175,6 +175,10 @@ class AgentBackendClient(LLMClient):
     def get_styling(self) -> tuple[str | None, str]:
         return self.bot_name, "cyan"
 
+    def compose_system_prompt(self, system_prompt: str) -> str:
+        """The complete prompt the backend would send for this render (TASK-1318)."""
+        return self._backend.compose_system_prompt(system_prompt, dict(self._bot_config))
+
     def stream_raw(self, messages: List[Message], **kwargs: Any) -> Iterator[str | dict[str, Any]]:
         """Stream from backend when supported; fallback to one-shot query."""
         prompt = ""
@@ -232,6 +236,9 @@ class AgentBackendClient(LLMClient):
         task_turn_capability = kwargs.pop("task_turn_capability", None)
         bridge_request_id = kwargs.pop("bridge_request_id", None)
         bridge_reset_action = kwargs.pop("bridge_reset_action", None)
+        # TASK-1318: the session-pinned prompt decision. Its bytes are already
+        # the system message; the backend must send them verbatim.
+        system_prompt_pin = kwargs.pop("system_prompt_pin", None)
 
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
@@ -253,6 +260,11 @@ class AgentBackendClient(LLMClient):
             config["request_id"] = bridge_request_id
         if bridge_reset_action:
             config["bridge_reset_action"] = bridge_reset_action
+        if system_prompt_pin is not None:
+            config["system_prompt_pinned"] = True
+            delivery = self._backend.system_prompt_delivery(system_prompt_pin.is_boundary)
+            if delivery:
+                config["system_prompt_delivery"] = delivery
 
         execution = kwargs.pop("turn_execution", None)
         if execution is not None:

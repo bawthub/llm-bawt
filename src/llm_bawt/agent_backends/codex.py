@@ -31,6 +31,17 @@ class CodexBackend(AgentBridgeBackend):
 
     name = "codex"
 
+    # TASK-1318: the bridge pastes the prompt into the thread, so thread
+    # history carries it. Pin it per session and paste it only when it takes
+    # effect, instead of appending a copy to every turn.
+    pins_system_prompt = True
+
+    def system_prompt_delivery(self, is_boundary: bool) -> str | None:
+        # "now": the pin moved this turn, paste it even on a resumed thread.
+        # "cold_start": paste only if the bridge opens a fresh thread (its own
+        # reset or fresh-session retry included); resumed threads already hold it.
+        return "now" if is_boundary else "cold_start"
+
     def _resolve_session_key(self, config: dict) -> str:
         # Route by bot + user so each user gets an independent Codex thread
         # for a given bot. The session_key in agent_backend_config is the

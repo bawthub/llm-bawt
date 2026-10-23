@@ -268,6 +268,7 @@ class AgentBridgeBackend(AgentBackend):
                             request_id=request_id,
                             attachments=attachments or [],
                             system_prompt=config.get("system_prompt"),
+                            system_prompt_delivery=config.get("system_prompt_delivery"),
                             model=config.get("model"),
                             backend=self.name,
                             bot_id=str(config.get("bot_id") or "").strip() or None,

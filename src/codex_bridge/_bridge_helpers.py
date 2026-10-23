@@ -35,6 +35,31 @@ _MCP_TOOL_CONTEXT_FALLBACK = (
 )
 
 
+def system_prompt_for_attempt(
+    system_prompt: str | None, delivery: str | None, *, resuming: bool,
+) -> str | None:
+    """The prompt to paste into this attempt's user input (TASK-1318).
+
+    The codex thread history keeps every pasted copy, so a session-pinned
+    prompt is pasted only when it takes effect: on a fresh thread (including
+    the bridge's own reset and fresh-session retry) or when the app moved the
+    pin this turn. Without a delivery mode the app did not pin, and the
+    prompt goes out every turn as before.
+    """
+    from agent_bridge.command_publisher import (
+        SYSTEM_PROMPT_DELIVERY_COLD_START,
+        SYSTEM_PROMPT_DELIVERY_MODES,
+    )
+
+    if not system_prompt:
+        return None
+    if delivery == SYSTEM_PROMPT_DELIVERY_COLD_START and resuming:
+        return None
+    if delivery is not None and delivery not in SYSTEM_PROMPT_DELIVERY_MODES:
+        logger.warning("Unknown system_prompt_delivery %r; pasting the prompt", delivery)
+    return system_prompt
+
+
 def _bot_slug_from_session_key(session_key: str) -> str:
     sk = (session_key or "").strip()
     if not sk:

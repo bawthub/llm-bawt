@@ -18,6 +18,30 @@ class AgentBackend(ABC):
 
     name: str = "base"
 
+    #: TASK-1318: the harness records the system prompt once per session and
+    #: ignores a changed prompt on resume, so llm-bawt pins the session's
+    #: prompt and sends those exact bytes every turn (service/system_prompt_pin).
+    #: False keeps the backend's historical per-turn render.
+    pins_system_prompt: bool = False
+
+    def compose_system_prompt(self, system_prompt: str, config: dict) -> str:
+        """Return the complete app-side system prompt for one turn.
+
+        Backends that wrap llm-bawt's rendered prompt (runtime context,
+        provider guidance) do it here, so a pinned session captures the exact
+        bytes the bridge receives. The default sends the render unchanged.
+        """
+        return system_prompt
+
+    def system_prompt_delivery(self, is_boundary: bool) -> str | None:
+        """How the bridge should deliver a pinned prompt (TASK-1318).
+
+        None: the bridge sends the prompt as-is every turn (the harness keeps
+        its own session snapshot). Backends whose harness stores the prompt in
+        thread history return a mode the bridge understands instead.
+        """
+        return None
+
     @abstractmethod
     async def chat(
         self,

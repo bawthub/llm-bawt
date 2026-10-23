@@ -151,7 +151,16 @@ class ClaudeResultMixin:
                     "context_action_post_tokens": post,
                 }
             else:
+                # The SDK said success but the transcript had no readable
+                # boundary metadata. The compaction still happened: record
+                # the outcome so the session prompt pin (TASK-1318) and the
+                # lifecycle view see the boundary, without inventing sizes.
                 note = "\n\n✅ Conversation compacted."
+                token_usage_payload = {
+                    **(token_usage_payload or {}),
+                    "context_action": "compact",
+                    "context_action_outcome": "success",
+                }
             seq += 1
             text_parts.append(note)
             self._publish_event(

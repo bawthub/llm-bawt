@@ -571,12 +571,13 @@ class BaseLLMBawt(OrchestratorInitializationMixin, ABC):
         # (TASK-288). Such content is stamped on the user message instead — the
         # single implementation point for every agent backend.
         #
-        # NOTE: the agent SDK does NOT lock or drop the system prompt on resume
-        # (that was a long-standing myth, corrected in TASK-288 after reading the
-        # SDK source — systemPrompt is rebuilt and sent on every query() call).
-        # The system prompt now persists every turn via the bridge; user-message
-        # prefixes here are about per-turn variance and cache-stability, not a
-        # workaround for a resume limitation.
+        # NOTE: the Claude Code CLI DOES freeze the system prompt per session
+        # (recorded at session start and after a manual /compact; a changed
+        # prompt on resume is ignored). llm-bawt pins the prompt per session and
+        # sends the pinned bytes (TASK-1318, service/system_prompt_pin.py), so a
+        # system-prompt edit lands at the next session boundary. Per-turn content
+        # must therefore ride the user message: it would never reach a resumed
+        # session through the system prompt.
         #
         # Slash commands (e.g. /new) are passed through untouched because the
         # bridges consume them via a literal startswith("/new") check before

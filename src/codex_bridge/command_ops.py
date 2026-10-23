@@ -36,6 +36,7 @@ from ._bridge_helpers import (
     _bot_slug_from_session_key,
     _is_auth_failure,
     _is_codex_session_error,
+    system_prompt_for_attempt,
 )
 
 logger = logging.getLogger("codex_bridge.bridge")
@@ -154,6 +155,7 @@ class CodexCommandMixin:
         bot_slug = (fields.get("bot_id", "") or "").strip() or _bot_slug_from_session_key(session_key)
         message = fields.get("message", "")
         system_prompt = fields.get("system_prompt") or None
+        system_prompt_delivery = (fields.get("system_prompt_delivery") or "").strip() or None
         model = fields.get("model") or self._default_model
         task_turn_capability = (fields.get("task_turn_capability") or "").strip()
         # Frontend-supplied user-message UUID; stamped on every emitted event
@@ -344,28 +346,26 @@ class CodexCommandMixin:
                     # for images get rebuilt too (the inner loop may clear and
                     # rebuild after a recoverable session error).
                     self._cleanup_tmp_files(tmp_image_paths)
+                    # TASK-1318: a session-pinned prompt is pasted only when it
+                    # takes effect (fresh thread, or the app moved the pin);
+                    # the resumed thread's history already carries it. Without
+                    # a delivery mode it is pasted every turn (TASK-288).
+                    attempt_system_prompt = system_prompt_for_attempt(
+                        system_prompt, system_prompt_delivery, resuming=bool(resume_id),
+                    )
                     # TASK-288 observability: log the system_prompt value AS SENT
                     # (prepended to the user message by _build_prompt_input),
                     # paired with resume state — the only place the resume-gate
                     # decision is visible.
                     logger.info(
-                        "Codex prompt: resume=%s system_prompt_sent=%s",
-                        bool(resume_id),
-                        f"{len(system_prompt)} chars" if system_prompt else "none",
+                        "Codex prompt: resume=%s delivery=%s system_prompt_sent=%s",
+                        bool(resume_id), system_prompt_delivery or "every_turn",
+                        f"{len(attempt_system_prompt)} chars" if attempt_system_prompt else "none",
                     )
                     prompt_input, tmp_image_paths = self._build_prompt_input(
                         message,
                         attachments,
-                        # TASK-288: inject the system prompt on EVERY turn, resume
-                        # included. Previously gated to fresh threads only, which
-                        # meant the persona decayed to nothing on long-lived codex
-                        # sessions (the steady state, since the thread is resumed
-                        # every turn). The prompt is now byte-stable (temporal +
-                        # response-style moved off it in core/base.py), so re-
-                        # sending keeps persona alive. Codex prepends it to the
-                        # user message rather than a cached system param, so this
-                        # adds the (stable) persona to each turn's input.
-                        system_prompt=system_prompt,
+                        system_prompt=attempt_system_prompt,
                     )
 
                     aborted = False

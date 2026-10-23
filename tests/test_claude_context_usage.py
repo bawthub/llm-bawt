@@ -259,3 +259,36 @@ def test_successful_compact_persists_lifecycle_in_usage(monkeypatch):
     assert usage["context_action_post_tokens"] == 250
     assert usage["resident_tokens"] == 250
     assert usage["resident_source"] == "claude_compact_metadata"
+
+
+def test_successful_compact_without_metadata_still_records_the_boundary(monkeypatch):
+    """TASK-1318: the session prompt pin moves only on a recorded success."""
+    harness = _Harness()
+    monkeypatch.setattr(send_result_module, "_read_latest_compact_metadata", lambda _session: None)
+    msg = SimpleNamespace(usage={}, model_usage={}, total_cost_usd=0.0, text="", content=[])
+    asyncio.run(harness._finalize_result_message(
+        msg,
+        request_id="req-compact",
+        session_key="snark:nick",
+        seq=0,
+        text_parts=[],
+        assistant_snapshot_text="",
+        api_retry_count=0,
+        api_last_error=None,
+        actual_model="openai_chatgpt/gpt",
+        model="openai_chatgpt/gpt",
+        bot_context_window=372000,
+        latest_assistant_usage=None,
+        latest_stream_usage=None,
+        cost_baseline_usd=0.0,
+        native_context_usage={"totalTokens": 250, "maxTokens": 372000},
+        compact_status="success",
+        compact_error_msg=None,
+        turn_session_id="sdk-compact",
+        turn_screenshot_assets=[],
+    ))
+    usage = harness.events[-1][3]["token_usage"]
+    assert usage["context_action"] == "compact"
+    assert usage["context_action_outcome"] == "success"
+    assert "context_action_post_tokens" not in usage
+    assert usage["resident_source"] == "claude_sdk_context"

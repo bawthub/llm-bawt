@@ -35,13 +35,12 @@ class ClaudeCodeBackend(AgentBridgeBackend):
 
     name = "claude-code"
 
-    def stream_raw(
-        self,
-        prompt: str,
-        config: dict,
-        attachments: list | None = None,
-        trigger_message_id: str | None = None,
-    ) -> Iterator[str | dict[str, Any]]:
+    # The Claude Code CLI records the system prompt on a session's first
+    # request and reuses it on every resume until compaction (TASK-1318).
+    pins_system_prompt = True
+
+    @staticmethod
+    def _require_model(config: dict) -> str:
         # Hard-require an explicit model. No silent fallback to Sonnet (or
         # any other model) — if the bot's agent_backend_config is missing
         # ``model``, fail loudly with a message that names the bot so the
@@ -54,7 +53,10 @@ class ClaudeCodeBackend(AgentBridgeBackend):
                 f"agent_backend_config. Set it on the bot's profile — the "
                 f"bridge will not fall back to a default."
             )
+        return model
 
+    def compose_system_prompt(self, system_prompt: str, config: dict) -> str:
+        model = self._require_model(config)
         # Inject the resolved model into the system prompt so the agent has
         # a ground-truth reference instead of confabulating from environment
         # variables or training-time defaults.  The Claude Agent SDK does
@@ -62,7 +64,7 @@ class ClaudeCodeBackend(AgentBridgeBackend):
         # the bridge logs `Actual model: ...` to itself, but the agent
         # never sees that line.  Without this block, "what model are you"
         # gets a guess (often wrong) instead of the truth.
-        sp = (config.get("system_prompt") or "").rstrip()
+        sp = (system_prompt or "").rstrip()
         provider_system_prompt = str(
             config.get("provider_system_prompt") or ""
         ).strip()
@@ -95,6 +97,25 @@ class ClaudeCodeBackend(AgentBridgeBackend):
         augmented_sp = f"{model_block}\n\n{sp}" if sp else model_block
         if provider_system_prompt:
             augmented_sp = f"{augmented_sp}\n\n{provider_system_prompt}"
+        return augmented_sp
+
+    def stream_raw(
+        self,
+        prompt: str,
+        config: dict,
+        attachments: list | None = None,
+        trigger_message_id: str | None = None,
+    ) -> Iterator[str | dict[str, Any]]:
+        self._require_model(config)
+        # TASK-1318: a pinned session prompt is already the composed, exact
+        # bytes for this session. Re-composing would let a catalog or registry
+        # edit change the prompt mid-session.
+        if config.get("system_prompt_pinned"):
+            augmented_sp = str(config.get("system_prompt") or "")
+        else:
+            augmented_sp = self.compose_system_prompt(
+                config.get("system_prompt") or "", config,
+            )
 
         # Resolve this system-wide policy at dispatch time so DB edits apply to
         # the next command without teaching the long-running bridge to poll the

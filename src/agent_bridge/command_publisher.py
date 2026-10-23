@@ -17,6 +17,14 @@ COMMAND_DEDUPE_TTL_S = 86400
 DELIVERY_REQUEST_PREFIX = "req_delivery_"
 DELIVERY_COMMAND_DEDUPE_TTL_S = 604800
 
+# TASK-1318: ``system_prompt_delivery`` for a session-pinned prompt on a bridge
+# that stores the prompt in thread history (codex). "now": the pin moved this
+# turn, deliver it even on a resumed thread. "cold_start": deliver it only when
+# the bridge opens a fresh thread. Absent: the historical every-turn delivery.
+SYSTEM_PROMPT_DELIVERY_NOW = "now"
+SYSTEM_PROMPT_DELIVERY_COLD_START = "cold_start"
+SYSTEM_PROMPT_DELIVERY_MODES = frozenset({SYSTEM_PROMPT_DELIVERY_NOW, SYSTEM_PROMPT_DELIVERY_COLD_START})
+
 
 def command_dedupe_ttl_s(request_id: str) -> int:
     """The dedupe TTL that :meth:`CommandPublisherMixin.send_command` applies."""
@@ -35,6 +43,7 @@ class CommandPublisherMixin:
         request_id: str,
         attachments: list | None = None,
         system_prompt: str | None = None,
+        system_prompt_delivery: str | None = None,
         model: str | None = None,
         backend: str | None = None,
         bot_id: str | None = None,
@@ -82,6 +91,10 @@ class CommandPublisherMixin:
             fields["attachments"] = json.dumps(attachments, ensure_ascii=False)
         if system_prompt:
             fields["system_prompt"] = system_prompt
+        if system_prompt_delivery is not None:
+            if system_prompt_delivery not in SYSTEM_PROMPT_DELIVERY_MODES:
+                raise ValueError("Unsupported system prompt delivery mode")
+            fields["system_prompt_delivery"] = system_prompt_delivery
         if model:
             fields["model"] = model
         if backend:

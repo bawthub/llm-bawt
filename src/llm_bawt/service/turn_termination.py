@@ -31,7 +31,12 @@ def interrupt_unresolved_tools(session: Session, turn_id: str, ended_at: datetim
 # delivery re-arm writes that start a new attempt (write_reservation,
 # save_turn's reserved UPDATE). ATTEMPT_KEYS describe a single attempt: they
 # survive late writes within it (update_turn) but never carry into the next.
-AUDIT_KEYS = ("abort_request", "ordinary_request_digest", "user_stop", "recovery", "manual_settle", "attempts")
+# TASK-1318: "system_prompt_pin" is written only by SystemPromptPinStore; on
+# the pin turn it carries the pinned prompt bytes other turns point at.
+AUDIT_KEYS = (
+    "abort_request", "ordinary_request_digest", "user_stop", "recovery", "manual_settle", "attempts",
+    "system_prompt_pin",
+)
 ATTEMPT_KEYS = ("abort_cause", EXECUTION_EXIT_KEY)
 # TASK-1234 Fix 2: how many earlier attempts ``attempts`` keeps (newest last).
 ATTEMPT_HISTORY_LIMIT = 10

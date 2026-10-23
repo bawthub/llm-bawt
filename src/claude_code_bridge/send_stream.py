@@ -261,13 +261,12 @@ class ClaudeStreamMixin:
         return ClaudeAgentOptions(
             **claude_skill_options(skill_bundle),
             model=model,
-            # TASK-288: send the system prompt on EVERY turn, resume
-            # included. The SDK rebuilds and re-sends systemPrompt on
-            # every query() (it is NOT locked at session start), and
-            # the prompt is now byte-stable (temporal + response-style
-            # moved off it), so re-sending reads the full prefix from
-            # cache (~10% cost, POC-confirmed) while keeping persona
-            # alive on resume instead of decaying to the stock default.
+            # TASK-1318: the CLI records the system prompt when a session
+            # starts (and on the first turn after a manual /compact) and
+            # ignores a changed prompt on resume. llm-bawt therefore pins
+            # the prompt per session and sends the pinned bytes every turn,
+            # so what is logged is what the model holds. The regression is
+            # tests/test_system_prompt_pin_sdk.py (make test-sdk-probe).
             system_prompt=system_prompt,
             cwd=self._cwd,
             disallowed_tools=disallowed_tools,

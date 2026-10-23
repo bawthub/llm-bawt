@@ -17,6 +17,7 @@ from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
 from .logging import get_service_logger
 from .pending_tool_calls import PendingToolCallCorrelator
+from .system_prompt_pin import SessionPinConfirmer, apply_session_pin
 from .tool_execution_stamps import ToolExecutionStamps
 from .turn_stream_context import TurnStreamContext, _TEXT_DELTA_FLUSH_CHARS
 from .turn_stream_finalize import TurnStreamFinalizer
@@ -213,6 +214,13 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     messages, outbound_task, user_prompt,
                 )
 
+            # TASK-1318: send (and log) the session's pinned system prompt.
+            system_prompt_pin = None
+            if is_agent_backend:
+                messages, system_prompt_pin = apply_session_pin(
+                    ctx, llm_bawt.client, messages, turn_id=turn_log_id,
+                )
+
             # TASK-215: the "AVATAR ANIMATION: You MUST call trigger_animation"
             # prompt-injection hack has been removed. Animation selection
             # now runs as a post-hoc embedding classifier (see hook after
@@ -335,6 +343,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     extra_kwargs["thread_binding"] = ctx.thread_binding
                 if is_agent_backend and ctx.bridge_reset_action:
                     extra_kwargs["bridge_reset_action"] = ctx.bridge_reset_action
+                if system_prompt_pin is not None:
+                    extra_kwargs["system_prompt_pin"] = system_prompt_pin
                 if is_agent_backend and task_turn_capability:
                     # TASK-701: opaque current-turn authority. The client/backend
                     # forwards this request-locally; it is never model-visible.
@@ -363,6 +373,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             # Fires once, on the SDK/bridge-CONFIRMED first output of this
             # turn, to reap any other still-open turns for this bot.
             _confirmed_start_reaped = [False]
+            _pin_confirmer = SessionPinConfirmer(ctx, system_prompt_pin, turn_id=turn_log_id)
 
             def _intercept_tool_events(inner):
                 _saw_tool = False  # Track tool→content transitions
@@ -464,6 +475,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     # before anything is produced. On this confirmed signal,
                     # reap any OTHER still-open turns for this bot as
                     # timeouts and clear their UI indicators. Runs once.
+                    _pin_confirmer.observe(item)  # TASK-1318: model output confirms a pin move
                     if not _confirmed_start_reaped[0]:
                         _confirmed_start_reaped[0] = True
                         try:
