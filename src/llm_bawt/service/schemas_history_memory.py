@@ -120,6 +120,9 @@ class HistorySearchAllMessage(BaseModel):
     bot_id: str
     rank: float
     author: MessageAuthor
+    # EffectiveAuthorRule class (TASK-1301): who the row authoritatively is,
+    # independent of display hydration. None = unknown (legacy/partial/foreign).
+    author_class: Literal["bot", "user", "delivery"] | None = None
 
 class HistorySearchAllResponse(BaseModel):
     """Response for cross-bot history search.

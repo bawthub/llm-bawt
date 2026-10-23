@@ -473,13 +473,38 @@ def search_history_get(
         raise  # unreachable, keeps type-checkers happy
 
 
+def _parse_author_filter(author: str | None):
+    """Split the ``type:id`` wire token once and validate it (TASK-1301 M3).
+
+    A well-formed bot id is a filter, never authorization: membership is
+    decided by the live policy inside the search.
+    """
+    from llm_bawt.message_authorship import normalize_author
+
+    if author is None:
+        return None
+    entity_type, sep, entity_id = author.partition(":")
+    if not sep:
+        raise HTTPException(status_code=400, detail="author must be user:<id> or bot:<id>")
+    try:
+        return normalize_author(entity_type, entity_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
 @router.post(
     "/v1/history/search_all",
     response_model=HistorySearchAllResponse,
     tags=["History"],
 )
 async def search_all_history(
-    query: str = Query(..., description="Search query (FTS keywords or substring/literal)"),
+    query: str = Query(
+        "",
+        description=(
+            "Search query (FTS keywords or substring/literal). May be empty "
+            "only when ``author`` or ``in_bot`` is set (newest first)."
+        ),
+    ),
     limit: int = Query(50, description="Maximum total results across all bots"),
     role_filter: str | None = Query(
         None,
@@ -520,30 +545,41 @@ async def search_all_history(
             "Upper-bound (inclusive). Same formats as ``since``. Omit for now."
         ),
     ),
+    author: str | None = Query(
+        None,
+        description=(
+            "Spotlight ``from:`` filter, ``user:<id>`` or ``bot:<id>``. "
+            "Matches the EffectiveAuthorRule class: a user's own messages, or "
+            "a public bot's replies and deliveries. Unknown and protected "
+            "bots return an ordinary empty result."
+        ),
+    ),
+    in_bot: str | None = Query(
+        None,
+        description="Spotlight ``in:`` filter: one public bot's history.",
+    ),
 ):
     """Cross-bot message search.
 
-    Two modes share this route:
+    Both modes run through
+    :meth:`llm_bawt.mcp_server.storage.MemoryStorage.search_messages_operator`
+    over the live public partitions (TASK-1301):
 
-    * ``mode=fts`` (default) — Postgres FTS via
-      :meth:`llm_bawt.mcp_server.storage.MemoryStorage.search_all_messages`.
-      One query over the partitioned ``messages`` parent, ranked by
-      ``ts_rank``. Good for concept-level queries; bad for IDs because
-      ``build_fts_query`` strips digits and hyphens before building the
-      tsquery (so ``TASK-241`` becomes ``task``, matching every "task"
-      message ever).
-    * ``mode=trgm`` — pg_trgm substring/fuzzy match via
-      :meth:`MemoryStorage.search_all_messages_trgm`. Same parent-table
-      shape but with ``content ILIKE`` filter + ``similarity()`` rank,
-      backed by the per-partition ``gin_trgm_ops`` GIN indexes templated
-      from the parent. Matches the literal query string verbatim — what
-      the user expects for ``TASK-241`` and friends.
+    * ``mode=fts`` (default) — Postgres FTS ranked by ``ts_rank``. Good for
+      concept-level queries; bad for IDs because ``build_fts_query`` strips
+      digits and hyphens (``TASK-241`` becomes ``task``).
+    * ``mode=trgm`` — pg_trgm substring match (``content ILIKE`` +
+      ``similarity()`` rank). Matches the literal query string verbatim.
+
+    ``author`` / ``in_bot`` drive Spotlight's ``from:`` / ``in:`` filters and
+    apply before LIMIT and ``total_count``. Each row carries ``author_class``.
 
     Returns ranked rows with bot attribution so a global search UI can
     render "who said this and when" without N+1 fans-out. First
     HTTP-exposed endpoint of the Spotlight Search project's Messages
     provider.
     """
+    from llm_bawt.bot_access import BotAccessError
     from llm_bawt.mcp_server.server import _parse_timestamp
     from llm_bawt.mcp_server.storage import get_storage
 
@@ -552,30 +588,34 @@ async def search_all_history(
         until_ts = _parse_timestamp(until)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    author_ref = _parse_author_filter(author)
+    in_bot = (in_bot or "").strip().lower() or None
+    if not query.strip() and author_ref is None and in_bot is None:
+        # Deliberate (TASK-1301): an empty query used to return [] silently.
+        raise HTTPException(status_code=400, detail="query is required unless author or in_bot is set")
 
     try:
-        storage = get_storage()
-        if mode == "trgm":
-            rows = await storage.search_all_messages_trgm(
-                query=query,
-                n_results=limit,
-                role_filter=role_filter,
-                sort_by=sort_by,
-                since=since_ts,
-                until=until_ts,
-            )
-        else:
-            # Default / legacy / explicit "fts" all route to the original
-            # ts_rank-backed search so existing callers (and the MCP
-            # surface, which is FTS-only) keep working unchanged.
-            rows = await storage.search_all_messages(
-                query=query,
-                n_results=limit,
-                role_filter=role_filter,
-                sort_by=sort_by,
-                since=since_ts,
-                until=until_ts,
-            )
+        # Operator membership is a fresh positive policy read (TASK-1301 M1):
+        # public partitions only, fail closed, every row author-classified.
+        rows = await get_storage().search_messages_operator(
+            query,
+            mode=mode,
+            author=author_ref,
+            in_bot=in_bot,
+            n_results=limit,
+            role_filter=role_filter,
+            sort_by=sort_by,
+            since=since_ts,
+            until=until_ts,
+        )
+    except BotAccessError as exc:
+        log.error(f"Cross-bot history search unavailable: {exc.code}")
+        raise HTTPException(status_code=503, detail=exc.code) from None
+    except Exception as e:
+        log.error(f"Failed cross-bot history search: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    try:
         messages = [
             HistorySearchAllMessage(
                 id=str(row.get("id", "")),
@@ -585,6 +625,7 @@ async def search_all_history(
                 bot_id=str(row.get("source", "")),
                 rank=float(row.get("rank", 0.0) or 0.0),
                 author=_message_author_payload(row),
+                author_class=row.get("author_class"),
             )
             for row in rows
         ]

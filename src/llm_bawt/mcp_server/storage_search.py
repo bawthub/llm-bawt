@@ -12,9 +12,38 @@ from typing import Any
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_access.context import current_bot_access
 from llm_bawt.bot_access.provenance import MemoryProvenance, ScopedMessageAuthority
+from llm_bawt.message_authorship import AuthorReference
 
 # Preserve the original logging namespace for existing filters and diagnostics.
 logger = logging.getLogger("llm_bawt.mcp_server.storage")
+
+
+def _operator_author(row: dict[str, Any], source: str) -> AuthorReference:
+    """Map an operator row's authoritative ``author_class`` to its author.
+
+    ``bot``: the conversation's own bot (``source``, canonical slug); legacy
+    when the row carries no author pair. ``user`` / ``delivery``: the stored
+    id, which the rule already matched. Anything else is Unknown.
+    """
+    author_class = row.get("author_class")
+    stored_id = row.get("author_entity_id")
+    if author_class == "bot":
+        reference = AuthorReference.bot(source)
+        return reference if stored_id else AuthorReference("bot", reference.entity_id, "legacy")
+    if author_class == "user" and stored_id:
+        return AuthorReference.user(stored_id)
+    if author_class == "delivery" and stored_id:
+        return AuthorReference.bot(stored_id)
+    return AuthorReference.unknown()
+
+
+def _with_row_status(envelope: dict[str, Any], reference: AuthorReference) -> dict[str, Any]:
+    """Presentation is keyed by identity, so one bot's canonical and legacy
+    rows share an envelope; keep each row's own status. A missing entity
+    stays ``unknown``."""
+    if envelope.get("status") == "unknown":
+        return dict(envelope)
+    return {**envelope, "status": reference.status}
 
 
 class StorageSearchMixin:
@@ -188,58 +217,80 @@ class StorageSearchMixin:
             logger.error("search_all_messages failed: %s", e)
             return []
 
-    async def search_all_messages_trgm(
+    async def search_messages_operator(
         self,
         query: str,
+        *,
+        mode: str = "fts",
+        author: AuthorReference | None = None,
+        in_bot: str | None = None,
         n_results: int = 10,
         role_filter: str | None = None,
         sort_by: str = "relevance",
         since: float | None = None,
         until: float | None = None,
     ) -> list[dict[str, Any]]:
-        """Cross-bot substring/fuzzy search via ``pg_trgm``.
+        """Operator (Spotlight/REST) cross-bot search with ``from:``/``in:`` (TASK-1301).
 
-        Companion to :meth:`search_all_messages` (which uses Postgres FTS via
-        ``to_tsquery``). FTS is great for natural-language queries — it
-        stems, drops stop-words, and ranks by lexeme density — but it
-        actively breaks on identifiers: ``to_tsquery('english', 'TASK-241')``
-        tokenizes to ``task`` (the digit half is dropped by our tokenizer
-        and the english stemmer doesn't know what to do with ``241`` anyway),
-        so a search for ``TASK-241`` returns every message that ever said
-        the word "task." That's wrong for the case where the user is
-        looking up an ID.
+        Membership comes from a fresh positive policy read; a policy or
+        backend failure raises :class:`BotAccessError` instead of returning an
+        empty or unrestricted result. Rows carry ``author_class``.
 
-        This method goes the other way: treat ``content`` as a flat
-        character sequence, find substring matches with ``ILIKE``, and rank
-        by trigram similarity. Backed by a per-table
-        ``USING gin (content gin_trgm_ops)`` index so the leading-wildcard
-        ILIKE stays fast. No tokenizer, no stemming, no stop-words —
-        ``TASK-241`` matches the literal substring or it doesn't.
-
-        UI dispatches between the two via the ``mode`` param on the route:
-        ``mode=fts`` (default) keeps prior behaviour; ``mode=trgm`` calls
-        this method. The Spotlight modal exposes the choice as a toggle.
+        ``mode="fts"`` uses Postgres FTS (stems, drops stop-words; breaks on
+        identifiers: ``TASK-241`` tokenizes to ``task``). ``mode="trgm"``
+        treats content as a flat character sequence: ``ILIKE`` substring
+        match ranked by trigram similarity, backed by the per-partition
+        ``gin_trgm_ops`` indexes, so ``TASK-241`` matches literally or not.
         """
-        from llm_bawt.mcp_server.message_search import CrossBotMessageSearcher
-
-        searcher = CrossBotMessageSearcher(
-            self._require_engine(),
-            lambda rows, source: self.hydrate_message_authors(rows, bot_id=source),
+        from llm_bawt.bot_access import BotPolicyResolver
+        from llm_bawt.mcp_server.message_search import (
+            CrossBotMessageSearcher,
+            OperatorMessageScope,
         )
+
         try:
+            engine = self._require_engine()
+            access = await BotPolicyResolver(engine).resolve(None)
+            scope = OperatorMessageScope.from_access(access, author=author, in_bot=in_bot)
+            searcher = CrossBotMessageSearcher(engine, self._hydrate_operator_authors)
             return await asyncio.to_thread(
-                searcher.search_trgm,
+                searcher.search_operator,
+                "trgm" if mode == "trgm" else "fts",
                 query,
+                scope,
                 n_results=n_results,
                 role_filter=role_filter,
                 sort_by=sort_by,
                 since=since,
                 until=until,
-                excluded_bot_ids=self._global_search_excluded_bot_ids(),
             )
+        except BotAccessError:
+            raise
         except Exception as e:
-            logger.error("search_all_messages_trgm failed: %s", e)
-            return []
+            logger.error("search_messages_operator failed: %s", e)
+            raise BotAccessError("source_unavailable") from None
+
+    def _hydrate_operator_authors(
+        self, rows: list[dict[str, Any]], source: str
+    ) -> list[dict[str, Any]]:
+        """Display envelopes derived only from the SQL ``author_class``.
+
+        :class:`EffectiveAuthorRule` already decided who wrote each row, so
+        the identity comes from that decision, not from LegacyAuthorResolver:
+        legacy hydration would re-guess (a delivery record can reattribute a
+        blank assistant row) or raise on a partial pair and fail the whole
+        result set. Presentation only adds name, color and avatar.
+        """
+        from llm_bawt.entity_presentation import EntityPresentationResolver
+
+        references = [_operator_author(row, source) for row in rows]
+        presentation = EntityPresentationResolver(
+            self._require_engine()
+        ).resolve_many_safe(references)
+        return [
+            {**row, "author": _with_row_status(presentation[(ref.entity_type, ref.entity_id)], ref)}
+            for row, ref in zip(rows, references, strict=True)
+        ]
 
     async def search_all_memories(
         self,

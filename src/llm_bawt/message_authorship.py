@@ -69,25 +69,47 @@ def normalize_author(
 class EffectiveAuthorRule:
     """Retrieval authority, deliberately separate from legacy display hydration.
 
-    Callers bind the canonical partition bot, trusted session user, and CURRENT
-    public author set. SQL aliases are fixed so no model input is SQL syntax.
-    The surrounding scope compiler supplies the canonical session/user join.
+    One CASE template renders two fixed, trusted modes; neither accepts caller
+    SQL. Outputs are ``'bot'``, ``'user'``, ``'delivery'`` or NULL (unknown).
+
+    ``sql_case`` (scoped): callers bind the canonical partition bot, trusted
+    session user, and CURRENT public author set. The surrounding scope
+    compiler supplies the canonical session/user join.
+
+    ``operator_case()`` (TASK-1301, operator search): the bot branch compares
+    against fixed alias ``p.bot_id``, the canonical slug of the message's
+    partition from the positive policy map (``m.bot_id = p.partition``), so
+    session-less rows still classify. The human branch compares the explicit
+    user author to ``s.user_id`` from a LEFT session join bound to
+    ``s.id = m.session_id AND s.bot_id = p.bot_id``, with no trusted-user pin;
+    a missing or foreign session yields NULL rather than human authority.
+    The delivery branch keeps the bound ``:authority_authors`` set.
     """
 
-    sql_case = """
+    _CASE_TEMPLATE = """
         CASE
           WHEN m.role = 'assistant' AND (
             (COALESCE(m.author_entity_type, '') = ''
              AND COALESCE(m.author_entity_id, '') = '')
-            OR (m.author_entity_type = 'bot' AND m.author_entity_id = :authority_bot)
+            OR (m.author_entity_type = 'bot' AND m.author_entity_id = {bot})
           ) THEN 'bot'
           WHEN m.role = 'user' AND m.author_entity_type = 'user'
-            AND m.author_entity_id = s.user_id
-            AND m.author_entity_id = :authority_user THEN 'user'
+            AND m.author_entity_id = s.user_id{user_pin} THEN 'user'
           WHEN m.role = 'user' AND m.author_entity_type = 'bot'
             AND m.author_entity_id = ANY(CAST(:authority_authors AS text[])) THEN 'delivery'
         END
     """
+
+    sql_case = _CASE_TEMPLATE.format(
+        bot=":authority_bot",
+        user_pin="\n            AND m.author_entity_id = :authority_user",
+    )
+    _operator_case = _CASE_TEMPLATE.format(bot="p.bot_id", user_pin="")
+
+    @classmethod
+    def operator_case(cls) -> str:
+        """The operator-mode rendering of the same template (see class doc)."""
+        return cls._operator_case
 
 
 class LegacyAuthorResolver:
