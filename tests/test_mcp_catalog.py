@@ -176,6 +176,27 @@ def test_call_critical_warnings_stay_inline(name, words):
 
 
 @pytest.mark.anyio
+async def test_task_and_step_status_guidance_uses_canonical_values():
+    from llm_bawt.mcp_server.task_step_types import STEP_STATUSES, TASK_STATUSES
+    from llm_bawt.mcp_server.task_tools import list_tasks, update_task
+
+    assert TASK_STATUSES == (
+        "QUEUED", "PLANNING", "REFINED", "IN_PROGRESS", "REVIEW",
+        "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED",
+    )
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    for status in TASK_STATUSES:
+        assert status in tools["tasks_list"].description
+        assert status in list_tasks.__doc__
+        assert status in update_task.__doc__
+    assert "excludes DELETED" in tools["tasks_list"].description
+    for name in ("steps_add", "steps_update", "steps_set"):
+        for status in STEP_STATUSES:
+            assert status in tools[name].description
+        assert "not IN_PROGRESS" in tools[name].description
+
+
+@pytest.mark.anyio
 async def test_unknown_tools_remain_discoverable_and_callables_unchanged():
     server = CatalogFastMCP("test-catalog")
 

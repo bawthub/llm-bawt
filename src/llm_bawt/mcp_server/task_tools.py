@@ -12,7 +12,7 @@ import httpx
 
 from .server import mcp
 from .task_association import associate_current_task
-from .task_step_types import TaskStepInput, validate_step_inputs
+from .task_step_types import TASK_STATUSES, TaskStepInput, validate_step_inputs
 from .task_api import (
     API_PREFIX as _API_PREFIX,
     api_delete as _api_delete,
@@ -37,7 +37,14 @@ async def list_projects() -> list[dict] | dict:
         return _http_error(error)
 
 
+def _task_status_docs(function):
+    """Render the shared enum before FastMCP captures the function docstring."""
+    function.__doc__ = (function.__doc__ or "").replace("{task_statuses}", ", ".join(TASK_STATUSES))
+    return function
+
+
 @mcp.tool(name="tasks_list")
+@_task_status_docs
 async def list_tasks(
     status: str | None = None,
     project_id: str | None = None,
@@ -50,8 +57,8 @@ async def list_tasks(
     Returns tasks sorted by most recently updated.
 
     Args:
-        status: Filter by status. One of: QUEUED, PLANNING, REFINED,
-                IN_PROGRESS, REVIEW, COMPLETED, FAILED, CANCELLED.
+        status: One task status: {task_statuses}. No comma lists.
+                Omitted or empty filter excludes DELETED.
         project_id: Filter to tasks in a specific project (cuid).
                     Use "none" for unassigned tasks.
         q: Search query - matches title, description, and shortId.
@@ -237,6 +244,7 @@ async def _task_is_unowned(task_id: str) -> bool:
 
 
 @mcp.tool(name="tasks_update")
+@_task_status_docs
 async def update_task(
     task_id: str,
     status: str | None = None,
@@ -276,8 +284,7 @@ async def update_task(
 
     Args:
         task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
-        status: New status (QUEUED, PLANNING, REFINED, IN_PROGRESS,
-                REVIEW, COMPLETED, FAILED, BUG, CANCELLED). You may set BUG
+        status: New task status: {task_statuses}. You may set BUG,
                 but cannot transition a task out of BUG (human-only).
         response: Summary text - your final answer / work output.
         model_id: Model identifier (e.g. "claude-opus-4-6").

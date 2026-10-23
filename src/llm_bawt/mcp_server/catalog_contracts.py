@@ -5,6 +5,11 @@ Each description must retain side effects and call-critical constraints. Do not
 copy argument types/defaults or tutorials here. See docs/MCP_TOOL_DESIGN.md.
 """
 
+from .task_step_types import STEP_STATUSES, TASK_STATUSES
+
+_TASK_STATUS_GUIDE = "|".join(TASK_STATUSES)
+_STEP_STATUS_GUIDE = "|".join(STEP_STATUSES) + "; not IN_PROGRESS"
+
 TOOL_SUMMARIES: dict[str, str] = {
     "memory_store": "Store a fact in bot_id's memory; importance is 0–1. Pass your own bot slug.",
     "memory_search": "Semantic search within bot_id's memories; relevance is 0–1. Pass your own bot slug.",
@@ -51,25 +56,25 @@ TOOL_SUMMARIES: dict[str, str] = {
     "sessions_get_active": "Read required bot_id/user_id's active session; never creates.",
     "sessions_get_or_create_active": "Get/create active session: required bot_id/user_id.",
     "sessions_rotate": "Rotate required bot_id's active thread: archive/create successor, not provider-context reset.",
-    "tasks_list": "List compact tasks by status/project/literal q; project_id='none' means unassigned. Use tasks_get for full details.",
-    "tasks_search_semantic": "Find related tasks by meaning; mode reports semantic or keyword fallback. Use tasks_list for exact filters.",
-    "tasks_get": "Read full task, steps, dependencies, and response by cuid or TASK-N.",
-    "tasks_get_context": "Read task/project briefing by cuid or TASK-N before work.",
-    "tasks_reviews_list": "Read paginated, task-owned review history by cuid or TASK-N; cursor continues newest-first pages. Separate from response.",
-    "tasks_reviews_add": "Append a review, not a task response/status change. Pass your own bot_id for author attribution and a stable idempotency_key on retries.",
+    "tasks_list": f"List compact tasks; literal q, project_id='none' unassigned. One status: {_TASK_STATUS_GUIDE}. Omitted excludes DELETED; tasks_get for detail.",
+    "tasks_search_semantic": "Semantic task search; mode reports keyword fallback. Exact filters: tasks_list.",
+    "tasks_get": "Read task, steps, dependencies, response by cuid/TASK-N.",
+    "tasks_get_context": "Read task/project briefing by cuid/TASK-N before work.",
+    "tasks_reviews_list": "Task reviews, newest first; cursor paginates. Not response.",
+    "tasks_reviews_add": "Append review, not response/status. Author: own bot_id; retry: stable idempotency_key.",
     "tasks_associate_current": "Link trusted turn when actually working a task, never from a mention. Supply cuid or TASK-N; unsupported context fails closed.",
-    "tasks_create": "Create a task with optional steps. Pass your bot_id; associate_current_turn=true links work started now using trusted server context.",
-    "tasks_update": "Patch provided task fields. Submit your own work to REVIEW; if Nick directly requests task review and closure, close verified, complete REVIEW tasks as COMPLETED. Agents cannot leave BUG. Pass own bot_id (owner if none); associate_current_turn links actual work.",
+    "tasks_create": "Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn.",
+    "tasks_update": "Patch; own work → REVIEW. Only Nick-requested review/closure permits verified complete REVIEW → COMPLETED. Agents cannot leave BUG. Own bot_id fills missing owner; associate_current_turn links actual work.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
-    "tasks_delete": "Permanently delete task and steps. Prefer tasks_update status=CANCELLED to retain history.",
-    "tasks_add_dependency": "Make task_id wait for depends_on_id (cuid or TASK-N). Self-dependencies and cycles are rejected.",
-    "tasks_remove_dependency": "Remove depends_on_id as a prerequisite of task_id; cuid or TASK-N accepted.",
-    "tasks_promote": "Create a project from a task and move that task into it.",
-    "tasks_regenerate": "Use server-side inference to replace task title and steps. Prefer writing your plan with tasks_update and steps_set.",
-    "steps_update": "Update one step's status/output, or batch updates (each needs step_id); nonempty updates overrides scalar fields. Full batch fields: skill reference.",
+    "tasks_delete": "Permanently delete task/steps; prefer tasks_update CANCELLED to retain history.",
+    "tasks_add_dependency": "Add task_id prerequisite depends_on_id; cuid/TASK-N. Rejects self/cycles.",
+    "tasks_remove_dependency": "Remove prerequisite depends_on_id from task_id; cuid/TASK-N.",
+    "tasks_promote": "Promote task into new project.",
+    "tasks_regenerate": "Inference replaces task title/steps; prefer tasks_update/steps_set.",
+    "steps_update": f"Patch step or batch (step_id required); nonempty updates overrides scalars. Status: {_STEP_STATUS_GUIDE}.",
     "steps_delete": "Permanently delete step_id or nonempty step_ids (batch wins). Prefer SKIPPED via steps_update to preserve the audit trail.",
-    "steps_add": "Append task steps; each needs title, defaults to type=PLAN/status=PENDING. Does not replace existing steps.",
-    "steps_set": "Atomically replace the ENTIRE checklist, deleting existing steps. Each needs title; [] clears it. Use steps_add to append.",
+    "steps_add": f"Append titled steps (default PLAN/PENDING). Status: {_STEP_STATUS_GUIDE}.",
+    "steps_set": f"Atomically replace ENTIRE checklist, deleting old steps; title required, [] clears. Status: {_STEP_STATUS_GUIDE}.",
     "projects_list": "List compact projects with task counts; projects_get returns full context and tasks.",
     "projects_get": "Read project context and tasks by project ID (cuid).",
     "projects_get_context": "Read only the project's name and instruction briefing, without its task list.",

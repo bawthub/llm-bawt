@@ -29,6 +29,12 @@ STEP_TYPES: tuple[StepType, ...] = (
 )
 _STEP_TYPE_SET = frozenset(STEP_TYPES)
 
+# Mirrors Prisma TaskStatus; task tools accept str so HTTP can normalize case.
+TASK_STATUSES = (
+    "QUEUED", "PLANNING", "REFINED", "IN_PROGRESS", "REVIEW",
+    "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED",
+)
+
 # Mirrors BawtHub's Prisma StepStatus enum (TASK-1313). Anything else used to
 # reach BawtHub and come back as an opaque HTTP 500.
 StepStatus = Literal["PENDING", "RUNNING", "COMPLETED", "FAILED", "SKIPPED"]
