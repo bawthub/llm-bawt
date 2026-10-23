@@ -107,6 +107,37 @@ def lock_wait_seconds() -> float:
     return seconds
 
 
+UNIT_TIME_BUDGET_ENV = "LLM_BAWT_UNIT_TIME_BUDGET_SECONDS"
+UNIT_TIME_BUDGET_DEFAULT_S = 1.0
+
+
+def unit_time_budget_seconds() -> float:
+    """Wall-clock bound per unit case (setup + call + teardown).
+
+    The 1s default is the standard every commit meets on echo through
+    ``make test-snapshot`` before it is pushed. Hosted CI reruns the same suite
+    on a shared virtual machine with fewer, slower cores, cold caches and a
+    virtual disk, where a case that takes 0.8s here by fixed waits exceeds 1s
+    with no regression. The workflow widens the bound there so CI still fails
+    on hangs and new sleeps without failing on runner noise (TASK-1312).
+    """
+    configured = os.environ.get(UNIT_TIME_BUDGET_ENV, "").strip()
+    if not configured:
+        return UNIT_TIME_BUDGET_DEFAULT_S
+    try:
+        seconds = float(configured)
+    except ValueError:
+        seconds = 0.0
+    if not 0 < seconds <= 60:
+        raise RuntimeError(f"{UNIT_TIME_BUDGET_ENV} must be >0 and at most 60 seconds, got {configured!r}")
+    return seconds
+
+
+def unit_gate() -> tuple[str, ...]:
+    """Arguments that make the unit suite a gate: per-case budget, zero skips, parallel."""
+    return (f"--unit-time-budget={unit_time_budget_seconds()}", "--require-no-skips", *parallel("load"))
+
+
 @contextmanager
 def runner_lock(wait_seconds: float | None = None, poll_seconds: float = 1.0):
     # All heavy suites on one runner serialize, even across separate worktrees.
@@ -167,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         with runner_lock(wait):
             if args.suite == "offline":
                 verify_offline_partition()
-                run(UNIT, "--unit-time-budget=1", "--require-no-skips", *parallel("load"))
+                run(UNIT, *unit_gate())
                 run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
                 run(LOCAL, "--require-no-skips", *parallel("load"))
             elif args.suite == "integration":
@@ -175,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
                 run(LOCAL, "--require-no-skips", *parallel("load"))
             elif args.suite == "unit":
-                run(UNIT, "--unit-time-budget=1", "--require-no-skips", *parallel("load"))
+                run(UNIT, *unit_gate())
             elif args.suite == "pg":
                 verify_offline_partition()
                 run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import event, text
-from sqlmodel import Session, create_engine
+from sqlmodel import Session
 
 from llm_bawt.inter_bot_delivery import DeliveryRecord, InterBotDeliveryStore
 from llm_bawt.inter_bot_preclaim import load_claim_head
@@ -25,6 +25,7 @@ from llm_bawt.service.prompt_delivery_state import receipt
 from llm_bawt.service.prompt_schedule_models import PromptOccurrence, PromptSchedule
 from llm_bawt.service.prompt_timing import PromptTiming
 from llm_bawt.service.scheduler import JobRun, create_scheduler_tables
+from tests.sqlite_support import fast_sqlite_engine
 
 NOW = datetime.now(timezone.utc)
 BOT = "disposable-schedule-bot"
@@ -102,7 +103,7 @@ def rig(tmp_path, monkeypatch):
         for i, name in [(1, "first"), (2, "second")]
     ])
     config = SimpleNamespace(ensure_model_catalog=lambda: catalog)
-    engine = create_engine("sqlite:///" + str(tmp_path / "delivery.db"))
+    engine = fast_sqlite_engine(tmp_path / "delivery.db")
     create_scheduler_tables(engine)
     with engine.begin() as conn:
         conn.execute(text("""CREATE TABLE sessions (id TEXT PRIMARY KEY, bot_id TEXT, user_id TEXT,

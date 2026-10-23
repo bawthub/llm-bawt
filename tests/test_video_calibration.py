@@ -4,13 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
 
 from llm_bawt.media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
 from llm_bawt.media.gpu_profile import CALIBRATION_PROFILE, video_profile
 from local_model_bridge import video_server
 from local_model_bridge.video_server import VideoJobs, VideoRequest
 from local_model_bridge.video_memory import VideoMemoryMeasurement
+from tests.sqlite_support import fast_sqlite_engine
 
 MEASUREMENT = {"gpu_uuid": "GPU-test", "total_mib": 15500, "device_total_mib": 16000, "baseline_used_mib": 1000,
                "sampled_peak_used_mib": 11000, "peak_reserved_mib": 9500,
@@ -19,7 +19,7 @@ MEASUREMENT = {"gpu_uuid": "GPU-test", "total_mib": 15500, "device_total_mib": 1
 
 @pytest.fixture
 def reserved(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/calibration.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "calibration.db", check_same_thread=False)
     ledger = GpuHandoffStore(engine)
     token, offer = ledger.offer(user="nick", target="video_calibration", actions=("park_voice",), expected_generation=0,
         plan={"calibration_profile": CALIBRATION_PROFILE, "observed": {"gpu": {"uuid": "GPU-test", "total_mib": 16000}}})

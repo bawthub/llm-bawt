@@ -7,13 +7,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 
 from llm_bawt.media.gpu_handoff import (
     CALIBRATION_PROFILE, START_OPERATIONS, STOP_OPERATIONS, GpuHandoff, HandoffAdapter,
 )
 from llm_bawt.media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
 from llm_bawt.service.routes import media_handoff
+from tests.sqlite_support import fast_sqlite_engine
 
 
 class FakeAdapter(HandoffAdapter):
@@ -95,7 +95,7 @@ class FakeAdapter(HandoffAdapter):
 
 @pytest.fixture
 def setup(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/handoff.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "handoff.db", check_same_thread=False)
     store, adapter = GpuHandoffStore(engine), FakeAdapter()
     yield store, adapter, GpuHandoff(store, adapter, poll_interval=0, job_timeout=0.1)
     engine.dispose()

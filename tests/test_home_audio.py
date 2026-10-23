@@ -7,11 +7,12 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings, wav_duration
 from llm_bawt.integrations.home_audio_store import HomeAudioStore
 from llm_bawt.integrations.home_audio_worker import HomeAudioWorker
+from tests.sqlite_support import fast_sqlite_engine
 
 
 @pytest.fixture
@@ -21,7 +22,7 @@ def anyio_backend():
 
 @pytest.fixture
 def store(tmp_path):
-    return HomeAudioStore(create_engine(f"sqlite:///{tmp_path / 'audio.db'}"))
+    return HomeAudioStore(fast_sqlite_engine(tmp_path / 'audio.db'))
 
 
 def payload(text="hello", bot_id="loopy"):

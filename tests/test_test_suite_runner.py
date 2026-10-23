@@ -126,3 +126,29 @@ def test_a_bad_lock_wait_fails_closed(monkeypatch, value):
     monkeypatch.setenv(suite.LOCK_WAIT_ENV, value)
     with pytest.raises(RuntimeError, match="must be 0-86400"):
         suite.lock_wait_seconds()
+
+
+@pytest.mark.parametrize(("value", "expected"), [("", 1.0), ("3", 3.0), ("2.5", 2.5)])
+def test_unit_time_budget_comes_from_the_environment(monkeypatch, value, expected):
+    monkeypatch.setenv(suite.UNIT_TIME_BUDGET_ENV, value)
+    assert suite.unit_time_budget_seconds() == expected
+
+
+@pytest.mark.parametrize("value", ["fast", "0", "-1", "61", "nan", "inf"])
+def test_a_bad_unit_time_budget_fails_closed(monkeypatch, value):
+    monkeypatch.setenv(suite.UNIT_TIME_BUDGET_ENV, value)
+    with pytest.raises(RuntimeError, match="at most 60"):
+        suite.unit_time_budget_seconds()
+
+
+@pytest.mark.parametrize(("configured", "flag"), [(None, "--unit-time-budget=1.0"), ("3", "--unit-time-budget=3.0")])
+def test_the_unit_gate_passes_the_configured_budget_to_pytest(monkeypatch, configured, flag):
+    seen = []
+    if configured is None:
+        monkeypatch.delenv(suite.UNIT_TIME_BUDGET_ENV, raising=False)
+    else:
+        monkeypatch.setenv(suite.UNIT_TIME_BUDGET_ENV, configured)
+    monkeypatch.setattr(suite, "runner_lock", lambda wait: nullcontext())
+    monkeypatch.setattr(suite, "run", lambda marker, *extra: seen.append((marker, extra)))
+    assert suite.main(["unit"]) == 0
+    assert seen == [(suite.UNIT, (flag, "--require-no-skips", *suite.parallel("load")))]

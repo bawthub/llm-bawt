@@ -10,14 +10,14 @@ import threading
 import time
 
 import pytest
-from sqlalchemy import event
-from sqlmodel import Session, create_engine
+from sqlmodel import Session
 
 from llm_bawt.ops.executor import DispatchResult, Executor, ReconcileResult
 from llm_bawt.ops.models import OpsJob
 from llm_bawt.ops.service import OpsDispatchError, OpsService
 from llm_bawt.ops.store import OpsStore
 from llm_bawt.ops.validation import ArgValidationError, validate_args, validate_catalog
+from tests.sqlite_support import fast_sqlite_engine
 
 
 class FakeExecutor(Executor):
@@ -37,13 +37,8 @@ class FakeExecutor(Executor):
 
 @pytest.fixture
 def system(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'ops.sqlite'}", connect_args={"check_same_thread": False, "timeout": 10})
-
-    @event.listens_for(engine, "connect")
-    def fast_fixture_writes(connection, _record):
-        # The test exercises SQL-level locking/revisions, not disk fsync.
-        connection.execute("PRAGMA synchronous = OFF")
-
+    # The test exercises SQL-level locking/revisions, not disk fsync.
+    engine = fast_sqlite_engine(tmp_path / "ops.sqlite", check_same_thread=False, timeout=10)
     store = OpsStore(None, engine=engine)
     executor = FakeExecutor()
     service = OpsService(store, executor=executor)
@@ -258,7 +253,7 @@ def test_mcp_dispatch_does_not_block_loop_and_uses_fresh_keys(system, monkeypatc
 def test_migration_adds_nullable_columns_and_baselines_only_existing_revision(tmp_path):
     from sqlalchemy import inspect
     from llm_bawt.ops.models import OpsOperation
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite'}")
+    engine = fast_sqlite_engine(tmp_path / "legacy.sqlite")
     with engine.begin() as conn:
         OpsOperation.__table__.create(conn)
         # Simulate exactly the old job schema using a copied table definition.

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from rich.console import Console
 from rich.logging import RichHandler
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel
 
 from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
 from agent_bridge.events import AgentEvent, AgentEventKind
@@ -25,11 +25,12 @@ from llm_bawt.service.turn_execution import TurnExecution, turn_executions
 from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
 from llm_bawt.service.tool_call_store import ToolCallRecord
 from llm_bawt.service.turn_termination import TurnAbortCoordinator
+from tests.sqlite_support import fast_sqlite_engine
 
 
 @pytest.fixture
 def store(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/turns.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "turns.db", check_same_thread=False)
     SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__, ToolCallRecord.__table__])
     store = TurnLogStore.__new__(TurnLogStore)
     store.engine = engine

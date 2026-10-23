@@ -11,6 +11,9 @@ from llm_bawt.service.tool_call_store import (
     ToolCallResultPayloadRecord,
     ToolCallStore,
 )
+# Imported at module level so the service import graph loads during collection,
+# not inside the first test's 1s budget on a cold CI runner (TASK-1312).
+from llm_bawt.service.turn_logs import TurnLog
 
 
 def test_mcp_resolution_replaces_placeholder_on_original_tool_row():
@@ -19,7 +22,6 @@ def test_mcp_resolution_replaces_placeholder_on_original_tool_row():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    from llm_bawt.service.turn_logs import TurnLog
     SQLModel.metadata.create_all(
         bind=engine,
         tables=[TurnLog.__table__, ToolCallRecord.__table__, ToolCallResultPayloadRecord.__table__],

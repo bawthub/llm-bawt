@@ -5,20 +5,20 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 
 from llm_bawt.media.gpu_handoff import GpuHandoff
 from llm_bawt.media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
 from llm_bawt.media.gpu_profile import video_profile
 from llm_bawt.service.routes import media, media_handoff
 from local_model_bridge.video_server import VideoRequest
+from tests.sqlite_support import fast_sqlite_engine
 from tests.test_gpu_handoff_executor import FakeAdapter, confirm, offer
 from tests.test_gpu_handoff_independent_review import measurement
 
 
 @pytest.fixture
 def restored(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/claims.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "claims.db", check_same_thread=False)
     store, adapter = GpuHandoffStore(engine), FakeAdapter()
     controller = GpuHandoff(store, adapter, poll_interval=0, job_timeout=0.1)
 

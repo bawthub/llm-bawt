@@ -8,7 +8,7 @@ Do not use `pytest -m ""`: that bypasses the external-target boundary.
 
 | Command | Selection | Requirements |
 | --- | --- | --- |
-| `make test` | Hermetic unit tests; **setup + call + teardown <1 s** per case | Python only |
+| `make test` | Hermetic unit tests; **setup + call + teardown <1 s** per case (`LLM_BAWT_UNIT_TIME_BUDGET_SECONDS`, see below) | Python only |
 | `make test-pg-acceptance` | All manifest-listed private SQL tests, zero skips | Docker with pinned pgvector image |
 | `make test-offline-integration` | Real local HTTP/thread lifecycle and real SDK wire integration, zero skips | Loopback/in-memory transport |
 | `make test-sdk-probe` | Optional installed SDK subprocess against fake localhost upstream, zero skips | Installed SDK CLI; never operational bot/provider |
@@ -19,6 +19,21 @@ Do not use `pytest -m ""`: that bypasses the external-target boundary.
 | `make test-target NODES=tests/test_file.py::test_name` | Explicit offline target, no skips | Relevant private fixtures |
 | `make test-snapshot PATHS="…" AUTHOR=<bot>` / `PATCHES="…"` | `test-all` (or `test-target` with `NODES`) on exactly BASE + patches in a throwaway worktree | Test host only; see below |
 | `make test-service` / `make test-paid` | **Refuse** until a disposable service/DB and credential scope are provisioned and verified | Never run against live :8642 |
+
+## Unit time budget (TASK-1312)
+
+Every unit case must finish setup + call + teardown within the budget, 1 s by
+default, or the run fails. That default is the standard every commit meets on
+echo through `make test-snapshot` before it is pushed. GitHub's hosted runner
+has fewer, slower cores, cold caches and a virtual disk, so cases that take
+0.8 s here by fixed waits exceed 1 s there with no regression;
+`.github/workflows/tests.yml` sets `LLM_BAWT_UNIT_TIME_BUDGET_SECONDS=3` so CI
+still fails on hangs and new sleeps without failing on runner noise. The value
+must be a number in (0, 60]; anything else fails closed. Keep echo at the
+default. Fixtures that need a file-backed SQLite engine use
+`tests/sqlite_support.py::fast_sqlite_engine`, which turns off per-commit fsync
+(`PRAGMA synchronous = OFF`); that is the dominant cost of such fixtures on a
+virtual disk and no test relies on durability across a power loss.
 
 ## Exact-bytes gate: `make test-snapshot` (TASK-1137)
 

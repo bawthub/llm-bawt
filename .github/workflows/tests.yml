@@ -16,4 +16,11 @@ jobs:
       - run: docker pull pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
       # Same serialized, fail-closed entrypoint as local development. No live
       # service, operational credentials, remote DB, or paid LLM invocation.
+      # The 1s per-case unit budget is enforced on echo for every commit
+      # (make test-snapshot) before it is pushed. This shared runner has fewer,
+      # slower cores, cold caches and a virtual disk, so the same bound is
+      # widened here: it still fails on hangs and new sleeps, not on runner
+      # noise (TASK-1312).
       - run: make test-all
+        env:
+          LLM_BAWT_UNIT_TIME_BUDGET_SECONDS: "3"

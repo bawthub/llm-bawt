@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel
 
 from agent_bridge.subscriber import RedisSubscriber
 from llm_bawt.agent_backends import agent_bridge
@@ -28,6 +28,7 @@ from llm_bawt.service.turn_execution import (
 )
 from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
 from llm_bawt.service.tool_call_store import ToolCallRecord
+from tests.sqlite_support import fast_sqlite_engine
 
 
 def _until(predicate, timeout=1.0):
@@ -293,7 +294,7 @@ def test_detach_agents_touches_every_registered_agent_turn_launched_or_not():
 
 @pytest.fixture
 def turn_store(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/turns.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "turns.db", check_same_thread=False)
     SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__, ToolCallRecord.__table__])
     store = TurnLogStore.__new__(TurnLogStore)
     store.engine = engine

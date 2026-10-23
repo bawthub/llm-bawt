@@ -16,8 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event
-from sqlmodel import create_engine
 
 from agent_bridge.mcp_call_context import canonical_invocation_hash
 from llm_bawt.approval_policies import REQ_APPROVED, ToolApprovalPolicyStore
@@ -34,6 +32,7 @@ from llm_bawt.ops.store import OpsStore
 from llm_bawt.service.health_checks import (
     DEGRADED, DOWN, OK, check_mcp_tool_registry, check_ops_admission,
 )
+from tests.sqlite_support import fast_sqlite_engine
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -58,13 +57,7 @@ class FakeExecutor(Executor):
 
 @pytest.fixture
 def system(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'ops.sqlite'}",
-                           connect_args={"check_same_thread": False, "timeout": 10})
-
-    @event.listens_for(engine, "connect")
-    def fast_fixture_writes(connection, _record):
-        connection.execute("PRAGMA synchronous = OFF")
-
+    engine = fast_sqlite_engine(tmp_path / "ops.sqlite", check_same_thread=False, timeout=10)
     store = OpsStore(None, engine=engine)
     executor = FakeExecutor()
     service = OpsService(store, executor=executor)

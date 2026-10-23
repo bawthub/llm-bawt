@@ -3,14 +3,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlmodel import create_engine
 
 from llm_bawt.ops.release_store import ReleaseStore
 from llm_bawt.service.routes import ops as routes
+from tests.sqlite_support import fast_sqlite_engine
 
 
 def test_release_list_and_detail_are_paginated_and_include_events(monkeypatch, tmp_path):
-    store = ReleaseStore(None, engine=create_engine(f"sqlite:///{tmp_path / 'releases.sqlite'}"))
+    store = ReleaseStore(None, engine=fast_sqlite_engine(tmp_path / 'releases.sqlite'))
     row = store.create(parent_job_id="a" * 32, release_task="TASK-1030", bump="patch",
                        github_repository="bawthub/bawthub",
                        workflow_path=".github/workflows/release-frontend.yml",

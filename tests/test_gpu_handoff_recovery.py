@@ -2,16 +2,16 @@
 import asyncio
 
 import pytest
-from sqlalchemy import create_engine
 
 from llm_bawt.media.gpu_handoff import GpuHandoff, START_OPERATIONS, STOP_OPERATIONS
 from llm_bawt.media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
+from tests.sqlite_support import fast_sqlite_engine
 from tests.test_gpu_handoff_executor import FakeAdapter, confirm, offer
 
 
 @pytest.fixture
 def setup(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path}/recovery.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "recovery.db", check_same_thread=False)
     store, adapter = GpuHandoffStore(engine), FakeAdapter()
     yield store, adapter, GpuHandoff(store, adapter, poll_interval=0, job_timeout=0.1)
     engine.dispose()

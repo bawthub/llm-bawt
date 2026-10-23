@@ -15,7 +15,6 @@ import asyncio
 import json
 import logging
 import math
-import shutil
 import time
 import types
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from agent_bridge.approval import (
     evaluate as evaluate_policies, grant_key,
 )
 from agent_bridge.events import AgentEventKind
+from claude_code_bridge import playwright_preflight as preflight
 from claude_code_bridge.playwright_preflight import playwright_syntax_error  # noqa: F401 (AST test namespace)
 
 
@@ -294,9 +294,34 @@ def test_pre_tool_use_hook_gates_dangerous_bash():
     assert _hook_decision(asyncio.run(run("rm -rf /home/x"))) == "deny"  # require→deny
 
 
-def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_execute():
-    if not shutil.which("node"):
-        return  # Other CI environments may delegate validation to Playwright.
+class _FakeNodeParser:
+    """Stand-in for the ``node`` parse subprocess: a verdict with no spawn.
+
+    This test proves the hook makes a parser denial model-visible and executes
+    nothing; whether V8 agrees about a given source is checked against a real
+    ``node`` in tests/test_playwright_preflight.py. A real spawn here timed out
+    on the hosted CI runner, failed open and returned ``{}`` (TASK-1312).
+    """
+
+    def __init__(self):
+        self.returncode = None
+
+    async def communicate(self, source=None):
+        if b"stray_text" in source:
+            self.returncode = 1
+            return b"", b"Unexpected identifier 'stray_text'\nplaywright-function:2"
+        self.returncode = 0
+        return b"", b""
+
+
+def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_execute(monkeypatch):
+    parsed = []
+
+    async def spawn(*_args, **_kwargs):
+        parsed.append(_FakeNodeParser())
+        return parsed[-1]
+
+    monkeypatch.setattr(preflight.asyncio, "create_subprocess_exec", spawn)
     b = _bridge()
     published = []
     b._publish_event = lambda *a, **k: published.append(k)  # type: ignore[assignment]
@@ -311,11 +336,15 @@ def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_exec
     reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
     assert "`function`" in reason and "not executed" in reason and "NEW tool call" in reason
     assert not any(e["kind"] == AgentEventKind.TOOL_EXECUTING for e in published)
+    assert parsed == []  # the known marker is denied before any parser runs
     syntax = asyncio.run(run(tool, {"function": "() => { return 1; } stray_text"}))
     assert _hook_decision(syntax) == "deny"
-    assert "Unexpected identifier 'stray_text'" in syntax["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "`function` at line 1: Unexpected identifier 'stray_text'" in (
+        syntax["hookSpecificOutput"]["permissionDecisionReason"])
+    assert len(parsed) == 1 and parsed[0].returncode == 1
     assert asyncio.run(run(tool, {"function": "() => { return 1; }"})) == {}
     assert any(e["kind"] == AgentEventKind.TOOL_EXECUTING for e in published)
+    assert len(parsed) == 2 and parsed[1].returncode == 0
     # Approval policy still gates a syntactically valid call; preflight must
     # never turn a denial into an allow.
     b._policy_bundle.policies.insert(0, ApprovalPolicy(
@@ -323,6 +352,7 @@ def test_pre_tool_use_playwright_syntax_error_is_model_visible_and_does_not_exec
         matcher_type=MatcherType.ALWAYS, action=PolicyAction.DENY,
     ))
     assert _hook_decision(asyncio.run(run(tool, {"function": "() => 1"}))) == "deny"
+    assert len(parsed) == 3
     surrogate = asyncio.run(run(tool, {"function": "() => 1\ud800"}))
     assert _hook_decision(surrogate) == "deny"
     assert "Playwright JavaScript" not in surrogate["hookSpecificOutput"]["permissionDecisionReason"]

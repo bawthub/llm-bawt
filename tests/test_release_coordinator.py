@@ -5,8 +5,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event
-from sqlmodel import create_engine
 
 from llm_bawt.ops.executor import ReconcileResult
 from llm_bawt.ops.release_coordinator import ReleaseCoordinator
@@ -15,6 +13,7 @@ from llm_bawt.ops.release_models import (
     RELEASE_LOST,
 )
 from llm_bawt.ops.release_store import ReleaseStore
+from tests.sqlite_support import fast_sqlite_engine
 
 SOURCE = "1" * 40
 BASE = "2" * 40
@@ -62,12 +61,7 @@ class FakeGateway:
 
 @pytest.fixture
 def rig(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'release.sqlite'}")
-
-    @event.listens_for(engine, "connect")
-    def fast_fixture_writes(connection, _record):
-        connection.execute("PRAGMA synchronous = OFF")
-
+    engine = fast_sqlite_engine(tmp_path / "release.sqlite")
     store = ReleaseStore(None, engine=engine)
     gateway = FakeGateway()
     current = [datetime.now(timezone.utc)]

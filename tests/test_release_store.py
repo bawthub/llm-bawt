@@ -5,8 +5,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event, update
-from sqlmodel import Session, create_engine
+from sqlalchemy import update
+from sqlmodel import Session
 
 from llm_bawt.ops.release_models import (
     RELEASE_BUILD_COMPLETE,
@@ -17,6 +17,7 @@ from llm_bawt.ops.release_models import (
     ReleaseRun,
 )
 from llm_bawt.ops.release_store import ReleaseStore, ReleaseStoreUnavailable
+from tests.sqlite_support import fast_sqlite_engine
 
 PLAN = dict(
     release_task="TASK-1030",
@@ -30,16 +31,8 @@ SOURCE = "1" * 40
 
 
 def fixture_engine(path):
-    engine = create_engine(
-        f"sqlite:///{path}", connect_args={"check_same_thread": False, "timeout": 10},
-    )
-
-    @event.listens_for(engine, "connect")
-    def fast_fixture_writes(connection, _record):
-        # Migration/transaction semantics matter here; disk fsync does not.
-        connection.execute("PRAGMA synchronous = OFF")
-
-    return engine
+    # Migration/transaction semantics matter here; disk fsync does not.
+    return fast_sqlite_engine(path, check_same_thread=False, timeout=10)
 
 
 @pytest.fixture

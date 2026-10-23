@@ -34,12 +34,12 @@ def test_gpu_status_reports_unavailable_bridge(monkeypatch):
 
 
 def test_gpu_status_exposes_original_calibration_reservation_after_reoffers(monkeypatch, tmp_path):
-    from sqlalchemy import create_engine
     from llm_bawt.media.gpu_handoff import GpuHandoff
     from llm_bawt.media.gpu_handoff_store import GpuHandoffStore
+    from tests.sqlite_support import fast_sqlite_engine
     from tests.test_gpu_handoff_executor import FakeAdapter, confirm, offer
 
-    engine = create_engine(f"sqlite:///{tmp_path}/status.db", connect_args={"check_same_thread": False})
+    engine = fast_sqlite_engine(tmp_path / "status.db", check_same_thread=False)
     ledger, adapter = GpuHandoffStore(engine), FakeAdapter()
     controller = GpuHandoff(ledger, adapter, poll_interval=0, job_timeout=0.1)
 
