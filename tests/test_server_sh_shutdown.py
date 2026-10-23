@@ -24,6 +24,34 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SERVER_SH = REPO / "server.sh"
 
+# Under Docker, server.sh is PID 1 with default signal dispositions. The test
+# suite is not: run as ``nohup make test-all … &`` over ssh (the recommended
+# background gate), the pytest process inherits SIGHUP (nohup) and
+# SIGINT/SIGQUIT (``&`` with no job control) as SIG_IGN, Python keeps an
+# inherited ignore, and a bash child cannot trap a signal ignored at entry
+# (bash(1), trap). The SIGINT case then hangs instead of shutting down. This
+# launcher restores the defaults and execs server.sh in the same pid, so
+# ``proc.pid`` is still bash. (Not ``preexec_fn``: unsafe under xdist's threads.)
+RESET_SIGNALS = (signal.SIGINT, signal.SIGQUIT, signal.SIGHUP, signal.SIGTERM)
+SIGNAL_RESET_LAUNCHER = (
+    "import os, signal, sys\n"
+    f"for signum in {tuple(int(s) for s in RESET_SIGNALS)}:\n"
+    "    signal.signal(signum, signal.SIG_DFL)\n"
+    "os.execvp(sys.argv[1], sys.argv[1:])\n"
+)
+
+
+def launch_with_default_signals(argv: list[str], **popen_kwargs) -> subprocess.Popen:
+    """Start ``argv`` with RESET_SIGNALS at SIG_DFL whatever this process inherited."""
+    return subprocess.Popen(
+        [sys.executable, "-I", "-c", SIGNAL_RESET_LAUNCHER, *argv], **popen_kwargs,
+    )
+
+
+def _ignored_mask(status_text: str) -> int:
+    line = next(l for l in status_text.splitlines() if l.startswith("SigIgn:"))
+    return int(line.split()[1], 16)
+
 FAKE_UV = """#!/usr/bin/env bash
 role=""
 probe=""
@@ -104,7 +132,7 @@ def stack(tmp_path):
             "FAKE_PYTHON": sys.executable,
             **extra_env,
         }
-        proc = subprocess.Popen(
+        proc = launch_with_default_signals(
             ["bash", str(app / "server.sh"), "start", "--stdout"],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             start_new_session=True, text=True,
@@ -133,6 +161,26 @@ def stack(tmp_path):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_launcher_resets_signals_the_suite_inherited_as_ignored():
+    """A parent that ignores INT/QUIT/HUP (``nohup … &``) still gets a trappable child."""
+    probe = (
+        "import signal, subprocess, sys\n"
+        f"for signum in {tuple(int(s) for s in RESET_SIGNALS[:3])}:\n"
+        "    signal.signal(signum, signal.SIG_IGN)\n"
+        "bash = ['bash', '-c', 'cat /proc/$$/status']\n"
+        "plain = subprocess.run(bash, capture_output=True, text=True, check=True).stdout\n"
+        f"reset = subprocess.run([sys.executable, '-I', '-c', {SIGNAL_RESET_LAUNCHER!r}, *bash],\n"
+        "                       capture_output=True, text=True, check=True).stdout\n"
+        "sys.stdout.write(plain + '\\n===\\n' + reset)\n"
+    )
+    out = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True,
+                         check=True).stdout
+    plain, reset = out.split("\n===\n")
+    wanted = sum(1 << (int(s) - 1) for s in RESET_SIGNALS)
+    assert _ignored_mask(plain) & wanted, "the simulated nohup parent did not pass its ignores on"
+    assert _ignored_mask(reset) & wanted == 0, reset
 
 
 @pytest.mark.integration
