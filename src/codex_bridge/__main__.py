@@ -31,6 +31,10 @@ import signal
 import sys
 from pathlib import Path
 
+from agent_bridge.chatgpt_models import (
+    CHATGPT_MODELS_CLIENT_VERSION,
+    parse_chatgpt_models,
+)
 from agent_bridge.publisher import RedisPublisher
 
 from .auth_broker import ensure_auth_file
@@ -48,8 +52,9 @@ logger = logging.getLogger("codex_bridge")
 # ``minimal_client_version`` exceeds it — so reporting a version below what the
 # installed binary actually is would silently drop newer models (e.g. gpt-5.6
 # needs >=0.144.0). We derive the real version from the binary at runtime so the
-# listing always matches what turns can actually run; this is only the floor.
-_CODEX_CLIENT_VERSION_FALLBACK = "0.144.1"
+# listing always matches what turns can actually run; this is only the floor,
+# shared with the app's own ChatGPT discovery (agent_bridge.chatgpt_models).
+_CODEX_CLIENT_VERSION_FALLBACK = CHATGPT_MODELS_CLIENT_VERSION
 
 
 async def _codex_client_version() -> str:
@@ -91,10 +96,11 @@ async def _fetch_codex_models() -> list[dict]:
     so the old ``from openai_codex import AsyncCodex`` path always 503'd and the
     app silently fell back to a stale hardcoded catalog.
 
-    Runs here — not in the app — because this container owns the OAuth bundle.
     The proxy's ``OpenAIChatGPTAdapter`` handles token load + auto-refresh and
     supplies the mandatory ``chatgpt-account-id`` header. Returns dicts carrying
-    ``id`` and ``context_window`` (hidden models are filtered out).
+    ``id`` and ``context_window`` (hidden models are filtered out) through the
+    parser shared with the app's own ChatGPT discovery
+    (``agent_bridge.chatgpt_models``), so both sides shape rows identically.
     """
     import httpx
 
@@ -114,24 +120,7 @@ async def _fetch_codex_models() -> list[dict]:
             headers=headers,
         )
     resp.raise_for_status()
-
-    out: list[dict] = []
-    for m in resp.json().get("models", []) or []:
-        if not isinstance(m, dict):
-            continue
-        if m.get("visibility") == "hide":
-            continue
-        slug = m.get("slug") or m.get("id")
-        if not slug:
-            continue
-        out.append(
-            {
-                "id": slug,
-                "context_window": m.get("context_window"),
-                "description": m.get("description") or m.get("display_name") or "",
-            }
-        )
-    return out
+    return parse_chatgpt_models(resp.json())
 
 
 def _http_response(status: str, body: str) -> bytes:

@@ -7,6 +7,7 @@ credential and response handling belongs here rather than in the models route.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
@@ -14,7 +15,16 @@ from typing import Any
 
 import httpx
 
+from agent_bridge.chatgpt_models import (
+    CHATGPT_MODELS_CLIENT_VERSION,
+    chatgpt_models_request,
+    parse_chatgpt_models,
+)
+
 from ..utils.config import Config
+from .curated_models import CURATED_KEY, curated_claude_rows
+
+logger = logging.getLogger(__name__)
 
 
 class ModelDiscoveryError(RuntimeError):
@@ -67,6 +77,11 @@ def _normalize(models: Iterable[object]) -> list[dict[str, Any]]:
         context_length = item.get("context_length")
         if isinstance(context_length, int) and not isinstance(context_length, bool):
             row["context_length"] = context_length
+        # The curated marker survives normalization only when true
+        # (TASK-1296 D1): it tells the wizard the row is a maintained
+        # fallback, not a live catalog answer.
+        if item.get(CURATED_KEY) is True:
+            row[CURATED_KEY] = True
         normalized.append(row)
     return normalized
 
@@ -159,36 +174,208 @@ class AnthropicDiscoveryProvider(ExistingFetcherProvider):
     """
 
     def _postprocess(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            api_window = row.get("context_length")
-            if not isinstance(api_window, int) or api_window <= CLAUDE_CODE_STANDARD_WINDOW:
-                out.append(row)
-                continue
-            label = row.get("description") or row["id"]
-            out.append({
-                **row,
-                "description": f"{label} · 200K context",
-                "context_length": CLAUDE_CODE_STANDARD_WINDOW,
-            })
-            out.append({
-                **row,
-                "id": f"{row['id']}{CLAUDE_CODE_1M_SUFFIX}",
-                "description": f"{label} · 1M context",
-                "context_length": min(api_window, CLAUDE_CODE_1M_WINDOW),
-            })
-        return out
+        return claude_code_slugs(rows)
 
 
-class CodexBridgeDiscoveryProvider(ModelDiscoveryProvider):
-    """Authenticated ChatGPT subscription catalog from the Codex bridge."""
+def claude_code_slugs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Express API rows as Claude Code CLI ids with the window the CLI enforces.
+
+    Shared by the API-key path and the subscription path so both offer the
+    same ids for the same model (see :class:`AnthropicDiscoveryProvider`).
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        api_window = row.get("context_length")
+        if not isinstance(api_window, int) or api_window <= CLAUDE_CODE_STANDARD_WINDOW:
+            out.append(row)
+            continue
+        label = row.get("description") or row["id"]
+        out.append({
+            **row,
+            "description": f"{label} · 200K context",
+            "context_length": CLAUDE_CODE_STANDARD_WINDOW,
+        })
+        out.append({
+            **row,
+            "id": f"{row['id']}{CLAUDE_CODE_1M_SUFFIX}",
+            "description": f"{label} · 1M context",
+            "context_length": min(api_window, CLAUDE_CODE_1M_WINDOW),
+        })
+    return out
+
+
+#: Beta header the Claude OAuth bearer needs on api.anthropic.com. Same value
+#: the usage adapter sends (``usage/adapters/claude.py``).
+CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
+CLAUDE_API_VERSION = "2023-06-01"
+CLAUDE_MODELS_URL = "https://api.anthropic.com/v1/models"
+
+
+class ClaudeSubscriptionDiscoveryProvider(ModelDiscoveryProvider):
+    """Claude catalog for the app-owned subscription login (TASK-1296 D1).
+
+    Tries ``GET /v1/models`` with the OAuth bearer. A refusal the login can't
+    do anything about (401/403/404 or any other non-transient 4xx) falls back
+    to the curated Claude Code list, labelled ``curated``. Server errors,
+    throttling and network failures raise instead: a stale answer must not
+    look like the live one.
+    """
+
+    aliases = ("claude",)
+
+    def fetch(self) -> list[dict[str, Any]]:
+        from .usage.claude_oauth import get_access_token
+
+        cred = get_access_token()
+        if cred.state != "ok" or not cred.token:
+            raise ModelDiscoveryError(
+                "Claude subscription discovery requires a connected Claude login",
+                status_code=503,
+            )
+        headers = {
+            "Authorization": f"Bearer {cred.token}",
+            "anthropic-beta": CLAUDE_OAUTH_BETA,
+            "anthropic-version": CLAUDE_API_VERSION,
+            "Accept": "application/json",
+        }
+        try:
+            response = httpx.get(CLAUDE_MODELS_URL, headers=headers, timeout=20.0)
+        except httpx.HTTPError as exc:
+            raise ModelDiscoveryError(
+                f"Network error reaching the Anthropic model catalog: {exc}"
+            ) from exc
+
+        status = response.status_code
+        if status >= 500 or status in (408, 429):
+            raise ModelDiscoveryError(
+                f"Anthropic model catalog returned HTTP {status}"
+            )
+        if status != 200:
+            return self._curated(f"HTTP {status}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ModelDiscoveryError(
+                "Anthropic model catalog returned non-JSON data"
+            ) from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            raise ModelDiscoveryError(
+                "Anthropic model catalog returned an invalid payload"
+            )
+        rows = _normalize(
+            {
+                "id": item.get("id"),
+                "description": item.get("display_name") or "",
+                "context_length": item.get("max_input_tokens"),
+            }
+            for item in data
+            if isinstance(item, dict)
+        )
+        if not rows:
+            return self._curated("an empty catalog")
+        return claude_code_slugs(rows)
+
+    @staticmethod
+    def _curated(reason: str) -> list[dict[str, Any]]:
+        logger.info(
+            "Claude subscription discovery: /v1/models answered %s; "
+            "offering the curated Claude Code catalog",
+            reason,
+        )
+        return claude_code_slugs(_normalize(curated_claude_rows()))
+
+
+#: ChatGPT Codex backend the subscription bearer authenticates against
+#: (same base as the ``openai-oauth`` access path and the proxy adapter).
+CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+class ChatGPTSubscriptionDiscoveryProvider(ModelDiscoveryProvider):
+    """ChatGPT-subscription catalog from the app's own token (TASK-1296 D2).
+
+    Calls the Codex backend's ``/models`` directly with the app-owned
+    ``openai_chatgpt`` bearer and ``chatgpt-account-id``. The Codex bridge is
+    consulted only when ``CODEX_BRIDGE_MODELS_URL`` is set, for deployments
+    that still run it.
+    """
 
     aliases = ("codex",)
 
+    def __init__(self, config: Config | None = None):
+        self._config = config
+
     def fetch(self) -> list[dict[str, Any]]:
-        url = os.getenv(
-            "CODEX_BRIDGE_MODELS_URL", "http://codex-bridge:8682/models"
+        bridge_url = os.getenv("CODEX_BRIDGE_MODELS_URL")
+        if bridge_url:
+            return CodexBridgeDiscoveryProvider(bridge_url).fetch()
+
+        from .usage.codex_oauth import get_access_token
+
+        cred = get_access_token()
+        if cred.state != "ok" or not cred.token or not cred.account_id:
+            raise ModelDiscoveryError(
+                "ChatGPT subscription discovery requires a connected ChatGPT login",
+                status_code=503,
+            )
+        client_version = (
+            getattr(self._config, "CODEX_CLIENT_VERSION", None)
+            or CHATGPT_MODELS_CLIENT_VERSION
         )
+        url, params, headers = chatgpt_models_request(
+            base_url=CHATGPT_CODEX_BASE_URL,
+            bearer=cred.token,
+            account_id=cred.account_id,
+            client_version=client_version,
+        )
+        try:
+            response = httpx.get(url, params=params, headers=headers, timeout=20.0)
+        except httpx.HTTPError as exc:
+            raise ModelDiscoveryError(
+                f"ChatGPT subscription model discovery failed: {exc}"
+            ) from exc
+        status = response.status_code
+        if status in (401, 403):
+            raise ModelDiscoveryError(
+                "ChatGPT rejected the subscription token while listing models",
+                status_code=503,
+            )
+        if status != 200:
+            raise ModelDiscoveryError(
+                f"ChatGPT subscription model discovery failed: HTTP {status}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ModelDiscoveryError(
+                "ChatGPT subscription model discovery returned non-JSON data"
+            ) from exc
+        models = _normalize(
+            {**item, "context_length": item.get("context_window")}
+            for item in parse_chatgpt_models(payload)
+        )
+        if not models:
+            raise ModelDiscoveryError(
+                "ChatGPT subscription model discovery returned no available models"
+            )
+        return models
+
+
+class CodexBridgeDiscoveryProvider(ModelDiscoveryProvider):
+    """Authenticated ChatGPT subscription catalog from the Codex bridge.
+
+    Not alias-addressable on its own: :class:`ChatGPTSubscriptionDiscoveryProvider`
+    delegates here when ``CODEX_BRIDGE_MODELS_URL`` is configured.
+    """
+
+    aliases = ()
+
+    def __init__(self, url: str):
+        self._url = url
+
+    def fetch(self) -> list[dict[str, Any]]:
+        url = self._url
         try:
             response = httpx.get(url, timeout=10.0)
             response.raise_for_status()
@@ -362,7 +549,8 @@ def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ..
     )
 
     return (
-        CodexBridgeDiscoveryProvider(),
+        ClaudeSubscriptionDiscoveryProvider(),
+        ChatGPTSubscriptionDiscoveryProvider(config),
         OpenAIDiscoveryProvider(
             aliases=("openai",),
             label="openai",

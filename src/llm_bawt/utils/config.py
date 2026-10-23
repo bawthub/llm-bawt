@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from rich.console import Console
 
+from agent_bridge.chatgpt_models import CHATGPT_MODELS_CLIENT_VERSION
+
 # Default system message fallback - only used if bot config fails to load
 DEFAULT_SYSTEM_MESSAGE = """You are Nova, a personal AI assistant running locally via llm-bawt.
 You have persistent memory across sessions. Keep responses concise and helpful."""
@@ -256,6 +258,18 @@ class Config(RuntimeTunables, BaseSettings):
 
     # --- xAI (Grok) Settings --- #
     XAI_API_KEY: str = Field(default="", description="xAI API key for Grok models (get from x.ai)")
+
+    # --- ChatGPT subscription discovery (TASK-1296) --- #
+    CODEX_CLIENT_VERSION: str = Field(
+        default=CHATGPT_MODELS_CLIENT_VERSION,
+        description=(
+            "client_version the ChatGPT Codex backend's /models listing is told. "
+            "The backend hides models whose minimal_client_version exceeds it, so "
+            "this is the floor a listing may claim. Accepted value: a codex CLI "
+            "version string (e.g. 0.144.1); raise it when a newer model needs a "
+            "newer client. Set via LLM_BAWT_CODEX_CLIENT_VERSION."
+        ),
+    )
 
     # --- OpenClaw Settings --- #
     OPENCLAW_GATEWAY_TOKEN: str = Field(

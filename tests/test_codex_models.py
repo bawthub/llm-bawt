@@ -136,6 +136,48 @@ async def _async_value(value):
     return value
 
 
+def test_parse_chatgpt_models_drops_hidden_and_slugless_rows():
+    from agent_bridge.chatgpt_models import parse_chatgpt_models
+
+    payload = {
+        "models": [
+            {"slug": "gpt-6-astra", "description": "Astra", "context_window": 1_100_000, "visibility": "list"},
+            {"slug": "gpt-6-hidden", "context_window": 1, "visibility": "hide"},
+            {"id": "gpt-5.4", "display_name": "GPT-5.4", "context_window": 400_000},
+            {"description": "no slug"},
+            "junk",
+        ]
+    }
+
+    assert parse_chatgpt_models(payload) == [
+        {"id": "gpt-6-astra", "context_window": 1_100_000, "description": "Astra"},
+        {"id": "gpt-5.4", "context_window": 400_000, "description": "GPT-5.4"},
+    ]
+    assert parse_chatgpt_models({"models": "nope"}) == []
+    assert parse_chatgpt_models(None) == []
+
+
+def test_chatgpt_models_request_shape():
+    from agent_bridge.chatgpt_models import chatgpt_models_request
+
+    url, params, headers = chatgpt_models_request(
+        base_url="https://chatgpt.com/backend-api/codex/",
+        bearer="tok",
+        account_id="acct",
+        client_version="0.144.1",
+    )
+
+    assert url == "https://chatgpt.com/backend-api/codex/models"
+    assert params == {"client_version": "0.144.1"}
+    assert headers == {"Authorization": "Bearer tok", "chatgpt-account-id": "acct"}
+
+
+def test_codex_bridge_fallback_version_is_the_shared_floor():
+    from agent_bridge.chatgpt_models import CHATGPT_MODELS_CLIENT_VERSION
+
+    assert codex_bridge_main._CODEX_CLIENT_VERSION_FALLBACK == CHATGPT_MODELS_CLIENT_VERSION == "0.144.1"
+
+
 def test_service_bot_init_applies_codex_default_model(monkeypatch):
     bot = SimpleNamespace(
         agent_backend="codex",
