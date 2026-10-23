@@ -28,6 +28,7 @@ from agent_bridge.session_queue import SessionQueue
 
 
 from .transport import CodexTransport, validate_auth_json
+from .rollout_usage import RolloutUsageReader
 from ._bridge_helpers import (
     CONSUMER_GROUP,
     CONSUMER_NAME,
@@ -98,6 +99,7 @@ class CodexBridge(
         self._session_queue = SessionQueue()
         self._transport = CodexTransport(codex_bin=codex_bin)
         self._model_info = _ModelInfoCache(app_api_url)
+        self._rollout_usage = RolloutUsageReader()
         # request_id → frontend user-message UUID, populated in _handle_send
         # and read by _publish_event so every emitted AgentEvent (tool_*,
         # assistant_*, etc.) carries the originating message id.  Cleared on

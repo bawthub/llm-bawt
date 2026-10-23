@@ -19,6 +19,7 @@ from agent_bridge.session_queue import SessionQueue
 
 from .transport import CodexTransport, validate_auth_json
 from .reset_evidence import CodexResetEvidence
+from .rollout_usage import TokenCounts
 from ._bridge_helpers import (
     CONSUMER_GROUP,
     CONSUMER_NAME,
@@ -134,91 +135,26 @@ class CodexEventMixin:
                 pass
         paths.clear()
 
-    @staticmethod
-    def _extract_token_usage(usage_or_carrier: Any, *, actual_model_or_default: str) -> dict | None:
-        """Normalize a Codex ``Usage`` (or carrier with a .usage attr) into
-        the AgentEvent token_usage dict.
+    async def _turn_token_usage(
+        self, usage_or_carrier: Any, *, thread: Any, model: str,
+    ) -> dict | None:
+        """This turn's AgentEvent token_usage, or ``None`` (TASK-1319).
+
+        The SDK's ``turn.completed`` usage is the thread's running total, so
+        it only serves to check the rollout, which holds the per-call counts
+        (see ``rollout_usage``).
         """
-        if usage_or_carrier is None:
+        sdk_usage = TokenCounts.from_sdk_usage(usage_or_carrier)
+        if sdk_usage is None:
             return None
-        # Allow callers to pass either the Usage directly or a wrapper with
-        # a .usage attribute (e.g. TurnCompletedEvent).
-        usage = usage_or_carrier
-        if hasattr(usage, "usage") and not hasattr(usage, "input_tokens"):
-            usage = getattr(usage, "usage")
-        if isinstance(usage_or_carrier, dict) and "usage" in usage_or_carrier:
-            usage = usage_or_carrier["usage"]
-        if usage is None:
+        turn = await self._rollout_usage.resolve(getattr(thread, "id", None), sdk_usage)
+        if turn is None:
             return None
-
-        def _g(key: str, default=0):
-            if hasattr(usage, key):
-                return getattr(usage, key)
-            if isinstance(usage, dict):
-                return usage.get(key, default)
-            return default
-        try:
-            # OpenAI/Codex ``input_tokens`` is INCLUSIVE of the cached subset
-            # (``cached_input_tokens`` ⊆ ``input_tokens``). The frontend context
-            # pill and cost estimator both SUM input + cache_read + cache_creation
-            # (Anthropic's convention, where those buckets are disjoint), so
-            # passing the raw inclusive value double-counts every cached token —
-            # a fully-cached turn shows ~2× its real size (e.g. 2.62M). Report the
-            # buckets disjoint so the sum equals the true prompt size and cache
-            # reads get billed at the cached rate, not full input.
-            raw_input = int(_g("input_tokens", 0) or 0)
-            cached = int(_g("cached_input_tokens", 0) or 0)
-            fresh_input = max(raw_input - cached, 0)
-            return {
-                "input_tokens": fresh_input,
-                "cache_read_tokens": cached,
-                "cache_creation_tokens": 0,
-                "output_tokens": int(_g("output_tokens", 0) or 0),
-                "context_window": None,  # filled in by _merge_model_info
-                "max_output_tokens": None,
-                "total_cost_usd": None,
-            }
-        except Exception:
-            return None
-
-    async def _merge_model_info(self, usage: dict | None, model: str) -> dict | None:
-        if not usage:
-            return usage
+        usage = turn.to_token_usage()
         info = await self._model_info.get(model)
-        usage["context_window"] = info.get("context_window")
+        usage["context_window"] = info.get("context_window") or turn.context_window
         usage["max_output_tokens"] = info.get("max_output_tokens")
         return usage
-
-    @staticmethod
-    def _sanitize_context_usage(usage: dict | None) -> dict | None:
-        """Suppress impossible Codex context counters before they reach the UI."""
-        if not usage:
-            return usage
-        try:
-            ctx = int(usage.get("context_window", 0) or 0)
-            total_in = (
-                int(usage.get("input_tokens", 0) or 0)
-                + int(usage.get("cache_read_tokens", 0) or 0)
-                + int(usage.get("cache_creation_tokens", 0) or 0)
-            )
-        except Exception:
-            return usage
-        if ctx <= 0 or total_in <= 0:
-            return usage
-        # Codex turn.completed usage can accumulate prompt reads across internal
-        # tool iterations. Those totals are not a truthful "context this turn"
-        # measurement and can dwarf the real model window.
-        if total_in <= max(ctx + 4096, int(ctx * 1.05)):
-            return usage
-        sanitized = dict(usage)
-        sanitized["input_tokens"] = 0
-        sanitized["cache_read_tokens"] = 0
-        sanitized["cache_creation_tokens"] = 0
-        logger.info(
-            "Suppressing impossible Codex context usage: total_in=%s ctx=%s",
-            total_in, ctx,
-        )
-        return sanitized
 
     async def _handle_event(
         self,
@@ -287,15 +223,9 @@ class CodexEventMixin:
                 reset_ack = reset_evidence.acknowledgment()
             usage = getattr(event, "usage", None) or self._dig(event, "usage")
             full_text = "".join(text_parts)
-            token_usage = None
-            if usage is not None:
-                token_usage = self._extract_token_usage(
-                    usage, actual_model_or_default=actual_model_ref[0],
-                )
-                token_usage = await self._merge_model_info(
-                    token_usage, actual_model_ref[0],
-                )
-                token_usage = self._sanitize_context_usage(token_usage)
+            token_usage = await self._turn_token_usage(
+                usage, thread=thread, model=actual_model_ref[0],
+            )
 
             seq += 1
             self._publish_event(

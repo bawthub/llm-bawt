@@ -459,14 +459,8 @@ class CodexCommandMixin:
                         if not aborted and not self._already_sent_done(seq, item_buffers):
                             if reset_evidence is not None:
                                 raise RuntimeError("Codex reset has no verified turn.completed event")
-                            token_usage = self._extract_token_usage(
-                                final_usage,
-                                actual_model_or_default=actual_model,
-                            )
-                            token_usage = self._sanitize_context_usage(
-                                await self._merge_model_info(
-                                    token_usage, actual_model,
-                                )
+                            token_usage = await self._turn_token_usage(
+                                final_usage, thread=thread, model=actual_model,
                             )
                             seq += 1
                             self._publish_event(
