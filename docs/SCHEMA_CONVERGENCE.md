@@ -42,6 +42,16 @@ source; regenerate both captures before migration. Snark's current receipts
 cover 327/327 partition outcomes and the exact guarded retirement of both
 unused backup tables. Do **not** repeat either action for schema drift.
 
+**TASK-1329 (2026-10-24):** bot tags add two source-owned shared tables,
+`bot_tag_catalog` and `bot_profile_tags` (bootstrapped by `BotProfileStore` via
+`bot_tags/catalog.py`). With TASK-1233's `system_gates` and `gate_members`, the
+shared set is now **53** top-level tables; `test_schema_full_store_pg.py` pins
+all four. Both tag tables were created live by the app restart that deployed
+S1–S4. The 49-table catalog above predates them, so any fresh reference/live
+comparison must expect 53. `bot_profiles.include_in_global_search` stays as a
+legacy mirror of "not private" (dual-written by the tag store) until nothing
+reads it; the NOT NULL proposal below still applies to it.
+
 ## Pristine reference and private legacy rehearsal (2026-10-18)
 
 `tests/test_schema_full_store_pg.py` composes 21 actual store bootstrap groups in

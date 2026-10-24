@@ -92,12 +92,15 @@ MCP storage/client modules are untouched; server.py only imports registration.
 
 ### Current DB policy
 
-`RecallDatabase.scope` reads the current `bot_profiles` search policy directly,
-with a bounded SELECT. Errors, absent/ambiguous policy, sanitation collisions,
-and unknown callers fail closed. There is no duplicated hardcoded protected
-bot list and no reuse of the existing fail-open aggregate-search helper.
-**Opted-out bots cannot use recall, even for their own history.** A policy change
-is re-read on every request, including follow-ups.
+`RecallDatabase.scope` reads the current bot-tag snapshot (`bot_tags.SNAPSHOT_SQL`,
+TASK-1329) directly, with a bounded SELECT, and validates it with `TagSnapshot`.
+The searchable set is every bot that is neither `private` nor `no_global_search`
+(private implies `no_global_search`; the legacy `include_in_global_search=false`
+column still counts as private). Errors, absent/ambiguous/malformed snapshots,
+sanitation collisions, and unknown callers fail closed. There is no hardcoded bot
+list and no reuse of the existing fail-open aggregate-search helper.
+**Bots outside the searchable set cannot use recall, even for their own history.**
+A tag change is re-read on every request, including follow-ups.
 
 ### Messages
 
@@ -106,10 +109,10 @@ non-null caller user. Only active/archived sessions and user/assistant messages
 qualify, authored by the caller user, the caller bot, or — **the single
 cross-bot boundary** — a delivery the caller actually received: a `role=user`
 row in the caller's own partition and own session whose bot author is in the
-current DB policy's searchable set and is not excluded/protected
-(`allowed − excluded − caller`, computed per request). Protected bots such as
-Mira are never in that set, so their deliveries stay unreachable even inside the
-caller's own history. Deleted sessions, forgotten messages, summaries, unknown
+current searchable set and is not excluded
+(`allowed − excluded − caller`, computed per request). `private` bots are never
+in that set, so their deliveries stay unreachable even inside the caller's own
+history. Deleted sessions, forgotten messages, summaries, unknown
 legacy authors, other users and imported other-bot assistant rows are omitted.
 Those omissions reduce recall coverage deliberately. Memories and tool evidence
 keep the stricter caller-user/own-bot rule.
@@ -158,7 +161,7 @@ existing endpoint explicitly labels its keyword fallback if embeddings fail).
 Explicit IDs bypass discovery. Each candidate is fetched through bounded HTTP,
 then checked against current task/project bot ownership, association user/bot
 provenance, and a complete bounded activity audit before admission to the model.
-Unknown/protected bot provenance or other-user associations deny the candidate.
+Unknown/private bot provenance or other-user associations deny the candidate.
 System/cron and null human-actor activities are normal neutral shared-task events,
 not authorization grants. Activity headers are attribution, not trusted authority.
 

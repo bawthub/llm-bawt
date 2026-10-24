@@ -35,7 +35,7 @@ Goals:
 - G3. Working memory adds no cache creation on a warm turn. The section changes only at boundaries the pin already has. A notice is a short append to the user message.
 - G4. A change the session didn't make (Nick's UI edit, a write from another session of the same bot) produces a notice on the session's next eligible started turn. Messages steered into a running turn don't carry it (section 9.1). The content reaches the prompt at the next boundary. The notice prompts a tool read; it does not deliver content, and the design does not check that the bot reads.
 - G5. Writes are bound to a trusted identity. The model can't set a bot or user parameter.
-- G6. Opt-in per bot, off by default. A bot that hasn't opted in, and every protected bot, gets a byte-identical prompt.
+- G6. Opt-in per bot, off by default. A bot that hasn't opted in, and every protected (`private`-tagged) bot, gets a byte-identical prompt.
 - G7. Nick can list, edit, cancel, soft delete and hard delete any opted-in or previously opted-in bot's items.
 
 Non-goals:
@@ -160,7 +160,7 @@ Rules:
 | REST create | not offered | — |
 | `/health` | excluded | reported as disabled |
 
-- **Protected bots.** `PROTECTED_BOT_IDS` (`service/jobs/idle_context_candidates.py:19`, also used by `service/message_routing.py:25`). Mira is refused everywhere. Protected-bot tests use synthetic fixtures, never Mira's live profile or history.
+- **Protected bots.** In this document a protected bot is one carrying the `private` bot tag (TASK-1329; `working_memory/policy.py` `is_protected` → `BotTags.has(bot, BehaviorTag.PRIVATE)`). No code names a bot. A failed tag read, an unreachable engine or a bot with no profile row all count as private. Protected-bot tests use synthetic `private`-tagged fixtures, never a live private bot's profile or history.
 - **Setting validation** [L9 OI-4]. `working_memory_enabled` is bot-scoped. A global write is refused. `true` is refused for a protected bot or a bot whose durable backend isn't claude-code, on both the single and batch paths of `routes/settings.py`, before any row is applied. Read-time gates still fail closed.
 - **Opt-in effect.** Off: the builder adds nothing, so the prompt is byte-identical to today's.
 - **Toggle timing** [r10]. Tools and notices follow the setting immediately. The section's presence in the prompt changes only at a boundary, because TASK-1318 sends pinned bytes. An enable mid-session produces one notice on the next eligible turn (section 9.2).
@@ -200,7 +200,7 @@ From TASK-1318 step 6 and `system_prompt_pin.py`:
 ### 8.3 Other harnesses
 
 - **Codex.** `pins_system_prompt` is False, and the codex bridge pastes a fresh render onto every user message (`codex_bridge/event_ops.py:91-92`). The section would go live every turn and grow the thread. Enabling is refused on codex until TASK-1318's held Codex change lands and is reviewed here.
-- **openclaw and chat.** No capability (`task_turn_context.py:23`); the only chat bot is Mira. Refused.
+- **openclaw and chat.** No capability (`task_turn_context.py:23`). Refused.
 - **gpt bots on the claude-code bridge** (`openai_chatgpt/*`) get the same CLI snapshot and the same pin, so they are in scope.
 
 ## 9. Notice

@@ -200,7 +200,7 @@ async def search_memory_source(
     sources.
 
     Args:
-        source: The bot_id whose memories to search (e.g. "nova", "mira").
+        source: The bot_id whose memories to search (e.g. "nova").
         query: Natural language search query.
         n_results: Maximum results to return.
         min_relevance: Minimum similarity threshold 0-1.

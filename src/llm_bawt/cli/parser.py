@@ -154,7 +154,7 @@ def parse_arguments(config_obj: "Config") -> argparse.Namespace:
         "-b", "--bot",
         type=str,
         default=None,
-        help="Bot to use (nova, spark, mira). Use --list-bots to see all."
+        help="Bot slug to use. Use --list-bots to see all."
     )
     parser.add_argument(
         "--list-bots",

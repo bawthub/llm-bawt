@@ -106,7 +106,7 @@ def parse_arguments(config_obj: Config) -> argparse.Namespace:
     parser.add_argument("--no-stream", action="store_true", default=False, help="Disable streaming output")
     parser.add_argument("--local", action="store_true", help="Use local filesystem for history instead of database")
     parser.add_argument("--service", action="store_true", help="Route queries through the background service (if running)")
-    parser.add_argument("-b", "--bot", type=str, default=None, help="Bot to use (nova, spark, mira). Use --list-bots to see all.")
+    parser.add_argument("-b", "--bot", type=str, default=None, help="Bot slug to use. Use --list-bots to see all.")
     parser.add_argument("--list-bots", action="store_true", help="List available bots and exit")
     parser.add_argument("--status", action="store_true", help="Show memory system status and configuration")
     parser.add_argument("--job-status", action="store_true", help="Show scheduled background jobs and recent run history")
