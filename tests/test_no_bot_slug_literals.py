@@ -1,22 +1,36 @@
 """TASK-1329 §11: code never branches on a bot slug; behaviour comes from bot tags/data.
 
 Every string constant under ``src/`` is checked against the deployed bot roster.
+Every file is parsed: the AST folds implicit concatenation (``"mi" "ra"``) and
+escapes (``"\\x6dira"``), so no text prefilter can safely skip a file. To stay
+inside the unit time budget, the files are split into ``SHARDS`` test cases.
 Docstrings and comments don't count. A slug that is also harness vocabulary
 (``codex`` is a bot and a bridge) is skipped, because the harness name is code
-vocabulary. ``KNOWN_DEBT`` pins the literals that predate the guardrail; it may
-only shrink, so a new literal or a stale entry both fail.
+vocabulary. Strings built at runtime (``"mi" + "ra"``) are not literals and are
+out of scope.
+
+``KNOWN_DEBT`` is a count ratchet over literals that predate the guardrail: a
+file's count per slug may only shrink. More literals than the pinned count
+fail, and so does a pinned count larger than the code. Swapping one pinned
+literal for a new one of the same slug in the same file keeps the count and is
+not caught.
 """
 
 from __future__ import annotations
 
 import ast
-import re
-from collections import Counter
+from collections.abc import Iterable
+from functools import cache
 from pathlib import Path
+
+import pytest
 
 from llm_bawt.bot_types import DURABLE_AGENT_HARNESSES
 
 SRC = Path(__file__).resolve().parents[1] / "src"
+# A full parse of src/ takes about 1.1 s on echo; eight shards keep each case
+# near 0.15 s, well inside the 1 s per-case unit budget even under xdist load.
+SHARDS = 8
 
 # The DB is the source of truth for bots and the bots.yaml seed is gone, so the
 # roster is listed here. Add a new bot's slug when it is created.
@@ -91,27 +105,76 @@ def test_harness_vocabulary_is_not_treated_as_a_bot_slug() -> None:
     assert {"mira", "nova", "qlocal"} <= CHECKED_SLUGS
 
 
-def test_src_has_no_bot_slug_literals_beyond_known_debt() -> None:
-    # Cheap prefilter (unit time budget): a constant equal to a slug appears in
-    # the source as a quoted slug, so only those files are parsed; the AST decides.
-    quoted = re.compile(
-        r"""(['"])\s*(?:%s)\s*\1""" % "|".join(sorted(CHECKED_SLUGS)), re.IGNORECASE
-    )
-    found: Counter[tuple[str, str]] = Counter()
-    where: dict[tuple[str, str], list[str]] = {}
-    for path in sorted(SRC.rglob("*.py")):
-        rel = path.relative_to(SRC).as_posix()
-        source = path.read_text(encoding="utf-8")
-        if not quoted.search(source):
-            continue
-        for line, slug in slug_literals(source, CHECKED_SLUGS):
-            found[(rel, slug)] += 1
-            where.setdefault((rel, slug), []).append(f"src/{rel}:{line}")
+def partition(root: Path, shards: int) -> list[list[Path]]:
+    """Every ``*.py`` under root in exactly one shard, largest file first onto the lightest shard."""
+    sized = sorted(((p.stat().st_size, p) for p in root.rglob("*.py")), key=lambda sp: (-sp[0], sp[1]))
+    loads = [0] * shards
+    parts: list[list[Path]] = [[] for _ in range(shards)]
+    for size, path in sized:
+        lightest = loads.index(min(loads))
+        parts[lightest].append(path)
+        loads[lightest] += size
+    return parts
 
-    new = {key: where[key] for key, count in found.items() if count > KNOWN_DEBT.get(key, 0)}
+
+def scan(paths: Iterable[Path], root: Path) -> dict[tuple[str, str], list[str]]:
+    """(path under root, slug) -> locations, parsing every file given."""
+    found: dict[tuple[str, str], list[str]] = {}
+    for path in paths:
+        rel = path.relative_to(root).as_posix()
+        for line, slug in slug_literals(path.read_text(encoding="utf-8"), CHECKED_SLUGS):
+            found.setdefault((rel, slug), []).append(f"{root.name}/{rel}:{line}")
+    return found
+
+
+@cache
+def _src_shards() -> list[list[Path]]:
+    return partition(SRC, SHARDS)
+
+
+def test_walker_parses_every_file_and_sees_folded_literals(tmp_path: Path) -> None:
+    files = {
+        "implicit.py": 'def f(bot_id):\n    return bot_id == "mi" "ra"\n',
+        "escaped.py": 'BOT = "\\x6dira"\n',
+        "fstring.py": 'LABEL = f"no" "va"\n',
+        "spaced.py": "SLUGS = {' Mira '}\n",
+        "pkg/clean.py": 'NAME = "mirage"\n',
+    }
+    for name, body in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(body, encoding="utf-8")
+
+    parts = partition(tmp_path, SHARDS)
+    assert sorted(p for part in parts for p in part) == sorted(tmp_path.rglob("*.py"))
+    found = {key for part in parts for key in scan(part, tmp_path)}
+    assert found == {
+        ("implicit.py", "mira"),
+        ("escaped.py", "mira"),
+        ("fstring.py", "nova"),
+        ("spaced.py", "mira"),
+    }
+
+
+def test_known_debt_paths_exist() -> None:
+    # A pinned file that was deleted or moved is in no shard; catch it here.
+    missing = sorted({rel for rel, _ in KNOWN_DEBT if not (SRC / rel).is_file()})
+    assert not missing, f"KNOWN_DEBT names files that are gone; drop these entries: {missing}"
+
+
+@pytest.mark.parametrize("shard", range(SHARDS))
+def test_src_has_no_bot_slug_literals_beyond_known_debt(shard: int) -> None:
+    paths = _src_shards()[shard]
+    found = scan(paths, SRC)
+
+    new = {key: locs for key, locs in found.items() if len(locs) > KNOWN_DEBT.get(key, 0)}
     assert not new, (
         "Bot-slug literal in code; read bot tags/data instead (TASK-1329): "
         f"{sorted(loc for locs in new.values() for loc in locs)}"
     )
-    stale = {key: count for key, count in KNOWN_DEBT.items() if found.get(key, 0) < count}
+    rels = {path.relative_to(SRC).as_posix() for path in paths}
+    stale = {
+        key: count
+        for key, count in KNOWN_DEBT.items()
+        if key[0] in rels and len(found.get(key, ())) < count
+    }
     assert not stale, f"KNOWN_DEBT is larger than src; shrink these entries: {stale}"
