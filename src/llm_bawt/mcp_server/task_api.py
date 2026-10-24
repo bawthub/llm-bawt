@@ -72,7 +72,7 @@ def compact_task(task: dict) -> dict:
     # TASK-1368: a BLOCKED row is Nick's action item; its reason is the point.
     if task.get("status") == "BLOCKED":
         compact["blockedReason"] = task.get("blockedReason")
-    # TASK-1422: a REVIEW row's "Where to look" pages are what Nick opens.
+    # TASK-1422: a REVIEW row's "Where to look" pages are what the reviewer opens.
     if task.get("status") == "REVIEW" and task.get("checkLinks"):
         compact["checkLinks"] = task.get("checkLinks")
     # TASK-1380: a focused task carries its place in the user's ordered focus list.

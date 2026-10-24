@@ -429,7 +429,7 @@ async def update_task(
     bot_id (your bot), it becomes the owner. bot_id never reassigns an owned
     task; pass agent_bot_id only to deliberately hand it to a different bot.
 
-    IMPORTANT: REVIEW is only for UI/UX Nick can visually inspect, and
+    IMPORTANT: REVIEW is only for UI/UX the user can visually inspect, and
     needs check_links. For backend, infra, tooling
     and skills, Snark or Rook verifies the review (Tier 0: self-check), pushed
     attributable commit and test/live receipt before closing COMPLETED,
