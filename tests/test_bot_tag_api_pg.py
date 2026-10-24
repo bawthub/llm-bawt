@@ -178,6 +178,82 @@ def test_concurrent_full_set_replaces_serialize_instead_of_committing_a_union(ap
     assert api.column("fixture-bot") is False
 
 
+# --- expected_tags compare-and-set (TASK-1398) ---------------------------------
+
+
+def test_a_stale_expected_set_is_a_409_with_the_current_tags_and_writes_nothing(api):
+    api.patch("fixture-bot", tags=["no_global_search"])
+    before = api.assigned("fixture-bot")
+
+    response = api.patch("fixture-bot", description="must not land",
+                         tags=["inactive"], expected_tags=[])
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "tags_changed", "current_tags": ["no_global_search"],
+        "message": "fixture-bot's tags changed since they were read; nothing was saved"}
+    assert api.assigned("fixture-bot") == before
+    assert api.store.get("fixture-bot").description == ""
+
+
+def test_a_matching_expected_set_replaces_regardless_of_order_or_duplicates(api):
+    api.patch("fixture-bot", tags=["no_global_search", "inactive"])
+
+    response = api.patch("fixture-bot", tags=["private"],
+                         expected_tags=["inactive", "no_global_search", "inactive"])
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tags"] == ["private"] and api.column("fixture-bot") is False
+
+
+@pytest.mark.parametrize("body", [
+    {"expected_tags": []},
+    {"expected_tags": None, "tags": []},
+    {"expected_tags": "private", "tags": []},
+])
+def test_a_malformed_expected_set_is_refused(api, body):
+    response = api.patch("fixture-bot", description="must not land", **body)
+
+    assert response.status_code == 422, response.text
+    assert api.store.get("fixture-bot").description == ""
+
+
+def test_two_adds_from_one_read_keep_both_tags_instead_of_dropping_private(api):
+    """Both writers read [inactive]; one adds private, the other no_global_search.
+
+    The holder commits private under the bot lock while the racing PATCH waits.
+    The racer's expected set is stale, so it gets a 409 carrying the current
+    set; recomputing its one-tag edit on that set keeps private.
+    """
+    api.patch("fixture-bot", tags=["inactive"])
+    with ThreadPoolExecutor(max_workers=1) as pool, api.rig.engine.connect() as holder:
+        holder.begin()
+        catalog.lock_bot(holder, "fixture-bot")
+        catalog.check_expected_assignments(holder, "fixture-bot", ["inactive"])
+        catalog.replace_assignments(holder, "fixture-bot", ["inactive", "private"], "fixture-holder")
+        racer = pool.submit(api.patch, "fixture-bot",
+                            tags=["inactive", "no_global_search"], expected_tags=["inactive"])
+        deadline = time.monotonic() + 10
+        while not api.rig.scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted"):
+            assert time.monotonic() < deadline, "the racing PATCH never waited on the bot lock"
+            assert not racer.done(), "the racing PATCH ran without the bot lock"
+            time.sleep(0.05)
+        holder.commit()
+        stale = racer.result(timeout=10)
+
+    assert stale.status_code == 409, stale.text
+    current = stale.json()["detail"]["current_tags"]
+    assert current == ["inactive", "private"]
+    assert api.rig.tags("fixture-bot") == ["inactive", "private"]
+
+    retried = api.patch("fixture-bot", tags=sorted({*current, "no_global_search"}),
+                        expected_tags=current)
+    assert retried.status_code == 200, retried.text
+    assert api.rig.tags("fixture-bot") == ["inactive", "no_global_search", "private"]
+    assert api.column("fixture-bot") is False
+
+
 # --- /v1/bot-tags catalog -----------------------------------------------------
 
 

@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping
 
 from sqlalchemy import text
 
-from .errors import TagValidationError
+from .errors import TagSetChanged, TagValidationError
 from .vocabulary import (
     API_ASSIGNER, BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, LEGACY_PRIVATE_TAGS, MIGRATION_ASSIGNER,
     SEEDED_ROLES, TAG_SLUG, BehaviorTag,
@@ -219,6 +219,25 @@ def replace_assignments(conn, bot_slug: str, tags: object, by: str | None) -> bo
     return str(BehaviorTag.PRIVATE) not in wanted
 
 
+def check_expected_assignments(conn, bot_slug: str, expected: object) -> None:
+    """Compare-and-set guard for a full-set replace (TASK-1398).
+
+    ``expected`` is the set the caller read before computing its replace. It is
+    compared with the stored set under the caller's :func:`lock_bot`, so two
+    writers that read the same set can't both commit; the second gets
+    :class:`TagSetChanged` carrying the current set, and its transaction rolls back.
+    """
+    if isinstance(expected, (str, bytes)) or not isinstance(expected, (list, tuple, set, frozenset)):
+        raise TagValidationError("expected_tags must be a list of tag slugs")
+    if any(not isinstance(t, str) for t in expected):
+        raise TagValidationError("expected_tags must be a list of tag slugs")
+    current = sorted(conn.execute(text(
+        "SELECT tag_slug FROM bot_profile_tags WHERE bot_slug = :bot"
+    ), {"bot": bot_slug}).scalars())
+    if frozenset(expected) != frozenset(current):
+        raise TagSetChanged(bot_slug, current)
+
+
 def profile_tag_write(conn, bot_slug: str, *, previous: bool | None,
                       payload: Mapping[str, object]) -> bool:
     """The one tag write a profile upsert makes; return the legacy column value.
@@ -228,6 +247,8 @@ def profile_tag_write(conn, bot_slug: str, *, previous: bool | None,
     (BOT_TAGS.md §4.1). ``previous`` is the stored column, or None for a create.
     """
     lock_bot(conn, bot_slug)
+    if "expected_tags" in payload:
+        check_expected_assignments(conn, bot_slug, payload["expected_tags"])
     if "tags" in payload:
         by = payload.get("tags_assigned_by") or API_ASSIGNER
         return replace_assignments(conn, bot_slug, payload["tags"], str(by))

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ...bot_tags import BehaviorTag
-from ...bot_tags.errors import BotTagError
+from ...bot_tags.errors import BotTagError, TagSetChanged
 from ...bot_tags.store import BotTagStore
 from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
@@ -333,6 +333,9 @@ async def _persist_bot_profile(
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except RouteIneligible as refused:  # a new route with no usable credential; nothing written
         raise HTTPException(status_code=refused.status_code, detail=refused.reason)
+    except TagSetChanged as stale:  # expected_tags no longer match; nothing written
+        raise HTTPException(status_code=stale.status_code, detail={
+            "code": stale.code, "message": str(stale), "current_tags": stale.current})
     except BotTagError as refused:  # an unknown or malformed tag; nothing written
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except Exception as exc:  # surface DB constraint violations as 400s
@@ -738,6 +741,8 @@ async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
                 "include_in_global_search must equal 'private' not in tags when both are sent; "
                 "send tags alone"))
         payload["tags_assigned_by"] = request.updated_by or API_ASSIGNER
+    elif "expected_tags" in request.model_fields_set:
+        raise HTTPException(status_code=422, detail="expected_tags is only valid with tags")
 
     # bot_type is DERIVED from agent_backend (the single source of truth), not
     # carried over from the stored row (TASK-516). A PATCH that touches an

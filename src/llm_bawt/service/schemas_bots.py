@@ -146,6 +146,19 @@ class BotProfilePatchRequest(BaseModel):
     updated_by: str | None = Field(
         default=None, min_length=1, max_length=128,
         description="Who made this change; recorded as assigned_by on new tag assignments.")
+    expected_tags: list[str] | None = Field(
+        default=None,
+        description="Optional compare-and-set for tags (TASK-1398): the set the caller "
+                    "read. If the bot's tags differ, the PATCH returns 409 "
+                    "{code: 'tags_changed', current_tags} and writes nothing. Absent "
+                    "keeps the unconditional replace.")
+
+    @field_validator("expected_tags")
+    @classmethod
+    def _expected_not_null(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            raise ValueError("expected_tags must be a list; omit it for an unconditional replace")
+        return value
 
     @field_validator("tags")
     @classmethod
