@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import bindparam, text
+
 DELIVERY_STATUSES = frozenset({
     "QUEUED", "STEERING", "DISPATCHING", "DELIVERED", "FAILED", "CANCELLED",
 })
@@ -119,3 +121,27 @@ class DeliveryListFilter:
             clauses.append("created_at>=:since")
             params["since"] = self.since
         return (" AND ".join(clauses) or "1=1"), params
+
+
+_IN_FLIGHT_BY_TARGET = text("""
+    SELECT target_bot_id, count(*) AS count, min(available_at) AS oldest_at
+    FROM inter_bot_deliveries
+    WHERE target_bot_id IN :targets AND status IN :statuses
+    GROUP BY target_bot_id
+""").bindparams(bindparam("targets", expanding=True), bindparam("statuses", expanding=True))
+
+
+def in_flight_by_target(conn, bot_ids) -> dict[str, tuple[int, datetime | None]]:
+    """``(count, oldest available_at)`` of each target's in-flight deliveries.
+
+    One grouped query (TASK-1400). Counts every sender: this is the target's
+    whole queue, the same set message routing treats as pending. Targets
+    with nothing in flight are absent.
+    """
+    targets = list(dict.fromkeys(bot_ids))
+    if not targets:
+        return {}
+    rows = conn.execute(
+        _IN_FLIGHT_BY_TARGET, {"targets": targets, "statuses": list(IN_FLIGHT_STATUSES)},
+    ).mappings().all()
+    return {row["target_bot_id"]: (int(row["count"]), row["oldest_at"]) for row in rows}

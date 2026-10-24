@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping
 
-from sqlalchemy import text as sa_text, update
+from sqlalchemy import bindparam, text as sa_text, update
 from sqlmodel import Session, select
 
 from ..approval_mcp_store import requeued_continuation_state, returned_claim
@@ -206,17 +206,37 @@ def lock_target(conn, bot_id: str) -> None:
         )
 
 
+_OPEN_TARGET_ROWS = sa_text(
+    "SELECT bot_id, id, status, agent_session_key, agent_request_id, user_id, created_at"
+    " FROM turn_logs WHERE bot_id IN :targets AND ended_at IS NULL"
+    " AND id != :turn_id ORDER BY created_at DESC"
+).bindparams(bindparam("targets", expanding=True))
+
+
 def classify_target(conn, bot_id: str, *, exclude_turn_id: str | None) -> TargetState:
     """All other open turn rows for ``bot_id``, newest first (call under the lock)."""
-    rows = conn.execute(
-        sa_text(
-            "SELECT id, status, agent_session_key, agent_request_id, user_id"
-            " FROM turn_logs WHERE bot_id=:target AND ended_at IS NULL"
-            " AND id != :turn_id ORDER BY created_at DESC"
-        ),
-        {"target": bot_id, "turn_id": exclude_turn_id or ""},
-    ).mappings().all()
-    return TargetState(tuple(dict(row) for row in rows))
+    return classify_targets(conn, (bot_id,), exclude_turn_id=exclude_turn_id)[bot_id]
+
+
+def classify_targets(
+    conn, bot_ids, *, exclude_turn_id: str | None = None,
+) -> dict[str, TargetState]:
+    """``classify_target`` for many bots in one query (TASK-1400).
+
+    The single-bot form delegates here, so a batched readout and admission
+    classify the same rows the same way. Without each bot's lock this is a
+    ``peek_target``-grade advisory view.
+    """
+    targets = tuple(dict.fromkeys(bot_ids))
+    grouped: dict[str, list[dict[str, Any]]] = {bot: [] for bot in targets}
+    if targets:
+        rows = conn.execute(
+            _OPEN_TARGET_ROWS, {"targets": list(targets), "turn_id": exclude_turn_id or ""},
+        ).mappings().all()
+        for row in rows:
+            values = dict(row)
+            grouped[values.pop("bot_id")].append(values)
+    return {bot: TargetState(tuple(rows)) for bot, rows in grouped.items()}
 
 
 def peek_target(engine, bot_id: str, *, exclude_turn_id: str | None) -> TargetState:
@@ -228,6 +248,12 @@ def peek_target(engine, bot_id: str, *, exclude_turn_id: str | None) -> TargetSt
     """
     with engine.connect() as conn:
         return classify_target(conn, bot_id, exclude_turn_id=exclude_turn_id)
+
+
+def peek_targets(engine, bot_ids) -> dict[str, TargetState]:
+    """Unlocked, read-only ``classify_targets``: advisory, admits nothing."""
+    with engine.connect() as conn:
+        return classify_targets(conn, bot_ids)
 
 
 def _reservation_payload(request_json: Any) -> Mapping[str, Any]:

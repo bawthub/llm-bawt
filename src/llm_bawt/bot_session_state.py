@@ -7,7 +7,16 @@ choose a historical session heuristically.
 """
 from __future__ import annotations
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+
+_POINTERS = text("""
+    SELECT b.slug, b.last_session_id, s.id, s.bot_id, s.user_id,
+           s.started_at, s.ended_at, s.archived_at, s.status,
+           s.session_metadata
+    FROM bot_profiles AS b
+    LEFT JOIN sessions AS s ON s.id = b.last_session_id
+    WHERE b.slug IN :bots
+""").bindparams(bindparam("bots", expanding=True))
 
 
 class BotSessionState:
@@ -59,21 +68,37 @@ class BotSessionState:
         Missing profiles and dangling/cross-bot/deleted pointers are errors;
         only a registered bot with a null pointer has no recorded session.
         """
-        row = conn.execute(text("""
-            SELECT b.last_session_id, s.id, s.bot_id, s.user_id,
-                   s.started_at, s.ended_at, s.archived_at, s.status,
-                   s.session_metadata
-            FROM bot_profiles AS b
-            LEFT JOIN sessions AS s ON s.id = b.last_session_id
-            WHERE b.slug = :bot
-        """), {"bot": bot_id}).mappings().one_or_none()
+        row = conn.execute(_POINTERS, {"bots": [bot_id]}).mappings().one_or_none()
         if row is None:
             raise ValueError(f"Unknown bot: {bot_id}")
+        return BotSessionState._validated(row, bot_id)
+
+    @staticmethod
+    def resolve_many(conn, *, bot_ids) -> dict[str, dict | None]:
+        """``resolve`` for many bots in one query (TASK-1400 readout).
+
+        Same rules per bot: ``None`` means no recorded session. Unknown bots
+        and invalid pointers are absent from the result, never guessed.
+        """
+        bots = list(dict.fromkeys(bot_ids))
+        if not bots:
+            return {}
+        resolved: dict[str, dict | None] = {}
+        for row in conn.execute(_POINTERS, {"bots": bots}).mappings().all():
+            bot_id = row["slug"]
+            try:
+                resolved[bot_id] = BotSessionState._validated(row, bot_id)
+            except ValueError:
+                continue
+        return resolved
+
+    @staticmethod
+    def _validated(row, bot_id: str) -> dict | None:
         if row["last_session_id"] is None:
             return None
         if row["id"] is None or row["bot_id"] != bot_id or row["status"] == "deleted":
             raise ValueError(f"Invalid last session for bot: {bot_id}")
-        return {key: value for key, value in row.items() if key != "last_session_id"}
+        return {key: value for key, value in row.items() if key not in ("last_session_id", "slug")}
 
     @staticmethod
     def accept(conn, *, bot_id: str, session_id: str) -> None:

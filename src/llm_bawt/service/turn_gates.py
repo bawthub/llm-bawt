@@ -349,10 +349,35 @@ def gate_blocks(conn, bot_id: str, actor: GateActor, *, exclude_owner_id: str | 
         if actor.kind in _REATTACH_ACTORS and actor.turn_id and _accepted_member(conn, row["id"], actor.turn_id):
             continue
         blocking.append(row)
-    if not blocking:
+    return _strictest(blocking)
+
+
+def _strictest(rows) -> GateBlock | None:
+    """Deny before hold, then the latest ``expires_at`` (then the newest id)."""
+    if not rows:
         return None
-    strictest = max(blocking, key=lambda row: (row["mode"] == DENY, row["expires_at"], row["id"]))
-    return _block(strictest)
+    return _block(max(rows, key=lambda row: (row["mode"] == DENY, row["expires_at"], row["id"])))
+
+
+def covering_gates(conn, profiles: Mapping[str, tuple[str | None, str | None]]) -> dict[str, GateBlock]:
+    """The strictest live gate covering each bot, in one query (TASK-1400).
+
+    ``profiles`` maps bot slug → ``(bot_type, agent_backend)``. A readout, not
+    an admission: actor allowances and re-attach exemptions are ignored, so a
+    covered bot is reported held even where one admission edge may still pass.
+    Bots no gate covers are absent. Always empty off PostgreSQL.
+    """
+    if not _is_postgres(conn) or not profiles:
+        return {}
+    gates = [(row, GateScope.from_json(row["scope"])) for row in _live_gates(conn)]
+    covered: dict[str, GateBlock] = {}
+    for bot_id, (bot_type, agent_backend) in profiles.items():
+        rows = [row for row, scope in gates
+                if scope.covers(bot_id, bot_type=bot_type, agent_backend=agent_backend)]
+        block = _strictest(rows)
+        if block is not None:
+            covered[bot_id] = block
+    return covered
 
 
 def _accepted_member(conn, gate_id: int, turn_id: str) -> bool:

@@ -6,9 +6,10 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
+from pydantic import Field
 
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.context import current_bot_access
@@ -662,19 +663,56 @@ def _profile_rows() -> list:
         raise BotAccessError("policy_unavailable") from None
 
 
+def _live_states(profiles: list) -> dict[str, dict]:
+    from llm_bawt.bot_live_state import BotIdentity, BotLiveStateReader
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+
+    try:
+        engine = get_shared_engine(Config())
+    except Exception:
+        logger.warning("bot live state: database unavailable", exc_info=True)
+        engine = None
+    return BotLiveStateReader(engine).read(
+        BotIdentity(row.slug, row.bot_type, row.agent_backend) for row in profiles
+    )
+
+
 @mcp.tool(name="bots_list_available")
-async def list_available_bots() -> list[dict]:
+async def list_available_bots(
+    tag: Annotated[str | None, Field(description="Only bots with this tag.")] = None,
+    include_state: Annotated[bool, Field(
+        description="Add state.turn.kind (idle/reserved/executing/ambiguous) and the other live fields."
+    )] = True,
+) -> list[dict]:
     """List bots available as inter-bot message targets, each with its tags.
 
     Read in-process (TASK-1329). Private and inactive bots are never listed. An
     unreadable policy or profile table raises ``policy_unavailable``, never an
-    unfiltered or partial list.
+    unfiltered or partial list. An unknown ``tag`` raises instead of matching
+    nothing.
+
+    ``state`` (TASK-1400) is an advisory, unlocked read: turn comes from the
+    admission classifier, so it matches what a send would see at that moment.
+    A source that can't be read is named in ``state.unavailable`` with null
+    fields, never reported as idle. Task counts live in BawtHub (``tasks_list``).
     """
     # Policy first: a profile created after the snapshot is unknown, so hidden.
     access = await _policy_resolver().resolve()
-    profiles = await asyncio.to_thread(_profile_rows)
-    return [
-        {
+    wanted = None
+    if tag is not None:
+        wanted = tag.strip().lower()
+        if wanted not in access.tags.catalog:
+            raise ValueError(f"unknown tag {tag!r}")
+    profiles = [
+        row for row in await asyncio.to_thread(_profile_rows)
+        if access.tags.excluded_reason(row.slug) is None
+        and (wanted is None or wanted in access.tags.tags.get(row.slug, ()))
+    ]
+    states = await asyncio.to_thread(_live_states, profiles) if include_state and profiles else {}
+    listed = []
+    for row in profiles:
+        entry = {
             "slug": row.slug,
             "name": row.name or row.slug,
             "bot_type": normalize_bot_type(row.bot_type, row.agent_backend),
@@ -683,6 +721,7 @@ async def list_available_bots() -> list[dict]:
             "agent_backend": row.agent_backend,
             "tags": sorted(access.tags.tags.get(row.slug, ())),
         }
-        for row in profiles
-        if access.tags.excluded_reason(row.slug) is None
-    ]
+        if include_state:
+            entry["state"] = states[row.slug]
+        listed.append(entry)
+    return listed

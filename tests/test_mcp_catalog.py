@@ -133,7 +133,9 @@ async def test_catalog_token_budgets():
     # 3,834 (+15). tasks_update stays at 97; its focus args are typed.
     # TASK-1380: tasks_list names archived=false (tasks_list now exactly 100):
     # 3,842 (+8).
-    assert sum(descriptions) <= 3842, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1400: bots_list_available names its live state and tag filter:
+    # 3,860 (+18). One call answers "who is busy/queued/held" for every bot.
+    assert sum(descriptions) <= 3860, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -170,7 +172,9 @@ async def test_catalog_token_budgets():
     # 13,982 (+164). One chat call answers or changes the user's focus.
     # TASK-1380: typed archived flag on tasks_update and tasks_list: 14,046
     # (+64). Archiving the Done lane from chat is one call per task.
-    assert total <= 14046, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1400: bots_list_available optional tag + include_state args and the
+    # live-state summary: 14,125 (+79). Replaces per-bot health/delivery probes.
+    assert total <= 14125, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

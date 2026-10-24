@@ -53,13 +53,20 @@ def policy(monkeypatch):
         state["order"].append("profiles")
         return state["profiles"]
 
+    def live_states(profiles):
+        state["order"].append("state")
+        state["state_reads"].append([row.slug for row in profiles])
+        return {row.slug: {"turn": {"kind": "idle"}, "fixture": row.slug} for row in profiles}
+
+    state["state_reads"] = []
     monkeypatch.setattr(tools, "_policy_resolver", _Resolver)
     monkeypatch.setattr(tools, "_profile_rows", profile_rows)
+    monkeypatch.setattr(tools, "_live_states", live_states)
     return state
 
 
 def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
-    listed = asyncio.run(tools.list_available_bots())
+    listed = asyncio.run(tools.list_available_bots(include_state=False))
 
     assert [bot["slug"] for bot in listed] == ["fixture-public", "fixture-quiet"]
     assert listed[0] == {"slug": "fixture-public", "name": "Fixture-Public", "bot_type": "agent",
@@ -67,6 +74,39 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
                          "agent_backend": "claude-code", "tags": ["reviewer"]}
     assert listed[1]["tags"] == ["no_global_search"]
     assert policy["order"] == ["policy", "profiles"]
+    assert policy["state_reads"] == []
+
+
+def test_state_is_read_once_for_the_visible_bots_only(policy):
+    listed = asyncio.run(tools.list_available_bots())
+
+    assert policy["order"] == ["policy", "profiles", "state"]
+    assert policy["state_reads"] == [["fixture-public", "fixture-quiet"]]
+    assert [bot["state"]["fixture"] for bot in listed] == ["fixture-public", "fixture-quiet"]
+
+
+@pytest.mark.parametrize("tag", ["reviewer", " Reviewer "])
+def test_the_tag_filter_keeps_only_matching_visible_bots(policy, tag):
+    listed = asyncio.run(tools.list_available_bots(tag=tag))
+
+    assert [bot["slug"] for bot in listed] == ["fixture-public"]
+    assert policy["state_reads"] == [["fixture-public"]]
+
+
+@pytest.mark.parametrize("tag", ["private", "inactive"])
+def test_filtering_on_a_hiding_tag_lists_nothing_and_reads_no_state(policy, tag):
+    assert asyncio.run(tools.list_available_bots(tag=tag)) == []
+    assert policy["state_reads"] == []
+
+
+def test_a_catalog_tag_no_visible_bot_carries_lists_nothing(policy):
+    assert asyncio.run(tools.list_available_bots(tag="coder")) == []
+
+
+def test_an_unknown_tag_raises_before_reading_profiles(policy):
+    with pytest.raises(ValueError, match="unknown tag"):
+        asyncio.run(tools.list_available_bots(tag="no-such-tag"))
+    assert policy["order"] == ["policy"]
 
 
 def test_a_profile_created_after_the_snapshot_is_hidden(policy):

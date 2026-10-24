@@ -290,3 +290,19 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                     .limit(limit)
                 ).all()
             )
+
+
+def pending_counts_by_bot(conn, bot_ids) -> dict[str, int]:
+    """Open (``pending``) approval requests per bot, in one grouped query.
+
+    TASK-1400 readout; bots with none are absent.
+    """
+    bots = list(dict.fromkeys(bot_ids))
+    if not bots:
+        return {}
+    rows = conn.execute(
+        select(ToolApprovalRequest.bot_id, func.count())
+        .where(ToolApprovalRequest.bot_id.in_(bots), ToolApprovalRequest.status == REQ_PENDING)
+        .group_by(ToolApprovalRequest.bot_id)
+    ).all()
+    return {bot: int(count) for bot, count in rows}
