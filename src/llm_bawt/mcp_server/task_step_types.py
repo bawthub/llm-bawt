@@ -32,7 +32,21 @@ _STEP_TYPE_SET = frozenset(STEP_TYPES)
 # Mirrors Prisma TaskStatus; task tools accept str so HTTP can normalize case.
 TASK_STATUSES = (
     "QUEUED", "PLANNING", "REFINED", "IN_PROGRESS", "REVIEW",
-    "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED",
+    "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED", "BLOCKED",
+)
+
+# TASK-1368: Nick's definition of BLOCKED, the only gate before COMPLETED.
+# Shared by the tasks_create/tasks_update descriptions and docstrings.
+BLOCKED_DEFINITION = (
+    "BLOCKED is the only gate before COMPLETED and makes the task Nick's action "
+    "item, so it should be rare. Block only for: (1) a design/product decision "
+    "only Nick can make; (2) a real-world dependency bots can't satisfy "
+    "(restart, deploy/ship, credentials, hardware, an external party); (3) a "
+    "change that would go against Nick's stated intent, beyond what reasoning "
+    "can settle. Never for mandate technicalities, small process deviations, "
+    "reviewer nits, bot-vs-bot disagreements (Gavel mediates) or work waiting "
+    "its turn; misusing BLOCKED is a process failure. Entering BLOCKED requires "
+    "blocked_reason: what Nick must do or decide. Leaving BLOCKED clears it."
 )
 
 # Mirrors BawtHub's Prisma StepStatus enum (TASK-1313). Anything else used to

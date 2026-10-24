@@ -50,7 +50,7 @@ def compact_task(task: dict) -> dict:
     dependents = task.get("dependents") if isinstance(task.get("dependents"), list) else []
     description = task.get("description") or ""
     response = task.get("response") or ""
-    return {
+    compact = {
         "id": task.get("id"),
         "shortId": task.get("shortId"),
         "title": task.get("title"),
@@ -69,6 +69,10 @@ def compact_task(task: dict) -> dict:
         "dependencyCount": len(dependencies),
         "dependentCount": len(dependents),
     }
+    # TASK-1368: a BLOCKED row is Nick's action item; its reason is the point.
+    if task.get("status") == "BLOCKED":
+        compact["blockedReason"] = task.get("blockedReason")
+    return compact
 
 
 def compact_task_list_payload(payload: Any) -> Any:

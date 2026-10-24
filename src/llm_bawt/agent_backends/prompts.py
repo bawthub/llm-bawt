@@ -20,7 +20,8 @@ Conventions
   Python's ``string.Formatter`` validator. Argument lists are described as
   Python kwargs (``tasks_update(task_id=..., status="...")``).
 - Tasks: ``QUEUED → PLANNING → REFINED → IN_PROGRESS → REVIEW → COMPLETED``
-  with ``FAILED`` / ``CANCELLED`` as terminal failure states. Agents NEVER
+  with ``FAILED`` / ``CANCELLED`` as terminal failure states and ``BLOCKED``
+  as an open state waiting on Nick (needs ``blockedReason``). Agents NEVER
   set ``COMPLETED``; only humans do.
 - Steps: ``PENDING → RUNNING → COMPLETED | FAILED | SKIPPED``. Agents own
   the full step lifecycle.
@@ -395,7 +396,8 @@ Base URL: {origin}
 ## Status Lifecycle
 
 Tasks: `QUEUED → PLANNING → REFINED → IN_PROGRESS → REVIEW → COMPLETED`
-       (with `FAILED` and `CANCELLED` as terminal failure states)
+       (with `FAILED` and `CANCELLED` as terminal failure states;
+       `BLOCKED` is an open state waiting on Nick and needs `blockedReason`)
 Steps: `PENDING → RUNNING → COMPLETED | FAILED | SKIPPED`
 
 CRITICAL: Agents set tasks to `REVIEW` when work is done — never

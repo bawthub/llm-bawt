@@ -125,7 +125,9 @@ async def test_catalog_token_budgets():
     # contract stated in-band so agents don't need the reference): 3,680 (+135).
     # TASK-1323: messages_find (cards, facets, handle paging, status set in-band
     # so agents don't need the reference to page or narrow): 3,734 (+54).
-    assert sum(descriptions) <= 3734
+    # TASK-1368: Nick's BLOCKED rule in-band on tasks_create, pointer on
+    # tasks_update (misused BLOCKED pages Nick): 3,797 (+63).
+    assert sum(descriptions) <= 3797, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -153,7 +155,9 @@ async def test_catalog_token_budgets():
     # 10.1): 13,474 (+23).
     # TASK-1323: messages_find (six optional typed args, speaker enum): 13,691
     # (+217). Replaces chained messages_get/search_all calls when locating.
-    assert total <= 13691, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1368: BLOCKED guidance + blocked_reason on tasks_create/update:
+    # 13,796 (+105).
+    assert total <= 13796, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
@@ -188,7 +192,7 @@ async def test_task_and_step_status_guidance_uses_canonical_values():
 
     assert TASK_STATUSES == (
         "QUEUED", "PLANNING", "REFINED", "IN_PROGRESS", "REVIEW",
-        "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED",
+        "COMPLETED", "FAILED", "BUG", "CANCELLED", "DELETED", "BLOCKED",
     )
     tools = {tool.name: tool for tool in await mcp.list_tools()}
     for status in TASK_STATUSES:
@@ -200,6 +204,25 @@ async def test_task_and_step_status_guidance_uses_canonical_values():
         for status in STEP_STATUSES:
             assert status in tools[name].description
         assert "not IN_PROGRESS" in tools[name].description
+
+
+@pytest.mark.anyio
+async def test_blocked_definition_reaches_task_write_tools():
+    # TASK-1368: Nick's BLOCKED definition rides every task-writing surface.
+    from llm_bawt.mcp_server.task_step_types import BLOCKED_DEFINITION
+    from llm_bawt.mcp_server.task_tools import create_task, update_task
+
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    for name, function in (("tasks_create", create_task), ("tasks_update", update_task)):
+        description = tools[name].description
+        assert "blocked_reason" in description and "what Nick must do/decide" in description
+        assert ("Never nits" if name == "tasks_create" else "rules in tasks_create") in description
+        assert BLOCKED_DEFINITION in function.__doc__
+        assert "{blocked_definition}" not in function.__doc__
+        assert "blocked_reason" in tools[name].inputSchema["properties"]
+    for clause in ("only Nick can make", "restart, deploy/ship, credentials", "against Nick's stated intent",
+                   "bot-vs-bot disagreements (Gavel mediates)", "misusing BLOCKED is a process failure"):
+        assert clause in BLOCKED_DEFINITION
 
 
 @pytest.mark.anyio

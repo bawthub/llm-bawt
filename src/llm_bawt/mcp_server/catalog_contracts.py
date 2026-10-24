@@ -9,6 +9,14 @@ from .task_step_types import STEP_STATUSES, TASK_STATUSES
 
 _TASK_STATUS_GUIDE = "|".join(TASK_STATUSES)
 _STEP_STATUS_GUIDE = "|".join(STEP_STATUSES) + "; not IN_PROGRESS"
+# TASK-1368: compact form of task_step_types.BLOCKED_DEFINITION (full text in
+# the tool docstrings and the bawthub-mcp reference).
+_BLOCKED_GUIDE = (
+    "BLOCKED needs blocked_reason (what Nick must do/decide): only his decisions, "
+    "ship/restart/credentials/external deps, or his intent. Never nits or bot disputes."
+)
+# tasks_update is near the 100-token description cap; it points at the rules.
+_BLOCKED_POINTER = "BLOCKED (rare) needs blocked_reason: what Nick must do/decide; rules in tasks_create."
 
 TOOL_SUMMARIES: dict[str, str] = {
     "memory_store": "Store a fact in bot_id's memory; importance is 0–1. Pass your own bot slug.",
@@ -64,8 +72,8 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_reviews_list": "Task reviews, newest first; cursor paginates. Not response.",
     "tasks_reviews_add": "Append review, not response/status. Author: own bot_id; retry: stable idempotency_key.",
     "tasks_associate_current": "Link trusted turn when actually working a task, never from a mention. Supply cuid or TASK-N; unsupported context fails closed.",
-    "tasks_create": "Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn.",
-    "tasks_update": "Patch; own work → REVIEW. Only Nick-requested review/closure permits verified complete REVIEW → COMPLETED. Agents cannot leave BUG. Own bot_id fills missing owner; associate_current_turn links actual work.",
+    "tasks_create": f"Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn. {_BLOCKED_GUIDE}",
+    "tasks_update": f"Patch; own work → REVIEW. Only Nick-requested review/closure permits verified complete REVIEW → COMPLETED. Agents cannot leave BUG. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links actual work.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
     "tasks_delete": "Permanently delete task/steps; prefer tasks_update CANCELLED to retain history.",
     "tasks_add_dependency": "Add task_id prerequisite depends_on_id; cuid/TASK-N. Rejects self/cycles.",

@@ -343,3 +343,39 @@ def test_create_forwards_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert calls[0]["path"] == "/tasks"
     assert calls[0]["json"]["outcome"] == "Users can do X."
+
+
+def test_update_forwards_blocked_reason_and_compact_shows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TASK-1368: blocked_reason passes through as blockedReason; BawtHub owns
+    # validation (required entering BLOCKED, cleared on exit).
+    calls = _capture_patch(monkeypatch)
+    blocked = {**_full_task(), "status": "BLOCKED", "blockedReason": "Approve the migration."}
+
+    async def fake_patch(path: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+        calls.append({"path": path, "json": json, "headers": headers})
+        return blocked
+
+    monkeypatch.setattr(task_tools, "_api_patch", fake_patch)
+    result = _run(task_tools.update_task("TASK-1", status="BLOCKED", blocked_reason="Approve the migration."))
+
+    assert calls[0]["json"] == {"status": "BLOCKED", "blockedReason": "Approve the migration."}
+    assert result["updated"] == ["blockedReason", "status"]
+    assert result["task"]["blockedReason"] == "Approve the migration."
+    # Non-BLOCKED compact rows stay unchanged.
+    assert "blockedReason" not in task_tools._compact_task({**_full_task(), "blockedReason": None})
+
+
+def test_create_forwards_blocked_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_post(path: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"path": path, **kwargs})
+        return _full_task()
+
+    monkeypatch.setattr(task_tools, "_api_post", fake_post)
+    _run(task_tools.create_task("Ship it", status="BLOCKED", blocked_reason="Say ship."))
+    _run(task_tools.create_task("Plain"))
+
+    assert calls[0]["json"]["status"] == "BLOCKED"
+    assert calls[0]["json"]["blockedReason"] == "Say ship."
+    assert "blockedReason" not in calls[1]["json"]

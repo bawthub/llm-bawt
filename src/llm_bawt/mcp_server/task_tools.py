@@ -12,7 +12,7 @@ import httpx
 
 from .server import mcp
 from .task_association import associate_current_task
-from .task_step_types import TASK_STATUSES, TaskStepInput, validate_step_inputs
+from .task_step_types import BLOCKED_DEFINITION, TASK_STATUSES, TaskStepInput, validate_step_inputs
 from .task_api import (
     API_PREFIX as _API_PREFIX,
     api_delete as _api_delete,
@@ -39,7 +39,11 @@ async def list_projects() -> list[dict] | dict:
 
 def _task_status_docs(function):
     """Render the shared enum before FastMCP captures the function docstring."""
-    function.__doc__ = (function.__doc__ or "").replace("{task_statuses}", ", ".join(TASK_STATUSES))
+    function.__doc__ = (
+        (function.__doc__ or "")
+        .replace("{task_statuses}", ", ".join(TASK_STATUSES))
+        .replace("{blocked_definition}", BLOCKED_DEFINITION)
+    )
     return function
 
 
@@ -259,6 +263,7 @@ async def update_task(
     agent_bot_id: str | None = None,
     bot_id: str | None = None,
     associate_current_turn: bool = False,
+    blocked_reason: str | None = None,
 ) -> dict:
     """Update a task's fields. Only provided fields are changed.
 
@@ -281,6 +286,10 @@ async def update_task(
     BUG status is human-locked: you may SET a task to BUG (to flag a defect for
     the user), but you CANNOT move a task OUT of BUG — the server rejects such
     transitions from agents. Only a human can clear BUG status.
+
+    {blocked_definition} Example: status="BLOCKED", blocked_reason="Approve
+    the shared-DB migration, then ship." While BLOCKED, blocked_reason alone
+    updates the reason.
 
     Args:
         task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
@@ -305,6 +314,9 @@ async def update_task(
         associate_current_turn: Also link this trusted current chat turn to the
                 task. Use when claiming/starting ordinary-chat work. The server
                 supplies all correlation IDs; unsupported harnesses fail closed.
+        blocked_reason: What Nick must do or decide. Required with
+                        status="BLOCKED"; rejected unless the task is or becomes
+                        BLOCKED. Cleared automatically when the task leaves BLOCKED.
 
     Returns:
         Compact updated task summary, or error dict. Use tasks_get for full detail.
@@ -331,6 +343,8 @@ async def update_task(
         body["projectId"] = project_id
     if agent_bot_id is not None:
         body["agentBotId"] = agent_bot_id
+    if blocked_reason is not None:
+        body["blockedReason"] = blocked_reason
 
     # REVIEW requires the task to have an owner (server guard
     # reviewTransitionMissingBot). When the task has NO owner, the submitting
@@ -559,6 +573,7 @@ async def regenerate_task(
 
 
 @mcp.tool(name="tasks_create")
+@_task_status_docs
 async def create_task(
     title: str,
     description: str | None = None,
@@ -569,10 +584,13 @@ async def create_task(
     steps: list[TaskStepInput] | None = None,
     bot_id: str | None = None,
     associate_current_turn: bool = False,
+    blocked_reason: str | None = None,
 ) -> dict:
     """Create a new agent task.
 
     Use this to break work into sub-tasks or queue follow-up work.
+
+    {blocked_definition}
 
     Args:
         title: Task title (required).
@@ -581,7 +599,7 @@ async def create_task(
                  (1-3 sentences). Optional; can be filled in later.
         project_id: Assign to a project (cuid). Omit for unassigned.
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE (default MEDIUM).
-        status: Initial status (default QUEUED).
+        status: Initial status (default QUEUED): {task_statuses}.
         steps: Optional initial steps. Each dict needs "title" (str)
                and optional "type": PLAN, READ_FILE, EDIT_FILE, CREATE_FILE,
                DELETE_FILE, RUN_COMMAND, SEARCH, ASK_USER, or REVIEW.
@@ -589,6 +607,8 @@ async def create_task(
         associate_current_turn: Link the newly created task to this trusted
                 current chat session and exact turn immediately after creation.
                 The server supplies all correlation IDs.
+        blocked_reason: What Nick must do or decide; required when
+                        status="BLOCKED" and rejected otherwise.
 
     Returns:
         Created task with generated shortId and, when requested, an association result.
@@ -605,6 +625,8 @@ async def create_task(
         body["outcome"] = outcome
     if project_id is not None:
         body["projectId"] = project_id
+    if blocked_reason is not None:
+        body["blockedReason"] = blocked_reason
     if steps is not None:
         validation_error = validate_step_inputs(steps)
         if validation_error:
