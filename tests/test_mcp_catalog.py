@@ -127,7 +127,9 @@ async def test_catalog_token_budgets():
     # so agents don't need the reference to page or narrow): 3,734 (+54).
     # TASK-1368: Nick's BLOCKED rule in-band on tasks_create, pointer on
     # tasks_update (misused BLOCKED pages Nick): 3,797 (+63).
-    assert sum(descriptions) <= 3797, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1374: visually confirmable REVIEW vs coordinator-verified closure:
+    # 3,819 (+22).
+    assert sum(descriptions) <= 3819, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -157,7 +159,9 @@ async def test_catalog_token_budgets():
     # (+217). Replaces chained messages_get/search_all calls when locating.
     # TASK-1368: BLOCKED guidance + blocked_reason on tasks_create/update:
     # 13,796 (+105).
-    assert total <= 13796, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1374: visually confirmable REVIEW vs coordinator-verified closure:
+    # 13,818 (+22).
+    assert total <= 13818, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
@@ -183,6 +187,17 @@ async def test_catalog_token_budgets():
 def test_call_critical_warnings_stay_inline(name, words):
     for word in words:
         assert word in TOOL_SUMMARIES[name]
+
+
+def test_task_update_closure_guidance_matches_visual_review_policy():
+    from llm_bawt.mcp_server.task_tools import update_task
+
+    for text in (TOOL_SUMMARIES["tasks_update"], update_task.__doc__):
+        assert "REVIEW" in text and "COMPLETED" in text
+        assert "UI/UX" in text and ("Snark or Rook" in text or "Snark/Rook" in text)
+        assert "BUG" in text
+        assert "Nick-requested" not in text
+        assert "REVIEW by default" not in text
 
 
 @pytest.mark.anyio

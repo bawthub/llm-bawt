@@ -269,8 +269,11 @@ async def update_task(
 
     Common patterns:
     - Start work: status="IN_PROGRESS", model_id="claude-opus-4-6"
-    - Finish work: status="REVIEW", response="Summary of what was done",
-      outcome="What now behaves differently, in plain language"
+    - Visually confirmable UI/UX: status="REVIEW", response="Dev URL and exact
+      look steps or screenshot", outcome="Plain-language change"
+    - Other finished work: record review (Tier 0: self-check), attributable
+      pushed commit and test/live check in response; Snark or Rook closes
+      status="COMPLETED" after verifying those receipts.
     - Report failure: status="FAILED", response="What went wrong"
 
     Moving a task to REVIEW requires it to have an owner. You don't need to set
@@ -278,10 +281,12 @@ async def update_task(
     bot_id (your bot), it becomes the owner. bot_id never reassigns an owned
     task; pass agent_bot_id only to deliberately hand it to a different bot.
 
-    IMPORTANT: Submit your own finished work to REVIEW by default. If Nick
-    directly asks you to review and close tasks, you may set verified, complete
-    REVIEW tasks to COMPLETED on his behalf; leave broken or incomplete ones
-    in REVIEW and explain why. This does not permit leaving BUG status.
+    IMPORTANT: REVIEW is only for UI/UX Nick can visually inspect; include a
+    dev URL with exact look steps or a screenshot. For backend, infra, tooling
+    and skills, Snark or Rook verifies the review (Tier 0: self-check), pushed
+    attributable commit and test/live receipt before closing COMPLETED,
+    including their own reviewed work. Leave incomplete work open with its
+    blocker recorded. No agent may move a task out of BUG status.
 
     BUG status is human-locked: you may SET a task to BUG (to flag a defect for
     the user), but you CANNOT move a task OUT of BUG — the server rejects such
@@ -301,7 +306,7 @@ async def update_task(
         description: Updated description / spec.
         outcome: Plain-language behavior change for a non-engineer (1-3
                  sentences, no file names/checklists). Draft when planning;
-                 overwrite with what actually shipped at REVIEW.
+                 overwrite with what actually shipped at REVIEW/COMPLETED.
         priority: URGENT, HIGH, MEDIUM, LOW, or NONE.
         planned: True after writing spec + steps.
         project_id: Move task to a different project (cuid).

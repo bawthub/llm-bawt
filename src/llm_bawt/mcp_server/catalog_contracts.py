@@ -73,7 +73,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_reviews_add": "Append review, not response/status. Author: own bot_id; retry: stable idempotency_key.",
     "tasks_associate_current": "Link trusted turn when actually working a task, never from a mention. Supply cuid or TASK-N; unsupported context fails closed.",
     "tasks_create": f"Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn. {_BLOCKED_GUIDE}",
-    "tasks_update": f"Patch; own work → REVIEW. Only Nick-requested review/closure permits verified complete REVIEW → COMPLETED. Agents cannot leave BUG. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links actual work.",
+    "tasks_update": f"Patch; UI/UX Nick can see → REVIEW with dev URL/steps. Other work: Snark/Rook close COMPLETED after review (Tier 0: self-check), attributable push and test/live receipt. BUG is human-locked. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links actual work.",
     "initiative_state": "Read, acquire an expiring lease, or CAS-checkpoint recurring task state; trusted turn identity owns writes and stale owners conflict.",
     "tasks_delete": "Permanently delete task/steps; prefer tasks_update CANCELLED to retain history.",
     "tasks_add_dependency": "Add task_id prerequisite depends_on_id; cuid/TASK-N. Rejects self/cycles.",
