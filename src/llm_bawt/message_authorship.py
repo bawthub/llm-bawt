@@ -105,11 +105,26 @@ class EffectiveAuthorRule:
         user_pin="\n            AND m.author_entity_id = :authority_user",
     )
     _operator_case = _CASE_TEMPLATE.format(bot="p.bot_id", user_pin="")
+    _aggregate_case = _CASE_TEMPLATE.format(
+        bot="p.bot_id",
+        user_pin="\n            AND m.author_entity_id = :authority_user",
+    )
 
     @classmethod
     def operator_case(cls) -> str:
         """The operator-mode rendering of the same template (see class doc)."""
         return cls._operator_case
+
+    @classmethod
+    def aggregate_case(cls) -> str:
+        """``sql_case`` over many partitions at once (TASK-1323 ``messages_find``).
+
+        The bot branch compares against ``p.bot_id`` (the canonical slug the
+        positive policy maps to ``m.bot_id = p.partition``); the human branch
+        keeps the trusted ``:authority_user`` pin; deliveries keep the bound
+        ``:authority_authors`` set.
+        """
+        return cls._aggregate_case
 
 
 class LegacyAuthorResolver:

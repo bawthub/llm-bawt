@@ -41,6 +41,9 @@ UNSCOPED_MUTATION_TOOLS = frozenset({
     "bots_send_message", "bots_route_message", "agent_context_reset", "agent_context_compact",
     "bots_delivery_cancel",
 })
+# TASK-1323: resolves BotAccess per call and narrows its own scope. Outside
+# the guard on purpose: an excluded bot filter must not answer access_denied.
+SCOPED_RETRIEVAL_TOOLS = frozenset({"messages_find"})
 GUARDED_TOOLS = BOT_TARGET_TOOLS | AGGREGATE_TOOLS | SPECIAL_TOOLS | PARTICIPANT_TOOLS
 CLASSIFIED_TOOLS = (GUARDED_TOOLS | SELF_NAMESPACE_TOOLS | NON_HISTORY_TOOLS
-                    | UNSCOPED_MUTATION_TOOLS)
+                    | UNSCOPED_MUTATION_TOOLS | SCOPED_RETRIEVAL_TOOLS)

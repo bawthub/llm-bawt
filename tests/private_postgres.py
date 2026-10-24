@@ -126,6 +126,7 @@ def private_module_db(private_pg):
 @pytest.fixture(scope="module")
 def private_app_pg(private_pg, private_module_db):
     """Select the module's private DB, verify identity, then app-bootstrap."""
+    from llm_bawt import prompt_registry
     from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
     from llm_bawt.service.turn_logs import TurnLogStore
     from llm_bawt.utils import db
@@ -137,6 +138,10 @@ def private_app_pg(private_pg, private_module_db):
     # Production's URL builder is for TCP hosts, not Unix-socket test paths.
     # Patch only in this pytest module's lifetime; no production code changes.
     patched.setattr(db, "build_postgres_url", lambda config: url)
+    # get_prompt_resolver() caches one resolver per process, bound to the
+    # Config (and module DB) of whichever module called it first. Under xdist
+    # a later module on the same worker would read a dropped database.
+    patched.setattr(prompt_registry, "_DEFAULT_PROMPT_RESOLVER", None)
     patched.setenv("LLM_BAWT_POSTGRES_HOST", str(socket))
     patched.setenv("LLM_BAWT_POSTGRES_PORT", PORT)
     patched.setenv("LLM_BAWT_POSTGRES_USER", "test_user")

@@ -123,7 +123,9 @@ async def test_catalog_token_budgets():
     # TASK-1233: ops_quiesce_ack (held turns answer a quiesce): 3,545 (+31).
     # TASK-1281: working_memory_list/create/update (CAS, idempotency and cap
     # contract stated in-band so agents don't need the reference): 3,680 (+135).
-    assert sum(descriptions) <= 3680
+    # TASK-1323: messages_find (cards, facets, handle paging, status set in-band
+    # so agents don't need the reference to page or narrow): 3,734 (+54).
+    assert sum(descriptions) <= 3734
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -149,7 +151,9 @@ async def test_catalog_token_budgets():
     # (+768). Typed enums and Ref reject bad writes at the schema boundary.
     # TASK-1281: sessions_rotate include_working_memory flag (WORKING_MEMORY.md
     # 10.1): 13,474 (+23).
-    assert total <= 13474, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1323: messages_find (six optional typed args, speaker enum): 13,691
+    # (+217). Replaces chained messages_get/search_all calls when locating.
+    assert total <= 13691, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
