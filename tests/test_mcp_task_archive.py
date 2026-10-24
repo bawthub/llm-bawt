@@ -85,8 +85,14 @@ def _status_error(status: int, body: dict[str, Any]) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError("boom", request=request, response=httpx.Response(status, json=body, request=request))
 
 
-def test_archiving_an_open_task_returns_the_servers_400(monkeypatch: pytest.MonkeyPatch) -> None:
-    error = _status_error(400, {"error": "Only finished tasks can be archived"})
+REFUSED = "Only COMPLETED, FAILED, CANCELLED tasks can be archived (status is QUEUED)"
+
+
+# 400: the resulting status can't be archived. 409: the status changed between
+# BawtHub's check and its row lock, so the caller must re-read, not retry.
+@pytest.mark.parametrize("status", [400, 409])
+def test_archive_refusals_pass_through_unchanged(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    error = _status_error(status, {"error": REFUSED})
 
     async def fake_patch(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise error
@@ -95,7 +101,7 @@ def test_archiving_an_open_task_returns_the_servers_400(monkeypatch: pytest.Monk
 
     result = _run(task_tools.update_task("TASK-7", status="QUEUED", archived=True, bot_id="al"))
 
-    assert result == {"error": "Only finished tasks can be archived", "status": 400}
+    assert result == {"error": REFUSED, "status": status}
 
 
 @pytest.mark.parametrize("archived", [True, False])

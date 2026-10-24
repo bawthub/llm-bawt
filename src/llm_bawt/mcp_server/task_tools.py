@@ -116,8 +116,8 @@ class _BoardState:
 
 _FOCUS = _BoardState(name="focus", patch_key="focus", row_key="focusRank", echo_key="focusFilter")
 # TASK-1380: archiving takes a finished task off the board. BawtHub allows it
-# only for a COMPLETED/FAILED/CANCELLED/DELETED (resulting) status and clears it
-# when the task reopens; the default list still includes archived tasks.
+# only for a COMPLETED/FAILED/CANCELLED (resulting) status and clears it on any
+# other status, DELETED included; the default list still includes archived tasks.
 _ARCHIVE = _BoardState(name="archive", patch_key="archived", row_key="archivedAt", echo_key="archiveFilter")
 
 
@@ -446,7 +446,8 @@ async def update_task(
 
     Archive takes Done tasks off the board when the user says "archive the
     done tasks": archived=True works only when the task is or becomes
-    COMPLETED/FAILED/CANCELLED/DELETED (otherwise 400); reopening a task
+    COMPLETED/FAILED/CANCELLED (otherwise 400; 409 if its status changed
+    meanwhile, so re-read before retrying); reopening or deleting a task
     unarchives it. Archived tasks stay in tasks_list unless archived=False.
 
     Args:
