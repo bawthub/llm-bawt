@@ -109,6 +109,9 @@ def message_parent_indexes() -> list[str]:
         f"CREATE INDEX IF NOT EXISTS idx_{MESSAGES_PARENT}_session_ts ON {MESSAGES_PARENT}(session_id, timestamp DESC)",
         f"CREATE INDEX IF NOT EXISTS idx_{MESSAGES_PARENT}_processed ON {MESSAGES_PARENT}(processed)",
         f"CREATE INDEX IF NOT EXISTS {MESSAGES_PARENT}_content_trgm_idx ON {MESSAGES_PARENT} USING gin (content gin_trgm_ops)",
+        # TASK-1323: word/identifier FTS. The expression must match the
+        # queries' to_tsvector('english', content) exactly to be usable.
+        f"CREATE INDEX IF NOT EXISTS {MESSAGES_PARENT}_content_fts_idx ON {MESSAGES_PARENT} USING gin (to_tsvector('english', content))",
     ]
 
 
