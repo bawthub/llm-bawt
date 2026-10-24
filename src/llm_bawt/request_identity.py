@@ -207,7 +207,9 @@ class RequestIdentityResolver:
         metadata.pop("_request_digest", None)
         if producer == "bot" and explicit:
             # A caller-pinned UUID is a promise about one request: replaying
-            # it with different content is a conflict, not a duplicate.
+            # it with different content is a conflict, not a duplicate. The
+            # digest covers the execution payload only; task_id, project_id
+            # and metadata are bookkeeping and are not compared.
             metadata["_request_digest"] = self._digest(submitted_payload)
         if producer == "ordinary":
             ordinary = dict(metadata.get("ordinary_chat") or {})

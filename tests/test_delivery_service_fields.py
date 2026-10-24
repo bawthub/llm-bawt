@@ -120,8 +120,38 @@ def test_session_must_belong_to_the_target_and_user(delivery_route):
     delivery_route.dispatcher.store.enqueue.assert_not_called()
 
 
+@pytest.mark.parametrize("status,owned", [("active", True), ("archived", True), ("deleted", False)])
+def test_ownership_query_admits_archived_task_threads_but_not_deleted(monkeypatch, status, owned):
+    """Born-archived task sessions are the dispatch target; deleted ones never are."""
+    rows = [{"id": S, "bot_id": "fixture-target", "user_id": "fixture-user", "status": status}]
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params):
+            query = str(sql)
+            assert "status <> 'deleted'" in query
+            match = [r for r in rows if r["id"] == params["id"] and r["bot_id"] == params["bot"]
+                     and r["user_id"] == params["user"] and r["status"] != "deleted"]
+            return SimpleNamespace(first=lambda: match[0] if match else None)
+
+    engine = SimpleNamespace(connect=Conn)
+    monkeypatch.setattr(route, "_dispatcher", lambda: SimpleNamespace(store=SimpleNamespace(engine=engine)))
+    if owned:
+        route._require_owned_session(S, "fixture-target", "fixture-user")
+    else:
+        with pytest.raises(HTTPException) as error:
+            route._require_owned_session(S, "fixture-target", "fixture-user")
+        assert error.value.status_code == 404
+
+
 @pytest.mark.parametrize("kwargs", [
     {"session_id": S, "prefer_steer": True},
+    {"user_message_id": U, "prefer_steer": True},
     {"session_id": S, "session_policy": "reset_retain_history"},
     {"session_id": S, "reset_session_before_delivery": True},
     {"user_message_id": U, "session_policy": "reset_without_history"},
@@ -148,11 +178,22 @@ def test_dispatch_to_a_chat_bot_is_a_typed_error_not_a_failed_row(delivery_route
     delivery_route.dispatcher.store.enqueue.assert_not_called()
 
 
-def test_dispatch_to_an_unknown_bot_is_a_typed_error(delivery_route):
+@pytest.mark.parametrize("pinned", [{"augment_memory": False}, {"user_message_id": U}])
+def test_dispatch_to_an_unknown_bot_is_a_typed_error(delivery_route, pinned):
     with pytest.raises(HTTPException) as error:
-        _send(_body(target_bot_id="nobody", augment_memory=False))
+        _send(_body(target_bot_id="nobody", **pinned))
     assert error.value.status_code == 404
     assert error.value.detail["error"] == "unknown_target"
+    delivery_route.dispatcher.store.enqueue.assert_not_called()
+
+
+def test_pinned_trigger_alone_to_a_chat_bot_does_not_burn_the_uuid(delivery_route):
+    delivery_route.bot.agent_backend = None
+    delivery_route.bot.harness = None
+    with pytest.raises(HTTPException) as error:
+        _send(_body(user_message_id=U))
+    assert error.value.detail["error"] == "target_not_durable"
+    delivery_route.dispatcher.store.enqueue.assert_not_called()
 
 
 def test_pinned_trigger_skips_the_automatic_context_reset(delivery_route, monkeypatch):

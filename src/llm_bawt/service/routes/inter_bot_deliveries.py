@@ -108,13 +108,17 @@ def _refuse_bot_privileged(request: Request | None, fields: list[str]) -> None:
 
 
 def _require_owned_session(session_id: str, bot_id: str, user_id: str) -> None:
-    """Never deliver into another bot's or user's thread."""
+    """Never deliver into another bot's or user's thread, or a deleted one.
+
+    Archived threads are allowed: task dispatch mints them born-archived.
+    """
     from sqlalchemy import text as sa_text
 
     engine = _dispatcher().store.engine
     with engine.connect() as conn:
         owned = conn.execute(sa_text(
             "SELECT 1 FROM sessions WHERE id=:id AND bot_id=:bot AND user_id=:user"
+            " AND status <> 'deleted'"
         ), {"id": session_id, "bot": bot_id, "user": user_id}).first()
     if owned is None:
         raise HTTPException(status_code=404, detail={
@@ -219,11 +223,14 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
     target_bot = bots.get_bot(target)
     target_exists = target_bot is not None
     durable_capable = bool(target_bot and durable_agent_backend(target_bot))
-    if privileged and not target_exists:
+    # A service dispatch: fail typed before admission rather than leaving a
+    # FAILED row that also burns the caller's pinned UUID.
+    service_dispatch = bool(privileged) or body.user_message_id is not None
+    if service_dispatch and not target_exists:
         raise HTTPException(status_code=404, detail={
             "error": "unknown_target", "detail": f"Unknown target bot {target!r}",
         })
-    if privileged and not durable_capable:
+    if service_dispatch and not durable_capable:
         # Service dispatch needs a durable agent turn; say so instead of
         # leaving a FAILED row the caller would have to discover.
         raise HTTPException(status_code=422, detail={
@@ -238,9 +245,11 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
     for pinned in ("session_id", "user_message_id"):
         if getattr(body, pinned) is not None and reset_requested:
             raise HTTPException(status_code=422, detail=f"{pinned} cannot be combined with a session reset")
-    if body.session_id is not None and body.prefer_steer:
-        # Steering joins whatever turn is running, in the active thread.
-        raise HTTPException(status_code=422, detail="session_id requires prefer_steer=false")
+    # Steering joins whatever turn is running, in the active thread, whose
+    # capability signs that turn's trigger, not the caller's pinned UUID.
+    for pinned in ("session_id", "user_message_id"):
+        if getattr(body, pinned) is not None and body.prefer_steer:
+            raise HTTPException(status_code=422, detail=f"{pinned} requires prefer_steer=false")
     try:
         delivery_user = resolve_delivery_user(
             get_service().config,
