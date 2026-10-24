@@ -129,7 +129,7 @@ async def test_catalog_token_budgets():
     # tasks_update (misused BLOCKED pages Nick): 3,797 (+63).
     # TASK-1374: visually confirmable REVIEW vs coordinator-verified closure:
     # 3,819 (+22).
-    # TASK-1380: tasks_list names Nick's focus list and where to change it:
+    # TASK-1380: tasks_list names the user's focus list and where to change it:
     # 3,834 (+15). tasks_update stays at 97; its focus args are typed.
     assert sum(descriptions) <= 3834, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
@@ -165,7 +165,7 @@ async def test_catalog_token_budgets():
     # 13,818 (+22).
     # TASK-1380: tasks_update focus/focus_position/focus_anchor (typed on/off
     # and placement enums, short field descriptions) + tasks_list focused:
-    # 13,982 (+164). One chat call answers or changes Nick's focus.
+    # 13,982 (+164). One chat call answers or changes the user's focus.
     assert total <= 13982, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 

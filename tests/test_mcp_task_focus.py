@@ -162,21 +162,34 @@ def test_compact_rows_carry_rank_only_when_focused() -> None:
     assert "focusRank" not in unfocused and "focusedAt" not in unfocused
 
 
-def _capture_list(monkeypatch: pytest.MonkeyPatch, tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
+_ABSENT = object()
+
+
+def _capture_list(
+    monkeypatch: pytest.MonkeyPatch, tasks: list[dict[str, Any]], focus_filter: Any = _ABSENT
+) -> list[dict[str, str]]:
+    """Fake GET /tasks; focus_filter is BawtHub's echoed ``focusFilter`` (absent = pre-focus server)."""
     seen: list[dict[str, str]] = []
 
     async def fake_get(path: str, params: dict | None = None) -> dict[str, Any]:
         assert path == "/tasks"
         seen.append(dict(params or {}))
-        return {"tasks": tasks, "total": len(tasks)}
+        payload: dict[str, Any] = {"tasks": tasks, "total": len(tasks)}
+        if focus_filter is not _ABSENT:
+            payload["focusFilter"] = focus_filter
+        return payload
 
     monkeypatch.setattr(task_tools, "_api_get", fake_get)
     return seen
 
 
+def _legacy_row(**extra: Any) -> dict[str, Any]:
+    return {key: value for key, value in _task(**extra).items() if not key.startswith("focus")}
+
+
 def test_focused_list_asks_for_rank_order_and_keeps_it(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [_task(id="b", shortId="TASK-2", focusRank=1), _task(id="a", shortId="TASK-1", focusRank=2)]
-    seen = _capture_list(monkeypatch, rows)
+    seen = _capture_list(monkeypatch, rows, focus_filter=True)
 
     result = _run(task_tools.list_tasks(focused=True))
 
@@ -185,7 +198,7 @@ def test_focused_list_asks_for_rank_order_and_keeps_it(monkeypatch: pytest.Monke
 
 
 def test_unfocused_list_is_the_backlog_by_recency(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen = _capture_list(monkeypatch, [_task(focusRank=None, focusedAt=None)])
+    seen = _capture_list(monkeypatch, [_task(focusRank=None, focusedAt=None)], focus_filter=False)
 
     result = _run(task_tools.list_tasks(focused=False, status="QUEUED"))
 
@@ -193,11 +206,51 @@ def test_unfocused_list_is_the_backlog_by_recency(monkeypatch: pytest.MonkeyPatc
     assert "focusRank" not in result["tasks"][0]
 
 
-def test_focused_list_from_a_server_without_focus_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    legacy = {key: value for key, value in _task().items() if not key.startswith("focus")}
-    _capture_list(monkeypatch, [legacy])
+@pytest.mark.parametrize("focused", [True, False])
+def test_an_empty_list_from_a_focus_server_is_truly_empty(monkeypatch: pytest.MonkeyPatch, focused: bool) -> None:
+    _capture_list(monkeypatch, [], focus_filter=focused)
 
-    result = _run(task_tools.list_tasks(focused=True))
+    assert _run(task_tools.list_tasks(focused=focused, status="BLOCKED")) == {
+        "tasks": [],
+        "total": 0,
+        "focusFilter": focused,
+    }
+
+
+@pytest.mark.parametrize(
+    ("focused", "rows", "focus_filter"),
+    [
+        # Pre-focus BawtHub: no focusFilter echo, whatever the rows look like.
+        (True, [], _ABSENT),
+        (False, [], _ABSENT),
+        (True, [_task(focusRank=1)], _ABSENT),
+        (False, [_legacy_row()], _ABSENT),
+        # The echo must be exactly the boolean that was sent.
+        (True, [_task(focusRank=1)], None),
+        (True, [_task(focusRank=1)], "true"),
+        (False, [_task(focusRank=None)], True),
+        # Rows must agree with the filter and carry the focusRank key.
+        (True, [_task(focusRank=1), _task(focusRank=None)], True),
+        (False, [_task(focusRank=3)], False),
+        (False, [_legacy_row()], False),
+    ],
+)
+def test_a_focus_list_bawthub_did_not_confirm_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, focused: bool, rows: list[dict[str, Any]], focus_filter: Any
+) -> None:
+    _capture_list(monkeypatch, rows, focus_filter=focus_filter)
+
+    result = _run(task_tools.list_tasks(focused=focused))
 
     assert set(result) == {"error"}
     assert "does not support focus" in result["error"]
+    assert f"focused={str(focused).lower()}" in result["error"]
+
+
+def test_unfiltered_list_needs_no_focus_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_list(monkeypatch, [_legacy_row()])
+
+    result = _run(task_tools.list_tasks())
+
+    assert seen == [{"limit": "20", "sort": "updated"}]
+    assert result["tasks"][0]["shortId"] == "TASK-7"

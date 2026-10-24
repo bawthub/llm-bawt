@@ -30,7 +30,7 @@ from .task_api import (
 
 logger = logging.getLogger(__name__)
 
-# TASK-1380: Nick's focus list. BawtHub owns the ranks; a caller names a
+# TASK-1380: the user's focus list. BawtHub owns the ranks; a caller names a
 # placement and the server rewrites ranks 1..n in the same transaction as the
 # rest of the PATCH. Any actor may focus or reorder; BawtHub records who did.
 FocusAction = Literal["on", "off"]
@@ -83,10 +83,19 @@ def _patch_error(error: httpx.HTTPStatusError) -> dict:
 _FOCUS_UNSUPPORTED = "The BawtHub task API does not support focus yet (no focusRank in its response)"
 
 
-def _rows_are_focused(payload: Any) -> bool:
-    tasks = payload.get("tasks") if isinstance(payload, dict) else None
+def _focus_filter_applied(payload: Any, focused: bool) -> bool:
+    """True only when BawtHub confirms it applied the focus filter we sent.
+
+    The list envelope echoes the applied filter as ``focusFilter`` (also on an
+    empty list, where row checks prove nothing); every row carries a
+    ``focusRank`` key whose nullness must match the filter.
+    """
+    if not isinstance(payload, dict) or payload.get("focusFilter") is not focused:
+        return False
+    tasks = payload.get("tasks")
     return isinstance(tasks, list) and all(
-        isinstance(task, dict) and task.get("focusRank") is not None for task in tasks
+        isinstance(task, dict) and "focusRank" in task and (task["focusRank"] is not None) is focused
+        for task in tasks
     )
 
 
@@ -121,7 +130,7 @@ async def list_tasks(
 
     Use this to find tasks by status, project, or keyword search.
     Returns tasks sorted by most recently updated, except focused=true, which
-    returns Nick's focus list in rank order (focusRank 1 first).
+    returns the user's focus list in rank order (focusRank 1 first).
 
     Args:
         status: One task status: {task_statuses}. No comma lists.
@@ -160,10 +169,10 @@ async def list_tasks(
         payload = await _api_get("/tasks", params=params)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
-    if focused and not _rows_are_focused(payload):
+    if focused is not None and not _focus_filter_applied(payload, focused):
         # A BawtHub without focus support ignores the filter and returns every
-        # task by recency; never present that as Nick's focus list.
-        return {"error": f"{_FOCUS_UNSUPPORTED}; the focus list was not read."}
+        # task by recency; never present that as the focus list or backlog.
+        return {"error": f"{_FOCUS_UNSUPPORTED}; the focused={str(focused).lower()} list was not read."}
     return _compact_task_list_payload(payload)
 
 
@@ -346,7 +355,7 @@ async def update_task(
     blocked_reason: str | None = None,
     focus: Annotated[
         FocusAction | None,
-        Field(description="Nick's focus list: on (default bottom; a focused task stays put) or off."),
+        Field(description="User's focus list: on (default bottom; a focused task stays put) or off."),
     ] = None,
     focus_position: Annotated[
         FocusPosition | None,
@@ -388,9 +397,9 @@ async def update_task(
     the shared-DB migration, then ship." While BLOCKED, blocked_reason alone
     updates the reason.
 
-    Focus is Nick's ordered list of work he chose to get done. When he says
-    "focus X", "put Y first" or "drop Z", set it here in one call: any bot or
-    user may, and BawtHub records who did. Examples: focus="on" (append at the
+    Focus is the user's ordered list of work they chose to get done. When
+    they say "focus X", "put Y first" or "drop Z", set it here in one call:
+    any bot or user may, and BawtHub records who did. Examples: focus="on" (append at the
     bottom), focus_position="top", focus_position="after",
     focus_anchor="TASK-42", focus="off". A task that is or becomes
     COMPLETED/FAILED/CANCELLED/DELETED can't be focused (409); the server also
