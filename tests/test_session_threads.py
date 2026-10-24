@@ -37,10 +37,13 @@ class _Bridge(ChatStreamingBridgeMixin):
 
     def __init__(self, rotate_result: bool = True):
         self.rotate_calls: list[str] = []
+        self.rotate_modes: list[str] = []
         self._rotate_result = rotate_result
 
-    def _rotate_chat_session(self, llm_bawt, bot_id: str) -> bool:  # type: ignore[override]
+    def _rotate_chat_session(self, llm_bawt, bot_id: str, *,  # type: ignore[override]
+                             working_memory_mode: str) -> bool:
         self.rotate_calls.append(bot_id)
+        self.rotate_modes.append(working_memory_mode)
         return self._rotate_result
 
 
@@ -73,6 +76,8 @@ class TestAgentNewRotationGate:
         b = _Bridge()
         assert b._maybe_rotate_agent_session(_llm(), "byte", "  /new please") is True
         assert b.rotate_calls == ["byte"]
+        # An undelivered human /new pins working memory (N1).
+        assert b.rotate_modes == ["pinned"]
 
     def test_empty_prompt_is_safe(self):
         b = _Bridge()
@@ -105,7 +110,8 @@ def test_chat_new_refuses_false_confirmation_and_follow_up(monkeypatch, command)
         NewSessionExecution.prepare_chat(
             b, _llm(backend), request, bot_id="byte", user_id="owner", user_prompt=command,
         )
-    assert calls == [{"idempotency_key": "failed-reset"}]
+    # No durable dispatcher on this bare host: the mode resolves to pinned.
+    assert calls == [{"idempotency_key": "failed-reset", "working_memory_mode": "pinned"}]
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -115,12 +121,14 @@ def test_chat_new_refuses_false_confirmation_and_follow_up(monkeypatch, command)
 class TestChatRotation:
     def test_no_backend_returns_false_for_legacy_fallback(self):
         b = ChatStreamingBridgeMixin()
-        assert b._rotate_chat_session(_llm(backend=None), "nova") is None  # TASK-257: falsy, not False
+        assert b._rotate_chat_session(_llm(backend=None), "nova",
+                                      working_memory_mode="pinned") is None  # TASK-257: falsy, not False
 
     def test_rotate_failure_returns_false(self):
         backend = SimpleNamespace(rotate_session=lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom")))
         b = ChatStreamingBridgeMixin()
-        assert b._rotate_chat_session(_llm(backend=backend), "nova") is None  # TASK-257: falsy, not False
+        assert b._rotate_chat_session(_llm(backend=backend), "nova",
+                                      working_memory_mode="pinned") is None  # TASK-257: falsy, not False
 
     def test_success_rotates_invalidates_and_keeps_only_summaries(self):
         options = []
@@ -134,8 +142,10 @@ class TestChatRotation:
             SimpleNamespace(role="assistant", content="b"),
         ]
         b = ChatStreamingBridgeMixin()
-        assert b._rotate_chat_session(llm, "nova") == "new-session-id"  # TASK-257: returns the new id
-        assert options == [{"accept_pointer": True}]
+        assert b._rotate_chat_session(
+            llm, "nova", working_memory_mode="suppressed",
+        ) == "new-session-id"  # TASK-257: returns the new id
+        assert options == [{"accept_pointer": True, "working_memory_mode": "suppressed"}]
         assert invalidated == [True]
         assert [m.role for m in llm.history_manager.messages] == ["summary"]
 
@@ -148,7 +158,7 @@ class TestChatRotation:
                             lambda *args, **kwargs: events.append((args, kwargs)))
         for _ in range(2):
             assert bridge._rotate_chat_session(
-                _llm(backend), "fixture", idempotency_key=key,
+                _llm(backend), "fixture", idempotency_key=key, working_memory_mode="pinned",
             ) == "successor"
         assert len(events) == (0 if key else 2)
 
@@ -281,7 +291,7 @@ class TestRegistryInvariantsLiveDB:
         bot, make = live_managers["bot"], live_managers["make"]
         m = make("nick")
         old = m.get_or_create_active_session(bot_id=bot, user_id="nick")
-        new = m.rotate_session(bot_id=bot, user_id="nick")
+        new = m.rotate_session(bot_id=bot, user_id="nick", working_memory_mode="pinned")
         assert new != old
         rows = _active_rows(m, bot, "nick")
         assert [r[0] for r in rows] == [new]
@@ -291,7 +301,7 @@ class TestRegistryInvariantsLiveDB:
         bot, make = live_managers["bot"], live_managers["make"]
         m = make("nick")
         current = m.get_or_create_active_session(bot_id=bot, user_id="nick")
-        newer = m.rotate_session(bot_id=bot, user_id="nick")
+        newer = m.rotate_session(bot_id=bot, user_id="nick", working_memory_mode="pinned")
         assert m.activate_session(current, bot_id=bot, user_id="nick") is True
         rows = _active_rows(m, bot, "nick")
         assert [r[0] for r in rows] == [current]
@@ -322,7 +332,7 @@ class TestRegistryInvariantsLiveDB:
         bot, make = live_managers["bot"], live_managers["make"]
         m = make("lc1")
         old = m.get_or_create_active_session(bot_id=bot, user_id="lc1")
-        m.rotate_session(bot_id=bot, user_id="lc1")
+        m.rotate_session(bot_id=bot, user_id="lc1", working_memory_mode="pinned")
         row = m.get_session(old)
         assert row["status"] == "archived"
         assert row["archived_at"] is not None
@@ -332,7 +342,7 @@ class TestRegistryInvariantsLiveDB:
         bot, make = live_managers["bot"], live_managers["make"]
         m = make("lc2")
         old = m.get_or_create_active_session(bot_id=bot, user_id="lc2")
-        m.rotate_session(bot_id=bot, user_id="lc2")
+        m.rotate_session(bot_id=bot, user_id="lc2", working_memory_mode="pinned")
         assert m.activate_session(old, bot_id=bot, user_id="lc2") is True
         row = m.get_session(old)
         assert row["status"] == "active"
@@ -343,7 +353,7 @@ class TestRegistryInvariantsLiveDB:
         bot, make = live_managers["bot"], live_managers["make"]
         m = make("lc3")
         doomed = m.get_or_create_active_session(bot_id=bot, user_id="lc3")
-        m.rotate_session(bot_id=bot, user_id="lc3")
+        m.rotate_session(bot_id=bot, user_id="lc3", working_memory_mode="pinned")
         assert m.set_session_status(doomed, "deleted") is True
         default_ids = [r["id"] for r in m.list_sessions(bot_id=bot, user_id="lc3")]
         assert doomed not in default_ids, "deleted thread leaked into default list"
@@ -373,7 +383,7 @@ class TestRegistryInvariantsLiveDB:
         bot, make = live_managers["bot"], live_managers["make"]
         m = make("lc5")
         sid = m.get_or_create_active_session(bot_id=bot, user_id="lc5")
-        m.rotate_session(bot_id=bot, user_id="lc5")
+        m.rotate_session(bot_id=bot, user_id="lc5", working_memory_mode="pinned")
         # Simulate a row written by a pre-TASK-250 process.
         with m._backend.engine.begin() as conn:
             conn.execute(

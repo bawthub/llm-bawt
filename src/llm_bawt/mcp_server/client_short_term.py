@@ -136,11 +136,12 @@ class _MCPShortTermManager:
         return self._memory_client.get_or_create_active_session()
 
     def rotate_session(
-        self, idempotency_key: str | None = None, *, accept_pointer: bool = False,
+        self, idempotency_key: str | None = None, *, working_memory_mode: str,
+        accept_pointer: bool = False,
     ) -> str | None:
         """Rotate the active thread; accepted /new stamps the bot-wide pointer."""
         return self._memory_client.rotate_session(
-            accept_pointer=accept_pointer,
+            accept_pointer=accept_pointer, working_memory_mode=working_memory_mode,
             **({"idempotency_key": idempotency_key} if idempotency_key else {})
         )
 

@@ -147,7 +147,9 @@ async def test_catalog_token_budgets():
     # TASK-1281: working_memory_list/create/update with the design §6.1 typed
     # fields (status/clear enums, typed Ref objects, CAS revision): 13,451
     # (+768). Typed enums and Ref reject bad writes at the schema boundary.
-    assert total <= 13451, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1281: sessions_rotate include_working_memory flag (WORKING_MEMORY.md
+    # 10.1): 13,474 (+23).
+    assert total <= 13474, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

@@ -103,6 +103,7 @@ class NewSessionExecution:
             )
         successor = service._rotate_chat_session(
             llm_bawt, bot_id, idempotency_key=delivery_id,
+            working_memory_mode=NewSessionExecution.working_memory_mode(service, delivery_id),
         )
         if successor != SessionResetLineage.delivery_successor_id(delivery_id):
             raise RuntimeError("chat /new did not bind its keyed successor")
@@ -110,6 +111,28 @@ class NewSessionExecution:
             session_id=successor,
             follow_up=NewSessionExecution.typed_follow_up(user_prompt),
         )
+
+    @staticmethod
+    def working_memory_mode(service: Any, delivery_id: str | None) -> str:
+        """The successor mode of a durable /new, from its own persisted intent.
+
+        Read like ``scheduled_history_scope``: only the server-stamped
+        ``new_session_intent`` decides (docs/WORKING_MEMORY.md 10.1), never a
+        request field. A /new without a delivery, or a bare harness client
+        without a durable store, is a human /new and pins (N1).
+        """
+        from ...working_memory.session_state import PINNED
+        from .lifecycle import NewSessionLifecycle
+
+        if not delivery_id:
+            return PINNED
+        dispatcher = getattr(service, "_inter_bot_dispatcher", None)
+        if dispatcher is None:
+            return PINNED
+        record = dispatcher.store.get(delivery_id)
+        if record is None:
+            raise ValueError("durable /new delivery is missing")
+        return NewSessionLifecycle.working_memory_mode(record.metadata, record.session_policy)
 
     @staticmethod
     def scheduled_history_scope(service: Any, delivery_id: str | None) -> str | None:

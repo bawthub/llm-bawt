@@ -56,9 +56,16 @@ async def get_or_create_active_session(
 async def rotate_session(
     bot_id: str, user_id: str | None = None,
     key: str = "", accept_pointer: bool = False,
+    include_working_memory: bool | None = None,
 ) -> str:
-    """Archive the active session; accepted /new stamps the bot pointer."""
+    """Archive the active session; accepted /new stamps the bot pointer.
+
+    include_working_memory=false suppresses working memory in the successor.
+    """
+    from ..working_memory.session_state import mode_from_flag
+
     return await _get_storage().rotate_session(
         bot_id=bot_id, user_id=user_id, accept_pointer=accept_pointer,
+        working_memory_mode=mode_from_flag(include_working_memory),
         **({"idempotency_key": key} if key else {}),
     )

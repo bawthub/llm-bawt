@@ -122,6 +122,9 @@ def test_runtime_switch_moves_only_pointed_owner_not_last_user(engine):
     metadata = json.loads(fresh["session_metadata"])
     assert metadata["context_lifecycle"]["action"] == RUNTIME_SWITCH_SOURCE
     assert "agent_session_keys" not in metadata
+    # A runtime switch is not a suppression request (WORKING_MEMORY.md 10.1).
+    for successor in successors.values():
+        assert json.loads(rows(engine, id=successor)[0]["session_metadata"])["working_memory"] == {"mode": "pinned"}
 
 
 @pytest.mark.parametrize("selected", [None, "archived"])

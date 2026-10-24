@@ -20,7 +20,7 @@ def rotate(conn):
     return SessionResetLineage.rotate(
         None, connection=conn, bot_id="fixture", user_id="other-user",
         new_id="successor", idempotency_key="delivery-fixture",
-        accept_pointer=True,
+        accept_pointer=True, working_memory_mode="pinned",
         context_lifecycle={"action": "reset_retain_history", "old_session_id": "second"},
     )
 

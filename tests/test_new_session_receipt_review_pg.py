@@ -29,6 +29,7 @@ def pending_receipt(rig, real_lifecycle):
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=rig.bot, user_id=rig.user,
             new_id=successor, idempotency_key=claim.id, accept_pointer=True,
+            working_memory_mode="pinned",
         )
         conn.execute(text("""
             INSERT INTO messages (bot_id, id, role, content, timestamp,
@@ -189,7 +190,8 @@ def test_delayed_old_event_never_rewinds_a_newer_pointer(pending_receipt):
     newer = str(uuid.uuid4())
     with state.rig.engine.begin() as conn:
         SessionResetLineage.rotate(None, connection=conn, bot_id=state.rig.bot,
-                                   user_id=state.rig.user, new_id=newer, accept_pointer=True)
+                                   user_id=state.rig.user, new_id=newer, accept_pointer=True,
+                                   working_memory_mode="pinned")
     subscriber = SimpleNamespace(publish_tool_event=AsyncMock(return_value="event-id"))
     assert asyncio.run(state.outbox.drain(subscriber)) == 1
     subscriber.publish_tool_event.assert_not_awaited()

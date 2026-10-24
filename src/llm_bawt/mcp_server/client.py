@@ -379,21 +379,28 @@ class MemoryClient(
         )))
 
     def rotate_session(
-        self, idempotency_key: str | None = None, *, accept_pointer: bool = False,
+        self, idempotency_key: str | None = None, *, working_memory_mode: str,
+        accept_pointer: bool = False,
     ) -> str | None:
         """Rotate the thread; an accepted /new stamps its pointer atomically."""
+        from ..working_memory.session_state import SUPPRESSED, require_mode
+
+        require_mode(working_memory_mode)
         self._ensure_initialized()
         key_args = {"idempotency_key": idempotency_key} if idempotency_key else {}
         if self.server_url:
+            # The tool takes the public flag; send it explicitly either way.
             return self._call_server(
                 "sessions_rotate", {"bot_id": self.bot_id, "user_id": self.user_id,
                                     "accept_pointer": accept_pointer,
+                                    "include_working_memory": working_memory_mode != SUPPRESSED,
                                     **({"key": idempotency_key} if idempotency_key else {})}
             )
         storage = self._get_storage()
         return _run_async(
             storage.rotate_session(bot_id=self.bot_id, user_id=self.user_id,
-                                   accept_pointer=accept_pointer, **key_args)
+                                   accept_pointer=accept_pointer,
+                                   working_memory_mode=working_memory_mode, **key_args)
         )
 
     def clear_messages(self) -> int:

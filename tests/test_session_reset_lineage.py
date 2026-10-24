@@ -42,7 +42,7 @@ def rotate(engine):
     manager = object.__new__(PostgreSQLShortTermManager)
     manager._backend = SimpleNamespace(engine=engine)
     manager.bot_id, manager.user_id = "test-bot", "test-user"
-    return manager.rotate_session()
+    return manager.rotate_session(working_memory_mode="pinned")
 
 
 def resolve(engine, origin):
@@ -81,11 +81,12 @@ def test_keyed_delivery_rotation_reuses_one_successor_across_manager_restart(ses
     first = object.__new__(PostgreSQLShortTermManager)
     first._backend = SimpleNamespace(engine=sessions)
     first.bot_id, first.user_id = "test-bot", "test-user"
-    successor = first.rotate_session(idempotency_key="delivery-one")
+    successor = first.rotate_session(idempotency_key="delivery-one", working_memory_mode="pinned")
     other = object.__new__(PostgreSQLShortTermManager)
     other._backend = SimpleNamespace(engine=sessions)
     other.bot_id, other.user_id = "test-bot", "test-user"
-    assert other.rotate_session(idempotency_key="delivery-one") == successor
+    assert other.rotate_session(idempotency_key="delivery-one",
+                                working_memory_mode="pinned") == successor
     assert read(sessions, successor)["status"] == "active"
     assert json.loads(read(sessions, successor)["session_metadata"])["rotation_delivery_id"] == "delivery-one"
     assert json.loads(read(sessions, successor)["session_metadata"])["reset_predecessor_ids"] == ["old"]
@@ -102,14 +103,16 @@ def test_keyed_delivery_rotation_reuses_one_successor_across_manager_restart(ses
         assert conn.execute(text("SELECT count(*) FROM sessions")).scalar_one() == 2
     with pytest.raises(ValueError, match="another owner"):
         SessionResetLineage.rotate(sessions, bot_id="test-bot", user_id="test-user",
-                                   new_id=successor, idempotency_key="delivery-other")
+                                   new_id=successor, idempotency_key="delivery-other",
+                                   working_memory_mode="pinned")
 
 
 def test_rotation_failure_rolls_back_archive_and_link(sessions):
     insert(sessions, "old")
     insert(sessions, "collision", status="archived")
     with pytest.raises(Exception):
-        SessionResetLineage.rotate(sessions, bot_id="test-bot", user_id="test-user", new_id="collision")
+        SessionResetLineage.rotate(sessions, bot_id="test-bot", user_id="test-user", new_id="collision",
+                                   working_memory_mode="pinned")
     assert read(sessions, "old")["status"] == "active"
     assert "reset_successor_id" not in json.loads(read(sessions, "old")["session_metadata"])
 

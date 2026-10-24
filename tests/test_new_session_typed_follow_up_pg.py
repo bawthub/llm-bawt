@@ -41,6 +41,7 @@ def _finished_follow_up(rig, provider, command):
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=rig.bot, user_id=rig.user,
             new_id=successor, idempotency_key=claim.id, accept_pointer=True,
+            working_memory_mode="pinned",
         )
         conn.execute(text("""
             UPDATE sessions SET session_metadata=jsonb_set(session_metadata,

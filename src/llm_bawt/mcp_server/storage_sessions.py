@@ -120,16 +120,19 @@ class StorageSessionsMixin:
         user_id: str | None = None,
         idempotency_key: str | None = None,
         accept_pointer: bool = False,
+        *, working_memory_mode: str,
     ) -> str:
         """Close the active thread for (bot, user) and open a new one.
 
         TASK-284: the non-destructive ``/new`` primitive — old rows untouched,
         the previous session row flips to ``status='archived'``. Returns the
-        new active session id. Close+open run in one transaction.
+        new active session id. Close+open run in one transaction. The caller
+        passes the successor's working-memory mode (no default).
         """
         manager = self.get_short_term_manager(bot_id, provision_schema=True)
         return manager.rotate_session(
             bot_id=bot_id, user_id=user_id, accept_pointer=accept_pointer,
+            working_memory_mode=working_memory_mode,
             **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         )
 

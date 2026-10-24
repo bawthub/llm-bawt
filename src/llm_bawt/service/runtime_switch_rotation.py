@@ -26,6 +26,7 @@ from sqlalchemy import text
 from ..bot_types import durable_agent_backend
 from ..bot_session_state import BotSessionState
 from ..memory.session_reset_lineage import SessionResetLineage
+from ..working_memory.session_state import PINNED
 from .turn_admission import lock_target
 
 log = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ def rotate_active_threads(engine, bot_id: str) -> list[tuple[str | None, str]]:
             SessionResetLineage.rotate(
                 None, connection=conn, bot_id=bot_id, user_id=user_id, new_id=new_id,
                 accept_pointer=bool(pointed_owner and pointed_owner["user_id"] == user_id),
+                # A runtime switch is not a suppression request; it pins (N1).
+                working_memory_mode=PINNED,
                 context_lifecycle={"action": RUNTIME_SWITCH_SOURCE},
             )
             rotated.append((user_id, new_id))

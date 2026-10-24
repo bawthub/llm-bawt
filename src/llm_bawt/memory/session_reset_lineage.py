@@ -18,6 +18,7 @@ class SessionResetLineage:
     @staticmethod
     def rotate(
         engine, *, bot_id: str, user_id: str | None, new_id: str,
+        working_memory_mode: str,
         idempotency_key: str | None = None, connection=None,
         context_lifecycle: dict | None = None, accept_pointer: bool = False,
     ) -> bool:
@@ -26,7 +27,15 @@ class SessionResetLineage:
         The delivery key is stamped on the successor in the same transaction as
         archiving the predecessor. A crash cannot leave a rotated thread without
         its retry proof. An unkeyed /new retains its original unique-id behavior.
+
+        ``working_memory_mode`` (``pinned`` or ``suppressed``, no default) is
+        written to the successor's ``session_metadata.working_memory`` in the
+        same INSERT (docs/WORKING_MEMORY.md 10.1). Each caller passes its
+        origin's mode. A keyed replay keeps the mode the successor was born with.
         """
+        from ..working_memory.session_state import KEY, successor_metadata
+
+        working_memory = successor_metadata(working_memory_mode)
         reset_at = time.time()
         with (nullcontext(connection) if connection is not None else engine.begin()) as conn:
             postgres = conn.dialect.name == "postgresql"
@@ -66,7 +75,7 @@ class SessionResetLineage:
                         archived_at=CURRENT_TIMESTAMP, status='archived',
                         session_metadata={meta_expr} WHERE id=:id
                 """), {"id": row["id"], "meta": json.dumps(metadata)})
-            metadata = {"reset_predecessor_ids": [row["id"] for row in rows]}
+            metadata = {"reset_predecessor_ids": [row["id"] for row in rows], KEY: working_memory}
             if idempotency_key:
                 metadata["rotation_delivery_id"] = idempotency_key
             if context_lifecycle is not None:

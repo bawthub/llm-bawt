@@ -31,7 +31,7 @@ def test_first_rotation_stamps_pointer_and_lineage_in_caller_transaction(engine)
         assert SessionResetLineage.rotate(
             engine, bot_id="fixture", user_id="nick", new_id="successor",
             idempotency_key="delivery-one", connection=conn,
-            context_lifecycle=lifecycle, accept_pointer=True,
+            context_lifecycle=lifecycle, accept_pointer=True, working_memory_mode="pinned",
         )
         assert conn.execute(text("SELECT last_session_id FROM bot_profiles WHERE slug='fixture'")).scalar_one() == "successor"
     with engine.connect() as conn:
@@ -44,7 +44,8 @@ def test_first_rotation_stamps_pointer_and_lineage_in_caller_transaction(engine)
 
 def test_keyed_replay_does_not_rewind_later_accepted_session(engine):
     opts = dict(bot_id="fixture", user_id="nick", new_id="successor",
-                idempotency_key="delivery-one", accept_pointer=True)
+                idempotency_key="delivery-one", accept_pointer=True,
+                working_memory_mode="pinned")
     assert SessionResetLineage.rotate(engine, **opts)
     with engine.begin() as conn:
         conn.execute(text("UPDATE bot_profiles SET last_session_id='later' WHERE slug='fixture'"))
@@ -60,13 +61,15 @@ def test_typed_new_manager_stamps_pointer_and_keyed_replay_does_not_rewind(engin
     manager = object.__new__(PostgreSQLShortTermManager)
     manager._backend = SimpleNamespace(engine=engine)
     manager.bot_id, manager.user_id = "fixture", "nick"
-    successor = manager.rotate_session(idempotency_key="typed-new", accept_pointer=True)
+    successor = manager.rotate_session(idempotency_key="typed-new", accept_pointer=True,
+                                       working_memory_mode="pinned")
     with engine.begin() as conn:
         assert conn.execute(text(
             "SELECT last_session_id FROM bot_profiles WHERE slug='fixture'"
         )).scalar_one() == successor
         conn.execute(text("UPDATE bot_profiles SET last_session_id='later' WHERE slug='fixture'"))
-    assert manager.rotate_session(idempotency_key="typed-new", accept_pointer=True) == successor
+    assert manager.rotate_session(idempotency_key="typed-new", accept_pointer=True,
+                                  working_memory_mode="pinned") == successor
     with engine.connect() as conn:
         assert conn.execute(text(
             "SELECT last_session_id FROM bot_profiles WHERE slug='fixture'"
@@ -76,7 +79,8 @@ def test_typed_new_manager_stamps_pointer_and_keyed_replay_does_not_rewind(engin
 def test_pointer_failure_rolls_back_session_archive(engine):
     with pytest.raises(ValueError, match="Cannot accept"):
         SessionResetLineage.rotate(engine, bot_id="unknown", user_id="nick",
-                                   new_id="successor", accept_pointer=True)
+                                   new_id="successor", accept_pointer=True,
+                                   working_memory_mode="pinned")
     with engine.connect() as conn:
         assert conn.execute(text("SELECT status FROM sessions WHERE id='old'")).scalar_one() == "active"
         assert conn.execute(text("SELECT 1 FROM sessions WHERE id='successor'")).first() is None

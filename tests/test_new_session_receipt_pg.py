@@ -28,6 +28,7 @@ def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle):
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=rig.bot, user_id=rig.user,
             new_id=new_id, idempotency_key=claim.id, accept_pointer=True,
+            working_memory_mode="pinned",
         )
         conn.execute(text("""
             INSERT INTO messages (bot_id, id, role, content, timestamp, session_id,
@@ -102,6 +103,7 @@ def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(rig, real_
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=rig.bot, user_id=rig.user,
             new_id=new_id, idempotency_key=claim.id, accept_pointer=True,
+            working_memory_mode="pinned",
         )
         conn.execute(text("""
             UPDATE sessions SET session_metadata=COALESCE(session_metadata, '{}'::jsonb)

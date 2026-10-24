@@ -73,6 +73,7 @@ def test_unaccepted_retry_preserves_first_rotation_predecessor(rig):
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=rig.bot, user_id=rig.user,
             new_id=successor, idempotency_key=record.id, accept_pointer=True,
+            working_memory_mode="pinned",
         )
     assert deliveries.requeue(record.id, first_claim.claim_token,
                               "bridge not ready", delay_seconds=0) is not None

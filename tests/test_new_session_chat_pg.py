@@ -66,11 +66,12 @@ def test_chat_claim_rotation_and_exact_receipt(rig, command, answer):
     backend = SimpleNamespace(get_session=get_session, get_active_session=get_active_session)
     bawt = SimpleNamespace(history_manager=SimpleNamespace(_db_backend=backend))
 
-    def rotate(_bawt, _bot_id, *, idempotency_key):
+    def rotate(_bawt, _bot_id, *, idempotency_key, working_memory_mode):
         successor = SessionResetLineage.delivery_successor_id(idempotency_key)
         SessionResetLineage.rotate(
             rig.engine, bot_id=rig.bot, user_id=rig.user, new_id=successor,
             idempotency_key=idempotency_key, accept_pointer=True,
+            working_memory_mode=working_memory_mode,
         )
         return successor
 
@@ -168,9 +169,9 @@ def test_chat_receipt_refuses_missing_chat_proof(rig, fault):
     successor = SessionResetLineage.delivery_successor_id(claim.id)
     SessionResetLineage.rotate(
         rig.engine, bot_id=rig.bot, user_id=rig.user, new_id=successor,
-        idempotency_key=claim.id, accept_pointer=True,
+        idempotency_key=claim.id, accept_pointer=True, working_memory_mode="pinned",
     )
-    answer = "wrong confirmation" if fault == "wrong_confirm" else RESET_CONFIRMATION
+    answer ="wrong confirmation" if fault == "wrong_confirm" else RESET_CONFIRMATION
     with rig.engine.begin() as conn:
         conn.execute(text("""
             INSERT INTO messages (bot_id, id, role, content, timestamp, session_id,

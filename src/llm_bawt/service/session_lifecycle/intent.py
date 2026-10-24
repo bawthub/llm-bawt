@@ -77,6 +77,27 @@ class NewSessionIntent:
     # optional per-job scope override is ``scheduler_parameters.continuity``,
     # read back from this persisted snapshot at execution time.
     scheduler_parameters: IdleContextResetParameters | None = None
+    # The explicit working-memory request of a session or context API reset
+    # (docs/WORKING_MEMORY.md 10.1, N1). None means not asked; only False
+    # suppresses. Persisted with the intent so the claim-time rotation
+    # writes the mode admission accepted.
+    include_working_memory: bool | None = None
+
+    @property
+    def working_memory_mode(self) -> str:
+        """The successor's working-memory mode for this origin (10.1, N1).
+
+        Suppressed only on an explicit request: ``include_working_memory=False``
+        on the session or context API, or a bot delivery resetting without
+        history. Everything else (typed /new, scheduler, overflow) pins.
+        """
+        from ...working_memory.session_state import PINNED, SUPPRESSED, mode_from_flag
+
+        if self.include_working_memory is not None:
+            return mode_from_flag(self.include_working_memory)
+        if self.origin is Origin.BOT_DELIVERY and self.continuity is Continuity.CLEAN:
+            return SUPPRESSED
+        return PINNED
 
     def __post_init__(self) -> None:
         # Durable delivery JSON turns enum values back into plain strings.
@@ -108,6 +129,11 @@ class NewSessionIntent:
             or self.follow_up is not None or self.continuity is not Continuity.CONFIGURED
         ):
             raise ValueError("scheduled /new requires System, configured continuity, and job/run/session/usage fences")
+        if self.include_working_memory is not None and (
+            not isinstance(self.include_working_memory, bool)
+            or self.origin not in {Origin.CONTEXT_API, Origin.SESSION_API}
+        ):
+            raise ValueError("include_working_memory is a session or context API boolean")
         if self.follow_up is not None and not self.follow_up.strip():
             raise ValueError("follow-up message cannot be blank")
 

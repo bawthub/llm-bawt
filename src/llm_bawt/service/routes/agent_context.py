@@ -21,6 +21,13 @@ class ContextResetRequest(BaseModel):
     )
     reason: str = Field(default="agent-requested context maintenance", max_length=1000)
     idempotency_key: str | None = Field(default=None, max_length=256)
+    include_working_memory: bool | None = Field(
+        default=None,
+        description=(
+            "false starts the new session with working memory suppressed (no "
+            "section, no change notice) for its lifetime; omitted or true pins it"
+        ),
+    )
 
 
 def _resolve(bot_id: str, user: str | None):
@@ -72,4 +79,5 @@ async def reset_agent_context(body: ContextResetRequest):
         service, bot_id=bot.slug, user_id=user_id, continuity=continuity,
         origin=Origin.CONTEXT_API, idempotency_key=body.idempotency_key,
         reason=body.reason.strip() or "agent-requested context maintenance",
+        include_working_memory=body.include_working_memory,
     )

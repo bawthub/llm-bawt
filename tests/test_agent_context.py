@@ -122,6 +122,21 @@ def test_health_prefers_native_resident_usage_and_scopes_active_thread(context_s
     assert after["resident_prompt_tokens"] is None
     assert after["state"] == "unknown"
     assert after["last_lifecycle_action"]["action"] == "reset_without_history"
+    # Without the explicit flag even a clean reset pins; only False suppresses
+    # (WORKING_MEMORY.md 10.1, N1).
+    assert successor["working_memory"] == {"mode": "pinned"}
+    suppressed = store.reset_idle_session(
+        bot_id=bot,
+        user_id=user,
+        backend="claude-code",
+        policy=SessionPolicy.RESET_RETAIN_HISTORY,
+        reason="explicit suppression",
+        include_working_memory=False,
+    )
+    with store.engine.connect() as conn:
+        assert conn.execute(sa_text(
+            "SELECT session_metadata FROM sessions WHERE id=:id"
+        ), {"id": suppressed["new_session_id"]}).scalar_one()["working_memory"] == {"mode": "suppressed"}
 
 
 def test_health_fallback_ignores_cumulative_cached_token_accounting(context_store):

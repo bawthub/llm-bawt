@@ -205,13 +205,15 @@ def recover_delivery_after_overflow(
         uuid.NAMESPACE_URL, f"inter-bot-overflow:{head['id']}:1"
     ))
     from .memory.session_reset_lineage import SessionResetLineage
+    from .working_memory.session_state import PINNED
 
     # Keep the existing overflow namespace; a persisted delivery must not
     # acquire a different successor when recovered after a process restart.
+    # Overflow recovery is not an explicit suppression request, so it pins (N1).
     SessionResetLineage.rotate(
         None, connection=conn, bot_id=target, user_id=user_id,
         new_id=new_session, idempotency_key=f"{head['id']}:overflow:1",
-        accept_pointer=True,
+        accept_pointer=True, working_memory_mode=PINNED,
         context_lifecycle={
             "action": policy.value,
             "reason": "confirmed context overflow",
@@ -423,8 +425,16 @@ class AgentContextStore:
         backend: str | None,
         policy: SessionPolicy,
         reason: str,
+        include_working_memory: bool | None = None,
     ) -> dict[str, Any]:
-        """Rotate one idle durable thread; prior messages remain untouched."""
+        """Rotate one idle durable thread; prior messages remain untouched.
+
+        Only an explicit ``include_working_memory=False`` suppresses working
+        memory for the successor; omitted pins it (docs/WORKING_MEMORY.md 10.1).
+        """
+        from .working_memory.session_state import mode_from_flag
+
+        working_memory_mode = mode_from_flag(include_working_memory)
         validate_session_policy(backend, policy)
         if policy == SessionPolicy.CONTINUE:
             raise ValueError("continue does not reset a session")
@@ -439,12 +449,14 @@ class AgentContextStore:
                 raise RuntimeError(f"target bot is active in turn {state.blocking_id()}")
             return self.rotate_locked(
                 conn, bot_id=bot_id, user_id=user_id, policy=policy, reason=reason,
+                working_memory_mode=working_memory_mode,
             )
 
     @staticmethod
     def rotate_locked(
         conn, *, bot_id: str, user_id: str, policy: SessionPolicy,
-        reason: str, expected_session_id: str | None = None,
+        reason: str, working_memory_mode: str,
+        expected_session_id: str | None = None,
         new_session_id: str | None = None,
     ) -> dict[str, Any]:
         """Rotate under the caller's per-bot lock, with /new lineage and a receipt.
@@ -469,6 +481,7 @@ class AgentContextStore:
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=bot_id, user_id=user_id,
             new_id=new_session, accept_pointer=True,
+            working_memory_mode=working_memory_mode,
             context_lifecycle={
                 "action": policy.value, "reason": reason,
                 "old_session_id": old_session,

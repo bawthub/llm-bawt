@@ -1204,6 +1204,8 @@ def test_confirmed_overflow_rotates_same_delivery_once(delivery_store):
     assert predecessor["reset_successor_id"] == recovered.new_session_id
     assert successor["reset_predecessor_ids"] == [old_session]
     assert successor["rotation_delivery_id"] == f"{original.id}:overflow:1"
+    # Overflow recovery is not a suppression request (WORKING_MEMORY.md 10.1).
+    assert successor["working_memory"] == {"mode": "pinned"}
     assert pointer == recovered.new_session_id
 
     reclaimed = store.claim_next(target, claim_owner="owner-two", steer_capable=False)

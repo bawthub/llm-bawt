@@ -127,7 +127,7 @@ def test_api_claim_rechecks_idle_pointer_before_any_rotation(rig, real_lifecycle
             expected_pointer = str(uuid4())
             SessionResetLineage.rotate(None, connection=conn, bot_id=rig.bot,
                                        user_id=rig.user, new_id=expected_pointer,
-                                       accept_pointer=True)
+                                       accept_pointer=True, working_memory_mode="pinned")
         else:
             conn.execute(text("UPDATE turn_logs SET ended_at=NULL,status='running' WHERE id=:id"),
                          {"id": rig.turn_id})

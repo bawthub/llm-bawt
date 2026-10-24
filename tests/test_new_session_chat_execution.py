@@ -49,7 +49,7 @@ def test_claimed_chat_nonstream_persists_command_and_exact_answer(command, answe
         "thread_session_id": "old-thread",
     }
     service._rotate_chat_session.assert_called_once_with(
-        llm, "caid", idempotency_key="delivery-test",
+        llm, "caid", idempotency_key="delivery-test", working_memory_mode="pinned",
     )
     if answer == RESET_CONFIRMATION:
         query.assert_not_called()

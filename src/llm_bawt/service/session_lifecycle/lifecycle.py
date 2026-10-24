@@ -74,6 +74,9 @@ class NewSessionLifecycle:
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=intent.bot_id, user_id=intent.user_id,
             new_id=new_session, idempotency_key=intent.idempotency_key,
+            working_memory_mode=NewSessionLifecycle.working_memory_mode(
+                head.get("metadata_json"), policy.value,
+            ),
             accept_pointer=True, context_lifecycle={
                 "action": policy.value,
                 "reason": head.get("reset_reason") or "inter-bot pre-delivery policy",
@@ -435,7 +438,28 @@ class NewSessionLifecycle:
         else:
             # Preserve the byte shape of pre-parameter intents during recovery.
             value.pop("scheduler_parameters", None)
+        if intent.include_working_memory is None:
+            # Same for intents admitted before the working-memory flag existed.
+            value.pop("include_working_memory", None)
         return value
+
+    @classmethod
+    def working_memory_mode(cls, metadata: dict | None, session_policy: str | None) -> str:
+        """The mode a claimed delivery's rotation writes (docs/WORKING_MEMORY.md 10.1).
+
+        The persisted ``new_session_intent`` decides when there is one, so an
+        API reset keeps the mode admission accepted. A delivery without one
+        suppresses only for ``reset_without_history``.
+        """
+        from ...agent_context import SessionPolicy
+        from ...working_memory.session_state import PINNED, SUPPRESSED
+
+        raw = (metadata or {}).get("new_session_intent")
+        if isinstance(raw, dict):
+            return cls._decode(raw).working_memory_mode
+        if session_policy == SessionPolicy.RESET_WITHOUT_HISTORY.value:
+            return SUPPRESSED
+        return PINNED
 
     def _observe(self, intent: NewSessionIntent, delivery_id: str) -> NewSessionResult | None:
         record = self.store.get(delivery_id)

@@ -36,7 +36,7 @@ def test_concurrent_claims_reuse_one_delivery_new_thread():
         manager = object.__new__(PostgreSQLShortTermManager)
         manager._backend = SimpleNamespace(engine=engine)
         manager.bot_id, manager.user_id = bot, user
-        return manager.rotate_session(idempotency_key=key)
+        return manager.rotate_session(idempotency_key=key, working_memory_mode="pinned")
 
     try:
         with ThreadPoolExecutor(max_workers=2) as workers:

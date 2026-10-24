@@ -20,7 +20,8 @@ class BridgeSessionResetMixin:
     """
 
     def _rotate_chat_session(
-        self, llm_bawt, bot_id: str, *, idempotency_key: str | None = None,
+        self, llm_bawt, bot_id: str, *, working_memory_mode: str,
+        idempotency_key: str | None = None,
     ) -> str | None:
         """TASK-284: non-destructive DB session rotation for chatbot /new.
 
@@ -44,7 +45,7 @@ class BridgeSessionResetMixin:
             if not callable(rotate):
                 return None
             new_id = rotate(
-                accept_pointer=True,
+                accept_pointer=True, working_memory_mode=working_memory_mode,
                 **({"idempotency_key": idempotency_key} if idempotency_key else {}),
             )
             inv = getattr(llm_bawt, "invalidate_history_cache", None)
@@ -480,8 +481,12 @@ class BridgeSessionResetMixin:
                 return False
         except Exception:
             return False
+        from ...working_memory.session_state import PINNED
+        from .execution import NewSessionExecution
+
         if not delivery_id:
-            successor = self._rotate_chat_session(llm_bawt, bot_id)
+            # An undelivered typed /new is a human /new: it pins (N1).
+            successor = self._rotate_chat_session(llm_bawt, bot_id, working_memory_mode=PINNED)
             if not successor:
                 raise RuntimeError("Durable /new session rotation did not return a successor")
             return successor
@@ -494,7 +499,10 @@ class BridgeSessionResetMixin:
             self._agent_new_delivery_rotations = cache
         if key in cache:
             return cache[key]
-        successor = self._rotate_chat_session(llm_bawt, bot_id, idempotency_key=delivery_id)
+        successor = self._rotate_chat_session(
+            llm_bawt, bot_id, idempotency_key=delivery_id,
+            working_memory_mode=NewSessionExecution.working_memory_mode(self, delivery_id),
+        )
         if not successor:
             raise RuntimeError("Durable /new session rotation did not return a successor")
         cache[key] = successor

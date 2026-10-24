@@ -420,7 +420,8 @@ class PostgreSQLShortTermManager:
 
     def rotate_session(
         self, bot_id: str | None = None, user_id: str | None = None,
-        idempotency_key: str | None = None, *, accept_pointer: bool = False,
+        idempotency_key: str | None = None, *, working_memory_mode: str,
+        accept_pointer: bool = False,
     ) -> str:
         """Atomically close the active thread for (bot,user) and open a new one.
 
@@ -428,7 +429,8 @@ class PostgreSQLShortTermManager:
         old thread's rows are untouched (its session row flips to
         ``status='archived'``); a fresh ``active`` thread is created and its id
         returned. Close+open run in ONE transaction so a crash cannot leave zero
-        or two active rows for the pair.
+        or two active rows for the pair. ``working_memory_mode`` is the caller's
+        origin mode for the successor (docs/WORKING_MEMORY.md 10.1).
         """
         target_bot = self.bot_id if bot_id is None else bot_id
         target_user = self.user_id if user_id is None else user_id
@@ -438,6 +440,7 @@ class PostgreSQLShortTermManager:
         SessionResetLineage.rotate(
             self._backend.engine, bot_id=target_bot, user_id=target_user, new_id=new_id,
             idempotency_key=idempotency_key, accept_pointer=accept_pointer,
+            working_memory_mode=working_memory_mode,
         )
         # Point this manager at the freshly opened thread.
         self._session_id_cache = new_id

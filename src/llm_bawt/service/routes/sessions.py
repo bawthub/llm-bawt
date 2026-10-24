@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...mcp_server.storage import get_storage
+from ...working_memory.session_state import mode_from_flag
 from ..dependencies import get_effective_bot_id, get_service
 from ..logging import get_service_logger
 from ..schemas_history_memory import MessageAuthor, ScheduledMessageOrigin
@@ -105,6 +106,16 @@ class CreateSessionRequest(BaseModel):
             "(bot,user) invariant. Reachable via explicit session_id for "
             "background task threads that must not disturb the user's live "
             "conversation."
+        ),
+    )
+    include_working_memory: bool | None = Field(
+        default=None,
+        description=(
+            "With activate=true: false starts the new thread with working "
+            "memory suppressed (no section, no change notice) for its "
+            "lifetime; omitted or true pins it. A non-activating thread is "
+            "not a rotation and always pins, so false with activate=false "
+            "is refused (422)."
         ),
     )
 
@@ -408,6 +419,11 @@ async def create_session(
     effective_bot = get_effective_bot_id(body.bot_id or bot_id)
     user_id = _resolve_user(body.user or user)
     storage = get_storage()
+    if body.include_working_memory is False and not body.activate:
+        raise HTTPException(
+            status_code=422,
+            detail="include_working_memory=false applies only to an activating session",
+        )
 
     # Validate fork provenance BEFORE rotating anything.
     if body.fork_from is not None:
@@ -428,6 +444,7 @@ async def create_session(
     if body.activate:
         new_id = await storage.rotate_session(
             bot_id=effective_bot, user_id=user_id,
+            working_memory_mode=mode_from_flag(body.include_working_memory),
         )
         if meta:
             await storage.update_session_metadata(

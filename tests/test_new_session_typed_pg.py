@@ -44,6 +44,7 @@ def _finish_bridge(rig, deliveries, record):
         SessionResetLineage.rotate(
             None, connection=conn, bot_id=rig.bot, user_id=rig.user,
             new_id=new_id, idempotency_key=claim.id, accept_pointer=True,
+            working_memory_mode="pinned",
         )
         conn.execute(text("""
             INSERT INTO messages (bot_id, id, role, content, timestamp, session_id,

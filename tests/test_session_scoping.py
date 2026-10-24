@@ -62,7 +62,7 @@ def scoped_env(private_app_pg):
     thread_a = direct.get_or_create_active_session(bot_id=bot, user_id=user)
     pg.add_message(role="user", content="alpha question", session_id=thread_a)
     pg.add_message(role="assistant", content="alpha answer", session_id=thread_a)
-    thread_b = direct.rotate_session(bot_id=bot, user_id=user)
+    thread_b = direct.rotate_session(bot_id=bot, user_id=user, working_memory_mode="pinned")
     pg.add_message(role="user", content="beta question", session_id=thread_b)
     pg.add_message(role="assistant", content="beta answer", session_id=thread_b)
     # A continuous rolling summary (summaries are bot-wide, provenance only).

@@ -824,6 +824,13 @@ class SessionResetRequest(BaseModel):
         None, description="User whose thread rotates; defaults to DEFAULT_USER"
     )
     idempotency_key: str | None = Field(default=None, max_length=256)
+    include_working_memory: bool | None = Field(
+        default=None,
+        description=(
+            "false starts the new session with working memory suppressed (no "
+            "section, no change notice) for its lifetime; omitted or true pins it"
+        ),
+    )
 
 
 class SessionResetResponse(BaseModel):
@@ -859,6 +866,7 @@ async def session_reset(request: SessionResetRequest) -> SessionResetResponse:
         service, bot_id=bot.slug, user_id=user_id,
         continuity=Continuity.CLEAN, origin=Origin.SESSION_API,
         idempotency_key=request.idempotency_key,
+        include_working_memory=request.include_working_memory,
     )
     return SessionResetResponse(**result)
 
