@@ -179,11 +179,13 @@ class StorageSearchMixin:
         backend failure raises :class:`BotAccessError` instead of returning an
         empty or unrestricted result. Rows carry ``author_class``.
 
-        ``mode="fts"`` uses Postgres FTS (stems, drops stop-words; breaks on
-        identifiers: ``TASK-241`` tokenizes to ``task``). ``mode="trgm"``
-        treats content as a flat character sequence: ``ILIKE`` substring
-        match ranked by trigram similarity, backed by the per-partition
-        ``gin_trgm_ops`` indexes, so ``TASK-241`` matches literally or not.
+        ``mode="fts"`` uses Postgres FTS through :class:`FtsQuery`: words
+        match by stem with stop-words dropped; identifiers (``TASK-241``,
+        ``snake_case``, paths) and quoted text match as phrases, hex runs as
+        commit-SHA prefixes. ``mode="trgm"`` treats content as a flat
+        character sequence: ``ILIKE`` substring match ranked by trigram
+        similarity, backed by the per-partition ``gin_trgm_ops`` indexes, so
+        the query matches literally or not.
         """
         from llm_bawt.bot_access import BotPolicyResolver
         from llm_bawt.mcp_server.message_search import (

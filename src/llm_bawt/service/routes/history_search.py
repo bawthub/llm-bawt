@@ -514,11 +514,12 @@ async def search_all_history(
         "fts",
         description=(
             "Search mode. 'fts' (default) uses Postgres full-text search "
-            "with the english config — stems + drops stop-words + ranks by "
-            "lexeme density. Best for natural-language queries. 'trgm' uses "
-            "the pg_trgm extension for substring/fuzzy matching against the "
-            "literal content — best for IDs, file paths, hyphenated tokens, "
-            "or anything where FTS tokenization would discard signal."
+            "with the english config — words stem + drop stop-words; "
+            "identifiers (TASK-241, snake_case, paths) and quoted text match "
+            "as phrases, hex runs as commit-SHA prefixes; ranked by ts_rank. "
+            "'trgm' uses the pg_trgm extension for a literal substring match "
+            "against the content, ranked by trigram similarity — best for "
+            "fragments FTS can't tokenize (partial words, punctuation runs)."
         ),
     ),
     sort_by: str = Query(
