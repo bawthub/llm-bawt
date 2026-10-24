@@ -483,6 +483,26 @@ def test_postgres_fallback_when_no_object_store(store, monkeypatch):
     assert after.text == "after-text"
 
 
+def test_content_for_rows_deduplicates_blob_reads_but_keeps_row_flags(store, monkeypatch):
+    calls = []
+
+    class Backend:
+        def get(self, key):
+            calls.append(key)
+            return {"old": b"before", "new": b"after"}[key]
+
+    monkeypatch.setattr(cfs, "_get_diff_blob_backend", lambda: Backend())
+    rows = [TurnChangedFile(id=index, before_blob_key="old", before_sha256="old",
+                            after_blob_key="new", after_sha256="new",
+                            binary=False, truncated=index == 2) for index in (1, 2, 3)]
+    content = store.content_for_rows(rows)
+
+    assert [side.text for side in content[1]] == ["before", "after"]
+    assert content[2][0].truncated is True and content[1][0].truncated is False
+    assert content[3][0].truncated is False
+    assert calls.count("old") == calls.count("new") == 2  # one per distinct flag
+
+
 def test_missing_file_returns_none(store):
     assert store.get_file_content(turn_id="nope", repo_key="r", path="x") is None
 

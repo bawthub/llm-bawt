@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -827,16 +828,20 @@ class ChangedFilesStore:
             return {}
         output: dict[int, tuple[FileContent, FileContent]] = {}
         with Session(self.engine) as session:
+            # A request can contain several snapshots of the same text. Bound
+            # decoded-content retention to 64 sides (<=64 MiB at capture cap),
+            # and include flags so each row keeps its own truncation semantics.
+            @lru_cache(maxsize=64)
+            def side(blob_key: str | None, sha: str | None,
+                     binary: bool, truncated: bool) -> FileContent:
+                return self._resolve_side(session, blob_key, sha, binary, truncated)
+
             for row in rows:
                 if row.id is None:
                     continue
                 output[row.id] = (
-                    self._resolve_side(
-                        session, row.before_blob_key, row.before_sha256, row.binary, row.truncated
-                    ),
-                    self._resolve_side(
-                        session, row.after_blob_key, row.after_sha256, row.binary, row.truncated
-                    ),
+                    side(row.before_blob_key, row.before_sha256, row.binary, row.truncated),
+                    side(row.after_blob_key, row.after_sha256, row.binary, row.truncated),
                 )
         return output
 

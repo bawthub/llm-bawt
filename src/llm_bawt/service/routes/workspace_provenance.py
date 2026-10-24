@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
+from time import perf_counter
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import bindparam, text
@@ -25,9 +27,11 @@ from ..workspace_provenance import (
     LineChange,
     TurnFileSnapshot,
     attribute_workspace,
+    matches_snapshot_location,
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 MAX_PROVENANCE_ROWS = 2000
 
 
@@ -77,18 +81,45 @@ def _session_ids_by_turn(session: Session, rows: list[TurnChangedFile]) -> dict[
     tags=["Debug"],
 )
 def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProvenanceResponse:
+    started = perf_counter()
+    current_files = [CurrentWorkspaceFile(
+        repo_id=item.repo_id,
+        repo_key=item.repo_key,
+        repo_aliases=tuple(item.repo_aliases),
+        path=item.path,
+        staged=item.staged,
+        status=item.status,
+        old_text=item.old_text,
+        new_text=item.new_text,
+        binary=item.binary,
+        truncated=item.truncated,
+        changes=tuple(LineChange(
+            kind=change.kind,
+            text=change.text,
+            hunk=change.hunk,
+            line=change.line,
+        ) for change in item.changes) or None,
+    ) for item in payload.files]
     turn_store = get_turn_log_store()
     if turn_store.engine is None:
         raise HTTPException(status_code=503, detail="Turn provenance DB unavailable")
 
     changed_store = ChangedFilesStore(turn_store.engine)
     try:
-        rows, truncated = changed_store.recent_rows(
+        recent, truncated = changed_store.recent_rows(
             user_id=payload.user_id,
             since_hours=payload.lookback_hours,
             limit=MAX_PROVENANCE_ROWS,
         )
+        metadata_at = perf_counter()
+        # Retain the global newest-2k safety cap; filter its metadata with the
+        # SAME repo/path rules used by attribution before any blob or turn read.
+        rows = [row for row in recent if any(
+            matches_snapshot_location(current, row) for current in current_files
+        )]
+        filtered_at = perf_counter()
         content = changed_store.content_for_rows(rows)
+        content_at = perf_counter()
     except Exception as error:
         raise HTTPException(status_code=503, detail="Changed-file provenance unavailable") from error
 
@@ -102,6 +133,7 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
         except Exception:
             # Session links are a navigation nicety; attribution must not fail on them.
             session_ids = {}
+    linked_at = perf_counter()
     turns_by_id = {row.id: row for row in turn_rows}
 
     snapshots: list[TurnFileSnapshot] = []
@@ -131,24 +163,6 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
             prompt=turn.user_prompt if turn else None,
         ))
 
-    current_files = [CurrentWorkspaceFile(
-        repo_id=item.repo_id,
-        repo_key=item.repo_key,
-        repo_aliases=tuple(item.repo_aliases),
-        path=item.path,
-        staged=item.staged,
-        status=item.status,
-        old_text=item.old_text,
-        new_text=item.new_text,
-        binary=item.binary,
-        truncated=item.truncated,
-        changes=tuple(LineChange(
-            kind=change.kind,
-            text=change.text,
-            hunk=change.hunk,
-            line=change.line,
-        ) for change in item.changes) or None,
-    ) for item in payload.files]
     attributions = attribute_workspace(current_files, snapshots)
 
     response_files = [WorkspaceFileAttributionResponse(
@@ -197,6 +211,16 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
         for summary in sorted(turn_summaries, key=lambda item: item.created_at, reverse=True)
     }
 
+    finished_at = perf_counter()
+    logger.info(
+        "workspace provenance files=%d metadata_rows=%d matched_rows=%d "
+        "metadata_ms=%.1f filter_ms=%.1f content_ms=%.1f links_ms=%.1f "
+        "attribute_ms=%.1f total_ms=%.1f",
+        len(current_files), len(recent), len(rows),
+        (metadata_at - started) * 1000, (filtered_at - metadata_at) * 1000,
+        (content_at - filtered_at) * 1000, (linked_at - content_at) * 1000,
+        (finished_at - linked_at) * 1000, (finished_at - started) * 1000,
+    )
     return WorkspaceProvenanceResponse(
         generated_at=datetime.now(timezone.utc),
         status_fingerprint=payload.status_fingerprint,

@@ -13,7 +13,7 @@ import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 Confidence = Literal["exact", "strong", "partial", "probable"]
 Ownership = Literal["owned", "shared", "unattributed"]
@@ -150,7 +150,15 @@ def _overlap(candidate: list[LineChange], dirty: list[LineChange]) -> tuple[list
     return sorted(set(matched_indices)), sorted(matched_hunks)
 
 
-def _repo_matches(current: CurrentWorkspaceFile, snapshot: TurnFileSnapshot) -> bool:
+class SnapshotLocation(Protocol):
+    """The metadata needed to screen rows before resolving their diff bytes."""
+
+    repo_key: str
+    repo_label: str | None
+    path: str
+
+
+def _repo_matches(current: CurrentWorkspaceFile, snapshot: SnapshotLocation) -> bool:
     aliases = {normalize_path(current.repo_key), *(normalize_path(value) for value in current.repo_aliases)}
     stored = {normalize_path(snapshot.repo_key), normalize_path(snapshot.repo_label or "")}
     stored.discard("")
@@ -160,7 +168,7 @@ def _repo_matches(current: CurrentWorkspaceFile, snapshot: TurnFileSnapshot) -> 
     return any(alias and f"/{alias}/" in f"/{snapshot_path}/" for alias in aliases)
 
 
-def _path_matches(current: CurrentWorkspaceFile, snapshot: TurnFileSnapshot) -> bool:
+def _path_matches(current: CurrentWorkspaceFile, snapshot: SnapshotLocation) -> bool:
     target = normalize_path(current.path)
     stored = normalize_path(snapshot.path)
     if stored == target or stored.endswith(f"/{target}"):
@@ -172,8 +180,18 @@ def _path_matches(current: CurrentWorkspaceFile, snapshot: TurnFileSnapshot) -> 
     )
 
 
+def matches_snapshot_location(current: CurrentWorkspaceFile, snapshot: SnapshotLocation) -> bool:
+    """Use the attribution engine's exact repo/path rules before loading blobs.
+
+    Capture repo_key may be ``workspace`` rather than the tracked repo, while
+    repo_label or an absolute path still identifies it. Keep both checks shared
+    with attribution so prefiltering can never discard a candidate it would use.
+    """
+    return _repo_matches(current, snapshot) and _path_matches(current, snapshot)
+
+
 def _candidate(current: CurrentWorkspaceFile, snapshot: TurnFileSnapshot) -> AttributionCandidate | None:
-    if not _repo_matches(current, snapshot) or not _path_matches(current, snapshot):
+    if not matches_snapshot_location(current, snapshot):
         return None
 
     dirty = [] if current.binary else list(current.changes or line_changes(current.old_text, current.new_text))
