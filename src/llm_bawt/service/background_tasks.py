@@ -19,32 +19,43 @@ log = get_service_logger(__name__)
 
 
 class BackgroundTasksMixin:
-    """Mixin providing background task processing for BackgroundService."""
+    """Mixin providing background task processing for BackgroundService.
+
+    Isolation contract (TASK-1358): every job runs whole on ``_bg_executor``.
+    Handlers are plain sync methods: they may block (LLM calls, embeddings,
+    DB, object store) because they never run on the app event loop, and they
+    must not submit work to ``_bg_executor`` themselves (a bounded pool
+    waiting on itself deadlocks). A new task type = a sync ``_process_*``
+    method plus an entry in ``TASK_HANDLERS``.
+    """
+
+    TASK_HANDLERS: dict[TaskType, str] = {
+        TaskType.MEANING_UPDATE: "_process_meaning_update",
+        TaskType.MEMORY_MAINTENANCE: "_process_maintenance",
+        TaskType.PROFILE_MAINTENANCE: "_process_profile_maintenance",
+        TaskType.HISTORY_SUMMARIZATION: "_process_history_summarization",
+        TaskType.MEMORY_EXTRACTION: "_process_memory_extraction",
+        TaskType.MEDIA_ASSETS_GC: "_process_media_assets_gc",
+        TaskType.TOOL_RESULT_GC: "_process_tool_result_gc",
+    }
 
     async def process_task(self, task: Task) -> TaskResult:
-        """Process a single background task."""
+        """Process a single background task on the job pool, off the event loop."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._bg_executor, self._run_task, task)
+
+    def _run_task(self, task: Task) -> TaskResult:
+        """Run one task to a TaskResult. Executes on a ``_bg_executor`` thread."""
         start_time = time.time()
         task_type_str = task.task_type.value
 
         log.debug(f"Processing task {task.task_id[:8]} ({task_type_str})")
 
         try:
-            if task.task_type == TaskType.MEANING_UPDATE:
-                result = await self._process_meaning_update(task)
-            elif task.task_type == TaskType.MEMORY_MAINTENANCE:
-                result = await self._process_maintenance(task)
-            elif task.task_type == TaskType.PROFILE_MAINTENANCE:
-                result = await self._process_profile_maintenance(task)
-            elif task.task_type == TaskType.HISTORY_SUMMARIZATION:
-                result = await self._process_history_summarization(task)
-            elif task.task_type == TaskType.MEMORY_EXTRACTION:
-                result = await self._process_memory_extraction(task)
-            elif task.task_type == TaskType.MEDIA_ASSETS_GC:
-                result = await self._process_media_assets_gc(task)
-            elif task.task_type == TaskType.TOOL_RESULT_GC:
-                result = await self._process_tool_result_gc(task)
-            else:
+            handler_name = self.TASK_HANDLERS.get(task.task_type)
+            if handler_name is None:
                 raise ValueError(f"Unknown task type: {task.task_type}")
+            result = getattr(self, handler_name)(task)
 
             elapsed_ms = (time.time() - start_time) * 1000
             log.task_completed(task.task_id, task_type_str, elapsed_ms, result)
@@ -66,7 +77,7 @@ class BackgroundTasksMixin:
                 processing_time_ms=elapsed_ms,
             )
 
-    async def _process_meaning_update(self, task: Task) -> dict:
+    def _process_meaning_update(self, task: Task) -> dict:
         """Process a meaning update task (via MCP tools)."""
         bot_id = task.bot_id
         payload = task.payload
@@ -78,21 +89,17 @@ class BackgroundTasksMixin:
         if not memory_client:
             return {"updated": False, "reason": "Memory client unavailable"}
 
-        loop = asyncio.get_event_loop()
-        success = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: memory_client.update_memory_meaning(
-                memory_id=memory_id,
-                intent=payload.get("intent"),
-                stakes=payload.get("stakes"),
-                emotional_charge=payload.get("emotional_charge"),
-                recurrence_keywords=payload.get("recurrence_keywords"),
-                updated_tags=payload.get("updated_tags"),
-            ),
+        success = memory_client.update_memory_meaning(
+            memory_id=memory_id,
+            intent=payload.get("intent"),
+            stakes=payload.get("stakes"),
+            emotional_charge=payload.get("emotional_charge"),
+            recurrence_keywords=payload.get("recurrence_keywords"),
+            updated_tags=payload.get("updated_tags"),
         )
         return {"updated": bool(success), "memory_id": memory_id}
 
-    async def _process_maintenance(self, task: Task) -> dict:
+    def _process_maintenance(self, task: Task) -> dict:
         """Process a unified memory maintenance task.
 
         Uses a cached LLM client if available, otherwise runs without LLM.
@@ -105,20 +112,15 @@ class BackgroundTasksMixin:
         if not memory_client:
             return {"error": "Memory client unavailable"}
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: memory_client.run_maintenance(
-                run_consolidation=payload.get("run_consolidation", True),
-                run_recurrence_detection=payload.get("run_recurrence_detection", True),
-                run_decay_pruning=payload.get("run_decay_pruning", False),
-                run_orphan_cleanup=payload.get("run_orphan_cleanup", False),
-                dry_run=payload.get("dry_run", False),
-            ),
+        return memory_client.run_maintenance(
+            run_consolidation=payload.get("run_consolidation", True),
+            run_recurrence_detection=payload.get("run_recurrence_detection", True),
+            run_decay_pruning=payload.get("run_decay_pruning", False),
+            run_orphan_cleanup=payload.get("run_orphan_cleanup", False),
+            dry_run=payload.get("dry_run", False),
         )
-        return result
 
-    async def _process_profile_maintenance(self, task: Task) -> dict:
+    def _process_profile_maintenance(self, task: Task) -> dict:
         """Process profile maintenance - consolidate attributes into summary.
 
         Uses configured maintenance model resolution and loads that model
@@ -155,16 +157,10 @@ class BackgroundTasksMixin:
 
         service = ProfileMaintenanceService(profile_manager, llm_client)
 
-        loop = asyncio.get_event_loop()
-        # Remote API call (grok/openai background client) — run on the bounded
-        # background pool, never on the default pool that interactive turns use,
-        # so a slow remote maintenance call can't starve chat (caused the caid
-        # stall on 2026-06-15). See TASK-274/TASK-283. (Local CUDA/llama-cpp
-        # inference moved out of process to local_model_bridge, TASK-276/278.)
-        result = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: service.run(entity_id, entity_type, dry_run)
-        )
+        # Remote API call (grok/openai background client). Already on the
+        # bounded background pool via process_task, never the default pool
+        # interactive turns use (caid stall 2026-06-15, TASK-274/283).
+        result = service.run(entity_id, entity_type, dry_run)
 
         return {
             "entity_id": result.entity_id,
@@ -174,7 +170,7 @@ class BackgroundTasksMixin:
             "error": result.error,
         }
 
-    async def _extract_from_summaries(
+    def _extract_from_summaries(
         self,
         summarization_results: list[dict],
         bot_id: str,
@@ -387,7 +383,7 @@ class BackgroundTasksMixin:
         except Exception as e:
             log.debug(f"Failed to mark summary {summary_id[:8]} as extracted: {e}")
 
-    async def _process_history_summarization(self, task: Task) -> dict:
+    def _process_history_summarization(self, task: Task) -> dict:
         """Process proactive history summarization and extraction for a bot."""
         from ..memory.summarization import (
             HistorySummarizer,
@@ -458,15 +454,11 @@ class BackgroundTasksMixin:
             max_context_tokens=max_context_tokens,
         )
 
-        loop = asyncio.get_event_loop()
-        # Remote API call — bounded bg pool (TASK-283), kept off the default
-        # interactive pool (TASK-274).
-        result = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: summarizer.summarize_eligible_sessions(
-                use_heuristic_fallback=use_heuristic_fallback,
-                max_tokens_per_chunk=max_tokens_per_chunk,
-            ),
+        # Remote API call — already on the bounded bg pool via process_task
+        # (TASK-283), kept off the default interactive pool (TASK-274).
+        result = summarizer.summarize_eligible_sessions(
+            use_heuristic_fallback=use_heuristic_fallback,
+            max_tokens_per_chunk=max_tokens_per_chunk,
         )
 
         if model_alias:
@@ -479,7 +471,7 @@ class BackgroundTasksMixin:
         profile_user_id = task.user_id
         if not profile_user_id or profile_user_id == "system":
             profile_user_id = getattr(self.config, "DEFAULT_USER", None) or "system"
-        extraction_results = await self._extract_from_summaries(
+        extraction_results = self._extract_from_summaries(
             result.get("results", []),
             bot_id=bot_id,
             user_id=profile_user_id,
@@ -488,7 +480,9 @@ class BackgroundTasksMixin:
 
         # Summary writes change context composition; invalidate cached history views
         # for this bot so next request reloads from DB immediately.
-        for (_model, cached_bot_id, _user), llm_bawt in self._llm_bawt_cache.items():
+        # Snapshot: this runs on a job thread while the event loop may add
+        # cache entries.
+        for (_model, cached_bot_id, _user), llm_bawt in list(self._llm_bawt_cache.items()):
             if cached_bot_id != bot_id:
                 continue
             invalidate = getattr(llm_bawt, "invalidate_history_cache", None)
@@ -497,7 +491,7 @@ class BackgroundTasksMixin:
 
         return result
 
-    async def _process_memory_extraction(self, task: Task) -> dict:
+    def _process_memory_extraction(self, task: Task) -> dict:
         """Extract memories from unprocessed conversation messages.
 
         Reads batches of unprocessed messages from the bot's message table,
@@ -537,12 +531,7 @@ class BackgroundTasksMixin:
         except Exception as e:
             return {"error": f"Failed to create memory backend: {e}"}
 
-        loop = asyncio.get_event_loop()
-
-        unprocessed = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: backend.get_unprocessed_messages(limit=batch_size),
-        )
+        unprocessed = backend.get_unprocessed_messages(limit=batch_size)
 
         if not unprocessed:
             return {
@@ -581,14 +570,11 @@ class BackgroundTasksMixin:
 
         if conversation:
             try:
-                # Remote API call — bounded bg pool (TASK-283), kept off the
-                # default interactive pool (TASK-274).
-                facts = await loop.run_in_executor(
-                    self._bg_executor,
-                    lambda: extraction_service.extract_from_conversation(
-                        messages=conversation,
-                        use_llm=use_llm and extraction_service.llm_client is not None,
-                    ),
+                # Remote API call — already on the bounded bg pool via
+                # process_task (TASK-283), off the default pool (TASK-274).
+                facts = extraction_service.extract_from_conversation(
+                    messages=conversation,
+                    use_llm=use_llm and extraction_service.llm_client is not None,
                 )
 
                 # Filter by importance
@@ -674,10 +660,7 @@ class BackgroundTasksMixin:
 
         # Mark messages as processed regardless of extraction outcome
         # so they aren't re-processed on the next run
-        await loop.run_in_executor(
-            self._bg_executor,
-            lambda: backend.mark_messages_processed(message_ids),
-        )
+        backend.mark_messages_processed(message_ids)
 
         log.info(
             "[MemExtract] %s: %d messages processed, %d facts extracted, %d stored",
@@ -695,49 +678,26 @@ class BackgroundTasksMixin:
             "extraction_method": extraction_model or "heuristic",
         }
 
-    async def _process_media_assets_gc(self, task: Task) -> dict:
+    def _process_media_assets_gc(self, task: Task) -> dict:
         """Garbage-collect orphan ``media_assets`` rows + their blobs (TASK-231).
 
-        Delegates to :func:`llm_bawt.service.jobs.media_gc.run_media_gc`.
-        The actual SQL + delete loop is synchronous (Postgres + filesystem
-        ops), so we run it through the executor to keep the event loop
-        free.
+        Delegates to :func:`llm_bawt.service.jobs.media_gc.run_media_gc`
+        (synchronous Postgres + filesystem ops, on the job pool).
         """
         from .jobs.media_gc import run_media_gc
 
         grace_days = int(task.payload.get("grace_days", 7))
         dry_run = bool(task.payload.get("dry_run", False))
+        return run_media_gc(self.config, grace_days=grace_days, dry_run=dry_run)
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: run_media_gc(
-                self.config,
-                grace_days=grace_days,
-                dry_run=dry_run,
-            ),
-        )
-        return result
-
-    async def _process_tool_result_gc(self, task: Task) -> dict:
+    def _process_tool_result_gc(self, task: Task) -> dict:
         """Prune transient overflow tool-result blobs + legacy rows (TASK-594).
 
-        Delegates to :func:`llm_bawt.service.jobs.tool_result_gc.run_tool_result_gc`.
-        Synchronous (Postgres + object-store deletes), so it runs through the
-        executor to keep the event loop free.
+        Delegates to :func:`llm_bawt.service.jobs.tool_result_gc.run_tool_result_gc`
+        (synchronous Postgres + object-store deletes, on the job pool).
         """
         from .jobs.tool_result_gc import run_tool_result_gc
 
         retention_days = int(task.payload.get("retention_days", 14))
         dry_run = bool(task.payload.get("dry_run", False))
-
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            self._bg_executor,
-            lambda: run_tool_result_gc(
-                self.config,
-                retention_days=retention_days,
-                dry_run=dry_run,
-            ),
-        )
-        return result
+        return run_tool_result_gc(self.config, retention_days=retention_days, dry_run=dry_run)

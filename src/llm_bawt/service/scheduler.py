@@ -224,8 +224,13 @@ class JobScheduler:
             JobType.MEMORY_DECAY,
         ):
             from llm_bawt.bots import BotManager
-            bot_manager = BotManager(self.task_processor.config)
-            all_bots = [bot.slug for bot in bot_manager.list_bots()]
+
+            def list_bot_slugs() -> list[str]:
+                # BotManager reloads bots from the DB after a registry
+                # invalidation, so it must not run on the event loop (TASK-1358).
+                return [bot.slug for bot in BotManager(self.task_processor.config).list_bots()]
+
+            all_bots = await asyncio.to_thread(list_bot_slugs)
             if not all_bots:
                 logger.debug("No bots found for wildcard job %s", job.job_type)
                 return

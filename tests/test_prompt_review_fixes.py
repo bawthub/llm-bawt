@@ -235,9 +235,9 @@ def test_summary_extraction_entrypoint_does_not_send_opted_out_user_content(hist
     service.config = SimpleNamespace()
     service._get_background_client = lambda: (object(), "mock")
     service.get_memory_client = lambda *a: object()
-    result = asyncio.run(service._extract_from_summaries([
+    result = service._extract_from_summaries([
         {"created": True, "summary_id": "summary", "summary_text": "Never extract my secret"}
-    ], "test", "owner"))
+    ], "test", "owner")
     assert result["summaries_processed"] == 0
     extract.assert_not_called()
 
