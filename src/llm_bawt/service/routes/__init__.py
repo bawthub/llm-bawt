@@ -28,6 +28,7 @@ from .session_continuity import router as session_continuity_router
 from .approval_policies import router as approval_policies_router
 from .ops import router as ops_router
 from .tasks import router as tasks_router
+from .task_events import router as task_events_router
 from .ha_weather import router as ha_weather_router
 from .turn_logs import router as turn_logs_router
 from .workspace_provenance import router as workspace_provenance_router
@@ -53,6 +54,7 @@ all_routers = [
     botchat_router,
     chat_router,
     tasks_router,
+    task_events_router,
     turn_logs_router,
     workspace_provenance_router,
     inter_bot_deliveries_router,
