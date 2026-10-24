@@ -16,6 +16,7 @@ from llm_bawt.mcp_server.message_search import CrossBotMessageSearcher, Operator
 from llm_bawt.memory.message_tsv import INDEX, ensure_message_tsv
 from llm_bawt.memory.postgresql_messages import PostgreSQLMessageMixin
 from llm_bawt.utils import db
+from tests.bot_tag_fixtures import ensure_tag_tables
 from tests.pg_isolation import require_test_db_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -78,6 +79,7 @@ def engine(private_app_pg):
                           "name text, color text, avatar text, avatar_render text)"))
         conn.execute(text("INSERT INTO bot_profiles (slug, include_in_global_search) VALUES "
                           "('pub', true), ('priv', false)"))
+        ensure_tag_tables(conn)  # migrated catalog; priv is private by its column
         conn.execute(text("CREATE TABLE entity_profiles (entity_type text, entity_id text, "
                           "display_name text, color text, avatar text, avatar_render text)"))
         conn.execute(text("CREATE TABLE sessions (id text, bot_id text, user_id text, status text)"))

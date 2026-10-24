@@ -62,8 +62,8 @@ class OperatorMessageScope:
         except BotAccessError as exc:
             if exc.code != "access_denied":
                 raise
-            # Unknown and protected bots read as an ordinary empty match.
-            return cls((), access.public_bots, author, in_bot)
+            # Unknown, private and no_global_search bots read as an ordinary empty match.
+            return cls((), access.searchable_bots, author, in_bot)
         return cls(scope.partitions, scope.public_authors, author, in_bot)
 
     @property

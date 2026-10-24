@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import metrics
-from .policy import WorkingMemoryPolicy, is_protected
+from .policy import WorkingMemoryPolicy
 from .prompts import notice_text
 from .render import EMPTY, OK, SECTION_NAME
 from .session_state import SUPPRESSED, compaction_gen_of, mode_of, read_state, update_state
@@ -169,9 +169,10 @@ def prepare_notice(engine, *, bot_id: str, user_id: str, session_id: str, decisi
     Returns the notice line when it fires, after its mark has committed.
     Never raises: a failure logs and the turn continues without a notice.
     """
-    if decision is None or is_protected(bot_id):
+    if decision is None:
         return None
     try:
+        # describe() reads the tags first: a private bot is refused before any row.
         if not WorkingMemoryPolicy(engine).describe(bot_id).tools_allowed:
             return None
         state = read_state(engine, session_id)

@@ -37,11 +37,11 @@ from llm_bawt.utils.db import get_shared_engine
 from llm_bawt.working_memory import health as wm_health
 from llm_bawt.working_memory import metrics, prompts, session_state
 from llm_bawt.working_memory import notice as notice_module
-from llm_bawt.working_memory import policy as policy_module
 from llm_bawt.working_memory.contracts import WorkingMemoryError
 from llm_bawt.working_memory.notice import prepare_notice
 from llm_bawt.working_memory.render import render_section
 from llm_bawt.working_memory.service import WorkingMemoryService
+from tests.bot_tag_fixtures import PRIVATE_MODES, make_private
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -70,7 +70,8 @@ def wm(private_app_pg, monkeypatch):
         profiles.upsert({"slug": slug, "bot_type": "agent", "agent_backend": backend, "harness": backend})
     settings.set_value("bot", bots["on"], KEY, True)
     settings.set_value("bot", bots["codex"], KEY, True)  # stored directly; read-time gate must still refuse
-    monkeypatch.setattr(policy_module, "PROTECTED_BOT_IDS", frozenset({"mira", bots["protected"]}))
+    with engine.begin() as conn:
+        make_private(conn, bots["protected"], "tag")
 
     def context(bot: str = bots["on"], user: str = f"user-{tag}") -> TaskTurnContext:
         return TaskTurnContext(
@@ -102,6 +103,7 @@ def wm(private_app_pg, monkeypatch):
             conn.execute(text(f"DELETE FROM {table} WHERE bot_id LIKE :p"), {"p": f"test-wm-%-{tag}"})
         conn.execute(text("DELETE FROM runtime_settings WHERE scope_id LIKE :p"), {"p": f"test-wm-%-{tag}"})
         conn.execute(text("DELETE FROM bot_profiles WHERE slug LIKE :p"), {"p": f"test-wm-%-{tag}"})
+        conn.execute(text("DELETE FROM bot_profile_tags WHERE bot_slug LIKE :p"), {"p": f"test-wm-%-{tag}"})
 
 
 def _key() -> str:
@@ -766,6 +768,27 @@ def test_health_report_counts_without_item_text(wm, ses, monkeypatch):
     monkeypatch.setattr(wm_health, "health_report", lambda engine: 1 / 0)
     response = client.get("/v1/working-memory/health")
     assert (response.status_code, response.json()) == (503, {"status": "unavailable", "bots": []})
+
+
+@pytest.mark.parametrize("mode", PRIVATE_MODES)
+def test_health_never_reads_an_opted_in_private_bot(wm, monkeypatch, mode):
+    """BOT_TAGS.md §10.11: excluded in the listing statement, before any per-bot query."""
+    private = f"test-wm-private-{mode}-{wm.user.removeprefix('user-')}"
+    BotProfileStore(wm.settings.config).upsert(
+        {"slug": private, "bot_type": "agent", "agent_backend": "claude-code", "harness": "claude-code"})
+    wm.settings.set_value("bot", private, KEY, True)
+    with wm.engine.begin() as conn:
+        make_private(conn, private, mode)
+    read: list[str] = []
+    for name in ("_counts", "_behind"):
+        original = getattr(wm_health, name)
+        monkeypatch.setattr(wm_health, name, lambda conn, bot, _o=original: (read.append(bot), _o(conn, bot))[1])
+
+    report = wm_health.health_report(wm.engine)
+
+    assert private not in {bot["bot_id"] for bot in report["bots"]}
+    assert wm.bots["on"] in {bot["bot_id"] for bot in report["bots"]}
+    assert private not in read and wm.bots["on"] in read
 
 
 # -- Loopy 2a r1 regressions (written by Loopy, adapted) -----------------------

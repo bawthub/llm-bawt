@@ -1,7 +1,7 @@
 """Working-memory health report (docs/WORKING_MEMORY.md 14).
 
-Per bot that has ``working_memory_enabled`` stored (protected bots never
-appear): whether the policy currently allows it, item counts, namespace
+Per bot that has ``working_memory_enabled`` stored (private bots never
+appear, excluded in the same statement that lists them): whether the policy currently allows it, item counts, namespace
 versions, the process-local counters, and the active sessions whose pinned
 section is behind the store. Counts and versions only, never item text.
 
@@ -14,20 +14,25 @@ from typing import Any
 
 from sqlalchemy import text
 
+from ..bot_tags import BehaviorTag, sql_allowed
+
 from . import metrics
 from .notice import entry_version
-from .policy import SETTING_KEY, WorkingMemoryPolicy, _enabled, is_protected
+from .policy import SETTING_KEY, WorkingMemoryPolicy, _enabled
 from .store import WorkingMemoryStore
 
 _PIN_KEY = "system_prompt_pin"  # TASK-1318 pointer (service/system_prompt_pin.py PIN_KEY)
 
 
+_ALLOWED, _ALLOWED_PARAMS = sql_allowed("rs.scope_id", {BehaviorTag.PRIVATE})
+
+
 def _opted_in_bots(conn) -> list[str]:
     rows = conn.execute(text(
-        "SELECT scope_id, value_json FROM runtime_settings"
-        " WHERE scope_type = 'bot' AND key = :key ORDER BY scope_id"
-    ), {"key": SETTING_KEY}).all()
-    return [str(slug) for slug, raw in rows if _enabled(raw) and not is_protected(str(slug))]
+        "SELECT rs.scope_id, rs.value_json FROM runtime_settings rs"
+        f" WHERE rs.scope_type = 'bot' AND rs.key = :key AND {_ALLOWED} ORDER BY rs.scope_id"
+    ), {"key": SETTING_KEY, **_ALLOWED_PARAMS}).all()
+    return [str(slug) for slug, raw in rows if _enabled(raw)]
 
 
 def _counts(conn, bot_id: str) -> dict[str, int]:

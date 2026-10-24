@@ -16,13 +16,13 @@ from typing import Any
 from sqlalchemy import text
 
 from ..agent_context import SessionPolicy, validate_session_policy
+from ..bot_tags import BotTags
 from ..bot_types import durable_agent_backend
 from ..bots import BotManager
 from ..inter_bot_delivery_record import DeliveryRecord
 from ..message_authorship import AuthorReference
 from ..model_catalog import bot_model_ref
 from ..utils.schema import SchemaBootstrapGuard
-from .jobs.idle_context_candidates import PROTECTED_BOT_IDS
 from .turn_admission import classify_target, lock_target
 
 
@@ -142,8 +142,11 @@ class MessageRouter:
     def set_enabled(self, user_id: str, bot_id: str, enabled: bool) -> dict:
         owner, _ = self._validate(RouteRequest(user_id=user_id))
         slug = bot_id.strip().lower()
-        bot = BotManager(self.service.config).get_bot(slug)
-        if not bot or slug in PROTECTED_BOT_IDS or not durable_agent_backend(bot):
+        # Tags first: a private or inactive bot is never configurable, and a
+        # failed snapshot excludes every bot (BOT_TAGS.md §5.3).
+        excluded = BotTags(self.engine).snapshot().excluded_reason(slug)
+        bot = None if excluded else BotManager(self.service.config).get_bot(slug)
+        if not bot or not durable_agent_backend(bot):
             raise ValueError("This bot cannot be configured for routing")
         with self.engine.begin() as conn:
             # A route binds under the same target lock; disabling wins or waits.
@@ -191,6 +194,9 @@ class MessageRouter:
 
     def _candidates(self, conn, request: RouteRequest, *, all_bots: bool) -> list[dict]:
         owner, narrowed = self._validate(request)
+        # One tag snapshot, on this connection, before the eligibility read and
+        # any activity query; an unreadable snapshot excludes every bot.
+        tags = BotTags(self.engine).snapshot(conn)
         bots = BotManager(self.service.config).list_bots()
         membership = dict(conn.execute(text("""
             SELECT bot_id, enabled FROM message_route_eligibility WHERE owner_user_id=:owner
@@ -200,15 +206,15 @@ class MessageRouter:
         rows = []
         for bot in bots:
             slug = bot.slug
-            # Protection must be evaluated before ANY activity/session/turn query.
-            protected = slug in PROTECTED_BOT_IDS
-            configurable = not protected and bool(durable_agent_backend(bot))
+            # Exclusion must be evaluated before ANY activity/session/turn query.
+            excluded = tags.excluded_reason(slug)
+            configurable = excluded is None and bool(durable_agent_backend(bot))
             enabled = bool(membership.get(slug, False)) if configurable else False
             if not all_bots and (not enabled or narrowed is not None and slug not in narrowed):
                 continue
             reasons = []
-            if protected:
-                reasons.append("protected bot")
+            if excluded:
+                reasons.append(excluded)
             elif not configurable:
                 reasons.append("unsupported backend")
             elif not getattr(bot, "enabled", True):

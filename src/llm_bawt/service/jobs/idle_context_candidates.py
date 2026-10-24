@@ -10,19 +10,22 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
+from ...bot_tags import BehaviorTag, sql_allowed
 from ..job_parameters import IdleContextResetParameters
 
 # Compatibility exports; the parameter model owns defaults.
 MIN_RESIDENT_TOKENS = IdleContextResetParameters().resident_tokens_gt
 MIN_IDLE = timedelta(minutes=IdleContextResetParameters().idle_minutes_gt)
-# Privacy boundary: exclude before reading any session or turn for this bot.
-PROTECTED_BOT_IDS = frozenset({"mira"})
+# Privacy boundary: private and inactive bots are excluded in the target CTE,
+# before any session or turn is read for them (BOT_TAGS.md §5.3).
+_TAGS_ALLOWED, _TAG_PARAMS = sql_allowed("bp.slug", {BehaviorTag.PRIVATE, BehaviorTag.INACTIVE})
 
 
 class IdleContextCandidates:
     def __init__(self, engine, *, protected_bot_ids=()):
         self.engine = engine
-        self.protected_bot_ids = PROTECTED_BOT_IDS | frozenset(
+        # Operator extras on top of the tag exclusion (job parameters).
+        self.protected_bot_ids = frozenset(
             slug.strip().lower() for slug in protected_bot_ids if isinstance(slug, str)
         )
 
@@ -42,11 +45,12 @@ class IdleContextCandidates:
         return rows[0] if rows else None
 
     def _read(self, conn, target_bot: str) -> list[dict]:
-        rows = conn.execute(text("""
+        rows = conn.execute(text(f"""
                 WITH targets AS MATERIALIZED (
-                    SELECT slug, last_session_id FROM bot_profiles
-                    WHERE (:target_bot='*' OR slug=:target_bot)
-                      AND lower(slug) != ALL(:protected)
+                    SELECT bp.slug, bp.last_session_id FROM bot_profiles bp
+                    WHERE (:target_bot='*' OR bp.slug=:target_bot)
+                      AND lower(bp.slug) != ALL(:protected)
+                      AND {_TAGS_ALLOWED}
                 )
                 SELECT b.slug AS bot_id, s.id AS session_id, s.user_id,
                        t.id AS usage_turn_id, t.ended_at, t.token_usage_json,
@@ -70,7 +74,7 @@ class IdleContextCandidates:
                     ORDER BY tl.created_at DESC, tl.id DESC LIMIT 1
                 ) latest ON true
                 ORDER BY b.slug
-        """), {"target_bot": target_bot, "protected": list(self.protected_bot_ids)})
+        """), {"target_bot": target_bot, "protected": list(self.protected_bot_ids), **_TAG_PARAMS})
         return [dict(row) for row in rows.mappings()]
 
     @staticmethod

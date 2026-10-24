@@ -14,6 +14,9 @@ from llm_bawt.bots import Bot, BotManager
 from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 from llm_bawt.model_catalog import AccessPath, ModelCatalog, ModelEndpoint, ModelIdentity
 from llm_bawt.service.message_routing import MessageRouter, RouteConflict, RouteRequest
+from llm_bawt.bot_tags import TagSnapshot
+from llm_bawt.service import message_routing
+from tests.bot_tag_fixtures import PRIVATE_MODES, clear_tags, ensure_tag_tables, make_private, tag
 from tests.pg_isolation import isolated_pg_store
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -28,6 +31,7 @@ def rig(monkeypatch):
                 slug VARCHAR(128) PRIMARY KEY, last_session_id VARCHAR(36)
             )
         """))
+        ensure_tag_tables(conn)
     owner = "route-owner-" + uuid.uuid4().hex
     slugs = ["test_route_a_" + uuid.uuid4().hex, "test_route_b_" + uuid.uuid4().hex]
     bots = [Bot(slug=slug, name=slug, description="test", system_prompt="test",
@@ -50,8 +54,11 @@ def rig(monkeypatch):
     dispatcher = SimpleNamespace(store=store, announce_admitted=Mock())
     service = SimpleNamespace(config=store.config, _inter_bot_dispatcher=dispatcher)
     router = MessageRouter(service)
-    yield SimpleNamespace(router=router, bots=bots, slugs=slugs,
-                          owner=owner, store=store, dispatcher=dispatcher)
+    ctx = SimpleNamespace(router=router, bots=bots, slugs=slugs, owner=owner,
+                          store=store, dispatcher=dispatcher, tagged=list(slugs))
+    yield ctx
+    with store.engine.begin() as conn:
+        clear_tags(conn, *ctx.tagged)
     store.engine.dispose()
 
 
@@ -92,19 +99,78 @@ def test_revocation_prevents_unaccepted_claim_and_accepted_work_is_not_retargete
     assert rig.router.route(RouteRequest(user_id=rig.owner), message="consent", idempotency_key="a")["selected_bot_id"] == selected
 
 
-def test_protection_and_empty_narrowing_never_query_private_history(rig, monkeypatch):
-    protected = Bot(slug="mira", name="Protected", description="test", system_prompt="test",
-                    bot_type="agent", agent_backend="claude-code", harness="claude-code")
-    monkeypatch.setattr(BotManager, "list_bots", lambda self: [protected, *rig.bots])
-    all_rows = rig.router.candidates(RouteRequest(user_id=rig.owner))["candidates"]
-    private = next(row for row in all_rows if row["bot_id"] == "mira")
-    assert not private["configurable"] and not private["enabled"]
-    assert private["exclusion_reasons"] == ["protected bot", "not opted in"]
+def _excluded_bot(rig, kind: str, mode: str | None = None) -> str:
+    """A fixture bot listed by BotManager and excluded by its tags."""
+    slug = f"test_route_{kind}_{uuid.uuid4().hex}"
+    rig.tagged.append(slug)
+    bot = Bot(slug=slug, name=slug, description="test", system_prompt="test",
+              bot_type="agent", agent_backend="claude-code", harness="claude-code",
+              endpoint_id=1, default_model="route-test")
+    rig.bots.insert(0, bot)
+    with rig.store.engine.begin() as conn:
+        conn.execute(text("INSERT INTO bot_profiles(slug) VALUES (:slug)"), {"slug": slug})
+        if kind == "private":
+            make_private(conn, slug, mode)
+        else:
+            tag(conn, slug, kind)
+    return slug
+
+
+def _statements(rig):
+    seen: list[tuple[str, object]] = []
+
+    def spy(conn, cursor, statement, parameters, context, executemany):
+        seen.append((statement, parameters))
+
+    event.listen(rig.store.engine, "before_cursor_execute", spy)
+    return seen, lambda: event.remove(rig.store.engine, "before_cursor_execute", spy)
+
+
+@pytest.mark.parametrize("kind,mode", [*(("private", m) for m in PRIVATE_MODES), ("inactive", None)])
+def test_private_and_inactive_bots_are_listed_never_configured_and_never_queried(
+        rig, kind, mode):
+    excluded = _excluded_bot(rig, kind, mode)
+    seen, stop = _statements(rig)
+    try:
+        all_rows = rig.router.candidates(RouteRequest(user_id=rig.owner))["candidates"]
+    finally:
+        stop()
+    row = next(row for row in all_rows if row["bot_id"] == excluded)
+    assert not row["configurable"] and not row["enabled"]
+    assert row["exclusion_reasons"] == [f"{kind} bot", "not opted in"]
+    # The snapshot is read before the eligibility read, and no statement after
+    # it names the excluded bot.
+    texts = [statement for statement, _ in seen]
+    snapshot_at = next(i for i, t in enumerate(texts) if "bot_tag_catalog" in t)
+    eligibility_at = next(i for i, t in enumerate(texts) if "message_route_eligibility" in t)
+    assert snapshot_at < eligibility_at
+    assert not any(excluded in repr(parameters) for _, parameters in seen[snapshot_at + 1:])
     with pytest.raises(ValueError, match="cannot be configured"):
-        rig.router.set_enabled(rig.owner, "mira", True)
+        rig.router.set_enabled(rig.owner, excluded, True)
     for slug in rig.slugs:
         rig.router.set_enabled(rig.owner, slug, True)
+    assert rig.router.preview(RouteRequest(user_id=rig.owner))["selected_bot_id"] in rig.slugs
     assert rig.router.preview(RouteRequest(user_id=rig.owner, candidate_bot_ids=[]))["state"] == "not_routed"
+
+
+def test_an_unreadable_tag_snapshot_yields_no_candidates(rig, monkeypatch):
+    for slug in rig.slugs:
+        rig.router.set_enabled(rig.owner, slug, True)
+
+    class _Down:
+        def __init__(self, engine=None):
+            pass
+
+        def snapshot(self, conn=None):
+            return TagSnapshot.unavailable()
+
+    monkeypatch.setattr(message_routing, "BotTags", _Down)
+    rows = rig.router.candidates(RouteRequest(user_id=rig.owner))["candidates"]
+    assert rows and all(not row["configurable"] and not row["enabled"] for row in rows)
+    assert {row["exclusion_reasons"][0] for row in rows} == {"private bot"}
+    assert rig.router.preview(RouteRequest(user_id=rig.owner))["state"] == "not_routed"
+    with pytest.raises(ValueError, match="cannot be configured"):
+        rig.router.set_enabled(rig.owner, rig.slugs[0], True)
 
 
 def test_rank_oldest_original_message_and_ignore_other_owner_and_summaries(rig):
@@ -221,6 +287,8 @@ def test_scheduled_preparation_and_direct_route_share_owner_pool_lock(rig):
                         bot_type="agent", agent_backend="claude-code", harness="claude-code",
                         endpoint_id=1, default_model="route-test"))
     rig.slugs.append(third)
+    with rig.store.engine.begin() as conn:
+        conn.execute(text("INSERT INTO bot_profiles(slug) VALUES (:slug)"), {"slug": third})
     create_scheduler_tables(rig.store.engine)
     for slug in rig.slugs:
         rig.router.set_enabled(rig.owner, slug, True)

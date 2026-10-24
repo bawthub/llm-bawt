@@ -18,6 +18,7 @@ from llm_bawt.mcp_server.storage import MemoryStorage
 from llm_bawt.memory.message_tsv import ensure_message_tsv
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.utils import db
+from tests.bot_tag_fixtures import ensure_tag_tables
 from tests.pg_isolation import require_test_db_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -59,6 +60,7 @@ def engine(private_app_pg):
         conn.execute(text("INSERT INTO bot_profiles (slug, include_in_global_search, name) VALUES "
                           "('public-fixture', true, 'Public Fixture'), ('peer', true, 'Peer'), "
                           "('private_fixture', false, 'Private')"))
+        ensure_tag_tables(conn)  # migrated catalog; private_fixture is private by its column
         # Read by the production display hydrator (presentation + legacy delivery lookup).
         conn.execute(text("CREATE TABLE entity_profiles (entity_type text, entity_id text, "
                           "display_name text, color text, avatar text, avatar_render text)"))

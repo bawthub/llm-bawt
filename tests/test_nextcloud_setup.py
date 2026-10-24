@@ -15,6 +15,8 @@ from sqlmodel import SQLModel, create_engine
 from llm_bawt.integrations.nextcloud.setup import (
     INTEGRATION_ID, NextcloudSetup, NextcloudSetupStore, SetupError, canonical_instance, pinned_url,
 )
+from llm_bawt.bot_tags import TagSnapshot
+from llm_bawt.integrations.nextcloud import setup_bindings
 from llm_bawt.integrations.nextcloud.setup_bindings import NextcloudBindings
 from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
 from llm_bawt.service.providers import crypto
@@ -262,13 +264,41 @@ def test_admin_discovery_denial_is_actionable_and_redacted(setup):
     assert APP_PASSWORD not in exc.value.message
 
 
-def test_binding_blocked_honestly_and_disconnect_only_clears_local_mapping(setup):
-    engine = setup.store._store.engine
+@pytest.fixture
+def tags(monkeypatch):
+    """Stands in for ``BotTags`` over this store's engine: profile rows are the known bots."""
+    state = {"private": set(), "down": False, "engines": []}
+
+    class _Tags:
+        def __init__(self, engine):
+            self.engine = engine
+            state["engines"].append(engine)
+
+        def snapshot(self):
+            if state["down"]:
+                return TagSnapshot.unavailable()
+            with self.engine.connect() as conn:
+                slugs = conn.execute(text("SELECT slug FROM bot_profiles ORDER BY slug")).scalars()
+                return TagSnapshot.from_rows(
+                    {"slug": slug, "include_in_global_search": True,
+                     "tags": ["private"] if slug in state["private"] else []} for slug in slugs)
+
+    monkeypatch.setattr(setup_bindings, "BotTags", _Tags)
+    return state
+
+
+def _bound_bots(engine, *slugs):
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE bot_profiles (slug TEXT PRIMARY KEY, nextcloud_config JSON)"))
-        conn.execute(text("INSERT INTO bot_profiles VALUES (:slug, :data)"), {
-            "slug": "test-bot", "data": json.dumps({"bot_id": 12, "conversation_token": "room123", "secret": "synthetic-signing-secret"}),
-        })
+        for slug in slugs:
+            conn.execute(text("INSERT INTO bot_profiles VALUES (:slug, :data)"), {
+                "slug": slug, "data": json.dumps({"bot_id": 12, "conversation_token": "room123", "secret": "synthetic-signing-secret"}),
+            })
+
+
+def test_binding_blocked_honestly_and_disconnect_only_clears_local_mapping(setup, tags):
+    engine = setup.store._store.engine
+    _bound_bots(engine, "test-bot")
     reloads = []
     bindings = NextcloudBindings(None, store=SimpleNamespace(engine=engine), reload=lambda: reloads.append(True))
     assert bindings.list()[0]["has_signing_secret"] is True
@@ -279,6 +309,42 @@ def test_binding_blocked_honestly_and_disconnect_only_clears_local_mapping(setup
     assert bindings.disconnect("test-bot") == {"disconnected": True, "remote_rooms_preserved": True}
     assert bindings.list() == []
     assert reloads == [True]
+    assert set(tags["engines"]) == {engine}
+
+
+def test_a_private_bot_is_never_listed_connected_or_disconnected(setup, tags):
+    engine = setup.store._store.engine
+    _bound_bots(engine, "fixture-private", "test-bot")
+    tags["private"].add("fixture-private")
+    bindings = NextcloudBindings(None, store=SimpleNamespace(engine=engine), reload=lambda: None)
+    assert [row["bot_id"] for row in bindings.list()] == ["test-bot"]
+    for attempt in (lambda: bindings.connect("Fixture-Private ", "room123", 12, "test-user"),
+                    lambda: bindings.disconnect("fixture-private")):
+        with pytest.raises(SetupError, match="protected_bot"):
+            attempt()
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT nextcloud_config FROM bot_profiles WHERE slug='fixture-private'")).scalar_one()
+
+
+def test_an_unreadable_tag_snapshot_lists_and_admits_no_bot(setup, tags):
+    engine = setup.store._store.engine
+    _bound_bots(engine, "test-bot")
+    tags["down"] = True
+    bindings = NextcloudBindings(None, store=SimpleNamespace(engine=engine), reload=lambda: None)
+    assert bindings.list() == []
+    with pytest.raises(SetupError, match="policy_unavailable") as refused:
+        bindings.disconnect("test-bot")
+    assert refused.value.status == 503
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT nextcloud_config FROM bot_profiles")).scalar_one()
+
+
+def test_no_engine_refuses_without_the_process_engine(tags):
+    bindings = NextcloudBindings(None, store=SimpleNamespace(engine=None))
+    assert bindings.list() == []
+    with pytest.raises(SetupError, match="policy_unavailable"):
+        bindings.connect("test-bot", "room123", 12, "test-user")
+    assert tags["engines"] == []
 
 
 def test_start_never_follows_redirects(setup):
@@ -332,7 +398,8 @@ def test_cookie_route_contract_and_no_google_handler_fallthrough(setup, monkeypa
         "bot_id": "test-bot", "room_token": "room123", "nextcloud_bot_id": 12, "user_id": "test-user",
     })
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "provisioning_unavailable"
+    # No engine: the private-bot check fails closed before provisioning is tried.
+    assert response.json()["detail"]["code"] == "policy_unavailable"
     assert client.put("/v1/integrations/nextcloud-talk/workspace", json={"service_account_json": "{}", "subject": "x@y.test"}).status_code == 404
     assert client.delete("/v1/integrations/nextcloud-talk").json()["remote_rooms_preserved"]
     assert not setup.status()["account_connected"]

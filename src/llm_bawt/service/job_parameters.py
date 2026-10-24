@@ -38,7 +38,7 @@ class IdleContextResetParameters(JobParameters):
     )
     protected_bot_ids: tuple[str, ...] = Field(
         default=(), title="Additional protected bots",
-        description="Additional bot IDs to exclude. Built-in protected bots are always excluded.",
+        description="Additional bot IDs to exclude. Bots tagged private or inactive are always excluded.",
     )
     continuity: ResetContinuity = Field(
         default="configured", title="Continuity",

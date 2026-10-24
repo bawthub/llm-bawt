@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import metrics
-from .policy import WorkingMemoryPolicy, is_protected
+from .policy import WorkingMemoryPolicy
 from .prompts import section_empty_text, section_text, section_unavailable_text
 from .session_state import SUPPRESSED, session_mode
 from .store import WorkingMemoryStore
@@ -142,7 +142,7 @@ def render_section(engine, *, bot_id: str, user_id: str, session_id: str | None,
     nothing but still reports its state. A storage failure renders the
     unavailable line, never the empty one, with ``version`` None.
     """
-    if is_protected(bot_id) or not _bot_policy_allows(engine, bot_id):
+    if not _bot_policy_allows(engine, bot_id):  # tags first: private reads no row
         return None
     try:
         if session_mode(engine, session_id) == SUPPRESSED:

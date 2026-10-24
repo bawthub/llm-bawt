@@ -14,7 +14,8 @@
 The tool addresses ``bot_id`` like the other ``self_*`` tools (LAN trust model).
 When a trusted current-turn capability is present, the caller is recorded as
 ``changed_by`` and used as the continuation's sender, so a cross-bot switch is
-attributed correctly. Mira is refused unless she is the trusted caller.
+attributed correctly. A bot tagged ``private`` (TASK-1329) is refused unless it
+is the trusted caller; an unreadable tag snapshot refuses every cross-bot call.
 
 Continuation scope (Snark review, TASK-1047): a bot-authored delivery always
 runs as DEFAULT_USER in the target's ACTIVE thread. ``continue_prompt`` is
@@ -28,6 +29,7 @@ retried call re-attaches instead of queueing a second follow-up.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -35,13 +37,13 @@ from typing import Any, Literal
 
 import httpx
 
+from ..bot_tags import BehaviorTag, BotTags
 from ..task_turn_context import TaskTurnContext, TaskTurnContextError
 from .server import mcp
 
 logger = logging.getLogger(__name__)
 
 _APP_BASE_URL = os.getenv("LLM_BAWT_APP_BASE_URL", "http://localhost:8642").rstrip("/")
-_PROTECTED_BOTS = frozenset({"mira"})
 # Harnesses whose bots can move between each other via the server-side heal in
 # ``_validate_model_endpoint``; the picker offers the union for the same reason.
 _HARNESS_OPTIONS: dict[str, tuple[str, ...]] = {
@@ -210,8 +212,10 @@ async def self_model(
     base = {"bot_id": bot_id, "action": action}
     if not bot_id or bot_id == "default":
         return {**base, "error": "Pass an explicit bot slug (your own); 'default' is refused."}
-    if bot_id in _PROTECTED_BOTS and caller != bot_id:
-        return {**base, "error": f"'{bot_id}' is a protected bot; only it may change its own model."}
+    if caller != bot_id:
+        tags = await asyncio.to_thread(BotTags().snapshot)
+        if tags.has(bot_id, BehaviorTag.PRIVATE):
+            return {**base, "error": f"'{bot_id}' is a private bot; only it may change its own model."}
 
     try:
         before = await _get_profile(bot_id)

@@ -19,7 +19,7 @@ async def test_registered_receipt_tools_use_scoped_reader_not_http(monkeypatch):
 
     class Reader:
         def __init__(self, access):
-            calls.append(access.public_bots)
+            calls.append(access.searchable_bots)
 
         async def get(self, delivery_id):
             return {"delivery_id": delivery_id, "error": "not found"}

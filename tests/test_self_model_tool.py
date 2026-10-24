@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
+from llm_bawt.bot_tags import TagSnapshot
 from llm_bawt.mcp_server import self_model_tools as smt
 from llm_bawt.task_turn_context import TaskTurnContext
 
@@ -60,12 +61,32 @@ _ENDPOINTS = {
 }
 
 
+class _Tags:
+    """Stands in for ``BotTags``: every harness bot known, ``private`` ones tagged."""
+
+    def __init__(self, harness: Harness) -> None:
+        self.harness = harness
+
+    def snapshot(self) -> TagSnapshot:
+        h = self.harness
+        h.tag_reads += 1
+        if h.tags_down:
+            return TagSnapshot.unavailable()
+        return TagSnapshot.from_rows(
+            {"slug": slug, "include_in_global_search": True,
+             "tags": ["private"] if slug in h.private else []}
+            for slug in sorted(h.active))
+
+
 class Harness:
     """Records boundary calls; profiles are mutated by PATCH like the server."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, profiles: dict[str, dict],
-                 caller: TaskTurnContext | None = None) -> None:
+                 caller: TaskTurnContext | None = None, private: tuple[str, ...] = ()) -> None:
         self.profiles = profiles
+        self.private = set(private)
+        self.tags_down = False
+        self.tag_reads = 0
         # Active default-user ("nick") thread per bot, as GET /v1/sessions/active.
         self.active = {slug: {"id": f"sess-{slug}", "user_id": "nick"}
                        for slug in [*profiles, "al", "snark"]}
@@ -110,6 +131,7 @@ class Harness:
         monkeypatch.setattr(smt, "_list_endpoints", list_endpoints)
         monkeypatch.setattr(smt, "_enqueue_continue", enqueue)
         monkeypatch.setattr(smt, "_get_active_session", get_active_session)
+        monkeypatch.setattr(smt, "BotTags", lambda: _Tags(self))
         context = _ctx("al") if caller is None else caller
         monkeypatch.setattr(smt, "_trusted_caller", lambda: context)
 
@@ -338,23 +360,51 @@ def test_default_and_blank_bot_refused(monkeypatch, bot_id):
     assert "error" in res and h.patches == []
 
 
-def test_protected_bot_refused_for_other_callers(monkeypatch):
-    h = Harness(monkeypatch, {"mira": _profile("mira", 2158, "claude-opus-5-5", "claude-code")},
-                caller=_ctx("al"))
+def _private_fixture(monkeypatch, caller: str) -> Harness:
+    return Harness(monkeypatch,
+                   {"fixture-private": _profile("fixture-private", 2158, "claude-opus-5-5",
+                                                "claude-code")},
+                   caller=_ctx(caller, turn="turn-p"), private=("fixture-private",))
+
+
+def test_private_bot_refused_for_other_callers(monkeypatch):
+    h = _private_fixture(monkeypatch, "al")
 
     for action in ("view", "switch"):
-        res = _run(smt.self_model(bot_id="mira", action=action, endpoint_id=2144))
-        assert "protected" in res["error"]
+        res = _run(smt.self_model(bot_id="fixture-private", action=action, endpoint_id=2144))
+        assert "private bot" in res["error"] and "current" not in res
     assert h.patches == []
 
 
-def test_protected_bot_may_switch_itself(monkeypatch):
-    h = Harness(monkeypatch, {"mira": _profile("mira", 2158, "claude-opus-5-5", "claude-code")},
-                caller=_ctx("mira", turn="turn-m"))
+def test_private_bot_refused_for_an_untrusted_caller(monkeypatch):
+    h = _private_fixture(monkeypatch, "al")
+    monkeypatch.setattr(smt, "_trusted_caller", lambda: None)
 
-    res = _run(smt.self_model(bot_id="mira", action="switch", endpoint_id=2144))
+    res = _run(smt.self_model(bot_id="fixture-private", action="switch", endpoint_id=2144))
 
-    assert res["switched"] is True and h.patches == [("mira", 2144)]
+    assert "private bot" in res["error"] and h.patches == []
+
+
+def test_private_bot_may_switch_itself_without_a_tag_read(monkeypatch):
+    h = _private_fixture(monkeypatch, "fixture-private")
+
+    res = _run(smt.self_model(bot_id="fixture-private", action="switch", endpoint_id=2144))
+
+    assert res["switched"] is True and h.patches == [("fixture-private", 2144)]
+    assert h.tag_reads == 0
+
+
+def test_unreadable_tags_refuse_every_cross_bot_call(monkeypatch):
+    h = Harness(monkeypatch, {"snark": _profile("snark", 2150, "gpt-6-sol", "claude-proxy"),
+                              "al": _profile("al", 2158, "claude-opus-5-5", "claude-code")},
+                caller=_ctx("al"))
+    h.tags_down = True
+
+    res = _run(smt.self_model(bot_id="snark", action="switch", endpoint_id=2158))
+    own = _run(smt.self_model(bot_id="al", action="switch", endpoint_id=2144))
+
+    assert "private bot" in res["error"]
+    assert own["switched"] is True and h.patches == [("al", 2144)]
 
 
 def test_openclaw_bot_has_nothing_to_switch(monkeypatch):
@@ -377,11 +427,19 @@ def test_switch_requires_integer_endpoint(monkeypatch, endpoint_id):
 
 
 def test_unknown_bot_reports_profile_error(monkeypatch):
-    Harness(monkeypatch, {})
+    Harness(monkeypatch, {}, caller=_ctx("ghost"))
 
     res = _run(smt.self_model(bot_id="ghost"))
 
     assert res["error"].startswith("Could not read profile (404)")
+
+
+def test_unknown_bot_is_private_to_other_callers(monkeypatch):
+    Harness(monkeypatch, {})
+
+    res = _run(smt.self_model(bot_id="ghost"))
+
+    assert "private bot" in res["error"]
 
 
 def test_registered_on_shared_server():

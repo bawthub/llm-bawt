@@ -25,7 +25,7 @@ def journal_run(monkeypatch, tmp_path):
     plan = SimpleNamespace(
         content_digest="reviewed", children=children, database="private_test", database_oid=1,
         cluster_id="private", server_version=160000, max_identifier_length=63,
-        parent_oids={"messages": 11},
+        parent_oids={"messages": 11}, protected_ids=(),
     )
     rows = [{
         "parent_oid": child.parent_oid, "parent_schema": "public", "parent_name": "messages",
@@ -45,6 +45,8 @@ def journal_run(monkeypatch, tmp_path):
     monkeypatch.setattr(planner, "_children", staticmethod(lambda conn, parents: rows))
     monkeypatch.setattr(planner, "_validate_child", staticmethod(lambda row, parents, max_name: row["storage_id"]))
     monkeypatch.setattr(planner, "_registry", staticmethod(lambda conn: {}))
+    # No database: the tag-locked protected set is empty (proven in test_orphan_partitions_pg).
+    monkeypatch.setattr(orphan_partitions, "protected_storage_ids", lambda conn: frozenset())
 
     committed = []
 

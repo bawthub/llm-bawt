@@ -9,13 +9,18 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from llm_bawt import orphan_partitions
 from llm_bawt.orphan_partitions import OrphanPartitionPlanner, PartitionManifestExecutor, PartitionExecutionHalted
+from llm_bawt.bot_tags import BehaviorTag
+from tests.bot_tag_fixtures import clear_tags, ensure_tag_tables, tag
 from tests.private_postgres import private_url
 
 pytestmark = pytest.mark.integration
+
+PRIVATE_SLUG = "fixture-private"
+PRIVATE = "fixtureprivate"  # its sanitized storage id
 
 
 @pytest.fixture
@@ -34,11 +39,14 @@ def orphan_db(private_pg, monkeypatch):
                     f"CREATE TABLE {parent} (bot_id text NOT NULL, body text) PARTITION BY LIST (bot_id)"
                 )
             conn.exec_driver_sql("INSERT INTO bot_profiles VALUES ('real')")
-            for bot in ("real", "mira", "spark", "system", "testcontext", "empty"):
+            ensure_tag_tables(conn)
+            # Private with no profile row: exactly the storage being protected.
+            tag(conn, PRIVATE_SLUG, BehaviorTag.PRIVATE)
+            for bot in ("real", PRIVATE, "spark", "system", "testcontext", "empty"):
                 conn.exec_driver_sql(
                     f"CREATE TABLE messages_p_{bot} PARTITION OF messages FOR VALUES IN ('{bot}')"
                 )
-            for bot in ("real", "mira", "spark", "system", "testcontext"):
+            for bot in ("real", PRIVATE, "spark", "system", "testcontext"):
                 conn.execute(text("INSERT INTO messages (bot_id, body) VALUES (:bot, 'proof')"),
                              {"bot": bot})
         yield engine
@@ -66,13 +74,14 @@ def test_planner_excludes_protected_before_counting_and_plans_all_unregistered(o
     assert plan.manifest()["sha256"] == plan.content_digest
     assert plan.manifest()["content"]["children"] == again.manifest()["content"]["children"]
     children = {c.storage_id: c for c in plan.children}
-    assert children["mira"].row_count is None
-    assert children["mira"].disposition == "held"
+    assert children[PRIVATE].row_count is None
+    assert (children[PRIVATE].disposition, children[PRIVATE].reason) == ("held", "protected identity")
+    assert plan.protected_ids == (PRIVATE,)
     assert children["real"].disposition == "held"
     for bot in ("spark", "system", "testcontext"):
         assert (children[bot].row_count, children[bot].action) == (1, "truncate-then-drop-RESTRICT")
     assert (children["empty"].row_count, children["empty"].action) == (0, "drop-empty-RESTRICT")
-    assert not any("mira" in sql for sql in counted)
+    assert not any(PRIVATE in sql for sql in counted)
     assert plan.manifest()["counts"] == {"proposed": 4, "held": 2, "nonempty": 3}
 
 
@@ -109,8 +118,9 @@ def test_nonempty_truncate_drop_restrict_journal_and_protected_survive(orphan_db
     assert all(outcome["status"] == "committed" for outcome in outcomes)
     assert (tmp_path / "outcomes.jsonl").read_text().count("\n") == 8
     locks = [sql for sql in statements if sql.startswith("LOCK TABLE")]
-    assert locks[:3] == [
+    assert locks[:4] == [
         'LOCK TABLE "public"."bot_profiles" IN SHARE MODE NOWAIT',
+        'LOCK TABLE "public"."bot_profile_tags" IN SHARE MODE NOWAIT',
         'LOCK TABLE ONLY "public"."messages" IN ACCESS EXCLUSIVE MODE NOWAIT',
         'LOCK TABLE "public"."messages_p_empty" IN ACCESS EXCLUSIVE MODE NOWAIT',
     ]
@@ -118,21 +128,22 @@ def test_nonempty_truncate_drop_restrict_journal_and_protected_survive(orphan_db
     assert sum("DROP TABLE" in sql and "RESTRICT" in sql for sql in statements) == 4
     assert not any("CASCADE" in sql for sql in statements)
     with orphan_db.connect() as conn:
-        assert conn.exec_driver_sql("SELECT bot_id FROM messages ORDER BY bot_id").scalars().all() == ["mira", "real"]
+        assert conn.exec_driver_sql("SELECT bot_id FROM messages ORDER BY bot_id").scalars().all() == [PRIVATE, "real"]
     remaining = OrphanPartitionPlanner(orphan_db).plan()
     assert remaining.manifest()["counts"] == {"proposed": 0, "held": 2, "nonempty": 0}
 
 
 def test_inconsistent_bound_name_rejected_without_counting_protected(orphan_db):
     with orphan_db.begin() as conn:
-        conn.exec_driver_sql("ALTER TABLE messages DETACH PARTITION messages_p_mira")
-        conn.exec_driver_sql("DROP TABLE messages_p_mira")
-        conn.exec_driver_sql("CREATE TABLE messages_p_mira_other PARTITION OF messages FOR VALUES IN ('mira')")
+        conn.exec_driver_sql(f"ALTER TABLE messages DETACH PARTITION messages_p_{PRIVATE}")
+        conn.exec_driver_sql(f"DROP TABLE messages_p_{PRIVATE}")
+        conn.exec_driver_sql(f"CREATE TABLE messages_p_{PRIVATE}_other PARTITION OF messages "
+                             f"FOR VALUES IN ('{PRIVATE}')")
     seen = []
     event.listen(orphan_db, "before_cursor_execute", lambda conn, cursor, sql, *args: seen.append(sql))
     with pytest.raises(ValueError, match="name/bound"):
         OrphanPartitionPlanner(orphan_db).plan()
-    assert not any("SELECT count(*) FROM ONLY" in sql and "mira" in sql for sql in seen)
+    assert not any("SELECT count(*) FROM ONLY" in sql and PRIVATE in sql for sql in seen)
 
 
 def test_cleanup_entrypoint_requires_exact_digest_before_any_mutation(orphan_db, monkeypatch, tmp_path):
@@ -276,3 +287,139 @@ def test_executor_does_not_use_manifest_identifiers(orphan_db, tmp_path):
             forged, forged.content_digest, journal_path=tmp_path / "forged.jsonl")
     with orphan_db.connect() as conn:
         assert conn.exec_driver_sql("SELECT count(*) FROM bot_profiles").scalar_one() == 1
+
+
+# --- TASK-1329: the protected set comes from bot tags (BOT_TAGS.md §6) -------
+
+
+def test_policy_v3_protects_tag_and_legacy_column_bots_without_counting(orphan_db):
+    with orphan_db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO bot_profiles (slug, include_in_global_search) "
+                             "VALUES ('fixture-column', false)")
+        conn.exec_driver_sql("CREATE TABLE messages_p_fixturecolumn PARTITION OF messages "
+                             "FOR VALUES IN ('fixturecolumn')")
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('fixturecolumn', 'proof')")
+    counted = []
+    event.listen(orphan_db, "before_cursor_execute",
+                 lambda conn, cursor, sql, *a: counted.append(sql) if "count(*) FROM ONLY" in sql else None)
+    plan = OrphanPartitionPlanner(orphan_db).plan()
+
+    assert plan.policy_version == "partition-orphans-v3"
+    assert plan.protected_ids == ("fixturecolumn", PRIVATE)
+    children = {c.storage_id: c for c in plan.children}
+    for storage in ("fixturecolumn", PRIVATE):
+        assert (children[storage].row_count, children[storage].reason) == (None, "protected identity")
+    assert not any("fixturecolumn" in sql or PRIVATE in sql for sql in counted)
+    assert "bot_profile_tags" in plan.manifest()["lock_impact"]
+
+
+def test_a_retag_after_preview_is_a_digest_mismatch(orphan_db, tmp_path):
+    plan = OrphanPartitionPlanner(orphan_db).plan()
+    with orphan_db.begin() as conn:
+        tag(conn, "spark", BehaviorTag.PRIVATE)
+    journal = tmp_path / "retag.jsonl"
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        PartitionManifestExecutor(orphan_db).execute(plan, plan.content_digest, journal_path=journal)
+    assert not journal.exists()
+    with orphan_db.connect() as conn:
+        assert conn.exec_driver_sql("SELECT count(*) FROM messages").scalar_one() == 5
+
+
+@pytest.mark.parametrize("change", ["tag spark", "untag the private bot"])
+def test_a_protected_set_change_mid_run_halts_under_the_tag_lock(orphan_db, tmp_path, monkeypatch, change):
+    """Commit a tag change after child one commits, before child two re-reads the set."""
+    plan = OrphanPartitionPlanner(orphan_db).plan()
+    journal = tmp_path / "drift.jsonl"
+    original_fsync = orphan_partitions.os.fsync
+    changed = False
+
+    def retag_after_first_commit(fd):
+        nonlocal changed
+        original_fsync(fd)
+        if changed or not journal.exists():
+            return
+        lines = journal.read_text().splitlines()
+        if lines and json.loads(lines[-1])["status"] == "committed":
+            changed = True
+            with orphan_db.begin() as conn:
+                if change == "tag spark":
+                    tag(conn, "spark", BehaviorTag.PRIVATE)
+                else:
+                    clear_tags(conn, PRIVATE_SLUG)
+
+    monkeypatch.setattr(orphan_partitions.os, "fsync", retag_after_first_commit)
+    with pytest.raises(PartitionExecutionHalted) as halted:
+        PartitionManifestExecutor(orphan_db).execute(plan, plan.content_digest, journal_path=journal)
+    receipt = halted.value.receipt()
+    assert changed
+    assert (receipt["status"], receipt["committed_count"]) == ("partial", 1)
+    assert receipt["error"] == "Protected identity set changed after preview"
+    with orphan_db.connect() as conn:
+        assert conn.exec_driver_sql("SELECT count(*) FROM messages_p_spark").scalar_one() == 1
+        assert conn.exec_driver_sql(f"SELECT count(*) FROM messages_p_{PRIVATE}").scalar_one() == 1
+
+
+def test_tag_lock_fences_a_concurrent_private_assignment(orphan_db, tmp_path):
+    plan = OrphanPartitionPlanner(orphan_db).plan()
+    attempted = False
+
+    def observe(conn, cursor, sql, params, context, many):
+        nonlocal attempted
+        if not attempted and sql.startswith("LOCK TABLE ONLY"):
+            attempted = True
+
+            def assign():
+                with orphan_db.begin() as writer:
+                    writer.exec_driver_sql("SET LOCAL lock_timeout = '200ms'")
+                    tag(writer, "spark", BehaviorTag.PRIVATE)
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with pytest.raises(OperationalError) as blocked:
+                    pool.submit(assign).result(timeout=3)
+                assert blocked.value.orig.pgcode == "55P03"
+
+    event.listen(orphan_db, "before_cursor_execute", observe)
+    try:
+        outcomes = PartitionManifestExecutor(orphan_db).execute(
+            plan, plan.content_digest, journal_path=tmp_path / "tag-fence.jsonl")
+    finally:
+        event.remove(orphan_db, "before_cursor_execute", observe)
+    assert attempted and len(outcomes) == 4
+
+
+def test_a_missing_tag_table_fails_closed_before_any_count_or_journal(orphan_db, tmp_path):
+    plan = OrphanPartitionPlanner(orphan_db).plan()
+    with orphan_db.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE bot_profile_tags")
+    counted = []
+    event.listen(orphan_db, "before_cursor_execute",
+                 lambda conn, cursor, sql, *a: counted.append(sql) if "count(*) FROM ONLY" in sql else None)
+    journal = tmp_path / "no-tags.jsonl"
+
+    with pytest.raises(ProgrammingError, match="bot_profile_tags"):
+        OrphanPartitionPlanner(orphan_db).plan()
+    with pytest.raises(ProgrammingError, match="bot_profile_tags"):
+        PartitionManifestExecutor(orphan_db).execute(plan, plan.content_digest, journal_path=journal)
+    assert counted == [] and not journal.exists()
+    with orphan_db.connect() as conn:
+        assert conn.exec_driver_sql("SELECT count(*) FROM messages").scalar_one() == 5
+
+
+def test_an_untagged_profileless_bot_becomes_proposed(orphan_db):
+    with orphan_db.begin() as conn:
+        clear_tags(conn, PRIVATE_SLUG)
+    children = {c.storage_id: c for c in OrphanPartitionPlanner(orphan_db).plan().children}
+
+    assert (children[PRIVATE].disposition, children[PRIVATE].row_count) == ("proposed", 1)
+    assert children[PRIVATE].action == "truncate-then-drop-RESTRICT"
+
+
+def test_a_v2_manifest_is_refused(orphan_db, tmp_path):
+    plan = OrphanPartitionPlanner(orphan_db).plan()
+    v2 = replace(plan, policy_version="partition-orphans-v2")
+    journal = tmp_path / "v2.jsonl"
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        PartitionManifestExecutor(orphan_db).execute(v2, v2.content_digest, journal_path=journal)
+    assert not journal.exists()

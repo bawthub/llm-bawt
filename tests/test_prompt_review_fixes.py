@@ -334,7 +334,9 @@ def purge_runtime(engine, monkeypatch):
     with engine.begin() as conn:
         for table, columns in {
             "messages": "bot_id TEXT", "memories": "bot_id TEXT",
-            "forgotten_messages": "bot_id TEXT", "bot_profiles": "slug TEXT",
+            "forgotten_messages": "bot_id TEXT",
+            "bot_profiles": "slug TEXT, include_in_global_search BOOLEAN DEFAULT 1",
+            "bot_profile_tags": "bot_slug TEXT, tag_slug TEXT",
             "runtime_settings": "scope_type TEXT, scope_id TEXT",
             "entity_profiles": "entity_type TEXT, entity_id TEXT",
             "entity_profile_attributes": "entity_type TEXT, entity_id TEXT",
@@ -348,7 +350,9 @@ def purge_runtime(engine, monkeypatch):
     def translate(conn, cursor, sql, parameters, context, many):
         if "FROM information_schema.tables" in sql:
             sql = "SELECT name FROM sqlite_master WHERE type='table'"
-        return sql.replace("entity_type::text", "entity_type"), parameters
+        elif sql.lstrip().startswith("LOCK TABLE"):
+            sql = "SELECT 1"  # SQLite has no table locks; the PG fence is proven in test_bot_tags_pg
+        return sql.replace("entity_type::text", "entity_type").replace("btrim(", "trim("), parameters
     event.listen(engine, "before_cursor_execute", translate, retval=True)
     monkeypatch.setattr(sqlalchemy, "create_engine", lambda *a, **kw: SimpleNamespace(
         connect=engine.connect, dispose=lambda: None))

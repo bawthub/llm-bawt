@@ -11,11 +11,21 @@ import pytest
 
 from llm_bawt.service.jobs.idle_context_candidates import IdleContextCandidates
 from llm_bawt.service.jobs.idle_context_reset import IdleContextResetJob
+from llm_bawt.service.jobs import idle_context_reset
 from llm_bawt.service.session_lifecycle.intent import (
     Admission, Continuity, NewSessionResult, Origin, Outcome, Stage,
 )
+from tests.bot_tag_fixtures import static_tags
 
 NOW = datetime(2026, 10, 20, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def tags(monkeypatch):
+    """No database: fixture-private and fixture-inactive are excluded by tags."""
+    fake = static_tags(private={"fixture-private"}, inactive={"fixture-inactive"})
+    monkeypatch.setattr(idle_context_reset, "BotTags", fake)
+    return fake
 
 
 def candidate(**overrides):
@@ -131,6 +141,24 @@ def test_unknown_pointer_is_not_guessed_or_submitted():
 
 def test_synthetic_protected_bot_never_reaches_lifecycle():
     job, lifecycle = job_with([candidate(bot_id="private-fixture")], protected=["private-fixture"])
+    assert run(job)["skipped"] == 1
+    lifecycle.submit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("bot,reason", [("fixture-private", "private bot"),
+                                        ("fixture-inactive", "inactive bot")])
+def test_a_tagged_bot_from_a_replaced_selector_never_reaches_lifecycle(bot, reason):
+    # Defense in depth: the selector SQL already excludes them.
+    job, lifecycle = job_with([candidate(bot_id=bot), candidate(bot_id="disposable")])
+    result = run(job)
+    assert result["skipped"] == 1 and result["reset"] == 1
+    assert result["bots"][bot]["detail"] == reason
+    assert [c.args[0].bot_id for c in lifecycle.submit.await_args_list] == ["disposable"]
+
+
+def test_an_unreadable_tag_snapshot_resets_nothing(tags):
+    tags.unavailable = True
+    job, lifecycle = job_with([candidate()])
     assert run(job)["skipped"] == 1
     lifecycle.submit.assert_not_awaited()
 

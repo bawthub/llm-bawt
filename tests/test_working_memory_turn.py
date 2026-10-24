@@ -13,10 +13,11 @@ from types import SimpleNamespace
 import pytest
 
 from agent_bridge.maintenance import is_clear_command
+from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.core.base import BaseLLMBawt
 from llm_bawt.core.prompt_builder import PromptBuilder, SectionPosition
 from llm_bawt.models.message import Message
-from llm_bawt.working_memory import metrics, notice, prompts, render, session_state, turn
+from llm_bawt.working_memory import metrics, notice, policy, prompts, render, session_state, turn
 from llm_bawt.working_memory.notice import Holding, entry_version, episode_version, fires, holding, next_floor
 
 NOW = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
@@ -31,6 +32,22 @@ def _decision(*, pin="pin-1", boundary=False, unverified=False, pinned=None, can
         pin_turn_id=pin, is_boundary=boundary, snapshot_unverified=unverified,
         pinned_sections=pinned, candidate_sections=candidate, text="SYSTEM",
     )
+
+
+@pytest.fixture(autouse=True)
+def private_bots(monkeypatch):
+    """No database here: the tag facade answers from this set of fixture bots."""
+    private: set[str] = set()
+
+    class _Tags:
+        def __init__(self, engine=None):
+            pass
+
+        def has(self, bot, tag, conn=None):
+            return tag == BehaviorTag.PRIVATE and bot.strip().lower() in private
+
+    monkeypatch.setattr(policy, "BotTags", _Tags)
+    return private
 
 
 @pytest.fixture(autouse=True)
@@ -185,18 +202,16 @@ class _Boom:
     begin = connect
 
 
-def test_protected_bot_renders_nothing_before_any_read(monkeypatch):
-    monkeypatch.setattr(render, "is_protected", lambda bot: True)
-    assert render.render_section(_Boom(), bot_id="mira", user_id="nick", session_id="s") is None
+def test_protected_bot_renders_nothing_before_any_read(private_bots):
+    private_bots.add("fixture-private")
+    assert render.render_section(_Boom(), bot_id="Fixture-Private", user_id="nick", session_id="s") is None
 
 
 def test_policy_failure_fails_closed(monkeypatch):
-    monkeypatch.setattr(render, "is_protected", lambda bot: False)
     assert render.render_section(_Boom(), bot_id="b", user_id="u", session_id="s") is None
 
 
 def test_storage_failure_renders_unavailable_never_empty(monkeypatch):
-    monkeypatch.setattr(render, "is_protected", lambda bot: False)
     monkeypatch.setattr(render, "_bot_policy_allows", lambda engine, bot: True)
     monkeypatch.setattr(render, "session_mode", lambda engine, sid: "pinned")
     monkeypatch.setattr(prompts, "resolve_text", lambda key, seed, bot: seed)
@@ -398,10 +413,8 @@ def test_bump_after_finalize_gating(monkeypatch, usage, ctx_kwargs, bumped):
     assert calls == ([("ENGINE", "s1")] if bumped else [])
 
 
-def test_bump_after_finalize_skips_protected_and_survives_failure(monkeypatch):
-    from llm_bawt.working_memory import policy
-
-    monkeypatch.setattr(policy, "PROTECTED_BOT_IDS", frozenset({"guarded"}))
+def test_bump_after_finalize_skips_protected_and_survives_failure(monkeypatch, private_bots):
+    private_bots.add("guarded")
     monkeypatch.setattr(session_state, "bump_compaction_gen", lambda *a: pytest.fail("bumped"))
     session_state.bump_after_finalize(_final_ctx(bot="guarded"), OK_COMPACT)
 

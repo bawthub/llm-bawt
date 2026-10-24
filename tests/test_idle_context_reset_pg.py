@@ -23,6 +23,8 @@ from llm_bawt.service.jobs.idle_context_reset import IdleContextResetJob
 from llm_bawt.service.scheduler import JobRun, JobScheduler, JobStatus, JobType, ScheduledJob
 from llm_bawt.service.session_lifecycle.intent import NewSessionResult, Outcome, Stage
 
+from llm_bawt.service.session_lifecycle.lifecycle import NewSessionLifecycle
+from tests.bot_tag_fixtures import PRIVATE_MODES, clear_tags, make_private, tag
 from tests.session_lifecycle_pg_fixtures import scheduled_intent
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -70,6 +72,25 @@ def test_one_pointer_not_one_session_per_user(rig):
     assert rows[0]["user_id"] == rig.user
     assert rows[0]["usage_turn_id"] == rig.turn_id
     assert IdleContextCandidates.skip_reason(rows[0], now=rig.now) is None
+
+
+@pytest.mark.parametrize("kind,mode", [*(("private", m) for m in PRIVATE_MODES), ("inactive", None)])
+def test_private_and_inactive_bots_are_never_candidates(rig, kind, mode):
+    assert select_one(rig)["session_id"] == rig.session_id  # the control
+    with rig.engine.begin() as conn:
+        if kind == "private":
+            make_private(conn, rig.bot, mode)
+        else:
+            tag(conn, rig.bot, kind)
+    try:
+        candidates = IdleContextCandidates(rig.engine)
+        assert candidates.read(rig.bot) == []
+        assert rig.bot not in {row["bot_id"] for row in candidates.read("*")}
+        with rig.engine.begin() as conn:
+            assert NewSessionLifecycle.scheduled_skip_reason(conn, scheduled_intent(rig)) == f"{kind} bot"
+    finally:
+        with rig.engine.begin() as conn:
+            clear_tags(conn, rig.bot)
 
 
 def test_null_pointer_does_not_fall_back_to_active_session(rig):

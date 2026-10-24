@@ -71,6 +71,11 @@ def test_approved_replay_uses_original_caller(monkeypatch) -> None:
 
 # ---- tools -----------------------------------------------------------------
 
+async def _no_refusal(_target_bot_id: str) -> None:
+    """Every fixture target is active; tag refusals are covered in test_bot_tag_discovery."""
+    return None
+
+
 def _capture_enqueue(monkeypatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
@@ -79,6 +84,7 @@ def _capture_enqueue(monkeypatch) -> list[dict[str, Any]]:
         return {"delivery_id": "delivery-1", "status": "QUEUED"}
 
     monkeypatch.setattr(server, "_enqueue_durable", enqueue)
+    monkeypatch.setattr(tools, "_target_refusal", _no_refusal)
     return calls
 
 

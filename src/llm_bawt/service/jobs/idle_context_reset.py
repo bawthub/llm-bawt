@@ -12,6 +12,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from ...bot_identities import SYSTEM_BOT_ID
+from ...bot_tags import BotTags
 from ...message_authorship import AuthorReference
 from ..job_parameters import IdleContextResetParameters
 from ..session_lifecycle.intent import (
@@ -32,16 +33,18 @@ class IdleContextResetJob:
         self._lifecycle = lifecycle
 
     async def run(self, *, job_id: str, run_id: str, target_bot: str) -> dict:
+        tags = await asyncio.to_thread(BotTags(self.candidates.engine).snapshot)
         rows = await asyncio.to_thread(self.candidates.read, target_bot)
         results = {}
         counts = {"reset": 0, "skipped": 0, "failed": 0, "ambiguous": 0}
         for candidate in rows:
             bot_id = candidate["bot_id"]
             # Defense in depth: no submit even if a future selector is replaced.
-            reason = ("protected bot" if bot_id.lower() in self.candidates.protected_bot_ids
-                      else self.candidates.skip_reason(
-                          candidate, now=datetime.now(timezone.utc), parameters=self.parameters,
-                      ))
+            reason = tags.excluded_reason(bot_id) or (
+                "protected bot" if bot_id.lower() in self.candidates.protected_bot_ids
+                else self.candidates.skip_reason(
+                    candidate, now=datetime.now(timezone.utc), parameters=self.parameters,
+                ))
             if reason:
                 result = NewSessionResult(outcome=Outcome.SKIPPED, stage=Stage.ADMISSION, detail=reason)
             else:

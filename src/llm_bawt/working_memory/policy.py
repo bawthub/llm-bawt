@@ -1,21 +1,25 @@
 """One server-side policy for who may use working memory (design section 7).
 
 Opt-in, protected status and the durable backend are read from the bot's
-profile and bot-scoped runtime setting, never from model input. Protected bots
-are refused before any of their rows is read.
+profile, its tags and bot-scoped runtime setting, never from model input.
+Private bots (BOT_TAGS.md §3) are refused before any of their rows is read;
+an unreadable tag snapshot treats every bot as private.
 """
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import text
 
+from ..bot_tags import BehaviorTag, BotTags
 from ..bot_types import durable_agent_backend
-from ..service.jobs.idle_context_candidates import PROTECTED_BOT_IDS
 from .contracts import WorkingMemoryError
+
+logger = logging.getLogger(__name__)
 
 SETTING_KEY = "working_memory_enabled"
 SUPPORTED_BACKEND = "claude-code"
@@ -34,8 +38,12 @@ class BotPolicy:
         return not self.protected and self.exists and self.enabled and self.backend == SUPPORTED_BACKEND
 
 
-def is_protected(bot_id: str) -> bool:
-    return bot_id.strip().lower() in PROTECTED_BOT_IDS
+def is_protected(bot_id: str, engine=None, *, conn=None) -> bool:
+    """Whether ``bot_id`` is private; a failed tag read answers True.
+
+    ``conn`` reads the tags on the caller's connection (never a second one).
+    """
+    return BotTags(engine).has(bot_id, BehaviorTag.PRIVATE, conn=conn)
 
 
 def _enabled(raw: str | None) -> bool:
@@ -55,12 +63,18 @@ class WorkingMemoryPolicy:
         self.engine = engine
 
     def describe(self, bot_id: str, conn=None) -> BotPolicy:
+        """The bot's policy; tags and rows are read on one connection, tags first."""
         slug = bot_id.strip().lower()
-        if is_protected(slug):
-            return BotPolicy(slug, True, False, False, None)
         if conn is None:
-            with self.engine.connect() as own:
+            try:
+                own = self.engine.connect()
+            except Exception:
+                logger.warning("working memory policy unreadable for %s; treating it as private", slug)
+                return BotPolicy(slug, True, False, False, None)
+            with own:
                 return self.describe(slug, own)
+        if is_protected(slug, conn=conn):
+            return BotPolicy(slug, True, False, False, None)
         profile = conn.execute(text(
             "SELECT agent_backend, harness FROM bot_profiles WHERE slug = :slug"
         ), {"slug": slug}).mappings().first()
@@ -83,10 +97,9 @@ class WorkingMemoryPolicy:
             )
         return policy
 
-    @staticmethod
-    def require_owner_access(bot_id: str) -> None:
+    def require_owner_access(self, bot_id: str) -> None:
         """REST owner path: protected bots are refused; disabled bots stay manageable."""
-        if is_protected(bot_id):
+        if is_protected(bot_id, self.engine):
             raise WorkingMemoryError("protected_bot", "working memory is not available for this bot")
 
     def validate_setting_write(self, scope_type: str, scope_id: str, key: str, value: Any) -> None:

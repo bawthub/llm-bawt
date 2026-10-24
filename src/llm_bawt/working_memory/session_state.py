@@ -145,7 +145,8 @@ def bump_after_finalize(ctx, usage: Any) -> None:
     from .policy import is_protected
 
     try:
-        if is_protected(str(ctx.bot_id or "")):
+        engine = ctx.svc._turn_log_store.engine
+        if is_protected(str(ctx.bot_id or ""), engine):
             return
         backend = getattr(getattr(ctx.llm_bawt, "client", None), "_backend", None)
         if not getattr(backend, "pins_system_prompt", False):
@@ -153,7 +154,7 @@ def bump_after_finalize(ctx, usage: Any) -> None:
         session_id = str((ctx.thread_binding or {}).get("thread_session_id") or "").strip()
         if not session_id:
             return
-        bump_compaction_gen(ctx.svc._turn_log_store.engine, session_id)
+        bump_compaction_gen(engine, session_id)
     except Exception:
         logger.warning(
             "working memory compaction_gen bump failed for turn %s; the notice re-arm for this "

@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, text
 
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver, TrustedCaller
 from llm_bawt.bot_access.provenance import MemoryProvenance, ScopedMessageAuthority
+from llm_bawt.bot_tags import catalog
 from llm_bawt.memory.postgresql_memories import PostgreSQLSemanticMemoryMixin
 from llm_bawt.utils import db
 from tests.pg_isolation import require_test_db_config
@@ -28,6 +29,8 @@ def rig(private_app_pg):
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE bot_profiles (slug text, include_in_global_search boolean)"))
         conn.execute(text("INSERT INTO bot_profiles VALUES ('public-fixture', true), ('peer', true), ('private_fixture', false)"))
+        catalog.ensure_schema(conn)  # private_fixture is private through the legacy column only
+        catalog.seed(conn)
         conn.execute(text("CREATE TABLE sessions (id text, bot_id text, user_id text, status text)"))
         conn.execute(text("""INSERT INTO sessions VALUES
             ('pub', 'public-fixture', 'user_a', 'active'),

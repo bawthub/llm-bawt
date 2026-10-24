@@ -23,7 +23,7 @@ class StorageSessionsMixin:
         if access.caller is not None and access.caller.user_id is None and not service_filter:
             raise BotAccessError("access_denied")
         user = None
-        if target in access.protected_bots and not service_filter:
+        if target in access.private_bots and not service_filter:
             user = access.caller.user_id
             if not user:
                 raise BotAccessError("caller_unavailable")

@@ -96,6 +96,11 @@ class FakeDurable:
         return self.rows.get((sender, target, key))
 
 
+async def _no_refusal(_target_bot_id: str) -> None:
+    """Every fixture target is active; tag refusals are covered in test_bot_tag_discovery."""
+    return None
+
+
 def _install(monkeypatch: pytest.MonkeyPatch, durable: FakeDurable, *, busy: dict | None = None):
     async def check(_target: str):
         return busy
@@ -104,6 +109,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, durable: FakeDurable, *, busy: dic
     monkeypatch.setattr(server, "_find_delivery_by_key", durable.find)
     monkeypatch.setattr(server, "_check_bot_in_turn", check)
     monkeypatch.setattr(server, "_bot_send_wait_ceiling_seconds", lambda: 300.0)
+    monkeypatch.setattr(tools, "_target_refusal", _no_refusal)
 
 
 def test_interrupted_wait_then_same_key_async_retry_reuses_one_delivery(monkeypatch) -> None:

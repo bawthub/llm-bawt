@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -26,6 +27,19 @@ from llm_bawt.service.session_lifecycle.intent import (
     Admission, Continuity, NewSessionIntent, NewSessionResult, Origin, Outcome, Stage,
 )
 from llm_bawt.service.session_lifecycle.lifecycle import NewSessionLifecycle
+from tests.bot_tag_fixtures import static_tags
+
+
+@pytest.fixture(autouse=True)
+def tags(monkeypatch):
+    """No database: fixture-private is excluded by its tags."""
+    from llm_bawt.service.jobs import idle_context_reset
+    from llm_bawt.service.session_lifecycle import lifecycle
+
+    fake = static_tags(private={"fixture-private"})
+    monkeypatch.setattr(lifecycle, "BotTags", fake)
+    monkeypatch.setattr(idle_context_reset, "BotTags", fake)
+    return fake
 
 
 @pytest.fixture
@@ -207,6 +221,16 @@ def test_configured_protection_applies_before_reading_target(monkeypatch):
     monkeypatch.setattr(IdleContextCandidates, "read_one", reader)
     parameters = IdleContextResetParameters(protected_bot_ids=[" FIXTURE "])
     assert NewSessionLifecycle.scheduled_skip_reason(Mock(), intent(parameters)) == "protected bot"
+    reader.assert_not_called()
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_a_private_target_is_skipped_under_the_lock_before_any_read(monkeypatch, tags, unavailable):
+    reader = Mock(side_effect=AssertionError("private target must not be read"))
+    monkeypatch.setattr(IdleContextCandidates, "read_one", reader)
+    tags.unavailable = unavailable
+    bot = "fixture-public" if unavailable else "fixture-private"
+    assert NewSessionLifecycle.scheduled_skip_reason(Mock(), replace(intent(), bot_id=bot)) == "private bot"
     reader.assert_not_called()
 
 

@@ -173,8 +173,20 @@ class BotProfileStore:
         if self.engine is None:
             return
         def bootstrap(conn) -> None:
+            from .bot_tags import catalog as tag_catalog
+            # Before any DDL: the one-shot tag migration runs only in the
+            # transaction that creates bot_profile_tags in this schema.
+            tags_existed = tag_catalog.owned(conn, tag_catalog.ASSIGNMENT_TABLE)
             SQLModel.metadata.create_all(bind=conn, tables=[BotProfile.__table__])
             self._migrate_add_columns(conn)
+            # After create_all, so an empty schema passes; a bot_profiles seen
+            # only through a later search_path entry refuses here (TASK-1329).
+            tag_catalog.require_owned(conn, "bot_profiles")
+            tag_catalog.ensure_schema(conn)
+            tag_catalog.seed(conn)
+            if not tags_existed:
+                migrated = tag_catalog.migrate_legacy_flag(conn)
+                logger.info("Bot tags: migrated %d legacy private assignments", migrated)
             from .bot_session_state import BotSessionState
             BotSessionState.ensure_schema(conn)
 
@@ -233,6 +245,8 @@ class BotProfileStore:
         from .bot_identities import RESERVED_JOB_BOT_IDS
         if slug in RESERVED_JOB_BOT_IDS:
             raise ValueError(f"Bot slug {slug!r} is reserved for system actions")
+        from .bot_tags.catalog import legacy_flag_write
+        from .bot_tags.vocabulary import LEGACY_FLAG_ASSIGNER
 
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
@@ -254,7 +268,10 @@ class BotProfileStore:
                     voice_optimized=bool(payload.get("voice_optimized", False)),
                     tts_mode=bool(payload.get("tts_mode", False)),
                     include_summaries=bool(payload.get("include_summaries", True)),
-                    include_in_global_search=bool(payload.get("include_in_global_search", True)),
+                    include_in_global_search=legacy_flag_write(
+                        session.connection(), slug, previous=None,
+                        requested=bool(payload.get("include_in_global_search", True)),
+                        by=LEGACY_FLAG_ASSIGNER),
                     uses_tools=bool(payload.get("uses_tools", False)),
                     uses_search=bool(payload.get("uses_search", False)),
                     uses_home_assistant=bool(payload.get("uses_home_assistant", False)),
@@ -282,7 +299,12 @@ class BotProfileStore:
                 row.voice_optimized = bool(payload.get("voice_optimized", row.voice_optimized))
                 row.tts_mode = bool(payload.get("tts_mode", row.tts_mode))
                 row.include_summaries = bool(payload.get("include_summaries", row.include_summaries))
-                row.include_in_global_search = bool(payload.get("include_in_global_search", row.include_in_global_search))
+                # The legacy flag mirrors ``not private``; tags change with it in
+                # this same transaction (BOT_TAGS.md §4.1).
+                row.include_in_global_search = legacy_flag_write(
+                    session.connection(), slug, previous=row.include_in_global_search,
+                    requested=bool(payload.get("include_in_global_search", row.include_in_global_search)),
+                    by=LEGACY_FLAG_ASSIGNER)
                 row.uses_tools = bool(payload.get("uses_tools", row.uses_tools))
                 row.uses_search = bool(payload.get("uses_search", row.uses_search))
                 row.uses_home_assistant = bool(payload.get("uses_home_assistant", row.uses_home_assistant))
@@ -547,14 +569,13 @@ def purge_orphaned_shared_rows(config: Config, dry_run: bool = False) -> dict[st
     """
     from sqlalchemy import text as _text
     from .bot_identities import RESERVED_JOB_BOT_IDS
-    from .orphan_partitions import PROTECTED_STORAGE_IDS
+    from .orphan_partitions import read_protected_slugs
     from .utils.db import get_shared_engine
 
     if not has_database_credentials(config):
         return {"error": "No database credentials configured"}
 
     engine = get_shared_engine(config)
-    protected = RESERVED_JOB_BOT_IDS | PROTECTED_STORAGE_IDS
 
     result: dict[str, Any] = {
         "dry_run": dry_run,
@@ -564,10 +585,16 @@ def purge_orphaned_shared_rows(config: Config, dry_run: bool = False) -> dict[st
     }
 
     with engine.connect() as conn:
-        # Known slugs from bot_profiles
+        if not dry_run:
+            # Fence profile and tag writes from the known-slug read through the
+            # DELETEs' commit; a conflict raises and nothing is deleted.
+            conn.execute(_text(
+                "LOCK TABLE bot_profiles, bot_profile_tags IN SHARE MODE NOWAIT"))
+        # Known slugs from bot_profiles, plus reserved and private identities
+        # (a private assignment outlives its profile, BOT_TAGS.md §6).
         rows = conn.execute(_text("SELECT slug FROM bot_profiles")).fetchall()
         known_slugs: set[str] = {r[0].strip().lower() for r in rows}
-        known_slugs |= protected
+        known_slugs |= RESERVED_JOB_BOT_IDS | read_protected_slugs(conn)
 
         # --- Shared tables only ---
         table_rows = conn.execute(

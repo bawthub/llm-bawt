@@ -24,7 +24,7 @@ class WorkingMemoryService:
     # -- bot, through the trusted turn capability (6.1) ----------------------
 
     def _bot_gate(self, context: TaskTurnContext):
-        if is_protected(context.bot_id):
+        if is_protected(context.bot_id, self.policy.engine):
             raise WorkingMemoryError("protected_bot", "working memory is not available for this bot")
         return lambda conn: self.policy.require_tools(context.bot_id, conn)
 

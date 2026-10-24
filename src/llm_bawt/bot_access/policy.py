@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping
 
-from sqlalchemy import text
-
+from llm_bawt.bot_tags import BehaviorTag, TagPolicyUnavailable, TagSnapshot, read_snapshot_rows
+from llm_bawt.bot_tags.vocabulary import is_canonical_bot_slug
 from llm_bawt.utils.bot_partition import sanitize_table_name
 from llm_bawt.utils.bounded_worker import BoundedWorker
 
@@ -45,7 +45,7 @@ def _identity(value) -> bool:
 
 def _canonical(value) -> bool:
     # Match the profile store's normalization, not a new slug regex.
-    return _identity(value) and value == value.lower()
+    return is_canonical_bot_slug(value)
 
 
 @dataclass(frozen=True)
@@ -64,20 +64,44 @@ class AggregateScope:
 
 @dataclass(frozen=True)
 class BotAccess:
+    """One caller's view of the live bot policy (TASK-1222, tags from TASK-1329).
+
+    ``readable_bots`` (known and not private) gates targeted per-bot tools;
+    ``searchable_bots`` (not private and not no_global_search) is the only set
+    aggregate search, recall and receipts may span.
+    """
+
     caller: TrustedCaller | None
     partitions: Mapping[str, str]
-    public_bots: frozenset[str]
-    protected_bots: frozenset[str]
+    tags: TagSnapshot
+
+    @property
+    def private_bots(self) -> frozenset[str]:
+        return self.tags.private_bots
+
+    @property
+    def searchable_bots(self) -> frozenset[str]:
+        return self.tags.searchable_bots
+
+    @property
+    def readable_bots(self) -> frozenset[str]:
+        return frozenset(self.partitions) - self.private_bots
+
+    def has_tag(self, bot_id: str, tag: str | BehaviorTag) -> bool:
+        return self.tags.has(bot_id, tag)
+
+    def _is_caller(self, bot: str) -> bool:
+        return self.caller is not None and bot == self.caller.bot_id
 
     def require_target(self, bot_id: str) -> str:
+        """Targeted per-bot tools: readable bots, or the caller itself."""
         if self.caller is not None:
             self.caller.validate()
         if not isinstance(bot_id, str):
             raise BotAccessError("access_denied")
         target = bot_id.strip().lower()
         if target not in self.partitions or (
-            target not in self.public_bots
-            and (self.caller is None or target != self.caller.bot_id)
+            target not in self.readable_bots and not self._is_caller(target)
         ):
             # Unknown and private-other are intentionally indistinguishable.
             raise BotAccessError("access_denied")
@@ -86,21 +110,30 @@ class BotAccess:
     def aggregate_scope(
         self, bot_id: str | None = None, *, require_user: bool = False,
     ) -> AggregateScope:
+        """Aggregate search spans searchable bots plus the caller.
+
+        An explicit filter only narrows that set: a bot outside it (private,
+        no_global_search or unknown) is the same indistinguishable denial.
+        """
         if self.caller is not None:
             self.caller.validate()
         user = self.caller.user_id if self.caller is not None else None
         if require_user and not user:
             raise BotAccessError("caller_unavailable")
-        allowed = set(self.public_bots)
+        searchable = self.searchable_bots
+        allowed = set(searchable)
         if self.caller is not None:
             allowed.add(self.caller.bot_id)
         if bot_id is not None:
-            allowed = {self.require_target(bot_id)}
+            target = bot_id.strip().lower() if isinstance(bot_id, str) else None
+            if target is None or target not in self.partitions or target not in allowed:
+                raise BotAccessError("access_denied")
+            allowed = {target}
         return AggregateScope(
             tuple(PartitionScope(bot, self.partitions[bot],
-                                 "global" if bot in self.public_bots else "caller")
+                                 "global" if bot in searchable else "caller")
                   for bot in sorted(allowed)),
-            self.public_bots, user,
+            searchable, user,
         )
 
 
@@ -127,15 +160,7 @@ class BotPolicyResolver:
         if caller is not None:
             caller.validate()
         try:
-            with self.engine.connect() as connection, connection.begin():
-                connection.execute(text("SET TRANSACTION READ ONLY"))
-                connection.execute(text("SET LOCAL statement_timeout = '2000ms'"))
-                connection.execute(text("SET LOCAL lock_timeout = '500ms'"))
-                rows = list(connection.execute(text(
-                    "SELECT slug, include_in_global_search FROM bot_profiles "
-                    "ORDER BY slug LIMIT 257"
-                )).mappings())
-            return self._compile(rows, caller)
+            return self._compile(read_snapshot_rows(self.engine), caller)
         except BotAccessError:
             raise
         except Exception:
@@ -143,24 +168,22 @@ class BotPolicyResolver:
 
     @staticmethod
     def _compile(rows, caller: TrustedCaller | None) -> BotAccess:
-        if not rows or len(rows) > 256:
+        rows = list(rows)
+        if not rows:
             raise BotAccessError("policy_unavailable")
+        try:
+            tags = TagSnapshot.from_rows(rows)
+        except TagPolicyUnavailable:
+            raise BotAccessError("policy_unavailable") from None
         partitions: dict[str, str] = {}
-        public: set[str] = set()
-        for row in rows:
-            bot, policy = row["slug"], row["include_in_global_search"]
-            if not _canonical(bot) or type(policy) is not bool:
-                raise BotAccessError("policy_unavailable")
+        for bot in tags.tags:
             partition = sanitize_table_name(bot)
             # PostgreSQL truncates identifiers at 63 bytes. Reject aliases there
             # too, rather than trusting a distinct untruncated Python mapping.
-            if (bot in partitions or partition in partitions.values()
+            if (partition in partitions.values()
                     or len("forgotten_messages_p_" + partition) > 63):
                 raise BotAccessError("policy_unavailable")
             partitions[bot] = partition
-            if policy:
-                public.add(bot)
         if caller is not None and caller.bot_id not in partitions:
             raise BotAccessError("caller_unavailable")
-        return BotAccess(caller, MappingProxyType(partitions), frozenset(public),
-                         frozenset(partitions.keys() - public))
+        return BotAccess(caller, MappingProxyType(partitions), tags)

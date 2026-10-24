@@ -1,12 +1,18 @@
-"""Compact MCP access to restart-safe BawtHub initiative state."""
+"""Compact MCP access to restart-safe BawtHub initiative state.
+
+Bots tagged ``private`` or ``inactive`` (TASK-1329) are outside initiative
+scope; an unreadable tag snapshot refuses every write.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Literal
 
 import httpx
 
+from ..bot_tags import BotTags, TagSnapshot
 from .registry import mcp
 from .task_association import current_task_turn_context
 
@@ -15,10 +21,11 @@ _INTERNAL_URL = os.getenv(
 ).rstrip("/")
 
 
-def _run() -> dict[str, Any]:
+def _run(tags: TagSnapshot) -> dict[str, Any]:
     context = current_task_turn_context()
-    if context.bot_id.lower() == "mira":
-        raise ValueError("protected bot is outside initiative scope")
+    excluded = tags.excluded_reason(context.bot_id)
+    if excluded:
+        raise ValueError(f"{excluded} is outside initiative scope")
     return {
         "sessionId": context.session_id,
         "turnId": context.turn_id,
@@ -50,6 +57,7 @@ async def initiative_state(
 ) -> dict:
     """Read, lease, or CAS-checkpoint recurring task state using trusted turn identity."""
     path = f"/internal/tasks/{task_id}/initiative"
+    run = None if action == "get" else _run(await asyncio.to_thread(BotTags().snapshot))
     try:
         async with httpx.AsyncClient(base_url=_INTERNAL_URL, timeout=10.0) as client:
             if action == "get":
@@ -60,7 +68,7 @@ async def initiative_state(
                 return {**state.json(), **events.json()}
             body: dict[str, Any] = {
                 "snapshot": snapshot,
-                "run": _run(),
+                "run": run,
                 "leaseSeconds": lease_seconds,
             }
             if expected_generation is not None:

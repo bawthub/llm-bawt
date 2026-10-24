@@ -19,6 +19,8 @@ from llm_bawt.working_memory.contracts import (
     normalize_idempotency_key,
     normalize_item_id,
 )
+from llm_bawt.bot_tags import BehaviorTag
+from llm_bawt.working_memory import policy as policy_module
 from llm_bawt.working_memory.policy import WorkingMemoryPolicy
 from llm_bawt.working_memory.store import Actor, WorkingMemoryStore
 
@@ -95,11 +97,48 @@ def test_setting_refused_without_reading_the_database(scope_type, value):
     policy.validate_setting_write("bot", "vex", "working_memory_enabled", False)
 
 
-def test_protected_bot_refused_before_any_read():
-    policy = WorkingMemoryPolicy(engine=None)  # any read would raise AttributeError
-    assert _code(lambda: policy.require_tools("Mira")) == "protected_bot"
-    assert _code(lambda: policy.require_owner_access("mira")) == "protected_bot"
-    assert _code(lambda: policy.validate_setting_write("bot", "mira", "working_memory_enabled", True)) == "invalid_setting"
+def test_protected_bot_refused_before_any_read(monkeypatch):
+    class _Tags:  # the private fixture bot, answered without a database
+        def __init__(self, engine=None):
+            pass
+
+        def has(self, bot, tag, conn=None):
+            return tag == BehaviorTag.PRIVATE and bot.strip().lower() == "fixture-private"
+
+    class _NoReads:  # a connection whose every statement fails the test
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, *args, **kwargs):
+            raise AssertionError("a private bot's rows were read")
+
+    monkeypatch.setattr(policy_module, "BotTags", _Tags)
+    policy = WorkingMemoryPolicy(engine=_NoReads())
+    assert _code(lambda: policy.require_tools("Fixture-Private")) == "protected_bot"
+    assert _code(lambda: policy.require_owner_access("fixture-private")) == "protected_bot"
+    assert _code(lambda: policy.validate_setting_write(
+        "bot", "fixture-private", "working_memory_enabled", True)) == "invalid_setting"
+    with pytest.raises(AssertionError, match="rows were read"):
+        policy.require_tools("fixture-public")  # the control: a public bot does read
+
+
+def test_an_unreachable_database_is_private_without_a_tag_read():
+    assert WorkingMemoryPolicy(engine=None).describe("fixture-public").protected
+
+
+def test_an_unreadable_tag_snapshot_refuses_every_bot():
+    class _Down:
+        def connect(self):
+            raise OperationalError("SELECT", {}, Exception("down"))
+
+    assert policy_module.is_protected("fixture-public", _Down()) is True
+    assert _code(lambda: WorkingMemoryPolicy(_Down()).require_tools("fixture-public")) == "protected_bot"
 
 
 class _DownEngine:

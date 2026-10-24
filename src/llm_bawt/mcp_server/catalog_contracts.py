@@ -82,7 +82,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "projects_update": "Patch provided project fields by project ID (cuid); omitted fields remain unchanged.",
     "projects_delete": "Permanently delete a project; its tasks remain but become unassigned.",
     "activity_get": "Read recent task/project activity; limit is capped at 100.",
-    "bots_list_available": "List possible inter-bot message targets; availability does not override protected-bot boundaries.",
+    "bots_list_available": "List inter-bot message targets and their tags; private and inactive bots are hidden.",
     "bots_send_message": "Durable async message: steer a busy capable bot or start one idle turn. delivery=when_idle skips steering; wait_for_reply blocks. force never permits concurrent turns.",
     "bots_route_message": "Queue a separate routed bot turn using trusted caller identity; never steer or broaden opt-in. Reuse idempotency_key for retries.",
     "bots_delivery_get": "Read durable delivery status/error by delivery_id; accepted or queued is not completed.",

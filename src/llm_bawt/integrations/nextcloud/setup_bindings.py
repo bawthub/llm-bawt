@@ -2,10 +2,13 @@
 
 Uses the existing bot_profiles.nextcloud_config transport mapping. Installing or
 recovering a remote signing secret is deliberately not implied by account login.
+Bots tagged ``private`` (TASK-1329) are outside setup scope: refused and never
+listed. Without readable tags every bot is refused (503) and none is listed.
 """
 from sqlalchemy import update
 from sqlmodel import Session, select
 
+from llm_bawt.bot_tags import BehaviorTag, BotTags, TagSnapshot
 from llm_bawt.runtime_settings import BotProfile, BotProfileStore
 from .setup import SetupError, PROVISIONING_REASON
 
@@ -15,18 +18,29 @@ class NextcloudBindings:
         self.store = store if store is not None else BotProfileStore(config)
         self.reload = reload
 
-    @staticmethod
-    def _bot_id(bot_id: str) -> str:
+    def _tags(self) -> TagSnapshot:
+        # Never BotTags(None): that would resolve the process-wide engine
+        # instead of this store's.
+        engine = self.store.engine
+        return BotTags(engine).snapshot() if engine is not None else TagSnapshot.unavailable()
+
+    def _bot_id(self, bot_id: str) -> str:
         bot_id = bot_id.strip().lower()
-        if bot_id == "mira":
+        tags = self._tags()
+        if not tags.available:
+            raise SetupError("policy_unavailable", "Bot tags are unavailable; try again shortly.", 503)
+        if tags.has(bot_id, BehaviorTag.PRIVATE):
             raise SetupError("protected_bot", "This bot is outside the supported setup scope.", 403)
         return bot_id
 
     def list(self) -> list[dict]:
         if self.store.engine is None:
             return []
+        # Snapshot first: a bot created after it is unknown, so private and hidden.
+        private = self._tags().has
         with Session(self.store.engine) as session:
-            rows = session.exec(select(BotProfile.slug, BotProfile.nextcloud_config).where(BotProfile.slug != "mira")).all()
+            rows = session.exec(select(BotProfile.slug, BotProfile.nextcloud_config)).all()
+        rows = [(slug, data) for slug, data in rows if not private(slug, BehaviorTag.PRIVATE)]
         return [{"bot_id": slug, "room_token": data.get("conversation_token"),
                  "nextcloud_bot_id": data.get("bot_id"), "user_id": data.get("user_id"),
                  "enabled": data.get("enabled", True), "has_signing_secret": bool(data.get("secret")),

@@ -98,7 +98,7 @@ class ToolBotAccess:
             if not service_filter:
                 raise BotAccessError("access_denied")
         if target is not None and access.caller is not None:
-            if target in access.protected_bots or access.caller.kind == "service":
+            if target in access.private_bots or access.caller.kind == "service":
                 if "user_id" in values and not service_filter:
                     supplied = values["user_id"]
                     if supplied is not None and supplied != access.caller.user_id:
@@ -114,7 +114,7 @@ class ToolBotAccess:
             except Exception:
                 raise BotAccessError("source_unavailable") from None
             if owner is not None and (owner[0] != target or (
-                target in access.protected_bots and not service_filter
+                target in access.private_bots and not service_filter
                 and owner[1] != access.caller.user_id
             )):
                 raise BotAccessError("access_denied")

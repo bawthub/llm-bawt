@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
+from llm_bawt.bot_tags import SNAPSHOT_SQL, TagPolicyUnavailable, TagSnapshot
+
 from .budgets import DATABASE_WORKER, compact_json
 from .contracts import (
     COVERAGE_BUCKETS, FOLLOW_ON_WINDOW_SECONDS, MAX_FOLLOW_ONS_PER_HIT, MAX_RECORD_CHARS, MAX_SOURCE_RECORDS,
@@ -82,16 +84,17 @@ class RecallDatabase:
 
     async def scope(self, context) -> RecallScope:
         try:
-            rows = await DATABASE_WORKER.run(self.read, """
-                SELECT slug, include_in_global_search FROM bot_profiles
-                ORDER BY slug LIMIT 257
-            """, {})
-            if not rows or len(rows) > 256:
+            rows = await DATABASE_WORKER.run(self.read, SNAPSHOT_SQL, {})
+            if not rows:
                 raise RecallError("policy_unavailable")
-            if any(not isinstance(r["include_in_global_search"], bool) for r in rows):
-                raise RecallError("policy_unavailable")
-            allowed = frozenset(r["slug"] for r in rows if r["include_in_global_search"])
-            excluded = frozenset(r["slug"] for r in rows if not r["include_in_global_search"])
+            try:
+                tags = TagSnapshot.from_rows(rows)
+            except TagPolicyUnavailable:
+                raise RecallError("policy_unavailable") from None
+            # Cross-bot recall spans searchable bots only: private implies
+            # no_global_search, and the legacy column false is private.
+            allowed = tags.searchable_bots
+            excluded = tags.known_bots - allowed
             if context.bot_id not in allowed:
                 raise RecallError("unauthorized")
             # Sanitation collisions must never broaden partition scope.

@@ -16,6 +16,7 @@ from sqlalchemy import text as sa_text
 from llm_bawt.bot_identities import SYSTEM_BOT_ID
 from llm_bawt.service import delivery_cancel_notice as cn
 from llm_bawt.service.turn_admission import lock_target
+from tests.bot_tag_fixtures import PRIVATE_MODES, clear_tags, make_private
 from tests.test_turn_gates_pg import _wait_blocked_by, gated  # noqa: F401  (gated is a fixture)
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
@@ -28,7 +29,9 @@ def notices(gated):
     gated.senders.append(SYSTEM_BOT_ID)  # the notices: this module's private database only
     gated.deliveries = InterBotDeliveryStore(gated.store.config)
     gated.pump = cn.CancelNoticePump(gated.deliveries)
-    return gated
+    yield gated
+    with gated.store.engine.begin() as conn:
+        clear_tags(conn, *gated.bots)
 
 
 def _send(ctx, sender, target, message="please run the migration", **extra):
@@ -138,16 +141,30 @@ def test_user_authored_scheduled_and_self_sent_rows_are_never_read_or_stamped(no
 def test_a_sender_that_is_not_an_agent_bot_is_stamped_and_skipped(notices):
     target = notices.bot()
     chat_bot = notices.bot(bot_type="chat", backend="")
+    record = _send(notices, chat_bot, target)
+    _cancel(notices, record)
+
+    result = notices.pump.run_pass()
+
+    assert (result.notified, result.skipped, result.errors) == ([], 1, 0)
+    assert _stamp(notices, record.id) is not None
+    assert _notices_for(notices, record.id) == []
+
+
+@pytest.mark.integration
+def test_a_sender_with_no_profile_is_private_and_never_stamped(notices):
+    # Unknown bot = private (BOT_TAGS.md §5.3): the row stays pending, unread.
+    target = notices.bot()
     no_profile = f"test-gate-unprofiled-{uuid.uuid4().hex}"
-    rows = [_send(notices, sender, target) for sender in (chat_bot, no_profile, SYSTEM_BOT_ID)]
+    rows = [_send(notices, sender, target) for sender in (no_profile, SYSTEM_BOT_ID)]
     for record in rows:
         _cancel(notices, record)
 
     result = notices.pump.run_pass()
 
-    assert (result.notified, result.skipped, result.errors) == ([], 3, 0)
+    assert (result.notified, result.skipped, result.errors) == ([], 0, 0)
     for record in rows:
-        assert _stamp(notices, record.id) is not None
+        assert _stamp(notices, record.id) is None
         assert _notices_for(notices, record.id) == []
 
 
@@ -168,25 +185,36 @@ def test_a_row_with_no_user_scope_is_stamped_and_skipped(notices, monkeypatch):
 
 
 @pytest.mark.integration
-def test_a_protected_bot_is_never_read_stamped_or_notified(notices):
-    protected, sender, target = notices.bot(), notices.bot(), notices.bot()
-    pump = cn.CancelNoticePump(notices.deliveries, protected=frozenset({protected}))
-    from_protected = _send(notices, protected, target)
-    to_protected = _send(notices, sender, protected)
-    for record in (from_protected, to_protected):
+@pytest.mark.parametrize("mode", PRIVATE_MODES)
+@pytest.mark.parametrize("side", ["sender", "target"])
+def test_a_private_bot_is_never_read_stamped_or_notified(notices, mode, side):
+    """BOT_TAGS.md §10.11: private sender or target, each of the three private ways."""
+    private, other = notices.bot(), notices.bot()
+    sender, target = (private, other) if side == "sender" else (other, private)
+    hidden = _send(notices, sender, target)
+    public_sender, public_target = notices.bot(), notices.bot()
+    public = _send(notices, public_sender, public_target)
+    for record in (hidden, public):
         _cancel(notices, record)
+    with notices.deliveries.engine.begin() as conn:
+        make_private(conn, private, mode)
 
-    assert pump.report()["pending"] == 0
-    result = pump.run_pass()
+    assert notices.pump.report()["pending"] == 1
+    with notices.deliveries.engine.connect() as conn:
+        candidates = {row["id"] for row in notices.pump._candidates()}
+        locked = conn.execute(sa_text(
+            f"SELECT id FROM inter_bot_deliveries WHERE id=:id AND {cn._PENDING} AND {cn._UNPROTECTED}"
+        ), notices.pump._params(id=hidden.id)).first()
+    assert hidden.id not in candidates and public.id in candidates and locked is None
+    result = notices.pump.run_pass()
 
-    assert (result.notified, result.skipped, result.errors) == ([], 0, 0)
-    for record in (from_protected, to_protected):
-        assert _stamp(notices, record.id) is None and _notices_for(notices, record.id) == []
-    with pytest.raises(ValueError, match="protected"):
-        with notices.deliveries.engine.begin() as conn:
-            row = conn.execute(sa_text("SELECT * FROM inter_bot_deliveries WHERE id=:id"),
-                               {"id": from_protected.id}).mappings().one()
-            pump._enqueue_notice(conn, row, "nick")
+    # The public pair is still notified: the sql_allowed parameters are wired.
+    assert [record.target_bot_id for record in result.notified] == [public_sender]
+    assert (result.skipped, result.errors) == (0, 0)
+    assert _stamp(notices, hidden.id) is None and _notices_for(notices, hidden.id) == []
+    assert notices.pump._decide({"id": hidden.id, "sender_bot_id": sender,
+                                 "target_bot_id": target}) == (cn._GONE, None)
+    assert _stamp(notices, hidden.id) is None
 
 
 @pytest.mark.integration
@@ -302,17 +330,18 @@ def test_rows_that_keep_failing_never_starve_newer_ones(notices, monkeypatch):
 
 
 @pytest.mark.integration
-def test_the_backfill_runs_only_with_the_column_add(notices, monkeypatch):
-    sender, target, protected = notices.bot(), notices.bot(), notices.bot()
+@pytest.mark.parametrize("mode", PRIVATE_MODES)
+def test_the_backfill_runs_only_with_the_column_add(notices, mode):
+    sender, target, private = notices.bot(), notices.bot(), notices.bot()
     history = _send(notices, sender, target, "cancelled long ago")
-    to_protected = _send(notices, sender, protected, "cancelled long ago")
-    for record in (history, to_protected):
+    to_private = _send(notices, sender, private, "cancelled long ago")
+    for record in (history, to_private):
         _cancel(notices, record)
     engine = notices.deliveries.engine
     with engine.begin() as conn:
+        make_private(conn, private, mode)
         conn.execute(sa_text("ALTER TABLE inter_bot_deliveries DROP COLUMN cancel_notified_at"))
     try:
-        monkeypatch.setattr(cn, "PROTECTED_BOT_IDS", frozenset({protected}))
         with engine.begin() as conn:
             cn._bootstrap(conn)
     finally:
@@ -320,7 +349,7 @@ def test_the_backfill_runs_only_with_the_column_add(notices, monkeypatch):
             cn._bootstrap(conn)
 
     assert _stamp(notices, history.id) is not None  # history is stamped, never notified
-    assert _stamp(notices, to_protected.id) is None  # protected rows are never touched
+    assert _stamp(notices, to_private.id) is None  # private rows are never touched
     with engine.begin() as conn:
         conn.execute(sa_text("UPDATE inter_bot_deliveries SET cancel_notified_at=NULL WHERE id=:id"),
                      {"id": history.id})
@@ -328,9 +357,27 @@ def test_the_backfill_runs_only_with_the_column_add(notices, monkeypatch):
         index = conn.execute(sa_text("SELECT to_regclass('ix_inter_bot_delivery_cancel_notice')")).scalar_one()
     assert _stamp(notices, history.id) is None
     assert index is not None
-    [notice] = [r for r in cn.CancelNoticePump(notices.deliveries, protected=frozenset({protected}))
-                .run_pass().notified]
+    [notice] = notices.pump.run_pass().notified
     assert notice.target_bot_id == sender
+
+
+@pytest.mark.integration
+def test_the_backfill_stamps_nothing_without_bot_tags(notices, monkeypatch):
+    sender, target = notices.bot(), notices.bot()
+    history = _send(notices, sender, target, "cancelled long ago")
+    _cancel(notices, history)
+    engine = notices.deliveries.engine
+    monkeypatch.setattr(cn, "owned", lambda conn, rel, kinds="rp": rel != "bot_profile_tags")
+    with engine.begin() as conn:
+        conn.execute(sa_text("ALTER TABLE inter_bot_deliveries DROP COLUMN cancel_notified_at"))
+    try:
+        with engine.begin() as conn:
+            cn._bootstrap(conn)
+    finally:
+        monkeypatch.undo()
+        with engine.begin() as conn:
+            cn._bootstrap(conn)
+    assert _stamp(notices, history.id) is None
 
 
 @pytest.mark.integration

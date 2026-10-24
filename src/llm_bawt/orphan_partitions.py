@@ -20,12 +20,32 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .bot_tags.vocabulary import BehaviorTag
 from .memory.postgresql import PARENT_TABLES, _sanitize_table_name, partition_name
 
 PLAN_VERSION = 2
-POLICY_VERSION = "partition-orphans-v2"
-PROTECTED_STORAGE_IDS = frozenset({"mira"})
+POLICY_VERSION = "partition-orphans-v3"
 _BOUND = re.compile(r"^FOR VALUES IN \('((?:[^']|'')*)'\)$")
+
+
+# Bots tagged private, plus the legacy column fallback (BOT_TAGS.md §6). The
+# first branch deliberately skips bot_profiles: a private assignment whose
+# profile was deleted is exactly the storage being protected.
+_PROTECTED_SQL = text("""
+    SELECT bot_slug FROM bot_profile_tags WHERE tag_slug = :private
+    UNION
+    SELECT lower(btrim(slug)) FROM bot_profiles WHERE NOT include_in_global_search
+""")
+
+
+def read_protected_slugs(conn) -> frozenset[str]:
+    """Private identities; a missing table or failed read raises (fail closed)."""
+    return frozenset(row[0] for row in conn.execute(
+        _PROTECTED_SQL, {"private": str(BehaviorTag.PRIVATE)}))
+
+
+def protected_storage_ids(conn) -> frozenset[str]:
+    return frozenset(_sanitize_table_name(slug) for slug in read_protected_slugs(conn))
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -101,7 +121,7 @@ class PartitionPlan:
                 "held": sum(c["disposition"] == "held" for c in children),
                 "nonempty": sum(c["disposition"] == "proposed" and c["row_count"] > 0 for c in children),
             },
-            "lock_impact": "NOWAIT SHARE on bot_profiles, then ACCESS EXCLUSIVE on ONLY one parent and one child per transaction",
+            "lock_impact": "NOWAIT SHARE on bot_profiles and bot_profile_tags, then ACCESS EXCLUSIVE on ONLY one parent and one child per transaction",
         }
 
 
@@ -198,6 +218,7 @@ class OrphanPartitionPlanner:
                 identity = self._identity(conn)
                 parents = self._parents(conn)
                 registry = self._registry(conn)
+                protected_ids = protected_storage_ids(conn)
                 raw = self._children(conn, parents)
                 max_name = int(identity["max_name"])
                 seen: dict[tuple[str, str], str] = {}
@@ -218,8 +239,8 @@ class OrphanPartitionPlanner:
                     # Inspect both identities BEFORE accessing child rows. A protected
                     # name paired with any other bound is ambiguous and stops planning.
                     protected_name = any(row["child_name"] == partition_name(parent, p)[:max_name]
-                                         for p in PROTECTED_STORAGE_IDS)
-                    if protected_name != (storage in PROTECTED_STORAGE_IDS):
+                                         for p in protected_ids)
+                    if protected_name != (storage in protected_ids):
                         raise ValueError("Protected partition name/bound mismatch")
                     protected = protected_name
                     child = _qualified(row["child_schema"], row["child_name"])
@@ -251,7 +272,7 @@ class OrphanPartitionPlanner:
                     max_identifier_length=max_name,
                     parent_oids={name: int(row["oid"]) for name, row in parents.items()},
                     registry_digest=digest(registry), catalog_digest=digest(catalog),
-                    protected_ids=tuple(sorted(PROTECTED_STORAGE_IDS)),
+                    protected_ids=tuple(sorted(protected_ids)),
                     children=tuple(children),
                 )
             finally:
@@ -363,6 +384,13 @@ class PartitionManifestExecutor:
                         # order and fence all registry writes through this commit.
                         registry_sql = _qualified(next(iter(parents.values()))["nspname"], "bot_profiles")
                         conn.exec_driver_sql(f"LOCK TABLE {registry_sql} IN SHARE MODE NOWAIT")
+                        # Same fence on private assignments, then re-read the
+                        # protected set under the lock: any change is drift.
+                        tags_sql = _qualified(next(iter(parents.values()))["nspname"], "bot_profile_tags")
+                        conn.exec_driver_sql(f"LOCK TABLE {tags_sql} IN SHARE MODE NOWAIT")
+                        protected_now = protected_storage_ids(conn)
+                        if protected_now != frozenset(fresh.protected_ids):
+                            raise ValueError("Protected identity set changed after preview")
                         catalog = OrphanPartitionPlanner._children(conn, parents)
                         matches = [r for r in catalog if int(r["child_oid"]) == child_plan.child_oid]
                         if len(matches) != 1:
@@ -378,7 +406,7 @@ class PartitionManifestExecutor:
                                 int(current["parent_oid"]) != child_plan.parent_oid or
                                 current["bound"] != child_plan.bound or bound != child_plan.storage_id or
                                 int(current["incoming_fks"]) != child_plan.incoming_fks or
-                                bound in PROTECTED_STORAGE_IDS):
+                                bound in protected_now):
                             raise ValueError("Child partition identity or dependency drift")
                         # ONLY avoids locking all descendants of the parent.
                         conn.exec_driver_sql(f"LOCK TABLE ONLY {parent_sql} IN ACCESS EXCLUSIVE MODE NOWAIT")

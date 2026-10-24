@@ -10,6 +10,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import llm_bawt.mcp_server.server as server
+import llm_bawt.mcp_server.inter_bot_tools as inter_bot_tools
+
+
+async def _no_refusal(_target_bot_id: str) -> None:
+    """Every fixture target is active; tag refusals are covered in test_bot_tag_discovery."""
+    return None
 
 
 def _run(coro: Any) -> Any:
@@ -37,6 +43,7 @@ def _stub_idle_and_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     monkeypatch.setattr(server, "_find_delivery_by_key", fake_find)
     monkeypatch.setattr(server, "_enqueue_durable", fake_enqueue)
     monkeypatch.setattr(server, "_await_delivery", fake_await)
+    monkeypatch.setattr(inter_bot_tools, "_target_refusal", _no_refusal)
     return observed
 
 

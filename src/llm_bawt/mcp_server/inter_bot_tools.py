@@ -10,7 +10,10 @@ from typing import Any
 
 import httpx
 
+from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.context import current_bot_access
+from llm_bawt.bot_tags import BehaviorTag
+from llm_bawt.bot_types import normalize_bot_type
 from .bot_access_deliveries import ScopedDeliveryReader
 from .inter_bot_send_mode import SendModeError, resolve_send_mode
 from .inter_bot_sender import SenderIdentityError, resolve_sender_bot_id
@@ -181,6 +184,26 @@ async def _check_bot_in_turn(target_bot_id: str) -> dict | None:
     except Exception as exc:
         logger.warning("in-turn check for %s failed (allowing send): %s", target_bot_id, exc)
         return None
+
+
+def _policy_resolver() -> BotPolicyResolver:
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+
+    return BotPolicyResolver(get_shared_engine(Config()))
+
+
+async def _target_refusal(target_bot_id: str) -> dict | None:
+    """A new send to an ``inactive`` bot is refused and never queued (TASK-1329)."""
+    try:
+        access = await _policy_resolver().resolve()
+    except BotAccessError as exc:
+        return {"error": exc.code}
+    target = (target_bot_id or "").strip().lower()
+    if access.has_tag(target, BehaviorTag.INACTIVE):
+        return {"error": "target_inactive",
+                "detail": f"'{target}' is inactive; it must be reactivated before it can receive messages."}
+    return None
 
 
 async def _enqueue_durable(
@@ -362,6 +385,23 @@ async def send_message_to_bot(
                 ),
             }
 
+    key = (idempotency_key or "").strip()
+    find_existing = _compat_hook("_find_delivery_by_key", _find_delivery_by_key)
+    existing = None
+    refusal = await _target_refusal(target_bot_id)
+    if refusal is not None:
+        # A same-key retry reattaches to the delivery accepted before the
+        # target went inactive; only genuinely new sends are refused.
+        if key:
+            try:
+                existing = await find_existing(
+                    sender_bot_id, target_bot_id.strip().lower(), key)
+            except Exception as exc:
+                logger.warning("key lookup for refused send failed: %s", exc)
+        if existing is None:
+            return {"success": False, "dispatched": False, "mode": mode.label,
+                    "bot_id": target_bot_id, "sender": sender_bot_id, **refusal}
+
     durable_kwargs = dict(
         target_bot_id=target_bot_id,
         message=message,
@@ -383,7 +423,10 @@ async def send_message_to_bot(
     )
     enqueue = _compat_hook("_enqueue_durable", _enqueue_durable)
     if not mode.wait:
-        receipt = await enqueue(prefer_steer=mode.prefer_steer, **durable_kwargs)
+        if existing is not None:
+            receipt = {**existing, "duplicate": True}
+        else:
+            receipt = await enqueue(prefer_steer=mode.prefer_steer, **durable_kwargs)
         return {**receipt, "mode": mode.label,
                 "dispatched": bool(receipt.get("delivery_id"))}
 
@@ -400,14 +443,8 @@ async def send_message_to_bot(
         if timeout_seconds > ceiling else {}
     )
 
-    existing = None
-    key = (idempotency_key or "").strip()
-    if key:
-        existing = await _compat_hook("_find_delivery_by_key", _find_delivery_by_key)(
-            sender_bot_id,
-            target_bot_id.strip().lower(),
-            key,
-        )
+    if existing is None and key:
+        existing = await find_existing(sender_bot_id, target_bot_id.strip().lower(), key)
     if existing is None:
         active = await _compat_hook("_check_bot_in_turn", _check_bot_in_turn)(target_bot_id)
         if active is not None:
@@ -612,26 +649,40 @@ async def agent_context_compact(
     )
 
 
+def _profile_rows() -> list:
+    from llm_bawt.runtime_settings import BotProfileStore
+    from llm_bawt.utils.config import Config
+
+    try:
+        store = BotProfileStore(Config())
+        if store.engine is None:
+            raise RuntimeError("bot profiles unavailable")
+        return store.list_all()
+    except Exception:
+        raise BotAccessError("policy_unavailable") from None
+
+
 @mcp.tool(name="bots_list_available")
 async def list_available_bots() -> list[dict]:
-    """List bots available as inter-bot message targets."""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{_APP_BASE_URL}/v1/bots", timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
-        bots = data.get("data", []) if isinstance(data, dict) else data
-        return [
-            {
-                "slug": bot.get("slug", "unknown"),
-                "name": bot.get("name", bot.get("slug", "Unknown")),
-                "bot_type": bot.get("bot_type", "chat"),
-                "description": bot.get("description", ""),
-                "default_model": bot.get("default_model", ""),
-                "agent_backend": bot.get("agent_backend"),
-            }
-            for bot in bots if isinstance(bot, dict)
-        ]
-    except Exception as exc:
-        logger.error("Failed to list available bots: %s", exc)
-        return []
+    """List bots available as inter-bot message targets, each with its tags.
+
+    Read in-process (TASK-1329). Private and inactive bots are never listed. An
+    unreadable policy or profile table raises ``policy_unavailable``, never an
+    unfiltered or partial list.
+    """
+    # Policy first: a profile created after the snapshot is unknown, so hidden.
+    access = await _policy_resolver().resolve()
+    profiles = await asyncio.to_thread(_profile_rows)
+    return [
+        {
+            "slug": row.slug,
+            "name": row.name or row.slug,
+            "bot_type": normalize_bot_type(row.bot_type, row.agent_backend),
+            "description": row.description or "",
+            "default_model": row.default_model or "",
+            "agent_backend": row.agent_backend,
+            "tags": sorted(access.tags.tags.get(row.slug, ())),
+        }
+        for row in profiles
+        if access.tags.excluded_reason(row.slug) is None
+    ]

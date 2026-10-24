@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from ...bot_tags import BotTags
 from ...bot_types import durable_agent_backend
 from ...bots import BotManager
 from ...inter_bot_delivery_record import DeliveryRecord
@@ -34,7 +35,6 @@ class NewSessionLifecycle:
             raise RuntimeError("new-session delivery service is unavailable")
         self.dispatcher = dispatcher
         self.store = dispatcher.store
-        self.candidates = IdleContextCandidates(self.store.engine)
 
     @staticmethod
     def rotate_delivery_claim(
@@ -105,7 +105,8 @@ class NewSessionLifecycle:
     ) -> str | None:
         """Recheck pointer, ownership, context and idle state inside target lock.
 
-        Never query a protected bot's sessions/turns. The target lock is held by
+        Never query a private, inactive or operator-protected bot's
+        sessions/turns; the tags are read on ``conn``. The target lock is held by
         both ordinary enqueue and claim, so no new turn can enter between these
         checks and reservation. No producer may turn SKIP into a delayed queue.
         """
@@ -115,6 +116,9 @@ class NewSessionLifecycle:
         )
         if intent.bot_id.strip().lower() in candidates.protected_bot_ids:
             return "protected bot"
+        excluded = BotTags().snapshot(conn).excluded_reason(intent.bot_id)
+        if excluded:
+            return excluded
         row = candidates.read_one(conn, intent.bot_id)
         if row is None:
             return "target bot not eligible"
@@ -257,8 +261,9 @@ class NewSessionLifecycle:
             raise NotImplementedError("new-session origin has no admitted adapter")
         if intent.admission is not Admission.SKIP:
             raise ValueError("scheduled reset must skip rather than wait")
-        if intent.bot_id.strip().lower() in self.candidates.protected_bot_ids:
-            return None, "protected bot"
+        excluded = BotTags(self.store.engine).snapshot().excluded_reason(intent.bot_id)
+        if excluded:  # rechecked under the target lock by scheduled_skip_reason
+            return None, excluded
         bot = BotManager(self.service.config).get_bot(intent.bot_id)
         if bot is None or durable_agent_backend(bot) != "claude-code":
             return None, "target does not support scheduled fresh provider sessions"

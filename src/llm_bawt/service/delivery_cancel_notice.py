@@ -9,8 +9,8 @@ API and recovery. It runs on each dispatcher pass.
 * Eligible (``_PENDING``): bot-authored, sender is not the target, not itself
   a notice (so a cancelled notice is never notified about), and not a
   scheduled prompt (its receipt belongs to the scheduling API). Rows sent by
-  or to a protected bot (``PROTECTED_BOT_IDS``) are never read, stamped or
-  notified.
+  or to a private bot (a ``private`` tag, the legacy column false, or no
+  profile at all; BOT_TAGS.md §5.3) are never read, stamped or notified.
 * Every row the pump decides on is stamped ``cancel_notified_at`` (the audit
   stamp), notified or not. A sender that is not an agent bot, or has no user
   to scope the notice to, is stamped and skipped.
@@ -45,12 +45,13 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from ..bot_identities import SYSTEM_BOT_ID
+from ..bot_tags import BehaviorTag, sql_allowed
+from ..bot_tags.catalog import ASSIGNMENT_TABLE, owned
 from ..bot_types import normalize_bot_type
 from ..inter_bot_delivery_record import DeliveryRecord
 from ..inter_bot_delivery_user import resolve_delivery_user
 from ..utils.db import is_postgresql
 from ..utils.schema import SchemaBootstrapGuard, ensure_columns, ensure_relations
-from .jobs.idle_context_candidates import PROTECTED_BOT_IDS
 
 log = logging.getLogger(__name__)
 
@@ -70,14 +71,19 @@ _NOTIFIED, _SKIPPED, _GONE = "notified", "skipped", "gone"
 
 # The one eligibility predicate, shared by the candidate read, the locked
 # re-check, the one-time backfill, the report and the partial index (whose
-# predicate must be a literal, so the protected exclusion stays a parameter).
+# predicate must be a literal, so the private exclusion stays out of it).
 _PENDING = f"""
     status='CANCELLED' AND cancel_notified_at IS NULL
     AND author_entity_type='bot' AND sender_bot_id <> target_bot_id
     AND message_kind IS DISTINCT FROM '{NOTICE_KIND}'
     AND metadata_json->'prompt_schedule' IS NULL
 """
-_UNPROTECTED = "sender_bot_id <> ALL(:protected) AND target_bot_id <> ALL(:protected)"
+_SENDER_ALLOWED, _SENDER_PARAMS = sql_allowed(
+    "inter_bot_deliveries.sender_bot_id", {BehaviorTag.PRIVATE}, prefix="snd")
+_TARGET_ALLOWED, _TARGET_PARAMS = sql_allowed(
+    "inter_bot_deliveries.target_bot_id", {BehaviorTag.PRIVATE}, prefix="tgt")
+_UNPROTECTED = f"{_SENDER_ALLOWED} AND {_TARGET_ALLOWED}"
+_UNPROTECTED_PARAMS = {**_SENDER_PARAMS, **_TARGET_PARAMS}
 
 _schema_guard = SchemaBootstrapGuard()
 _COLUMNS = {"cancel_notified_at": ("TIMESTAMPTZ", None)}
@@ -101,10 +107,16 @@ def _bootstrap(conn) -> None:
     # so the backfill runs only with the ADD that created the column.
     added = ensure_columns(conn, "inter_bot_deliveries", _COLUMNS)
     if any("ADD COLUMN" in statement for statement in added):
-        stamped = conn.execute(sa_text(
-            f"UPDATE inter_bot_deliveries SET cancel_notified_at=now() WHERE {_PENDING} AND {_UNPROTECTED}"
-        ), {"protected": sorted(PROTECTED_BOT_IDS)}).rowcount
-        log.info("cancel_notified_at added; %d historical cancelled deliveries stamped (never notified)", stamped)
+        if not (owned(conn, "bot_profiles") and owned(conn, ASSIGNMENT_TABLE)):
+            # No tag data to tell private rows apart: stamp nothing (a private
+            # row is never stamped). Only a database with no history gets here.
+            log.warning("cancel_notified_at added before bot tags exist; no historical rows stamped")
+        else:
+            stamped = conn.execute(sa_text(
+                f"UPDATE inter_bot_deliveries SET cancel_notified_at=now() WHERE {_PENDING} AND {_UNPROTECTED}"
+            ), _UNPROTECTED_PARAMS).rowcount
+            log.info("cancel_notified_at added; %d historical cancelled deliveries stamped (never notified)",
+                     stamped)
     ensure_relations(conn, _RELATIONS)
 
 
@@ -118,10 +130,9 @@ class PassResult:
 class CancelNoticePump:
     """One sender notice per eligible cancelled delivery."""
 
-    def __init__(self, store: Any, *, protected: frozenset[str] = PROTECTED_BOT_IDS,
-                 batch_size: int = BATCH_SIZE, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, store: Any, *, batch_size: int = BATCH_SIZE,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.store = store
-        self.protected = frozenset(protected)
         self.batch_size = batch_size
         self._clock = clock
         self._last_report: int | None = None
@@ -133,7 +144,7 @@ class CancelNoticePump:
         return self.store.engine
 
     def _params(self, **extra: Any) -> dict[str, Any]:
-        return {"protected": sorted(self.protected), **extra}
+        return {**_UNPROTECTED_PARAMS, **extra}
 
     def mode(self) -> str:
         from ..runtime_setting_resolution import resolve_global_runtime_setting
@@ -241,8 +252,6 @@ class CancelNoticePump:
 
     def _enqueue_notice(self, conn, row, user: str) -> DeliveryRecord:
         sender = row["sender_bot_id"]
-        if sender in self.protected:  # unreachable past the SQL exclusion; never send to one
-            raise ValueError(f"refusing a cancel notice to protected bot {sender!r}")
         message = notice_text(sender, {
             "delivery_id": row["id"], "target_bot_id": row["target_bot_id"],
             "task_id": row["task_id"] or "none", "reason": row["last_error"] or "not recorded",
