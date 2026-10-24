@@ -164,7 +164,7 @@ class MessageSource(PostgresSource):
                           / 86400.0 / {RECENCY_HALF_WEIGHT_DAYS}) AS score
             FROM messages m JOIN sessions s ON s.id = m.session_id
             CROSS JOIN query_lexemes q
-            CROSS JOIN LATERAL (SELECT to_tsvector('english', m.content) AS doc) v
+            CROSS JOIN LATERAL (SELECT m.content_tsv AS doc) v
             WHERE {HISTORY_AUTHORITY}
               AND v.doc @@ to_tsquery('english', :query)
             ORDER BY coverage DESC, score DESC, m.timestamp DESC, m.id

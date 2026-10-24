@@ -145,10 +145,10 @@ class CrossBotMessageSearcher:
             SELECT id, role, content, timestamp, session_id,
                    author_entity_type, author_entity_id,
                    bot_id AS source,
-                   ts_rank(to_tsvector('english', content), {tsquery}) AS rank,
+                   ts_rank(content_tsv, {tsquery}) AS rank,
                    COUNT(*) OVER () AS total
             FROM {MESSAGES_PARENT}
-            WHERE to_tsvector('english', content) @@ {tsquery}
+            WHERE content_tsv @@ {tsquery}
               AND role != 'system'
               {bot_clause}
               {role_clause}
@@ -201,8 +201,8 @@ class CrossBotMessageSearcher:
                     return []
                 params.update(fts.params)
                 tsquery = fts.tsquery_sql()
-                match_clause = f"AND to_tsvector('english', m.content) @@ {tsquery}"
-                rank_sql = f"ts_rank(to_tsvector('english', m.content), {tsquery})"
+                match_clause = f"AND m.content_tsv @@ {tsquery}"
+                rank_sql = f"ts_rank(m.content_tsv, {tsquery})"
             order_clause = ("ORDER BY m.timestamp DESC" if sort_by == "recent"
                             else "ORDER BY rank DESC, m.timestamp DESC")
         role_clause = "AND m.role = :role_filter" if role_filter else ""

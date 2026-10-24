@@ -31,6 +31,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from ..message_authorship import AuthorReference
+from .message_tsv import ensure_message_tsv
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,10 @@ _forgotten_table_cache: dict[str, Table] = {}
 
 def ensure_message_parent_tables(conn) -> None:
     """Create the canonical and forgotten partitioned message parents."""
+    # Unqualified, like the DDL below, so it follows the connection's search_path.
+    messages_was_new = conn.execute(
+        text("SELECT to_regclass(:name) IS NULL"), {"name": MESSAGES_PARENT}
+    ).scalar_one()
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS {MESSAGES_PARENT} (
             bot_id VARCHAR(64) NOT NULL,
@@ -100,6 +105,9 @@ def ensure_message_parent_tables(conn) -> None:
             f"ALTER TABLE {table_name} "
             "ADD COLUMN IF NOT EXISTS interrupt_content_offset INTEGER"
         ))
+    # TASK-1323: stored content_tsv for FTS. Built only on a new parent; an
+    # existing one needs the reviewed online upgrade (logged, never blocking).
+    ensure_message_tsv(conn, table_was_new=messages_was_new)
 
 
 def message_parent_indexes() -> list[str]:
@@ -109,9 +117,7 @@ def message_parent_indexes() -> list[str]:
         f"CREATE INDEX IF NOT EXISTS idx_{MESSAGES_PARENT}_session_ts ON {MESSAGES_PARENT}(session_id, timestamp DESC)",
         f"CREATE INDEX IF NOT EXISTS idx_{MESSAGES_PARENT}_processed ON {MESSAGES_PARENT}(processed)",
         f"CREATE INDEX IF NOT EXISTS {MESSAGES_PARENT}_content_trgm_idx ON {MESSAGES_PARENT} USING gin (content gin_trgm_ops)",
-        # TASK-1323: word/identifier FTS. The expression must match the
-        # queries' to_tsvector('english', content) exactly to be usable.
-        f"CREATE INDEX IF NOT EXISTS {MESSAGES_PARENT}_content_fts_idx ON {MESSAGES_PARENT} USING gin (to_tsvector('english', content))",
+        # FTS uses the stored content_tsv index (memory.message_tsv).
     ]
 
 

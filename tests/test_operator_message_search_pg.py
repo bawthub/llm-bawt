@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, text
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver, TrustedCaller
 from llm_bawt.mcp_server.message_search import CrossBotMessageSearcher, OperatorMessageScope
 from llm_bawt.mcp_server.storage import MemoryStorage
+from llm_bawt.memory.message_tsv import ensure_message_tsv
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.utils import db
 from tests.pg_isolation import require_test_db_config
@@ -77,6 +78,7 @@ def engine(private_app_pg):
         conn.execute(text("""CREATE TABLE messages (
             id text, bot_id text, session_id text, role text, content text,
             timestamp double precision, author_entity_type text, author_entity_id text)"""))
+        ensure_message_tsv(conn, table_was_new=True)
         rows = ROWS + [
             ("x_reply", "private_fixture", "priv", "assistant", "bot", "private_fixture", None),
             ("x_user", "private_fixture", "priv", "user", "user", "user_a", None),

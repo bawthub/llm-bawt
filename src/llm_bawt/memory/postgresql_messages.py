@@ -270,9 +270,9 @@ class PostgreSQLMessageMixin:
 
                 sql = text(f"""
                     SELECT id, role, content, timestamp,
-                           ts_rank(to_tsvector('english', content), {tsquery}) AS rank
+                           ts_rank(content_tsv, {tsquery}) AS rank
                     FROM {self._messages_table_name}
-                    WHERE to_tsvector('english', content) @@ {tsquery}
+                    WHERE content_tsv @@ {tsquery}
                     AND timestamp < :cutoff
                     {role_clause}
                     {since_clause}

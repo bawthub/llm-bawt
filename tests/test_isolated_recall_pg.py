@@ -25,6 +25,7 @@ from llm_bawt.recall.excerpts import fts_query
 from llm_bawt.recall.postgres import MessageSource, RecallDatabase
 from llm_bawt.utils import db
 from tests.pg_isolation import require_test_db_config
+from tests.test_fts_query_pg import assert_no_stored_vector, result_columns
 from tests.test_isolated_recall_sources import AL_REPLY, NICK_ASK
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -126,6 +127,15 @@ def test_term_free_correction_and_confirmation_follow_the_stale_hit(rig):
     assert by_id[stale].at < by_id[correction].at < by_id[confirmation].at
     assert by_id[stale].at.endswith("Z") and len(by_id[stale].at) == len("2026-10-21T10:33:37.000000Z")
     assert len(rows) <= MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)
+
+
+def test_recall_never_returns_the_stored_vector(rig):
+    """content_tsv drives the match and rank only; no recall row carries it (TASK-1323)."""
+    stale, *_rest = thread_with_dense_competitors(rig)
+    with result_columns(rig.engine) as columns:
+        rows = rig.recall(QUESTION)
+    assert stale in {row.id for row in rows}
+    assert_no_stored_vector(columns)
 
 
 def test_follow_ons_never_cross_sessions_bots_users_or_window(rig):
