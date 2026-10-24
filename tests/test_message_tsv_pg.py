@@ -289,3 +289,29 @@ def test_invalid_attached_leaf_is_incomplete_and_rebuilt_in_place(legacy):
     ids, plan = scoped_plan(legacy)
     assert ids == ["hit"]
     assert f"Bitmap Index Scan on {leaf_index}" in plan, plan
+
+
+def test_failed_reindex_ccnew_is_dropped_before_attached_leaf_repair(legacy):
+    upgrade(legacy)
+    attached = leaf_index_name(ALPHA)
+    ccnew = attached + "_ccnew"
+    with legacy.begin() as conn:
+        # A failed concurrent reindex leaves an invalid unattached _ccnew.
+        conn.execute(text(f"CREATE INDEX {ccnew} ON {ALPHA} USING gin (content_tsv)"))
+        conn.execute(text(
+            "UPDATE pg_index SET indisvalid = false "
+            "WHERE indexrelid IN (CAST(:attached AS regclass), CAST(:ccnew AS regclass))"
+        ), {"attached": attached, "ccnew": ccnew})
+    assert not state(legacy).complete
+
+    report = upgrade(legacy)
+    assert ccnew in report.invalid_indexes_dropped
+    assert attached in report.leaf_indexes_reindexed
+    with legacy.connect() as conn:
+        assert conn.execute(text("SELECT to_regclass(:name)"), {"name": ccnew}).scalar_one() is None
+        owner = conn.execute(text(
+            "SELECT inhparent::regclass::text FROM pg_inherits "
+            "WHERE inhrelid = CAST(:attached AS regclass)"
+        ), {"attached": attached}).scalar_one()
+        assert owner == INDEX
+    assert state(legacy).complete
