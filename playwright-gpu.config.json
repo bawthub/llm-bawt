@@ -1,5 +1,5 @@
 {
-  "//": "GPU Chrome launch flags for playwright-mcp. Mounted read-only and passed via --config. See TASK-368. Without these + the nvidia runtime + NVIDIA_DRIVER_CAPABILITIES=all, headless Chromium falls back to SwiftShader (software WebGL) and OOMs on heavy VRM scenes.",
+  "//": "GPU Chrome launch flags for playwright-mcp. Mounted read-only and passed via --config. See TASK-368. Without these + the nvidia runtime + NVIDIA_DRIVER_CAPABILITIES=all, headless Chromium falls back to SwiftShader (software WebGL) and OOMs on heavy VRM scenes. contextOptions.storageState (TASK-1375) seeds every --isolated context as user nick on dev.bawthub.com (bawthub-subject cookie + bawthub-selected-user localStorage, format from bawthub frontend/src/lib/selectedUser.ts) so bots skip the TASK-1337 user picker; prod ignores it (Authelia identity wins). To test the picker itself, clear that cookie and localStorage key first. Single-file bind mount: edit in place, then verify with docker exec llm-bawt-playwright-mcp cat /etc/playwright-gpu.json before restarting.",
   "browser": {
     "browserName": "chromium",
     "launchOptions": {
@@ -10,6 +10,33 @@
         "--use-angle=vulkan",
         "--enable-features=Vulkan"
       ]
+    },
+    "contextOptions": {
+      "storageState": {
+        "cookies": [
+          {
+            "name": "bawthub-subject",
+            "value": "nick",
+            "domain": "dev.bawthub.com",
+            "path": "/",
+            "expires": -1,
+            "httpOnly": false,
+            "secure": true,
+            "sameSite": "Strict"
+          }
+        ],
+        "origins": [
+          {
+            "origin": "https://dev.bawthub.com",
+            "localStorage": [
+              {
+                "name": "bawthub-selected-user",
+                "value": "{\"v\":1,\"id\":\"nick\"}"
+              }
+            ]
+          }
+        ]
+      }
     }
   }
 }
