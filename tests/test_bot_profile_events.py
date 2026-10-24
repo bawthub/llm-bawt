@@ -54,7 +54,7 @@ def test_profile_change_publishes_only_after_commit_and_cache_reload(monkeypatch
     monkeypatch.setattr(settings, "_clear_session_model_overrides", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(settings, "_resolve_effective_bot_prompt", lambda *_args: "")
     monkeypatch.setattr(settings, "_effective_bot_settings", lambda *_args: {})
-    monkeypatch.setattr(settings, "_to_profile_response", lambda profile, settings: profile)
+    monkeypatch.setattr(settings, "_to_profile_response", lambda profile, settings, tags=None: profile)
 
     result = asyncio.run(settings._persist_bot_profile({"slug": "al", "endpoint_id": 42}, create_only=False))
     assert result is profile

@@ -1,5 +1,6 @@
 """Route router collection for app registration."""
 
+from .bot_tags import router as bot_tags_router
 from .botchat import router as botchat_router
 from .chat import router as chat_router
 from .config import router as config_router
@@ -68,6 +69,7 @@ all_routers = [
     nextcloud_setup_router,  # Specific setup routes precede generic integration paths.
     integrations_router,
     settings_router,
+    bot_tags_router,
     setup_router,
     sessions_router,
     session_continuity_router,

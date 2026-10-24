@@ -199,6 +199,7 @@ def list_bots():
             tts_mode=bot.tts_mode,
             include_summaries=bot.include_summaries,
             include_in_global_search=bot.include_in_global_search,
+            tags=bot.tags,
             default_voice=bot.default_voice,
             uses_tools=bot.uses_tools,
             uses_search=bot.uses_search,

@@ -186,7 +186,10 @@ class BotProfileStore:
             tag_catalog.seed(conn)
             if not tags_existed:
                 migrated = tag_catalog.migrate_legacy_flag(conn)
-                logger.info("Bot tags: migrated %d legacy private assignments", migrated)
+                # WARNING, not INFO: this first bootstrap usually runs at module
+                # import, before service logging is configured, and only the
+                # lastResort handler (WARNING and up) prints then (TASK-1361).
+                logger.warning("Bot tags: migrated %d legacy private assignments", migrated)
             from .bot_session_state import BotSessionState
             BotSessionState.ensure_schema(conn)
 
@@ -245,8 +248,7 @@ class BotProfileStore:
         from .bot_identities import RESERVED_JOB_BOT_IDS
         if slug in RESERVED_JOB_BOT_IDS:
             raise ValueError(f"Bot slug {slug!r} is reserved for system actions")
-        from .bot_tags.catalog import legacy_flag_write
-        from .bot_tags.vocabulary import LEGACY_FLAG_ASSIGNER
+        from .bot_tags.catalog import profile_tag_write
 
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
@@ -268,10 +270,8 @@ class BotProfileStore:
                     voice_optimized=bool(payload.get("voice_optimized", False)),
                     tts_mode=bool(payload.get("tts_mode", False)),
                     include_summaries=bool(payload.get("include_summaries", True)),
-                    include_in_global_search=legacy_flag_write(
-                        session.connection(), slug, previous=None,
-                        requested=bool(payload.get("include_in_global_search", True)),
-                        by=LEGACY_FLAG_ASSIGNER),
+                    include_in_global_search=profile_tag_write(
+                        session.connection(), slug, previous=None, payload=payload),
                     uses_tools=bool(payload.get("uses_tools", False)),
                     uses_search=bool(payload.get("uses_search", False)),
                     uses_home_assistant=bool(payload.get("uses_home_assistant", False)),
@@ -299,12 +299,11 @@ class BotProfileStore:
                 row.voice_optimized = bool(payload.get("voice_optimized", row.voice_optimized))
                 row.tts_mode = bool(payload.get("tts_mode", row.tts_mode))
                 row.include_summaries = bool(payload.get("include_summaries", row.include_summaries))
-                # The legacy flag mirrors ``not private``; tags change with it in
-                # this same transaction (BOT_TAGS.md §4.1).
-                row.include_in_global_search = legacy_flag_write(
+                # The legacy flag mirrors ``not private``; a ``tags`` replace or the
+                # flag's translation commits with it here (BOT_TAGS.md §4.1).
+                row.include_in_global_search = profile_tag_write(
                     session.connection(), slug, previous=row.include_in_global_search,
-                    requested=bool(payload.get("include_in_global_search", row.include_in_global_search)),
-                    by=LEGACY_FLAG_ASSIGNER)
+                    payload=payload)
                 row.uses_tools = bool(payload.get("uses_tools", row.uses_tools))
                 row.uses_search = bool(payload.get("uses_search", row.uses_search))
                 row.uses_home_assistant = bool(payload.get("uses_home_assistant", row.uses_home_assistant))

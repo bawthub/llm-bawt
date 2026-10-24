@@ -27,7 +27,8 @@ class Bot:
     voice_optimized: bool = False  # Whether output is optimized for TTS
     tts_mode: bool = False  # Default for tts_mode request flag (TTS formatting instructions)
     include_summaries: bool = True  # Default for include_summaries request flag
-    include_in_global_search: bool = True  # Whether aggregate cross-bot search includes this bot
+    include_in_global_search: bool = True  # Legacy mirror of "not private" (TASK-1329 §4.1)
+    tags: list[str] | None = None  # Assigned bot tags, sorted; None = could not be read
     default_voice: str | None = None  # Optional default voice identifier for TTS/voice clients
     default_model: str | None = None  # Default model alias for this bot
     harness: str | None = None  # Turn execution harness
@@ -168,6 +169,7 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
             return {}
 
         rows = store.list_all()
+        tags_by_bot = _load_bot_tags(store.engine)
         profiles: dict[str, dict[str, Any]] = {}
         for row in rows:
             slug = (row.slug or "").strip().lower()
@@ -183,6 +185,7 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
                 "tts_mode": row.tts_mode,
                 "include_summaries": row.include_summaries,
                 "include_in_global_search": row.include_in_global_search,
+                "tags": None if tags_by_bot is None else tags_by_bot.get(slug, []),
                 "uses_tools": row.uses_tools,
                 "uses_search": row.uses_search,
                 "uses_home_assistant": row.uses_home_assistant,
@@ -221,6 +224,16 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
                 pass
 
 
+def _load_bot_tags(engine) -> dict[str, list[str]] | None:
+    """Assigned tags per bot, or None (unavailable) so a tag read failure never drops a bot."""
+    try:
+        from llm_bawt.bot_tags.store import BotTagStore
+        return BotTagStore(engine).tags_by_bot()
+    except Exception as e:
+        logger.warning("Could not load bot tags; bots report them unavailable: %s", e)
+        return None
+
+
 def _load_bots_config() -> None:
     """Load bot definitions from the database.
 
@@ -253,6 +266,7 @@ def _load_bots_config() -> None:
             tts_mode=data.get("tts_mode", False),
             include_summaries=data.get("include_summaries", True),
             include_in_global_search=data.get("include_in_global_search", True),
+            tags=data.get("tags"),
             default_voice=data.get("default_voice"),
             default_model=data.get("default_model"),
             harness=data.get("harness"),

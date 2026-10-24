@@ -9,9 +9,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 BotKind = Literal["chat", "agent"]
+
+_TAGS_DOC = ("Assigned bot tags (TASK-1329), sorted. null means the tags could not be "
+             "read; it never means 'no tags'.")
 
 
 class BotInfo(BaseModel):
@@ -26,6 +29,7 @@ class BotInfo(BaseModel):
     tts_mode: bool = False
     include_summaries: bool = True
     include_in_global_search: bool = True
+    tags: list[str] | None = Field(default=None, description=_TAGS_DOC)
     default_voice: str | None = None
     uses_tools: bool = False
     uses_search: bool = False
@@ -62,6 +66,7 @@ class BotProfileResponse(BaseModel):
     tts_mode: bool = False
     include_summaries: bool = True
     include_in_global_search: bool = True
+    tags: list[str] | None = Field(default=None, description=_TAGS_DOC)
     uses_tools: bool = False
     uses_search: bool = False
     uses_home_assistant: bool = False
@@ -134,6 +139,20 @@ class BotProfilePatchRequest(BaseModel):
     endpoint_id: int | None = None
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] | None = None
+    tags: list[str] | None = Field(
+        default=None,
+        description="Full-set replace of the bot's tags, validated against the catalog "
+                    "(TASK-1329). [] clears every tag; null is refused.")
+    updated_by: str | None = Field(
+        default=None, min_length=1, max_length=128,
+        description="Who made this change; recorded as assigned_by on new tag assignments.")
+
+    @field_validator("tags")
+    @classmethod
+    def _tags_not_null(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            raise ValueError("tags must be a list; send [] to clear every tag")
+        return value
 
 
 class BotCreateRequest(BotProfileUpsertRequest):
@@ -147,3 +166,55 @@ class BotProfileListResponse(BaseModel):
     profiles: list[BotProfileResponse]
     total_count: int
     filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class BotTagUse(BaseModel):
+    """One assignment of a catalog tag; ``has_profile`` is false for a deleted bot."""
+    bot: str
+    has_profile: bool
+
+
+class BotTagResponse(BaseModel):
+    """One bot tag catalog row (TASK-1329)."""
+    slug: str
+    name: str
+    description: str
+    kind: Literal["behavior", "role"]
+    prompt_key: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    system: bool
+    used_by: list[BotTagUse] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class BotTagCatalogResponse(BaseModel):
+    object: str = "list"
+    data: list[BotTagResponse]
+
+
+class BotTagCreateRequest(BaseModel):
+    """Create a role tag; behaviour tags come from code only."""
+    model_config = ConfigDict(extra="forbid")  # kind/system are code-owned, never silently dropped
+
+    slug: str
+    name: str
+    description: str = ""
+    prompt_key: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class BotTagPatchRequest(BaseModel):
+    """Edit a role tag; only provided fields change. ``prompt_key: null`` clears it."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    description: str | None = None
+    prompt_key: str | None = None
+    capabilities: list[str] | None = None
+
+
+class BotTagAssignmentRemovedResponse(BaseModel):
+    tag: str
+    bot: str
+    has_profile: bool

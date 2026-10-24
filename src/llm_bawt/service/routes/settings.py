@@ -9,6 +9,10 @@ from sqlmodel import Session, select
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from ...bot_tags import BehaviorTag
+from ...bot_tags.errors import BotTagError
+from ...bot_tags.store import BotTagStore
+from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
 from ...orphan_partitions import PartitionExecutionHalted
@@ -129,7 +133,24 @@ def _resolve_effective_bot_prompt(config, profile) -> str:
     return base
 
 
-def _to_profile_response(profile, settings: dict[str, object] | None = None) -> BotProfileResponse:
+def _profile_tags(engine, slugs: list[str] | None = None) -> dict[str, list[str]] | None:
+    """Assigned tags per bot (one read), or None when they cannot be read.
+
+    A tag read failure must not fail a profile read or a committed write, so it
+    reports the tags unavailable (``tags: null``) instead.
+    """
+    try:
+        store = BotTagStore(engine)
+        if slugs is not None and len(slugs) == 1:
+            return {slugs[0]: store.tags_for(slugs[0])}
+        return store.tags_by_bot()
+    except Exception as exc:
+        logger.warning("Bot tags unavailable for the profile response: %s", type(exc).__name__)
+        return None
+
+
+def _to_profile_response(profile, settings: dict[str, object] | None = None,
+                         tags: dict[str, list[str]] | None = None) -> BotProfileResponse:
     return BotProfileResponse(
         slug=profile.slug,
         name=profile.name,
@@ -141,6 +162,7 @@ def _to_profile_response(profile, settings: dict[str, object] | None = None) -> 
         tts_mode=profile.tts_mode,
         include_summaries=profile.include_summaries,
         include_in_global_search=profile.include_in_global_search,
+        tags=None if tags is None else tags.get(profile.slug, []),
         uses_tools=profile.uses_tools,
         uses_search=profile.uses_search,
         uses_home_assistant=profile.uses_home_assistant,
@@ -311,6 +333,8 @@ async def _persist_bot_profile(
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except RouteIneligible as refused:  # a new route with no usable credential; nothing written
         raise HTTPException(status_code=refused.status_code, detail=refused.reason)
+    except BotTagError as refused:  # an unknown or malformed tag; nothing written
+        raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except Exception as exc:  # surface DB constraint violations as 400s
         msg = _humanize_bot_constraint_error(exc)
         if msg is not None:
@@ -333,7 +357,8 @@ async def _persist_bot_profile(
                 agent_id = parts[1]
         await _push_soul_background(profile.slug, agent_id, effective_prompt)
 
-    response = _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug))
+    response = _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug),
+                                    tags=_profile_tags(store.engine, [profile.slug]))
     await _publish_bot_profile_changed(service, profile.slug)
     await _publish_runtime_switch_threads(service, profile.slug, rotated_threads)
     return response
@@ -608,10 +633,12 @@ def list_bot_profiles(
 
     total_count = len(filtered)
     page = filtered[offset : offset + limit]
+    tags = _profile_tags(store.engine)
 
     return BotProfileListResponse(
         profiles=[
-            _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug))
+            _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug),
+                                 tags=tags)
             for profile in page
         ],
         total_count=total_count,
@@ -648,7 +675,8 @@ def get_bot_profile(slug: str):
     profile = store.get(slug)
     if profile is None:
         raise HTTPException(status_code=404, detail="Bot profile not found")
-    return _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug))
+    return _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug),
+                                tags=_profile_tags(store.engine, [profile.slug]))
 
 
 @router.put("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])
@@ -698,8 +726,18 @@ async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
         "agent_backend": existing.agent_backend,
         "agent_backend_config": existing.agent_backend_config,
     }
-    for field_name in request.model_fields_set:
+    for field_name in request.model_fields_set - {"updated_by"}:
         payload[field_name] = getattr(request, field_name)
+    if "tags" in request.model_fields_set:
+        # A full-set replace (BOT_TAGS.md §8). The legacy flag mirrors
+        # ``not private``, so naming both is only allowed when they agree.
+        mirror = BehaviorTag.PRIVATE not in request.tags
+        if ("include_in_global_search" in request.model_fields_set
+                and request.include_in_global_search is not mirror):
+            raise HTTPException(status_code=422, detail=(
+                "include_in_global_search must equal 'private' not in tags when both are sent; "
+                "send tags alone"))
+        payload["tags_assigned_by"] = request.updated_by or API_ASSIGNER
 
     # bot_type is DERIVED from agent_backend (the single source of truth), not
     # carried over from the stored row (TASK-516). A PATCH that touches an

@@ -7,12 +7,14 @@ transaction; nothing here commits. Existence checks are pinned to
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from sqlalchemy import text
 
+from .errors import TagValidationError
 from .vocabulary import (
-    BEHAVIOR_TAGS, LEGACY_PRIVATE_TAGS, MIGRATION_ASSIGNER, SEEDED_ROLES, BehaviorTag,
+    API_ASSIGNER, BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, LEGACY_PRIVATE_TAGS, MIGRATION_ASSIGNER,
+    SEEDED_ROLES, TAG_SLUG, BehaviorTag,
 )
 
 CATALOG_TABLE = "bot_tag_catalog"
@@ -166,3 +168,70 @@ def legacy_flag_write(conn, bot_slug: str, *, previous: bool | None, requested: 
         assign(conn, bot_slug, LEGACY_PRIVATE_TAGS, by)
     # A re-created slug keeps inherited tags; a private identity stays private.
     return not has_assignment(conn, bot_slug, BehaviorTag.PRIVATE)
+
+
+def lock_bot(conn, bot_slug: str) -> None:
+    """Serialize every tag write for one bot until the caller's transaction ends.
+
+    Without it two concurrent full-set replaces each miss the other's
+    uncommitted inserts and commit the union, a set neither asked for.
+    """
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('bot-tags'), hashtext(:bot))"),
+                 {"bot": bot_slug})
+
+
+def validate_assignment_set(conn, tags: object) -> frozenset[str]:
+    """Exact catalog slugs, deduplicated; anything else raises TagValidationError.
+
+    No normalization: ``" Private"`` is refused, never quietly stored as
+    ``private``. The catalog rows are KEY SHARE locked, so a concurrent catalog
+    delete waits for this transaction and then meets the FK.
+    """
+    if isinstance(tags, (str, bytes)) or not isinstance(tags, (list, tuple, set, frozenset)):
+        raise TagValidationError("tags must be a list of tag slugs")
+    bad = sorted(repr(t) for t in tags if not isinstance(t, str) or not TAG_SLUG.fullmatch(t))
+    if bad:
+        raise TagValidationError(f"malformed tag slug(s): {', '.join(bad)}")
+    wanted = frozenset(tags)
+    known = set(conn.execute(text("""
+        SELECT slug FROM bot_tag_catalog WHERE slug = ANY(CAST(:tags AS text[]))
+        ORDER BY slug FOR KEY SHARE
+    """), {"tags": sorted(wanted)}).scalars())
+    unknown = sorted(wanted - known)
+    if unknown:
+        raise TagValidationError(f"unknown bot tag(s): {', '.join(unknown)}")
+    return wanted
+
+
+def replace_assignments(conn, bot_slug: str, tags: object, by: str | None) -> bool:
+    """Full-set replace of one bot's tags; return the legacy column value.
+
+    Kept assignments keep their ``assigned_at``/``assigned_by``. The column is
+    written as ``not private`` from the new set (BOT_TAGS.md §4.1). The caller
+    holds :func:`lock_bot`.
+    """
+    wanted = validate_assignment_set(conn, tags)
+    conn.execute(text("""
+        DELETE FROM bot_profile_tags
+        WHERE bot_slug = :bot AND NOT (tag_slug = ANY(CAST(:tags AS text[])))
+    """), {"bot": bot_slug, "tags": sorted(wanted)})
+    assign(conn, bot_slug, sorted(wanted), by)
+    return str(BehaviorTag.PRIVATE) not in wanted
+
+
+def profile_tag_write(conn, bot_slug: str, *, previous: bool | None,
+                      payload: Mapping[str, object]) -> bool:
+    """The one tag write a profile upsert makes; return the legacy column value.
+
+    A payload carrying ``tags`` is a full-set replace by ``tags_assigned_by``;
+    otherwise the legacy ``include_in_global_search`` flag is translated
+    (BOT_TAGS.md §4.1). ``previous`` is the stored column, or None for a create.
+    """
+    lock_bot(conn, bot_slug)
+    if "tags" in payload:
+        by = payload.get("tags_assigned_by") or API_ASSIGNER
+        return replace_assignments(conn, bot_slug, payload["tags"], str(by))
+    default = True if previous is None else previous
+    return legacy_flag_write(
+        conn, bot_slug, previous=previous,
+        requested=bool(payload.get("include_in_global_search", default)), by=LEGACY_FLAG_ASSIGNER)

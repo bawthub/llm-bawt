@@ -57,6 +57,8 @@ LEGACY_PRIVATE_TAGS: tuple[BehaviorTag, ...] = (BehaviorTag.PRIVATE, BehaviorTag
 
 MIGRATION_ASSIGNER = "migration:TASK-1329"
 LEGACY_FLAG_ASSIGNER = "legacy:include_in_global_search"
+# A REST tag write whose request names no ``updated_by``.
+API_ASSIGNER = "api"
 
 TAG_SLUG = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
