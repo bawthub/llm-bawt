@@ -284,6 +284,32 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "Claude MCP calls receive 30 seconds of extra client-side headroom."
         ),
     ),
+    "user_stop_queue_hold_seconds": SettingDefinition(
+        key="user_stop_queue_hold_seconds",
+        type="int",
+        default=600,
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Queue hold after Stop (s)",
+        help=(
+            "After a user Stop, the bot's queued deliveries wait this long (or until "
+            "Resume / Cancel all) instead of starting the next turn. The user's own "
+            "chat still runs. 0 disables the hold."
+        ),
+    ),
+    "delivery_cancel_notice_mode": SettingDefinition(
+        key="delivery_cancel_notice_mode",
+        type="str",
+        default="notify",
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Cancelled-delivery notices",
+        help=(
+            "When a bot's message to another bot is cancelled before it runs, tell the "
+            "sending agent bot once. notify sends the notice; report only logs how many "
+            "are pending; off does neither. An unknown value acts as report."
+        ),
+    ),
     "timeout_seconds": SettingDefinition(
         key="timeout_seconds",
         type="int",

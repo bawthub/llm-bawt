@@ -273,12 +273,29 @@ def _is_postgres(conn) -> bool:
     return getattr(getattr(conn, "dialect", None), "name", None) == "postgresql"
 
 
-_LIVE = "released_at IS NULL AND expires_at > now()"
+def _clock(fresh: bool) -> str:
+    """The DB clock a gate decision reads.
+
+    ``now()`` is the transaction start. A decision taken after waiting on a
+    target lock passes ``fresh=True`` to read the wall clock instead
+    (``clock_timestamp()``), so an expiry that passed during the wait counts
+    (TASK-1327 IR1). Every other gate keeps the transaction-start clock.
+    """
+    return "clock_timestamp()" if fresh else "now()"
+
+
+def _live(*, fresh: bool = False) -> str:
+    return f"released_at IS NULL AND expires_at > {_clock(fresh)}"
+
+
+_LIVE = _live()
+
+_GATE_COLUMNS = "id, mode, owner_kind, owner_id, reason, expires_at"
 
 
 def _live_gates(conn) -> list[Mapping[str, Any]]:
     return conn.execute(sa_text(
-        "SELECT id, mode, owner_kind, owner_id, reason, expires_at, scope, allow_actors"
+        f"SELECT {_GATE_COLUMNS}, scope, allow_actors"
         f" FROM system_gates WHERE {_LIVE}"
     )).mappings().all()
 
@@ -300,7 +317,7 @@ def _block(row: Mapping[str, Any]) -> GateBlock:
     )
 
 
-def gate_blocks(conn, bot_id: str, actor: GateActor) -> GateBlock | None:
+def gate_blocks(conn, bot_id: str, actor: GateActor, *, exclude_owner_id: str | None = None) -> GateBlock | None:
     """The strictest live gate refusing ``actor`` on ``bot_id``, else None.
 
     Call after ``lock_target(conn, bot_id)`` in the admission's transaction.
@@ -309,10 +326,14 @@ def gate_blocks(conn, bot_id: str, actor: GateActor) -> GateBlock | None:
     re-attaches (``delivery_claim``/``save_turn``) to a turn that gate's
     roster recorded as ``accepted`` (C1). Strictest: deny before hold, then
     the latest ``expires_at``. Always None off PostgreSQL.
+
+    ``exclude_owner_id`` drops that exact owner's gates BEFORE the strictest
+    choice, so every other gate is still evaluated in full (the TASK-1327
+    user-Stop bypass asks "does anything else block?").
     """
     if not _is_postgres(conn):
         return None
-    gates = _live_gates(conn)
+    gates = [row for row in _live_gates(conn) if row["owner_id"] != exclude_owner_id]
     if not gates:
         return None
     profile = _bot_profile(conn, bot_id)
@@ -340,25 +361,37 @@ def _accepted_member(conn, gate_id: int, turn_id: str) -> bool:
     ), {"gate": gate_id, "turn": turn_id}).first() is not None
 
 
-def gate_is_live(conn, gate_id: int) -> bool:
-    """Is generation ``gate_id`` unreleased and unexpired on the DB clock?"""
+def gate_is_live(conn, gate_id: int, *, fresh: bool = False) -> bool:
+    """Is generation ``gate_id`` unreleased and unexpired on the DB clock (``_clock``)?"""
     if not _is_postgres(conn):
         return False
     return conn.execute(sa_text(
-        f"SELECT 1 FROM system_gates WHERE id=:id AND {_LIVE}"
+        f"SELECT 1 FROM system_gates WHERE id=:id AND {_live(fresh=fresh)}"
     ), {"id": gate_id}).first() is not None
 
 
-def extend_gate(conn, gate_id: int, *, owner_id: str, ttl_seconds: float) -> bool:
+def live_gate_for_owner(conn, owner_id: str, *, fresh: bool = False) -> GateBlock | None:
+    """``owner_id``'s live gate (exact match), the latest-expiring if several, else None."""
+    if not _is_postgres(conn):
+        return None
+    row = conn.execute(sa_text(
+        f"SELECT {_GATE_COLUMNS} FROM system_gates WHERE owner_id=:owner AND {_live(fresh=fresh)}"
+        " ORDER BY expires_at DESC, id DESC LIMIT 1"
+    ), {"owner": owner_id}).mappings().first()
+    return _block(row) if row is not None else None
+
+
+def extend_gate(conn, gate_id: int, *, owner_id: str, ttl_seconds: float, fresh: bool = False) -> bool:
     """Renew a live gate's lease; extends only, never shortens.
 
     False when the gate is released, already expired, or not ``owner_id``'s:
     a lapsed gate is never revived (the caller opens a new generation).
+    ``fresh`` reads both the liveness and the new lease from the wall clock.
     """
     return bool(conn.execute(sa_text(f"""
         UPDATE system_gates
-        SET expires_at=GREATEST(expires_at, now() + (:ttl * interval '1 second'))
-        WHERE id=:id AND owner_id=:owner AND {_LIVE}
+        SET expires_at=GREATEST(expires_at, {_clock(fresh)} + (:ttl * interval '1 second'))
+        WHERE id=:id AND owner_id=:owner AND {_live(fresh=fresh)}
     """), {"id": gate_id, "owner": owner_id, "ttl": float(ttl_seconds)}).rowcount)
 
 
@@ -582,13 +615,16 @@ def bots_in_scope(conn, scope: GateScope) -> list[str]:
     )
 
 
-def insert_gate(conn, spec: GateSpec) -> GateBlock:
-    """Insert one gate row (``activate_hold`` calls this under the target locks)."""
-    row = conn.execute(sa_text("""
+def insert_gate(conn, spec: GateSpec, *, fresh: bool = False) -> GateBlock:
+    """Insert one gate row (``activate_hold`` calls this under the target locks).
+
+    ``fresh`` starts the lease on the wall clock rather than the transaction start.
+    """
+    row = conn.execute(sa_text(f"""
         INSERT INTO system_gates (owner_kind, owner_id, mode, scope, reason, allow_actors, expires_at)
         VALUES (:owner_kind, :owner_id, :mode, CAST(:scope AS jsonb), :reason,
-                CAST(:allow AS jsonb), now() + (:ttl * interval '1 second'))
-        RETURNING id, mode, owner_kind, owner_id, reason, expires_at
+                CAST(:allow AS jsonb), {_clock(fresh)} + (:ttl * interval '1 second'))
+        RETURNING {_GATE_COLUMNS}
     """), {
         "owner_kind": spec.owner_kind, "owner_id": spec.owner_id, "mode": spec.mode,
         "scope": spec.scope.to_json(), "reason": spec.reason,
@@ -719,6 +755,7 @@ __all__ = [
     "initial_control_state",
     "insert_gate",
     "insert_member",
+    "live_gate_for_owner",
     "member_drained",
     "pin_member_request",
     "release_gates",

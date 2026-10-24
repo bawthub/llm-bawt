@@ -31,6 +31,7 @@ from .prompt_default_loaders import (
     load_agents_task_spec,
     load_chat_steer_interrupt_replacement,
     load_chat_steer_next_aside,
+    load_deliveries_cancel_notice,
     load_global_recall_guidance,
     load_inter_bot_reply_channel_async,
     load_inter_bot_restart_retry_continue,
@@ -416,6 +417,23 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "to the original request, so it must tell the bot to check what it "
             "already completed and not repeat side effects. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "deliveries.cancel_notice": PromptDefinition(
+        key="deliveries.cancel_notice",
+        title="Cancelled Delivery Notice",
+        category="agent_execution",
+        required_vars=("delivery_id", "target_bot_id", "task_id", "reason", "excerpt"),
+        loader=load_deliveries_cancel_notice,
+        metadata={"notes": (
+            "Body of the system delivery (TASK-1327) that tells an agent bot a "
+            "message it sent to another bot was cancelled before it ran: by the "
+            "user's Stop, the queue hold's Cancel all, the cancel API or recovery. "
+            "{reason} is the recorded cancel reason and {excerpt} the message's "
+            "first 200 characters. It must say the message will not be delivered "
+            "and that a user-stopped message is not to be resent automatically. "
+            "A blank body or one that no longer renders falls back to the seed. "
+            "Sender-bot overrides supported."
         )},
     ),
     "ops.quiesce_receipt": PromptDefinition(

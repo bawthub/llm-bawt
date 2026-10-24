@@ -113,6 +113,11 @@ def set_utc_on_connect(engine: Engine) -> None:
         _configure_dbapi_connection(dbapi_connection)
 
 
+def is_postgresql(bind: Any) -> bool:
+    """Whether ``bind`` (an engine or a connection) is PostgreSQL; False for None."""
+    return getattr(getattr(bind, "dialect", None), "name", None) == "postgresql"
+
+
 def build_postgres_url(config: Any) -> str | None:
     """Assemble a SQLAlchemy postgres URL from a config object, or None."""
     host = getattr(config, "POSTGRES_HOST", None) or "localhost"

@@ -30,6 +30,7 @@ from .service.dispatcher_leadership import (
     probe_lock_session,
     release_lock_session,
 )
+from .service.delivery_cancel_notice import ensure_cancel_notice_schema
 from .service.turn_gates import ensure_gate_schema
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
 from .inter_bot_delivery_record import DeliveryRecord
@@ -274,6 +275,7 @@ class InterBotDeliveryStore:
         self._schema_guard.run(self.engine, "inter-bot-deliveries", bootstrap)
         # The delivery claim asks the system gate under the target lock (TASK-1233).
         ensure_gate_schema(self.engine)
+        ensure_cancel_notice_schema(self.engine)  # TASK-1327 sender notices
 
     def acquire_dispatcher_lock(
         self, lock_name: str = "inter-bot-dispatcher"
@@ -534,7 +536,9 @@ class InterBotDeliveryStore:
         except (TypeError, ValueError):
             return False
         audit = request.get("abort_request") if isinstance(request, dict) else None
-        return isinstance(audit, dict) and audit.get("source") in ("chat_stop", "bot_list_stop")
+        from .service.user_stop_hold import USER_STOP_SOURCES
+
+        return isinstance(audit, dict) and audit.get("source") in USER_STOP_SOURCES
 
     def cancel_stopped_claim(self, delivery_id: str, claim_token: str) -> DeliveryRecord | None:
         """Fence an explicitly stopped delivery, but never an unrelated steer."""
@@ -911,20 +915,25 @@ class InterBotDeliveryStore:
             current = conn.execute(sa_text("""
                 SELECT * FROM inter_bot_deliveries WHERE id=:id FOR UPDATE
             """), {"id": delivery_id}).mappings().first()
-            if not current or current["status"] != QUEUED:
-                return None
-            if ((current.get("metadata_json") or {}).get("prompt_schedule")
-                    and current.get("transport_accepted_at") is not None):
-                return None
-            # Preserve legacy cancellation for accepted, queued *ordinary*
-            # callbacks. Routed and scheduled work retain the no-abort-after-
-            # acceptance invariant.
-            origin = current.get("metadata_json") or {}
-            row = self.cancel_unaccepted_locked(
-                conn, current,
-                allow_accepted_queued=not (origin.get("prompt_schedule") or origin.get("message_route")),
-            )
+            row = self.cancel_queued_locked(conn, current) if current else None
         return DeliveryRecord.from_mapping(row) if row else None
+
+    @classmethod
+    def cancel_queued_locked(cls, conn, current: dict, reason: str | None = None) -> dict | None:
+        """The one rule for cancelling a QUEUED delivery on request.
+
+        ``current`` is locked under its target lock. Shared by ``cancel`` and
+        the user-Stop hold's Cancel all (TASK-1327). Accepted, queued
+        *ordinary* callbacks may still be cancelled (legacy); routed and
+        scheduled work keep the no-abort-after-acceptance invariant.
+        """
+        if current["status"] != QUEUED:
+            return None
+        origin = current.get("metadata_json") or {}
+        return cls.cancel_unaccepted_locked(
+            conn, current, reason,
+            allow_accepted_queued=not (origin.get("prompt_schedule") or origin.get("message_route")),
+        )
 
     def turn_state(self, delivery_id: str) -> tuple[str | None, datetime | None]:
         if self.engine is None:

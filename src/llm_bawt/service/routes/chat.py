@@ -45,6 +45,8 @@ class ChatAbortResponse(BaseModel):
     ok: bool
     detail: str | None = None
     turn_id: str | None = None
+    # A user Stop's queue hold (TASK-1327): {gate_id, expires_at, queued_count}.
+    queue_hold: dict | None = None
 
 
 @router.post("/v1/chat/abort", tags=["OpenAI Compatible"])
@@ -62,7 +64,22 @@ async def chat_abort(request: ChatAbortRequest, http_request: Request) -> ChatAb
         service, turn, source=request.source,
         peer=http_request.client.host if http_request.client else None,
     )
-    return ChatAbortResponse(ok=True, detail=detail, turn_id=turn.id)
+    return ChatAbortResponse(ok=True, detail=detail, turn_id=turn.id,
+                             queue_hold=await _queue_hold_summary(store.engine, turn.bot_id, request.source))
+
+
+async def _queue_hold_summary(engine, bot_id: str | None, source: str) -> dict | None:
+    from ..user_stop_hold import USER_STOP_SOURCES, snapshot
+
+    if source not in USER_STOP_SOURCES or not bot_id:
+        return None
+    try:
+        hold = await asyncio.to_thread(snapshot, engine, bot_id)
+    except Exception:  # the Stop already happened; the strip rehydrates from GET
+        log.exception("Queue hold snapshot failed for %s", bot_id)
+        return None
+    return hold.summary() if hold is not None else None
+
 
 class ChatSteerRequest(BaseModel):
     """Redirect an in-flight Claude agent turn without creating another turn."""

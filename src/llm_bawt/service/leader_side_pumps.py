@@ -2,7 +2,8 @@
 
 The delivery dispatcher's job is claiming and running deliveries. Everything
 else its leader does on the same cadence lives here: new-session receipts and
-their outbox, Nextcloud Talk replies, the quiesce control pump. A sweep calls
+their outbox, Nextcloud Talk replies, the quiesce control pump and the
+cancelled-delivery sender notices (TASK-1327). A sweep calls
 ``run_pass`` once; ``stop`` tears the work down before leadership is released.
 """
 
@@ -21,16 +22,18 @@ class LeaderSidePumps:
     """Single owner of the dispatcher leader's non-claim pumps."""
 
     def __init__(self, service: Any, store: Any, *, talk_replies: Any = None,
-                 quiesce_control: Any = None) -> None:
+                 quiesce_control: Any = None, cancel_notices: Any = None) -> None:
         self.service = service
         self.store = store
         self.talk_replies = talk_replies
         self.quiesce_control = quiesce_control
+        self.cancel_notices = cancel_notices
         self.talk_reply_task: asyncio.Task | None = None
         self._new_session_outbox = None
 
     @classmethod
     def build(cls, service: Any, store: Any) -> "LeaderSidePumps":
+        from .delivery_cancel_notice import CancelNoticePump
         from .quiesce_control import QuiesceControlRunner, build_pump
         from .talk_reply_outbox import TalkReplyOutbox
 
@@ -40,6 +43,7 @@ class LeaderSidePumps:
             talk_replies=TalkReplyOutbox(engine) if engine is not None else None,
             # TASK-1233 B3: ask each quiesce-held running turn to stop.
             quiesce_control=QuiesceControlRunner(lambda: build_pump(service, engine)),
+            cancel_notices=CancelNoticePump(store) if engine is not None else None,
         )
 
     async def run_pass(self, emit: Emit) -> None:
@@ -55,6 +59,16 @@ class LeaderSidePumps:
             self.talk_reply_task = task
         if self.quiesce_control is not None:
             self.quiesce_control.maybe_start()
+        if self.cancel_notices is not None:
+            await self._send_cancel_notices(emit)
+
+    async def _send_cancel_notices(self, emit: Emit) -> None:
+        notices = (await asyncio.to_thread(self.cancel_notices.run_pass)).notified
+        for notice in notices:
+            await emit(notice)
+        dispatcher = getattr(self.service, "_inter_bot_dispatcher", None)
+        if notices and dispatcher is not None:
+            dispatcher.wake()  # claim the new notices now, not on the next interval
 
     async def _settle_session_receipts(self, emit: Emit) -> None:
         from .session_lifecycle.outbox import NewSessionOutbox

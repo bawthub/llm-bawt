@@ -631,7 +631,9 @@ _OPEN_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE bot_id=:bot AND ended_
 _LOCK_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE id = ANY(:ids) ORDER BY id FOR UPDATE"
 
 
-def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> ActivatedGate:
+def activate_hold(
+    conn, spec: GateSpec, *, predecessor: int | None = None, fresh_clock: bool = False,
+) -> ActivatedGate:
     """Open a gate and capture its roster in the caller's transaction (TASK-1233 B2/B4).
 
     1. ``lock_target`` every in-scope agent bot, in sorted bot_id order.
@@ -661,6 +663,9 @@ def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> Ac
     ``spec.scope``, and are not target-locked (their admission isn't gated).
     Their turn rows are locked with the captured ones (``_lock_rows``), so a
     concurrent bind is never lost between the predecessor read and the insert.
+
+    ``fresh_clock`` starts the lease on the wall clock read after the target
+    locks (``insert_gate(fresh=True)``), not the transaction start (TASK-1327 IR1).
     """
     if conn.dialect.name != "postgresql":
         raise AdmissionUnavailable("system gates require PostgreSQL")
@@ -679,7 +684,7 @@ def activate_hold(conn, spec: GateSpec, *, predecessor: int | None = None) -> Ac
     carried_turns = [] if predecessor is None else list(conn.execute(sa_text(
         "SELECT DISTINCT turn_id FROM gate_members WHERE gate_id=:old"), {"old": predecessor}).scalars())
     rows = _lock_rows(conn, rows, also=carried_turns)
-    gate = insert_gate(conn, spec)
+    gate = insert_gate(conn, spec, fresh=fresh_clock)
     members: list[GateMember] = []
     for bot_id, row in rows:
         member = _capture_member(conn, gate, spec, bot_id, row)

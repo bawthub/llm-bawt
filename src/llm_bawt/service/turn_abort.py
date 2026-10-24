@@ -35,7 +35,7 @@ async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
     store = service._turn_log_store
     current = store.get_turn(turn.id)
     if current is not None and current.status == "reserved" and current.ended_at is None:
-        stopped = await _stop_reservation(service, turn.id, source=source, peer=peer)
+        stopped = await _stop_reservation(service, turn, source=source, peer=peer)
         if stopped is not None:
             return stopped
         # Consumed between our read and the target lock (Vex B1): it is a
@@ -45,6 +45,10 @@ async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
             return "already_completed"
         turn.agent_session_key = current.agent_session_key
         turn.agent_request_id = current.agent_request_id
+    # Hold the bot's queue before the stop releases admission, so the backlog
+    # cannot claim the freed slot first (TASK-1327). Kept if the turn turns
+    # out to have completed already: the user asked the bot to stop.
+    await _hold_queue(service, turn.bot_id, source)
     coordinator = TurnAbortCoordinator(store)
     # This transaction is the cancellation linearization point. It must happen
     # BEFORE an RPC can close the SDK stream and deliver EOF/ResultMessage.
@@ -86,23 +90,52 @@ async def abort_turn(service, turn, *, source: str, peer: str | None) -> str:
     return f"aborted:{stop['bridge_state']}"
 
 
-async def _stop_reservation(service, turn_id: str, *, source: str, peer: str | None) -> str | None:
+async def _stop_reservation(service, turn, *, source: str, peer: str | None) -> str | None:
     """A reserved row has no run: revoke its producer, then settle it.
 
     None (nothing written) when the row is no longer an open reservation.
+    A user Stop opens the queue hold in the revoke's own transaction, so the
+    cancel and the hold commit together (TASK-1327).
     """
     from .turn_admission import revoke_reservation
+    from .user_stop_hold import hold_quietly, stop_hold_ttl
 
-    producer = await asyncio.to_thread(
-        revoke_reservation, service._turn_log_store.engine, turn_id,
-        disposition="user_stop",
-        audit={"bridge_state": "reserved", "confirmed": False, "source": source, "peer": peer},
-    )
+    engine = service._turn_log_store.engine
+    audit = {"bridge_state": "reserved", "confirmed": False, "source": source, "peer": peer}
+
+    def revoke_and_hold():
+        ttl = stop_hold_ttl(engine, getattr(service, "config", None), source)
+        with engine.begin() as conn:
+            producer = revoke_reservation(engine, turn.id, disposition="user_stop", audit=audit, connection=conn)
+            if producer is not None:
+                hold_quietly(conn, turn.bot_id, ttl)
+            return producer
+
+    producer = await asyncio.to_thread(revoke_and_hold)
     if producer is None:
         return None
     _wake_dispatcher(service)
-    await publish_abort_snapshot(service, turn_id)
+    await publish_abort_snapshot(service, turn.id)
     return "aborted:reserved"
+
+
+async def _hold_queue(service, bot_id: str | None, source: str) -> None:
+    """Open or extend ``bot_id``'s user-Stop queue hold; never fails the Stop."""
+    from .user_stop_hold import hold_quietly, stop_hold_ttl
+
+    engine = service._turn_log_store.engine
+
+    def hold():
+        ttl = stop_hold_ttl(engine, getattr(service, "config", None), source)
+        if not bot_id or ttl is None:
+            return
+        with engine.begin() as conn:
+            hold_quietly(conn, bot_id, ttl)
+
+    try:
+        await asyncio.to_thread(hold)
+    except Exception:
+        log.exception("user-Stop queue hold failed for %s; Stop proceeds without it", bot_id)
 
 
 async def _await_terminal(store, turn_id: str, bound_seconds: float) -> bool:

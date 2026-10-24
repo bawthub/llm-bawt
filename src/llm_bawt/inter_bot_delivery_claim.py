@@ -33,14 +33,23 @@ class DeliveryClaim:
         target = target_bot_id.strip().lower()
         claim_token = f"claim-{uuid.uuid4().hex}"
         from .service.turn_admission import lock_target
-        from .service.turn_gates import GateActor, gate_blocks
+        from .service.turn_gates import GateActor, gate_blocks, live_gate_for_owner
+        from .service.user_stop_hold import hold_owner
 
         with store.engine.begin() as conn:
             # The one per-bot admission lock, so a claim linearizes with gate
             # activation and every other admission edge (TASK-1233).
             lock_target(conn, target)
-            from .inter_bot_preclaim import load_claim_head
-            head = load_claim_head(conn, target, store.config)
+            from .inter_bot_preclaim import load_claim_head, load_user_bypass
+
+            # A user-Stop hold lets the user's own chat run ahead of the held
+            # backlog; every other gate still applies to it (TASK-1327).
+            head, exempt_owner = None, None
+            if live_gate_for_owner(conn, hold_owner(target), fresh=True) is not None:
+                head = load_user_bypass(conn, target, store.config)
+                exempt_owner = hold_owner(target) if head else None
+            if head is None:
+                head = load_claim_head(conn, target, store.config)
             if (
                 not head
                 or head["status"] != QUEUED
@@ -54,7 +63,8 @@ class DeliveryClaim:
                     WHERE id=:id AND status='QUEUED'
                 """), {"id": head["id"]})
                 return None
-            if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"])) is not None:
+            if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"]),
+                           exclude_owner_id=exempt_owner) is not None:
                 # A live system gate holds the head: it stays QUEUED with no
                 # attempt spent and nothing written, and the target's FIFO
                 # waits behind it. The first sweep after release claims it.

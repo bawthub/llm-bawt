@@ -13,6 +13,58 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 
+# A DISPATCHING row whose fallback turn the target accepted and has not ended:
+# already delivered in order, so it neither heads the queue nor fences a jump.
+_ACCEPTED_OPEN_DISPATCH = """
+    d.status='DISPATCHING'
+    AND d.transport_accepted_at IS NOT NULL
+    AND EXISTS (
+        SELECT 1 FROM turn_logs t
+        WHERE t.id=d.turn_id AND t.ended_at IS NULL
+    )
+"""
+
+
+def load_user_bypass(conn, target: str, config):
+    """The user's own chat row a user-Stop hold lets through, locked; else None.
+
+    TASK-1327: under a live ``user_stop:<target>`` gate (the caller checked it
+    under the target lock) the earliest ready QUEUED row the user authored as
+    ordinary chat may run ahead of the held backlog. Claimed work is never
+    jumped: no bypass while any STEERING row or in-flight DISPATCHING row
+    (``load_claim_head``'s own definition) exists for the target. The row gets
+    the same route veto a head gets.
+    """
+    candidate = conn.execute(text(f"""
+        SELECT c.id FROM inter_bot_deliveries c
+        WHERE c.target_bot_id=:target AND c.status='QUEUED'
+          AND c.author_entity_type='user'
+          AND c.metadata_json->'ordinary_chat' IS NOT NULL
+          AND c.metadata_json->'prompt_schedule' IS NULL
+          AND c.available_at <= clock_timestamp()
+          AND NOT EXISTS (
+              SELECT 1 FROM inter_bot_deliveries d
+              WHERE d.target_bot_id=:target
+                AND d.status IN ('STEERING','DISPATCHING')
+                AND NOT ({_ACCEPTED_OPEN_DISPATCH})
+          )
+        ORDER BY c.ordinal ASC LIMIT 1
+    """), {"target": target}).mappings().first()
+    if not candidate:
+        return None
+    head = _lock_delivery(conn, candidate["id"])
+    if not head or head["status"] != "QUEUED":
+        return None
+    meta = head.get("metadata_json") or {}
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    if meta.get("message_route"):
+        from .route_dispatch_gate import check_route_claim
+
+        return check_route_claim(conn, head, config)
+    return head
+
+
 def load_claim_head(conn, target: str, config):
     """Return the locked FIFO head, or None if its producer vetoed dispatch.
 
@@ -22,18 +74,11 @@ def load_claim_head(conn, target: str, config):
     started instead of waiting for it to end (TASK-1067). Before acceptance, or
     once the turn has ended, it still blocks until marked terminal.
     """
-    candidate = conn.execute(text("""
+    candidate = conn.execute(text(f"""
         SELECT d.* FROM inter_bot_deliveries d
         WHERE d.target_bot_id=:target
           AND d.status IN ('QUEUED','STEERING','DISPATCHING')
-          AND NOT (
-              d.status='DISPATCHING'
-              AND d.transport_accepted_at IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM turn_logs t
-                  WHERE t.id=d.turn_id AND t.ended_at IS NULL
-              )
-          )
+          AND NOT ({_ACCEPTED_OPEN_DISPATCH})
         ORDER BY d.ordinal ASC LIMIT 1
     """), {"target": target}).mappings().first()
     if not candidate:
