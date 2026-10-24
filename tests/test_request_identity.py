@@ -344,3 +344,31 @@ def test_schedule_policy_and_producer_cannot_be_downgraded():
     assert forged.rows[0]["metadata_json"]["_request_identity_producer"] == "ordinary"
     with pytest.raises(identity.IdentityConflict):
         submit(forged, user=user, key="ordinary:" + user, producer="bot", metadata={})
+
+
+def test_bot_pinned_uuid_replay_must_match_its_request():
+    """A service caller's U is one request: a changed replay is a conflict."""
+    user = str(uuid.uuid4())
+    conn = FakeConnection()
+    first, duplicate = submit(conn, user=user, key=user, message="dispatch TASK-1")
+    assert not duplicate
+    assert submit(conn, user=user, key=user, message="dispatch TASK-1")[0].id == first.id
+    with pytest.raises(identity.IdentityConflict, match="different queued request"):
+        submit(conn, user=user, key=user, message="dispatch TASK-2")
+    with pytest.raises(identity.IdentityConflict, match="different queued request"):
+        submit(conn, user=user, key=user, message="dispatch TASK-1",
+               payload={"messages": [{"role": "user", "content": "dispatch TASK-1"}],
+                        "session_id": "other"})
+    # Unpinned bot sends keep key-only replay semantics.
+    keyed, _ = submit(conn, key="plain", message="one")
+    assert submit(conn, key="plain", message="two")[0].id == keyed.id
+
+
+def test_bot_request_digest_is_server_owned():
+    user = str(uuid.uuid4())
+    conn = FakeConnection()
+    record, _ = submit(conn, key="k", metadata={"_request_digest": "forged"})
+    assert "_request_digest" not in conn.rows[0]["metadata_json"]
+    assert submit(conn, key="k", message="changed")[0].id == record.id
+    submit(conn, user=user, metadata={"_request_digest": "forged"})
+    assert conn.rows[1]["metadata_json"]["_request_digest"] != "forged"

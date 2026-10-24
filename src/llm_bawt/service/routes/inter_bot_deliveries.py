@@ -66,6 +66,61 @@ class DeliveryCreate(BaseModel):
         description="Compatibility reset-history choice; requires reset_session_before_delivery.",
     )
     reset_reason: str | None = Field(default=None, max_length=1000)
+    user_message_id: str | None = Field(
+        default=None, max_length=64,
+        description="Caller-minted trigger UUID; also the default idempotency key.",
+    )
+    # Privileged (see PRIVILEGED_FIELDS): they change what the target's turn sees.
+    session_id: str | None = Field(
+        default=None, max_length=36,
+        description="Deliver into this (target bot, user) thread instead of the active one.",
+    )
+    augment_memory: bool | None = Field(
+        default=None, description="Memory retrieval for the turn; default true.",
+    )
+    raw_message: bool | None = Field(
+        default=None, description="Store the message verbatim, without sender attribution.",
+    )
+
+
+# Fields a bot tool must never set: each changes another bot's turn. The real
+# fence is the MCP tool schema (bots_send_message builds a fixed body without
+# them). The route additionally refuses them on any request carrying a bot turn
+# capability. Neither stops a direct HTTP call: /v1/* has no service auth, the
+# same as /v1/chat/completions (TASK-1420 adds it).
+PRIVILEGED_FIELDS = ("session_id", "augment_memory", "raw_message")
+
+
+def _privileged_fields(body: DeliveryCreate) -> list[str]:
+    return [name for name in PRIVILEGED_FIELDS if name in body.model_fields_set]
+
+
+def _refuse_bot_privileged(request: Request | None, fields: list[str]) -> None:
+    from ...task_turn_context import TASK_TURN_CONTEXT_HEADER
+
+    # Presence, not validity: a bot turn's request is refused even if its
+    # capability has expired or is forged.
+    if fields and request is not None and request.headers.get(TASK_TURN_CONTEXT_HEADER):
+        raise HTTPException(status_code=403, detail={
+            "error": "privileged_field", "fields": fields,
+            "detail": "These fields are for service callers, not bot tools.",
+        })
+
+
+def _require_owned_session(session_id: str, bot_id: str, user_id: str) -> None:
+    """Never deliver into another bot's or user's thread."""
+    from sqlalchemy import text as sa_text
+
+    engine = _dispatcher().store.engine
+    with engine.connect() as conn:
+        owned = conn.execute(sa_text(
+            "SELECT 1 FROM sessions WHERE id=:id AND bot_id=:bot AND user_id=:user"
+        ), {"id": session_id, "bot": bot_id, "user": user_id}).first()
+    if owned is None:
+        raise HTTPException(status_code=404, detail={
+            "error": "session_not_found",
+            "detail": f"No session {session_id!r} for bot {bot_id!r} and this user",
+        })
 
 
 def _dispatcher():
@@ -123,9 +178,18 @@ def _gate_disposition(request: Request | None, body: "DeliveryCreate", sender: s
 
 @router.post("/v1/inter-bot-deliveries", tags=["Inter-Bot Deliveries"], status_code=202)
 async def create_delivery(body: DeliveryCreate, request: Request = None):  # type: ignore[assignment]
-    """Persist a callback and dispatch it through the target's next idle turn."""
+    """Persist a callback and dispatch it through the target's next idle turn.
+
+    Service callers (BawtHub task dispatch) may also pin the trigger UUID, the
+    target thread and memory retrieval. Those privileged fields are refused
+    with 403 ``privileged_field`` on a request carrying a bot turn capability.
+    That stops tool-level injection, not a direct curl to this unauthenticated
+    route (TASK-1420).
+    """
     target = body.target_bot_id.strip().lower()
     sender = body.sender_bot_id.strip().lower() or "unknown"
+    privileged = _privileged_fields(body)
+    _refuse_bot_privileged(request, privileged)
     on_gate = _gate_disposition(request, body, sender, target)
     try:
         explicit_author = normalize_author(
@@ -155,6 +219,28 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
     target_bot = bots.get_bot(target)
     target_exists = target_bot is not None
     durable_capable = bool(target_bot and durable_agent_backend(target_bot))
+    if privileged and not target_exists:
+        raise HTTPException(status_code=404, detail={
+            "error": "unknown_target", "detail": f"Unknown target bot {target!r}",
+        })
+    if privileged and not durable_capable:
+        # Service dispatch needs a durable agent turn; say so instead of
+        # leaving a FAILED row the caller would have to discover.
+        raise HTTPException(status_code=422, detail={
+            "error": "target_not_durable",
+            "detail": f"Target bot {target!r} does not support durable agent delivery",
+        })
+    # A reset admits through NewSessionLifecycle, which mints its own identity
+    # and rotates the active thread, so neither pinned field survives it.
+    reset_requested = (body.session_policy or "continue") != "continue" or bool(
+        body.reset_session_before_delivery
+    )
+    for pinned in ("session_id", "user_message_id"):
+        if getattr(body, pinned) is not None and reset_requested:
+            raise HTTPException(status_code=422, detail=f"{pinned} cannot be combined with a session reset")
+    if body.session_id is not None and body.prefer_steer:
+        # Steering joins whatever turn is running, in the active thread.
+        raise HTTPException(status_code=422, detail="session_id requires prefer_steer=false")
     try:
         delivery_user = resolve_delivery_user(
             get_service().config,
@@ -175,7 +261,11 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
                 body.retain_history,
             )
         )
-        if target_bot and policy.value == "continue" and not policy_was_explicit:
+        # A pinned thread is not the active one, so active-thread health must
+        # not reset anything on its behalf; and an automatic reset would drop
+        # a caller's pinned trigger UUID.
+        if (target_bot and policy.value == "continue" and not policy_was_explicit
+                and body.session_id is None and body.user_message_id is None):
             from ...runtime_settings import RuntimeSettingsResolver
             from ...setting_definitions import setting_default
 
@@ -234,7 +324,8 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
         or body.message.split(maxsplit=1)[0] != "/compact"
     ):
         raise HTTPException(status_code=422, detail="Compaction maintenance requires an idle Claude /compact command")
-    formatted = body.message if compact_maintenance else _format_delivery_message(body.message, author)
+    verbatim = compact_maintenance or bool(body.raw_message)
+    formatted = body.message if verbatim else _format_delivery_message(body.message, author)
     payload = {
         "messages": [{"role": "user", "content": formatted}],
         "reply_mode": body.reply_mode,
@@ -244,10 +335,13 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
         "max_tokens": body.max_tokens,
         "temperature": body.temperature,
         "extract_memory": False,
-        "augment_memory": True,
+        "augment_memory": True if body.augment_memory is None else body.augment_memory,
         "stream": False,
         "inter_bot_timeout_seconds": body.timeout_seconds,
     }
+    if body.session_id is not None:
+        _require_owned_session(body.session_id, target, delivery_user)
+        payload["session_id"] = body.session_id
     dispatcher = _dispatcher()
     try:
         if policy.value != "continue":
@@ -272,7 +366,9 @@ async def create_delivery(body: DeliveryCreate, request: Request = None):  # typ
         else:
             record, duplicate = dispatcher.store.enqueue(
                 sender_bot_id=sender, target_bot_id=target, message=body.message,
-                payload=payload, author=author, idempotency_key=body.idempotency_key,
+                payload=payload, author=author,
+                idempotency_key=body.idempotency_key or body.user_message_id,
+                user_message_id=body.user_message_id,
                 project_id=body.project_id, task_id=body.task_id,
                 message_kind=body.message_kind, metadata=body.metadata,
                 max_attempts=body.max_attempts, session_policy=policy,

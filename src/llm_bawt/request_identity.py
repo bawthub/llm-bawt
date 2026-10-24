@@ -149,6 +149,9 @@ class RequestIdentityResolver:
             raise IdentityConflict(
                 f"idempotency key already exists with session_policy={row['session_policy']!r}"
             )
+        elif (metadata.get("_request_digest") is not None
+              and self._digest(payload) != metadata["_request_digest"]):
+            raise IdentityConflict("same message id has a different queued request")
         return DeliveryRecord.from_mapping(row)
 
     def _winner(self, by_uuid: Any, by_key: Any, values: dict[str, Any],
@@ -201,6 +204,11 @@ class RequestIdentityResolver:
                        inter_bot_bridge_request_id=f"req_delivery_{token.hex}")
         metadata = dict(metadata)
         metadata["_request_identity_producer"] = producer  # overwrite untrusted metadata
+        metadata.pop("_request_digest", None)
+        if producer == "bot" and explicit:
+            # A caller-pinned UUID is a promise about one request: replaying
+            # it with different content is a conflict, not a duplicate.
+            metadata["_request_digest"] = self._digest(submitted_payload)
         if producer == "ordinary":
             ordinary = dict(metadata.get("ordinary_chat") or {})
             ordinary["assistant_supplied"] = explicit_assistant is not None
