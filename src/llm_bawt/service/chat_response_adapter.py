@@ -114,36 +114,69 @@ async def _wait_stream_reply(service: Any, request: ChatCompletionRequest, recei
 
 EXTENSION_COMMENT = ": llm-bawt-event "
 
+# Fields of OpenAI's ChatCompletionChunk / chunk Choice / ChoiceDelta. Anything
+# else (e.g. delta.reasoning_content) is an llm-bawt extension.
+_CHUNK_KEYS = frozenset({"id", "object", "created", "model", "choices",
+                         "system_fingerprint", "service_tier", "usage"})
+_CHOICE_KEYS = frozenset({"index", "delta", "finish_reason", "logprobs"})
+_DELTA_KEYS = frozenset({"role", "content", "refusal"})
+# Every tool in this stream already ran on the server. These fields mean "the
+# client must execute this call and reply", so they never reach OpenAI clients.
+_CLIENT_TOOL_DELTA = ("tool_calls", "function_call")
+_CLIENT_TOOL_FINISH = frozenset({"tool_calls", "function_call"})
 
-def _is_openai_chunk(payload: dict) -> bool:
-    """True for a standard chunk a stock OpenAI client should act on.
 
-    Every tool call in this stream already ran on the server. OpenAI's
-    ``delta.tool_calls`` / ``finish_reason: "tool_calls"`` mean "the client
-    must execute this and reply", so those frames are extensions here, as are
-    warnings, usage, animation and ask-user sidecars.
+def _split_chunk(payload: dict) -> tuple[dict | None, dict | None]:
+    """Split one frame into (standard OpenAI chunk, llm-bawt extension).
+
+    Either side may be None. A frame that is not a chunk at all (warnings,
+    usage, animation, ask-user) or that carries a server-run tool call is
+    entirely an extension.
     """
     choices = payload.get("choices")
-    if payload.get("object") != "chat.completion.chunk" or not isinstance(choices, list) or not choices:
-        return False
-    return not any(
-        isinstance(choice, dict) and (
-            choice.get("finish_reason") == "tool_calls"
-            or (isinstance(choice.get("delta"), dict) and choice["delta"].get("tool_calls"))
-        )
-        for choice in choices
-    )
+    if (payload.get("object") != "chat.completion.chunk" or not isinstance(choices, list)
+            or not choices or not all(isinstance(choice, dict) for choice in choices)):
+        return None, payload
+    deltas = [choice.get("delta") if isinstance(choice.get("delta"), dict) else {} for choice in choices]
+    if any(choice.get("finish_reason") in _CLIENT_TOOL_FINISH for choice in choices) or any(
+            delta.get(key) for delta in deltas for key in _CLIENT_TOOL_DELTA):
+        return None, payload
+    extra_top = {key: value for key, value in payload.items() if key not in _CHUNK_KEYS}
+    standard_choices, extension_choices = [], []
+    for choice, delta in zip(choices, deltas):
+        standard_choices.append({
+            **{key: value for key, value in choice.items() if key in _CHOICE_KEYS},
+            "delta": {key: value for key, value in delta.items() if key in _DELTA_KEYS},
+        })
+        extra_choice = {key: value for key, value in choice.items() if key not in _CHOICE_KEYS}
+        extra_delta = {key: value for key, value in delta.items() if key not in _DELTA_KEYS}
+        if extra_choice or extra_delta:
+            extension_choices.append({"index": choice.get("index", 0), **extra_choice,
+                                      "delta": extra_delta, "finish_reason": None})
+    if not extra_top and not extension_choices:
+        return payload, None
+    head = {key: payload[key] for key in ("id", "object", "created", "model") if key in payload}
+    extension = {**head, **extra_top, "choices": extension_choices}
+    standard = {**{key: value for key, value in payload.items() if key in _CHUNK_KEYS},
+                "choices": standard_choices}
+    if not any(choice["delta"] or choice.get("finish_reason") for choice in standard_choices):
+        standard = None  # e.g. a reasoning-only chunk: nothing standard left.
+    return standard, extension
 
 
-def _extension_event(event: str, payload: dict, extensions: str) -> str | None:
-    """Encode one non-OpenAI frame for the caller's negotiated extension mode."""
+def _openai_frames(event: str, payload: dict, extensions: str) -> list[str]:
+    """Encode one frame for the caller's negotiated extension mode."""
+    standard, extension = _split_chunk(payload)
+    if extension is None:
+        return [event]  # Already a pure standard chunk: bytes unchanged.
+    if extensions == "data":
+        return [event]  # Pre-negotiation BawtHub: keep the frames it consumes.
+    frames = [] if standard is None else [_data(standard)]
     if extensions == "comment":
         # SSE comments are ignored by every OpenAI client; BawtHub's proxy
-        # turns this exact JSON back into the frame its UI already handles.
-        return f"{EXTENSION_COMMENT}{json.dumps(payload)}\n\n"
-    if extensions == "data":
-        return event  # Pre-negotiation BawtHub: keep the frames it consumes.
-    return None  # A stock OpenAI client gets standard chunks only.
+        # turns this JSON back into the data frame its UI already handles.
+        frames.append(f"{EXTENSION_COMMENT}{json.dumps(extension)}\n\n")
+    return frames  # extensions == "none": a stock client gets standard chunks only.
 
 
 async def completion_stream(
@@ -184,12 +217,8 @@ async def completion_stream(
                 if failures:
                     yield _stream_error("; ".join(failures))
                     return  # A failed turn must never emit a successful stop/DONE.
-            if _is_openai_chunk(payload):
-                yield event
-                continue
-            encoded = _extension_event(event, payload, extensions)
-            if encoded is not None:
-                yield encoded
+            for frame in _openai_frames(event, payload, extensions):
+                yield frame
     except Exception as exc:
         # Once StreamingResponse has sent headers, HTTPException cannot change
         # status. A concrete error event is the only honest in-band outcome.

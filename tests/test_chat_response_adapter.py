@@ -236,6 +236,7 @@ TEXT = _chunk({"content": "hi"})
 STOP = _chunk({}, "stop")
 EXTENSIONS = [
     _sse({"object": "service.warning", "model": "m", "warnings": ["model fallback"]}),
+    _chunk({"reasoning_content": "thinking"}),  # chunk-shaped, but no standard field
     _chunk({"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "text_offset": 0,
                             "function": {"name": "time", "arguments": "{}"}}]}),
     _chunk({}, "tool_calls"),
@@ -265,6 +266,51 @@ def test_openai_stream_extension_frames_follow_negotiation(monkeypatch, headers,
     assert response.text == "".join([": connected\n\n", TEXT, *expected_extensions,
                                      STOP, "data: [DONE]\n\n"])
     service.chat_completion.assert_not_awaited()
+
+
+def test_comment_mode_translates_back_to_the_frames_bawthub_renders(monkeypatch):
+    """BawtHub's proxy rewrites ': llm-bawt-event ' to 'data: '. For what
+    chat_streaming emits (reasoning, tools, sidecars, content in between), the
+    result must equal the legacy frames, so reasoning keeps its chunk shape and
+    its order relative to content."""
+    stream = [": connected\n\n", _chunk({"role": "assistant", "content": "a"}),
+              _chunk({"reasoning_content": "r1"}), TEXT, *EXTENSIONS,
+              _chunk({"reasoning_content": "r2"}), _chunk({"content": "b"}), STOP, "data: [DONE]\n\n"]
+    outputs = {}
+    for mode, headers in {"data": {"X-LLM-Bawt-Admission-Events": "comment"},
+                          "comment": {"X-LLM-Bawt-Extension-Events": "comment"}}.items():
+        client, _service, path = _client(monkeypatch, stream_events=stream)
+        with client:
+            outputs[mode] = client.post(path, json={**BODY, "stream": True}, headers={
+                "X-LLM-Bawt-Response-Mode": "openai", **headers}).text
+    assert outputs["data"] == "".join(stream)
+    assert ": llm-bawt-event " in outputs["comment"]
+    assert outputs["comment"].replace(": llm-bawt-event ", "data: ") == outputs["data"]
+
+
+MIXED = {"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m", "turn_id": "t",
+         "choices": [{"index": 0, "delta": {"content": "hi", "reasoning_content": "r"},
+                      "finish_reason": None, "text_offset": 3}]}
+MIXED_STANDARD = _sse({"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m",
+                       "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]})
+MIXED_EXTENSION = ": llm-bawt-event " + json.dumps({
+    "id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m", "turn_id": "t",
+    "choices": [{"index": 0, "text_offset": 3, "delta": {"reasoning_content": "r"},
+                 "finish_reason": None}],
+}) + "\n\n"
+
+
+@pytest.mark.parametrize("headers,expected", [
+    ({}, [MIXED_STANDARD]),
+    ({"X-LLM-Bawt-Admission-Events": "comment"}, [_sse(MIXED)]),
+    ({"X-LLM-Bawt-Extension-Events": "comment"}, [MIXED_STANDARD, MIXED_EXTENSION]),
+])
+def test_mixed_chunk_splits_standard_fields_from_extensions(monkeypatch, headers, expected):
+    client, _service, path = _client(monkeypatch, stream_events=[_sse(MIXED), STOP, "data: [DONE]\n\n"])
+    with client:
+        response = client.post(path, json={**BODY, "stream": True},
+                               headers={"X-LLM-Bawt-Response-Mode": "openai", **headers})
+    assert response.text == "".join([*expected, STOP, "data: [DONE]\n\n"])
 
 
 def test_legacy_stream_is_untouched_by_extension_negotiation(monkeypatch):

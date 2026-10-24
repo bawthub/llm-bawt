@@ -20,6 +20,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
+from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
 from llm_bawt.service import chat_response_adapter as adapter
 from llm_bawt.service.routes import chat
@@ -121,14 +123,26 @@ def _delivered(monkeypatch, text="queued answer"):
     return observer
 
 
+def _unknown_keys(raw: dict) -> list[str]:
+    """Wire keys the stock SDK's own models do not define (it keeps them as extras)."""
+    unknown = [k for k in raw if k not in ChatCompletionChunk.model_fields]
+    for choice in raw.get("choices") or []:
+        unknown += [f"choices.{k}" for k in choice if k not in ChunkChoice.model_fields]
+        unknown += [f"delta.{k}" for k in choice.get("delta") or {} if k not in ChoiceDelta.model_fields]
+    return unknown
+
+
 def _strict_chunks(stream) -> list[ChatCompletionChunk]:
     chunks = []
     for chunk in stream:
         # The SDK builds chunks without validation; a sidecar frame would come
-        # back as a "chunk" with no choices. Re-validate every frame strictly.
-        strict = ChatCompletionChunk.model_validate(chunk.to_dict())
+        # back as a "chunk" with no choices, and unknown fields (for example
+        # delta.reasoning_content) survive as extras. Re-validate strictly.
+        raw = chunk.to_dict()
+        strict = ChatCompletionChunk.model_validate(raw)
         assert strict.object == "chat.completion.chunk"
-        assert strict.choices, f"non-chunk frame reached the SDK: {chunk.to_dict()}"
+        assert strict.choices, f"non-chunk frame reached the SDK: {raw}"
+        assert not _unknown_keys(raw), f"non-standard fields reached the SDK: {_unknown_keys(raw)}"
         chunks.append(strict)
     return chunks
 
