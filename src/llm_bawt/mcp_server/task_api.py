@@ -72,6 +72,10 @@ def compact_task(task: dict) -> dict:
     # TASK-1368: a BLOCKED row is Nick's action item; its reason is the point.
     if task.get("status") == "BLOCKED":
         compact["blockedReason"] = task.get("blockedReason")
+    # TASK-1380: a focused task carries its place in Nick's ordered focus list.
+    if task.get("focusRank") is not None:
+        compact["focusRank"] = task.get("focusRank")
+        compact["focusedAt"] = task.get("focusedAt")
     return compact
 
 

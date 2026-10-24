@@ -6,9 +6,10 @@ Imported by server.py to register the task tool group.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
+from pydantic import Field
 
 from .server import mcp
 from .task_association import associate_current_task
@@ -28,6 +29,66 @@ from .task_api import (
 )
 
 logger = logging.getLogger(__name__)
+
+# TASK-1380: Nick's focus list. BawtHub owns the ranks; a caller names a
+# placement and the server rewrites ranks 1..n in the same transaction as the
+# rest of the PATCH. Any actor may focus or reorder; BawtHub records who did.
+FocusAction = Literal["on", "off"]
+FocusPosition = Literal["top", "bottom", "before", "after"]
+_ANCHORED_POSITIONS = frozenset({"before", "after"})
+
+
+def _focus_patch(
+    focus: FocusAction | None,
+    position: FocusPosition | None,
+    anchor: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """BawtHub ``focus`` PATCH object for the tool args, or an argument error.
+
+    A position alone means focus on. The server owns every rule that depends on
+    task state or request shape it can see (anchor is self, before/after needs
+    an anchor, anchor not focused); this only rejects arg combinations the tool
+    itself makes contradictory.
+    """
+    if focus is None and position is None and anchor is None:
+        return None, None
+    if focus == "off":
+        if position is not None or anchor is not None:
+            return None, "focus='off' takes no focus_position or focus_anchor"
+        return {"on": False}, None
+    if anchor is not None and position not in _ANCHORED_POSITIONS:
+        return None, "focus_anchor needs focus_position='before' or 'after'"
+    patch: dict[str, Any] = {"on": True}
+    if position is not None:
+        patch["placement"] = position
+    if anchor is not None:
+        patch["anchorId"] = anchor
+    return patch, None
+
+
+def _patch_error(error: httpx.HTTPStatusError) -> dict:
+    """Task PATCH error dict; a focus 409 keeps the server's current order."""
+    result = _http_error(error)
+    if error.response.status_code == 409:
+        try:
+            body = error.response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("focused"), list):
+            result["focused"] = body["focused"]
+    return result
+
+
+# A BawtHub that predates focus ignores the field/filter instead of rejecting it.
+_FOCUS_UNSUPPORTED = "The BawtHub task API does not support focus yet (no focusRank in its response)"
+
+
+def _rows_are_focused(payload: Any) -> bool:
+    tasks = payload.get("tasks") if isinstance(payload, dict) else None
+    return isinstance(tasks, list) and all(
+        isinstance(task, dict) and task.get("focusRank") is not None for task in tasks
+    )
+
 
 async def list_projects() -> list[dict] | dict:
     """Compatibility wrapper; the registered tool lives in project_tools."""
@@ -54,11 +115,13 @@ async def list_tasks(
     project_id: str | None = None,
     q: str | None = None,
     limit: int = 20,
+    focused: bool | None = None,
 ) -> dict:
     """List agent tasks with optional filters.
 
     Use this to find tasks by status, project, or keyword search.
-    Returns tasks sorted by most recently updated.
+    Returns tasks sorted by most recently updated, except focused=true, which
+    returns Nick's focus list in rank order (focusRank 1 first).
 
     Args:
         status: One task status: {task_statuses}. No comma lists.
@@ -67,24 +130,41 @@ async def list_tasks(
                     Use "none" for unassigned tasks.
         q: Search query - matches title, description, and shortId.
         limit: Maximum tasks to return (default 20, max 50).
+        focused: True for focused tasks only, in focus order; False for
+                 unfocused tasks only (the backlog). Combines with the other
+                 filters. Change focus with tasks_update(focus=...).
 
     Returns:
         Dict with "tasks" list and "total" count.
-        Each task is a compact row with title/status metadata and counts.
+        Each task is a compact row with title/status metadata and counts;
+        focused tasks also carry focusRank and focusedAt.
         Use tasks_get or tasks_get_context for full descriptions and steps.
     """
-    logger.debug("MCP tool invoked: tools/list_tasks status=%s project=%s q=%s", status, project_id, q)
-    params: dict[str, str] = {"limit": str(min(limit, 50)), "sort": "updated"}
+    logger.debug(
+        "MCP tool invoked: tools/list_tasks status=%s project=%s q=%s focused=%s",
+        status, project_id, q, focused,
+    )
+    params: dict[str, str] = {
+        "limit": str(min(limit, 50)),
+        "sort": "focus" if focused else "updated",
+    }
     if status:
         params["status"] = status
     if project_id:
         params["projectId"] = project_id
     if q:
         params["q"] = q
+    if focused is not None:
+        params["focused"] = "true" if focused else "false"
     try:
-        return _compact_task_list_payload(await _api_get("/tasks", params=params))
+        payload = await _api_get("/tasks", params=params)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    if focused and not _rows_are_focused(payload):
+        # A BawtHub without focus support ignores the filter and returns every
+        # task by recency; never present that as Nick's focus list.
+        return {"error": f"{_FOCUS_UNSUPPORTED}; the focus list was not read."}
+    return _compact_task_list_payload(payload)
 
 
 @mcp.tool(name="tasks_search_semantic")
@@ -264,6 +344,18 @@ async def update_task(
     bot_id: str | None = None,
     associate_current_turn: bool = False,
     blocked_reason: str | None = None,
+    focus: Annotated[
+        FocusAction | None,
+        Field(description="Nick's focus list: on (default bottom; a focused task stays put) or off."),
+    ] = None,
+    focus_position: Annotated[
+        FocusPosition | None,
+        Field(description="Place in the focus list; implies focus on."),
+    ] = None,
+    focus_anchor: Annotated[
+        str | None,
+        Field(description="Task cuid/TASK-N for before/after; must be focused."),
+    ] = None,
 ) -> dict:
     """Update a task's fields. Only provided fields are changed.
 
@@ -296,6 +388,15 @@ async def update_task(
     the shared-DB migration, then ship." While BLOCKED, blocked_reason alone
     updates the reason.
 
+    Focus is Nick's ordered list of work he chose to get done. When he says
+    "focus X", "put Y first" or "drop Z", set it here in one call: any bot or
+    user may, and BawtHub records who did. Examples: focus="on" (append at the
+    bottom), focus_position="top", focus_position="after",
+    focus_anchor="TASK-42", focus="off". A task that is or becomes
+    COMPLETED/FAILED/CANCELLED/DELETED can't be focused (409); the server also
+    clears focus when a task finishes. A 409 includes "focused", the current
+    order, so you can re-anchor. Read the list with tasks_list(focused=True).
+
     Args:
         task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         status: New task status: {task_statuses}. You may set BUG,
@@ -322,6 +423,11 @@ async def update_task(
         blocked_reason: What Nick must do or decide. Required with
                         status="BLOCKED"; rejected unless the task is or becomes
                         BLOCKED. Cleared automatically when the task leaves BLOCKED.
+        focus: "on" or "off". "on" without a position puts an unfocused task
+               at the bottom and leaves a focused task where it is.
+        focus_position: "top", "bottom", "before" or "after"; implies "on".
+        focus_anchor: Task (cuid or TASK-N) to place before/after; it must
+                      be focused itself.
 
     Returns:
         Compact updated task summary, or error dict. Use tasks_get for full detail.
@@ -350,6 +456,11 @@ async def update_task(
         body["agentBotId"] = agent_bot_id
     if blocked_reason is not None:
         body["blockedReason"] = blocked_reason
+    focus_body, focus_error = _focus_patch(focus, focus_position, focus_anchor)
+    if focus_error:
+        return {"error": focus_error}
+    if focus_body is not None:
+        body["focus"] = focus_body
 
     # REVIEW requires the task to have an owner (server guard
     # reviewTransitionMissingBot). When the task has NO owner, the submitting
@@ -373,12 +484,21 @@ async def update_task(
             headers=_headers(bot_id),
         )
         if isinstance(updated, dict):
-            result = {
-                "ok": True,
-                "updated": sorted(body.keys()),
-                "task": _compact_task(updated),
-                "detail": "Use tasks_get for full task description, response, steps, and dependencies.",
-            }
+            if focus_body is not None and "focusRank" not in updated:
+                # An older BawtHub ignores the unknown field but applies the
+                # rest of the PATCH. Say exactly that instead of reporting OK.
+                result = {
+                    "error": f"{_FOCUS_UNSUPPORTED}; focus was not changed, the other fields were applied.",
+                    "updated": sorted(key for key in body if key != "focus"),
+                    "task": _compact_task(updated),
+                }
+            else:
+                result = {
+                    "ok": True,
+                    "updated": sorted(body.keys()),
+                    "task": _compact_task(updated),
+                    "detail": "Use tasks_get for full task description, response, steps, and dependencies.",
+                }
             if associate_current_turn:
                 try:
                     task_ref = str(updated.get("shortId") or task_id)
@@ -392,7 +512,7 @@ async def update_task(
             return result
         return updated
     except httpx.HTTPStatusError as e:
-        return _http_error(e)
+        return _patch_error(e)
 
 
 @mcp.tool(name="tasks_delete")

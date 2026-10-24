@@ -65,7 +65,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "sessions_get_active": "Read required bot_id/user_id's active session; never creates.",
     "sessions_get_or_create_active": "Get/create active session: required bot_id/user_id.",
     "sessions_rotate": "Rotate required bot_id's active thread: archive/create successor, not provider-context reset.",
-    "tasks_list": f"List compact tasks; literal q, project_id='none' unassigned. One status: {_TASK_STATUS_GUIDE}. Omitted excludes DELETED; tasks_get for detail.",
+    "tasks_list": f"List compact tasks; literal q, project_id='none' unassigned. One status: {_TASK_STATUS_GUIDE}. Omitted excludes DELETED; tasks_get for detail. focused=true: Nick's ranked focus list; tasks_update focus edits it.",
     "tasks_search_semantic": "Semantic task search; mode reports keyword fallback. Exact filters: tasks_list.",
     "tasks_get": "Read task, steps, dependencies, response by cuid/TASK-N.",
     "tasks_get_context": "Read task/project briefing by cuid/TASK-N before work.",
