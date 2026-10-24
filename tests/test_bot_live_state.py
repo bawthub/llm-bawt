@@ -184,6 +184,39 @@ def test_a_covering_gate_is_reported(engine, sources, monkeypatch):
     assert states["fixture-idle"]["gated"] is False
 
 
+def test_a_refused_connection_reports_everything_unavailable():
+    def refuse():
+        raise OSError("connection refused")
+
+    refusing = create_engine("sqlite://", creator=refuse)
+
+    states = _read(refusing)
+
+    assert set(states) == set(BOTS)
+    for state in states.values():
+        assert state["turn"] is None and state["gated"] is None
+        assert state["unavailable"] == sorted(BotLiveStateReader.SOURCES)
+
+
+def test_a_connection_lost_mid_read_keeps_answered_sources(engine, sources, monkeypatch):
+    from sqlalchemy.engine import Connection
+
+    def lost(*_args, **_kwargs):
+        raise OSError("connection lost")
+
+    def dead_rollback(self):
+        raise OSError("server closed the connection")
+
+    monkeypatch.setattr(turn_gates, "covering_gates", lost)
+    monkeypatch.setattr(Connection, "rollback", dead_rollback)
+
+    state = _read(engine)["fixture-busy"]
+
+    assert state["turn"]["kind"] == "idle" and state["queued_deliveries"]["count"] == 2
+    assert state["gated"] is None and state["pending_approvals"] is None
+    assert state["unavailable"] == ["gate", "pending_approvals", "session"]
+
+
 def test_no_database_reports_everything_unavailable():
     state = BotLiveStateReader(None).read([BotIdentity("fixture-idle", "agent", None)])["fixture-idle"]
 

@@ -90,14 +90,19 @@ class BotLiveStateReader:
         }
         results: dict[str, Mapping[str, Any]] = {}
         failed: set[str] = set()
-        with self.engine.connect() as conn:
-            for source, load in loaders.items():
-                try:
-                    results[source] = load(conn)
-                except Exception:
-                    log.warning("bot live state: %s unavailable", source, exc_info=True)
-                    failed.add(source)
-                    conn.rollback()  # an aborted PG transaction must not poison the next source
+        try:
+            with self.engine.connect() as conn:
+                for source, load in loaders.items():
+                    try:
+                        results[source] = load(conn)
+                    except Exception:
+                        log.warning("bot live state: %s unavailable", source, exc_info=True)
+                        failed.add(source)
+                        conn.rollback()  # an aborted PG transaction must not poison the next source
+        except Exception:
+            # No connection, or it died mid-read: whatever didn't answer is unavailable.
+            log.warning("bot live state: database connection failed", exc_info=True)
+            failed.update(source for source in self.SOURCES if source not in results)
         return {slug: self._assemble(slug, results, failed) for slug in slugs}
 
     # -- sources: each is one query for every bot -----------------------------
