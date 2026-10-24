@@ -565,9 +565,10 @@ async def search_all_history(
     :meth:`llm_bawt.mcp_server.storage.MemoryStorage.search_messages_operator`
     over the live public partitions (TASK-1301):
 
-    * ``mode=fts`` (default) — Postgres FTS ranked by ``ts_rank``. Good for
-      concept-level queries; bad for IDs because ``build_fts_query`` strips
-      digits and hyphens (``TASK-241`` becomes ``task``).
+    * ``mode=fts`` (default) — Postgres FTS ranked by ``ts_rank``. Words
+      match by stem; identifiers (``TASK-241``, ``snake_case``, paths) and
+      quoted text match as phrases, hex runs as commit-SHA prefixes
+      (:class:`llm_bawt.retrieval.FtsQuery`).
     * ``mode=trgm`` — pg_trgm substring match (``content ILIKE`` +
       ``similarity()`` rank). Matches the literal query string verbatim.
 

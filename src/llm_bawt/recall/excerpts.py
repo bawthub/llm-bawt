@@ -25,14 +25,14 @@ def _word_start(content: str, raw: int) -> int:
 def query_terms(query: str) -> list[str]:
     """Meaningful lowercase alphanumeric terms, in query order.
 
-    Unlike the shared memory FTS builder, identifier parts survive: the
+    Unlike :class:`llm_bawt.retrieval.FtsQuery`, identifiers are decomposed: the
     `maintenance_model`, `query_bounded` and `TASK-1210` in a question yield
     maintenance/model, query/bounded and task/1210, matching how PostgreSQL's
     english parser splits those same identifiers in stored text.
     """
-    from llm_bawt.memory.postgresql import _FTS_STOP_WORDS
+    from llm_bawt.retrieval.fts_query import FTS_STOP_WORDS
     words = re.findall(r"[a-z0-9]+", query.lower())
-    meaningful = [word for word in words if word not in _FTS_STOP_WORDS
+    meaningful = [word for word in words if word not in FTS_STOP_WORDS
                   and (len(word) > 2 or (word.isdigit() and len(word) > 1))]
     if not meaningful:
         meaningful = [word for word in words if len(word) > 2][:3]

@@ -1,6 +1,9 @@
 """Cross-bot discovery and search for the storage facade.
 
-Mechanical extraction only: existing policy and error semantics are unchanged.
+Every aggregate call runs under a ``BotAccess``: the caller's bound access, or
+a fresh no-caller policy read (TASK-1323). There is no exclusion-list path, so
+a policy or backend failure raises :class:`BotAccessError` instead of
+returning ``[]`` or an unrestricted result.
 """
 
 from __future__ import annotations
@@ -9,7 +12,7 @@ import asyncio
 import logging
 from typing import Any
 
-from llm_bawt.bot_access import BotAccessError
+from llm_bawt.bot_access import BotAccess, BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.context import current_bot_access
 from llm_bawt.bot_access.provenance import MemoryProvenance, ScopedMessageAuthority
 from llm_bawt.message_authorship import AuthorReference
@@ -49,85 +52,35 @@ def _with_row_status(envelope: dict[str, Any], reference: AuthorReference) -> di
 class StorageSearchMixin:
     """Aggregate operations using the facade's engine, backends and hydration."""
 
-    def _list_partition_bots(self, parent: str) -> list[str]:
-        """Enumerate bot ids that have a partition of ``parent`` (TASK-571).
+    async def _aggregate_access(self) -> BotAccess:
+        """The bound caller's access, else a fresh no-caller policy read.
 
-        Replaces the legacy ``information_schema`` shard-table discovery.
-        Partitions are named ``<parent>_p_<bot>`` by
-        :func:`llm_bawt.memory.postgresql.partition_name`, and the partition
-        bound value equals the suffix, so the name is authoritative. Bots
-        with EMPTY partitions are included — matching the old behavior where
-        an existing-but-empty shard table still surfaced as a source.
+        Guarded MCP tools and the embedded client always bind one; the
+        fallback serves direct in-process callers. Never a cached or
+        best-effort list: a failed read raises ``policy_unavailable``.
         """
-        from sqlalchemy import text
-
-        prefix = f"{parent}_p_"
+        access = current_bot_access()
+        if access is not None:
+            return access
         try:
-            with self._require_engine().connect() as conn:
-                rows = conn.execute(text("""
-                    SELECT c.relname
-                    FROM pg_inherits i
-                    JOIN pg_class c ON c.oid = i.inhrelid
-                    WHERE i.inhparent = CAST(:parent AS regclass)
-                    ORDER BY c.relname
-                """), {"parent": parent}).fetchall()
-            return [
-                relname.removeprefix(prefix)
-                for (relname,) in rows
-                if relname.startswith(prefix)
-            ]
-        except Exception as e:
-            logger.error("Failed to list %s partitions: %s", parent, e)
-            return []
-
-    def _global_search_excluded_bot_ids(self) -> set[str]:
-        """Return sanitized bot IDs opted out of aggregate search.
-
-        Sanitized on purpose: the ``bot_id`` partition-key values are the
-        sanitized bot identity (same identity the legacy shard-table
-        prefixes carried), so exclusion compares like with like.
-        """
-        try:
-            from llm_bawt.bots import BotManager
-            from llm_bawt.memory.postgresql import _sanitize_table_name
-
-            return {
-                _sanitize_table_name(bot.slug)
-                for bot in BotManager(self.config).list_bots()
-                if getattr(bot, "include_in_global_search", True) is False
-            }
-        except Exception as e:
-            logger.warning("Failed to load global search bot policy: %s", e)
-            return set()
-
-    def _global_search_bots(self, parent: str) -> list[str]:
-        """Bot ids eligible for aggregate search over ``parent``."""
-        bots = self._list_partition_bots(parent)
-        if not bots:
-            return []
-
-        excluded = self._global_search_excluded_bot_ids()
-        if not excluded:
-            return bots
-
-        return [bot_id for bot_id in bots if bot_id not in excluded]
+            engine = self._require_engine()
+        except Exception:
+            raise BotAccessError("source_unavailable") from None
+        return await BotPolicyResolver(engine).resolve(None)
 
     async def list_memory_sources(self) -> list[dict[str, Any]]:
-        """Discover all available memory sources (bot_ids with memory partitions).
+        """List the memory sources in scope with their memory counts.
 
-        One GROUP BY over the partitioned ``memories`` parent replaces the
-        legacy per-shard COUNT loop (TASK-571). Bots with empty partitions
-        still appear with ``memory_count`` 0.
+        One GROUP BY over the partitioned ``memories`` parent (TASK-571) for
+        the bots in scope. Bots with no memories appear with
+        ``memory_count`` 0.
         """
         from sqlalchemy import text
 
         from llm_bawt.memory.postgresql import MEMORIES_PARENT
 
-        access = current_bot_access()
-        scope = access.aggregate_scope() if access is not None else None
-        bots = ([p.partition for p in scope.partitions] if scope is not None
-                else self._global_search_bots(MEMORIES_PARENT))
-        if not bots:
+        scope = (await self._aggregate_access()).aggregate_scope()
+        if not scope.partitions:
             return []
 
         try:
@@ -135,19 +88,15 @@ class StorageSearchMixin:
                 rows = conn.execute(text(
                     f"SELECT bot_id, COUNT(*) FROM {MEMORIES_PARENT} "
                     "WHERE bot_id = ANY(CAST(:partitions AS text[])) GROUP BY bot_id"
-                ), {"partitions": bots}).fetchall()
-            counts = {bot_id: int(n) for bot_id, n in rows}
-            names = ({p.partition: p.bot_id for p in scope.partitions}
-                     if scope is not None else {})
-            return [
-                {"source": names.get(bot_id, bot_id), "memory_count": counts.get(bot_id, 0)}
-                for bot_id in bots
-            ]
+                ), {"partitions": [p.partition for p in scope.partitions]}).fetchall()
         except Exception as e:
-            if access is not None:
-                raise BotAccessError("source_unavailable") from None
             logger.error("Failed to list memory sources: %s", e)
-            return []
+            raise BotAccessError("source_unavailable") from None
+        counts = {partition: int(n) for partition, n in rows}
+        return [
+            {"source": p.bot_id, "memory_count": counts.get(p.partition, 0)}
+            for p in scope.partitions
+        ]
 
     async def search_all_messages(
         self,
@@ -175,47 +124,41 @@ class StorageSearchMixin:
         * ``since`` / ``until`` — Unix seconds. Inclusive bounds; either can
           be omitted. Used by the time-range chips (24h / 7d / 30d / all).
         * ``bot_id`` — restrict to a single bot's history.  Omit to search
-          all bots.
+          all bots in scope. A bot outside the scope raises ``access_denied``.
 
         Each returned row also carries a ``total`` field (window COUNT(*)
         over the unbounded result set) so the UI can render "showing N of M
         matches" without a second roundtrip. ``total`` is identical on
         every row; callers can read it from the first row and ignore the
         rest. Empty result → no rows → caller should treat as ``total=0``.
+        A failed search raises ``source_unavailable``; ``[]`` always means
+        no match.
         """
         from llm_bawt.mcp_server.message_search import CrossBotMessageSearcher
 
-        searcher = CrossBotMessageSearcher(
-            self._require_engine(),
-            lambda rows, source: self.hydrate_message_authors(rows, bot_id=source),
-        )
-        access = current_bot_access()
-        scope = access.aggregate_scope(bot_id or None) if access is not None else None
+        scope = (await self._aggregate_access()).aggregate_scope(bot_id or None)
+        names = {p.partition: p.bot_id for p in scope.partitions}
         try:
+            searcher = CrossBotMessageSearcher(
+                self._require_engine(),
+                lambda rows, source: self.hydrate_message_authors(rows, bot_id=source),
+            )
             rows = await asyncio.to_thread(
                 searcher.search_fts,
                 query,
+                partitions=frozenset(names),
                 n_results=n_results,
                 role_filter=role_filter,
                 sort_by=sort_by,
                 since=since,
                 until=until,
-                bot_id=(access.partitions[access.require_target(bot_id)]
-                        if access is not None and bot_id else bot_id),
-                excluded_bot_ids=set() if access is not None else self._global_search_excluded_bot_ids(),
-                **({"allowed_bot_ids": frozenset(p.partition for p in scope.partitions)}
-                   if scope is not None else {}),
             )
-            if scope is not None:
-                names = {p.partition: p.bot_id for p in scope.partitions}
-                for row in rows:
-                    row["source"] = names[row["source"]]
-            return rows
         except Exception as e:
-            if access is not None:
-                raise BotAccessError("source_unavailable") from None
             logger.error("search_all_messages failed: %s", e)
-            return []
+            raise BotAccessError("source_unavailable") from None
+        for row in rows:
+            row["source"] = names[row["source"]]
+        return rows
 
     async def search_messages_operator(
         self,
@@ -313,46 +256,30 @@ class StorageSearchMixin:
         """
         from llm_bawt.memory.embeddings import generate_embedding
 
-        access = current_bot_access()
-        scope = (access.aggregate_scope(bot_id or None, require_user=True)
-                 if access is not None else None)
+        scope = (await self._aggregate_access()).aggregate_scope(
+            bot_id or None, require_user=True,
+        )
         try:
             query_embedding = generate_embedding(
                 query, self.config.MEMORY_EMBEDDING_MODEL, verbose=self.config.VERBOSE,
             )
         except Exception:
-            if access is not None:
-                raise BotAccessError("source_unavailable") from None
-            raise
+            raise BotAccessError("source_unavailable") from None
         if not query_embedding:
-            if access is not None:
-                raise BotAccessError("source_unavailable")
-            return []
-
-        from llm_bawt.memory.postgresql import MEMORIES_PARENT
-
-        bots = ([p.bot_id for p in scope.partitions] if scope is not None
-                else self._global_search_bots(MEMORIES_PARENT))
-        if not bots:
-            return []
-
-        # Operator storage callers retain their separate legacy filter semantics.
-        if bot_id and scope is None:
-            bots = [bid for bid in bots if bid == bot_id]
-            if not bots:
-                return []
+            raise BotAccessError("source_unavailable")
 
         all_results: list[dict[str, Any]] = []
-        for bot_id in bots:
+        for partition in scope.partitions:
+            bot_id = partition.bot_id
             try:
                 backend = self._get_backend(bot_id)
                 results = backend.search_memories_by_embedding(
                     embedding=query_embedding,
                     n_results=n_results,
                     min_importance=0.0,
-                    **({"eligibility": MemoryProvenance(
+                    eligibility=MemoryProvenance(
                         ScopedMessageAuthority.for_partition(scope, bot_id)
-                    )} if scope is not None else {}),
+                    ),
                 )
                 for r in results:
                     relevance = r.get("similarity") or r.get("relevance", 0.0)
@@ -364,9 +291,8 @@ class StorageSearchMixin:
             except BotAccessError:
                 raise
             except Exception as e:
-                if access is not None:
-                    raise BotAccessError("source_unavailable") from None
-                logger.warning("search_all_memories skipped %s: %s", bot_id, e)
+                logger.error("search_all_memories failed on %s: %s", bot_id, e)
+                raise BotAccessError("source_unavailable") from None
 
         # Time-range post-filter on created_at (ISO string or Unix float).
         if since is not None or until is not None:

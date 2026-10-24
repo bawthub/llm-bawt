@@ -27,7 +27,6 @@ The separation allows:
 """
 
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -235,46 +234,6 @@ def ensure_bot_partitions(conn, bot_id: str) -> None:
 # Memory backends share the process-wide engine (TASK-202): see
 # llm_bawt.utils.db.get_shared_engine. All bots talk to the same Postgres
 # database — only table names differ — so they all share one pool.
-
-
-# ---------------------------------------------------------------------------
-# Shared full-text search helpers
-# ---------------------------------------------------------------------------
-
-# Stop words for full-text message/memory search queries
-_FTS_STOP_WORDS: set[str] = {
-    # Standard English stop words
-    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-    'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-    'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-    'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need',
-    'we', 'you', 'i', 'he', 'she', 'it', 'they', 'them', 'their', 'our',
-    'my', 'your', 'his', 'her', 'its', 'what', 'which', 'who', 'whom',
-    'this', 'that', 'these', 'those', 'am', 'not', 'no', 'yes', 'so',
-    'if', 'then', 'than', 'too', 'very', 'just', 'about', 'before', 'after',
-    # Conversational meta-words (common in memory queries but not content)
-    'remember', 'tell', 'told', 'said', 'say', 'know', 'think', 'thought',
-    'talk', 'talked', 'talking', 'conversation', 'conversations', 'discussed',
-    'discuss', 'discussion', 'mention', 'mentioned', 'anything', 'something',
-    'everything', 'nothing', 'past', 'previous', 'earlier', 'last', 'time',
-    'when', 'where', 'how', 'why', 'like', 'want', 'wanted', 'please',
-}
-
-
-def build_fts_query(query: str) -> str | None:
-    """Build a PostgreSQL OR tsquery string from a natural language query.
-
-    Strips stop words and short tokens, returns ``None`` when no meaningful
-    terms remain.  Result is suitable for ``to_tsquery('english', ...)``.
-    """
-    words = re.findall(r'\b[a-zA-Z]+\b', query.lower())
-    meaningful = [w for w in words if w not in _FTS_STOP_WORDS and len(w) > 2]
-    if not meaningful:
-        # Fallback: use any words > 2 chars
-        meaningful = [w for w in words if len(w) > 2][:3]
-    if not meaningful:
-        return None
-    return ' | '.join(meaningful)
 
 
 # Shared metadata for table definitions

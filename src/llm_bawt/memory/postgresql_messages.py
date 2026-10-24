@@ -14,6 +14,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session
 
 from ..message_authorship import AuthorReference
+from ..retrieval.fts_query import FtsQuery
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +237,8 @@ class PostgreSQLMessageMixin:
         """Search raw messages using PostgreSQL full-text search.
 
         This is a fallback when no distilled memories exist yet.
-        Uses OR logic so any matching word will return results.
+        Uses OR logic so any matching word, identifier or quoted phrase
+        returns results (:class:`llm_bawt.retrieval.FtsQuery`).
 
         Args:
             query: Search query
@@ -252,9 +254,10 @@ class PostgreSQLMessageMixin:
         if not query or query.isspace():
             return []
 
-        or_query = build_fts_query(query)
-        if not or_query:
+        fts = FtsQuery.parse(query)
+        if fts is None:
             return []
+        tsquery = fts.tsquery_sql()
 
         cutoff_time = time.time() - exclude_recent_seconds
 
@@ -267,9 +270,9 @@ class PostgreSQLMessageMixin:
 
                 sql = text(f"""
                     SELECT id, role, content, timestamp,
-                           ts_rank(to_tsvector('english', content), to_tsquery('english', :query)) AS rank
+                           ts_rank(to_tsvector('english', content), {tsquery}) AS rank
                     FROM {self._messages_table_name}
-                    WHERE to_tsvector('english', content) @@ to_tsquery('english', :query)
+                    WHERE to_tsvector('english', content) @@ {tsquery}
                     AND timestamp < :cutoff
                     {role_clause}
                     {since_clause}
@@ -279,7 +282,7 @@ class PostgreSQLMessageMixin:
                 """)
 
                 params: dict[str, Any] = {
-                    "query": or_query,
+                    **fts.params,
                     "limit": n_results,
                     "cutoff": cutoff_time,
                 }

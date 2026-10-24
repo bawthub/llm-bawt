@@ -16,8 +16,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from llm_bawt.bot_access import BotAccess, BotAccessError, PartitionScope
-from llm_bawt.memory.postgresql import MESSAGES_PARENT, build_fts_query
+from llm_bawt.memory.postgresql import MESSAGES_PARENT
 from llm_bawt.message_authorship import AuthorReference, EffectiveAuthorRule
+from llm_bawt.retrieval.fts_query import FtsQuery
 
 AuthorHydrator = Callable[[list[dict[str, Any]], str], list[dict[str, Any]]]
 
@@ -109,34 +110,29 @@ class CrossBotMessageSearcher:
         self,
         query: str,
         *,
+        partitions: frozenset[str],
         n_results: int,
         role_filter: str | None,
         sort_by: str,
         since: float | None,
         until: float | None,
-        bot_id: str | None,
-        excluded_bot_ids: set[str],
-        allowed_bot_ids: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
-        or_query = build_fts_query(query)
-        if not or_query:
+        """Scoped FTS over exactly ``partitions`` (from a ``BotAccess`` scope).
+
+        There is no unscoped form: an empty set searches nothing.
+        """
+        fts = FtsQuery.parse(query)
+        if fts is None or not partitions:
             return []
 
-        params: dict[str, Any] = {"query": or_query, "limit": n_results}
-        if bot_id:
-            if bot_id in excluded_bot_ids:
-                return []
-            bot_clause = "AND bot_id = :bot_filter"
-            params["bot_filter"] = bot_id
-        elif excluded_bot_ids:
-            bot_clause = "AND NOT (bot_id = ANY(:excluded))"
-            params["excluded"] = sorted(excluded_bot_ids)
+        params: dict[str, Any] = {**fts.params, "limit": n_results}
+        if len(partitions) == 1:
+            bot_clause = "AND bot_id = :partition"
+            params["partition"] = next(iter(partitions))
         else:
-            bot_clause = ""
-
-        if allowed_bot_ids is not None:
-            bot_clause += " AND bot_id = ANY(CAST(:allowed AS text[]))"
-            params["allowed"] = sorted(allowed_bot_ids)
+            bot_clause = "AND bot_id = ANY(CAST(:partitions AS text[]))"
+            params["partitions"] = sorted(partitions)
+        tsquery = fts.tsquery_sql()
         time_lower = "AND timestamp >= :since" if since is not None else ""
         time_upper = "AND timestamp <= :until" if until is not None else ""
         role_clause = "AND role = :role_filter" if role_filter else ""
@@ -149,11 +145,10 @@ class CrossBotMessageSearcher:
             SELECT id, role, content, timestamp, session_id,
                    author_entity_type, author_entity_id,
                    bot_id AS source,
-                   ts_rank(to_tsvector('english', content),
-                           to_tsquery('english', :query)) AS rank,
+                   ts_rank(to_tsvector('english', content), {tsquery}) AS rank,
                    COUNT(*) OVER () AS total
             FROM {MESSAGES_PARENT}
-            WHERE to_tsvector('english', content) @@ to_tsquery('english', :query)
+            WHERE to_tsvector('english', content) @@ {tsquery}
               AND role != 'system'
               {bot_clause}
               {role_clause}
@@ -201,14 +196,13 @@ class CrossBotMessageSearcher:
                 match_clause = "AND m.content ILIKE :ilike"
                 rank_sql = "similarity(m.content, :query)"
             else:
-                or_query = build_fts_query(query)
-                if not or_query:
+                fts = FtsQuery.parse(query)
+                if fts is None:
                     return []
-                params["query"] = or_query
-                match_clause = ("AND to_tsvector('english', m.content)"
-                                " @@ to_tsquery('english', :query)")
-                rank_sql = ("ts_rank(to_tsvector('english', m.content),"
-                            " to_tsquery('english', :query))")
+                params.update(fts.params)
+                tsquery = fts.tsquery_sql()
+                match_clause = f"AND to_tsvector('english', m.content) @@ {tsquery}"
+                rank_sql = f"ts_rank(to_tsvector('english', m.content), {tsquery})"
             order_clause = ("ORDER BY m.timestamp DESC" if sort_by == "recent"
                             else "ORDER BY rank DESC, m.timestamp DESC")
         role_clause = "AND m.role = :role_filter" if role_filter else ""

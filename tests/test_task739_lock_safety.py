@@ -72,8 +72,7 @@ def test_cross_bot_search_closes_select_before_author_hydration() -> None:
         sort_by="relevance",
         since=None,
         until=None,
-        bot_id=None,
-        excluded_bot_ids=set(),
+        partitions=frozenset({"snark", "al"}),
     )
 
     assert [row["id"] for row in results] == ["one", "two"]
@@ -109,6 +108,8 @@ def test_cold_history_read_constructs_manager_without_schema_ddl(monkeypatch) ->
 
 
 def test_async_cross_bot_search_offloads_synchronous_database_work(monkeypatch) -> None:
+    from llm_bawt.bot_access import BotPolicyResolver
+    from llm_bawt.bot_access.context import bind_bot_access
     from llm_bawt.mcp_server import message_search, storage as storage_module
 
     worker_threads: list[int] = []
@@ -125,7 +126,9 @@ def test_async_cross_bot_search_offloads_synchronous_database_work(monkeypatch) 
     monkeypatch.setattr(message_search, "CrossBotMessageSearcher", Searcher)
     storage = storage_module.MemoryStorage(config=SimpleNamespace())
 
-    assert asyncio.run(storage.search_all_messages("locking")) == []
+    access = BotPolicyResolver._compile([{"slug": "snark", "include_in_global_search": True}], None)
+    with bind_bot_access(access):
+        assert asyncio.run(storage.search_all_messages("locking")) == []
     assert len(worker_threads) == 1
     assert worker_threads[0] != threading.get_ident()
 
