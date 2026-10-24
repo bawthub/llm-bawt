@@ -4,6 +4,7 @@ from pathlib import Path
 
 from sqlmodel import SQLModel, create_engine
 
+from llm_bawt.agent_backends.prompts import AGENTS_DOCS_PROMPT
 from llm_bawt.prompt_registry import (
     AGENT_GLOBAL_PROMPT,
     PromptResolver,
@@ -99,6 +100,14 @@ def test_inter_bot_docs_do_not_restore_queue_only_contract() -> None:
     assert "default immediate async" not in combined
     assert "may overlap the manager" not in combined
     assert "wakes one fresh manager turn after idle" not in combined
+
+
+def test_agents_docs_seed_keeps_visual_review_distinct_from_coordinator_closure() -> None:
+    assert "Visual UI/UX Nick can see stays in `REVIEW` for Nick" in AGENTS_DOCS_PROMPT
+    assert "put the dev URL and\n  exact steps to check in `response`" in AGENTS_DOCS_PROMPT
+    assert "a coordinator (Snark/Rook)\n  closes it to `COMPLETED`" in AGENTS_DOCS_PROMPT
+    assert "a recorded review, a pushed commit,\n  and verification evidence" in AGENTS_DOCS_PROMPT
+    assert "Only humans transition tasks to `COMPLETED`" not in AGENTS_DOCS_PROMPT
 
 
 def test_prompt_store_seed_defaults_is_idempotent() -> None:

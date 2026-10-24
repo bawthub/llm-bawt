@@ -400,10 +400,15 @@ Tasks: `QUEUED → PLANNING → REFINED → IN_PROGRESS → REVIEW → COMPLETED
        `BLOCKED` is an open state waiting on Nick and needs `blockedReason`)
 Steps: `PENDING → RUNNING → COMPLETED | FAILED | SKIPPED`
 
-CRITICAL: Agents set tasks to `REVIEW` when work is done — never
-`COMPLETED`. Only humans transition tasks to `COMPLETED`. Steps, however,
-are owned by agents — set them to `COMPLETED` / `FAILED` / `SKIPPED` as
-you work.
+CRITICAL: The agent doing the work sets the task to `REVIEW` when done —
+never `COMPLETED` on its own work. Closure:
+- Visual UI/UX Nick can see stays in `REVIEW` for Nick; put the dev URL and
+  exact steps to check in `response`.
+- Everything else (backend, infra, tooling): a coordinator (Snark/Rook)
+  closes it to `COMPLETED` once there is a recorded review, a pushed commit,
+  and verification evidence in `outcome`.
+Steps are owned by agents — set them to `COMPLETED` / `FAILED` / `SKIPPED`
+as you work.
 
 ## MCP Tools (preferred)
 
