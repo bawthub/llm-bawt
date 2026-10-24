@@ -6,6 +6,7 @@ Imported by server.py to register the task tool group.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -79,24 +80,45 @@ def _patch_error(error: httpx.HTTPStatusError) -> dict:
     return result
 
 
-# A BawtHub that predates focus ignores the field/filter instead of rejecting it.
-_FOCUS_UNSUPPORTED = "The BawtHub task API does not support focus yet (no focusRank in its response)"
+@dataclass(frozen=True)
+class _BoardState:
+    """A board state BawtHub added after this tool: focus or archive.
 
-
-def _focus_filter_applied(payload: Any, focused: bool) -> bool:
-    """True only when BawtHub confirms it applied the focus filter we sent.
-
-    The list envelope echoes the applied filter as ``focusFilter`` (also on an
-    empty list, where row checks prove nothing); every row carries a
-    ``focusRank`` key whose nullness must match the filter.
+    A BawtHub that predates the state silently ignores its PATCH field and list
+    filter instead of rejecting them, so success needs proof from the response:
+    each task row always carries ``row_key`` (null when the state is off), and
+    the list envelope echoes the applied filter as ``echo_key`` (also on an
+    empty list, where row checks prove nothing).
     """
-    if not isinstance(payload, dict) or payload.get("focusFilter") is not focused:
-        return False
-    tasks = payload.get("tasks")
-    return isinstance(tasks, list) and all(
-        isinstance(task, dict) and "focusRank" in task and (task["focusRank"] is not None) is focused
-        for task in tasks
-    )
+
+    name: str
+    patch_key: str
+    row_key: str
+    echo_key: str
+
+    @property
+    def unsupported(self) -> str:
+        return f"The BawtHub task API does not support {self.name} yet (no {self.row_key} in its response)"
+
+    def is_on(self, task: dict) -> bool:
+        return task[self.row_key] is not None
+
+    def filter_applied(self, payload: Any, value: bool) -> bool:
+        """True only when BawtHub confirms it applied the filter we sent."""
+        if not isinstance(payload, dict) or payload.get(self.echo_key) is not value:
+            return False
+        tasks = payload.get("tasks")
+        return isinstance(tasks, list) and all(
+            isinstance(task, dict) and self.row_key in task and self.is_on(task) is value
+            for task in tasks
+        )
+
+
+_FOCUS = _BoardState(name="focus", patch_key="focus", row_key="focusRank", echo_key="focusFilter")
+# TASK-1380: archiving takes a finished task off the board. BawtHub allows it
+# only for a COMPLETED/FAILED/CANCELLED/DELETED (resulting) status and clears it
+# when the task reopens; the default list still includes archived tasks.
+_ARCHIVE = _BoardState(name="archive", patch_key="archived", row_key="archivedAt", echo_key="archiveFilter")
 
 
 async def list_projects() -> list[dict] | dict:
@@ -125,12 +147,14 @@ async def list_tasks(
     q: str | None = None,
     limit: int = 20,
     focused: bool | None = None,
+    archived: bool | None = None,
 ) -> dict:
     """List agent tasks with optional filters.
 
     Use this to find tasks by status, project, or keyword search.
     Returns tasks sorted by most recently updated, except focused=true, which
     returns the user's focus list in rank order (focusRank 1 first).
+    Archived tasks are included unless archived=False.
 
     Args:
         status: One task status: {task_statuses}. No comma lists.
@@ -142,16 +166,20 @@ async def list_tasks(
         focused: True for focused tasks only, in focus order; False for
                  unfocused tasks only (the backlog). Combines with the other
                  filters. Change focus with tasks_update(focus=...).
+        archived: True for archived (finished, off the board) tasks only;
+                  False to leave them out. Change it with
+                  tasks_update(archived=...).
 
     Returns:
         Dict with "tasks" list and "total" count.
         Each task is a compact row with title/status metadata and counts;
-        focused tasks also carry focusRank and focusedAt.
+        focused tasks also carry focusRank and focusedAt, archived tasks
+        archivedAt.
         Use tasks_get or tasks_get_context for full descriptions and steps.
     """
     logger.debug(
-        "MCP tool invoked: tools/list_tasks status=%s project=%s q=%s focused=%s",
-        status, project_id, q, focused,
+        "MCP tool invoked: tools/list_tasks status=%s project=%s q=%s focused=%s archived=%s",
+        status, project_id, q, focused, archived,
     )
     params: dict[str, str] = {
         "limit": str(min(limit, 50)),
@@ -163,16 +191,22 @@ async def list_tasks(
         params["projectId"] = project_id
     if q:
         params["q"] = q
-    if focused is not None:
-        params["focused"] = "true" if focused else "false"
+    filters = {
+        param: (state, value)
+        for param, state, value in (("focused", _FOCUS, focused), ("archived", _ARCHIVE, archived))
+        if value is not None
+    }
+    for param, (_state, value) in filters.items():
+        params[param] = "true" if value else "false"
     try:
         payload = await _api_get("/tasks", params=params)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
-    if focused is not None and not _focus_filter_applied(payload, focused):
-        # A BawtHub without focus support ignores the filter and returns every
-        # task by recency; never present that as the focus list or backlog.
-        return {"error": f"{_FOCUS_UNSUPPORTED}; the focused={str(focused).lower()} list was not read."}
+    for param, (state, value) in filters.items():
+        if not state.filter_applied(payload, value):
+            # A BawtHub without the state ignores the filter and returns every
+            # task; never present that as the filtered list.
+            return {"error": f"{state.unsupported}; the {param}={str(value).lower()} list was not read."}
     return _compact_task_list_payload(payload)
 
 
@@ -365,6 +399,10 @@ async def update_task(
         str | None,
         Field(description="Task cuid/TASK-N for before/after; must be focused."),
     ] = None,
+    archived: Annotated[
+        bool | None,
+        Field(description="True takes a finished task off the board; false restores it."),
+    ] = None,
 ) -> dict:
     """Update a task's fields. Only provided fields are changed.
 
@@ -406,6 +444,11 @@ async def update_task(
     clears focus when a task finishes. A 409 includes "focused", the current
     order, so you can re-anchor. Read the list with tasks_list(focused=True).
 
+    Archive takes Done tasks off the board when the user says "archive the
+    done tasks": archived=True works only when the task is or becomes
+    COMPLETED/FAILED/CANCELLED/DELETED (otherwise 400); reopening a task
+    unarchives it. Archived tasks stay in tasks_list unless archived=False.
+
     Args:
         task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
         status: New task status: {task_statuses}. You may set BUG,
@@ -437,6 +480,8 @@ async def update_task(
         focus_position: "top", "bottom", "before" or "after"; implies "on".
         focus_anchor: Task (cuid or TASK-N) to place before/after; it must
                       be focused itself.
+        archived: True archives a finished task; False unarchives it.
+                  Combines with status in the same update.
 
     Returns:
         Compact updated task summary, or error dict. Use tasks_get for full detail.
@@ -470,6 +515,8 @@ async def update_task(
         return {"error": focus_error}
     if focus_body is not None:
         body["focus"] = focus_body
+    if archived is not None:
+        body["archived"] = archived
 
     # REVIEW requires the task to have an owner (server guard
     # reviewTransitionMissingBot). When the task has NO owner, the submitting
@@ -493,12 +540,19 @@ async def update_task(
             headers=_headers(bot_id),
         )
         if isinstance(updated, dict):
-            if focus_body is not None and "focusRank" not in updated:
+            unconfirmed = [
+                state for state in (_FOCUS, _ARCHIVE)
+                if state.patch_key in body and state.row_key not in updated
+            ]
+            if unconfirmed:
                 # An older BawtHub ignores the unknown field but applies the
                 # rest of the PATCH. Say exactly that instead of reporting OK.
+                skipped = {state.patch_key for state in unconfirmed}
                 result = {
-                    "error": f"{_FOCUS_UNSUPPORTED}; focus was not changed, the other fields were applied.",
-                    "updated": sorted(key for key in body if key != "focus"),
+                    "error": "; ".join(
+                        f"{state.unsupported}; {state.name} was not changed" for state in unconfirmed
+                    ) + ", the other fields were applied.",
+                    "updated": sorted(key for key in body if key not in skipped),
                     "task": _compact_task(updated),
                 }
             else:

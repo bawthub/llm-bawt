@@ -76,6 +76,9 @@ def compact_task(task: dict) -> dict:
     if task.get("focusRank") is not None:
         compact["focusRank"] = task.get("focusRank")
         compact["focusedAt"] = task.get("focusedAt")
+    # TASK-1380: an archived task is finished and off the board.
+    if task.get("archivedAt") is not None:
+        compact["archivedAt"] = task.get("archivedAt")
     return compact
 
 
