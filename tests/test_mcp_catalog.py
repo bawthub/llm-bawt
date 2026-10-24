@@ -174,7 +174,9 @@ async def test_catalog_token_budgets():
     # (+64). Archiving the Done lane from chat is one call per task.
     # TASK-1400: bots_list_available optional tag + include_state args and the
     # live-state summary: 14,125 (+79). Replaces per-bot health/delivery probes.
-    assert total <= 14125, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1422: typed check_links on tasks_update (REVIEW's "Where to look"):
+    # 14,234 (+109). Replaces free-text dev URLs and look steps in response.
+    assert total <= 14234, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

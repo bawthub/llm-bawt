@@ -74,6 +74,19 @@ class TaskStepInput(TypedDict, total=False):
     filePath: NotRequired[str]
 
 
+class CheckLinkInput(TypedDict):
+    """One "Where to look" entry (TASK-1422): a page to open to check the change."""
+
+    label: str
+    path: str
+    steps: list[str]
+
+
+CHECK_LINKS_DOC = (
+    'Required for REVIEW: [{label, path "/app/path", steps: 1-4 checks}]; replaces.'
+)
+
+
 def step_type_error(value: object, field: str) -> str | None:
     """Error naming the valid step types, or None when absent or valid."""
     if value is None or (isinstance(value, str) and value in _STEP_TYPE_SET):

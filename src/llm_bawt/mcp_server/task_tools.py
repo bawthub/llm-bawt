@@ -14,7 +14,14 @@ from pydantic import Field
 
 from .server import mcp
 from .task_association import associate_current_task
-from .task_step_types import BLOCKED_DEFINITION, TASK_STATUSES, TaskStepInput, validate_step_inputs
+from .task_step_types import (
+    BLOCKED_DEFINITION,
+    CHECK_LINKS_DOC,
+    TASK_STATUSES,
+    CheckLinkInput,
+    TaskStepInput,
+    validate_step_inputs,
+)
 from .task_api import (
     API_PREFIX as _API_PREFIX,
     api_delete as _api_delete,
@@ -135,6 +142,7 @@ def _task_status_docs(function):
         (function.__doc__ or "")
         .replace("{task_statuses}", ", ".join(TASK_STATUSES))
         .replace("{blocked_definition}", BLOCKED_DEFINITION)
+        .replace("{check_links_doc}", CHECK_LINKS_DOC)
     )
     return function
 
@@ -262,7 +270,7 @@ async def get_task(
 
     Returns:
         Full task object with title, description, status, priority,
-        response, steps (ordered), project info, and dependencies.
+        response, checkLinks, steps (ordered), project info, and dependencies.
         Returns error dict if not found.
     """
     logger.debug("MCP tool invoked: tools/get_task id=%s", task_id)
@@ -387,6 +395,7 @@ async def update_task(
     bot_id: str | None = None,
     associate_current_turn: bool = False,
     blocked_reason: str | None = None,
+    check_links: list[CheckLinkInput] | None = None,
     focus: Annotated[
         FocusAction | None,
         Field(description="User's focus list: on (default bottom; a focused task stays put) or off."),
@@ -408,8 +417,8 @@ async def update_task(
 
     Common patterns:
     - Start work: status="IN_PROGRESS", model_id="claude-opus-4-6"
-    - Visually confirmable UI/UX: status="REVIEW", response="Dev URL and exact
-      look steps or screenshot", outcome="Plain-language change"
+    - Visually confirmable UI/UX: status="REVIEW", check_links=[...],
+      outcome="Plain-language change"
     - Other finished work: record review (Tier 0: self-check), attributable
       pushed commit and test/live check in response; Snark or Rook closes
       status="COMPLETED" after verifying those receipts.
@@ -420,8 +429,8 @@ async def update_task(
     bot_id (your bot), it becomes the owner. bot_id never reassigns an owned
     task; pass agent_bot_id only to deliberately hand it to a different bot.
 
-    IMPORTANT: REVIEW is only for UI/UX Nick can visually inspect; include a
-    dev URL with exact look steps or a screenshot. For backend, infra, tooling
+    IMPORTANT: REVIEW is only for UI/UX Nick can visually inspect, and
+    needs check_links. For backend, infra, tooling
     and skills, Snark or Rook verifies the review (Tier 0: self-check), pushed
     attributable commit and test/live receipt before closing COMPLETED,
     including their own reviewed work. Leave incomplete work open with its
@@ -476,6 +485,7 @@ async def update_task(
         blocked_reason: What Nick must do or decide. Required with
                         status="BLOCKED"; rejected unless the task is or becomes
                         BLOCKED. Cleared automatically when the task leaves BLOCKED.
+        check_links: {check_links_doc}
         focus: "on" or "off". "on" without a position puts an unfocused task
                at the bottom and leaves a focused task where it is.
         focus_position: "top", "bottom", "before" or "after"; implies "on".
@@ -511,6 +521,8 @@ async def update_task(
         body["agentBotId"] = agent_bot_id
     if blocked_reason is not None:
         body["blockedReason"] = blocked_reason
+    if check_links is not None:
+        body["checkLinks"] = check_links
     focus_body, focus_error = _focus_patch(focus, focus_position, focus_anchor)
     if focus_error:
         return {"error": focus_error}

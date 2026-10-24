@@ -379,3 +379,24 @@ def test_create_forwards_blocked_reason(monkeypatch: pytest.MonkeyPatch) -> None
     assert calls[0]["json"]["status"] == "BLOCKED"
     assert calls[0]["json"]["blockedReason"] == "Say ship."
     assert "blockedReason" not in calls[1]["json"]
+
+
+def test_check_links_pass_through_and_compact_shows_them_in_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TASK-1422: check_links passes through as checkLinks; BawtHub validates
+    # paths and requires them for a bot's move to REVIEW.
+    links = [{"label": "Tasks board", "path": "/tasks/board", "steps": ["Open a REVIEW card"]}]
+    review = {**_full_task(), "status": "REVIEW", "agentBotId": "nova", "checkLinks": links}
+    patches: list[dict[str, Any]] = []
+
+    async def fake_patch(path: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+        patches.append(json)
+        return review
+
+    monkeypatch.setattr(task_tools, "_api_patch", fake_patch)
+    result = _run(task_tools.update_task("TASK-1", check_links=links))
+
+    assert patches[0] == {"checkLinks": links}
+    assert result["task"]["checkLinks"] == links
+    assert "checkLinks" not in task_tools._compact_task({**_full_task(), "status": "IN_PROGRESS", "checkLinks": links})
+    assert "check_links" in (task_tools.update_task.__doc__ or "")
+    assert "{check_links_doc}" not in (task_tools.update_task.__doc__ or "")
