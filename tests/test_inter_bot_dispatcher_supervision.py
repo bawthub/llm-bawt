@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+from llm_bawt.service.leader_side_pumps import LeaderSidePumps
 
 
 class _FakeStore:
@@ -123,7 +124,9 @@ async def test_talk_outbound_wait_never_blocks_agent_delivery_sweep():
         entered.set()
         await release.wait()
 
-    dispatcher.talk_replies = SimpleNamespace(drain=blocked_reply)
+    dispatcher.side_pumps = LeaderSidePumps(
+        dispatcher.service, dispatcher.store, talk_replies=SimpleNamespace(drain=blocked_reply),
+    )
     sweeps = []
     dispatcher._schedule_eligible_targets = lambda: sweeps.append(True)
     loop_task = asyncio.create_task(dispatcher.run())
@@ -135,7 +138,7 @@ async def test_talk_outbound_wait_never_blocks_agent_delivery_sweep():
                 break
             await asyncio.sleep(0.01)
         assert len(sweeps) >= 2
-        assert dispatcher._talk_reply_task is not None
+        assert dispatcher.side_pumps.talk_reply_task is not None
     finally:
         release.set()
         dispatcher._stop_event.set()

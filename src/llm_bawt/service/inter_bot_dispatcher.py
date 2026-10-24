@@ -4,22 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
 from typing import Any
 
 import httpx
 
-from ..inter_bot_delivery import (
-    DELIVERED,
-    DISPATCHING,
-    FAILED,
-    QUEUED,
-    DeliveryRecord,
-    InterBotDeliveryStore,
-)
-from ..inter_bot_delivery_retry import fail_claim_with_restart_retry, retry_original_author
-from ..inter_bot_delivery_steer_fence import steer_uncertain
+from ..inter_bot_delivery import DeliveryRecord, InterBotDeliveryStore
+from ..inter_bot_delivery_retry import fail_claim_with_restart_retry
 from ..inter_bot_delivery_user import resolve_delivery_user
 from .dispatcher_leadership import (
     PROBE_TIMEOUT_SECONDS,
@@ -79,11 +70,10 @@ class InterBotDeliveryDispatcher:
     ):
         self.service = service
         self.store = InterBotDeliveryStore(service.config)
-        from .talk_reply_outbox import TalkReplyOutbox
-        self.talk_replies = TalkReplyOutbox(self.store.engine) if self.store.engine is not None else None
-        from .quiesce_control import QuiesceControlRunner, build_pump
-        # TASK-1233 B3: ask each quiesce-held running turn to stop (leader-only).
-        self.quiesce_control = QuiesceControlRunner(lambda: build_pump(service, self.store.engine))
+        from .leader_side_pumps import LeaderSidePumps
+        self.side_pumps = LeaderSidePumps.build(service, self.store)
+        # Public handle for Talk webhook registration; side_pumps owns it.
+        self.talk_replies = self.side_pumps.talk_replies
         self.recovery_interval_seconds = max(1.0, recovery_interval_seconds)
         self.leadership_retry_delay_seconds = max(0.0, leadership_retry_delay_seconds)
         self._wake_event = asyncio.Event()
@@ -103,8 +93,6 @@ class InterBotDeliveryDispatcher:
         self._target_tasks: dict[str, asyncio.Task] = {}
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._announce_tasks: set[asyncio.Task] = set()
-        self._talk_reply_task: asyncio.Task | None = None
-        self._new_session_outbox = None
         self.claim_owner = f"dispatcher-{uuid.uuid4().hex}"
         self._dispatcher_lock = None
         self._lock_probed_at: float | None = None
@@ -232,18 +220,18 @@ class InterBotDeliveryDispatcher:
         # to the next process now instead of after its lease. No await between
         # here and the cancels below, so no new worker can start in between.
         detached = turn_executions.detach_agents()
+        side_pumps = getattr(self, "side_pumps", None)
         tasks = [
             task for task in (*self._target_tasks.values(), *self._dispatch_tasks,
-                              getattr(self, "_talk_reply_task", None))
+                              *(side_pumps.running_tasks() if side_pumps is not None else ()))
             if task is not None and not task.done()
         ]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        quiesce_control = getattr(self, "quiesce_control", None)
-        if quiesce_control is not None:
-            await quiesce_control.stop()
+        if side_pumps is not None:
+            await side_pumps.stop()
         if self._task:
             await asyncio.gather(self._task, return_exceptions=True)
         if self._leader_task:
@@ -393,39 +381,9 @@ class InterBotDeliveryDispatcher:
             try:
                 self.store.recover_expired(live_owner=self.claim_owner)
                 self._schedule_eligible_targets()
-                if getattr(self.store, "engine", None) is not None:
-                    from .session_lifecycle.outbox import NewSessionOutbox
-                    from .session_lifecycle.receipt import NewSessionReceipt
-
-                    settled = await asyncio.to_thread(
-                        NewSessionReceipt.reconcile_typed, self.store.engine,
-                    )
-                    for delivery in settled:
-                        await self._emit(delivery)
-                    from .session_lifecycle.policy_receipt import BotPolicyReceipt
-
-                    settled_policy = await asyncio.to_thread(
-                        BotPolicyReceipt.reconcile, self.store.engine,
-                    )
-                    for delivery in settled_policy:
-                        await self._emit(delivery)
-                    if self._new_session_outbox is None:
-                        self._new_session_outbox = NewSessionOutbox(self.store.engine)
-                    await self._new_session_outbox.drain(
-                        getattr(self.service, "_redis_subscriber", None),
-                    )
-                talk_replies = getattr(self, "talk_replies", None)
-                running_reply = getattr(self, "_talk_reply_task", None)
-                if talk_replies is not None and (running_reply is None or running_reply.done()):
-                    reply_task = asyncio.create_task(
-                        talk_replies.drain(self.store, self.service._turn_log_store),
-                        name="talk-reply-drain",
-                    )
-                    reply_task.add_done_callback(self._talk_reply_done)
-                    self._talk_reply_task = reply_task
-                quiesce_control = getattr(self, "quiesce_control", None)
-                if quiesce_control is not None:
-                    quiesce_control.maybe_start()
+                side_pumps = getattr(self, "side_pumps", None)
+                if side_pumps is not None:
+                    await side_pumps.run_pass(self._emit)
             except Exception:
                 consecutive_failures += 1
                 backoff = min(30.0, float(2 ** min(consecutive_failures - 1, 5)))
@@ -444,11 +402,6 @@ class InterBotDeliveryDispatcher:
         await asyncio.gather(
             *self._target_tasks.values(), *self._dispatch_tasks, return_exceptions=True
         )
-
-    @staticmethod
-    def _talk_reply_done(task: asyncio.Task) -> None:
-        if not task.cancelled() and task.exception():
-            logger.error("Talk reply sweep failed", exc_info=task.exception())
 
     def _schedule_eligible_targets(self) -> None:
         subscriber = getattr(self.service, "_redis_subscriber", None)
@@ -1009,78 +962,16 @@ class InterBotDeliveryDispatcher:
         return isinstance(status_code, int) and 400 <= status_code < 500 and status_code not in (408, 409, 425, 429)
 
     async def _emit(self, record: DeliveryRecord) -> None:
-        event = {
-            "_type": "inter_bot_delivery",
-            "delivery_id": record.id,
-            "status": record.status,
-            "sender_bot_id": record.sender_bot_id,
-            "target_bot_id": record.target_bot_id,
-            "bot_id": record.sender_bot_id,
-            "user_id": self.service.config.DEFAULT_USER,
-            "turn_id": record.turn_id,
-            "target_turn_id": record.target_turn_id,
-            "delivery_mode": record.delivery_mode,
-            "reply_mode": record.reply_mode,
-            "session_policy": record.session_policy,
-            "reset_status": record.reset_status,
-            "reset_reason": record.reset_reason,
-            "old_session_id": record.old_session_id,
-            "new_session_id": record.new_session_id,
-            "reset_at": record.reset_at.isoformat() if record.reset_at else None,
-            "overflow_recovery_count": record.overflow_recovery_count,
-            "attempt_count": record.attempt_count,
-            "next_retry_at": record.next_retry_at.isoformat() if record.next_retry_at else None,
-            "last_error": record.last_error,
-            "project_id": record.project_id,
-            "task_id": record.task_id,
-            "message_kind": record.message_kind,
-            "retry_of_delivery_id": (record.metadata.get("manual_retry_of")
-                                     or record.metadata.get("restart_retry_of")),
-            "steer_uncertain": steer_uncertain(record),
-            # TASK-1300: publishing is async, so two events for one row can
-            # arrive out of order; consumers drop a lower revision.
-            "revision": record.revision,
-            "ts": time.time(),
-        }
-        if record.metadata.get("prompt_schedule"):
-            event["user_id"] = record.author_entity_id
-            event["bot_id"] = record.target_bot_id
-            event["prompt_schedule"] = record.metadata["prompt_schedule"]
-        chat_user = None
-        if record.metadata.get("ordinary_chat"):
-            # Ordinary queued sends belong to the selected user, not the
-            # service's default user or the inter-bot sender namespace. A
-            # system-authored restart child (TASK-1231B) belongs to the user
-            # whose request it carries.
-            if record.author_entity_type == "user":
-                chat_user = record.author_entity_id
-            else:
-                original = retry_original_author(record)
-                if original is not None and original.entity_type == "user":
-                    chat_user = original.entity_id
-        if chat_user:
-            event.update(
-                bot_id=record.target_bot_id, user_id=chat_user,
-                ordinary_chat=True, user_message_id=record.user_message_id,
-                session_id=record.metadata["ordinary_chat"].get("session_id"),
-            )
         subscriber = getattr(self.service, "_redis_subscriber", None)
-        if record.metadata.get("maintenance_user_queue"):
-            event.update(bot_id=record.target_bot_id, user_id=record.author_entity_id)
-        if subscriber is not None:
-            try:
-                if record.metadata.get("maintenance_user_queue"):
-                    state = {QUEUED: "queued", DISPATCHING: "started", DELIVERED: "completed",
-                             FAILED: "refused", "CANCELLED": "cancelled"}.get(record.status)
-                    if state:
-                        await subscriber.publish_tool_event(record.target_bot_id, record.author_entity_id, {
-                            "_type": "steer_lifecycle", "message_id": record.user_message_id,
-                            "bot_id": record.target_bot_id, "user_id": record.author_entity_id, "state": state,
-                        })
-                await subscriber.publish_tool_event(
-                    event["bot_id"],
-                    event["user_id"],
-                    event,
-                )
-            except Exception:
-                logger.warning("could not publish inter-bot lifecycle event", exc_info=True)
+        if subscriber is None:
+            return
+        from .inter_bot_delivery_events import delivery_event, maintenance_steer_event
+
+        event = delivery_event(record, default_user=self.service.config.DEFAULT_USER)
+        try:
+            steer_event = maintenance_steer_event(record)
+            if steer_event is not None:
+                await subscriber.publish_tool_event(record.target_bot_id, record.author_entity_id, steer_event)
+            await subscriber.publish_tool_event(event["bot_id"], event["user_id"], event)
+        except Exception:
+            logger.warning("could not publish inter-bot lifecycle event", exc_info=True)

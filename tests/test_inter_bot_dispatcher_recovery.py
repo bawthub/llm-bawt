@@ -85,8 +85,7 @@ def _dispatcher(check: _Check):
     dispatcher._loop = None
     dispatcher._target_tasks = {}
     dispatcher._dispatch_tasks = set()
-    dispatcher._talk_reply_task = None
-    dispatcher.talk_replies = None
+    dispatcher.side_pumps = None
     dispatcher.claim_owner = "test-dispatcher"
     dispatcher._dispatcher_lock = object()
     dispatcher._subscriber_gap_logged = False

@@ -411,7 +411,7 @@ def _stopping_dispatcher(order):
     dispatcher.store = _StopStore(order)
     dispatcher._stop_event = asyncio.Event()
     dispatcher._wake_event = asyncio.Event()
-    dispatcher._task = dispatcher._leader_task = dispatcher._talk_reply_task = None
+    dispatcher._task = dispatcher._leader_task = dispatcher.side_pumps = None
     dispatcher._recovery = None
     dispatcher._target_tasks = {}
     dispatcher._dispatch_tasks = set()
