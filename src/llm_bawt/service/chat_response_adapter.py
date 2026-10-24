@@ -112,10 +112,50 @@ async def _wait_stream_reply(service: Any, request: ChatCompletionRequest, recei
     yield "data: [DONE]\n\n"
 
 
+EXTENSION_COMMENT = ": llm-bawt-event "
+
+
+def _is_openai_chunk(payload: dict) -> bool:
+    """True for a standard chunk a stock OpenAI client should act on.
+
+    Every tool call in this stream already ran on the server. OpenAI's
+    ``delta.tool_calls`` / ``finish_reason: "tool_calls"`` mean "the client
+    must execute this and reply", so those frames are extensions here, as are
+    warnings, usage, animation and ask-user sidecars.
+    """
+    choices = payload.get("choices")
+    if payload.get("object") != "chat.completion.chunk" or not isinstance(choices, list) or not choices:
+        return False
+    return not any(
+        isinstance(choice, dict) and (
+            choice.get("finish_reason") == "tool_calls"
+            or (isinstance(choice.get("delta"), dict) and choice["delta"].get("tool_calls"))
+        )
+        for choice in choices
+    )
+
+
+def _extension_event(event: str, payload: dict, extensions: str) -> str | None:
+    """Encode one non-OpenAI frame for the caller's negotiated extension mode."""
+    if extensions == "comment":
+        # SSE comments are ignored by every OpenAI client; BawtHub's proxy
+        # turns this exact JSON back into the frame its UI already handles.
+        return f"{EXTENSION_COMMENT}{json.dumps(payload)}\n\n"
+    if extensions == "data":
+        return event  # Pre-negotiation BawtHub: keep the frames it consumes.
+    return None  # A stock OpenAI client gets standard chunks only.
+
+
 async def completion_stream(
     service: Any, request: ChatCompletionRequest, *, admission_comment: bool = False,
+    extensions: str = "none",
 ) -> AsyncIterator[str]:
-    """Preserve live direct chunks; turn a queued receipt into its exact reply."""
+    """Preserve live direct chunks; turn a queued receipt into its exact reply.
+
+    ``extensions`` is ``comment`` (caller translates ``: llm-bawt-event``
+    comments), ``data`` (legacy caller keeps non-OpenAI data frames) or
+    ``none`` (stock OpenAI client: such frames are dropped).
+    """
     try:
         async for event in service.chat_completion_stream(request):
             if not event.startswith("data: "):
@@ -144,7 +184,12 @@ async def completion_stream(
                 if failures:
                     yield _stream_error("; ".join(failures))
                     return  # A failed turn must never emit a successful stop/DONE.
-            yield event
+            if _is_openai_chunk(payload):
+                yield event
+                continue
+            encoded = _extension_event(event, payload, extensions)
+            if encoded is not None:
+                yield encoded
     except Exception as exc:
         # Once StreamingResponse has sent headers, HTTPException cannot change
         # status. A concrete error event is the only honest in-band outcome.

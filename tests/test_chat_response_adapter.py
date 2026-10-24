@@ -221,3 +221,55 @@ def test_delivery_in_flight_is_observed_until_terminal(monkeypatch):
         return await task
 
     assert asyncio.run(wait())["response_text"] == "done"
+
+
+def _sse(payload):
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _chunk(delta, finish_reason=None):
+    return _sse({"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m",
+                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]})
+
+
+TEXT = _chunk({"content": "hi"})
+STOP = _chunk({}, "stop")
+EXTENSIONS = [
+    _sse({"object": "service.warning", "model": "m", "warnings": ["model fallback"]}),
+    _chunk({"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "text_offset": 0,
+                            "function": {"name": "time", "arguments": "{}"}}]}),
+    _chunk({}, "tool_calls"),
+    _sse({"object": "chat.completion.usage", "turn_id": "t", "token_usage": {}}),
+    _sse({"object": "service.animation", "animation": "wave"}),
+    _sse({"object": "tool.await_result", "tool_use_id": "q1"}),
+]
+DIRECT = [": connected\n\n", TEXT, *EXTENSIONS, STOP, "data: [DONE]\n\n"]
+
+
+@pytest.mark.parametrize("headers,expected_extensions", [
+    # Stock OpenAI client: server-run tools and sidecars never reach it.
+    ({}, []),
+    # BawtHub proxy that predates extension negotiation: frames unchanged.
+    ({"X-LLM-Bawt-Admission-Events": "comment"}, EXTENSIONS),
+    # Negotiated: the exact legacy JSON, carried as an SSE comment.
+    ({"X-LLM-Bawt-Admission-Events": "comment", "X-LLM-Bawt-Extension-Events": "comment"},
+     [": llm-bawt-event " + frame[6:] for frame in EXTENSIONS]),
+    ({"X-LLM-Bawt-Extension-Events": "comment"},
+     [": llm-bawt-event " + frame[6:] for frame in EXTENSIONS]),
+])
+def test_openai_stream_extension_frames_follow_negotiation(monkeypatch, headers, expected_extensions):
+    client, service, path = _client(monkeypatch, stream_events=DIRECT)
+    with client:
+        response = client.post(path, json={**BODY, "stream": True},
+                               headers={"X-LLM-Bawt-Response-Mode": "openai", **headers})
+    assert response.text == "".join([": connected\n\n", TEXT, *expected_extensions,
+                                     STOP, "data: [DONE]\n\n"])
+    service.chat_completion.assert_not_awaited()
+
+
+def test_legacy_stream_is_untouched_by_extension_negotiation(monkeypatch):
+    client, _service, path = _client(monkeypatch, stream_events=DIRECT)
+    with client:
+        response = client.post(path, json={**BODY, "stream": True},
+                               headers={"X-LLM-Bawt-Extension-Events": "comment"})
+    assert response.text == "".join(DIRECT)

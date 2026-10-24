@@ -935,12 +935,20 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         )
 
     if request.stream:
+        admission_comment = http_request.headers.get("X-LLM-Bawt-Admission-Events") == "comment"
+        # Non-OpenAI frames (server-run tool calls, warnings, usage, sidecars):
+        # comments for a caller that translates them; data frames for a BawtHub
+        # proxy built before that negotiation existed; dropped for a stock
+        # OpenAI client, which would misread them.
+        if http_request.headers.get("X-LLM-Bawt-Extension-Events") == "comment":
+            extensions = "comment"
+        else:
+            extensions = "data" if admission_comment else "none"
         # Streaming response
         try:
             return StreamingResponse(
                 (completion_stream(
-                    service, request,
-                    admission_comment=http_request.headers.get("X-LLM-Bawt-Admission-Events") == "comment",
+                    service, request, admission_comment=admission_comment, extensions=extensions,
                 ) if openai_response else service.chat_completion_stream(request)),
                 media_type="text/event-stream",
                 headers={
