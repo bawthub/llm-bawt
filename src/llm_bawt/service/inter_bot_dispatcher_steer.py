@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from agent_bridge.steer_contract import STEER_UNFRAMED
+from agent_bridge.steer_contract import STEER_RUN_FINISHING, STEER_UNFRAMED
 
 STEER_REQUEST_PREFIX = "steer_delivery_"
 # ``delivery-<uuid hex>`` ids (request_identity); generation 0 has no suffix.
@@ -45,13 +45,16 @@ APP_RUN_NOT_READY = "Active bridge run is not ready"
 BRIDGE_RUN_NOT_READY = frozenset({"no_active_run", "active_run_mismatch"})
 
 # Every definitive non-acceptance before transport acceptance. The two
-# maintenance errors and ``steer_unframed`` (TASK-1300: no app framing for a
-# non-system steer) are raised by ActiveRun.steer before anything is injected;
-# the last two are app-side and publish no RPC.
+# maintenance errors, ``steer_unframed`` (TASK-1300: no app framing for a
+# non-system steer) and ``run_finishing`` (TASK-1344: the run already gave its
+# final result, so it never registers as steerable again) are raised by
+# ActiveRun.steer before anything is injected; the last two are app-side and
+# publish no RPC.
 DEFINITIVE_NOT_ACCEPTED = BRIDGE_RUN_NOT_READY | frozenset({
     "maintenance_active",
     "maintenance_command_requires_turn",
     STEER_UNFRAMED,
+    STEER_RUN_FINISHING,
     "Turn is no longer active",
     "Turn not found",
 })

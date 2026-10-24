@@ -5,6 +5,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Literal
 
+from agent_bridge.steer_contract import STEER_RUN_FINISHING
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -297,7 +298,9 @@ async def steer_active_turn(
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     if not result.get("ok"):
         detail = str(result.get("error") or result.get("detail") or "steer failed")
-        status = 409 if detail in {"no_active_run", "active_run_mismatch"} else 502
+        # TASK-1344: ``run_finishing`` is definite too; the run already gave its
+        # final result, so callers send the message as a fresh turn.
+        status = 409 if detail in {"no_active_run", "active_run_mismatch", STEER_RUN_FINISHING} else 502
         raise HTTPException(status_code=status, detail=detail)
 
     persisted = False

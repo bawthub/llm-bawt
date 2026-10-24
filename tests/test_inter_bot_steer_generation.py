@@ -99,6 +99,9 @@ def test_bridge_no_run_falls_back_once_the_target_closed_or_the_bound_is_spent(e
     "maintenance_active", "maintenance_command_requires_turn",
     "Turn is no longer active", "Turn not found",
     "steer_unframed",  # TASK-1300: refused before the CLI, so it never ran
+    # TASK-1344: the target already produced its final result. It will never
+    # take a steer again; wait for it to end, then use an idle turn.
+    "run_finishing",
 ])
 def test_other_definitive_rejections_fall_back_even_with_an_open_target(error):
     assert classify(error, accepted=False, target_open=True) == "fallback"

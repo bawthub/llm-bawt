@@ -178,3 +178,33 @@ def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch):
     assert len(persisted) == 1
     assert "Message from bot 'sender': verdict?" in persisted[0]
     assert not any("Reply channel" in str(arg) for arg in persisted[0])
+
+
+@pytest.mark.parametrize("steer_request_id", [None, "steer_delivery_test"])
+def test_run_finishing_is_a_definite_409_without_composer_retries(monkeypatch, steer_request_id):
+    """TASK-1344: the run already produced its final result; it will not become
+    steerable again, so the composer loop must not spin and callers get a 409
+    they route to a fresh turn."""
+    from fastapi import HTTPException
+
+    from llm_bawt.agent_backends import agent_bridge
+    from llm_bawt.bots import BotManager
+    from llm_bawt.service.routes import chat
+
+    turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="nick", ended_at=None,
+                           status="streaming", agent_session_key="session-key", agent_request_id="req",
+                           trigger_message_id="trigger")
+    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda id: turn),
+                              get_memory_client=lambda *args: None)
+    subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": False, "error": "run_finishing"}))
+    monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
+    monkeypatch.setattr(BotManager, "__init__", lambda *args: None)
+    monkeypatch.setattr(BotManager, "get_bot", lambda *args: SimpleNamespace(agent_backend="claude-code"))
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(chat.steer_active_turn(service, chat.ChatSteerRequest(
+            turn_id="turn-live", bot_id="target", user_id="nick", message_id="message-steer", message="late",
+        ), steer_request_id=steer_request_id))
+
+    assert (raised.value.status_code, raised.value.detail) == (409, "run_finishing")
+    assert subscriber.send_steer.await_count == 1

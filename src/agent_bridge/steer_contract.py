@@ -38,6 +38,13 @@ STEER_ITEMS_SEPARATOR = "\n\n"
 
 STEER_UNFRAMED = "steer_unframed"
 
+# The run already handed its final ResultMessage to the send handler and is
+# finalizing or tearing down (TASK-1344). Nothing can serve a steer there: the
+# CLI would run it as an unseen follow-up. Raised before anything reaches the
+# CLI, so it is a definite non-delivery; callers send the message as a fresh
+# turn, the same as a steer to an idle bot.
+STEER_RUN_FINISHING = "run_finishing"
+
 # ``steer_lifecycle`` event states (the CLI's ``command_lifecycle`` frames,
 # plus the bridge's own ``uncertain``) and the rejection proofs that a
 # command can never run. Published by ``claude_code_bridge.active_run``;

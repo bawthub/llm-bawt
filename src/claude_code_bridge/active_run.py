@@ -36,6 +36,16 @@ carries a ``proof`` only when the bridge knows the command can never run:
 
 When the bridge cannot know, it publishes ``uncertain`` and never a
 rejection. The app fences an uncertain command and never re-queues it.
+
+Finishing (TASK-1344). Once :meth:`ClaudeActiveRun.messages` yields the
+ResultMessage that ends the run, the send handler finalizes and tears down.
+No steer can be served after that point: the CLI would run it as a follow-up
+nobody renders. ``now`` and ``next`` steers are refused there with
+:data:`STEER_RUN_FINISHING` before anything is written, so the caller sends the
+message as a fresh turn. A command written earlier is settled from the CLI
+frames the SDK reader buffered but the consumer never took; those are read
+from a clone of the SDK's receive stream taken when the consumer stops, so
+the teardown's ``close_receive_stream()`` does not discard them.
 """
 
 from __future__ import annotations
@@ -47,6 +57,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
+
 from agent_bridge.maintenance import is_compact_command
 from agent_bridge.steer_contract import (
     LIFECYCLE_REJECTED,
@@ -54,6 +66,7 @@ from agent_bridge.steer_contract import (
     PROOF_CLI_TERMINAL,
     PROOF_SWEEP_RECEIPT,
     STEER_ITEMS_SLOT,
+    STEER_RUN_FINISHING,
     STEER_UNFRAMED,
     render_interrupt,
 )
@@ -118,6 +131,19 @@ def _buffered_frames(handle: Any) -> int | None:
     """
     try:
         return int(handle._message_receive.statistics().current_buffer_used)
+    except Exception:
+        return None
+
+
+def _clone_receive(handle: Any) -> Any | None:
+    """A second reader on the SDK's frame buffer, or ``None``.
+
+    ``disconnect()`` closes the SDK's receive side. anyio keeps a shared
+    buffer readable while any clone is open, so frames the reader buffered
+    before it was cancelled survive the teardown.
+    """
+    try:
+        return handle._message_receive.clone()
     except Exception:
         return None
 
@@ -188,6 +214,11 @@ class ClaudeActiveRun:
     steering_attempted: bool = False
     # The run's one bounded teardown, shared with the send (TASK-1232 S1).
     teardown: RunTeardown | None = None
+    # Set when ``messages()`` yields the run's terminal ResultMessage
+    # (TASK-1344); steers are refused from then on.
+    _finishing: bool = False
+    # Clone of the SDK frame buffer, taken when the consumer stops.
+    _teardown_frames: Any = None
 
     async def steer(
         self,
@@ -260,6 +291,10 @@ class ClaudeActiveRun:
                 raise RuntimeError("steer_already_cancelled")
             state = self._commands.get(command_uuid)
             if state is None or state in _REJECTED:
+                # Only a new CLI command is refused here: a replay of one
+                # already accepted keeps its answer, so it can never become a
+                # second, fresh-turn delivery.
+                self._refuse_new_command()
                 self._commands[command_uuid] = "sent"
                 event = self._command_events[command_uuid] = asyncio.Event()
                 # A re-send is a new CLI command: drop the old send's evidence.
@@ -550,10 +585,13 @@ class ClaudeActiveRun:
     def release_unstarted(self, outcome: Any = None) -> list[str]:
         """Publish ``uncertain`` for held commands a finished run never settled.
 
-        Runs once the run's teardown has finished. A confirmed CLI exit does
+        Runs once the run's teardown has finished. Frames the SDK reader had
+        already buffered are applied first (TASK-1344), so a command the CLI
+        started is published started, not uncertain. A confirmed CLI exit does
         not prove a command never started (its frame may be unread), so this
-        never publishes a rejection.
+        never publishes a rejection without the CLI's own frame.
         """
+        self._reconcile_buffered_frames()
         released: list[str] = []
         for uuid in self._held:
             if (
@@ -575,6 +613,47 @@ class ClaudeActiveRun:
                 self.request_id, self._describe(released),
             )
         return released
+
+    def _reconcile_buffered_frames(self) -> None:
+        """Apply the lifecycle frames the consumer never took, then drop the clone.
+
+        Only ``command_lifecycle`` frames matter here: the run is over, so
+        nothing else in the buffer would be rendered.
+        """
+        stream, self._teardown_frames = self._teardown_frames, None
+        if stream is None:
+            return
+        applied = 0
+        try:
+            while True:
+                try:
+                    data = stream.receive_nowait()
+                except (anyio.WouldBlock, anyio.EndOfStream, anyio.ClosedResourceError):
+                    break
+                if isinstance(data, dict) and data.get("type") == "command_lifecycle":
+                    applied += 1
+                    self.note_lifecycle(
+                        str(data.get("command_uuid") or ""), str(data.get("state") or "")
+                    )
+        finally:
+            stream.close()
+        if applied:
+            logger.info(
+                "reconciled buffered lifecycle frames at teardown: request=%s frames=%d",
+                self.request_id, applied,
+            )
+
+    def _refuse_new_command(self) -> None:
+        """Refuse a new CLI write the run can no longer serve; call under the steer lock."""
+        if self._completed.is_set():
+            raise RuntimeError("no_active_run")
+        if self._finishing:
+            raise RuntimeError(STEER_RUN_FINISHING)
+
+    def _finish(self, result: Any) -> Any:
+        """Mark ``result`` as the run's terminal result and return it."""
+        self._finishing = True
+        return result
 
     def note_lifecycle(self, command_uuid: str, state: str) -> None:
         """Record a CLI ``command_lifecycle`` frame for our injected commands."""
@@ -648,15 +727,20 @@ class ClaudeActiveRun:
         """Yield parsed SDK messages, handling ``next``-steer turn boundaries.
 
         Replaces ``client.receive_messages()`` for the single response consumer.
+        Every ResultMessage it yields while no interrupt boundary is expected
+        ends the run, so steering closes as it is yielded (TASK-1344).
         """
+        from claude_agent_sdk import ResultMessage, UserMessage
+
         handle = _sdk_query_handle(self.client)
         if handle is None:
             self.lifecycle_supported = False
             async for msg in self.client.receive_messages():
+                if isinstance(msg, ResultMessage) and self._expected_interrupt_results <= 0:
+                    msg = self._finish(msg)
                 yield msg
             return
 
-        from claude_agent_sdk import ResultMessage, UserMessage
         from claude_agent_sdk._internal.message_parser import parse_message
 
         self.lifecycle_supported = True
@@ -681,7 +765,7 @@ class ClaudeActiveRun:
                         if self._expected_interrupt_results > 0:
                             self._expected_interrupt_results -= 1
                         else:
-                            yield deferred
+                            yield self._finish(deferred)
                     # Otherwise it started a follow-up turn whose own
                     # ResultMessage will end the run; drop the stale one.
                 if self._pending_user_result is not None and not any(
@@ -692,7 +776,7 @@ class ClaudeActiveRun:
                     if self._expected_interrupt_results > 0:
                         self._expected_interrupt_results -= 1
                     else:
-                        yield result
+                        yield self._finish(result)
                 continue
             msg = parse_message(data)
             if msg is None:
@@ -713,10 +797,11 @@ class ClaudeActiveRun:
                     # retain it until the lifecycle is published on the run.
                     self._pending_user_result = msg
                     continue
+                msg = self._finish(msg)
             yield msg
         if self._pending_user_result is not None:
-            yield self._pending_user_result
-            self._pending_user_result = None
+            result, self._pending_user_result = self._pending_user_result, None
+            yield self._finish(result)
 
     async def _steer_now(self, replacement_prompt: str) -> None:
         """Interrupt current work and inject ``replacement_prompt`` into the run.
@@ -727,8 +812,7 @@ class ClaudeActiveRun:
         unfinished work, so the run resumes by default.
         """
         async with self._steer_lock:
-            if self._completed.is_set():
-                raise RuntimeError("no_active_run")
+            self._refuse_new_command()
 
             self.steering_attempted = True
             self._expected_interrupt_results += 1
@@ -786,8 +870,18 @@ class ClaudeActiveRun:
                 )
 
     def mark_completed(self) -> None:
-        """Signal that the response consumer reached the run's terminal edge."""
+        """Signal that the response consumer reached the run's terminal edge.
+
+        The consumer has stopped reading, so this is where the frames it never
+        took start to matter: keep a reader on the SDK buffer for
+        :meth:`release_unstarted`. A run torn down earlier has nothing left
+        to clone.
+        """
         self._completed.set()
+        if self._teardown_frames is None:
+            handle = _sdk_query_handle(self.client)
+            if handle is not None:
+                self._teardown_frames = _clone_receive(handle)
 
     def consume_replaced_result(self, result_message: Any) -> bool:
         """Consume one terminal boundary superseded by a steering message.
