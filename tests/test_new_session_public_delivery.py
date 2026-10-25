@@ -17,11 +17,12 @@ from llm_bawt.service.session_lifecycle.intent import Admission, Continuity, Ori
     ("reset_without_history", Continuity.CLEAN, "user"),
 ])
 def test_public_policy_send_uses_one_typed_admission(monkeypatch, policy, mode, author_type):
+    from llm_bawt import inter_bot_send as send
     from llm_bawt.service.routes import inter_bot_deliveries as route
     from llm_bawt.service.session_lifecycle.lifecycle import NewSessionLifecycle
 
     bot = SimpleNamespace(slug="recipient", agent_backend="claude-code", harness="claude-code")
-    monkeypatch.setattr(route, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
+    monkeypatch.setattr(send, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
     record = SimpleNamespace(
         id="delivery", status="QUEUED", metadata={},
         to_api=lambda duplicate=False: {"delivery_id": "delivery", "duplicate": duplicate},
@@ -75,12 +76,13 @@ def test_public_send_rejects_caller_supplied_lifecycle_intent(monkeypatch, polic
     """TASK-1203: a forged scheduler intent must never reach the durable row."""
     from llm_bawt.message_authorship import AuthorReference
     from llm_bawt.service.job_parameters import IdleContextResetParameters
+    from llm_bawt import inter_bot_send as send
     from llm_bawt.service.routes import inter_bot_deliveries as route
     from llm_bawt.service.session_lifecycle.intent import NewSessionIntent
     from llm_bawt.service.session_lifecycle.lifecycle import NewSessionLifecycle
 
     bot = SimpleNamespace(slug="recipient", agent_backend="claude-code", harness="claude-code")
-    monkeypatch.setattr(route, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
+    monkeypatch.setattr(send, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
     store = SimpleNamespace(engine=object(), enqueue=Mock(side_effect=AssertionError("enqueued")))
     service = SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="nick"),
                               _inter_bot_dispatcher=SimpleNamespace(store=store))

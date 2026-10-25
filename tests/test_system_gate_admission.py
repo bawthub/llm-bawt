@@ -374,8 +374,10 @@ def test_the_public_route_reads_the_capability_header(
     async def emit(_record):
         return None
 
+    from llm_bawt import inter_bot_send as send
+
     bot = SimpleNamespace(slug=sender, agent_backend="claude-code", harness="claude-code")
-    monkeypatch.setattr(route, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
+    monkeypatch.setattr(send, "BotManager", lambda _cfg: SimpleNamespace(get_bot=lambda _slug: bot))
     monkeypatch.setattr(route, "get_service", lambda: SimpleNamespace(config=SimpleNamespace(DEFAULT_USER="nick")))
     store = SimpleNamespace(enqueue=enqueue, get=lambda _id: record, payload=lambda _id: {})
     monkeypatch.setattr(route, "_dispatcher", lambda: SimpleNamespace(store=store, _emit=emit, wake=lambda _t: None))

@@ -118,9 +118,11 @@ def test_public_bot_send_preserves_formatted_task_through_exact_receipt(rig, rea
     from llm_bawt.service.session_lifecycle.receipt import RESET_CONFIRMATION
 
     bot = SimpleNamespace(slug=rig.bot, agent_backend="claude-code", harness="claude-code")
-    monkeypatch.setattr(route, "BotManager", lambda _config: SimpleNamespace(get_bot=lambda _slug: bot))
+    from llm_bawt import inter_bot_send as send
+
+    monkeypatch.setattr(send, "BotManager", lambda _config: SimpleNamespace(get_bot=lambda _slug: bot))
     monkeypatch.setattr(route, "get_service", lambda: real_lifecycle.service)
-    monkeypatch.setattr(route, "resolve_delivery_user", lambda _config, _user: rig.user)
+    monkeypatch.setattr(send, "resolve_delivery_user", lambda _config, _user: rig.user)
     real_lifecycle.dispatcher._emit = AsyncMock()
     app = FastAPI()
     app.include_router(route.router)

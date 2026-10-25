@@ -92,7 +92,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "projects_delete": "Permanently delete a project; its tasks remain but become unassigned.",
     "activity_get": "Read recent task/project activity; limit is capped at 100.",
     "bots_list_available": "List inter-bot message targets with tags and live state (busy/idle turn, queue, gate, approvals, session); tag filters. Private and inactive bots are hidden.",
-    "bots_send_message": "Durable async message: steer a busy capable bot or start one idle turn. delivery=when_idle skips steering; wait_for_reply blocks. force never permits concurrent turns.",
+    "bots_send_message": "Durable async message: steer a busy capable bot or start one idle turn. delivery=when_idle skips steering; steer_only never starts a turn; wait_for_reply blocks. targets fans out (key required). force never permits concurrent turns.",
     "bots_route_message": "Queue a separate routed bot turn using trusted caller identity; never steer or broaden opt-in. Reuse idempotency_key for retries.",
     "bots_delivery_get": "Read durable delivery status/error by delivery_id; accepted or queued is not completed.",
     "bots_deliveries_list": "Compact delivery rows, newest first; bots_delivery_get reads one full receipt. bot_id matches either side; active_only=in flight; status takes a comma list; chat/self rows hidden unless include_chat. Limit ≤50.",

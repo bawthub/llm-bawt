@@ -16,7 +16,12 @@ from llm_bawt.bot_access.context import current_bot_access
 from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.bot_types import normalize_bot_type
 from .bot_access_deliveries import ScopedDeliveryReader
-from .inter_bot_send_mode import SendModeError, resolve_send_mode
+from llm_bawt.inter_bot_send_targets import SelectorError
+from .inter_bot_fanout import selector_error, send_batch, single_explicit_target
+from .inter_bot_send_mode import (
+    STEER_ONLY, STEER_OR_IDLE, WHEN_IDLE, SendMode, SendModeError,
+    require_one_recipient, resolve_send_mode,
+)
 from .inter_bot_sender import SenderIdentityError, resolve_sender_bot_id
 from .server import _get_storage, mcp
 from ..task_turn_context import TaskTurnContextError, is_delivery_turn_id
@@ -93,7 +98,18 @@ _now = time.monotonic  # patch point; never patch time.monotonic (event loop)
 
 
 async def _waited_reply_origin(sender_bot_id: str, target_bot_id: str) -> str | None:
-    """Identify an awaited inbound turn from signed, request-local context only."""
+    """The awaited inbound delivery whose sender is ``target_bot_id``, if any."""
+    origin = await _waited_inbound(sender_bot_id)
+    if origin and origin[1] == target_bot_id.strip().lower():
+        return origin[0]
+    return None
+
+
+async def _waited_inbound(sender_bot_id: str) -> tuple[str, str] | None:
+    """``(delivery_id, waiting sender)`` of this awaited inbound turn, if any.
+
+    Read from signed, request-local context only.
+    """
     from .task_association import current_task_turn_context
 
     try:
@@ -113,9 +129,9 @@ async def _waited_reply_origin(sender_bot_id: str, target_bot_id: str) -> str | 
     if (record and record.get("turn_id") == context.turn_id
             and record.get("user_message_id") == context.trigger_message_id
             and record.get("target_bot_id") == context.bot_id
-            and record.get("sender_bot_id") == target_bot_id.strip().lower()
+            and record.get("sender_bot_id")
             and record.get("reply_mode") == "waited"):
-        return delivery_id
+        return delivery_id, str(record["sender_bot_id"])
     return None
 
 
@@ -227,9 +243,14 @@ async def _enqueue_durable(
     reset_reason: str | None,
     reply_mode: str = "async",
     headers: dict[str, str] | None = None,
+    steer_only: bool = False,
 ) -> dict:
     """``headers`` is for first-party tool code only (the self-model continue
-    forwards its signed turn capability); bots_send_message never sets it."""
+    forwards its signed turn capability); bots_send_message never sets it.
+
+    ``steer_only`` is sent only when set, so every other body is unchanged.
+    """
+    delivery_name = STEER_ONLY if steer_only else STEER_OR_IDLE if prefer_steer else WHEN_IDLE
     body = {
         "reply_mode": reply_mode,
         "target_bot_id": target_bot_id,
@@ -249,6 +270,8 @@ async def _enqueue_durable(
         "retain_history": retain_history,
         "reset_reason": reset_reason,
     }
+    if steer_only:
+        body["steer_only"] = True
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -270,7 +293,7 @@ async def _enqueue_durable(
         return {
             "success": False,
             "queued": False,
-            "delivery": "steer_or_idle" if prefer_steer else "when_idle",
+            "delivery": delivery_name,
             "bot_id": target_bot_id,
             "sender": sender_bot_id,
             "error": str(detail),
@@ -280,16 +303,42 @@ async def _enqueue_durable(
         return {
             "success": False,
             "queued": False,
-            "delivery": "steer_or_idle" if prefer_steer else "when_idle",
+            "delivery": delivery_name,
             "bot_id": target_bot_id,
             "sender": sender_bot_id,
             "error": str(exc) or exc.__class__.__name__,
         }
 
 
+async def _send_fanout(
+    targets: Any, mode: SendMode, common: dict[str, Any], *, separate: bool,
+) -> dict:
+    """One batch to every bot ``targets`` selects (TASK-1431 design r3 §7).
+
+    In an awaited inbound turn the waiting sender already gets this turn's
+    final answer, so it is left out of the batch and reported as skipped.
+    """
+    exclude: list[str] = []
+    skipped: list[dict[str, str]] = []
+    if not separate:
+        origin = await _waited_inbound(common["sender_bot_id"])
+        if origin:
+            exclude.append(origin[1])
+            skipped.append({
+                "target": origin[1], "in_reply_to_delivery_id": origin[0],
+                "reason": "awaiting this turn's final answer",
+            })
+    fields = {key: value for key, value in common.items() if value is not None}
+    result = await send_batch(
+        _APP_BASE_URL, targets=targets, mode=mode, exclude=exclude, fields=fields,
+    )
+    return {**result, "skipped": skipped} if skipped else result
+
+
 @mcp.tool(name="bots_send_message")
 async def send_message_to_bot(
-    target_bot_id: str,
+    target_bot_id: str = "",
+    *,
     message: str,
     sender_bot_id: str = "",
     max_tokens: int | None = None,
@@ -310,6 +359,7 @@ async def send_message_to_bot(
     retain_history: bool | None = None,
     reset_reason: str | None = None,
     separate_message_reason: str | None = None,
+    targets: dict[str, Any] | list[str] | None = None,
 ) -> dict:
     """Send a message to another bot without creating concurrent agent turns.
 
@@ -324,10 +374,19 @@ async def send_message_to_bot(
       one safe idle turn. Returns immediately.
     * ``delivery="when_idle"`` (or ``queue_if_busy=True``) — never steer; wait
       for one separate idle turn. Returns immediately.
+    * ``delivery="steer_only"`` — steer an executing Claude Code turn, else
+      settle as not needed; never starts a turn. Cannot be waited.
     * ``wait_for_reply=True`` (or ``fire_and_forget=False``) — when_idle delivery
       plus a bounded wait for the reply. A busy target is rejected without side
       effects unless the key already owns a delivery. Cannot be combined with
       ``delivery="steer_or_idle"``; task handoffs (``task_id``) require a key.
+
+    Name the recipient with exactly one of ``target_bot_id`` or ``targets``.
+    ``targets`` is ``{"bots": [...]}`` (or a bare list), ``{"all_agents": true}``,
+    ``{"backends": [...]}`` or ``{"tags": [...]}``; you are left out. One
+    explicit bot returns the usual receipt. More returns ``{batch_id,
+    deliveries, refused}``, needs an ``idempotency_key``, never waits or
+    resets, and is limited to 3 new batches per 10 minutes.
 
     ``force=True`` is accepted for compatibility but never permits concurrency.
     In a signed inbound waited turn, a callback to that sender is redundant:
@@ -350,6 +409,7 @@ async def send_message_to_bot(
             "bot_id": target_bot_id,
         }
     try:
+        require_one_recipient(target_bot_id, targets)
         mode = resolve_send_mode(
             delivery=delivery,
             queue_if_busy=queue_if_busy,
@@ -370,6 +430,32 @@ async def send_message_to_bot(
     if separate_message_reason is not None and len(separate_message_reason.strip()) > 500:
         return {"success": False, "dispatched": False,
                 "error": "separate_message_reason must be at most 500 characters"}
+    common = dict(
+        message=message,
+        sender_bot_id=sender_bot_id,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        # The target turn's own bridge budget; never the caller's wait budget.
+        timeout_seconds=max(timeout_seconds, 1800.0),
+        idempotency_key=idempotency_key,
+        project_id=project_id,
+        task_id=task_id,
+        message_kind=message_kind,
+        metadata=metadata,
+        session_policy=session_policy,
+        reset_session_before_delivery=reset_session_before_delivery,
+        retain_history=retain_history,
+        reset_reason=reset_reason,
+    )
+    if targets is not None:
+        try:
+            single = single_explicit_target(targets, sender_bot_id)
+        except SelectorError as exc:
+            return selector_error(exc, sender_bot_id)
+        if single is None:
+            return await _send_fanout(
+                targets, mode, common, separate=bool((separate_message_reason or "").strip()))
+        target_bot_id = single
     if not (separate_message_reason or "").strip():
         origin_id = await _waited_reply_origin(sender_bot_id, target_bot_id)
         if origin_id:
@@ -403,31 +489,17 @@ async def send_message_to_bot(
             return {"success": False, "dispatched": False, "mode": mode.label,
                     "bot_id": target_bot_id, "sender": sender_bot_id, **refusal}
 
-    durable_kwargs = dict(
-        target_bot_id=target_bot_id,
-        message=message,
-        sender_bot_id=sender_bot_id,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        # The target turn's own bridge budget; never the caller's wait budget.
-        timeout_seconds=max(timeout_seconds, 1800.0),
-        idempotency_key=idempotency_key,
-        project_id=project_id,
-        task_id=task_id,
-        message_kind=message_kind,
-        metadata=metadata,
-        reply_mode=mode.label,
-        session_policy=session_policy,
-        reset_session_before_delivery=reset_session_before_delivery,
-        retain_history=retain_history,
-        reset_reason=reset_reason,
-    )
+    durable_kwargs = dict(common, target_bot_id=target_bot_id, reply_mode=mode.label)
     enqueue = _compat_hook("_enqueue_durable", _enqueue_durable)
     if not mode.wait:
         if existing is not None:
             receipt = {**existing, "duplicate": True}
         else:
-            receipt = await enqueue(prefer_steer=mode.prefer_steer, **durable_kwargs)
+            receipt = await enqueue(
+                prefer_steer=mode.prefer_steer,
+                **({"steer_only": True} if mode.steer_only else {}),
+                **durable_kwargs,
+            )
         return {**receipt, "mode": mode.label,
                 "dispatched": bool(receipt.get("delivery_id"))}
 

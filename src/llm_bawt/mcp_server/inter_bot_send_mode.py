@@ -1,10 +1,13 @@
-"""Single resolver for ``bots_send_message`` mode flags (TASK-1015).
+"""Single resolver for ``bots_send_message`` mode flags (TASK-1015, TASK-1431).
 
-Every send is durable. The flags only choose two orthogonal things:
+Every send is durable. The flags only choose three orthogonal things:
 
 * **delivery** — ``steer_or_idle`` (steer an active Claude turn, else one idle
-  turn) or ``when_idle`` (never steer; one separate idle turn).
+  turn), ``when_idle`` (never steer; one separate idle turn) or ``steer_only``
+  (steer an active Claude turn, else settle as not needed; never a turn).
 * **wait** — whether the caller blocks (bounded) for the target turn's reply.
+* **addressing** — exactly one of ``target_bot_id`` or ``targets``
+  (:func:`require_one_recipient`).
 
 Conflicting combinations are rejected here, before any side effect. The
 2026-10-04 incident (``delivery="when_idle"`` + ``fire_and_forget=False``
@@ -15,9 +18,14 @@ key) is exactly what this module exists to prevent.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-STEER_OR_IDLE = "steer_or_idle"
-WHEN_IDLE = "when_idle"
+from ..inter_bot_steer_only import STEER_ONLY, STEER_OR_IDLE, WHEN_IDLE
+
+__all__ = [
+    "STEER_ONLY", "STEER_OR_IDLE", "WHEN_IDLE", "SendMode", "SendModeError",
+    "require_one_recipient", "resolve_send_mode",
+]
 
 _DELIVERY_ALIASES = {
     "steer_or_idle": STEER_OR_IDLE,
@@ -25,6 +33,7 @@ _DELIVERY_ALIASES = {
     "when_idle": WHEN_IDLE,
     "queued": WHEN_IDLE,
     "queue_if_busy": WHEN_IDLE,
+    "steer_only": STEER_ONLY,
 }
 
 
@@ -39,11 +48,25 @@ class SendMode:
 
     @property
     def prefer_steer(self) -> bool:
-        return self.delivery == STEER_OR_IDLE
+        return self.delivery in (STEER_OR_IDLE, STEER_ONLY)
+
+    @property
+    def steer_only(self) -> bool:
+        return self.delivery == STEER_ONLY
 
     @property
     def label(self) -> str:
         return "waited" if self.wait else "async"
+
+
+def require_one_recipient(target_bot_id: str | None, targets: Any) -> None:
+    """Exactly one of ``target_bot_id`` or ``targets`` (design r3 §7)."""
+    has_target = bool((target_bot_id or "").strip())
+    if has_target == (targets is not None):
+        raise SendModeError(
+            "Pass exactly one of target_bot_id or targets."
+            if has_target else "Name a recipient: target_bot_id or targets."
+        )
 
 
 def resolve_send_mode(
@@ -62,14 +85,15 @@ def resolve_send_mode(
         explicit_delivery = _DELIVERY_ALIASES.get(normalized)
         if explicit_delivery is None:
             raise SendModeError(
-                f"Unknown delivery mode '{delivery}'. Use 'steer_or_idle' or 'when_idle'."
+                f"Unknown delivery mode '{delivery}'. "
+                "Use 'steer_or_idle', 'when_idle' or 'steer_only'."
             )
 
     if wait_for_reply and fire_and_forget is True:
         raise SendModeError(
             "wait_for_reply=true contradicts fire_and_forget=true; pass only one."
         )
-    if queue_if_busy and explicit_delivery == STEER_OR_IDLE:
+    if queue_if_busy and explicit_delivery in (STEER_OR_IDLE, STEER_ONLY):
         raise SendModeError(
             f"queue_if_busy=true contradicts delivery='{delivery}'; "
             "use delivery='when_idle' alone."
@@ -81,7 +105,7 @@ def resolve_send_mode(
     )
 
     if wait:
-        if explicit_delivery == STEER_OR_IDLE:
+        if explicit_delivery in (STEER_OR_IDLE, STEER_ONLY):
             raise SendModeError(
                 "A waited send needs its own target turn; it cannot steer. "
                 "Drop wait_for_reply/fire_and_forget=false, or use delivery='when_idle'."

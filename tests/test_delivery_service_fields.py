@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import HTTPException
 
+from llm_bawt import inter_bot_send as send
 from llm_bawt.service.routes import inter_bot_deliveries as route
 from llm_bawt.service.schemas import ChatCompletionRequest
 from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER
@@ -31,14 +32,14 @@ def delivery_route(monkeypatch):
     bots = {"fixture-target": bot, "fixture-sender": bot}
     owned = {(S, "fixture-target", "fixture-user")}
     monkeypatch.setattr(route, "get_service", lambda: service)
-    monkeypatch.setattr(route, "BotManager", lambda config: SimpleNamespace(get_bot=bots.get))
-    monkeypatch.setattr(route, "submission_result", lambda *a, **kw: (202, {"success": True}))
+    monkeypatch.setattr(send, "BotManager", lambda config: SimpleNamespace(get_bot=bots.get))
+    monkeypatch.setattr(send, "submission_result", lambda *a, **kw: (202, {"success": True}))
 
-    def require_owned(session_id, bot_id, user_id):
+    def require_owned(_sender, session_id, bot_id, user_id):
         if (session_id, bot_id, user_id) not in owned:
             raise HTTPException(status_code=404, detail={"error": "session_not_found"})
 
-    monkeypatch.setattr(route, "_require_owned_session", require_owned)
+    monkeypatch.setattr(send.DeliverySender, "_require_owned_session", require_owned)
     return SimpleNamespace(dispatcher=dispatcher, bot=bot, bots=bots, owned=owned)
 
 
@@ -140,12 +141,13 @@ def test_ownership_query_admits_archived_task_threads_but_not_deleted(monkeypatc
             return SimpleNamespace(first=lambda: match[0] if match else None)
 
     engine = SimpleNamespace(connect=Conn)
-    monkeypatch.setattr(route, "_dispatcher", lambda: SimpleNamespace(store=SimpleNamespace(engine=engine)))
+    sender = send.DeliverySender(
+        lambda: None, dispatcher=lambda: SimpleNamespace(store=SimpleNamespace(engine=engine)))
     if owned:
-        route._require_owned_session(S, "fixture-target", "fixture-user")
+        sender._require_owned_session(S, "fixture-target", "fixture-user")
     else:
         with pytest.raises(HTTPException) as error:
-            route._require_owned_session(S, "fixture-target", "fixture-user")
+            sender._require_owned_session(S, "fixture-target", "fixture-user")
         assert error.value.status_code == 404
 
 
@@ -199,7 +201,7 @@ def test_pinned_trigger_alone_to_a_chat_bot_does_not_burn_the_uuid(delivery_rout
 def test_pinned_trigger_skips_the_automatic_context_reset(delivery_route, monkeypatch):
     """Active-thread health must not rotate a thread or drop the caller's U."""
     health = Mock(side_effect=AssertionError("context health consulted"))
-    monkeypatch.setattr(route, "AgentContextStore", lambda config: SimpleNamespace(health=health))
+    monkeypatch.setattr(send, "AgentContextStore", lambda config: SimpleNamespace(health=health))
     _send(_body(user_message_id=U))
     _send(_body(session_id=S))
     assert delivery_route.dispatcher.store.enqueue.call_count == 2

@@ -82,6 +82,15 @@ class DeliveryClaim:
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
             prefer_steer = bool(payload.get("prefer_steer", True))
+            from .inter_bot_steer_only import (
+                NO_ACTIVE_RUN, UNSUPPORTED_BACKEND, is_steer_only, settle_not_needed,
+            )
+
+            steer_only = is_steer_only(payload)
+            if steer_only and not steer_capable:
+                # TASK-1431: nothing on this backend can be steered, so the row
+                # is not needed; it never waits for or starts a turn.
+                return settle_not_needed(conn, head["id"], UNSUPPORTED_BACKEND)
             try:
                 delivery_user_id = resolve_delivery_user(store.config, payload.get("user"))
             except ValueError as exc:
@@ -162,6 +171,10 @@ class DeliveryClaim:
                 status = STEERING
                 target_turn_id = active["id"]
                 delivery_mode = "steer"
+            elif steer_only:
+                # Idle target: a steer_only row settles as not needed under this
+                # lock, with no reservation and no fallback turn (TASK-1431).
+                return settle_not_needed(conn, head["id"], NO_ACTIVE_RUN)
             else:
                 status = DISPATCHING
                 target_turn_id = head["turn_id"]

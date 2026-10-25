@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from llm_bawt.chat_prompt_defaults import COMPACT_SUMMARY_DEFAULT
 from claude_code_bridge.send_preflight import prepare_send
+from llm_bawt import inter_bot_send as send
 from llm_bawt.service.routes import inter_bot_deliveries as route
 
 
@@ -24,8 +25,8 @@ def delivery_route(monkeypatch):
                               _inter_bot_dispatcher=dispatcher)
     bot = SimpleNamespace(agent_backend="claude-code", harness="claude-code")
     monkeypatch.setattr(route, "get_service", lambda: service)
-    monkeypatch.setattr(route, "BotManager", lambda config: SimpleNamespace(get_bot=lambda slug: bot))
-    monkeypatch.setattr(route, "submission_result", lambda *a, **kw: (202, {"success": True}))
+    monkeypatch.setattr(send, "BotManager", lambda config: SimpleNamespace(get_bot=lambda slug: bot))
+    monkeypatch.setattr(send, "submission_result", lambda *a, **kw: (202, {"success": True}))
     return dispatcher, bot
 
 
@@ -124,8 +125,8 @@ def test_preventive_health_uses_explicit_owner_not_empty_default(delivery_route,
     dispatcher, _bot = delivery_route
     route.get_service().config.DEFAULT_USER = None
     health = Mock(return_value={"state": "healthy"})
-    monkeypatch.setattr(route, "AgentContextStore", lambda config: SimpleNamespace(health=health))
-    monkeypatch.setattr(route, "_target_context_window", lambda config, bot: None)
+    monkeypatch.setattr(send, "AgentContextStore", lambda config: SimpleNamespace(health=health))
+    monkeypatch.setattr(send, "_target_context_window", lambda config, bot: None)
     monkeypatch.setattr(runtime_settings, "RuntimeSettingsResolver", lambda *a, **kw: SimpleNamespace(
         resolve=lambda key, fallback: fallback,
     ))

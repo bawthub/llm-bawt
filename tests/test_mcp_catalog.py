@@ -135,7 +135,9 @@ async def test_catalog_token_budgets():
     # 3,842 (+8).
     # TASK-1400: bots_list_available names its live state and tag filter:
     # 3,860 (+18). One call answers "who is busy/queued/held" for every bot.
-    assert sum(descriptions) <= 3860, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1431: bots_send_message names steer_only and keyed targets fan-out:
+    # 3,874 (+14). Both change what one call may do, so they stay in-band.
+    assert sum(descriptions) <= 3874, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -176,7 +178,10 @@ async def test_catalog_token_budgets():
     # live-state summary: 14,125 (+79). Replaces per-bot health/delivery probes.
     # TASK-1422: typed check_links on tasks_update (REVIEW's "Where to look"):
     # 14,234 (+109). Replaces free-text dev URLs and look steps in response.
-    assert total <= 14234, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1431: bots_send_message targets (selector object or bot list),
+    # optional target_bot_id and the summary above: 14,281 (+47). One keyed
+    # call replaces N single sends.
+    assert total <= 14281, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

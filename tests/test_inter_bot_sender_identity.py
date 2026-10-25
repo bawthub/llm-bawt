@@ -17,6 +17,7 @@ from llm_bawt.mcp_server.inter_bot_sender import (
     SenderIdentityError,
     resolve_sender_bot_id,
 )
+from llm_bawt import inter_bot_send as send
 from llm_bawt.service.routes import inter_bot_deliveries as route
 from llm_bawt.task_turn_context import TaskTurnContextError
 
@@ -152,10 +153,10 @@ def delivery_route(monkeypatch):
     bot = SimpleNamespace(agent_backend="claude-code", harness="claude-code")
     known = {"al", "snark"}
     monkeypatch.setattr(route, "get_service", lambda: service)
-    monkeypatch.setattr(route, "BotManager", lambda config: SimpleNamespace(
+    monkeypatch.setattr(send, "BotManager", lambda config: SimpleNamespace(
         get_bot=lambda slug: bot if slug.strip().lower() in known else None,
     ))
-    monkeypatch.setattr(route, "submission_result", lambda *a, **kw: (202, {"success": True}))
+    monkeypatch.setattr(send, "submission_result", lambda *a, **kw: (202, {"success": True}))
     return store
 
 
