@@ -805,6 +805,37 @@ def test_drop_columns_drops_only_what_the_table_still_has_in_one_statement(gated
         assert drop_columns(conn, "caid_drop", ["a", "gone", "b"]) == []
 
 
+@pytest.mark.integration
+def test_drop_columns_behind_an_open_reader_is_skipped_and_retried_next_time(gated):
+    """Codex S4 r1 S1: the contract ALTER never queues readers behind it for longer than lock_timeout."""
+    from llm_bawt.utils.schema import drop_columns
+
+    engine = gated.store.engine
+    table = f"caid_drop_{uuid.uuid4().hex[:12]}"
+    with engine.begin() as conn:
+        conn.execute(sa_text(f"CREATE TABLE {table} (id INT, retired INT)"))
+    try:
+        with engine.connect() as holder:
+            txn = holder.begin()
+            holder.execute(sa_text(f"SELECT count(*) FROM {table}"))
+            try:
+                with engine.begin() as conn:
+                    conn.execute(sa_text("SET LOCAL lock_timeout = '10s'"))
+                    started = time.monotonic()
+                    assert drop_columns(conn, table, ["retired"], lock_timeout="200ms") == []
+                    assert time.monotonic() - started < 3  # its own timeout, not the caller's 10s
+                    assert conn.execute(sa_text("SELECT current_setting('lock_timeout')")).scalar_one() == "10s"
+                    conn.execute(sa_text(f"SELECT retired FROM {table}"))  # the txn is still usable
+            finally:
+                txn.rollback()
+        with engine.begin() as conn:
+            assert drop_columns(conn, table, ["retired"]) == [
+                f"ALTER TABLE {table} DROP COLUMN IF EXISTS retired"]
+    finally:
+        with engine.begin() as conn:
+            conn.execute(sa_text(f"DROP TABLE IF EXISTS {table}"))
+
+
 def _member_columns(conn):
     return {r[0] for r in conn.execute(sa_text(
         "SELECT attname FROM pg_attribute WHERE attrelid = 'gate_members'::regclass"

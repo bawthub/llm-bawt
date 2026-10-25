@@ -14,6 +14,7 @@ from weakref import WeakKeyDictionary, WeakSet
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import OperationalError
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +126,24 @@ def ensure_columns(conn: Connection, table: str, columns: Mapping[str, tuple[str
     return ddl
 
 
-def drop_columns(conn: Connection, table: str, names: Iterable[str]) -> list[str]:
+LOCK_NOT_AVAILABLE = "55P03"
+
+
+def drop_columns(
+    conn: Connection, table: str, names: Iterable[str], *, lock_timeout: str = "2s",
+) -> list[str]:
     """Drop the retired columns ``table`` still has; return the DDL run.
 
     The contract half of an expand/contract migration. Like ``ensure_columns``,
     one catalog read decides, so a table already contracted gets no ALTER (a
     no-op ``DROP COLUMN IF EXISTS`` still requests ACCESS EXCLUSIVE). Every
     present column goes in one statement: one lock, one catalog change.
+
+    The bootstrap can first run on a hot path, where an ALTER queued behind an
+    open transaction would stall every reader of ``table`` queued behind it.
+    So the ALTER waits at most ``lock_timeout`` inside a savepoint; on
+    lock_not_available it is skipped (``[]``, a warning) and the next process
+    start tries again. Nothing reads the retired columns, so a late drop is safe.
     """
     wanted = list(names)
     present = {row[0] for row in conn.execute(text("""
@@ -143,7 +155,19 @@ def drop_columns(conn: Connection, table: str, names: Iterable[str]) -> list[str
     if not drops:
         return []
     statement = f"ALTER TABLE {table} " + ", ".join(f"DROP COLUMN IF EXISTS {name}" for name in drops)
-    conn.execute(text(statement))
+    previous = conn.execute(text("SELECT current_setting('lock_timeout')")).scalar_one()
+    savepoint = conn.begin_nested()
+    try:
+        conn.execute(text("SELECT set_config('lock_timeout', :v, true)"), {"v": lock_timeout})
+        conn.execute(text(statement))
+    except OperationalError as exc:
+        savepoint.rollback()  # also restores lock_timeout
+        if getattr(exc.orig, "pgcode", None) != LOCK_NOT_AVAILABLE:
+            raise
+        logger.warning("Skipped %r: lock not available within %s; the next start retries", statement, lock_timeout)
+        return []
+    savepoint.commit()
+    conn.execute(text("SELECT set_config('lock_timeout', :v, true)"), {"v": previous})
     return [statement]
 
 
