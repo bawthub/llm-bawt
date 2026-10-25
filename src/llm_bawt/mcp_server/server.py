@@ -35,6 +35,7 @@ from llm_bawt.shared.logging import LogConfig
 # across the tool_modules keep working byte-compatibly.
 from .registry import mcp  # noqa: F401 — re-exported for downstream tool modules
 from .bot_access_identity import BotAccessMiddleware
+from .agent_view import for_caller
 
 if TYPE_CHECKING:
     pass
@@ -264,7 +265,7 @@ async def search_all_messages(
     """
     logger.debug("MCP tool invoked: tools/search_all_messages")
     storage = _get_storage()
-    return await storage.search_all_messages(
+    return for_caller(await storage.search_all_messages(
         query=query,
         n_results=n_results,
         role_filter=role_filter,
@@ -272,7 +273,7 @@ async def search_all_messages(
         until=_parse_timestamp(until),
         sort_by=sort_by,
         bot_id=bot_id,
-    )
+    ))
 
 
 @mcp.tool(name="memory_search_all")
@@ -623,9 +624,9 @@ async def get_message_by_id(
         None if not found.
     """
     storage = _get_storage()
-    return await storage.get_message_by_id(
+    return for_caller(await storage.get_message_by_id(
         bot_id=bot_id, message_id=message_id, before=before, after=after,
-    )
+    ))
 
 
 @mcp.tool(name="messages_ignore_by_id")
@@ -748,11 +749,11 @@ async def get_messages(
         bot_id, session_id, summaries_only, exclude_summarized,
     )
     storage = _get_storage()
-    return await storage.get_messages(
+    return for_caller(await storage.get_messages(
         bot_id=bot_id, since_seconds=since_seconds, limit=limit,
         session_id=session_id, summaries_only=summaries_only,
         exclude_summarized=exclude_summarized,
-    )
+    ))
 
 
 @mcp.tool(name="messages_clear")
