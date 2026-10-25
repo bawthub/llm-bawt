@@ -20,6 +20,10 @@ from .tasks import Task, TaskResult, TaskStatus
 
 logger = logging.getLogger(__name__)
 
+# Wire prefix of a negotiated extension frame (chat_response_adapter's
+# EXTENSION_COMMENT). Kept local so the CLI client does not import FastAPI.
+_EXTENSION_EVENT = ": llm-bawt-event "
+
 # Check for optional httpx
 try:
     import httpx
@@ -310,7 +314,11 @@ class ServiceClient:
         import urllib.error
 
         url = f"{self.http_url}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
+        # The route sends a stock OpenAI stream. Warnings and server-run tool
+        # calls arrive only when negotiated, as ": llm-bawt-event " comments
+        # carrying the same JSON a data frame would.
+        headers = {"Content-Type": "application/json",
+                   "X-LLM-Bawt-Extension-Events": "comment"}
         body = json.dumps(payload).encode()
 
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -326,15 +334,27 @@ class ServiceClient:
                     if not raw_line:
                         break
                     line = raw_line.decode().strip()
+                    if line.startswith(_EXTENSION_EVENT):
+                        line = "data: " + line[len(_EXTENSION_EVENT):]
                     if line.startswith("data: "):
                         data = line[6:]
                         if data == "[DONE]":
                             break
                         try:
                             chunk = json.loads(data)
+                            if not isinstance(chunk, dict):
+                                continue
                             if is_accepted_receipt(chunk):
+                                # Only an older service still sends receipts.
                                 yield chunk
                                 continue
+                            if isinstance(chunk.get("error"), dict):
+                                # Terminal in-band failure: the turn was admitted,
+                                # so the caller must not fall back and resubmit.
+                                message = str(chunk["error"].get("message") or "stream failed")
+                                self.last_error = message
+                                yield {"stream_error": message}
+                                return
                             # Service warning event (e.g. model fallback)
                             if chunk.get("object") == "service.warning":
                                 yield {"warnings": chunk.get("warnings", []), "model": chunk.get("model")}

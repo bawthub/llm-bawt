@@ -40,8 +40,7 @@ def test_nonstream_receipt_waits_on_exact_original(monkeypatch):
     monkeypatch.setattr(adapter, "observe_receipt", observer)
     client, service, path = _client(monkeypatch)
     with client:
-        response = client.post(path, json={**BODY, "stream": False},
-                               headers={"X-LLM-Bawt-Response-Mode": "openai"})
+        response = client.post(path, json={**BODY, "stream": False})
     assert response.status_code == 200
     assert response.json()["object"] == "chat.completion"
     assert response.json()["choices"][0]["message"]["content"] == "hello back"
@@ -54,26 +53,31 @@ def test_nonstream_receipt_waits_on_exact_original(monkeypatch):
 
 @pytest.mark.parametrize("headers", [
     {},
-    {"X-LLM-Bawt-Response-Mode": "unknown"},
+    {"X-LLM-Bawt-Response-Mode": "openai"},  # retired opt-in, now ignored
+    {"X-LLM-Bawt-Response-Mode": "legacy"},  # no value brings receipts back
     {"X-LLM-Bawt-Admission-Events": "comment"},
 ])
 @pytest.mark.parametrize("stream", [False, True])
-def test_unmigrated_caller_keeps_original_receipt_contract(monkeypatch, headers, stream):
+def test_no_caller_receives_a_queued_receipt(monkeypatch, headers, stream):
+    """TASK-1144: the 202 / receipt-frame shortcut is gone for every caller."""
     events = [f"data: {json.dumps(RECEIPT)}\n\n", "data: [DONE]\n\n"]
-    observer = AsyncMock(side_effect=AssertionError("legacy request unexpectedly waited"))
+    observer = AsyncMock(return_value={"status": "DELIVERED", "response_text": "hello back"})
     monkeypatch.setattr(adapter, "observe_receipt", observer)
     client, service, path = _client(monkeypatch, stream_events=events)
     with client:
         response = client.post(path, json={**BODY, "stream": stream}, headers=headers)
+    assert response.status_code == 200
     if stream:
-        assert response.status_code == 200
-        assert response.text == "".join(events)
+        frames = [line[6:] for line in response.text.split("\n\n") if line.startswith("data: ")]
+        assert all("chat.completion.queued" not in frame for frame in frames)
+        assert json.loads(frames[0])["choices"][0]["delta"]["content"] == "hello back"
+        assert frames[-1] == "[DONE]"
         service.chat_completion.assert_not_awaited()
     else:
-        assert response.status_code == 202
-        assert response.json() == RECEIPT
+        assert response.json()["object"] == "chat.completion"
+        assert response.json()["choices"][0]["message"]["content"] == "hello back"
         service.chat_completion.assert_awaited_once()
-    observer.assert_not_awaited()
+    observer.assert_awaited_once()
 
 
 def test_botchat_stream_preserves_legacy_pending_receipt_failure_shape(monkeypatch):
@@ -97,8 +101,7 @@ def test_nonstream_failure_never_returns_receipt(monkeypatch, reply, code):
     monkeypatch.setattr(adapter, "observe_receipt", AsyncMock(return_value=reply))
     client, service, path = _client(monkeypatch)
     with client:
-        response = client.post(path, json=BODY,
-                               headers={"X-LLM-Bawt-Response-Mode": "openai"})
+        response = client.post(path, json=BODY)
     assert response.status_code == code
     assert "choices" not in response.json()
     service.chat_completion.assert_awaited_once()
@@ -115,8 +118,7 @@ def test_stream_receipt_exact_reply_or_error(monkeypatch, reply, success):
     monkeypatch.setattr(adapter, "observe_receipt", observer)
     client, service, path = _client(monkeypatch, stream_events=events)
     with client:
-        response = client.post(path, json={**BODY, "stream": True},
-                               headers={"X-LLM-Bawt-Response-Mode": "openai"})
+        response = client.post(path, json={**BODY, "stream": True})
     chunks = [line[6:] for line in response.text.split("\n\n") if line.startswith("data: ")]
     assert all("chat.completion.queued" not in item for item in chunks)
     assert (chunks[-1] == "[DONE]") is success
@@ -137,8 +139,7 @@ def test_stream_failure_never_emits_success_trailer(monkeypatch, warning):
               "data: [DONE]\n\n"]
     client, service, path = _client(monkeypatch, stream_events=events)
     with client:
-        response = client.post(path, json={**BODY, "stream": True},
-                               headers={"X-LLM-Bawt-Response-Mode": "openai"})
+        response = client.post(path, json={**BODY, "stream": True})
     assert "[DONE]" not in response.text
     assert "finish_reason" not in response.text
     assert json.loads(response.text.strip()[6:])["error"]["message"] == warning
@@ -154,8 +155,7 @@ def test_negotiated_admission_comment_is_not_an_openai_data_frame(monkeypatch):
     with client:
         response = client.post(
             path, json={**BODY, "stream": True},
-            headers={"X-LLM-Bawt-Response-Mode": "openai",
-                     "X-LLM-Bawt-Admission-Events": "comment"},
+            headers={"X-LLM-Bawt-Admission-Events": "comment"},
         )
     assert f": llm-bawt-admission {json.dumps(RECEIPT)}\n\n" in response.text
     assert f"data: {json.dumps(RECEIPT)}\n\n" not in response.text
@@ -261,8 +261,7 @@ DIRECT = [": connected\n\n", TEXT, *EXTENSIONS, STOP, "data: [DONE]\n\n"]
 def test_openai_stream_extension_frames_follow_negotiation(monkeypatch, headers, expected_extensions):
     client, service, path = _client(monkeypatch, stream_events=DIRECT)
     with client:
-        response = client.post(path, json={**BODY, "stream": True},
-                               headers={"X-LLM-Bawt-Response-Mode": "openai", **headers})
+        response = client.post(path, json={**BODY, "stream": True}, headers=headers)
     assert response.text == "".join([": connected\n\n", TEXT, *expected_extensions,
                                      STOP, "data: [DONE]\n\n"])
     service.chat_completion.assert_not_awaited()
@@ -281,8 +280,8 @@ def test_comment_mode_translates_back_to_the_frames_bawthub_renders(monkeypatch)
                           "comment": {"X-LLM-Bawt-Extension-Events": "comment"}}.items():
         client, _service, path = _client(monkeypatch, stream_events=stream)
         with client:
-            outputs[mode] = client.post(path, json={**BODY, "stream": True}, headers={
-                "X-LLM-Bawt-Response-Mode": "openai", **headers}).text
+            outputs[mode] = client.post(path, json={**BODY, "stream": True},
+                                        headers=headers).text
     assert outputs["data"] == "".join(stream)
     assert ": llm-bawt-event " in outputs["comment"]
     assert outputs["comment"].replace(": llm-bawt-event ", "data: ") == outputs["data"]
@@ -308,14 +307,5 @@ MIXED_EXTENSION = ": llm-bawt-event " + json.dumps({
 def test_mixed_chunk_splits_standard_fields_from_extensions(monkeypatch, headers, expected):
     client, _service, path = _client(monkeypatch, stream_events=[_sse(MIXED), STOP, "data: [DONE]\n\n"])
     with client:
-        response = client.post(path, json={**BODY, "stream": True},
-                               headers={"X-LLM-Bawt-Response-Mode": "openai", **headers})
+        response = client.post(path, json={**BODY, "stream": True}, headers=headers)
     assert response.text == "".join([*expected, STOP, "data: [DONE]\n\n"])
-
-
-def test_legacy_stream_is_untouched_by_extension_negotiation(monkeypatch):
-    client, _service, path = _client(monkeypatch, stream_events=DIRECT)
-    with client:
-        response = client.post(path, json={**BODY, "stream": True},
-                               headers={"X-LLM-Bawt-Extension-Events": "comment"})
-    assert response.text == "".join(DIRECT)

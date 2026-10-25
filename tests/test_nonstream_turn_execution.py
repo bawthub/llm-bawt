@@ -393,8 +393,10 @@ def test_post_admission_agent_setup_failure_closes_turn(monkeypatch, stream):
     assert "rotation failed" in service._update_turn_log.call_args.kwargs["error_text"]
 
 
-def test_nonstream_route_returns_202_for_queued_ack(monkeypatch):
+def test_nonstream_route_answers_a_queued_ack_instead_of_202(monkeypatch):
+    """TASK-1144: no header brings back the 202 receipt shortcut."""
     from starlette.requests import Request
+    from llm_bawt.service import chat_response_adapter as adapter
     from llm_bawt.service.routes import chat as chat_routes
 
     receipt = {
@@ -403,15 +405,16 @@ def test_nonstream_route_returns_202_for_queued_ack(monkeypatch):
         "turn_id": "turn-delivery-test", "assistant_message_id": "assistant-test",
         "status": "QUEUED",
     }
-    monkeypatch.setattr(chat_routes, "get_service", lambda: SimpleNamespace(
-        chat_completion=AsyncMock(return_value=receipt),
-    ))
+    service = SimpleNamespace(chat_completion=AsyncMock(return_value=receipt))
+    monkeypatch.setattr(chat_routes, "get_service", lambda: service)
+    observer = AsyncMock(return_value={"status": "DELIVERED", "response_text": "the answer"})
+    monkeypatch.setattr(adapter, "observe_receipt", observer)
     http_request = Request({"type": "http", "headers": [], "method": "POST", "path": "/v1/chat/completions"})
     response = asyncio.run(chat_routes.chat_completions(_request(), http_request))
-    assert response.status_code == 202
-    assert response.media_type == "application/json"
-    import json
-    assert json.loads(response.body) == receipt
+    assert response.object == "chat.completion"
+    assert response.choices[0].message.content == "the answer"
+    assert observer.await_args.args[2] == receipt  # the exact admitted turn, not a resubmit
+    service.chat_completion.assert_awaited_once()
 
 
 def test_agent_client_threads_request_local_identity_into_backend_config() -> None:

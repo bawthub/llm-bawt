@@ -1,21 +1,17 @@
-"""Stock OpenAI SDK contract for /v1/chat/completions (TASK-1144 cutover gate).
+"""Stock OpenAI SDK contract for /v1/chat/completions (TASK-1144).
 
 Drives the real ``openai`` client against the real route with no llm-bawt
-knowledge beyond ``extra_body``. ``OPENAI`` cases use the opt-in response mode
-and must pass now. ``DEFAULT`` cases are the same calls with no header. Where
-today's default is not compliant they run under ``_contract`` and must FAIL the
-compliance assertions (the gate forbids xfail). Once the default flips they stop
-failing, ``_contract`` raises, and the cutover is done when ``PRECUTOVER`` is
-deleted and every case passes with no header.
+knowledge beyond ``extra_body``. Every case runs twice: with the retired
+``X-LLM-Bawt-Response-Mode: openai`` opt-in (now ignored) and with no header.
+Both must be compliant: no queued receipt, no sidecar frames, no server-run
+tool calls, and a failed turn is an SDK error, not an empty success.
 """
 
-import contextlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import openai
-import pydantic
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -29,23 +25,7 @@ from llm_bawt.service.schemas import ChatCompletionChoice, ChatCompletionRespons
 
 OPENAI = {"X-LLM-Bawt-Response-Mode": "openai"}
 DEFAULT: dict[str, str] = {}
-PRECUTOVER = "precutover-default"
-# Compliant now in openai mode; the no-header default is a documented defect.
-MODES = [pytest.param(OPENAI, id="openai"), pytest.param(PRECUTOVER, id="default")]
 BOTH_PASS = [pytest.param(OPENAI, id="openai"), pytest.param(DEFAULT, id="default")]
-
-
-def _headers(mode) -> dict[str, str]:
-    return DEFAULT if mode == PRECUTOVER else mode
-
-
-def _contract(mode):
-    """Compliance block: must pass in openai mode, must fail pre-cutover."""
-    if mode != PRECUTOVER:
-        return contextlib.nullcontext()
-    # Failed = a nested pytest.raises that did not raise; ValidationError = a
-    # receipt or sidecar frame that is not a valid ChatCompletion[Chunk].
-    return pytest.raises((AssertionError, pytest.fail.Exception, pydantic.ValidationError))
 
 RECEIPT = {
     "object": "chat.completion.queued", "status": "QUEUED", "delivery_id": "delivery-1",
@@ -168,66 +148,61 @@ def test_nonstream_direct_chat_bot(harness, headers):
     assert strict.choices[0].finish_reason == "stop"
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_nonstream_queued_agent_turn_returns_the_answer(harness, monkeypatch, mode):
+@pytest.mark.parametrize("headers", BOTH_PASS)
+def test_nonstream_queued_agent_turn_returns_the_answer(harness, monkeypatch, headers):
     _delivered(monkeypatch)
     harness.service.chat_completion.return_value = dict(RECEIPT)
-    result = harness.sdk(_headers(mode)).chat.completions.create(
+    result = harness.sdk(headers).chat.completions.create(
         model="test-model", messages=MESSAGES, extra_body=EXTRA)
-    with _contract(mode):  # pre-cutover: HTTP 202 chat.completion.queued receipt
-        strict = ChatCompletion.model_validate(result.to_dict())
-        assert strict.object == "chat.completion"
-        assert strict.choices[0].message.content == "queued answer"
+    strict = ChatCompletion.model_validate(result.to_dict())
+    assert strict.object == "chat.completion"
+    assert strict.choices[0].message.content == "queued answer"
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_nonstream_queued_failure_is_an_sdk_error(harness, monkeypatch, mode):
+@pytest.mark.parametrize("headers", BOTH_PASS)
+def test_nonstream_queued_failure_is_an_sdk_error(harness, monkeypatch, headers):
     monkeypatch.setattr(adapter, "observe_receipt", AsyncMock(
         return_value={"status": "FAILED", "error": "bridge rejected"}))
     harness.service.chat_completion.return_value = dict(RECEIPT)
-    with _contract(mode):  # pre-cutover: the receipt is a 2xx "success"
-        with pytest.raises(openai.APIStatusError) as caught:
-            harness.sdk(_headers(mode)).chat.completions.create(
-                model="test-model", messages=MESSAGES, extra_body=EXTRA)
-        assert caught.value.status_code == 502
+    with pytest.raises(openai.APIStatusError) as caught:
+        harness.sdk(headers).chat.completions.create(
+            model="test-model", messages=MESSAGES, extra_body=EXTRA)
+    assert caught.value.status_code == 502
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_stream_direct_turn_is_standard_chunks_only(harness, mode):
+@pytest.mark.parametrize("headers", BOTH_PASS)
+def test_stream_direct_turn_is_standard_chunks_only(harness, headers):
     harness.service.stream_events = DIRECT_STREAM
-    stream = harness.sdk(_headers(mode)).chat.completions.create(
+    stream = harness.sdk(headers).chat.completions.create(
         model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
-    with _contract(mode):  # pre-cutover: sidecars and server-run tool_calls leak
-        _assert_one_answer(_strict_chunks(stream), "Let me check. It is noon.")
+    _assert_one_answer(_strict_chunks(stream), "Let me check. It is noon.")
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_stream_queued_agent_turn_streams_the_answer(harness, monkeypatch, mode):
+@pytest.mark.parametrize("headers", BOTH_PASS)
+def test_stream_queued_agent_turn_streams_the_answer(harness, monkeypatch, headers):
     _delivered(monkeypatch)
     harness.service.stream_events = QUEUED_STREAM
-    stream = harness.sdk(_headers(mode)).chat.completions.create(
+    stream = harness.sdk(headers).chat.completions.create(
         model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
-    with _contract(mode):  # pre-cutover: the receipt frame instead of the answer
-        _assert_one_answer(_strict_chunks(stream), "queued answer")
+    _assert_one_answer(_strict_chunks(stream), "queued answer")
 
 
-@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("headers", BOTH_PASS)
 @pytest.mark.parametrize("warning", ["stream_interrupted: bridge dropped", "request_failed: denied"])
-def test_stream_failure_raises_instead_of_a_fake_success(harness, mode, warning):
+def test_stream_failure_raises_instead_of_a_fake_success(harness, headers, warning):
     harness.service.stream_events = [
         _chunk({"role": "assistant", "content": "partial"}),
         _frame({"object": "service.warning", "model": "test-model", "warnings": [warning]}),
         _chunk({}, "stop"),
         "data: [DONE]\n\n",
     ]
-    stream = harness.sdk(_headers(mode)).chat.completions.create(
+    stream = harness.sdk(headers).chat.completions.create(
         model="test-model", messages=MESSAGES, stream=True, extra_body=EXTRA)
     received = []
-    with _contract(mode):  # pre-cutover: warning frame, then stop + [DONE]
-        with pytest.raises(openai.APIError, match=warning):
-            for chunk in stream:
-                received.append(chunk)
-        assert all(not c.choices or c.choices[0].finish_reason is None for c in received)
+    with pytest.raises(openai.APIError, match=warning):
+        for chunk in stream:
+            received.append(chunk)
+    assert all(not c.choices or c.choices[0].finish_reason is None for c in received)
 
 
 @pytest.mark.parametrize("headers", BOTH_PASS)

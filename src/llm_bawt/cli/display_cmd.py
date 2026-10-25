@@ -125,6 +125,11 @@ def query_via_service(
                         answer = resolve_accepted_receipt(item)
                         if answer:
                             yield answer
+                    elif isinstance(item, dict) and "stream_error" in item:
+                        # The service admitted the turn and then reported its
+                        # failure; falling back would run the prompt twice.
+                        accepted_receipt = True
+                        console.print(f"[bold red]{item['stream_error']}[/bold red]")
                     elif isinstance(item, dict) and "warnings" in item:
                         # Service warnings (e.g. model fallback)
                         for warning in item["warnings"]:
@@ -171,7 +176,9 @@ def query_via_service(
                 first_content = next(content_iter)
             except StopIteration:
                 if accepted_receipt:
-                    return True  # Accepted work is never an unavailable-service fallback.
+                    # Accepted (or admitted-then-failed) work is never an
+                    # unavailable-service fallback.
+                    return True
                 if got_metadata:
                     # Service responded (we got the model) but produced no content.
                     # This typically means a server-side error (e.g. tool execution failed).
