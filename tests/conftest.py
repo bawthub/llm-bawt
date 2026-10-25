@@ -172,3 +172,22 @@ def force_fs_media_backend(monkeypatch):
     """
     monkeypatch.setenv("LLM_BAWT_STORAGE_BACKEND", "fs")
     monkeypatch.setenv("LLM_BAWT_S3_FALLBACK_FS", "false")
+
+
+@pytest.fixture(autouse=True)
+def no_derived_bawthub_service_token(monkeypatch):
+    """Never derive the BawtHub service token from a real master key (TASK-1472).
+
+    With no override set, llm-bawt derives the token from the master Fernet
+    key, which on echo is the live ``~/.config/llm-bawt/secret.key``. Tests that
+    need derivation patch it back in with a fixture key; everyone else sees the
+    pre-derivation behaviour (no token, no bearer) and nothing is exported.
+    """
+    from llm_bawt.bawthub_auth import service_token
+
+    def refuse() -> str:
+        raise RuntimeError("tests never derive from a real master key")
+
+    monkeypatch.setattr(service_token, "derive_service_token", refuse)
+    monkeypatch.setattr(service_token._SOURCE, "_derived", None)
+    monkeypatch.delenv(service_token.EXPORT_FILE_ENV, raising=False)

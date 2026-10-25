@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
-from llm_bawt.bawthub_auth import TOKEN_ENV, TOKEN_FILE_ENV
+from llm_bawt.bawthub_auth import TOKEN_ENV, TOKEN_FILE_ENV, service_token
 from llm_bawt.bawthub_auth.secret_store import (
     BawtHubAuthSecretStore,
     SecretUnreadable,
@@ -82,6 +82,7 @@ def test_no_or_wrong_token_is_401(client, store, headers, method, path, body):
     ("GET", None), ("PUT", {"value": "v"}), ("PUT", {"wrong": "shape"}), ("PUT", b"{not json"),
 ])
 def test_unconfigured_token_fails_closed(client, store, monkeypatch, method, body):
+    # No override, and conftest makes master-key derivation fail.
     monkeypatch.delenv(TOKEN_ENV)
     for headers in ({}, AUTH, {"Authorization": "Bearer "}):
         response = _send(client, method, f"{URL}/session-secret", headers, body)
@@ -98,6 +99,18 @@ def test_token_from_secret_file(client, monkeypatch, tmp_path):
     assert client.get(f"{URL}/session-secret", headers=AUTH).status_code == 401
     ok = client.get(f"{URL}/session-secret", headers={"Authorization": "Bearer file-token"})
     assert ok.status_code == 404
+
+
+def test_derived_token_authorizes_with_no_override(client, store, monkeypatch):
+    """Zero config: with no env or file override, the derived token is the bearer."""
+    derived = "fixture-derived-token-" + "f" * 42
+    monkeypatch.delenv(TOKEN_ENV)
+    monkeypatch.setattr(service_token, "derive_service_token", lambda: derived)
+    assert client.get(f"{URL}/session-secret", headers=AUTH).status_code == 401
+    put = client.put(f"{URL}/session-secret", headers={"Authorization": f"Bearer {derived}"},
+                     json={"value": "v"})
+    assert put.status_code == 201
+    assert store.get("session-secret") == "v"
 
 
 # --- behaviour ---------------------------------------------------------------

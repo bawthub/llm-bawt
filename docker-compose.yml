@@ -48,9 +48,17 @@ services:
       # bridges already use for LLM_BAWT_API_URL.
       - LLM_BAWT_AGENT_ORIGIN=http://app:8642
       # TASK-701/793: trusted current-turn MCP tools write through BawtHub's
-      # container-only association API, sending the BawtHub service bearer
-      # (BAWTHUB_SERVICE_TOKEN[_FILE] from .env, TASK-1472) when configured.
+      # container-only association API, sending the BawtHub service bearer.
       - BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL=${BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL:-http://frontend-prod:3002}
+      # TASK-1472: the BawtHub service bearer is derived from the master key
+      # (no hand-set secret). At startup the app writes it, 0600, to this file
+      # in the shared bawthub-service-token volume, owned by the BawtHub
+      # frontend image's own user (uid 1001, `hono` in bawthub's
+      # frontend/Dockerfile.vite). BawtHub mounts the volume read-only and reads
+      # it via BAWTHUB_SERVICE_TOKEN_FILE. Operator override: set
+      # BAWTHUB_SERVICE_TOKEN[_FILE] in .env; the override is what gets exported.
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_FILE=/run/bawthub-service-token/token
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_UID=${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
       # TASK-636: CODEX_AUTH_PATH removed — the app reads the codex bundle
       # from the encrypted DB store (provider_connection:openai_chatgpt).
     ports:
@@ -61,6 +69,9 @@ services:
       # endpoint's dedicated Claude login bundle lives under this (RW) mount at
       # claude-usage/.credentials.json — the app refreshes it in place.
       - ${HOME}/.config/llm-bawt:/root/.config/llm-bawt
+      # TASK-1472: holds only the exported BawtHub service token. A directory
+      # volume, not a single-file mount, so atomic replaces reach the reader.
+      - bawthub-service-token:/run/bawthub-service-token
       # TASK-636: codex auth.json bind mount REMOVED — the app reads the
       # bundle from the encrypted DB store (usage probe calls codex_oauth
       # in-process; broker endpoint serves bridges).
@@ -478,3 +489,7 @@ services:
 
 volumes:
   redis-data:
+  # TASK-1472: fixed name so BawtHub's separate compose project can mount it
+  # as an external volume (bring `app` up first; it creates the volume).
+  bawthub-service-token:
+    name: llm-bawt-bawthub-service-token

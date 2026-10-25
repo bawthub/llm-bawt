@@ -108,9 +108,9 @@ current-turn context path for the BawtHub task tools:
   ContextVar, PUTs `source: AGENT` to BawtHub's internal listener at
   `${BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL}/internal/tasks/{task_ref}/associations`.
   The listener is container-only. Every BawtHub call also carries the service
-  bearer from `BAWTHUB_SERVICE_TOKEN` / `BAWTHUB_SERVICE_TOKEN_FILE`
-  (TASK-1472) when one is configured. Raw identifiers are never accepted as
-  MCP tool arguments.
+  bearer (TASK-1472): derived from the master Fernet key by default, or the
+  `BAWTHUB_SERVICE_TOKEN` / `BAWTHUB_SERVICE_TOKEN_FILE` override. Raw
+  identifiers are never accepted as MCP tool arguments.
 
 Task tools that use this path (`src/llm_bawt/mcp_server/task_tools.py`):
 

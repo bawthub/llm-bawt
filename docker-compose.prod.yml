@@ -107,6 +107,12 @@ services:
       # point LLM_BAWT_STORAGE_BACKEND=s3 at echo's Garage (10.0.2.38) — that is
       # a cross-tenant data leak. s3 is only valid against a tenant-OWNED store.
       - LLM_BAWT_STORAGE_BACKEND=${LLM_BAWT_STORAGE_BACKEND:-fs}
+      # TASK-1472: the BawtHub service bearer is derived from the master key,
+      # so there is nothing to provision. The app writes it at startup, 0600,
+      # owned by the frontend image's own user (uid 1001); the frontend reads
+      # it from the shared volume. Override: BAWTHUB_SERVICE_TOKEN[_FILE] in .env.
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_FILE=/run/bawthub-service-token/token
+      - BAWTHUB_SERVICE_TOKEN_EXPORT_UID=${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
     ports:
       - "${MCP_PORT:-8001}:8001"
       - "${SERVICE_PORT:-8642}:8642"
@@ -115,6 +121,7 @@ services:
       - app-config:/root/.config/llm-bawt
       - app-storage:/app/storage
       - app-logs:/app/.logs
+      - bawthub-service-token:/run/bawthub-service-token
     depends_on:
       postgres:
         condition: service_healthy
@@ -189,7 +196,11 @@ services:
       # Self-serve schema sync on start (prisma db push + prisma/sql deltas).
       - PRISMA_DB_PUSH=1
       - STORAGE_BACKEND=fs
+      # TASK-1472: the service token the app exported (read on every call).
+      - BAWTHUB_SERVICE_TOKEN_FILE=/run/bawthub-service-token/token
     volumes:
+      # Only the exported service token; read-only, never the master key.
+      - bawthub-service-token:/run/bawthub-service-token:ro
       # TASK-835: the /repos dashboard reads REPOS_ROOT (default /repos). Same
       # volume the bridge writes, mounted READ-ONLY here — the viewer's git
       # status/diff physically cannot mutate a tree (TASK-634 invariant).
@@ -211,6 +222,8 @@ volumes:
   app-config:
   app-storage:
   app-logs:
+  # TASK-1472: the exported BawtHub service token (app writes, frontend reads).
+  bawthub-service-token:
   # Agent workspace — written by claude-code-bridge, read-only in frontend.
   bridge-dev:
   bridge-claude:

@@ -42,6 +42,12 @@ async def lifespan(app):
     process_started_at = datetime.now(timezone.utc)
     config = Config()
 
+    # TASK-1472: publish the derived BawtHub service token to the shared file
+    # BawtHub reads. Never raises; BawtHub fails closed until it is written.
+    from ..bawthub_auth import export_service_token
+
+    export_service_token()
+
     # Prefer MCP tool-based memory retrieval for llm-service.
     # This ensures memory retrieval happens via MCP tools and can be logged clearly.
     _ensure_mcp_server(config)
