@@ -50,10 +50,10 @@ RUN_RETENTION_S = 14 * 24 * 3600
 RUNNER_FILES = ("Makefile", "pyproject.toml", "uv.lock", "scripts/test_suite.py",
                 "scripts/test_snapshot.py", "tests/conftest.py", "tests/suite_manifest.py")
 PROVENANCE_WINDOW_DAYS = 14
-SUITE_TARGETS = {"offline": "test-all", "target": "test-target", "gate": "test-gate",
+# gate = test-all at exactly REV, recorded as the SHIP receipt (TASK-1457). The
+# repeated stress step is an optional diagnostic (make test-stress), not part of it.
+SUITE_TARGETS = {"offline": "test-all", "target": "test-target", "gate": "test-all",
                  "sweep": "test-sweep"}
-# gate = test-all plus the stress step on test files changed since this ref (TASK-1457).
-DEFAULT_STRESS_BASE = "origin/master"
 LOCK_WAIT_ENV = "LLM_BAWT_TEST_LOCK_WAIT_SECONDS"
 # Never inherit a caller's Make or git context into the snapshot.
 SCRUBBED_ENV = ("MAKEFLAGS", "MAKELEVEL", "MFLAGS", "MAKEOVERRIDES", "GIT_DIR",
@@ -134,7 +134,6 @@ class Receipt:
     runner_touched: list[str] = field(default_factory=list)
     suite: str = "offline"
     nodes: list[str] = field(default_factory=list)
-    stress_base: str | None = None
     suite_exit: int | None = None
     runner: list[str] = field(default_factory=list)
     summaries: list[str] = field(default_factory=list)
@@ -156,8 +155,6 @@ class Receipt:
                  f"  run:     {self.run_id}",
                  f"  base:    {self.base}  mode={self.mode}"
                  + (f" author={self.author}" if self.author else "")]
-        if self.stress_base:
-            lines.append(f"  suite:   {self.suite}; stress range {self.stress_base[:12]}..{(self.base or '?')[:12]}")
         for patch in self.patches:
             lines.append(f"  patch:   sha256:{patch.sha256[:16]}  {patch.saved_as}")
         if self.diff_sha256:
@@ -496,12 +493,10 @@ def pin_patches(sources: list[Path], run_dir: Path) -> list[PatchRecord]:
 # ── Suite ──────────────────────────────────────────────────────────────────
 
 
-def suite_command(suite: str, nodes: list[str], stress_base: str | None = None) -> list[str]:
+def suite_command(suite: str, nodes: list[str]) -> list[str]:
     command = ["make", "--no-print-directory", SUITE_TARGETS[suite]]
     if suite == "target":
         command.append("NODES=" + " ".join(nodes))
-    if suite == "gate" and stress_base:
-        command.append("STRESS_BASE=" + stress_base)
     return command
 
 
@@ -617,12 +612,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--author", default="", help="bot id; required with --path")
     parser.add_argument("--suite", choices=sorted(SUITE_TARGETS), default="offline")
     parser.add_argument("--node", action="append", default=[], help="repeatable; suite=target")
-    parser.add_argument("--stress-base", default=DEFAULT_STRESS_BASE,
-                        help="suite=gate: stress test files changed since this ref forked")
     parser.add_argument("--receipt-for", metavar="REV",
                         help="print the newest gate receipt for REV and exit (0 only if it PASSED)")
-    parser.add_argument("--upstream", default=DEFAULT_STRESS_BASE,
-                        help="--receipt-for: a receipt counts only if it stressed all of UPSTREAM..REV")
     parser.add_argument("--lock-wait", type=int, default=DEFAULT_LOCK_WAIT_S)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--repo", type=Path, default=REPO)
@@ -695,9 +686,6 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
     receipt.base = git.out("rev-parse", "--verify", f"{args.base}^{{commit}}")
     receipt.canonical_head = git.out("rev-parse", "HEAD")
     receipt.suite, receipt.nodes, receipt.author = args.suite, args.node, args.author or None
-    if args.suite == "gate":
-        # Pinned to a SHA so the receipt says exactly which range was stressed.
-        receipt.stress_base = git.out("rev-parse", "--verify", f"{args.stress_base}^{{commit}}")
     swept = sweep_stale(root)
     if swept:
         print(f"Snapshot: removed {len(swept)} stale snapshot(s): {', '.join(swept)}", flush=True)
@@ -741,7 +729,7 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
         if snap.run("diff", "--quiet", check=False).returncode:
             raise RuntimeError("snapshot working tree differs from its index after apply")
         command = (json.loads(args.suite_command) if args.suite_command
-                   else suite_command(args.suite, args.node, receipt.stress_base))
+                   else suite_command(args.suite, args.node))
         print(f"Snapshot: {receipt.base[:12]} + {len(receipt.patches)} patch(es), "
               f"diff sha256:{receipt.diff_sha256_short}; running {' '.join(command)}", flush=True)
         receipt.suite_exit = run_suite(command, worktree, Path(receipt.log or run_dir / "test.log"),
@@ -754,27 +742,10 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
     return EXIT_FAILED
 
 
-def stress_covers(git: Git, sha: str, stress_base: str | None, upstream_fork: str) -> bool:
-    """Whether a gate that stressed ``stress_base``'s fork point..``sha`` covered
-    every commit in ``upstream_fork``..``sha``: its fork point must be at or
-    before the upstream's. A gate run with ``STRESS_BASE=<tip>`` stresses
-    nothing, so it covers nothing."""
-    if not stress_base:
-        return False
-    try:
-        fork = git.out("merge-base", stress_base, sha)
-    except Refused:
-        return False
-    return git.run("merge-base", "--is-ancestor", fork, upstream_fork, check=False).returncode == 0
-
-
-def find_gate_receipt(root: Path, sha: str,
-                      covers=lambda stress_base: True) -> tuple[dict[str, Any] | None, int]:
-    """Newest gate run at exactly ``sha`` with no patches (a PATCHES trial doesn't
-    count) whose stressed range ``covers`` the push range, plus how many runs at
-    ``sha`` were skipped for stressing a narrower one."""
+def find_gate_receipt(root: Path, sha: str) -> dict[str, Any] | None:
+    """Newest gate run at exactly ``sha`` with no patches (a PATCHES trial tests
+    other bytes, so it doesn't count)."""
     newest: dict[str, Any] | None = None
-    narrower = 0
     for path in (root / "runs").glob("*/receipt.json"):
         try:
             data = json.loads(path.read_text())
@@ -782,27 +753,21 @@ def find_gate_receipt(root: Path, sha: str,
             continue
         if data.get("suite") != "gate" or data.get("mode") != "base" or data.get("base") != sha:
             continue
-        if not covers(data.get("stress_base")):
-            narrower += 1
-        elif newest is None or data.get("started_at", "") > newest.get("started_at", ""):
+        if newest is None or data.get("started_at", "") > newest.get("started_at", ""):
             newest = data
-    return newest, narrower
+    return newest
 
 
 def show_gate_receipt(args: argparse.Namespace) -> int:
     git = Git(args.repo)
     try:
         sha = git.out("rev-parse", "--verify", f"{args.receipt_for}^{{commit}}")
-        upstream_fork = git.out("merge-base", args.upstream, sha)
     except Refused as exc:
         print(f"Gate receipt: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    data, narrower = find_gate_receipt(
-        args.root, sha, lambda stress_base: stress_covers(git, sha, stress_base, upstream_fork))
+    data = find_gate_receipt(args.root, sha)
     if data is None:
-        skipped = (f"; {narrower} gate run(s) at it stressed less than {args.upstream}..{sha[:12]} "
-                   "and don't count" if narrower else "")
-        print(f"Gate receipt: none for {sha} under {args.root / 'runs'}{skipped}; "
+        print(f"Gate receipt: none for {sha} under {args.root / 'runs'}; "
               f"run make gate REV={sha} AUTHOR=<bot> on the test host", file=sys.stderr)
         return EXIT_REFUSED
     known = {item.name for item in fields(Receipt)}

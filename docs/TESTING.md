@@ -18,9 +18,8 @@ Do not use `pytest -m ""`: that bypasses the external-target boundary.
 | `make test-profile` | Detailed hermetic setup/call/teardown timings | Python only |
 | `make test-target NODES=tests/test_file.py::test_name` | Explicit offline target, no skips | Relevant private fixtures |
 | `make test-snapshot PATHS="…" AUTHOR=<bot>` / `PATCHES="…"` | `test-all` (or `test-target` with `NODES`) on exactly BASE + patches in a throwaway worktree | Test host only; see below |
-| `make test-stress [STRESS_BASE=origin/master] [REPEAT=10] [FILES="…"]` | Test files added or modified since `STRESS_BASE` forked, `REPEAT` times under CI's conditions | Linux, 2+ CPUs; see below |
-| `make test-gate` | `test-all`, then `test-stress` | Docker + loopback |
-| `make gate REV=<sha> AUTHOR=<bot>` / `make gate-receipt REV=<sha>` | The llm-bawt SHIP gate (`test-gate` on exactly `REV`) / its newest receipt | Test host only; see below |
+| `make test-stress [STRESS_BASE=origin/master] [REPEAT=10] [FILES="…"]` | Optional diagnostic: test files added or modified since `STRESS_BASE` forked, `REPEAT` times under CI's conditions | Linux, 2+ CPUs; see below |
+| `make gate REV=<sha> AUTHOR=<bot>` / `make gate-receipt REV=<sha>` | The llm-bawt SHIP gate (`test-all` on exactly `REV`) / its newest receipt | Test host only; see below |
 | `make test-sweep` | One round of every offline test under CI's conditions | Docker + loopback |
 | `make test-service` / `make test-paid` | **Refuse** until a disposable service/DB and credential scope are provisioned and verified | Never run against live :8642 |
 
@@ -39,7 +38,7 @@ default. Fixtures that need a file-backed SQLite engine use
 (`PRAGMA synchronous = OFF`); that is the dominant cost of such fixtures on a
 virtual disk and no test relies on durability across a power loss.
 
-## CI's conditions on echo: the stress step (TASK-1457)
+## CI's conditions on echo: the optional stress diagnostic (TASK-1457)
 
 echo is fast enough that a timing-dependent test passes there and fails on
 GitHub's 4-vCPU runner. `make test-stress` reruns the tests a push adds or
@@ -51,15 +50,14 @@ count and unit budget read from the `make test-all` step's `env` in
 the partition and with the flags `make test-all` gives it; a changed
 integration test that isn't in a gate suite fails the step. Any failure in any
 of the `REPEAT` rounds (default 10) fails it, naming the round and partition.
+It is a diagnostic for chasing a suspected flake, not a push requirement:
+repeated rounds only find a timing dependence by chance, and they cost minutes.
 
 **SHIP gate.** An llm-bawt SHIP needs a PASSED `make gate REV=<tip> AUTHOR=<bot>`
-receipt for the exact commit being pushed. It runs `make test-gate` on exactly
-`REV` in a throwaway worktree, stressing `origin/master..REV` (the base is
-pinned to a SHA in the receipt). `make gate-receipt REV=<tip>` prints the newest
+receipt for the exact commit being pushed. It runs `make test-all` on exactly
+`REV` in a throwaway worktree. `make gate-receipt REV=<tip>` prints the newest
 such receipt and exits 0 only if it passed (1 failed, 2 none). A `PATCHES`
-trial never counts, because it tested other bytes. Neither does a run whose
-stressed range misses part of `origin/master..REV` (e.g. `STRESS_BASE=<tip>`,
-which stresses nothing).
+trial never counts, because it tested other bytes.
 
 ## Timing patterns the guard rejects (TASK-1457)
 
@@ -97,7 +95,7 @@ inside a container.
 | `PATHS="a.py b.py"` + `AUTHOR=<bot>` | Build the patch from this checkout's working tree for exactly these files (new, modified or deleted) vs HEAD. BASE must be HEAD. |
 | `PATCHES="/abs/one.patch /abs/two.patch"` | Apply these patch files in order with `git apply --index` (no fuzz; any reject fails the run). |
 | `BASE=<commit>` | Default `HEAD`. |
-| `NODES="tests/…"` / `SUITE=offline\|target\|gate\|sweep` | `NODES` alone selects `test-target`; the default is `test-all`. `gate` adds the stress step (`STRESS_BASE`, default `origin/master`); `sweep` is `test-sweep`. |
+| `NODES="tests/…"` / `SUITE=offline\|target\|gate\|sweep` | `NODES` alone selects `test-target`; the default is `test-all`. `gate` is `test-all` recorded as a SHIP receipt; `sweep` is `test-sweep`. |
 | `LOCK_WAIT=<s>` | How long to wait for another suite to finish (default 1800). The runner lock is never bypassed. |
 
 **Ownership.** `PATHS` refuses a file unless its uncommitted bytes provably

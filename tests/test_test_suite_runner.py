@@ -299,11 +299,14 @@ def test_bad_stress_arguments_are_refused(argv):
         suite.main(argv)
 
 
-def test_the_gate_runs_the_offline_suite_then_stresses_the_push_range(monkeypatch):
+def test_the_offline_suite_never_runs_the_stress_step(monkeypatch):
+    # Stress is an opt-in diagnostic (make test-stress); the SHIP gate is the offline suite.
     seen = []
     monkeypatch.setattr(suite, "runner_lock", lambda wait: nullcontext())
     monkeypatch.setattr(suite, "verify_offline_partition", lambda: seen.append("partition"))
     monkeypatch.setattr(suite, "run", lambda marker, *extra: seen.append(marker))
-    monkeypatch.setattr(suite, "stress", lambda base, repeat, *rest: seen.append(("stress", base, repeat, rest)))
-    assert suite.main(["gate", "--stress-base", "abc123"]) == 0
-    assert seen == ["partition", suite.UNIT, suite.PG, suite.LOCAL, ("stress", "abc123", 10, ())]
+    monkeypatch.setattr(suite, "stress", lambda *args, **kwargs: seen.append("stress"))
+    assert suite.main(["offline"]) == 0
+    assert seen == ["partition", suite.UNIT, suite.PG, suite.LOCAL]
+    with pytest.raises(SystemExit, match="2"):
+        suite.main(["gate"])

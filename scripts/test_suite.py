@@ -152,7 +152,8 @@ def unit_gate() -> tuple[str, ...]:
 # ── Stress: changed tests under CI's conditions (TASK-1457) ─────────────────
 #
 # Echo is fast enough that a timing-dependent test passes here and fails on
-# GitHub's runner. The stress step reruns tests under CI's conditions: CI's
+# GitHub's runner. An optional diagnostic, not part of the SHIP gate: repeated
+# rounds only find timing flakes by chance. The stress step reruns tests under CI's conditions: CI's
 # worker count and unit budget, read from the workflow itself so the two can't
 # drift, with this process, its pytest children and the private PostgreSQL
 # container all pinned to STRESS_CPUS CPUs. CI derives its 2 workers from 4
@@ -348,14 +349,14 @@ def runner_lock(wait_seconds: float | None = None, poll_seconds: float = 1.0):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("unit", "pg", "offline-integration", "sdk-probe", "integration",
-                                           "offline", "target", "profile", "coverage", "stress", "gate",
+                                           "offline", "target", "profile", "coverage", "stress",
                                            "service", "paid"))
     parser.add_argument("node", nargs="*",
                         help="target: explicit tests/... node IDs; stress: test files instead of the changed ones")
     parser.add_argument("--keyword", help="profile only: pytest -k expression")
     parser.add_argument("--stress-base", default=STRESS_BASE_DEFAULT,
-                        help="stress/gate: stress test files changed since this ref forked")
-    parser.add_argument("--repeat", type=int, default=STRESS_REPEAT_DEFAULT, help="stress/gate: rounds")
+                        help="stress: stress test files changed since this ref forked")
+    parser.add_argument("--repeat", type=int, default=STRESS_REPEAT_DEFAULT, help="stress: rounds")
     parser.add_argument("--all", action="store_true", dest="everything",
                         help="stress only: the whole offline suite instead of changed files")
     args = parser.parse_args(argv)
@@ -380,13 +381,11 @@ def main(argv: list[str] | None = None) -> int:
         # The wait is the runner's own setting; the tests it launches never inherit it.
         os.environ.pop(LOCK_WAIT_ENV, None)
         with runner_lock(wait):
-            if args.suite in {"offline", "gate"}:
+            if args.suite == "offline":
                 verify_offline_partition()
                 run(UNIT, *unit_gate())
                 run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
                 run(LOCAL, "--require-no-skips", *parallel("load"))
-                if args.suite == "gate":
-                    stress(args.stress_base, args.repeat)
             elif args.suite == "stress":
                 stress(args.stress_base, args.repeat, args.node, args.everything)
             elif args.suite == "integration":

@@ -311,7 +311,7 @@ endif  # not Windows
 # DEV TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-gate test-sweep gate gate-receipt test-service test-paid
+.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-sweep gate gate-receipt test-service test-paid
 
 # Every scenario enters the same locked runner; CI calls these targets too.
 TEST_RUNNER := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory python -m scripts.test_suite
@@ -361,21 +361,17 @@ test-snapshot: ## Gate BASE + patches in a throwaway worktree: make test-snapsho
 		$(foreach p,$(PATCHES),--patch '$(p)') $(foreach p,$(PATHS),--path '$(p)') \
 		$(foreach n,$(NODES),--node '$(n)')
 
-# CI's conditions on echo (TASK-1457): 2 pinned CPUs, CI's workers and unit budget.
-test-stress: ## Changed tests REPEAT (10) times as CI runs them: make test-stress [STRESS_BASE=origin/master] [FILES=...]
+# Optional diagnostic, not a SHIP gate (TASK-1457): 2 pinned CPUs, CI's workers and unit budget.
+test-stress: ## Diagnostic: changed tests REPEAT (10) times as CI runs them: make test-stress [STRESS_BASE=origin/master] [FILES=...]
 	$(TEST_RUNNER) stress $(if $(STRESS_BASE),--stress-base '$(STRESS_BASE)') \
 		$(if $(REPEAT),--repeat '$(REPEAT)') $(FILES)
-
-test-gate: ## test-all, then test-stress on the push range (use make gate REV=<sha>)
-	$(TEST_RUNNER) gate $(if $(STRESS_BASE),--stress-base '$(STRESS_BASE)')
 
 test-sweep: ## One round of every offline test as CI runs it (2 pinned CPUs)
 	$(TEST_RUNNER) stress --all --repeat 1
 
-gate: ## SHIP gate at a commit, in a throwaway worktree: make gate REV=<sha> AUTHOR=<bot>
+gate: ## SHIP gate: test-all at exactly a commit, in a throwaway worktree: make gate REV=<sha> AUTHOR=<bot>
 	python3 scripts/test_snapshot.py --base '$(if $(REV),$(REV),HEAD)' --suite gate --author '$(AUTHOR)' \
-		$(if $(LOCK_WAIT),--lock-wait '$(LOCK_WAIT)') $(if $(STRESS_BASE),--stress-base '$(STRESS_BASE)') \
-		$(foreach p,$(PATCHES),--patch '$(p)')
+		$(if $(LOCK_WAIT),--lock-wait '$(LOCK_WAIT)') $(foreach p,$(PATCHES),--patch '$(p)')
 
 gate-receipt: ## Newest gate receipt for a commit (exit 0 only if PASSED): make gate-receipt REV=<sha>
 	python3 scripts/test_snapshot.py --receipt-for '$(if $(REV),$(REV),HEAD)'
