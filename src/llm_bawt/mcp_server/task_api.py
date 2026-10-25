@@ -137,36 +137,49 @@ def headers(bot_id: str | None = None) -> dict[str, str]:
     return {"X-Agent-Bot-Id": bot_id} if bot_id else {}
 
 
+class NotJsonResponse(ValueError):
+    """BawtHub answered 2xx with a body that is not JSON."""
+
+
+def json_body(resp: httpx.Response) -> Any:
+    """The JSON reply of a task API call; HTTP errors raise HTTPStatusError.
+
+    A BawtHub build without the route answers 200 with its web app page, so a
+    raw decode error would hide that the endpoint is missing (TASK-1460).
+    """
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except ValueError:
+        kind = resp.headers.get("content-type", "").split(";")[0].strip() or "an untyped body"
+        raise NotJsonResponse(
+            f"BawtHub answered {resp.request.method} {resp.request.url.path} with {kind}, "
+            "not JSON; this BawtHub build may predate the endpoint."
+        ) from None
+
+
 async def api_get(path: str, params: dict | None = None) -> Any:
     url = f"{API_PREFIX}{path}"
     logger.debug("Task API GET %s params=%s", url, params)
-    resp = await get_client().get(url, params=params)
-    resp.raise_for_status()
-    return resp.json()
+    return json_body(await get_client().get(url, params=params))
 
 
 async def api_post(path: str, json: dict | list, headers: dict | None = None) -> Any:
     url = f"{API_PREFIX}{path}"
     logger.debug("Task API POST %s", url)
-    resp = await get_client().post(url, json=json, headers=headers or {})
-    resp.raise_for_status()
-    return resp.json()
+    return json_body(await get_client().post(url, json=json, headers=headers or {}))
 
 
 async def api_patch(path: str, json: dict, headers: dict | None = None) -> Any:
     url = f"{API_PREFIX}{path}"
     logger.debug("Task API PATCH %s", url)
-    resp = await get_client().patch(url, json=json, headers=headers or {})
-    resp.raise_for_status()
-    return resp.json()
+    return json_body(await get_client().patch(url, json=json, headers=headers or {}))
 
 
 async def api_put(path: str, json: dict | list, headers: dict | None = None) -> Any:
     url = f"{API_PREFIX}{path}"
     logger.debug("Task API PUT %s", url)
-    resp = await get_client().put(url, json=json, headers=headers or {})
-    resp.raise_for_status()
-    return resp.json()
+    return json_body(await get_client().put(url, json=json, headers=headers or {}))
 
 
 async def api_delete(
@@ -181,8 +194,7 @@ async def api_delete(
         resp = await client.delete(url, headers=headers or {})
     else:
         resp = await client.request("DELETE", url, json=json, headers=headers or {})
-    resp.raise_for_status()
-    return resp.json()
+    return json_body(resp)
 
 
 def http_error(error: httpx.HTTPStatusError) -> dict:

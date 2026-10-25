@@ -88,3 +88,26 @@ def test_endpoint_error_is_returned_not_raised(monkeypatch: pytest.MonkeyPatch) 
     _stub(monkeypatch, status=400, body={"error": "limit must be a positive integer"})
 
     assert _run(task_tools.tasks_board()) == {"error": "limit must be a positive integer", "status": 400}
+
+
+def _stub_web_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A BawtHub build without the route answers 200 with its web app page.
+    client = httpx.AsyncClient(base_url="http://bawthub.test", transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<!doctype html><html></html>",
+                                       headers={"content-type": "text/html; charset=utf-8"})))
+    monkeypatch.setattr(task_api, "_client", client)
+
+
+def test_a_web_page_reply_names_the_missing_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_web_page(monkeypatch)
+
+    assert _run(task_tools.tasks_board()) == {"error": (
+        "BawtHub answered GET /api/tasks/board with text/html, not JSON; "
+        "this BawtHub build may predate the endpoint.")}
+
+
+def test_every_task_api_call_rejects_a_web_page_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_web_page(monkeypatch)
+
+    with pytest.raises(task_api.NotJsonResponse, match="PATCH /api/tasks/tasks/x with text/html"):
+        _run(task_api.api_patch("/tasks/x", json={}))

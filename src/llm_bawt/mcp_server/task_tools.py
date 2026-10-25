@@ -24,6 +24,7 @@ from .task_step_types import (
 )
 from .task_api import (
     API_PREFIX as _API_PREFIX,
+    NotJsonResponse,
     api_delete as _api_delete,
     api_get as _api_get,
     api_patch as _api_patch,
@@ -34,6 +35,7 @@ from .task_api import (
     get_client as _get_client,
     headers as _headers,
     http_error as _http_error,
+    json_body as _json_body,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +272,8 @@ async def tasks_board(
         return await _api_get("/board", params=params)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    except NotJsonResponse as e:
+        return {"error": str(e)}
 
 
 @mcp.tool(name="tasks_search_semantic")
@@ -758,8 +762,7 @@ async def remove_task_dependency(
             json={"depId": resolved_dep_id},
             headers=_headers(bot_id),
         )
-        resp.raise_for_status()
-        return resp.json()
+        return _json_body(resp)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
     except ValueError as e:
