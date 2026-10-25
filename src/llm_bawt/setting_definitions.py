@@ -66,6 +66,15 @@ class SettingDefinition:
 
 # Canonical typed settings. Keyed by setting key.
 SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
+    "anthropic_api_monthly_budget_usd": SettingDefinition(
+        key="anthropic_api_monthly_budget_usd",
+        type="float",
+        default=None,
+        applies_to=(),  # global report, not a per-bot spend limit
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Anthropic API monthly budget (USD)",
+        help="Optional display-only target for this month's API spend; does not enforce a spending limit.",
+    ),
     # --- session-memory continuity (TASK-492: unifies the two flags) ---------
     "session_memory_continuity": SettingDefinition(
         key="session_memory_continuity",

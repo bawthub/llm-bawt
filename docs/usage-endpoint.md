@@ -1,7 +1,7 @@
-# Subscription Usage Endpoint
+# Provider Usage Endpoint
 
-`GET /v1/usage` exposes a provider-pluggable view of subscription or plan
-usage. The route is in
+`GET /v1/usage` exposes provider-pluggable subscription windows and API spend.
+A `kind=spend` snapshot is not a subscription quota. The route is in
 [src/llm_bawt/service/routes/usage.py](../src/llm_bawt/service/routes/usage.py)
 and the adapter registry is in
 [src/llm_bawt/service/usage/](../src/llm_bawt/service/usage).
@@ -12,27 +12,46 @@ and the adapter registry is in
 |---|---|
 | `GET /v1/usage` | All registered providers |
 | `GET /v1/usage?provider=claude` | One provider |
-| `GET /v1/usage?bot_id=<slug>` | Resolve provider from a bot's model |
+| `GET /v1/usage?bot_id=<slug>` | Resolve via the bot's bound catalog endpoint |
+| `GET /v1/usage?access_path=<key>` | Resolve the frozen route of a completed turn |
 | `...&force=true` | Bypass cache |
 
 ## Registered providers
 
 The registry currently includes:
 
-- `claude`
+- `claude` (`anthropic-oauth` subscription windows)
+- `anthropic_api` (`anthropic-api` pay-per-token spend)
 - `zai`
 - `openai_chatgpt`
 - `xai` (API-key only — no plan limits; used so Grok bots don't fall back to Claude)
 
-Support level differs by adapter. The canonical response shape is the same for
-all of them. API-key providers like `xai` return `status=ok` with an empty
-`limits` list so the chat context popup shows turn tokens/cost only.
+Support level differs by adapter. The canonical response carries `kind`:
+`subscription_windows` uses `limits[]`, while `spend` uses `spend` and leaves
+`limits[]` empty. Unrecognized paths are unavailable; a model name alone never
+selects a subscription credential. Other API-key providers without cost reports
+may return an empty `limits` list.
 
 ## Caching
 
 Successful snapshots are cached for `LLM_BAWT_USAGE_CACHE_TTL` seconds
 (default `120`). On refresh errors or upstream `429`s, the endpoint returns the
 last good cached snapshot when it has one.
+
+## Anthropic API spend
+
+`anthropic_api` reports UTC calendar-day, 7-day and month-to-date USD spend.
+Connect an `anthropic-admin` Usage reporting key separately from the
+`anthropic-api` inference key. The Admin credential is encrypted by the provider
+connection store and is never exposed by the inference token broker. With an
+Admin key, the adapter reads Anthropic's paginated organization Cost Report and
+Usage Report; the cost report determines spend. Without it, the adapter sums
+positive `turn_logs.token_usage_json.total_cost_usd` on the frozen
+`anthropic-api` access path. That is an **estimate limited to recorded app
+turns**, not the whole account. A configured positive global runtime setting
+`anthropic_api_monthly_budget_usd` adds a display percentage; it never enforces
+a limit. Failed report reads are unavailable, never silently replaced with zero
+spend or a different account's subscription quota.
 
 ## ChatGPT / Codex usage
 

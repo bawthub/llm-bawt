@@ -177,6 +177,7 @@ class OpenAIChatGPTUsageAdapter(UsageAdapter):
     provider = "openai_chatgpt"
     display_name = "ChatGPT · codex"
     backend = "claude-code"
+    access_path_keys = ("openai-oauth",)
 
     async def _read_snapshot(self) -> dict | None:
         url = (

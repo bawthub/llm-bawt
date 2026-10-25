@@ -25,6 +25,8 @@ class UsageAdapter(ABC):
     provider: str = ""             # canonical provider id
     display_name: str = ""         # human label
     backend: str | None = None     # owning agent backend, if any
+    access_path_keys: tuple[str, ...] = ()  # exact catalog paths this report covers
+    kind: str = "subscription_windows"
 
     @abstractmethod
     async def fetch(self) -> ProviderUsage:
@@ -39,6 +41,7 @@ class UsageAdapter(ABC):
             provider=self.provider,
             display_name=self.display_name,
             backend=self.backend,
+            kind=self.kind,
             fetched_at=int(time.time()),
         )
         fields.update(overrides)

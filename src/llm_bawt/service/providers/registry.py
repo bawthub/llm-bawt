@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ...utils.config import Config
+from .anthropic_admin import AnthropicAdminAdapter
 from .anthropic_key import AnthropicKeyAdapter
 from .base import (
     CONNECTED_HEALTH_STATES,
@@ -48,6 +49,7 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     XaiAdapter.id: XaiAdapter,
     OpenAIKeyAdapter.id: OpenAIKeyAdapter,
     AnthropicKeyAdapter.id: AnthropicKeyAdapter,
+    AnthropicAdminAdapter.id: AnthropicAdminAdapter,
     XAdapter.id: XAdapter,
     # TASK-997: release-deploy credentials (DB-stored, never env).
     GitHubReleaseAdapter.id: GitHubReleaseAdapter,

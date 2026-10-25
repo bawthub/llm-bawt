@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 
 from llm_bawt.service.model_discovery import ExistingFetcherProvider
 from llm_bawt.service.providers.api_key import ApiKeyAdapter, resolve_api_key
+from llm_bawt.service.providers.anthropic_admin import AnthropicAdminAdapter
+from llm_bawt.service.providers.anthropic_key import AnthropicKeyAdapter
 from llm_bawt.service.providers.base import ConnectionRecord
 from llm_bawt.service.providers.registry import all_adapters
 from llm_bawt.service.routes import providers as provider_routes
@@ -91,7 +93,7 @@ def test_registry_exposes_all_raw_api_key_adapters(monkeypatch) -> None:
     )
     ids = {adapter.id for adapter in all_adapters(SimpleNamespace())}
 
-    assert {"xai", "openai-api", "anthropic-api"} <= ids
+    assert {"xai", "openai-api", "anthropic-api", "anthropic-admin"} <= ids
 
 
 def test_api_key_broker_returns_stored_key(monkeypatch) -> None:
@@ -114,6 +116,41 @@ def test_api_key_broker_returns_stored_key(monkeypatch) -> None:
         "expires_at": None,
         "state": "ok",
     }
+
+
+def test_admin_key_is_not_a_model_key_and_inference_probe_explains_slot(monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("admin key must not be probed against models")))
+    store = FakeStore(ConnectionRecord(
+        provider="anthropic-api", status="connected", secret={"api_key": "working"}))
+    inference = object.__new__(AnthropicKeyAdapter)
+    inference.store = store
+    result = inference.set_api_key("sk-ant-admin01-example")
+    assert not result.ok and "Usage reporting key" in (result.detail or "")
+    assert store.record.secret == {"api_key": "working"}
+    assert not issubclass(AnthropicAdminAdapter, ApiKeyAdapter)
+
+
+def test_admin_probe_validates_report_then_saves_separate_slot(monkeypatch) -> None:
+    import httpx
+
+    seen = []
+    def report(url, *, params, headers, timeout):
+        seen.append((url, headers))
+        return httpx.Response(200, json={"data": []}, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "get", report)
+    adapter = object.__new__(AnthropicAdminAdapter)
+    store = FakeStore()
+    adapter.store = store
+    assert not adapter.set_api_key("sk-ant-api03-inference").ok
+    assert store.saved == []
+    assert adapter.set_api_key("sk-ant-admin01-report").ok
+    assert store.saved[0].provider == "anthropic-admin"
+    assert store.saved[0].secret == {"admin_key": "sk-ant-admin01-report"}
+    assert seen[0][1]["x-api-key"] == "sk-ant-admin01-report"
+    assert "cost_report" in seen[0][0]
 
 
 def test_model_discovery_uses_credential_store_key(monkeypatch) -> None:

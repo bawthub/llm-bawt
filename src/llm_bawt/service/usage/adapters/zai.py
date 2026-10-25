@@ -125,6 +125,7 @@ class ZaiUsageAdapter(UsageAdapter):
     provider = "zai"
     display_name = "z.ai · GLM"
     backend = "claude-code"
+    access_path_keys = ("zai-anthropic",)
 
     async def fetch(self) -> ProviderUsage:
         key = os.getenv("ZAI_API_KEY") or os.getenv("Z_AI_API_KEY")

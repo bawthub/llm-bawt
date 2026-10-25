@@ -155,6 +155,7 @@ class KimiCodingUsageAdapter(UsageAdapter):
     provider = "kimi_coding"
     display_name = "Kimi For Coding"
     backend = "claude-code"
+    access_path_keys = ("kimi-coding-chat",)
 
     @staticmethod
     def _key() -> str | None:

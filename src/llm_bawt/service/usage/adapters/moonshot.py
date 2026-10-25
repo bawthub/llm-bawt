@@ -64,6 +64,7 @@ class MoonshotUsageAdapter(UsageAdapter):
     provider = "moonshot"
     display_name = "Moonshot · Kimi"
     backend = "claude-code"  # reached via the claude-code bridge proxy
+    access_path_keys = ("moonshot-anthropic",)
 
     # -- helpers ---------------------------------------------------------
 

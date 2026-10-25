@@ -30,6 +30,8 @@ class AnthropicKeyAdapter(ApiKeyAdapter):
 
     @staticmethod
     def _probe(key: str) -> tuple[str | None, str | None]:
+        if key.startswith("sk-ant-admin"):
+            return None, "This is an Admin key; it can't run models. Add it under Usage reporting key (Admin)."
         try:
             resp = httpx.get(
                 _KEY_CHECK_URL,

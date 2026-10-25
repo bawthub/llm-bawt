@@ -78,6 +78,15 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]])
     """
     policy = WorkingMemoryPolicy(engine)
     for scope_type, scope_id, key, value in writes:
+        if key == "anthropic_api_monthly_budget_usd":
+            from decimal import Decimal, InvalidOperation
+
+            try:
+                amount = Decimal(str(value))
+            except (InvalidOperation, ValueError, TypeError):
+                amount = Decimal("NaN")
+            if scope_type != "global" or not amount.is_finite() or amount <= 0:
+                raise HTTPException(status_code=400, detail="Monthly API budget must be a positive global USD amount")
         try:
             policy.validate_setting_write(scope_type, scope_id, key, value)
         except WorkingMemoryError as exc:

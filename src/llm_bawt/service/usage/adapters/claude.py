@@ -170,6 +170,7 @@ class ClaudeUsageAdapter(UsageAdapter):
     provider = "claude"
     display_name = "Claude"
     backend = "claude-code"
+    access_path_keys = ("anthropic-oauth",)
 
     async def fetch(self) -> ProviderUsage:
         cred = load_usage_token()

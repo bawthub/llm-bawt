@@ -42,18 +42,31 @@ class UsageLimit(BaseModel):
     active: bool | None = None     # whether this window is currently the binding one
 
 
+class UsageSpend(BaseModel):
+    """USD spend, never confused with subscription quota percentages."""
+
+    today_usd: float
+    seven_day_usd: float
+    month_usd: float
+    monthly_budget_usd: float | None = None
+    monthly_used_pct: float | None = None
+    source: str  # anthropic_reported | bawt_recorded_estimate
+
+
 class ProviderUsage(BaseModel):
     """One provider/subscription's usage snapshot in canonical form."""
 
     provider: str                  # canonical provider id, e.g. "claude"
     display_name: str              # human label, e.g. "Claude"
     backend: str | None = None     # owning agent backend, e.g. "claude-code"
+    kind: str = "subscription_windows"  # subscription_windows | spend
     available: bool = False        # True only when live limits were fetched
     status: str = STATUS_ERROR     # one of STATUS_* above
     error: str | None = None       # human-readable detail when not ok
     fetched_at: int | None = None  # unix seconds the snapshot was produced
     cached: bool = False           # True if served from cache / stale
     limits: list[UsageLimit] = Field(default_factory=list)
+    spend: UsageSpend | None = None
     raw: dict | None = None        # provider-native payload, for debug/refine
 
 

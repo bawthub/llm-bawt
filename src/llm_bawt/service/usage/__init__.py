@@ -29,6 +29,7 @@ from .canonical import (
     STATUS_ERROR,
 )
 from .adapters import (
+    AnthropicApiUsageAdapter,
     ClaudeUsageAdapter,
     KimiCodingUsageAdapter,
     MoonshotUsageAdapter,
@@ -40,15 +41,39 @@ from .adapters import (
 logger = logging.getLogger(__name__)
 
 _REGISTRY: dict[str, UsageAdapter] = {}
+_ACCESS_PATH_ADAPTERS: dict[str, UsageAdapter] = {}
 
 
 def register(adapter: UsageAdapter) -> None:
+    """Register one usage source and reject overlapping access-path ownership."""
+    for key in adapter.access_path_keys:
+        previous = _ACCESS_PATH_ADAPTERS.get(key)
+        if previous is not None and previous.provider != adapter.provider:
+            raise ValueError(f"usage access path {key!r} claimed by {previous.provider!r} and {adapter.provider!r}")
+    old = _REGISTRY.get(adapter.provider)
+    if old is not None:
+        for key in old.access_path_keys:
+            _ACCESS_PATH_ADAPTERS.pop(key, None)
     _REGISTRY[adapter.provider] = adapter
+    for key in adapter.access_path_keys:
+        _ACCESS_PATH_ADAPTERS[key] = adapter
+
+
+def usage_adapter_for_access_path(key: str | None) -> UsageAdapter | None:
+    """Exact report owner; unknown/local/API paths without reporting return None."""
+    return _ACCESS_PATH_ADAPTERS.get(str(key or "").strip().lower())
+
+
+def get_cached(provider: str) -> ProviderUsage | None:
+    """Read last authoritative snapshot without fetching or refreshing upstream."""
+    hit = _cache.get(provider)
+    return _cached_copy(hit[1]) if hit else None
 
 
 # Default registrations. Add a provider = create the adapter, import it here,
 # register an instance.
 register(ClaudeUsageAdapter())
+register(AnthropicApiUsageAdapter())
 register(ZaiUsageAdapter())
 register(OpenAIChatGPTUsageAdapter())
 register(XaiUsageAdapter())
@@ -116,6 +141,7 @@ async def get_usage(provider: str, *, force: bool = False) -> ProviderUsage | No
                 provider=provider,
                 display_name=adapter.display_name,
                 backend=adapter.backend,
+                kind=adapter.kind,
                 available=False,
                 status=STATUS_ERROR,
                 error=str(e),
@@ -150,6 +176,8 @@ __all__ = [
     "UsageLimit",
     "AllUsage",
     "register",
+    "usage_adapter_for_access_path",
+    "get_cached",
     "list_providers",
     "has_provider",
     "get_usage",

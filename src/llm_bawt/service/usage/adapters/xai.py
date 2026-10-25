@@ -27,6 +27,7 @@ class XaiUsageAdapter(UsageAdapter):
     provider = "xai"
     display_name = "xAI · Grok"
     backend = "claude-code"  # typically reached via the claude-code bridge proxy
+    access_path_keys = ("xai-chat", "xai-responses")
 
     def _has_key(self) -> bool:
         for env in ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY"):
