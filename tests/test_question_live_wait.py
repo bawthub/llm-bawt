@@ -364,10 +364,28 @@ def test_answer_claim_wins_bridge_timeout_without_redis_delivery(store, monkeypa
     monkeypatch.setattr("claude_code_bridge.approval_ops.httpx.AsyncClient", Client)
 
     async def scenario():
-        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=0.01)
+        # The bridge's live wait times out only after the answer claim, so the
+        # claim never races a wall-clock deadline (a 10ms one lapsed under load).
+        waiting, claimed = asyncio.Event(), asyncio.Event()
+
+        async def timeout_after_claim(awaitable, timeout):
+            assert timeout == 30
+            waiting.set()
+            await claimed.wait()
+            awaitable.cancel()
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(
+            "claude_code_bridge.approval_ops.asyncio",
+            SimpleNamespace(**{**vars(asyncio), "wait_for": timeout_after_claim}),
+        )
+        cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=30)
         pending = asyncio.create_task(cb("AskUserQuestion", SHIP_INPUT, SimpleNamespace(tool_use_id="t1")))
-        await asyncio.sleep(0)
+        await waiting.wait()
+        assert store.get("t1").status == "awaiting_live"
+        assert not bridge._pending_question_futures["t1"][1].done()
         assert store.claim_live_answer("t1", "Ship: Yes", [{"question_id": "Ship", "selected": ["Yes"]}])
+        claimed.set()
         assert (await pending).updated_input["answers"] == {"Ship it?": "Yes"}
         assert not bridge._pending_question_futures
 
