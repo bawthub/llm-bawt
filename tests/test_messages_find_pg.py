@@ -111,6 +111,13 @@ def no_handle(resp: dict) -> dict:
     return {k: v for k, v in resp.items() if k != "handle"}
 
 
+def leaks(token: str, resp: dict) -> bool:
+    """Whether ``token`` appears anywhere in the response's data. The handle is
+    a random token_urlsafe(32), so it can spell a short id like "m3" by chance
+    (~1% of runs); it carries no row data, so it isn't searched."""
+    return token in json.dumps(no_handle(resp))
+
+
 def card_ids(resp: dict) -> set[str]:
     return {c["id"] for c in resp.get("best", []) + resp.get("latest", [])} | {
         a for c in resp.get("best", []) + resp.get("latest", []) for a in c["also"]}
@@ -137,7 +144,7 @@ def test_1_protected_legacy_row_changes_nothing(world):
     assert leaked["status"] == "ok" and leaked["total"] == 1
     assert leaked["outside_filters"] == {"speaker": 1}
     assert no_handle(leaked) == no_handle(control)
-    assert legacy not in json.dumps(leaked) and "secret" not in json.dumps(leaked)
+    assert not leaks(legacy, leaked) and not leaks("secret", leaked)
 
 
 def test_2_malformed_or_unknown_sender_is_omitted(world):
@@ -219,7 +226,7 @@ def test_8_trigger_message_never_appears(world):
     earlier = world.message("pub", "s_pub_b", "TASK-782 was about retries")
     resp = world.find(query="TASK-782", trigger_id=trigger)
     assert resp["total"] == 1 and card_ids(resp) == {earlier}
-    assert trigger not in json.dumps(resp)
+    assert not leaks(trigger, resp)
     browse = world.find(trigger_id=trigger)
     assert trigger not in card_ids(browse)
 

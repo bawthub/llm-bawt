@@ -204,6 +204,10 @@ shutdown_foreground() {
     if (( ticks >= max_ticks )); then
       echo "[server] Still running after ${SHUTDOWN_WAIT_SECONDS}s, force killing: ${alive[*]}"
       kill -KILL "${alive[@]}" 2>/dev/null || true
+      # SIGKILL lands asynchronously; reap our children so "exited" means
+      # "gone" (on a loaded host they can still be running when we return).
+      # A pid that isn't our child returns from wait at once.
+      wait "${alive[@]}" 2>/dev/null || true
       rc=1
       break
     fi
