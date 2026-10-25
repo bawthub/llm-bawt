@@ -176,7 +176,7 @@ dev-run: ## [uv] Run llm from .venv (e.g. make dev-run ARGS="--status")
 
 run: ## Stop app + bridges, rebuild dev, tail logs
 	$(DEV_COMPOSE) down --remove-orphans --timeout 5 app openclaw-bridge claude-code-bridge
-	$(DEV_COMPOSE) up -d app openclaw-bridge claude-code-bridge
+	$(DEV_COMPOSE) up -d app openclaw-bridge claude-code-bridge app
 	docker compose logs -f --tail=50 app openclaw-bridge claude-code-bridge
 
 up: ## Docker compose up (production)
