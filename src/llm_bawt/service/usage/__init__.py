@@ -10,7 +10,11 @@ aggressively rate-limited, so successful snapshots are cached per-provider for
 ``LLM_BAWT_USAGE_CACHE_TTL`` seconds (default 120). On a fetch error or a 429
 we serve the last-good snapshot marked ``cached=True`` rather than failing the
 UI. A per-provider lock collapses concurrent requests into a single upstream
-call.
+call. An adapter may shorten its TTL (``report_ttl``): a provider balance API
+uses it as a short debounce, refreshed on demand after that provider's turns.
+
+Balances are never cached: an anchored balance (``balance_mode == "anchor"``)
+is read from its counter row on every request and overlaid on the report.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import logging
 import os
 import time
 
+from .balance import BALANCE_ANCHOR
 from .base import UsageAdapter
 from .canonical import (
     AllUsage,
@@ -59,9 +64,13 @@ def register(adapter: UsageAdapter) -> None:
         _ACCESS_PATH_ADAPTERS[key] = adapter
 
 
+def normalize_access_path(key: str | None) -> str:
+    return str(key or "").strip().lower()
+
+
 def usage_adapter_for_access_path(key: str | None) -> UsageAdapter | None:
     """Exact report owner; unknown/local/API paths without reporting return None."""
-    return _ACCESS_PATH_ADAPTERS.get(str(key or "").strip().lower())
+    return _ACCESS_PATH_ADAPTERS.get(normalize_access_path(key))
 
 
 def get_cached(provider: str) -> ProviderUsage | None:
@@ -98,11 +107,51 @@ def has_provider(provider: str) -> bool:
     return provider in _REGISTRY
 
 
-def _cache_ttl() -> float:
+def _cache_ttl(adapter: UsageAdapter) -> float:
+    if adapter.report_ttl is not None:
+        return adapter.report_ttl
     try:
         return float(os.getenv("LLM_BAWT_USAGE_CACHE_TTL", "120"))
     except (TypeError, ValueError):
         return 120.0
+
+
+def _balance_store():
+    from ..dependencies import get_service
+    from .balance import ApiBalanceStore
+
+    return ApiBalanceStore(get_service()._turn_log_store.engine)
+
+
+def _with_anchored_balance(adapter: UsageAdapter, snap: ProviderUsage) -> ProviderUsage:
+    """Overlay the live counter row on a (possibly cached) report: never cached itself."""
+    from .balance import anchored_balance
+
+    out = snap.model_copy(deep=True)
+    out.balance_supported = True
+    try:
+        balance, reason = anchored_balance(_balance_store().read(adapter.provider),
+                                           adapter.credential_connected_at())
+    except Exception as exc:  # noqa: BLE001 — unknown credit is shown as unknown, never as zero
+        logger.warning("Balance read failed for %s: %s", adapter.provider, type(exc).__name__)
+        balance, reason = None, "API balance unavailable"
+    out.balance = balance
+    if reason:
+        out.error = reason
+    return out
+
+
+def set_balance(provider: str, amount) -> None:
+    """Anchor a user-entered balance as of now (``balance_mode == "anchor"`` only)."""
+    _balance_store().set_anchor(provider, amount)
+
+
+def clear_balance(provider: str) -> bool:
+    return _balance_store().clear(provider)
+
+
+def get_adapter(provider: str) -> UsageAdapter | None:
+    return _REGISTRY.get(provider)
 
 
 # provider -> (fetched_monotonic, ProviderUsage)
@@ -121,8 +170,15 @@ async def get_usage(provider: str, *, force: bool = False) -> ProviderUsage | No
     adapter = _REGISTRY.get(provider)
     if adapter is None:
         return None
+    snap = await _report(adapter, force=force)
+    if adapter.balance_mode == BALANCE_ANCHOR:
+        snap = await asyncio.to_thread(_with_anchored_balance, adapter, snap)
+    return snap
 
-    ttl = _cache_ttl()
+
+async def _report(adapter: UsageAdapter, *, force: bool) -> ProviderUsage:
+    provider = adapter.provider
+    ttl = _cache_ttl(adapter)
     now = time.monotonic()
     hit = _cache.get(provider)
     if not force and hit and (now - hit[0]) < ttl:
@@ -147,6 +203,7 @@ async def get_usage(provider: str, *, force: bool = False) -> ProviderUsage | No
                 display_name=adapter.display_name,
                 backend=adapter.backend,
                 kind=adapter.kind,
+                balance_supported=bool(adapter.balance_mode),
                 available=False,
                 status=STATUS_ERROR,
                 error=str(e),
@@ -157,9 +214,9 @@ async def get_usage(provider: str, *, force: bool = False) -> ProviderUsage | No
         # last-good snapshot if we have one.
         if snap.status == STATUS_OK:
             _cache[provider] = (time.monotonic(), snap)
-        elif snap.status == STATUS_RATE_LIMITED and hit is not None and snap.balance is None:
-            # Keep a freshly computed local balance even if its separate Admin
-            # cost report hit a rate limit; a cached balance would be stale.
+        elif snap.status == STATUS_RATE_LIMITED and hit is not None:
+            # An anchored balance is overlaid fresh after this; a provider-
+            # reported one is only as old as the last good fetch.
             stale = _cached_copy(hit[1])
             stale.error = "rate-limited; showing last cached snapshot"
             return stale
@@ -184,8 +241,12 @@ __all__ = [
     "AllUsage",
     "register",
     "usage_adapter_for_access_path",
+    "normalize_access_path",
     "get_cached",
     "invalidate_cache",
+    "get_adapter",
+    "set_balance",
+    "clear_balance",
     "list_providers",
     "has_provider",
     "get_usage",

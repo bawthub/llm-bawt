@@ -66,15 +66,7 @@ class SettingDefinition:
 
 # Canonical typed settings. Keyed by setting key.
 SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
-    "anthropic_api_balance_anchor": SettingDefinition(
-        key="anthropic_api_balance_anchor",
-        type="json",
-        default=None,
-        applies_to=(),  # one global prepaid account, not a per-bot limit
-        storage=STORAGE_RUNTIME_SETTING,
-        label="Anthropic API prepaid balance anchor",
-        help="Last manually confirmed balance and its server-stamped UTC time; app-recorded charges after that time reduce the estimate.",
-    ),
+    # API balances are not settings: see /v1/usage/{provider}/balance (TASK-1461).
     # --- session-memory continuity (TASK-492: unifies the two flags) ---------
     "session_memory_continuity": SettingDefinition(
         key="session_memory_continuity",

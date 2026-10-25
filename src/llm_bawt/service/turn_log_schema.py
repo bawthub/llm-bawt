@@ -286,6 +286,10 @@ def bootstrap_turn_log_schema(conn) -> None:
                 FOREIGN KEY (turn_id) REFERENCES public.turn_logs(id)
                 ON DELETE SET NULL NOT DEFERRABLE
             """))
+        # TASK-1461: the API balance ledger/counter is written in update_turn's
+        # transaction, so it must exist whenever turn_logs does.
+        from .usage.balance import bootstrap_balance_schema
+        bootstrap_balance_schema(conn)
     except Exception:
         logger.exception("Turn-log additive schema migration failed")
         raise

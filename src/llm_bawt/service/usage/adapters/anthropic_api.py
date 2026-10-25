@@ -1,31 +1,32 @@
-"""Anthropic API spend from organization reports, or local turn-log estimate.
+"""Anthropic API prepaid balance, plus spend from organization reports or the ledger.
 
-The admin report is account-wide, while the no-admin-key fallback includes only
-turns recorded by this app. Neither is a Claude subscription window. API key
-retrieval is deliberately isolated from the inference provider/token broker.
+Anthropic has no balance endpoint, so the balance is a user-set anchor counted
+down per turn (``usage.balance``; the registry overlays it on every read). The
+spend detail comes from the Admin cost report when an Admin key is connected
+(account-wide), otherwise from this app's per-turn ledger. Neither is a Claude
+subscription window. Admin key retrieval is deliberately isolated from the
+inference provider/token broker.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
-from sqlalchemy import text
 
+from ..balance import BALANCE_ANCHOR
 from ..base import UsageAdapter
-from ..canonical import STATUS_ERROR, STATUS_OK, STATUS_RATE_LIMITED, STATUS_UNAUTHORIZED, UsageBalance, UsageSpend
+from ..canonical import STATUS_ERROR, STATUS_OK, STATUS_RATE_LIMITED, STATUS_UNAUTHORIZED, UsageSpend
 
 logger = logging.getLogger(__name__)
 COST_URL = "https://api.anthropic.com/v1/organizations/cost_report"
 ANTHROPIC_VERSION = "2023-06-01"
 ADMIN_CONNECTION = "anthropic-admin"
 INFERENCE_CONNECTION = "anthropic-api"
-BALANCE_SETTING = "anthropic_api_balance_anchor"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -70,49 +71,6 @@ def cost_totals(buckets: list[dict], *, now: datetime) -> tuple[Decimal, Decimal
     return tuple(totals)
 
 
-def read_local_spend(engine: Any, now: datetime, *, since: datetime) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-    """Count verified API-path turns strictly after the connection/anchor time.
-
-    A model alias before the key was connected was only catalog intent; it was
-    not proof that the bridge used that key. A frozen path is required as well.
-    The fourth result is the full post-anchor debit, even across month changes.
-    """
-    if engine is None:
-        raise RuntimeError("turn-log database unavailable")
-    today_start, seven_start, month_start = _windows(now)
-    total = [Decimal(0), Decimal(0), Decimal(0), Decimal(0)]
-    with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT created_at, token_usage_json FROM turn_logs
-            WHERE created_at > :start AND created_at <= :end AND token_usage_json IS NOT NULL
-              AND token_usage_json LIKE :path_hint
-        """), {"start": since, "end": now, "path_hint": '%"anthropic-api"%'})
-        for created_at, raw in rows:
-            try:
-                usage = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(usage, dict):
-                continue
-            frozen = usage.get("access_path")
-            if not isinstance(frozen, dict) or frozen.get("key") != "anthropic-api":
-                continue
-            cost = _decimal(usage.get("total_cost_usd"))
-            if cost <= 0:
-                continue
-            started = created_at.astimezone(timezone.utc)
-            if started <= since or started > now:
-                continue
-            total[3] += cost
-            if started >= today_start:
-                total[0] += cost
-            if started >= seven_start:
-                total[1] += cost
-            if started >= month_start:
-                total[2] += cost
-    return tuple(total)
-
-
 async def _pages(client: httpx.AsyncClient, url: str, key: str, params: dict[str, str]) -> list[dict]:
     buckets: list[dict] = []
     seen: set[str] = set()
@@ -143,10 +101,9 @@ class AnthropicApiUsageAdapter(UsageAdapter):
     display_name = "Anthropic API"
     backend = "claude-code"
     access_path_keys = ("anthropic-api",)
-    kind = "spend"
-
-    def _base(self, **overrides):
-        return super()._base(balance_supported=True, **overrides)
+    kind = "balance"
+    balance_mode = BALANCE_ANCHOR
+    legacy_balance_setting = "anthropic_api_balance_anchor"
 
     def _admin_key(self) -> str | None:
         from ...dependencies import get_service
@@ -158,89 +115,55 @@ class AnthropicApiUsageAdapter(UsageAdapter):
         key = record.secret.get("admin_key")
         return key if isinstance(key, str) and key.startswith("sk-ant-admin") else None
 
-    def _anchor_and_connection(self) -> tuple[Decimal | None, datetime | None, datetime | None]:
+    def credential_connected_at(self) -> datetime | None:
         from ...dependencies import get_service
         from ...providers.base import CredentialStore
-        from ....runtime_settings import RuntimeSettingsStore
 
-        config = get_service().config
-        settings = RuntimeSettingsStore(config).get_scope_settings("global", "*")
-        raw = settings.get(BALANCE_SETTING)
-        amount = _decimal(raw.get("amount_usd")) if isinstance(raw, dict) else Decimal(0)
-        anchor = _utc_date(raw.get("as_of")) if isinstance(raw, dict) else None
-        connection = CredentialStore(config).load(INFERENCE_CONNECTION)
-        connected_at = _utc_date(connection.connected_at) if connection else None
-        if amount <= 0 or (anchor and anchor > datetime.now(timezone.utc)):
-            anchor = None  # invalid DB data is never a trustworthy zero-debit anchor
-        return (amount if anchor else None, anchor, connected_at)
+        connection = CredentialStore(get_service().config).load(INFERENCE_CONNECTION)
+        return _utc_date(connection.connected_at) if connection else None
 
-    def _local_spend(self, now: datetime, since: datetime) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-        from ...dependencies import get_service
-        return read_local_spend(get_service()._turn_log_store.engine, now, since=since)
+    def _ledger_spend(self, now: datetime, since: datetime) -> tuple[Decimal, ...]:
+        from .. import _balance_store
+
+        return _balance_store().spend(self.provider, since=since, starts=_windows(now))
 
     async def fetch(self):
         now = datetime.now(timezone.utc)
+        key = None
         try:
             key = await asyncio.to_thread(self._admin_key)
-            amount, anchor, connected_at = await asyncio.to_thread(self._anchor_and_connection)
-            balance_error = None
-            if connected_at is None:
-                # Admin reports do not depend on the inference connection. Its
-                # absence does, however, rule out a trustworthy local debit.
-                if not key:
+            if not key:
+                # Before the key was connected, an anthropic-api label was only
+                # catalog intent, never proof this key paid: floor the ledger.
+                connected_at = await asyncio.to_thread(self.credential_connected_at)
+                if connected_at is None:
                     raise ValueError("Anthropic API connection time is unavailable")
-                local = (Decimal(0),) * 4
-                balance_error = "Anthropic API connection time unavailable; confirm the balance after connecting a key"
-            else:
-                # A replaced/re-saved key gets a new connected_at. If it is
-                # later than the balance anchor, earlier charges may belong to
-                # another account: never silently discard them and overstate
-                # the remaining credit. The operator must re-anchor.
-                if anchor is not None and anchor < connected_at:
-                    balance_error = "API key changed after the balance was confirmed; confirm the balance again"
-                # Calendar spend has its own connection floor; confirming a
-                # balance mid-month must not erase earlier verified API spend.
-                local = await asyncio.to_thread(self._local_spend, now, connected_at)
+                totals = await asyncio.to_thread(self._ledger_spend, now, connected_at)
+                return self._spend(totals, "bawt_recorded_estimate")
         except Exception as exc:  # noqa: BLE001 — no fabricated zero-spend on failure
-            logger.warning("Anthropic API balance unavailable: %s", type(exc).__name__)
+            logger.warning("Anthropic API spend unavailable: %s", type(exc).__name__)
             return self._base(available=False, status=STATUS_ERROR,
-                              error="Anthropic API balance or connection time unavailable")
+                              error="Anthropic API spend or connection time unavailable")
+        try:
+            _, _, month_start = _windows(now)
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                cost = await _pages(client, COST_URL, key, {
+                    "starting_at": month_start.isoformat(), "group_by[]": "description",
+                    "bucket_width": "1d", "limit": "31",
+                })
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            status = STATUS_UNAUTHORIZED if code in (401, 403) else STATUS_RATE_LIMITED if code == 429 else STATUS_ERROR
+            return self._base(available=False, status=status,
+                              error=f"Anthropic usage report returned HTTP {code}")
+        except Exception as exc:  # noqa: BLE001 — the balance overlay is independent
+            logger.warning("Anthropic API cost report unavailable: %s", type(exc).__name__)
+            return self._base(available=False, status=STATUS_ERROR, error="Anthropic cost report unavailable")
+        # Cost reports are daily and lag; they never debit the real-time balance.
+        return self._spend(cost_totals(cost, now=now), "anthropic_reported")
 
-        balance = None
-        if amount is not None and anchor is not None and balance_error is None:
-            # After a mid-period re-anchor, only later turns debit the balance;
-            # the calendar spend above still includes earlier post-key turns.
-            used = (await asyncio.to_thread(self._local_spend, now, anchor))[3] if anchor > connected_at else local[3]
-            balance = UsageBalance(amount_usd=float(amount), remaining_usd=float(amount - used),
-                                   used_usd=float(used), as_of=int(anchor.timestamp()))
-
-        totals = local[:3]
-        source = "bawt_recorded_estimate"
-        if key:
-            try:
-                _, _, month_start = _windows(now)
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    # Cost reports are daily and lag; their first bucket cannot
-                    # isolate an arbitrary anchor time. Never use them to debit
-                    # a real-time prepaid balance (local frozen-path turns do).
-                    cost = await _pages(client, COST_URL, key, {
-                        "starting_at": month_start.isoformat(), "group_by[]": "description",
-                        "bucket_width": "1d", "limit": "31",
-                    })
-                totals = cost_totals(cost, now=now)
-                source = "anthropic_reported"
-            except httpx.HTTPStatusError as exc:
-                code = exc.response.status_code
-                status = STATUS_UNAUTHORIZED if code in (401, 403) else STATUS_RATE_LIMITED if code == 429 else STATUS_ERROR
-                return self._base(available=False, status=status, balance=balance,
-                                  error=f"Anthropic usage report returned HTTP {code}; local balance is still available")
-            except Exception as exc:  # noqa: BLE001 — preserve a valid local balance
-                logger.warning("Anthropic API cost report unavailable: %s", type(exc).__name__)
-                return self._base(available=False, status=STATUS_ERROR, balance=balance,
-                                  error="Anthropic cost report unavailable; local balance is still available")
-
+    def _spend(self, totals: tuple[Decimal, ...], source: str):
         today, seven, month = totals
         spend = UsageSpend(today_usd=float(today), seven_day_usd=float(seven),
                            month_usd=float(month), source=source)
-        return self._base(available=True, status=STATUS_OK, spend=spend, balance=balance,
-                          error=balance_error, limits=[])
+        return self._base(available=True, status=STATUS_OK, spend=spend, limits=[])

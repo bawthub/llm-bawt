@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from .canonical import ProviderUsage, STATUS_NOT_IMPLEMENTED
 
@@ -27,11 +28,22 @@ class UsageAdapter(ABC):
     backend: str | None = None     # owning agent backend, if any
     access_path_keys: tuple[str, ...] = ()  # exact catalog paths this report covers
     kind: str = "subscription_windows"
+    # Prepaid credit (see usage.balance): "anchor" = user-entered amount counted
+    # down per turn; "provider" = the provider's balance API; None = no balance.
+    balance_mode: str | None = None
+    # Seconds a successful report is reused; None = LLM_BAWT_USAGE_CACHE_TTL.
+    report_ttl: float | None = None
+    # Runtime-setting key of a pre-counter anchor to migrate once, if any.
+    legacy_balance_setting: str | None = None
 
     @abstractmethod
     async def fetch(self) -> ProviderUsage:
         """Return a fresh canonical snapshot. May be slow (external call)."""
         raise NotImplementedError
+
+    def credential_connected_at(self) -> datetime | None:
+        """When the billed credential was last connected; an older anchor is void."""
+        return None
 
     # -- helpers for subclasses ------------------------------------------
 
@@ -42,6 +54,7 @@ class UsageAdapter(ABC):
             display_name=self.display_name,
             backend=self.backend,
             kind=self.kind,
+            balance_supported=bool(self.balance_mode),
             fetched_at=int(time.time()),
         )
         fields.update(overrides)

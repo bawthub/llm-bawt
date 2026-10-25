@@ -484,14 +484,10 @@ class TurnLogStore:
                 # drains the queue. In that repair path, the successful
                 # finalization is authoritative and should also repair ended_at.
                 row.ended_at = _terminal_ended_at(row.created_at, latency_ms)
-            if row.ended_at is not None:
-                from .turn_termination import interrupt_unresolved_tools
-                interrupt_unresolved_tools(session, row.id, row.ended_at)
             session.add(row)
             if row.ended_at is not None:
-                session.flush()
-                from .turn_context_snapshot import record_turn_context
-                record_turn_context(session, row)
+                from .turn_terminal_effects import record_terminal_effects
+                record_terminal_effects(session, row)
             session.commit()
 
     def update_partial_response(

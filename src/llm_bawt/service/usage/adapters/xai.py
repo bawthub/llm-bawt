@@ -17,17 +17,21 @@ from __future__ import annotations
 
 import os
 
+from ..balance import BALANCE_ANCHOR
 from ..base import UsageAdapter
 from ..canonical import STATUS_OK, STATUS_UNAUTHORIZED
 
 
 class XaiUsageAdapter(UsageAdapter):
-    """API-key Grok — no plan limits, just identity for the usage popup."""
+    """API-key Grok — no plan limits; a user-set balance counted down per turn."""
 
     provider = "xai"
     display_name = "xAI · Grok"
     backend = "claude-code"  # typically reached via the claude-code bridge proxy
     access_path_keys = ("xai-chat", "xai-responses")
+    kind = "balance"
+    # No xAI balance API is wired yet (TASK-1473); until then a manual anchor.
+    balance_mode = BALANCE_ANCHOR
 
     def _has_key(self) -> bool:
         for env in ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY"):

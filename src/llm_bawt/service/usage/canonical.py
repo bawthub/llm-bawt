@@ -56,13 +56,19 @@ class UsageSpend(BaseModel):
 
 
 class UsageBalance(BaseModel):
-    """Manual prepaid balance minus app-recorded charges after its anchor."""
+    """Prepaid API credit (see ``usage.balance``).
 
-    amount_usd: float
+    ``bawt_recorded_estimate``: a user-set anchor minus recorded turn costs
+    since; every field is set. ``provider_reported``: only ``remaining_usd``
+    is known; the deposit, debits and anchor time stay None, never invented.
+    """
+
+    amount_usd: float | None
     remaining_usd: float
-    used_usd: float
-    as_of: int  # unix seconds; the anchor is stamped on the server
-    source: str = "bawt_recorded_estimate"
+    used_usd: float | None
+    as_of: int | None  # unix seconds; the anchor is stamped on the server
+    source: str = "bawt_recorded_estimate"  # bawt_recorded_estimate | provider_reported
+    updated_at: float | None = None  # fractional unix seconds; orders turn_complete updates
 
 
 class ProviderUsage(BaseModel):
@@ -71,7 +77,8 @@ class ProviderUsage(BaseModel):
     provider: str                  # canonical provider id, e.g. "claude"
     display_name: str              # human label, e.g. "Claude"
     backend: str | None = None     # owning agent backend, e.g. "claude-code"
-    kind: str = "subscription_windows"  # subscription_windows | spend
+    kind: str = "subscription_windows"  # subscription_windows | balance (spend: pre-counter servers)
+    access_path_key: str | None = None  # echoed for a path/bot query: the route it resolved
     available: bool = False        # True only when live limits were fetched
     status: str = STATUS_ERROR     # one of STATUS_* above
     error: str | None = None       # human-readable detail when not ok

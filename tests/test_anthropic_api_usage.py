@@ -1,76 +1,40 @@
-"""Anthropic pay-per-token usage, credential isolation, and cost normalization."""
+"""Pay-per-token usage: Anthropic API spend, balance contract, credential isolation."""
 
-import json
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
 import pytest
 from fastapi import HTTPException
 
-from llm_bawt.service.routes import settings as setting_routes
 from llm_bawt.service import usage as usage_registry
-from llm_bawt.service.usage.canonical import UsageBalance, UsageSpend
-
 from llm_bawt.service.providers.anthropic_key import AnthropicKeyAdapter
-from llm_bawt.service.usage.adapters.anthropic_api import (
-    AnthropicApiUsageAdapter,
-    cost_totals,
-    read_local_spend,
-)
+from llm_bawt.service.routes import settings as setting_routes
+from llm_bawt.service.routes import usage as usage_routes
+from llm_bawt.service.usage.adapters.anthropic_api import AnthropicApiUsageAdapter, cost_totals
+from llm_bawt.service.usage.adapters.moonshot import MoonshotUsageAdapter
+from llm_bawt.service.usage.balance import BalanceRow, anchored_balance, balance_update_for_turn
+from llm_bawt.service.usage.canonical import UsageSpend
+
+NOW = datetime(2026, 10, 25, 16, tzinfo=timezone.utc)
 
 
-def test_balance_anchor_requires_global_positive_amount_and_stamps_server_time(monkeypatch):
-    class NoopPolicy:
-        def __init__(self, _engine):
-            pass
-
-        def validate_setting_write(self, *_args):
-            pass
-
-    monkeypatch.setattr(setting_routes, "WorkingMemoryPolicy", NoopPolicy)
-    key = "anthropic_api_balance_anchor"
-    before = datetime.now(timezone.utc)
-    value = {"amount_usd": 157}
-    setting_routes._validate_setting_writes(None, [("global", "*", key, value)])
-    stored = setting_routes._setting_value_for_storage(key, value)
-    assert stored["amount_usd"] == "157"
-    assert before <= datetime.fromisoformat(stored["as_of"]) <= datetime.now(timezone.utc)
-    assert value == {"amount_usd": 157}  # caller cannot choose the timestamp
-    for scope, bad in [("bot", value), ("global", {"amount_usd": 0}),
-                       ("global", {"amount_usd": -1}), ("global", {"amount_usd": "NaN"}),
-                       ("global", {"amount_usd": 157, "as_of": "yesterday"})]:
-        with pytest.raises(HTTPException):
-            setting_routes._validate_setting_writes(None, [(scope, "*", key, bad)])
-    with pytest.raises(HTTPException, match="replaced"):
-        setting_routes._validate_setting_writes(None, [("global", "*", "anthropic_api_monthly_budget_usd", 25)])
+def _row(*, anchor="100", spent="2.5", unpriced=0, anchor_at=NOW):
+    return BalanceRow("anthropic_api", Decimal(anchor), anchor_at, Decimal(spent), unpriced,
+                      anchor_at + timedelta(minutes=5))
 
 
-def test_settings_put_persists_one_server_stamped_anchor_and_invalidates_usage(monkeypatch):
-    from types import SimpleNamespace
-    from llm_bawt.service.schemas import RuntimeSettingUpsertRequest
+class _Store:
+    def __init__(self, row=None, spend=(Decimal(0),) * 3):
+        self.row, self._spend, self.spend_calls = row, spend, []
 
-    class NoopPolicy:
-        def __init__(self, _engine):
-            pass
+    def read(self, _provider):
+        return self.row
 
-        def validate_setting_write(self, *_args):
-            pass
-
-    writes = []
-    invalidated = []
-    store = SimpleNamespace(engine=object(), set_value=lambda *args: writes.append(args))
-    service = SimpleNamespace(config=object(), _default_bot="example",
-                              invalidate_all_instances=lambda: 0)
-    monkeypatch.setattr(setting_routes, "WorkingMemoryPolicy", NoopPolicy)
-    monkeypatch.setattr(setting_routes, "get_service", lambda: service)
-    monkeypatch.setattr(setting_routes, "get_runtime_settings_store", lambda _config: store)
-    monkeypatch.setattr(setting_routes, "_invalidate_balance_report", invalidated.append)
-    response = setting_routes.upsert_runtime_setting(RuntimeSettingUpsertRequest(
-        scope_type="global", key="anthropic_api_balance_anchor", value={"amount_usd": 157}))
-    assert writes == [("global", "*", "anthropic_api_balance_anchor", response["value"])]
-    assert invalidated == ["anthropic_api_balance_anchor"]
-    assert datetime.fromisoformat(response["value"]["as_of"]).tzinfo is not None
+    def spend(self, provider, *, since, starts):
+        self.spend_calls.append((provider, since, starts))
+        return self._spend
 
 
 @pytest.fixture
@@ -97,9 +61,98 @@ def report():
     }
 
 
+# -- canonical balance ------------------------------------------------------
+
+
+def test_anchored_balance_is_one_row_read_with_every_field_set():
+    balance, reason = anchored_balance(_row(), NOW - timedelta(days=1))
+    assert reason is None
+    assert balance.model_dump() == {
+        "amount_usd": 100.0, "remaining_usd": 97.5, "used_usd": 2.5,
+        "as_of": int(NOW.timestamp()), "source": "bawt_recorded_estimate",
+        "updated_at": (NOW + timedelta(minutes=5)).timestamp(),
+    }
+
+
+def test_no_anchor_is_no_balance_not_a_fabricated_zero():
+    assert anchored_balance(None, NOW) == (None, None)
+
+
+def test_unpriced_turn_fails_closed_instead_of_charging_a_guess():
+    balance, reason = anchored_balance(_row(unpriced=2), None)
+    assert balance is None and "2 API turn(s)" in reason
+
+
+def test_key_reconnected_after_anchor_voids_the_balance():
+    balance, reason = anchored_balance(_row(), NOW + timedelta(seconds=1))
+    assert balance is None and "key changed" in reason
+
+
+def test_provider_reported_balance_invents_no_deposit_debit_or_anchor(monkeypatch):
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"code": 0, "data": {"available_balance": 49.53}}
+
+    async def fake_get(self, url, *, headers):
+        return Response()
+
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-test")
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    import asyncio
+
+    snap = asyncio.run(MoonshotUsageAdapter().fetch())
+    assert snap.kind == "balance" and snap.balance_supported and snap.status == "ok"
+    balance = snap.balance
+    assert (balance.remaining_usd, balance.source) == (49.53, "provider_reported")
+    assert balance.amount_usd is None and balance.used_usd is None and balance.as_of is None
+    assert balance.updated_at is not None
+
+
+# -- registry overlay: balances are never cached ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_cached_report_always_gets_a_fresh_counter_read(monkeypatch):
+    adapter = usage_registry.get_adapter("anthropic_api")
+    report = adapter._base(status="ok", available=True,
+                           spend=UsageSpend(today_usd=1, seven_day_usd=1, month_usd=1,
+                                            source="bawt_recorded_estimate"))
+    monkeypatch.setitem(usage_registry._cache, "anthropic_api", (time.monotonic(), report))
+    store = _Store(_row(spent="2.5"))
+    monkeypatch.setattr(usage_registry, "_balance_store", lambda: store)
+    monkeypatch.setattr(adapter, "credential_connected_at", lambda: None)
+    first = await usage_registry.get_usage("anthropic_api")
+    store.row = _row(spent="7")
+    second = await usage_registry.get_usage("anthropic_api")
+    assert first.cached and second.cached  # the spend report came from cache...
+    assert (first.balance.remaining_usd, second.balance.remaining_usd) == (97.5, 93.0)  # ...the balance did not
+    assert usage_registry.get_cached("anthropic_api").balance is None
+
+
+@pytest.mark.asyncio
+async def test_unreadable_counter_reports_unknown_credit_not_zero(monkeypatch):
+    adapter = usage_registry.get_adapter("anthropic_api")
+    monkeypatch.setitem(usage_registry._cache, "anthropic_api",
+                        (time.monotonic(), adapter._base(status="ok", available=True)))
+
+    def broken():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(usage_registry, "_balance_store", broken)
+    monkeypatch.setattr(adapter, "credential_connected_at", lambda: None)
+    snap = await usage_registry.get_usage("anthropic_api")
+    assert snap.balance is None and snap.balance_supported
+    assert snap.error == "API balance unavailable"
+
+
+# -- Anthropic spend detail (Admin report preserved, ledger otherwise) ------
+
+
 def test_report_decimal_cents_convert_without_rounding_error(report):
-    now = datetime(2026, 10, 25, 16, tzinfo=timezone.utc)
-    today, seven, month = cost_totals(report["data"], now=now)
+    today, seven, month = cost_totals(report["data"], now=NOW)
     assert today == Decimal("0.30")
     assert seven == Decimal("1.61")
     assert month == Decimal("1.61")
@@ -132,18 +185,15 @@ async def test_admin_cost_report_paginates_without_unused_requests_or_inference_
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     adapter = AnthropicApiUsageAdapter()
     monkeypatch.setattr(adapter, "_admin_key", lambda: "sk-ant-admin01-report")
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("20"), now, now))
-    monkeypatch.setattr(adapter, "_local_spend", lambda now, since: (Decimal(0),) * 4)
+    monkeypatch.setattr(adapter, "_ledger_spend",
+                        lambda *_: (_ for _ in ()).throw(AssertionError("Admin report replaces the ledger")))
     snap = await adapter.fetch()
-    assert snap.status == "ok"
-    assert snap.spend is not None
+    assert snap.status == "ok" and snap.kind == "balance" and snap.balance_supported
     assert snap.spend.source == "anthropic_reported"
-    assert snap.balance is not None and snap.balance.remaining_usd == 20.0
+    assert snap.balance is None  # the counter overlay owns the balance
     assert len(seen) == 2
     assert seen[1][1]["page"] == "page1"
     assert all(call[2]["x-api-key"] == "sk-ant-admin01-report" for call in seen)
-    assert all("cost_report" in call[0] for call in seen)
 
 
 @pytest.mark.asyncio
@@ -154,11 +204,8 @@ async def test_rejected_admin_report_never_falls_back_to_mislabelled_estimate(mo
     monkeypatch.setattr(httpx.AsyncClient, "get", forbidden)
     adapter = AnthropicApiUsageAdapter()
     monkeypatch.setattr(adapter, "_admin_key", lambda: "sk-ant-admin01-report")
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (None, None, now))
-    monkeypatch.setattr(adapter, "_local_spend", lambda now, since: (Decimal(0),) * 4)
     snap = await adapter.fetch()
-    assert snap.kind == "spend" and snap.status == "unauthorized"
+    assert snap.status == "unauthorized"
     assert snap.spend is None and not snap.available
 
 
@@ -168,151 +215,39 @@ async def test_bad_admin_key_cannot_hide_a_valid_recorded_balance(monkeypatch):
         return httpx.Response(403, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", forbidden)
-    adapter = AnthropicApiUsageAdapter()
-    now = datetime.now(timezone.utc)
+    adapter = usage_registry.get_adapter("anthropic_api")
     monkeypatch.setattr(adapter, "_admin_key", lambda: "sk-ant-admin01-bad")
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("157"), now, now))
-    monkeypatch.setattr(adapter, "_local_spend", lambda _now, since: (Decimal(0), Decimal(0), Decimal(0), Decimal("2.50")))
-    snap = await adapter.fetch()
-    assert snap.status == "unauthorized" and snap.spend is None
-    assert snap.balance.remaining_usd == 154.50
-    assert "local balance" in snap.error
-
-
-@pytest.mark.asyncio
-async def test_rate_limited_admin_report_keeps_fresh_local_balance_not_cached_old_one(monkeypatch):
-    import time
-
-    adapter = usage_registry.usage_adapter_for_access_path("anthropic-api")
-    old_balance = UsageBalance(amount_usd=157, remaining_usd=150, used_usd=7, as_of=1)
-    fresh_balance = UsageBalance(amount_usd=157, remaining_usd=145, used_usd=12, as_of=1)
-    old = adapter._base(status="ok", available=True, balance=old_balance,
-                        spend=UsageSpend(today_usd=7, seven_day_usd=7, month_usd=7,
-                                         source="anthropic_reported"))
-    monkeypatch.setitem(usage_registry._cache, "anthropic_api", (time.monotonic() - 300, old))
-
-    async def report_rate_limited():
-        return adapter._base(status="rate_limited", balance=fresh_balance,
-                             error="Admin report returned HTTP 429; local balance remains available")
-
-    monkeypatch.setattr(adapter, "fetch", report_rate_limited)
-    snap = await usage_registry.get_usage("anthropic_api", force=True)
-    assert snap.status == "rate_limited" and snap.balance.remaining_usd == 145
-    assert snap.spend is None
-    assert usage_registry.get_cached("anthropic_api").balance.remaining_usd == 150
+    monkeypatch.setattr(adapter, "credential_connected_at", lambda: NOW - timedelta(days=1))
+    monkeypatch.setattr(usage_registry, "_balance_store", lambda: _Store(_row(spent="2.5")))
     usage_registry.invalidate_cache("anthropic_api")
-    assert usage_registry.get_cached("anthropic_api") is None
+    snap = await usage_registry.get_usage("anthropic_api", force=True)
+    assert snap.status == "unauthorized" and snap.spend is None
+    assert snap.balance.remaining_usd == 97.5
 
 
 @pytest.mark.asyncio
-async def test_balance_anchor_does_not_truncate_calendar_spend(monkeypatch):
-    from datetime import timedelta
-
+async def test_no_admin_key_reads_ledger_spend_since_key_connection(monkeypatch):
     adapter = AnthropicApiUsageAdapter()
-    now = datetime.now(timezone.utc)
-    connection, anchor = now - timedelta(days=2), now - timedelta(hours=1)
+    connected = datetime.now(timezone.utc) - timedelta(days=2)
+    store = _Store(spend=(Decimal("3.25"), Decimal("7.5"), Decimal("12")))
     monkeypatch.setattr(adapter, "_admin_key", lambda: None)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("157"), anchor, connection))
-    floors = []
-    def local_spend(_now, since):
-        floors.append(since)
-        return ((Decimal("10"), Decimal("30"), Decimal("50"), Decimal("80"))
-                if since == connection else (Decimal("2"),) * 4)
-    monkeypatch.setattr(adapter, "_local_spend", local_spend)
-    snapshot = await adapter.fetch()
-    assert floors == [connection, anchor]
-    assert snapshot.spend.month_usd == 50
-    assert snapshot.balance.used_usd == 2 and snapshot.balance.remaining_usd == 155
-
-
-@pytest.mark.asyncio
-async def test_no_admin_key_uses_only_recorded_anthropic_api_cost(monkeypatch):
-    adapter = AnthropicApiUsageAdapter()
-    monkeypatch.setattr(adapter, "_admin_key", lambda: None)
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("157"), now, now))
-    monkeypatch.setattr(adapter, "_local_spend", lambda now, since: (Decimal("3.25"), Decimal("7.5"), Decimal("12"), Decimal("44.70")))
+    monkeypatch.setattr(adapter, "credential_connected_at", lambda: connected)
+    monkeypatch.setattr(usage_registry, "_balance_store", lambda: store)
     snap = await adapter.fetch()
-    assert snap.status == "ok"
+    assert snap.status == "ok" and snap.limits == []
     assert snap.spend.source == "bawt_recorded_estimate"
-    assert snap.spend.today_usd == 3.25
-    assert snap.balance.remaining_usd == 112.30
-    assert snap.balance.used_usd == 44.70
-    assert snap.limits == []
+    assert (snap.spend.today_usd, snap.spend.seven_day_usd, snap.spend.month_usd) == (3.25, 7.5, 12.0)
+    [(provider, since, starts)] = store.spend_calls
+    assert provider == "anthropic_api" and since == connected and len(starts) == 3
 
 
-def test_local_spend_excludes_pre_connection_pre_anchor_and_legacy_paths():
-    from datetime import timedelta
-
-    now = datetime(2026, 10, 25, 16, tzinfo=timezone.utc)
-    anchor = now - timedelta(hours=1)
-
-    class FakeConnection:
-        def execute(self, _statement, values):
-            assert values["start"] == anchor and values["end"] == now
-            # Include out-of-range rows deliberately: the parser also checks the
-            # time boundary, rather than relying solely on the SQL mock.
-            return [
-                (anchor - timedelta(days=23), json.dumps({"total_cost_usd": 2925, "access_path": {"key": "anthropic-api"}})),
-                (anchor, json.dumps({"total_cost_usd": 100, "access_path": {"key": "anthropic-api"}})),
-                (now, json.dumps({"total_cost_usd": 3.25, "access_path": {"key": "anthropic-api"}})),
-                (now, json.dumps({"total_cost_usd": 20, "access_path": {"key": "anthropic-oauth"}})),
-                (now, json.dumps({"total_cost_usd": 12, "access_path": {"key": "<none>"}})),
-                (now, json.dumps({"total_cost_usd": 90})),
-                (now, "not json"),
-            ]
-
-    class FakeEngine:
-        def connect(self):
-            from contextlib import nullcontext
-            return nullcontext(FakeConnection())
-
-    totals = read_local_spend(FakeEngine(), now, since=anchor)
-    assert totals == (Decimal("3.25"),) * 4
-
-
-def test_no_anchor_does_not_expose_a_fabricated_zero_balance(monkeypatch):
-    import asyncio
-
-    adapter = AnthropicApiUsageAdapter()
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(adapter, "_admin_key", lambda: None)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (None, None, now))
-    monkeypatch.setattr(adapter, "_local_spend", lambda _now, since: (Decimal(0),) * 4)
-    snapshot = asyncio.run(adapter.fetch())
-    assert snapshot.status == "ok" and snapshot.balance is None
-    assert snapshot.spend.month_usd == 0
-
-
-def test_missing_connection_timestamp_fails_closed(monkeypatch):
-    import asyncio
-
+@pytest.mark.asyncio
+async def test_missing_connection_timestamp_fails_closed(monkeypatch):
     adapter = AnthropicApiUsageAdapter()
     monkeypatch.setattr(adapter, "_admin_key", lambda: None)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("157"), datetime.now(timezone.utc), None))
-    snapshot = asyncio.run(adapter.fetch())
-    assert snapshot.status == "error" and snapshot.balance is None and snapshot.spend is None
-
-
-def test_reconnected_key_after_anchor_refuses_misleading_balance(monkeypatch):
-    import asyncio
-    from datetime import timedelta
-
-    adapter = AnthropicApiUsageAdapter()
-    now = datetime.now(timezone.utc)
-    connection = now - timedelta(hours=1)
-    monkeypatch.setattr(adapter, "_admin_key", lambda: None)
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("157"), now - timedelta(days=2), connection))
-    observed = []
-    def local_spend(_now, since):
-        observed.append(since)
-        return (Decimal("0.3"), Decimal("0.3"), Decimal("0.3"), Decimal("0.3"))
-    monkeypatch.setattr(adapter, "_local_spend", local_spend)
-    snapshot = asyncio.run(adapter.fetch())
-    assert observed == [connection]
-    assert snapshot.balance is None
-    assert "confirm the balance again" in snapshot.error
-    assert snapshot.spend.month_usd == 0.3
+    monkeypatch.setattr(adapter, "credential_connected_at", lambda: None)
+    snap = await adapter.fetch()
+    assert snap.status == "error" and snap.spend is None and snap.balance is None
 
 
 @pytest.mark.asyncio
@@ -323,9 +258,114 @@ async def test_admin_spend_stays_available_without_inference_connection(monkeypa
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     adapter = AnthropicApiUsageAdapter()
     monkeypatch.setattr(adapter, "_admin_key", lambda: "sk-ant-admin01-report")
-    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (None, None, None))
-    monkeypatch.setattr(adapter, "_local_spend", lambda *_args: (_ for _ in ()).throw(AssertionError("no connection floor")))
-    snapshot = await adapter.fetch()
-    assert snapshot.status == "ok" and snapshot.spend.source == "anthropic_reported"
-    assert snapshot.balance is None
-    assert "connection time" in snapshot.error
+    monkeypatch.setattr(adapter, "credential_connected_at", lambda: None)
+    snap = await adapter.fetch()
+    assert snap.status == "ok" and snap.spend.source == "anthropic_reported"
+
+
+# -- HTTP contract ------------------------------------------------------------
+
+
+@pytest.fixture
+def anchors(monkeypatch):
+    calls = []
+    monkeypatch.setattr(usage_routes, "set_balance", lambda provider, amount: calls.append(("set", provider, amount)))
+    monkeypatch.setattr(usage_routes, "clear_balance", lambda provider: calls.append(("clear", provider)))
+
+    async def report(provider, *, force=False):
+        return usage_registry.get_adapter(provider)._base(status="ok", available=True)
+
+    monkeypatch.setattr(usage_routes, "get_usage", report)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", ["157.25", 157, 0.5])
+async def test_put_balance_anchors_the_amount_and_returns_the_report(anchors, amount):
+    snap = await usage_routes.set_balance_endpoint(
+        "anthropic_api", usage_routes.BalanceAnchorRequest(amount_usd=amount))
+    assert anchors == [("set", "anthropic_api", Decimal(str(amount)))]
+    assert snap.provider == "anthropic_api" and snap.kind == "balance"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", [0, -1, "NaN", "Infinity", True, None, "abc", [5], {"v": 1}, 10**9])
+async def test_put_balance_rejects_non_positive_non_finite_or_absurd_amounts(anchors, amount):
+    with pytest.raises(HTTPException) as err:
+        await usage_routes.set_balance_endpoint(
+            "anthropic_api", usage_routes.BalanceAnchorRequest(amount_usd=amount))
+    assert err.value.status_code == 400 and anchors == []
+
+
+@pytest.mark.asyncio
+async def test_delete_balance_clears_the_anchor(anchors):
+    await usage_routes.clear_balance_endpoint("xai")
+    assert anchors == [("clear", "xai")]
+
+
+@pytest.mark.asyncio
+async def test_balance_writes_refuse_provider_reported_unknown_and_subscription_providers(anchors, monkeypatch):
+    monkeypatch.setitem(usage_registry._REGISTRY, "moonshot", MoonshotUsageAdapter())
+    for provider, code in [("moonshot", 409), ("claude", 409), ("nope", 404)]:
+        for call in (lambda: usage_routes.set_balance_endpoint(
+                         provider, usage_routes.BalanceAnchorRequest(amount_usd=5)),
+                     lambda: usage_routes.clear_balance_endpoint(provider)):
+            with pytest.raises(HTTPException) as err:
+                await call()
+            assert err.value.status_code == code
+    assert anchors == []
+
+
+@pytest.mark.asyncio
+async def test_path_query_echoes_the_resolved_access_path(anchors):
+    snap = await usage_routes.get_usage_endpoint(provider=None, access_path=" Anthropic-API ",
+                                                 bot_id=None, force=False)
+    assert snap.provider == "anthropic_api" and snap.access_path_key == "anthropic-api"
+
+
+def test_retired_balance_settings_point_at_the_balance_endpoint(monkeypatch):
+    class NoopPolicy:
+        def __init__(self, _engine):
+            pass
+
+        def validate_setting_write(self, *_args):
+            pass
+
+    monkeypatch.setattr(setting_routes, "WorkingMemoryPolicy", NoopPolicy)
+    for key in ("anthropic_api_balance_anchor", "anthropic_api_monthly_budget_usd"):
+        with pytest.raises(HTTPException, match="/v1/usage/"):
+            setting_routes._validate_setting_writes(None, [("global", "*", key, {"amount_usd": 5})])
+
+
+# -- turn_complete.balance_update ---------------------------------------------
+
+
+def test_balance_update_for_a_provider_reported_turn_asks_for_a_refresh(monkeypatch):
+    monkeypatch.setitem(usage_registry._ACCESS_PATH_ADAPTERS, "moonshot-anthropic", MoonshotUsageAdapter())
+    update = balance_update_for_turn(None, {"access_path": {"key": "moonshot-anthropic"}, "total_cost_usd": 0.1})
+    assert update["provider"] == "moonshot" and update["access_path_key"] == "moonshot-anthropic"
+    assert update["balance"] is None and update["refresh"] is True
+
+
+def test_balance_update_for_an_anchored_turn_carries_the_committed_counter(monkeypatch):
+    from llm_bawt.service.usage import balance as balance_module
+
+    class Store:
+        def __init__(self, _engine):
+            pass
+
+        def read(self, _provider):
+            return _row(spent="4")
+
+    monkeypatch.setattr(balance_module, "ApiBalanceStore", Store)
+    monkeypatch.setattr(usage_registry.get_adapter("anthropic_api"), "credential_connected_at", lambda: None)
+    update = balance_update_for_turn(object(), '{"access_path": {"key": "anthropic-api"}}')
+    assert update["provider"] == "anthropic_api" and "refresh" not in update
+    assert update["balance"]["remaining_usd"] == 96.0
+    assert update["updated_at"] == update["balance"]["updated_at"]
+
+
+@pytest.mark.parametrize("usage", [None, "not json", {"total_cost_usd": 1},
+                                   {"access_path": {"key": "anthropic-oauth"}}])
+def test_turns_off_balance_paths_get_no_balance_update(usage):
+    assert balance_update_for_turn(None, usage) is None

@@ -2,8 +2,6 @@
 
 import json
 import logging
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -58,6 +56,7 @@ from .bot_profile_validation import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+RETIRED_BALANCE_SETTINGS = frozenset({"anthropic_api_monthly_budget_usd", "anthropic_api_balance_anchor"})
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None, default_bot: str) -> tuple[str, str]:
@@ -80,36 +79,13 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]])
     """
     policy = WorkingMemoryPolicy(engine)
     for scope_type, scope_id, key, value in writes:
-        if key == "anthropic_api_monthly_budget_usd":
-            raise HTTPException(status_code=400, detail="Monthly API budget was replaced by the prepaid balance anchor")
-        if key == "anthropic_api_balance_anchor":
-            if scope_type != "global" or not isinstance(value, dict) or set(value) != {"amount_usd"}:
-                raise HTTPException(status_code=400, detail="Balance anchor requires a global amount_usd; the server sets as_of")
-            try:
-                amount = Decimal(str(value["amount_usd"]))
-            except (InvalidOperation, ValueError, TypeError):
-                amount = Decimal("NaN")
-            if isinstance(value["amount_usd"], bool) or not amount.is_finite() or amount <= 0:
-                raise HTTPException(status_code=400, detail="API balance must be a positive USD amount")
+        if key in RETIRED_BALANCE_SETTINGS:
+            # One writer for API credit: the per-provider counter (TASK-1461).
+            raise HTTPException(status_code=400, detail="Set API balances with PUT /v1/usage/{provider}/balance")
         try:
             policy.validate_setting_write(scope_type, scope_id, key, value)
         except WorkingMemoryError as exc:
             raise HTTPException(status_code=400, detail=exc.message) from exc
-
-
-def _setting_value_for_storage(key: str, value: object) -> object:
-    if key != "anthropic_api_balance_anchor":
-        return value
-    # The UI supplies the amount, never the clock. This timestamp and the value
-    # are one atomic runtime-setting write, even in the batch endpoint.
-    return {"amount_usd": str(Decimal(str(value["amount_usd"]))),
-            "as_of": datetime.now(timezone.utc).isoformat()}
-
-
-def _invalidate_balance_report(key: str) -> None:
-    if key == "anthropic_api_balance_anchor":
-        from ..usage import invalidate_cache
-        invalidate_cache("anthropic_api")
 
 
 async def _push_soul_background(slug: str, agent_id: str, system_prompt: str) -> None:
@@ -533,9 +509,7 @@ def upsert_runtime_setting(request: RuntimeSettingUpsertRequest):
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
     _validate_setting_writes(store.engine, [(st, sid, request.key, request.value)])
-    value = _setting_value_for_storage(request.key, request.value)
-    store.set_value(st, sid, request.key, value)
-    _invalidate_balance_report(request.key)
+    store.set_value(st, sid, request.key, request.value)
     if st == "bot":
         _invalidate_bot_instance_cache(service, sid)
     else:
@@ -545,7 +519,7 @@ def upsert_runtime_setting(request: RuntimeSettingUpsertRequest):
         "scope_type": st,
         "scope_id": sid,
         "key": request.key,
-        "value": value,
+        "value": request.value,
     }
 
 
@@ -562,8 +536,6 @@ def delete_runtime_setting(
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
     deleted = store.delete_value(st, sid, key)
-    if deleted:
-        _invalidate_balance_report(key)
     if st == "bot":
         _invalidate_bot_instance_cache(service, sid)
     else:
@@ -595,9 +567,7 @@ def batch_upsert_runtime_settings(request: RuntimeSettingBatchUpsertRequest):
     touched_bots: set[str] = set()
     touched_global = False
     for st, sid, item in scoped:
-        value = _setting_value_for_storage(item.key, item.value)
-        store.set_value(st, sid, item.key, value)
-        _invalidate_balance_report(item.key)
+        store.set_value(st, sid, item.key, item.value)
         if st == "bot":
             touched_bots.add(sid)
         else:

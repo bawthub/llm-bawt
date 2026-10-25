@@ -11,14 +11,12 @@ of — is an account balance:
 so instead of xAI's empty-limits placeholder we can surface real remaining
 credit, which is the number that actually predicts "will my next turn work".
 
-**Mapping note (deliberate, read before "fixing" it).** ``UsageLimit`` models a
-*consumption* window — ``used`` out of ``limit``. A prepaid balance has no
-denominator: we know what's left, never what was topped up. So we do NOT
-invent a ``used_pct`` — a percentage here would be fabricated. We report the
-balance in ``limit`` (the only numeric slot that isn't a lie), leave ``used``
-and ``used_pct`` as ``None``, and stash the untouched payload in ``raw``.
-Surfacing this properly would mean adding a canonical ``remaining`` field plus
-UI work; that's intentionally deferred, not overlooked.
+**Mapping note (deliberate, read before "fixing" it).** A prepaid balance has
+no denominator: we know what's left, never what was topped up. The canonical
+``balance`` (``source="provider_reported"``, TASK-1461) carries only
+``remaining_usd``; the deposit, debits and anchor time stay ``None`` rather
+than being invented. The legacy ``credit_balance`` limit row (balance in
+``limit``, no ``used_pct``) remains for older clients only.
 
 Response shape is handled defensively — it was not confirmable against a live
 200 at implementation time (the vault key was revoked; see TASK-654). The
@@ -33,15 +31,18 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import httpx
 
+from ..balance import BALANCE_PROVIDER
 from ..base import UsageAdapter
 from ..canonical import (
     STATUS_ERROR,
     STATUS_OK,
     STATUS_RATE_LIMITED,
     STATUS_UNAUTHORIZED,
+    UsageBalance,
     UsageLimit,
 )
 
@@ -65,6 +66,11 @@ class MoonshotUsageAdapter(UsageAdapter):
     display_name = "Moonshot · Kimi"
     backend = "claude-code"  # reached via the claude-code bridge proxy
     access_path_keys = ("moonshot-anthropic",)
+    kind = "balance"
+    balance_mode = BALANCE_PROVIDER
+    # Not a timer: readers refetch after a Moonshot turn completes or a page
+    # opens; this only collapses a burst of those into one balance request.
+    report_ttl = 10.0
 
     # -- helpers ---------------------------------------------------------
 
@@ -194,6 +200,10 @@ class MoonshotUsageAdapter(UsageAdapter):
         return self._base(
             available=True,
             status=STATUS_OK,
+            # The limit row serves clients from before ``balance``; remove it
+            # once every deployed BawtHub reads kind="balance" (TASK-1461).
             limits=[limit],
+            balance=UsageBalance(amount_usd=None, remaining_usd=balance, used_usd=None,
+                                 as_of=None, source="provider_reported", updated_at=time.time()),
             raw=payload if isinstance(payload, dict) else None,
         )

@@ -1,7 +1,7 @@
 # Provider Usage Endpoint
 
-`GET /v1/usage` exposes provider-pluggable subscription windows and API spend.
-A `kind=spend` snapshot is not a subscription quota. The route is in
+`GET /v1/usage` exposes provider-pluggable subscription windows and prepaid API
+balances. A `kind=balance` snapshot is not a subscription quota. The route is in
 [src/llm_bawt/service/routes/usage.py](../src/llm_bawt/service/routes/usage.py)
 and the adapter registry is in
 [src/llm_bawt/service/usage/](../src/llm_bawt/service/usage).
@@ -15,28 +15,73 @@ and the adapter registry is in
 | `GET /v1/usage?bot_id=<slug>` | Resolve via the bot's bound catalog endpoint |
 | `GET /v1/usage?access_path=<key>` | Resolve the frozen route of a completed turn |
 | `...&force=true` | Bypass cache |
+| `PUT /v1/usage/{provider}/balance` `{"amount_usd": 157}` | Set "$X left as of now" (anchor providers only) |
+| `DELETE /v1/usage/{provider}/balance` | Clear the anchor |
+
+A `bot_id`/`access_path` query echoes the resolved route as `access_path_key`.
+Balance writes return the provider's report: `404` for an unknown provider,
+`409` for a provider that reports its own balance or has none, `400` unless
+`amount_usd` is a positive finite number below 10^9.
 
 ## Registered providers
 
 The registry currently includes:
 
 - `claude` (`anthropic-oauth` subscription windows)
-- `anthropic_api` (`anthropic-api` pay-per-token spend)
+- `anthropic_api` (`anthropic-api` prepaid balance, anchor mode)
 - `zai`
 - `openai_chatgpt`
-- `xai` (API-key only — no plan limits; used so Grok bots don't fall back to Claude)
+- `xai` (`xai-chat`/`xai-responses` prepaid balance, anchor mode)
+- `moonshot` (`moonshot-anthropic` prepaid balance from Moonshot's balance API;
+  registered only when a Moonshot OpenPlatform key is configured)
 
 Support level differs by adapter. The canonical response carries `kind`:
-`subscription_windows` uses `limits[]`, while `spend` uses `spend` and leaves
-`limits[]` empty. Unrecognized paths are unavailable; a model name alone never
-selects a subscription credential. Other API-key providers without cost reports
-may return an empty `limits` list.
+`subscription_windows` uses `limits[]`, while `balance` uses `balance` (and
+`spend` where reported) with `balance_supported=true`. Unrecognized paths are
+unavailable; a model name alone never selects a subscription credential.
+
+## Prepaid API balances (TASK-1461)
+
+Implemented in
+[src/llm_bawt/service/usage/balance.py](../src/llm_bawt/service/usage/balance.py).
+An adapter declares `balance_mode`:
+
+- `anchor`: the user enters the remaining credit; `api_balances` holds one row
+  per provider (`anchor_usd`, server-stamped `anchor_at`, `spent_usd`,
+  `unpriced_turns`). `remaining_usd = anchor_usd - spent_usd` is read from that
+  row on every request; it is never cached and never computed by scanning
+  turn logs.
+- `provider`: the provider's balance API is authoritative; nothing counts down
+  locally. Its `balance` has `source=provider_reported`, and `amount_usd`,
+  `used_usd` and `as_of` are `null` (never invented).
+
+`spent_usd` moves only in `TurnLogStore.update_turn`'s transaction for a
+terminal turn, by the change in that turn's `api_balance_ledger` row
+(`turn_id` primary key). A replayed finalize charges nothing; a revised cost
+charges the difference. Only turns created after `anchor_at` whose usage
+carries a frozen `access_path` of that provider count. A counted turn without
+a valid `total_cost_usd` is never charged a guess: it increments
+`unpriced_turns` and the balance reads as unknown until it is set again. A key
+reconnected after the anchor also voids the balance.
+
+`turn_complete` carries `balance_update = {provider, access_path_key, balance,
+updated_at}` for a turn on a balance path; provider mode sends
+`balance: null, refresh: true` so readers refetch. `balance.updated_at` is a
+fractional epoch that orders updates.
+
+The turn-log scan (`backfill_ledger`) runs only on ledger creation, legacy
+migration (the retired `anthropic_api_balance_anchor` runtime setting moves into
+`api_balances` once) and `ApiBalanceStore.repair`. Runtime-setting writes to
+`anthropic_api_balance_anchor` or `anthropic_api_monthly_budget_usd` return
+`400`.
 
 ## Caching
 
 Successful snapshots are cached for `LLM_BAWT_USAGE_CACHE_TTL` seconds
-(default `120`). On refresh errors or upstream `429`s, the endpoint returns the
-last good cached snapshot when it has one.
+(default `120`; an adapter may set a shorter `report_ttl`, which Moonshot uses
+as a 10 s debounce). On refresh errors or upstream `429`s, the endpoint returns
+the last good cached snapshot when it has one. Anchored balances are overlaid
+fresh on every read, including cached reports.
 
 ## Anthropic API spend
 
@@ -47,13 +92,12 @@ connection store and is never exposed by the inference token broker. With an
 Admin key, the adapter reads Anthropic's paginated organization Cost Report
 (Anthropic excludes Priority Tier costs from this endpoint). It does not request
 the separate Usage Report because no usage breakdown is displayed; an unused
-report cannot hold up spend. Without the Admin key, the adapter sums
-positive `turn_logs.token_usage_json.total_cost_usd` on the frozen
-`anthropic-api` access path. That is an **estimate limited to recorded app
-turns**, not the whole account. A configured positive global runtime setting
-`anthropic_api_monthly_budget_usd` adds a display percentage; it never enforces
-a limit. Failed report reads are unavailable, never silently replaced with zero
-spend or a different account's subscription quota.
+report cannot hold up spend. Without the Admin key, the adapter sums the
+`api_balance_ledger` since the `anthropic-api` key was connected. That is an
+**estimate limited to recorded app turns**, not the whole account. Neither
+source debits the balance; the per-turn counter does. Failed report reads are
+unavailable, never silently replaced with zero spend or a different account's
+subscription quota.
 
 ## ChatGPT / Codex usage
 
