@@ -57,7 +57,9 @@ receipt for the exact commit being pushed. It runs `make test-gate` on exactly
 `REV` in a throwaway worktree, stressing `origin/master..REV` (the base is
 pinned to a SHA in the receipt). `make gate-receipt REV=<tip>` prints the newest
 such receipt and exits 0 only if it passed (1 failed, 2 none). A `PATCHES`
-trial never counts: it tested other bytes.
+trial never counts, because it tested other bytes. Neither does a run whose
+stressed range misses part of `origin/master..REV` (e.g. `STRESS_BASE=<tip>`,
+which stresses nothing).
 
 ## Timing patterns the guard rejects (TASK-1457)
 

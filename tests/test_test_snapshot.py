@@ -547,35 +547,60 @@ def test_the_gate_suite_stresses_from_the_pinned_base():
     assert snap.suite_command("sweep", []) == ["make", "--no-print-directory", "test-sweep"]
 
 
-def gate_receipt(repo: Path, root: Path, rev: str, capsys) -> tuple[int, str]:
+def gate_receipt(repo: Path, root: Path, rev: str, capsys, upstream: str) -> tuple[int, str]:
     capsys.readouterr()
-    code = snap.main(["--repo", str(repo), "--root", str(root), "--receipt-for", rev])
+    code = snap.main(["--repo", str(repo), "--root", str(root), "--receipt-for", rev, "--upstream", upstream])
     captured = capsys.readouterr()
     return code, captured.out + captured.err
 
 
-def test_a_ship_reads_the_newest_unpatched_gate_receipt_for_the_exact_tip(repo, root, tmp_path, capsys):
-    head = git(repo, "rev-parse", "HEAD").strip()
-    code, output = gate_receipt(repo, root, "HEAD", capsys)
-    assert code == snap.EXIT_REFUSED and f"none for {head}" in output
+@pytest.fixture
+def pushed(repo) -> tuple[str, str]:
+    """``upstream`` (what origin/master holds) and an unpushed ``tip`` on top of it."""
+    upstream = git(repo, "rev-parse", "HEAD").strip()
+    (repo / "app.py").write_text("a = 1\nx = 2\nz = 1\n")
+    git(repo, "commit", "-qam", "tip")
+    return upstream, git(repo, "rev-parse", "HEAD").strip()
 
-    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", "HEAD", suite=check("pass"))
+
+def test_a_ship_reads_the_newest_unpatched_gate_receipt_for_the_exact_tip(repo, root, tmp_path, capsys, pushed):
+    upstream, tip = pushed
+    code, output = gate_receipt(repo, root, "HEAD", capsys, upstream)
+    assert code == snap.EXIT_REFUSED and f"none for {tip}" in output
+
+    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", upstream, suite=check("pass"))
     assert code == snap.EXIT_PASSED
     assert (receipt["suite"], receipt["mode"], receipt["base"], receipt["stress_base"]) == (
-        "gate", "base", head, head)
-    code, output = gate_receipt(repo, root, "HEAD", capsys)
-    assert code == snap.EXIT_PASSED and "PASSED" in output and f"stress range {head[:12]}" in output
+        "gate", "base", tip, upstream)
+    code, output = gate_receipt(repo, root, "HEAD", capsys, upstream)
+    assert code == snap.EXIT_PASSED and "PASSED" in output and f"stress range {upstream[:12]}" in output
 
     # A later failing gate at the same tip is the answer, not the earlier pass.
-    code, _ = run_cli(repo, root, "--suite", "gate", "--stress-base", "HEAD", suite=check("raise SystemExit(1)"))
+    code, _ = run_cli(repo, root, "--suite", "gate", "--stress-base", upstream, suite=check("raise SystemExit(1)"))
     assert code == snap.EXIT_FAILED
-    code, output = gate_receipt(repo, root, "HEAD", capsys)
+    code, output = gate_receipt(repo, root, "HEAD", capsys, upstream)
     assert code == snap.EXIT_FAILED and "FAILED" in output
 
     # A PATCHES trial at that tip tests other bytes, so it never counts.
-    patch = make_patch(repo, tmp_path, "x2.patch", x2)
-    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", "HEAD", "--patch", str(patch),
+    patch = make_patch(repo, tmp_path, "z2.patch", lambda r: (r / "app.py").write_text("a = 1\nx = 2\nz = 2\n"))
+    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", upstream, "--patch", str(patch),
                             suite=check("pass"))
     assert code == snap.EXIT_PASSED and receipt["mode"] != "base"
-    code, _ = gate_receipt(repo, root, "HEAD", capsys)
+    code, _ = gate_receipt(repo, root, "HEAD", capsys, upstream)
     assert code == snap.EXIT_FAILED
+
+
+def test_a_gate_that_stressed_less_than_the_push_range_does_not_count(repo, root, capsys, pushed):
+    upstream, tip = pushed
+    # STRESS_BASE=<tip> stresses an empty range, so it passes vacuously.
+    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", tip, suite=check("pass"))
+    assert code == snap.EXIT_PASSED and receipt["stress_base"] == tip
+    code, output = gate_receipt(repo, root, tip, capsys, upstream)
+    assert code == snap.EXIT_REFUSED
+    assert f"1 gate run(s) at it stressed less than {upstream}..{tip[:12]}" in output
+
+    # A base at or before the upstream's fork point covers it; the narrow run stays ignored.
+    code, _ = run_cli(repo, root, "--suite", "gate", "--stress-base", upstream, suite=check("pass"))
+    assert code == snap.EXIT_PASSED
+    code, output = gate_receipt(repo, root, tip, capsys, upstream)
+    assert code == snap.EXIT_PASSED and f"stress range {upstream[:12]}" in output
