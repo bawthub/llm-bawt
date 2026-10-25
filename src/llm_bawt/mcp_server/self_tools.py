@@ -499,10 +499,11 @@ async def self_system_prompt(
     (``PATCH /v1/bots/{slug}/profile``): the DB row is upserted, the in-memory
     bot registry is reloaded, per-bot instance caches are invalidated, and for
     OpenClaw agents the new prompt is pushed to SOUL.md. It never rewrites the
-    current in-flight context. A pinned agent session (Claude Code, TASK-1318)
-    keeps its pinned prompt until the next session boundary: /new, reset, model
-    switch, or the first turn after a manual /compact. Other backends pick the
-    change up on the next turn.
+    current in-flight context. Agent backends that pin the prompt per session
+    (``pins_system_prompt``, TASK-1318) keep it until the next session
+    boundary: /new, reset, model switch, or the first turn after a manual
+    /compact. Unpinned bots pick the change up on the next turn. The result's
+    ``note`` says which applies to this bot.
 
     Args:
         bot_id: The bot whose system prompt to act on. Pass YOUR OWN slug
@@ -617,11 +618,27 @@ async def self_system_prompt(
         "name": after.get("name"),
         "bot_type": after.get("bot_type"),
         "updated_at": after.get("updated_at"),
-        # TASK-1318: pin-enabled agent sessions keep their pinned prompt until
-        # the next session boundary (service/system_prompt_pin.py).
-        "note": (
-            "Not this turn. A pinned agent session (Claude Code) picks this up at its next "
-            "session boundary: /new, reset, model switch, or the first turn after a manual "
-            "/compact. Other backends pick it up on the next turn."
-        ),
+        "note": _prompt_edit_note({**before, **after}),
     }
+
+
+def _backend_pins_prompt(profile: dict) -> bool:
+    """True when the bot's agent backend pins the system prompt per session."""
+    if profile.get("bot_type") != "agent":
+        return False
+    from llm_bawt.agent_backends import list_backends
+
+    cls = list_backends().get(profile.get("agent_backend") or "")
+    return bool(getattr(cls, "pins_system_prompt", False))
+
+
+def _prompt_edit_note(profile: dict) -> str:
+    # TASK-1318: pin-enabled backends keep the session's pinned prompt until
+    # the next session boundary (service/system_prompt_pin.py).
+    if _backend_pins_prompt(profile):
+        return (
+            "Not this turn. This bot's sessions pin their prompt, so the edit lands at the "
+            "next session boundary: /new, reset, model switch, or the first turn after a "
+            "manual /compact."
+        )
+    return "Takes effect on the next turn; the current in-flight context is unchanged."

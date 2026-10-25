@@ -104,7 +104,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "self_recap": "Generate a continuation briefing from your bot_id's history using inference. Window is hours+days*24; store=true writes a summary.",
     "self_tail": "Read your bot_id's last count raw conversation bubbles for context restoration. Absorb them; do not reprint the transcript unless asked.",
     "self_fwd": "Forward YOUR recent bubbles to target_bot_id; sender_bot_id must be your explicit slug. Async by default; force never authorizes concurrency.",
-    "self_system_prompt": "Read your own durable persona (action=view) or fully replace it (edit, new_prompt). Use your bot_id; edits land at next session boundary, not harness wrapper.",
+    "self_system_prompt": "Read your own durable persona (action=view) or fully replace it (edit, new_prompt). Use your bot_id; lands next turn, pinned sessions at next boundary; not harness wrapper.",
     "self_model": "View or persistently switch bot_id's model endpoint; applies next turn, not this one. continue_prompt queues one when_idle follow-up turn on the new model.",
     "ops_list_operations": "Discover enabled ops and schemas before ops_run; include_disabled grants no execution permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",

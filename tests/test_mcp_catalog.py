@@ -139,7 +139,9 @@ async def test_catalog_token_budgets():
     # 3,874 (+14). Both change what one call may do, so they stay in-band.
     # TASK-1460: tasks_board (the board's lanes as /tasks/board draws them):
     # 3,911 (+37).
-    assert sum(descriptions) <= 3911, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1318: self_system_prompt says pinned sessions (Claude Code, Codex)
+    # get edits at the next boundary, unpinned bots next turn: 3,914 (+3).
+    assert sum(descriptions) <= 3914, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -188,7 +190,8 @@ async def test_catalog_token_budgets():
     # place of a tasks_list call per status.
     # TASK-1249: bots_list_available optional capability filter: 14,499 (+31).
     # Finds a bot by what its role tags can do without naming a custom tag.
-    assert total <= 14499, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1318: self_system_prompt pinned-vs-unpinned edit timing: 14,502 (+3).
+    assert total <= 14502, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
