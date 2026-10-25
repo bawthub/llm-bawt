@@ -45,7 +45,8 @@ Connect an `anthropic-admin` Usage reporting key separately from the
 `anthropic-api` inference key. The Admin credential is encrypted by the provider
 connection store and is never exposed by the inference token broker. With an
 Admin key, the adapter reads Anthropic's paginated organization Cost Report and
-Usage Report; the cost report determines spend. Without it, the adapter sums
+Usage Report; the cost report determines spend (Anthropic excludes Priority Tier
+costs from this endpoint). Without it, the adapter sums
 positive `turn_logs.token_usage_json.total_cost_usd` on the frozen
 `anthropic-api` access path. That is an **estimate limited to recorded app
 turns**, not the whole account. A configured positive global runtime setting

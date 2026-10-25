@@ -133,6 +133,19 @@ def test_admin_key_is_not_a_model_key_and_inference_probe_explains_slot(monkeypa
     assert not issubclass(AnthropicAdminAdapter, ApiKeyAdapter)
 
 
+def test_admin_key_cannot_be_read_from_inference_token_broker(monkeypatch) -> None:
+    admin = object.__new__(AnthropicAdminAdapter)
+    admin.store = FakeStore(ConnectionRecord(
+        provider="anthropic-admin", status="connected", secret={"admin_key": "sk-ant-admin01-report"}))
+    monkeypatch.delenv("BRIDGE_CLAUDE_TOKEN_SECRET", raising=False)
+    monkeypatch.setattr(provider_routes, "_adapter_or_404", lambda _provider_id: admin)
+    app = FastAPI()
+    app.include_router(provider_routes.router)
+    response = TestClient(app).get("/v1/providers/anthropic-admin/token")
+    assert response.status_code == 404
+    assert "sk-ant-admin" not in response.text
+
+
 def test_admin_probe_validates_report_then_saves_separate_slot(monkeypatch) -> None:
     import httpx
 

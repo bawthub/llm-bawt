@@ -69,6 +69,20 @@ def test_cached_snapshot_is_copy_without_fetch(monkeypatch):
     assert usage.get_cached("nonexistent") is None
 
 
+@pytest.mark.asyncio
+async def test_unknown_access_path_returns_unavailable_without_fetch(monkeypatch):
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("an unknown path must never fetch a provider report")
+
+    monkeypatch.setattr(usage_routes, "get_usage", unexpected)
+    response = await usage_routes.get_usage_endpoint(
+        provider=None, bot_id=None, access_path="unrecognized-route", force=False,
+    )
+    assert response.provider == "unavailable"
+    assert response.status == "not_implemented"
+    assert response.limits == []
+
+
 def test_usage_adapter_ownership_is_exact_and_unimplemented_routes_are_unknown():
     assert usage_adapter_for_access_path("anthropic-api").provider == "anthropic_api"
     assert usage_adapter_for_access_path("anthropic-oauth").provider == "claude"

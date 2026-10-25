@@ -6,6 +6,9 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from fastapi import HTTPException
+
+from llm_bawt.service.routes import settings as setting_routes
 
 from llm_bawt.service.providers.anthropic_key import AnthropicKeyAdapter
 from llm_bawt.service.usage.adapters.anthropic_api import (
@@ -13,6 +16,21 @@ from llm_bawt.service.usage.adapters.anthropic_api import (
     cost_totals,
     read_local_spend,
 )
+
+
+def test_monthly_budget_is_positive_global_only(monkeypatch):
+    class NoopPolicy:
+        def __init__(self, _engine):
+            pass
+
+        def validate_setting_write(self, *_args):
+            pass
+
+    monkeypatch.setattr(setting_routes, "WorkingMemoryPolicy", NoopPolicy)
+    setting_routes._validate_setting_writes(None, [("global", "*", "anthropic_api_monthly_budget_usd", 25)])
+    for scope, value in [("bot", 25), ("global", 0), ("global", -1), ("global", "NaN")]:
+        with pytest.raises(HTTPException, match="positive global USD amount"):
+            setting_routes._validate_setting_writes(None, [(scope, "*", "anthropic_api_monthly_budget_usd", value)])
 
 
 @pytest.fixture
@@ -86,6 +104,22 @@ async def test_admin_report_paginates_and_never_uses_inference_key(monkeypatch, 
     assert seen[1][1]["page"] == "page1"
     assert all(call[2]["x-api-key"] == "sk-ant-admin01-report" for call in seen)
     assert any("usage_report/messages" in call[0] for call in seen)
+
+
+@pytest.mark.asyncio
+async def test_rejected_admin_report_never_falls_back_to_mislabelled_estimate(monkeypatch):
+    async def forbidden(self, url, *, params, headers):
+        return httpx.Response(403, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", forbidden)
+    adapter = AnthropicApiUsageAdapter()
+    monkeypatch.setattr(adapter, "_admin_key", lambda: "sk-ant-admin01-report")
+    monkeypatch.setattr(adapter, "_budget", lambda: None)
+    monkeypatch.setattr(adapter, "_local_spend", lambda now: (_ for _ in ()).throw(
+        AssertionError("configured but rejected Admin credential must not silently use local spend")))
+    snap = await adapter.fetch()
+    assert snap.kind == "spend" and snap.status == "unauthorized"
+    assert snap.spend is None and not snap.available
 
 
 @pytest.mark.asyncio
