@@ -5,7 +5,8 @@ The system-prompt shape used to be imperative logic split across two methods
 ``_assemble_system_builder`` for the per-turn sections). This module makes the
 shape DATA: one ordered list of :class:`SectionSpec` that a single walk function
 iterates. Each section's actual rendering logic lives in a ``_sec_<name>``
-method on ``BaseLLMBawt`` (referenced by name here) — so this file is the one
+method on ``BaseLLMBawt`` (defined in ``prompt_sections.py``, referenced by
+name here) — so this file is the one
 place to read the entire prompt shape top-to-bottom, while the heterogeneous
 per-section logic stays where it can reach ``self``.
 
