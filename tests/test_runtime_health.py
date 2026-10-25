@@ -95,7 +95,8 @@ def delivery_host():
             ordinal INTEGER, id TEXT, status TEXT, target_bot_id TEXT, sender_bot_id TEXT,
             author_entity_type TEXT, author_entity_id TEXT, task_id TEXT, turn_id TEXT,
             created_at TIMESTAMP, updated_at TIMESTAMP,
-            available_at TIMESTAMP, lease_expires_at TIMESTAMP)"""))
+            available_at TIMESTAMP, lease_expires_at TIMESTAMP,
+            lane TEXT DEFAULT 'normal', transport_accepted_at TIMESTAMP)"""))
         conn.execute(text("""CREATE TABLE turn_logs (
             id TEXT, bot_id TEXT, status TEXT, agent_session_key TEXT,
             agent_request_id TEXT, user_id TEXT, created_at TIMESTAMP, ended_at TIMESTAMP)"""))
@@ -108,18 +109,22 @@ def delivery_host():
 _SEQ = iter(range(1, 100_000))
 
 
-def insert(service, status, *, age=0, delay=0, lease=60, target="rook", sender="snark",
-           task_id=None, turn_id=None, author="bot"):
+def insert(service, status, *, age=0, delay=None, lease=60, target="rook", sender="snark",
+           task_id=None, turn_id=None, author="bot", lane="normal"):
+    """``delay`` sets available_at relative to NOW; by default it is created_at, as on enqueue."""
     n = next(_SEQ)
     with service._inter_bot_dispatcher.store.engine.begin() as conn:
-        conn.execute(text("""INSERT INTO inter_bot_deliveries VALUES
-            (:n,:id,:status,:target,:sender,:author,:author_id,:task,:turn,:created,:updated,:available,:lease)"""),
+        conn.execute(text("""INSERT INTO inter_bot_deliveries (ordinal, id, status, target_bot_id,
+                sender_bot_id, author_entity_type, author_entity_id, task_id, turn_id, created_at,
+                updated_at, available_at, lease_expires_at, lane)
+            VALUES (:n,:id,:status,:target,:sender,:author,:author_id,:task,:turn,:created,:updated,
+                    :available,:lease,:lane)"""),
                      {"n": n, "id": f"delivery-{n}", "status": status, "target": target, "sender": sender,
                       "author": author, "author_id": "someone" if author == "user" else sender,
                       "task": task_id, "turn": turn_id or f"turn-delivery-{n}",
-                      "created": NOW-timedelta(seconds=age),
-                      "updated": NOW-timedelta(seconds=age), "available": NOW+timedelta(seconds=delay),
-                      "lease": NOW+timedelta(seconds=lease)})
+                      "created": NOW-timedelta(seconds=age), "updated": NOW-timedelta(seconds=age),
+                      "available": NOW + timedelta(seconds=-age if delay is None else delay),
+                      "lease": NOW+timedelta(seconds=lease), "lane": lane})
     return f"delivery-{n}"
 
 
@@ -153,7 +158,7 @@ def test_wait_behind_a_busy_target_is_ok_and_named(delivery_host):
     row = deliveries(delivery_host)
     assert row["status"] == "ok"
     assert row["reason"] == (
-        "2 queued behind busy or held bots: "
+        "2 waiting as expected: "
         "rook ← snark (TASK-1249, 14m, target busy: executing), "
         "byte ← snark (TASK-1249, 8m, target busy: reserved)")
     assert [(i["target"], i["wait"], i["degraded"]) for i in row["items"]] == [
@@ -222,8 +227,48 @@ def test_named_deliveries_are_capped_at_three(delivery_host):
         "5 deliveries stuck: a ← snark (3m, target idle, not picked up), "
         "b ← snark (3m, target idle, not picked up), "
         "c ← snark (3m, target idle, not picked up) +2 more; "
-        "1 queued behind busy or held bots: byte ← snark (3m, target busy: executing)")
+        "1 waiting as expected: byte ← snark (3m, target busy: executing)")
     assert len(row["items"]) == 6
+
+
+def _item(row, delivery_id):
+    return next(item for item in row["items"] if item["id"] == delivery_id)
+
+
+@pytest.mark.parametrize("head_kw,wait,detail", [
+    # Codex r1 Blocker 1: strict FIFO holds a due row behind these heads.
+    ({"age": 900, "delay": 3600}, "backoff", "retry due in 1h"),
+    ({"age": 900, "delay": -30}, "pending", "target idle, claim due"),
+])
+def test_a_due_row_behind_a_head_that_isnt_claimable_yet_is_ok(delivery_host, head_kw, wait, detail):
+    head = insert(delivery_host, "QUEUED", **head_kw)
+    behind = insert(delivery_host, "QUEUED", age=300, task_id="TASK-3")
+    row = deliveries(delivery_host)
+    assert row["status"] == "ok"
+    item = _item(row, behind)
+    assert (item["wait"], item["behind"]) == (wait, head)
+    assert item["detail"] == f"behind {head}: {detail}"
+
+
+def test_a_row_behind_an_in_flight_head_is_ok(delivery_host):
+    head = insert(delivery_host, "DISPATCHING", age=200, lease=120)
+    behind = insert(delivery_host, "QUEUED", age=150)
+    assert (row := deliveries(delivery_host))["status"] == "ok"
+    assert _item(row, behind)["detail"] == f"behind {head}: dispatching in flight"
+
+
+def test_rows_behind_a_stuck_head_are_stuck_too_and_name_it(delivery_host):
+    head = insert(delivery_host, "QUEUED", age=600)
+    behind = insert(delivery_host, "QUEUED", age=300)
+    row = deliveries(delivery_host)
+    assert row["status"] == "degraded"
+    assert [(i["id"], i["wait"], i["behind"]) for i in row["items"]] == [
+        (head, "idle", None), (behind, "idle", head)]
+
+
+def test_a_head_just_out_of_backoff_is_not_reported_yet(delivery_host):
+    insert(delivery_host, "QUEUED", age=900, delay=-30)
+    assert deliveries(delivery_host) == {"name": "deliveries.queue", "status": "ok", "reason": None}
 
 
 def test_deliveries_ignore_future_backoff_valid_lease_and_old_failure(delivery_host):

@@ -25,18 +25,29 @@ _ACCEPTED_OPEN_DISPATCH = """
 """
 
 
-def load_user_bypass(conn, target: str, config):
-    """The user's own chat row a user-Stop hold lets through, locked; else None.
+def head_candidate(conn, target: str):
+    """The target's FIFO head row, unlocked; None when the lane is empty.
 
-    TASK-1327: under a live ``user_stop:<target>`` gate (the caller checked it
-    under the target lock) the earliest ready QUEUED row the user authored as
-    ordinary chat may run ahead of the held backlog. Claimed work is never
-    jumped: no bypass while any STEERING row or in-flight DISPATCHING row
-    (``load_claim_head``'s own definition) exists for the target. The row gets
-    the same route veto a head gets.
+    The one definition of "head" (``load_claim_head`` locks and vetoes this
+    row; ``deliveries.queue`` health reads it, TASK-1458).
     """
-    candidate = conn.execute(text(f"""
-        SELECT c.id FROM inter_bot_deliveries c
+    return conn.execute(text(f"""
+        SELECT d.* FROM inter_bot_deliveries d
+        WHERE d.target_bot_id=:target AND d.lane='normal'
+          AND d.status IN ('QUEUED','STEERING','DISPATCHING')
+          AND NOT ({_ACCEPTED_OPEN_DISPATCH})
+        ORDER BY d.ordinal ASC LIMIT 1
+    """), {"target": target}).mappings().first()
+
+
+def user_bypass_candidate(conn, target: str):
+    """The ready user chat row a user-Stop hold would let run ahead, unlocked.
+
+    PostgreSQL only (``clock_timestamp``); callers ask only under a live hold,
+    which exists only there. See ``load_user_bypass`` for the rule.
+    """
+    return conn.execute(text(f"""
+        SELECT c.* FROM inter_bot_deliveries c
         WHERE c.target_bot_id=:target AND c.status='QUEUED' AND c.lane='normal'
           AND c.author_entity_type='user'
           AND c.metadata_json->'ordinary_chat' IS NOT NULL
@@ -50,6 +61,19 @@ def load_user_bypass(conn, target: str, config):
           )
         ORDER BY c.ordinal ASC LIMIT 1
     """), {"target": target}).mappings().first()
+
+
+def load_user_bypass(conn, target: str, config):
+    """The user's own chat row a user-Stop hold lets through, locked; else None.
+
+    TASK-1327: under a live ``user_stop:<target>`` gate (the caller checked it
+    under the target lock) the earliest ready QUEUED row the user authored as
+    ordinary chat may run ahead of the held backlog. Claimed work is never
+    jumped: no bypass while any STEERING row or in-flight DISPATCHING row
+    (``load_claim_head``'s own definition) exists for the target. The row gets
+    the same route veto a head gets.
+    """
+    candidate = user_bypass_candidate(conn, target)
     if not candidate:
         return None
     head = _lock_delivery(conn, candidate["id"])
@@ -74,13 +98,7 @@ def load_claim_head(conn, target: str, config):
     started instead of waiting for it to end (TASK-1067). Before acceptance, or
     once the turn has ended, it still blocks until marked terminal.
     """
-    candidate = conn.execute(text(f"""
-        SELECT d.* FROM inter_bot_deliveries d
-        WHERE d.target_bot_id=:target AND d.lane='normal'
-          AND d.status IN ('QUEUED','STEERING','DISPATCHING')
-          AND NOT ({_ACCEPTED_OPEN_DISPATCH})
-        ORDER BY d.ordinal ASC LIMIT 1
-    """), {"target": target}).mappings().first()
+    candidate = head_candidate(conn, target)
     if not candidate:
         return None
     meta = candidate.get("metadata_json") or {}

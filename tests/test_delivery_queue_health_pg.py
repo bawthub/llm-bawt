@@ -34,7 +34,7 @@ def rig():
     assert deliveries.engine is not None
     tag = uuid.uuid4().hex[:12]
     ctx = SimpleNamespace(engine=deliveries.engine, deliveries=deliveries, bots=[],
-                          owner=f"job-queue-health-{tag}")
+                          owner=f"job-queue-health-{tag}", gate_owners=[])
 
     def bot():
         slug = f"test-qh-{tag}-{len(ctx.bots)}"
@@ -46,7 +46,8 @@ def rig():
     ctx.bot = bot
     yield ctx
     with ctx.engine.begin() as conn:
-        conn.execute(sa_text("DELETE FROM system_gates WHERE owner_id=:o"), {"o": ctx.owner})
+        for owner in (ctx.owner, *ctx.gate_owners):
+            conn.execute(sa_text("DELETE FROM system_gates WHERE owner_id=:o"), {"o": owner})
         for slug in ctx.bots:
             for sql in (
                 "DELETE FROM inter_bot_deliveries WHERE target_bot_id=:b",
@@ -121,3 +122,55 @@ def test_a_fresh_wait_is_not_reported(rig):
     sender, target = rig.bot(), rig.bot()
     _queued(rig, sender, target, age="30 seconds")
     assert _items(rig) == {}
+
+
+def _rows(rig):
+    row = DeliveryQueueHealth(rig.engine).check(datetime.now(UTC))
+    return {item["id"]: item for item in row.get("items", ()) if item["target"] in rig.bots}
+
+
+def test_a_due_row_behind_a_delayed_head_waits_on_it_as_the_claim_does(rig):
+    """Codex r1 Blocker 1: strict FIFO holds a due row behind a head in backoff."""
+    sender, target = rig.bot(), rig.bot()
+    head = _queued(rig, sender, target, age="10 minutes")
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE inter_bot_deliveries SET available_at=now() + interval '1 hour' WHERE id=:id"
+        ), {"id": head})
+    behind = _queued(rig, sender, target, task_id="TASK-2")
+
+    assert rig.deliveries.claim_next(target, claim_owner="health-test", steer_capable=False) is None
+    item = _rows(rig)[behind]
+    assert (item["wait"], item["degraded"], item["behind"]) == ("backoff", False, head)
+    assert item["detail"].startswith(f"behind {head[:17]}: retry due in ")
+
+
+def test_a_user_chat_row_past_a_user_stop_hold_is_judged_as_the_claim_judges_it(rig):
+    """Codex r1 Blocker 2: the hold lets the user's own chat run ahead, so an
+    idle target that hasn't claimed it is stuck; the bot backlog is held."""
+    from llm_bawt.message_authorship import AuthorReference
+    from llm_bawt.service.user_stop_hold import hold_owner, open_or_extend
+
+    sender, target = rig.bot(), rig.bot()
+    backlog = _queued(rig, sender, target)
+    user, _ = rig.deliveries.enqueue(
+        sender_bot_id=target, target_bot_id=target, author=AuthorReference.user("fixture-user"),
+        message="chat", metadata={"ordinary_chat": {"session_id": None, "stream": True}},
+        payload={"messages": [{"role": "user", "content": "chat"}], "bot_id": target,
+                 "user": "fixture-user", "stream": True},
+    )
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET created_at = now() - interval '5 minutes',
+                available_at = now() - interval '5 minutes' WHERE id = :id
+        """), {"id": user.id})
+        open_or_extend(conn, target, 600)
+    rig.gate_owners.append(hold_owner(target))
+
+    items = _rows(rig)
+    assert (items[user.id]["wait"], items[user.id]["degraded"]) == ("idle", True)
+    assert items[backlog]["wait"] == "held"
+    assert items[backlog]["detail"] == f"held by hold gate (operator user_stop:{target})"
+
+    claimed = rig.deliveries.claim_next(target, claim_owner="health-test", steer_capable=False)
+    assert claimed is not None and claimed.id == user.id
