@@ -42,6 +42,13 @@ def client(store, monkeypatch):
     return TestClient(app)
 
 
+def _send(client, method, url, headers, body):
+    if isinstance(body, bytes):
+        headers = {**headers, "Content-Type": "application/json"}
+        return client.request(method, url, headers=headers, content=body)
+    return client.request(method, url, headers=headers, json=body)
+
+
 # --- auth --------------------------------------------------------------------
 
 @pytest.mark.parametrize("headers", [
@@ -57,10 +64,12 @@ def client(store, monkeypatch):
     ("PUT", "oidc/authelia", {"value": "s"}),
     ("GET", "not-a-name", None),  # unknown names don't leak before auth
     ("PUT", "session-secret", {"wrong": "shape"}),  # auth runs before body validation
+    ("PUT", "session-secret", b"{not json"),  # ... and before JSON decoding
+    ("PUT", "oidc/authelia", b""),
 ])
 def test_no_or_wrong_token_is_401(client, store, headers, method, path, body):
     store.put("oidc/authelia", "existing")
-    response = client.request(method, f"{URL}/{path}", headers=headers, json=body)
+    response = _send(client, method, f"{URL}/{path}", headers, body)
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"] == "Bearer"
     assert response.headers["Cache-Control"] == "no-store"
@@ -69,12 +78,17 @@ def test_no_or_wrong_token_is_401(client, store, headers, method, path, body):
     assert store.get("oidc/authelia") == "existing"
 
 
-def test_unconfigured_token_fails_closed(client, monkeypatch):
+@pytest.mark.parametrize("method,body", [
+    ("GET", None), ("PUT", {"value": "v"}), ("PUT", {"wrong": "shape"}), ("PUT", b"{not json"),
+])
+def test_unconfigured_token_fails_closed(client, store, monkeypatch, method, body):
     monkeypatch.delenv(TOKEN_ENV)
     for headers in ({}, AUTH, {"Authorization": "Bearer "}):
-        response = client.get(f"{URL}/session-secret", headers=headers)
+        response = _send(client, method, f"{URL}/session-secret", headers, body)
         assert response.status_code == 503
         assert response.json() == {"detail": "service_token_unconfigured"}
+        assert response.headers["Cache-Control"] == "no-store"
+    assert store.get("session-secret") is None
 
 
 def test_token_from_secret_file(client, monkeypatch, tmp_path):
@@ -139,9 +153,13 @@ def test_no_list_route(client):
 
 
 @pytest.mark.parametrize("body", [{}, {"value": ""}, {"value": "x" * 8193},
-                                  {"value": "v", "extra": 1}, {"value": 5}])
+                                  {"value": "v", "extra": "secret-extra"}, {"value": 5},
+                                  b"{not json", b"", b"[]"])
 def test_bad_bodies_are_422(client, body):
-    assert client.put(f"{URL}/session-secret", headers=AUTH, json=body).status_code == 422
+    response = _send(client, "PUT", f"{URL}/session-secret", AUTH, body)
+    assert response.status_code == 422
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "xxxxxxxx" not in response.text and "secret-extra" not in response.text
     assert client.get(f"{URL}/session-secret", headers=AUTH).status_code == 404
 
 

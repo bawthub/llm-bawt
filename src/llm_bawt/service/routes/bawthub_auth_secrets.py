@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
@@ -75,10 +75,22 @@ async def get_secret(name: str, store: BawtHubAuthSecretStore = Depends(get_secr
     return JSONResponse({"name": name, "value": value}, headers=NO_STORE)
 
 
+async def _read_write(request: Request) -> SecretWrite:
+    # Parsed here, not as a declared body parameter: FastAPI decodes a declared
+    # body before router dependencies run, so malformed JSON would answer 422
+    # ahead of the bearer check. Errors never echo the submitted value.
+    try:
+        return SecretWrite.model_validate_json(await request.body())
+    except ValidationError as error:
+        detail = error.errors(include_url=False, include_input=False, include_context=False)
+        raise HTTPException(422, detail, headers=NO_STORE) from None
+
+
 @router.put("/{name:path}")
-async def put_secret(body: SecretWrite, name: str,
+async def put_secret(name: str, request: Request,
                      store: BawtHubAuthSecretStore = Depends(get_secret_store)):
     name = _known(name)
+    body = await _read_write(request)
     if is_create_only(name):
         if not await run_in_threadpool(store.create_if_absent, name, body.value):
             raise HTTPException(409, "exists", headers=NO_STORE)
