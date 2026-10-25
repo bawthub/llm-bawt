@@ -48,8 +48,8 @@ services:
       # bridges already use for LLM_BAWT_API_URL.
       - LLM_BAWT_AGENT_ORIGIN=http://app:8642
       # TASK-701/793: trusted current-turn MCP tools write through BawtHub's
-      # container-only association API. No bearer — the docker network boundary
-      # is the auth layer (see llm-bawt security model).
+      # container-only association API, sending the BawtHub service bearer
+      # (BAWTHUB_SERVICE_TOKEN[_FILE] from .env, TASK-1472) when configured.
       - BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL=${BAWTHUB_TASK_ASSOCIATION_INTERNAL_URL:-http://frontend-prod:3002}
       # TASK-636: CODEX_AUTH_PATH removed — the app reads the codex bundle
       # from the encrypted DB store (provider_connection:openai_chatgpt).
