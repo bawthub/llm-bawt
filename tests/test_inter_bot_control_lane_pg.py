@@ -230,6 +230,41 @@ def test_a_pin_that_differs_from_the_members_binding_is_unconfirmed(rig):
     assert (settled.status, settled.last_error) == ("FAILED", "unconfirmed:pinned_run_unaddressable")
 
 
+@pytest.mark.parametrize("case, expected", [
+    ("user", ("FAILED", "unconfirmed:user_mismatch")),
+    ("pin", ("FAILED", "unconfirmed:pinned_run_unaddressable")),
+    ("unlinked", ("CANCELLED", "not_needed:control_revoked")),
+])
+def test_the_drain_emits_a_settled_control_row_and_never_dispatches_it(rig, monkeypatch, case, expected):
+    """A control row the claim settles terminal is emitted and the drain moves
+    on; it must never reach ``_dispatch`` as a fallback turn."""
+    from unittest.mock import AsyncMock
+
+    import llm_bawt.bots as bots
+
+    turn_id = _turn(rig)
+    job_id = _open(rig)
+    control, _ = _control(rig, turn_id, **({"user": "someone-else"} if case == "user" else
+                                           {"session": "sess-other"} if case == "pin" else {}))
+    if case != "unlinked":
+        _link(rig, job_id, turn_id, control.id)
+    monkeypatch.setattr(bots, "BotManager", lambda _config: SimpleNamespace(
+        get_bot=lambda _bot: SimpleNamespace(agent_backend="claude-code")))
+    monkeypatch.setattr("llm_bawt.service.maintenance_queue.MaintenanceQueue.publish_ready", AsyncMock())
+    dispatcher, route, emitted = _dispatcher(rig, monkeypatch)
+    dispatcher.claim_owner = "test-drain"
+    dispatched = []
+
+    async def _dispatch(record):
+        dispatched.append(record)
+
+    dispatcher._dispatch = _dispatch
+    before = _turn_count(rig)
+    assert asyncio.run(dispatcher._drain_target(control.target_bot_id)) is True
+    assert [(r.id, r.status, r.last_error) for r in emitted] == [(control.id, *expected)]
+    assert dispatched == [] and route.calls == [] and _turn_count(rig) == before
+
+
 @pytest.mark.parametrize("forge", ["token", "bot", "turn", "delivery", "lease", "released", "settled",
                                    "unlinked"])
 def test_a_delivery_grant_naming_no_live_claim_is_refused(rig, forge):

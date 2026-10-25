@@ -463,8 +463,9 @@ class InterBotDeliveryDispatcher:
         if record is None:
             return False
         await self._emit(record)
-        if record.status == "CANCELLED":
-            # A steer_only row the claim settled as not needed (TASK-1431).
+        if record.status in ("CANCELLED", "FAILED"):
+            # A steer_only or control row the claim settled terminal (TASK-1431):
+            # not needed, or a control ask it could not confirm.
             return True
         if record.status == "STEERING":
             await self._steer(record)
