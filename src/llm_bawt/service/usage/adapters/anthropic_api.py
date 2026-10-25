@@ -22,7 +22,6 @@ from ..canonical import STATUS_ERROR, STATUS_OK, STATUS_RATE_LIMITED, STATUS_UNA
 
 logger = logging.getLogger(__name__)
 COST_URL = "https://api.anthropic.com/v1/organizations/cost_report"
-USAGE_URL = "https://api.anthropic.com/v1/organizations/usage_report/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 ADMIN_CONNECTION = "anthropic-admin"
 BUDGET_SETTING = "anthropic_api_monthly_budget_usd"
@@ -177,17 +176,13 @@ class AnthropicApiUsageAdapter(UsageAdapter):
                 totals = await asyncio.to_thread(self._local_spend, now)
                 source = "bawt_recorded_estimate"
             else:
-                _, seven_start, month_start = _windows(now)
+                _, _, month_start = _windows(now)
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     # The cost endpoint includes non-token charges (e.g. web search).
-                    # Usage is fetched by model for future breakdowns, not used as
-                    # a pricing proxy. Reports can lag a few minutes.
+                    # Fetch only the report consumed by this spend view: an unused
+                    # usage request must not mask a successful cost report.
                     cost = await _pages(client, COST_URL, key, {
                         "starting_at": month_start.isoformat(), "group_by[]": "description",
-                        "bucket_width": "1d", "limit": "31",
-                    })
-                    await _pages(client, USAGE_URL, key, {
-                        "starting_at": seven_start.isoformat(), "group_by[]": "model",
                         "bucket_width": "1d", "limit": "31",
                     })
                 totals = cost_totals(cost, now=now)

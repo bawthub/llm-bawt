@@ -77,7 +77,7 @@ def test_inference_probe_rejects_admin_key_without_network(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admin_report_paginates_and_never_uses_inference_key(monkeypatch, report):
+async def test_admin_cost_report_paginates_without_unused_requests_or_inference_key(monkeypatch, report):
     seen = []
     pages = [
         {**report, "has_more": True, "next_page": "page1"},
@@ -86,9 +86,8 @@ async def test_admin_report_paginates_and_never_uses_inference_key(monkeypatch, 
 
     async def fake_get(self, url, *, params, headers):
         seen.append((url, dict(params), dict(headers)))
-        if "cost_report" in url:
-            return httpx.Response(200, json=pages.pop(0), request=httpx.Request("GET", url))
-        return httpx.Response(200, json={"data": [], "has_more": False}, request=httpx.Request("GET", url))
+        assert "cost_report" in url, "unused usage endpoint must not delay or break spend reporting"
+        return httpx.Response(200, json=pages.pop(0), request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     adapter = AnthropicApiUsageAdapter()
@@ -100,10 +99,10 @@ async def test_admin_report_paginates_and_never_uses_inference_key(monkeypatch, 
     assert snap.spend.source == "anthropic_reported"
     assert snap.spend.today_usd is not None
     assert snap.spend.monthly_budget_usd == 20.0
-    assert len(seen) == 3
+    assert len(seen) == 2
     assert seen[1][1]["page"] == "page1"
     assert all(call[2]["x-api-key"] == "sk-ant-admin01-report" for call in seen)
-    assert any("usage_report/messages" in call[0] for call in seen)
+    assert all("cost_report" in call[0] for call in seen)
 
 
 @pytest.mark.asyncio
