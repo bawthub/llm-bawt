@@ -338,6 +338,53 @@ def test_more_than_the_cap_is_refused_before_any_row(user_batch):
     assert user_batch == []
 
 
+# ---- a one-bot targets send obeys the selector rules -----------------------
+
+@pytest.fixture
+def selector_sender(monkeypatch):
+    """The real single-route admission up to its selector check, no database."""
+    bots = {b.slug: b for b in (_bot("fx-a"), _bot("fx-private"), _bot("fx-inactive"),
+                                _bot("fx-chat", bot_type="chat", backend=None), _bot(SENDER))}
+    rows = [{"slug": slug, "include_in_global_search": True,
+             "tags": ([BehaviorTag.PRIVATE] if slug == "fx-private" else [])
+             + ([BehaviorTag.INACTIVE] if slug == "fx-inactive" else [])} for slug in bots]
+
+    class Tags:
+        def __init__(self, _engine):
+            pass
+
+        def snapshot(self):
+            return TagSnapshot.from_rows(rows)
+
+    monkeypatch.setattr(bot_tags, "BotTags", Tags)
+    monkeypatch.setattr(send, "BotManager", lambda _cfg: SimpleNamespace(
+        list_bots=lambda: list(bots.values()), get_bot=bots.get))
+    return send.DeliverySender(lambda: SimpleNamespace(config=SimpleNamespace()),
+                               dispatcher=lambda: SimpleNamespace(store=SimpleNamespace(engine=None)))
+
+
+@pytest.mark.parametrize(("target", "author", "status", "error"), [
+    ("fx-private", {}, 404, "unknown_target"),  # a bot caller can't tell private from unknown
+    ("fx-private", {"author_entity_type": "user", "author_entity_id": "fixture-user"},
+     403, "target_private"),
+    ("fx-inactive", {}, 422, "target_inactive"),
+    ("fx-chat", {}, 422, "target_not_durable"),
+    ("ghost", {}, 404, "unknown_target"),
+])
+def test_a_one_bot_targets_send_is_refused_as_a_fan_out_would_be(
+        selector_sender, target, author, status, error):
+    body = send.DeliveryCreate(sender_bot_id=SENDER, target_bot_id=target, message="hi",
+                               from_selector=True, **author)
+    with pytest.raises(send.DeliveryRefused) as refused:
+        asyncio.run(selector_sender.admit(body))
+    assert refused.value.status_code == status and refused.value.detail["error"] == error
+
+
+def test_an_eligible_one_bot_target_passes_the_selector_check(selector_sender):
+    selector_sender._refuse_unselectable("fx-a", SENDER, bot_caller=True)
+    selector_sender._refuse_unselectable(SENDER, SENDER, bot_caller=True)  # MCP never collapses self
+
+
 # ---- MCP targets routing ---------------------------------------------------
 
 def _signed(monkeypatch, bot_id, turn_id="turn-" + "c" * 32):
@@ -382,11 +429,39 @@ def test_one_explicit_target_takes_the_single_path(mcp_sends):
     [call] = mcp_sends["single"]
     assert call["target_bot_id"] == "fx-a" and call["steer_only"] is True
     assert call["prefer_steer"] is True
+    assert call["from_selector"] is True  # the route applies the selector rules
 
 
 def test_a_default_single_send_body_does_not_name_steer_only(mcp_sends):
     _send(target_bot_id="fx-a")
     assert "steer_only" not in mcp_sends["single"][0]
+    assert "from_selector" not in mcp_sends["single"][0]
+
+
+def test_the_single_send_body_carries_from_selector_only_when_set(monkeypatch):
+    posted: list[dict[str, Any]] = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, _url, json, **_kwargs):
+            posted.append(json)
+            return SimpleNamespace(status_code=202, json=lambda: {"delivery_id": "d-1"},
+                                   raise_for_status=lambda: None)
+
+    monkeypatch.setattr(tools.httpx, "AsyncClient", Client)
+    common = dict(prefer_steer=True, target_bot_id="fx-a", message="hi", sender_bot_id=SENDER,
+                  max_tokens=None, temperature=0.7, timeout_seconds=60, idempotency_key=None,
+                  project_id=None, task_id=None, message_kind=None, metadata=None,
+                  session_policy=None, reset_session_before_delivery=None,
+                  retain_history=None, reset_reason=None)
+    asyncio.run(tools._enqueue_durable(**common))
+    asyncio.run(tools._enqueue_durable(**common, from_selector=True))
+    assert "from_selector" not in posted[0] and posted[1]["from_selector"] is True
 
 
 @pytest.mark.parametrize("targets", [["fx-a", "fx-c"], {"tags": [ROLE]}, [SENDER]])

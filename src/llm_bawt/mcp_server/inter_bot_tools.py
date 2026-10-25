@@ -244,11 +244,13 @@ async def _enqueue_durable(
     reply_mode: str = "async",
     headers: dict[str, str] | None = None,
     steer_only: bool = False,
+    from_selector: bool = False,
 ) -> dict:
     """``headers`` is for first-party tool code only (the self-model continue
     forwards its signed turn capability); bots_send_message never sets it.
 
-    ``steer_only`` is sent only when set, so every other body is unchanged.
+    ``steer_only`` and ``from_selector`` are sent only when set, so every other
+    body is unchanged.
     """
     delivery_name = STEER_ONLY if steer_only else STEER_OR_IDLE if prefer_steer else WHEN_IDLE
     body = {
@@ -272,6 +274,8 @@ async def _enqueue_durable(
     }
     if steer_only:
         body["steer_only"] = True
+    if from_selector:
+        body["from_selector"] = True
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -456,6 +460,8 @@ async def send_message_to_bot(
             return await _send_fanout(
                 targets, mode, common, separate=bool((separate_message_reason or "").strip()))
         target_bot_id = single
+        # The route applies the selector's target rules to this one bot (r3 §1.1).
+        common["from_selector"] = True
     if not (separate_message_reason or "").strip():
         origin_id = await _waited_reply_origin(sender_bot_id, target_bot_id)
         if origin_id:

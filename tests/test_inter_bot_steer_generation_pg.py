@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -229,17 +230,33 @@ def batches(delivery_store, monkeypatch):  # noqa: F811
                      "bot_id": body.target_bot_id, "stream": False},
             idempotency_key=body.idempotency_key, metadata=body.metadata,
         )
+        await asyncio.sleep(0.02)  # the real _admit_one awaits _emit and yields the loop
         return 202, {**record.to_api(duplicate=duplicate), "success": True}
 
     monkeypatch.setattr(send.DeliverySender, "_admit_one", admit_one)
     sender_api = send.DeliverySender(lambda: SimpleNamespace(config=store.config),
                                      dispatcher=lambda: SimpleNamespace(store=store))
 
-    def submit(key, targets=None):
-        body = send.BatchDeliveryCreate(sender_bot_id=sender, message="all hands",
+    def body_for(key, targets=None):
+        return send.BatchDeliveryCreate(sender_bot_id=sender, message="all hands",
                                         targets=targets or [target, *others],
                                         idempotency_key=key)
-        return asyncio.run(sender_api.submit(body))
+
+    def submit(key, targets=None):
+        return asyncio.run(sender_api.submit(body_for(key, targets)))
+
+    def on_one_loop(*keys):
+        """Submit concurrently on ONE event loop, as one app process serves them."""
+        async def each(key):
+            try:
+                return await sender_api.submit(body_for(key))
+            except send.DeliveryRefused as exc:
+                return exc.status_code, exc.detail
+
+        async def gather():
+            return await asyncio.gather(*(each(key) for key in keys))
+
+        return asyncio.run(gather())
 
     def count():
         with store.engine.connect() as conn:
@@ -247,7 +264,8 @@ def batches(delivery_store, monkeypatch):  # noqa: F811
                 "SELECT count(*) FROM inter_bot_deliveries WHERE sender_bot_id=:s"
             ), {"s": sender}).scalar_one()
 
-    return SimpleNamespace(submit=submit, count=count, send=send, targets=sorted([target, *others]))
+    return SimpleNamespace(submit=submit, on_one_loop=on_one_loop, count=count, send=send,
+                           targets=sorted([target, *others]), sender=sender, engine=store.engine)
 
 
 def test_a_bots_fourth_batch_in_the_window_is_rate_limited(batches):
@@ -304,3 +322,39 @@ def test_concurrent_batches_cannot_both_take_the_last_slot(batches):
         thread.join(timeout=30)
     assert sorted(outcomes) == [202, 429]
     assert batches.count() == 9
+
+
+def test_same_sender_batches_on_one_loop_serialize_without_blocking_it(batches):
+    """Loopy r1 B1: two submits on one event loop must not deadlock the loop."""
+    batches.submit("k1")
+    batches.submit("k2")
+    started = time.monotonic()
+    (first, accepted), (second, refused) = batches.on_one_loop("k3", "k4")
+    assert time.monotonic() - started < 5
+    assert first == 202 and len(accepted["deliveries"]) == 3
+    assert second == 429 and refused["error"] == "fanout_rate_limited"
+    assert batches.count() == 9
+
+
+def test_a_keyed_retry_racing_its_original_on_one_loop_replays(batches):
+    (first, original), (second, again) = batches.on_one_loop("k1", "k1")
+    assert (first, second) == (202, 202)
+    assert [d["delivery_id"] for d in again["deliveries"]] == [
+        d["delivery_id"] for d in original["deliveries"]]
+    assert all(d["duplicate"] for d in again["deliveries"])
+    assert batches.count() == 3
+
+
+def test_a_batch_held_by_another_process_is_refused_busy_not_waited_on(batches):
+    with batches.engine.connect() as other, other.begin():
+        other.execute(sa_text(
+            "SELECT pg_advisory_xact_lock(hashtext('inter-bot-fanout'), hashtext(:s))"
+        ), {"s": batches.sender})
+        started = time.monotonic()
+        with pytest.raises(batches.send.DeliveryRefused) as refused:
+            batches.submit("k1")
+        assert time.monotonic() - started < 5
+    assert refused.value.status_code == 429
+    assert refused.value.detail["error"] == "fanout_busy"
+    assert refused.value.detail["retryable"] is True
+    assert batches.count() == 0

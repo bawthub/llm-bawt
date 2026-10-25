@@ -12,12 +12,12 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from .inter_bot_fanout_limit import (
-    FanoutRateLimited, batch_id_for, batch_reader, sender_batch_lock,
+    FanoutBusy, FanoutRateLimited, batch_id_for, batch_reader, sender_batch_lock,
 )
-from .inter_bot_send import DeliveryRefused, Principal
 from .inter_bot_send_targets import (
-    MAX_FANOUT_TARGETS, Expansion, SelectorError, TargetExpander, TargetSelector,
+    MAX_FANOUT_TARGETS, Expansion, SelectorError, TargetSelector,
 )
+from .inter_bot_send_types import DeliveryRefused, Principal
 from .message_authorship import AuthorReference, normalize_author
 
 if TYPE_CHECKING:
@@ -65,26 +65,6 @@ class FanoutBatch:
                 "detail": "A bot's multi-target send cannot reset sessions; use session_policy=continue.",
             })
 
-    def _expand(self, selector: TargetSelector, sender: str, principal: Principal, engine) -> Expansion:
-        from .bot_tags import BotTags
-        from .inter_bot_send import BotManager
-
-        snapshot = BotTags(engine).snapshot()
-        if not snapshot.available:
-            raise DeliveryRefused(status_code=503, detail={
-                "error": "bot_tags_unavailable",
-                "detail": "Bot tags could not be read, so no target can be resolved.",
-            })
-        expander = TargetExpander(BotManager(self._sender.service.config).list_bots(), snapshot)
-        try:
-            expander.validate_tags(selector)
-            return expander.expand(
-                selector, sender=sender, exclude=self._body.exclude,
-                include_self=self._body.include_self, bot_caller=principal.kind == "bot",
-            )
-        except SelectorError as exc:
-            raise DeliveryRefused(status_code=422, detail=str(exc)) from exc
-
     def _record(self, selector: TargetSelector, targets: tuple[str, ...]) -> dict[str, Any]:
         return {
             "selector": selector.to_json(),
@@ -121,39 +101,55 @@ class FanoutBatch:
             hold = sender_batch_lock(engine, sender)
         else:
             hold = batch_reader(engine) if key else nullcontext(None)
+        try:
+            async with hold as ledger:
+                deliveries, refused = await self._admit(ledger, selector, sender, principal, batch_id)
+        except FanoutBusy as exc:
+            raise DeliveryRefused(status_code=429, detail={
+                "error": "fanout_busy", "detail": str(exc), "retryable": True,
+            }) from exc
+        return self._response(batch_id, deliveries, refused)
+
+    async def _admit(
+        self, ledger, selector: TargetSelector, sender: str, principal: Principal, batch_id: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Under the batch lock: rate limit, expand (or replay), admit each target."""
+        body = self._body
         deliveries: list[dict[str, Any]] = []
         refused: list[dict[str, Any]] = []
-        with hold as ledger:
-            recorded = ledger.recorded(sender, batch_id) if ledger is not None else None
-            if recorded is None and principal.kind == "bot":
-                try:
-                    ledger.check(sender, batch_id)
-                except FanoutRateLimited as exc:
-                    raise DeliveryRefused(status_code=429, detail={
-                        "error": "fanout_rate_limited", "detail": str(exc),
-                    }) from exc
-            expansion = self._expand(selector, sender, principal, engine)
-            if recorded is not None:
-                expansion = self._replay(dict(recorded), selector, expansion)
-            if len(expansion.targets) > MAX_FANOUT_TARGETS:
-                raise DeliveryRefused(status_code=422, detail={
-                    "error": "too_many_targets",
-                    "detail": f"{len(expansion.targets)} targets; a batch sends to at most "
-                              f"{MAX_FANOUT_TARGETS}.",
-                })
-            refused.extend(_refusal_entry(r.target, r.status_code, {"error": r.error, "detail": r.detail})
-                           for r in expansion.refused)
-            batch = self._record(selector, expansion.targets)
-            for target in expansion.targets:
-                metadata = {**body.metadata, "batch_id": batch_id, "batch": batch}
-                try:
-                    _, receipt = await self._sender._admit_one(
-                        body.for_target(target, metadata), self._request)
-                except DeliveryRefused as exc:
-                    refused.append(_refusal_entry(target, exc.status_code, exc.detail))
-                    continue
-                deliveries.append(receipt)
-        return self._response(batch_id, deliveries, refused)
+        recorded = ledger.recorded(sender, batch_id) if ledger is not None else None
+        if recorded is None and principal.kind == "bot":
+            try:
+                ledger.check(sender, batch_id)
+            except FanoutRateLimited as exc:
+                raise DeliveryRefused(status_code=429, detail={
+                    "error": "fanout_rate_limited", "detail": str(exc),
+                }) from exc
+        expansion = self._sender.expand_targets(
+            selector, sender=sender, exclude=body.exclude,
+            include_self=body.include_self, bot_caller=principal.kind == "bot",
+        )
+        if recorded is not None:
+            expansion = self._replay(dict(recorded), selector, expansion)
+        if len(expansion.targets) > MAX_FANOUT_TARGETS:
+            raise DeliveryRefused(status_code=422, detail={
+                "error": "too_many_targets",
+                "detail": f"{len(expansion.targets)} targets; a batch sends to at most "
+                          f"{MAX_FANOUT_TARGETS}.",
+            })
+        refused.extend(_refusal_entry(r.target, r.status_code, {"error": r.error, "detail": r.detail})
+                       for r in expansion.refused)
+        batch = self._record(selector, expansion.targets)
+        for target in expansion.targets:
+            metadata = {**body.metadata, "batch_id": batch_id, "batch": batch}
+            try:
+                _, receipt = await self._sender._admit_one(
+                    body.for_target(target, metadata), self._request)
+            except DeliveryRefused as exc:
+                refused.append(_refusal_entry(target, exc.status_code, exc.detail))
+                continue
+            deliveries.append(receipt)
+        return deliveries, refused
 
     def _response(self, batch_id: str, deliveries: list[dict[str, Any]],
                   refused: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:

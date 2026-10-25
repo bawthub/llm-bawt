@@ -3,23 +3,34 @@
 A batch is identified by ``metadata_json.batch_id`` on each of its rows. A bot
 sender may start at most ``LIMIT`` new batches per ``WINDOW_MINUTES``; a retry
 of a batch that already has rows is not a new batch. The count and the batch's
-own inserts are serialized per sender by a transaction-scoped advisory lock
-held on one dedicated connection for the whole batch, so two concurrent
-batches cannot both read "2 so far".
+own inserts are serialized per sender for the whole batch, so two concurrent
+batches cannot both read "2 so far":
+
+* in this process, by an ``asyncio.Lock`` per (event loop, sender). A batch
+  awaits ``_emit`` while it holds the lock, so a second batch on the same loop
+  must wait by awaiting, never by blocking the loop thread;
+* across processes, by a transaction-scoped advisory lock taken with
+  ``pg_try_advisory_xact_lock`` on one dedicated connection. It never blocks:
+  if another process holds it, the batch is refused with :class:`FanoutBusy`,
+  which is retryable.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+import weakref
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from typing import Any
 
 from sqlalchemy import text as sa_text
 
 LIMIT = 3
 WINDOW_MINUTES = 10
-LOCK_TIMEOUT = "10s"
 _LOCK_NAMESPACE = "inter-bot-fanout"
+# asyncio.Lock binds to the loop that first waits on it, so locks are per loop.
+_LOCAL_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary())
 # Fixed namespace so a keyed batch id is stable across processes and restarts.
 _BATCH_NAMESPACE = uuid.UUID("6f1b7c2e-1431-5a0e-9d3f-b4c1e2a7f00d")
 
@@ -33,6 +44,17 @@ class FanoutRateLimited(Exception):
         super().__init__(
             f"{sender!r} started {recent} fan-out batches in the last {WINDOW_MINUTES} "
             f"minutes (limit {LIMIT}); retry later or reuse a batch's idempotency_key"
+        )
+
+
+class FanoutBusy(Exception):
+    """Another process is admitting a batch for this sender right now."""
+
+    def __init__(self, sender: str):
+        self.sender = sender
+        super().__init__(
+            f"Another fan-out batch from {sender!r} is being admitted; retry shortly "
+            "with the same idempotency_key"
         )
 
 
@@ -77,19 +99,29 @@ class FanoutLedger:
             raise FanoutRateLimited(sender, recent)
 
 
-@contextmanager
-def sender_batch_lock(engine, sender: str) -> Iterator[FanoutLedger]:
-    """Hold the per-sender batch lock until the block (the whole batch) ends."""
-    with engine.connect() as conn, conn.begin():
-        conn.execute(sa_text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
-        conn.execute(sa_text(
-            "SELECT pg_advisory_xact_lock(hashtext(:namespace), hashtext(:sender))"
-        ), {"namespace": _LOCK_NAMESPACE, "sender": sender})
-        yield FanoutLedger(conn)
+def _local_lock(sender: str) -> asyncio.Lock:
+    locks = _LOCAL_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(sender, asyncio.Lock())
 
 
-@contextmanager
-def batch_reader(engine) -> Iterator[FanoutLedger]:
+@asynccontextmanager
+async def sender_batch_lock(engine, sender: str) -> AsyncIterator[FanoutLedger]:
+    """Hold the per-sender batch lock until the block (the whole batch) ends.
+
+    Raises :class:`FanoutBusy` at entry when another process holds it.
+    """
+    async with _local_lock(sender):
+        with engine.connect() as conn, conn.begin():
+            held = conn.execute(sa_text(
+                "SELECT pg_try_advisory_xact_lock(hashtext(:namespace), hashtext(:sender))"
+            ), {"namespace": _LOCK_NAMESPACE, "sender": sender}).scalar()
+            if not held:
+                raise FanoutBusy(sender)
+            yield FanoutLedger(conn)
+
+
+@asynccontextmanager
+async def batch_reader(engine) -> AsyncIterator[FanoutLedger]:
     """An unlocked ledger, for callers that are not rate limited."""
     with engine.connect() as conn:
         yield FanoutLedger(conn)

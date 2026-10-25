@@ -9,6 +9,9 @@ from sqlalchemy import text as sa_text
 from .agent_context import SessionPolicy
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_user import resolve_delivery_user
+from .inter_bot_steer_only import (
+    NO_ACTIVE_RUN, UNSUPPORTED_BACKEND, is_steer_only, settle_not_needed,
+)
 from .maintenance_delivery import MaintenanceBarrier
 
 QUEUED = "QUEUED"
@@ -90,10 +93,6 @@ class DeliveryClaim:
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
             prefer_steer = bool(payload.get("prefer_steer", True))
-            from .inter_bot_steer_only import (
-                NO_ACTIVE_RUN, UNSUPPORTED_BACKEND, is_steer_only, settle_not_needed,
-            )
-
             steer_only = is_steer_only(payload)
             if steer_only and not steer_capable:
                 # TASK-1431: nothing on this backend can be steered, so the row

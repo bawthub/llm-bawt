@@ -10,11 +10,10 @@ detail), plus the ``steer_only`` mode.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
-from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .agent_context import (
@@ -27,6 +26,9 @@ from .bot_types import durable_agent_backend
 from .bots import BotManager
 from .inter_bot_delivery import CANCELLED, submission_result
 from .inter_bot_delivery_user import resolve_delivery_user
+from .inter_bot_fanout_batch import FanoutBatch
+from .inter_bot_send_targets import Expansion, SelectorError, TargetExpander, TargetSelector
+from .inter_bot_send_types import DeliveryRefused, Principal  # noqa: F401  (re-exported)
 from .inter_bot_steer_only import (
     NOT_NEEDED_PREFIX, STEER_ONLY, STEER_ONLY_KEY, STEER_OR_IDLE, WHEN_IDLE,
 )
@@ -48,14 +50,6 @@ PRIVILEGED_FIELDS = ("session_id", "augment_memory", "raw_message")
 # ``batch_id``; ``batch`` records a batch's resolved targets; ``control`` is the
 # control lane's pin. A caller supplying any of them is refused on every route.
 SERVER_OWNED_METADATA_KEYS = ("new_session_intent", "batch_id", "batch", "control")
-
-
-class DeliveryRefused(HTTPException):
-    """A send refused before any row was written.
-
-    An HTTPException so the routes report it unchanged; typed so a batch can
-    record it per target and carry on.
-    """
 
 
 class _DeliveryFields(BaseModel):
@@ -108,6 +102,11 @@ class DeliveryCreate(_DeliveryFields):
         default=False,
         description="Steer an executing Claude turn or do nothing; never starts a turn.",
     )
+    from_selector: bool = Field(
+        default=False,
+        description=("The target came from a one-bot `targets` selector: refuse it as a "
+                     "fan-out would (private, inactive, not durable)."),
+    )
     user_message_id: str | None = Field(
         default=None, max_length=64,
         description="Caller-minted trigger UUID; also the default idempotency key.",
@@ -157,18 +156,6 @@ class BatchDeliveryCreate(_DeliveryFields):
             **common, target_bot_id=target, metadata=metadata,
             prefer_steer=self.mode != WHEN_IDLE, steer_only=self.mode == STEER_ONLY,
         )
-
-
-@dataclass(frozen=True)
-class Principal:
-    """Who is sending: ``bot`` and ``user`` arrive over HTTP, ``system`` in-process."""
-
-    kind: Literal["bot", "user", "system"]
-    entity_id: str
-
-    @classmethod
-    def of_author(cls, author: AuthorReference) -> Principal:
-        return cls("user" if author.entity_type == "user" else "bot", author.entity_id or "")
 
 
 def refuse_server_owned_metadata(metadata: dict[str, Any]) -> None:
@@ -274,10 +261,42 @@ class DeliverySender:
 
     async def submit(self, body: BatchDeliveryCreate, request: Any = None) -> tuple[int, dict[str, Any]]:
         """A fan-out batch (design r3 §1.2, §1.3)."""
-        from .inter_bot_fanout_batch import FanoutBatch
-
         refuse_server_owned_metadata(body.metadata)
         return await FanoutBatch(self, body, request).run()
+
+    def expand_targets(
+        self, selector: TargetSelector, *, sender: str, exclude: Iterable[str] = (),
+        include_self: bool = False, bot_caller: bool,
+    ) -> Expansion:
+        """The one selector expansion: a batch's targets, or a one-bot ``targets`` send's check."""
+        from .bot_tags import BotTags
+
+        snapshot = BotTags(self._dispatcher().store.engine).snapshot()
+        if not snapshot.available:
+            raise DeliveryRefused(status_code=503, detail={
+                "error": "bot_tags_unavailable",
+                "detail": "Bot tags could not be read, so no target can be resolved.",
+            })
+        expander = TargetExpander(BotManager(self.service.config).list_bots(), snapshot)
+        try:
+            expander.validate_tags(selector)
+            return expander.expand(
+                selector, sender=sender, exclude=exclude,
+                include_self=include_self, bot_caller=bot_caller,
+            )
+        except SelectorError as exc:
+            raise DeliveryRefused(status_code=422, detail=str(exc)) from exc
+
+    def _refuse_unselectable(self, target: str, sender: str, *, bot_caller: bool) -> None:
+        """A one-bot ``targets`` send obeys the selector rules a fan-out does (r3 §1.1)."""
+        expansion = self.expand_targets(
+            TargetSelector.parse([target]), sender=sender, include_self=True,
+            bot_caller=bot_caller,
+        )
+        for refusal in expansion.refused:
+            raise DeliveryRefused(status_code=refusal.status_code, detail={
+                "error": refusal.error, "detail": refusal.detail,
+            })
 
     def _require_owned_session(self, session_id: str, bot_id: str, user_id: str) -> None:
         """Never deliver into another bot's or user's thread, or a deleted one.
@@ -333,6 +352,8 @@ class DeliverySender:
                 status_code=422,
                 detail=f"Bot-authored deliveries need a real sender bot, got {author.entity_id!r}",
             )
+        if body.from_selector:
+            self._refuse_unselectable(target, sender, bot_caller=author.entity_type == "bot")
         target_bot = bots.get_bot(target)
         target_exists = target_bot is not None
         durable_capable = bool(target_bot and durable_agent_backend(target_bot))
