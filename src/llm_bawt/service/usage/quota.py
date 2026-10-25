@@ -62,9 +62,12 @@ def quota_state(snapshot: ProviderUsage | None, model_key: str | None,
         if lim.used_pct is None:
             under = False
             continue
-        reset = lim.resets_at is not None and lim.resets_at <= current
-        if lim.used_pct >= 100 and not reset:
-            return Quota(QUOTA_EXHAUSTED, checked)
+        if lim.used_pct >= 100:
+            if lim.resets_at is None or lim.resets_at > current:
+                return Quota(QUOTA_EXHAUSTED, checked)
+            # The window reset after this reading: no longer provably
+            # exhausted, but nothing has measured it under 100 either.
+            under = False
     return Quota(QUOTA_AVAILABLE if under else QUOTA_UNKNOWN, checked)
 
 

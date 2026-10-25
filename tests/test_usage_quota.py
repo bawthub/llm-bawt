@@ -40,8 +40,13 @@ def test_a_maxed_unscoped_window_is_exhausted():
     assert _state(_snap(_limit(100.0))) == "exhausted"
 
 
-def test_a_window_that_already_reset_is_not_exhausted():
-    assert _state(_snap(_limit(100, resets=NOW - 1), _limit(5))) == "available"
+def test_a_maxed_window_that_already_reset_is_unknown_not_available():
+    # Its 100% reading predates the reset, so nothing shows it under 100.
+    assert _state(_snap(_limit(100, resets=NOW - 1))) == "unknown"
+    assert _state(_snap(_limit(100, resets=NOW))) == "unknown"
+    assert _state(_snap(_limit(100, resets=NOW - 1), _limit(5))) == "unknown"
+    # A maxed window that hasn't reset still decides it.
+    assert _state(_snap(_limit(100, resets=NOW - 1), _limit(100, resets=NOW + 1))) == "exhausted"
 
 
 def test_only_another_models_window_is_unknown():
