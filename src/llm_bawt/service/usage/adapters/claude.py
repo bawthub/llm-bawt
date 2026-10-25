@@ -46,12 +46,12 @@ _KIND_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 # Fallback only — top-level window keys, used if `limits[]` is ever absent.
-_TOPLEVEL_WINDOWS: list[tuple[str, str, str, str]] = [
-    # (response key, canonical id, label, window)
-    ("five_hour", "session_5h", "5-hour limit", "5h"),
-    ("seven_day", "weekly_all", "Weekly · all models", "7d"),
-    ("seven_day_opus", "weekly_opus", "Weekly · Opus", "7d"),
-    ("seven_day_sonnet", "weekly_sonnet", "Weekly · Sonnet", "7d"),
+_TOPLEVEL_WINDOWS: list[tuple[str, str, str, str, list[str] | None]] = [
+    # (response key, canonical id, label, window, model scope)
+    ("five_hour", "session_5h", "5-hour limit", "5h", None),
+    ("seven_day", "weekly_all", "Weekly · all models", "7d", None),
+    ("seven_day_opus", "weekly_opus", "Weekly · Opus", "7d", ["opus"]),
+    ("seven_day_sonnet", "weekly_sonnet", "Weekly · Sonnet", "7d", ["sonnet"]),
 ]
 
 
@@ -106,9 +106,15 @@ def _from_limit_item(item: dict, idx: int) -> UsageLimit | None:
     # `percent` is provider-native 0-100; never treat it as a fraction.
     pct = _parse_pct(item.get("percent"), allow_fraction=False)
     resets = _parse_reset(item.get("resets_at"))
+    scope: list[str] | None = None
     if kind == "weekly_scoped":
-        model = (((item.get("scope") or {}).get("model") or {}).get("display_name")) or "scoped"
+        scoped = ((item.get("scope") or {}).get("model") or {})
+        model = scoped.get("display_name") or "scoped"
         cid, label, window = f"weekly_{model.lower()}", f"Weekly · {model}", "7d"
+        # An unnamed scope stays unscoped: counting it against every model is
+        # the conservative reading.
+        names = [str(v).strip().lower() for v in (scoped.get("id"), scoped.get("display_name")) if v]
+        scope = list(dict.fromkeys(n for n in names if n)) or None
     elif kind in _KIND_MAP:
         cid, label, window = _KIND_MAP[kind]
     else:
@@ -118,14 +124,14 @@ def _from_limit_item(item: dict, idx: int) -> UsageLimit | None:
         window = "7d" if group == "weekly" else "5h" if group == "session" else None
     return UsageLimit(
         id=cid, label=label, used_pct=pct, resets_at=resets, window=window,
-        severity=item.get("severity"), active=item.get("is_active"),
+        severity=item.get("severity"), active=item.get("is_active"), model_scope=scope,
     )
 
 
 def _from_toplevel(data: dict) -> list[UsageLimit]:
     """Fallback mapper over top-level window keys (`{utilization, resets_at}`)."""
     out: list[UsageLimit] = []
-    for key, cid, label, window in _TOPLEVEL_WINDOWS:
+    for key, cid, label, window, scope in _TOPLEVEL_WINDOWS:
         val = data.get(key)
         if isinstance(val, dict):
             pct = _parse_pct(val.get("utilization"))
@@ -133,6 +139,7 @@ def _from_toplevel(data: dict) -> list[UsageLimit]:
             if pct is not None or resets is not None:
                 out.append(UsageLimit(
                     id=cid, label=label, used_pct=pct, resets_at=resets, window=window,
+                    model_scope=scope,
                 ))
     return out
 

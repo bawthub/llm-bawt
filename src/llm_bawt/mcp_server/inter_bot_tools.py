@@ -772,6 +772,94 @@ def _live_states(profiles: list) -> dict[str, dict]:
     )
 
 
+def _discovery_caller(arguments: dict) -> tuple[str | None, str | None]:
+    """(signed caller bot, its signed turn id) for discovery (TASK-1249).
+
+    No credential is anonymous: (None, None). A supplied but bad or
+    mismatched credential raises ``caller_unavailable``, never anonymous.
+    """
+    from .bot_access_identity import trusted_caller
+    from .task_association import current_task_turn_context
+
+    caller = trusted_caller("bots_list_available", arguments)
+    if caller is None:
+        return None, None
+    if caller.kind != "turn":
+        return caller.bot_id, None
+    try:
+        turn = current_task_turn_context()
+    except Exception:
+        raise BotAccessError("caller_unavailable") from None
+    if (turn.bot_id, turn.user_id) != (caller.bot_id, caller.user_id):
+        raise BotAccessError("caller_unavailable")
+    return caller.bot_id, turn.turn_id
+
+
+def _turn_model(turn_id: str, bot_id: str) -> str | None:
+    """The endpoint ref a signed turn actually runs on, from its turn log."""
+    from sqlalchemy import text
+
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+
+    try:
+        with get_shared_engine(Config()).connect() as conn:
+            return conn.execute(text(
+                "SELECT model FROM turn_logs WHERE id = :id AND bot_id = :bot"
+            ), {"id": turn_id, "bot": bot_id}).scalar()
+    except Exception:
+        logger.warning("bot discovery: turn log unavailable", exc_info=True)
+        return None
+
+
+def _route_facts(profiles: list, caller: str | None, turn_id: str | None
+                 ) -> tuple[dict[str, dict], str | None]:
+    """Per-bot model/provider/quota facts, plus the caller's provider (TASK-1249).
+
+    The provider is the vendor of the bot's bound endpoint, never a guess from
+    ``default_model``. Quota comes from the usage report that owns the
+    endpoint's access path, read from cache only. A turn caller's provider is
+    the model its signed turn runs on; any other caller's is its profile's.
+    """
+    from llm_bawt.service.usage import get_cached, usage_adapter_for_access_path
+    from llm_bawt.service.usage.quota import QUOTA_UNKNOWN, Quota, quota_state
+    from llm_bawt.utils.config import Config
+
+    try:
+        catalog = Config().ensure_model_catalog()
+    except Exception:
+        logger.warning("bot discovery: model catalog unavailable", exc_info=True)
+        catalog = None
+
+    def endpoint_of(row):
+        if catalog is None or getattr(row, "endpoint_id", None) is None:
+            return None
+        try:
+            return catalog.resolve_endpoint(int(row.endpoint_id))
+        except Exception:
+            return None
+
+    facts: dict[str, dict] = {}
+    caller_endpoint = None
+    for row in profiles:
+        endpoint = endpoint_of(row)
+        if row.slug == caller:
+            caller_endpoint = endpoint
+        adapter = usage_adapter_for_access_path(endpoint.access_path.key) if endpoint else None
+        quota = (quota_state(get_cached(adapter.provider), endpoint.model.key)
+                 if adapter is not None else Quota(QUOTA_UNKNOWN))
+        facts[row.slug] = {
+            "model": endpoint.ref if endpoint else None,
+            "provider": endpoint.model.vendor if endpoint else None,
+            "quota": quota.state,
+            "quota_checked_at": quota.checked_at,
+        }
+    if turn_id is not None and caller is not None:
+        ref = _turn_model(turn_id, caller)
+        caller_endpoint = catalog.endpoint_by_ref(ref) if catalog is not None and ref else None
+    return facts, caller_endpoint.model.vendor if caller_endpoint else None
+
+
 @mcp.tool(name="bots_list_available")
 async def list_available_bots(
     tag: Annotated[str | None, Field(description="Only bots with this tag.")] = None,
@@ -793,11 +881,20 @@ async def list_available_bots(
     of the bot's tags; ``capability`` filters on it. Tokens are operator data
     and opaque here. An unknown ``capability`` raises like an unknown tag.
 
+    Route facts (TASK-1249): ``model`` is the bound endpoint ref and
+    ``provider`` its model vendor, null when unbound. ``quota`` is
+    available/exhausted/unknown from cached usage for that access path, with
+    ``quota_checked_at`` (unix seconds) of the snapshot. A signed caller is
+    left out of the list, and ``same_provider_as_caller`` is a bool only when
+    both providers are known; an unsigned caller gets null and is not excluded.
+
     ``state`` (TASK-1400) is an advisory, unlocked read: turn comes from the
     admission classifier, so it matches what a send would see at that moment.
     A source that can't be read is named in ``state.unavailable`` with null
     fields, never reported as idle. Task counts live in BawtHub (``tasks_list``).
     """
+    caller, turn_id = _discovery_caller(
+        {"tag": tag, "capability": capability, "include_state": include_state})
     # Policy first: a profile created after the snapshot is unknown, so hidden.
     access = await _policy_resolver().resolve()
     wanted = None
@@ -815,15 +912,23 @@ async def list_available_bots(
         wanted_capability = capability.strip()
         if not any(wanted_capability in caps for caps in by_tag.values()):
             raise ValueError(f"unknown capability {capability!r}")
+    every = await asyncio.to_thread(_profile_rows)
     profiles = [
-        row for row in await asyncio.to_thread(_profile_rows)
+        row for row in every
         if access.tags.excluded_reason(row.slug) is None
+        and row.slug != caller
         and (wanted is None or wanted in access.tags.tags.get(row.slug, ()))
         and (wanted_capability is None or wanted_capability in capabilities_of(row.slug))
     ]
+    # The caller's own row may be hidden from the list but still names its route.
+    routed = profiles + [row for row in every if row.slug == caller]
+    facts, caller_provider = await asyncio.to_thread(_route_facts, routed, caller, turn_id)
     states = await asyncio.to_thread(_live_states, profiles) if include_state and profiles else {}
     listed = []
     for row in profiles:
+        route = facts[row.slug]
+        known = caller is not None and None not in (route["provider"], caller_provider)
+        same = route["provider"] == caller_provider if known else None
         entry = {
             "slug": row.slug,
             "name": row.name or row.slug,
@@ -833,6 +938,8 @@ async def list_available_bots(
             "agent_backend": row.agent_backend,
             "tags": sorted(access.tags.tags.get(row.slug, ())),
             "capabilities": capabilities_of(row.slug),
+            **route,
+            "same_provider_as_caller": same,
         }
         if include_state:
             entry["state"] = states[row.slug]

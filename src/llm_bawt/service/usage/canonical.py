@@ -40,6 +40,10 @@ class UsageLimit(BaseModel):
     window: str | None = None      # descriptive window, e.g. "5h", "7d"
     severity: str | None = None    # provider-native severity, e.g. "normal"/"critical"
     active: bool | None = None     # whether this window is currently the binding one
+    # Models this window counts against: catalog model keys or model-family
+    # names (``fable`` covers ``claude-fable-5-1``). None = every model on the
+    # subscription. See ``usage.quota.limit_applies``.
+    model_scope: list[str] | None = None
 
 
 class UsageSpend(BaseModel):

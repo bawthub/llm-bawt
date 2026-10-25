@@ -8,6 +8,7 @@ side effect. Fixture bots only.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,6 +31,9 @@ _TAGS = {
 def _rows() -> list[dict]:
     return [{"slug": slug, "include_in_global_search": slug != "fixture-column",
              "tags": tags, "catalog": _CATALOG} for slug, tags in sorted(_TAGS.items())]
+
+
+_NO_ROUTE = {"model": None, "provider": None, "quota": "unknown", "quota_checked_at": None}
 
 
 def _profile(slug: str, **overrides: Any) -> SimpleNamespace:
@@ -62,9 +66,27 @@ def policy(monkeypatch):
         state["order"].append("capabilities")
         return state["capabilities"]
 
+    def discovery_caller(arguments):
+        state["caller_args"] = arguments
+        if isinstance(state["caller"], Exception):
+            raise state["caller"]
+        return state["caller"]
+
+    def route_facts(profiles, caller, turn_id):
+        state["order"].append("routes")
+        state["route_reads"].append(([row.slug for row in profiles], caller, turn_id))
+        return ({row.slug: dict(state["routes"].get(row.slug, _NO_ROUTE)) for row in profiles},
+                state["caller_provider"])
+
     state["state_reads"] = []
+    state["route_reads"] = []
+    state["caller"] = (None, None)
+    state["routes"] = {}
+    state["caller_provider"] = None
     # Stored order is the operator's; discovery reports the sorted union.
     state["capabilities"] = {"coder": ("implement",), "reviewer": ("review", "implement")}
+    monkeypatch.setattr(tools, "_discovery_caller", discovery_caller)
+    monkeypatch.setattr(tools, "_route_facts", route_facts)
     monkeypatch.setattr(tools, "_policy_resolver", _Resolver)
     monkeypatch.setattr(tools, "_role_capabilities", role_capabilities)
     monkeypatch.setattr(tools, "_profile_rows", profile_rows)
@@ -79,17 +101,19 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
     assert listed[0] == {"slug": "fixture-public", "name": "Fixture-Public", "bot_type": "agent",
                          "description": "", "default_model": "fixture-model",
                          "agent_backend": "claude-code", "tags": ["reviewer"],
-                         "capabilities": ["implement", "review"]}
+                         "capabilities": ["implement", "review"], **_NO_ROUTE,
+                         "same_provider_as_caller": None}
     assert listed[1]["tags"] == ["no_global_search"]
     assert listed[1]["capabilities"] == []
-    assert policy["order"] == ["policy", "capabilities", "profiles"]
+    assert policy["order"] == ["policy", "capabilities", "profiles", "routes"]
     assert policy["state_reads"] == []
+    assert policy["caller_args"] == {"tag": None, "capability": None, "include_state": False}
 
 
 def test_state_is_read_once_for_the_visible_bots_only(policy):
     listed = asyncio.run(tools.list_available_bots())
 
-    assert policy["order"] == ["policy", "capabilities", "profiles", "state"]
+    assert policy["order"] == ["policy", "capabilities", "profiles", "routes", "state"]
     assert policy["state_reads"] == [["fixture-public", "fixture-quiet"]]
     assert [bot["state"]["fixture"] for bot in listed] == ["fixture-public", "fixture-quiet"]
 
@@ -173,6 +197,206 @@ def test_an_unreadable_profile_table_is_policy_unavailable(monkeypatch):
 
     with pytest.raises(BotAccessError, match="policy_unavailable"):
         tools._profile_rows()
+
+
+# --- route facts (TASK-1249) ----------------------------------------------------
+
+
+def _route(provider, quota="available"):
+    return {"model": f"fixture-model@{provider}-path", "provider": provider,
+            "quota": quota, "quota_checked_at": 1_800_000_000}
+
+
+def test_a_signed_caller_is_left_out_and_compared_by_provider(policy):
+    providers = {"fixture-public": "vendor-a", "fixture-quiet": "vendor-b"}
+    policy["routes"] = {slug: _route(p) for slug, p in providers.items()}
+    policy["caller"] = ("fixture-public", "turn-1")
+    policy["caller_provider"] = "vendor-a"
+
+    listed = asyncio.run(tools.list_available_bots(include_state=False))
+
+    assert [b["slug"] for b in listed] == ["fixture-quiet"]
+    assert listed[0]["same_provider_as_caller"] is False
+    assert (listed[0]["provider"], listed[0]["quota"]) == ("vendor-b", "available")
+    # The caller's own row still feeds the route read; the turn id rides along.
+    assert policy["route_reads"] == [(["fixture-quiet", "fixture-public"], "fixture-public", "turn-1")]
+
+
+def test_a_hidden_caller_still_names_its_route(policy):
+    policy["caller"] = ("fixture-private", None)
+
+    asyncio.run(tools.list_available_bots(include_state=False))
+
+    assert policy["route_reads"][0][0] == ["fixture-public", "fixture-quiet", "fixture-private"]
+
+
+def test_one_provider_for_everyone_marks_every_row_same_and_still_lists_them(policy):
+    policy["routes"] = {s: _route("vendor-a") for s in _TAGS}
+    policy["caller"] = ("fixture-column", None)
+    policy["caller_provider"] = "vendor-a"
+
+    listed = asyncio.run(tools.list_available_bots(capability="review", include_state=False))
+
+    assert [(b["slug"], b["same_provider_as_caller"]) for b in listed] == [("fixture-public", True)]
+
+
+@pytest.mark.parametrize("caller, caller_provider, row_provider", [
+    ((None, None), "vendor-a", "vendor-a"),          # unsigned: never compared
+    (("fixture-column", None), None, "vendor-a"),    # caller's provider unknown
+    (("fixture-column", None), "vendor-a", None),    # row's provider unknown
+])
+def test_same_provider_is_null_unless_both_sides_are_known(policy, caller, caller_provider,
+                                                            row_provider):
+    policy["routes"] = {"fixture-public": _route(row_provider)}
+    policy["caller"] = caller
+    policy["caller_provider"] = caller_provider
+
+    listed = asyncio.run(tools.list_available_bots(include_state=False))
+
+    assert listed[0]["same_provider_as_caller"] is None
+
+
+def test_an_unsigned_caller_is_not_excluded(policy):
+    listed = asyncio.run(tools.list_available_bots(include_state=False))
+
+    assert [b["slug"] for b in listed] == ["fixture-public", "fixture-quiet"]
+
+
+def test_a_bad_credential_raises_before_reading_anything(policy):
+    policy["caller"] = BotAccessError("caller_unavailable")
+
+    with pytest.raises(BotAccessError, match="caller_unavailable"):
+        asyncio.run(tools.list_available_bots())
+    assert policy["order"] == []
+
+
+class _Catalog:
+    """Endpoint ids 1-3 bound to fixture paths; refs are model@path."""
+
+    def __init__(self):
+        def endpoint(eid, model, vendor, path):
+            return SimpleNamespace(id=eid, ref=f"{model}@{path}",
+                                   model=SimpleNamespace(key=model, vendor=vendor),
+                                   access_path=SimpleNamespace(key=path))
+        self.by_id = {1: endpoint(1, "fixture-a", "vendor-a", "path-sub"),
+                      2: endpoint(2, "fixture-a", "vendor-a", "path-api"),
+                      3: endpoint(3, "fixture-b", "vendor-b", "path-sub-b")}
+
+    def resolve_endpoint(self, eid):
+        return self.by_id[eid]
+
+    def endpoint_by_ref(self, ref):
+        return next((e for e in self.by_id.values() if e.ref == ref), None)
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    import llm_bawt.service.usage as usage
+    from llm_bawt.service.usage.canonical import ProviderUsage, UsageLimit
+    from llm_bawt.utils import config as config_module
+
+    state = {"turn_models": {}}
+    snaps = {"report-sub": ProviderUsage(
+        provider="report-sub", display_name="Sub", status="ok", available=True,
+        fetched_at=int(time.time()) - 60,
+        limits=[UsageLimit(id="w", label="w", used_pct=40)])}
+    adapters = {"path-sub": SimpleNamespace(provider="report-sub"),
+                "path-sub-b": SimpleNamespace(provider="report-missing")}
+    catalog = _Catalog()
+    monkeypatch.setattr(config_module, "Config",
+                        lambda: SimpleNamespace(ensure_model_catalog=lambda: catalog))
+    monkeypatch.setattr(usage, "usage_adapter_for_access_path", adapters.get)
+    monkeypatch.setattr(usage, "get_cached", lambda provider: snaps.get(provider))
+    monkeypatch.setattr(tools, "_turn_model", lambda turn, bot: state["turn_models"].get((turn, bot)))
+    return state
+
+
+def test_route_facts_come_from_the_bound_endpoint_and_cached_usage(routes):
+    rows = [_profile("fixture-sub", endpoint_id=1, default_model="fixture-b@path-sub-b"),
+            _profile("fixture-api", endpoint_id=2),
+            _profile("fixture-b", endpoint_id=3),
+            _profile("fixture-unbound", endpoint_id=None),
+            _profile("fixture-gone", endpoint_id=99)]
+
+    facts, caller_provider = tools._route_facts(rows, None, None)
+
+    # default_model never wins over the endpoint binding.
+    assert facts["fixture-sub"] == {"model": "fixture-a@path-sub", "provider": "vendor-a",
+                                    "quota": "available",
+                                    "quota_checked_at": facts["fixture-sub"]["quota_checked_at"]}
+    assert facts["fixture-sub"]["quota_checked_at"] is not None
+    # Same vendor, a path no usage report owns: provider known, quota unknown.
+    assert (facts["fixture-api"]["provider"], facts["fixture-api"]["quota"]) == ("vendor-a", "unknown")
+    # An owning report with nothing cached yet is unknown, never available.
+    assert facts["fixture-b"]["quota"] == "unknown"
+    for slug in ("fixture-unbound", "fixture-gone"):
+        assert facts[slug] == _NO_ROUTE
+    assert caller_provider is None
+
+
+def test_a_turn_callers_provider_is_the_model_its_turn_runs_on(routes):
+    rows = [_profile("fixture-me", endpoint_id=1)]
+    routes["turn_models"][("turn-1", "fixture-me")] = "fixture-b@path-sub-b"
+
+    assert tools._route_facts(rows, "fixture-me", "turn-1")[1] == "vendor-b"
+    # Without a turn the profile's endpoint names it.
+    assert tools._route_facts(rows, "fixture-me", None)[1] == "vendor-a"
+    # An unreadable or unknown turn model is unknown, not the profile's guess.
+    assert tools._route_facts(rows, "fixture-me", "turn-2")[1] is None
+
+
+def test_an_unreadable_catalog_reports_unknown_routes(monkeypatch):
+    from llm_bawt.utils import config as config_module
+
+    def broken():
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(config_module, "Config",
+                        lambda: SimpleNamespace(ensure_model_catalog=broken))
+
+    facts, caller_provider = tools._route_facts([_profile("fixture-x", endpoint_id=1)], None, None)
+
+    assert facts == {"fixture-x": _NO_ROUTE} and caller_provider is None
+
+
+def test_discovery_caller_maps_signed_and_unsigned_callers(monkeypatch):
+    import llm_bawt.mcp_server.bot_access_identity as identity
+    import llm_bawt.mcp_server.task_association as association
+    from llm_bawt.bot_access import TrustedCaller
+
+    seen = {}
+
+    def caller_for(value):
+        def trusted(name, arguments):
+            seen["name"] = name
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return trusted
+
+    turn = SimpleNamespace(bot_id="fixture-me", user_id="fixture-user", turn_id="turn-1")
+    monkeypatch.setattr(association, "current_task_turn_context", lambda: turn)
+
+    monkeypatch.setattr(identity, "trusted_caller", caller_for(None))
+    assert tools._discovery_caller({}) == (None, None)
+    assert seen["name"] == "bots_list_available"
+
+    monkeypatch.setattr(identity, "trusted_caller",
+                        caller_for(TrustedCaller("fixture-me", None, "service")))
+    assert tools._discovery_caller({}) == ("fixture-me", None)
+
+    monkeypatch.setattr(identity, "trusted_caller",
+                        caller_for(TrustedCaller("fixture-me", "fixture-user", "turn")))
+    assert tools._discovery_caller({}) == ("fixture-me", "turn-1")
+
+    monkeypatch.setattr(identity, "trusted_caller",
+                        caller_for(TrustedCaller("fixture-other", "fixture-user", "turn")))
+    with pytest.raises(BotAccessError, match="caller_unavailable"):
+        tools._discovery_caller({})
+
+    monkeypatch.setattr(identity, "trusted_caller", caller_for(BotAccessError("caller_unavailable")))
+    with pytest.raises(BotAccessError, match="caller_unavailable"):
+        tools._discovery_caller({})
 
 
 def _sends(monkeypatch) -> list[dict]:
