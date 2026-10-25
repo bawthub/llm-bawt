@@ -1,24 +1,26 @@
-"""Unit tests for the TASK-1233 B3 quiesce control steer's app side.
+"""Unit tests for the quiesce control steer's app side (TASK-1233 B3, TASK-1431 S3).
 
-The pump's database behaviour is in ``test_quiesce_control_pg``; here are the
-steer route's control path, the production RPC adapter and the runner.
+The producer's database behaviour is in ``test_quiesce_control_producer_pg``
+and the control lane's in ``test_inter_bot_control_lane_pg``; here are the
+steer route's control path, the producer's pure helpers and its wiring into
+the dispatcher leader's sweep (``LeaderSidePumps``).
 """
 from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
+from llm_bawt.inter_bot_control_lane import DeliveryControlGrant
 from llm_bawt.service import quiesce_control as qc
 from llm_bawt.service import system_gate_admission as gates
-from llm_bawt.service.system_gate_admission import ControlGrant, ControlGrantRefused, ControlTarget
+from llm_bawt.service.leader_side_pumps import CONTROL_RECHECK_CAP_SECONDS, LeaderSidePumps
+from llm_bawt.service.system_gate_admission import ControlGrantRefused, ControlTarget
 
-UNTIL = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
-GRANT = ControlGrant(gate_id=8, bot_id="bot", turn_id="turn", claim_token="tok")
+GRANT = DeliveryControlGrant(bot_id="bot", turn_id="turn", delivery_id="d1", claim_token="tok")
 PINNED = ControlTarget(request_id="req-pinned", backend="claude-code", session_key="sess-pinned")
 
 
@@ -156,180 +158,134 @@ def test_the_control_target_is_the_pinned_request_binding(member, expected):
     assert gates.control_target(member) == expected
 
 
-# --- the production RPC adapter ------------------------------------------
+# --- the producer's pure helpers ------------------------------------------
 
 
-def _claim(generation=0):
-    return qc.ControlClaim(member_id=1, grant=GRANT, request_id="steer_quiesce_turn_req", user_id="user",
-                           attempts=1, generation=generation)
+def test_the_run_key_is_one_per_pinned_run():
+    assert qc.control_request_id("turn", "req") == "steer_quiesce_turn_req"
 
 
-def _adapter(monkeypatch, result):
-    from llm_bawt.ops import quiesce_prompts
-    from llm_bawt.service.routes import chat
-
-    calls = []
-    monkeypatch.setattr(quiesce_prompts, "resolve", lambda key, bot: f"{key}@{bot}")
-
-    async def steer(service, request, **kwargs):
-        calls.append((service, request, kwargs))
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    monkeypatch.setattr(chat, "steer_active_turn", steer)
-    return calls
-
-
-def test_the_adapter_steers_from_system_with_the_registry_text_and_a_stable_message_id(monkeypatch):
-    from llm_bawt.bot_identities import SYSTEM_BOT_ID
-    from llm_bawt.service.routes.chat import ChatSteerResponse
-
-    calls = _adapter(monkeypatch, ChatSteerResponse(ok=True, detail="steered", turn_id="turn", message_id="m"))
-    service = object()
-    outcome = asyncio.run(qc.service_steer(service)(_claim()))
-    assert outcome == qc.SteerOutcome(qc.STEERED, "steered")
-    asyncio.run(qc.service_steer(service)(_claim()))
-    [(svc, request, kwargs), (_, again, _)] = calls
-    assert svc is service and request.message == "ops.quiesce_request@bot"
-    assert (request.turn_id, request.bot_id, request.user_id, request.priority) == ("turn", "bot", "user", "next")
-    assert request.message_id == again.message_id == str(uuid.uuid5(uuid.NAMESPACE_URL, "steer_quiesce_turn_req"))
-    assert kwargs["steer_request_id"] == "steer_quiesce_turn_req" and kwargs["control"] is GRANT
-    assert (kwargs["author"].entity_type, kwargs["author"].entity_id) == ("bot", SYSTEM_BOT_ID)
-
-
-def test_a_later_generation_is_a_fresh_rpc_id_for_the_same_timeline_message(monkeypatch):
-    from llm_bawt.service.routes.chat import ChatSteerResponse
-
-    calls = _adapter(monkeypatch, ChatSteerResponse(ok=True, detail="steered", turn_id="turn", message_id="m"))
-    asyncio.run(qc.service_steer(object())(_claim(generation=2)))
-    [(_, request, kwargs)] = calls
-    assert kwargs["steer_request_id"] == "steer_quiesce_turn_req_g2"
-    assert request.message_id == str(uuid.uuid5(uuid.NAMESPACE_URL, "steer_quiesce_turn_req"))
-
-
-def test_every_control_rpc_id_keeps_its_bridge_result_as_long_as_its_dedupe_key():
-    """A retry re-reads the first result only while the publisher still holds it."""
-    from agent_bridge.publisher import DURABLE_RPC_RESULT_PREFIXES
-
+def test_successor_keys_round_trip_and_reject_other_keys():
     run = qc.control_request_id("turn", "req")
-    for generation in (0, 1, 7):
-        assert _claim(generation).rpc_request_id.startswith(DURABLE_RPC_RESULT_PREFIXES)
-    assert run.startswith(DURABLE_RPC_RESULT_PREFIXES)
+    assert [qc.successor_key(run, k) for k in (0, 1, 12)] == [run, f"{run}:r1", f"{run}:r12"]
+    for k in (0, 1, 12):
+        assert qc.successor_index(run, qc.successor_key(run, k)) == k
+    for other in (None, "", f"{run}:r", f"{run}:rx", f"{run}x", f"{run}:r1:r2", "steer_quiesce_turn_re"):
+        assert qc.successor_index(run, other) is None
 
 
-@pytest.mark.parametrize("error,kind", [
-    (HTTPException(404, "Turn not found"), qc.GONE),
-    # Not registered at the bridge (yet): retried; an ended turn settles on the next claim.
-    (HTTPException(409, "no_active_run"), qc.RETRY),
-    (HTTPException(409, "active_run_mismatch"), qc.RETRY),
-    (HTTPException(409, "Active bridge run is not ready"), qc.RETRY),
-    (HTTPException(502, "steer failed"), qc.RETRY),
-    (HTTPException(504, "timed out"), qc.RETRY),
-    (ControlGrantRefused(GRANT), qc.RETRY),
-    (gates.SteerGateRefused(gates.GateBlock(id=1, mode="deny", owner_kind="operator", owner_id="o",
-                                            reason="r", expires_at=UNTIL)), qc.RETRY),
-])
-def test_the_adapter_settles_a_gone_turn_and_retries_everything_else(monkeypatch, error, kind):
-    _adapter(monkeypatch, error)
-    assert asyncio.run(qc.service_steer(object())(_claim())).kind == kind
+def test_no_producer_is_built_off_postgresql():
+    assert qc.build_producer(SimpleNamespace()) is None
+    assert qc.build_producer(SimpleNamespace(engine=None)) is None
+    assert qc.build_producer(SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))) is None
+    store = SimpleNamespace(engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+    producer = qc.build_producer(store)
+    assert isinstance(producer, qc.QuiesceControlProducer) and producer.engine is store.engine
 
 
-def test_the_backoff_doubles_to_its_cap():
-    pump = qc.QuiesceControlPump.__new__(qc.QuiesceControlPump)
-    assert [pump.backoff(n) for n in range(1, 7)] == [2, 4, 8, 16, 30, 30]
+def test_the_old_pump_is_gone():
+    for name in ("QuiesceControlPump", "QuiesceControlRunner", "service_steer", "ControlClaim", "build_pump"):
+        assert not hasattr(qc, name)
+    assert not hasattr(gates, "ControlGrant")
 
 
-def test_no_pump_is_built_off_postgresql():
-    assert qc.build_pump(object(), None) is None
-    assert qc.build_pump(object(), SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))) is None
+# --- the producer on the leader's sweep -----------------------------------
 
 
-# --- the runner ----------------------------------------------------------
+class Dispatcher:
+    def __init__(self):
+        self.wakes = 0
+
+    def wake(self):
+        self.wakes += 1
 
 
-class FakePump:
-    def __init__(self, *open_work, fail=False):
-        self.open_work = list(open_work)
-        self.passes = 0
-        self.fail = fail
-        self.release = asyncio.Event()
+class Producer:
+    def __init__(self, *passes):
+        self.passes = list(passes)
+        self.calls = 0
 
-    async def run_pass(self):
-        self.passes += 1
-        if self.fail:
+    def run_pass(self):
+        self.calls += 1
+        return self.passes.pop(0)
+
+
+def _pumps(producer):
+    dispatcher = Dispatcher()
+    pumps = LeaderSidePumps(SimpleNamespace(_inter_bot_dispatcher=dispatcher), SimpleNamespace(engine=None),
+                            quiesce_control=producer)
+    return pumps, dispatcher
+
+
+async def _noop_emit(_record):
+    return None
+
+
+def test_a_new_control_row_wakes_the_dispatcher_at_once():
+    async def scenario():
+        pumps, dispatcher = _pumps(Producer(qc.ProducerPass(linked=1, enqueued=1)))
+        await pumps.run_pass(_noop_emit)
+        assert dispatcher.wakes == 1 and pumps._control_recheck is None
+
+    asyncio.run(scenario())
+
+
+def test_a_link_to_an_existing_row_needs_no_wake():
+    async def scenario():
+        pumps, dispatcher = _pumps(Producer(qc.ProducerPass(linked=1, enqueued=0)))
+        await pumps.run_pass(_noop_emit)
+        assert dispatcher.wakes == 0 and pumps._control_recheck is None
+
+    asyncio.run(scenario())
+
+
+def test_a_recheck_is_one_timer_replaced_by_the_next_pass_and_floored():
+    async def scenario():
+        pumps, dispatcher = _pumps(Producer(qc.ProducerPass(retry_in=30.0), qc.ProducerPass(retry_in=0.0)))
+        loop = asyncio.get_running_loop()
+        await pumps.run_pass(_noop_emit)
+        first = pumps._control_recheck
+        assert first.when() - loop.time() == pytest.approx(CONTROL_RECHECK_CAP_SECONDS, abs=0.5)
+        await pumps.run_pass(_noop_emit)
+        second = pumps._control_recheck
+        assert first.cancelled() and second is not first and not second.cancelled()
+        assert dispatcher.wakes == 0
+        await asyncio.sleep(0.6)  # the 0.5 s floor
+        assert dispatcher.wakes == 1
+
+    asyncio.run(scenario())
+
+
+def test_stop_cancels_the_recheck():
+    async def scenario():
+        pumps, dispatcher = _pumps(Producer(qc.ProducerPass(retry_in=0.0)))
+        await pumps.run_pass(_noop_emit)
+        handle = pumps._control_recheck
+        await pumps.stop()
+        assert handle.cancelled() and pumps._control_recheck is None
+        await asyncio.sleep(0.6)
+        assert dispatcher.wakes == 0
+
+    asyncio.run(scenario())
+
+
+def test_a_failing_producer_pass_is_logged_and_the_later_pumps_still_run(caplog):
+    class Broken:
+        def run_pass(self):
             raise RuntimeError("db down")
-        await self.release.wait()
-        return 0
 
-    def has_open_work(self):
-        return self.open_work.pop(0) if self.open_work else False
+    class Notices:
+        calls = 0
 
+        def run_pass(self):
+            Notices.calls += 1
+            return SimpleNamespace(notified=[])
 
-def test_the_runner_is_single_flight_and_gated_on_elapsed_time():
     async def scenario():
-        now = [100.0]
-        pump = FakePump()
-        built = []
-        runner = qc.QuiesceControlRunner(lambda: built.append(1) or pump, clock=lambda: now[0])
-        assert runner.maybe_start() is True
-        now[0] += 10
-        assert runner.maybe_start() is False  # one task at a time
-        pump.release.set()
-        await asyncio.sleep(0.01)
-        assert runner._task.done() and pump.passes == 1
-        now[0] += 1
-        assert runner.maybe_start() is True  # 11s since the last start
-        await asyncio.sleep(0.01)
-        assert runner.maybe_start() is False  # done, but within the interval
-        now[0] += runner.INTERVAL_SECONDS
-        assert runner.maybe_start() is True
-        await runner.stop()
-        assert built == [1]  # one pump, built once
+        pumps, dispatcher = _pumps(Broken())
+        pumps.cancel_notices = Notices()
+        await pumps.run_pass(_noop_emit)
+        assert Notices.calls == 1 and dispatcher.wakes == 0 and pumps._control_recheck is None
 
     asyncio.run(scenario())
-
-
-def test_the_runner_drains_while_work_is_open_then_exits():
-    async def scenario():
-        pump = FakePump(True, True, False)
-        pump.release.set()
-        runner = qc.QuiesceControlRunner(lambda: pump)
-        runner.INTERVAL_SECONDS = 0
-        assert runner.maybe_start()
-        await asyncio.wait_for(runner._task, 1)
-        assert pump.passes == 3
-
-    asyncio.run(scenario())
-
-
-def test_a_failing_pass_ends_the_task_for_the_next_dispatcher_pass():
-    async def scenario():
-        pump = FakePump(True, fail=True)
-        runner = qc.QuiesceControlRunner(lambda: pump)
-        runner.maybe_start()
-        await asyncio.wait_for(runner._task, 1)
-        assert pump.passes == 1 and runner._task.exception() is None
-
-    asyncio.run(scenario())
-
-
-def test_no_pump_means_no_task():
-    async def scenario():
-        runner = qc.QuiesceControlRunner(lambda: None)
-        assert runner.maybe_start() is False and runner._task is None
-
-    asyncio.run(scenario())
-
-
-def test_stop_cancels_a_running_pass():
-    async def scenario():
-        pump = FakePump()
-        runner = qc.QuiesceControlRunner(lambda: pump)
-        runner.maybe_start()
-        task = runner._task
-        await asyncio.sleep(0)
-        await runner.stop()
-        assert task.cancelled()
-
-    asyncio.run(scenario())
+    assert "Quiesce control producer pass failed" in caplog.text

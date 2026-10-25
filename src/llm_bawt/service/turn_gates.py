@@ -758,7 +758,40 @@ def carry_forward(conn, *, predecessor: int, gate: GateBlock) -> list[GateMember
         WHERE fresh.gate_id = :new AND prior.gate_id = :old AND prior.turn_id = fresh.turn_id
           AND prior.ack_status IS NOT NULL
     """), {"new": gate.id, "old": predecessor})
+    _carry_control_links(conn, predecessor=predecessor, gate_id=gate.id)
     return carried
+
+
+def _carry_control_links(conn, *, predecessor: int, gate_id: int) -> None:
+    """Keep a rebuilt run's in-flight control ask (TASK-1431 §3, r2 R1b).
+
+    A fresh member of the same turn and pinned request, not linked yet,
+    inherits its predecessor's link while that row still absorbs, read
+    ``FOR SHARE``. This only narrows a race: ``activate_hold`` does not hold
+    the producer's ``lock_target``, so a claim can still settle the row dead
+    in parallel, and the producer re-links any member whose row is dead
+    (r2 R1a). No turn row is locked.
+    """
+    from ..inter_bot_control_lane import ABSORBING_SQL
+
+    if conn.execute(sa_text("SELECT to_regclass('inter_bot_deliveries')")).scalar() is None:
+        return  # no delivery store on this database: nothing was ever linked
+    links = conn.execute(sa_text(f"""
+        SELECT prior.turn_id, prior.agent_request_id, prior.control_delivery_id
+        FROM gate_members prior
+        JOIN inter_bot_deliveries d ON d.id = prior.control_delivery_id
+        WHERE prior.gate_id = :old AND prior.control_state = 'steering' AND {ABSORBING_SQL}
+        ORDER BY prior.id
+        FOR SHARE OF d
+    """), {"old": predecessor}).mappings().all()
+    for link in links:
+        conn.execute(sa_text("""
+            UPDATE gate_members SET control_delivery_id = :delivery, control_state = 'steering',
+                control_changed_at = now()
+            WHERE gate_id = :new AND turn_id = :turn AND agent_request_id = :request
+              AND control_state = 'pending' AND control_delivery_id IS NULL
+        """), {"new": gate_id, "turn": link["turn_id"], "request": link["agent_request_id"],
+               "delivery": link["control_delivery_id"]})
 
 
 __all__ = [

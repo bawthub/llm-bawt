@@ -1,10 +1,11 @@
 """Read-only operator views of quiesce holds (TASK-1233 (f)).
 
 * :func:`attach_members` adds ``quiesce.members`` to job API dicts: one row
-  per turn enrolled in the job's CURRENT gate generation, with its stored
-  ``control_state``/``ack_status`` as they are (nothing is renamed or
-  inferred) and the driver's last drain verdict for that turn from
-  ``quiesce_json.roster``. One batched query serves a whole page of jobs.
+  per turn enrolled in the job's CURRENT gate generation, with its
+  ``control_state``/``ack_status`` and the driver's last drain verdict for
+  that turn from ``quiesce_json.roster``. One batched query serves a whole
+  page of jobs. A member linked to a control-lane delivery (TASK-1431 S3)
+  reports that delivery's state, attempts and error (``_CONTROL_SQL``).
 * :func:`live_holds` lists every live gate (job-owned and operator-owned)
   with member counts; ``job`` is null for operator gates.
 
@@ -19,11 +20,28 @@ from sqlalchemy import bindparam, text
 
 from ..service.turn_gates import ensure_gate_schema
 
-_MEMBER_SQL = text("""
-    SELECT gate_id, bot_id, turn_id, backend, disposition, control_state, control_attempts,
-           control_error, ack_status, ack_note, acked_at, created_at AS enrolled_at,
-           COALESCE(control_changed_at, created_at) AS control_changed_at
-    FROM gate_members WHERE gate_id IN :gate_ids ORDER BY gate_id, id
+# Design §5: a ``steering`` member reports its linked delivery's state. A
+# DELIVERED row means the run was asked, not that it stopped: the drain never
+# reads this. Every other stored state is reported as it is.
+_CONTROL_SQL = """
+    CASE WHEN m.control_state <> 'steering' OR d.id IS NULL THEN m.control_state
+         WHEN d.status IN ('QUEUED', 'STEERING') THEN 'steering'
+         WHEN d.status = 'DELIVERED' THEN 'steered'
+         WHEN d.status = 'CANCELLED' AND d.last_error LIKE 'not\\_needed:%' THEN 'not_needed'
+         WHEN d.status = 'CANCELLED' THEN 'cancelled'
+         WHEN d.status = 'FAILED' THEN 'unconfirmed'
+         ELSE m.control_state END
+"""
+
+_MEMBER_SQL = text(f"""
+    SELECT m.gate_id, m.bot_id, m.turn_id, m.backend, m.disposition,
+           {_CONTROL_SQL} AS control_state,
+           COALESCE(d.attempt_count, 0) AS control_attempts,
+           CASE WHEN d.id IS NULL THEN m.control_error ELSE d.last_error END AS control_error,
+           m.ack_status, m.ack_note, m.acked_at, m.created_at AS enrolled_at,
+           COALESCE(m.control_changed_at, m.created_at) AS control_changed_at
+    FROM gate_members m LEFT JOIN inter_bot_deliveries d ON d.id = m.control_delivery_id
+    WHERE m.gate_id IN :gate_ids ORDER BY m.gate_id, m.id
 """).bindparams(bindparam("gate_ids", expanding=True))
 
 # Same predicate as turn_gates._LIVE: a gate holds until released or expired.
@@ -37,10 +55,11 @@ _HOLDS_SQL = text("""
     ORDER BY g.id
 """)
 
-_COUNTS_SQL = text("""
-    SELECT gate_id, disposition, control_state, count(*) AS n
-    FROM gate_members WHERE gate_id IN :gate_ids
-    GROUP BY gate_id, disposition, control_state
+_COUNTS_SQL = text(f"""
+    SELECT m.gate_id, m.disposition, {_CONTROL_SQL} AS control_state, count(*) AS n
+    FROM gate_members m LEFT JOIN inter_bot_deliveries d ON d.id = m.control_delivery_id
+    WHERE m.gate_id IN :gate_ids
+    GROUP BY 1, 2, 3
 """).bindparams(bindparam("gate_ids", expanding=True))
 
 

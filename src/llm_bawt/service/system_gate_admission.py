@@ -18,8 +18,9 @@ What a live gate does at each edge:
   (``inter_bot_delivery_claim``).
 * scheduled prompt: any live gate leaves the occurrence due, a held no-op.
 * steer: any live gate refuses a steer into a running turn, except the gate
-  owner's own stop request: a quiesce control steer carrying a ``ControlGrant``
-  that matches its member row (B3, ``check_steer``).
+  owner's own stop request: a control-lane delivery's steer carrying a
+  ``DeliveryControlGrant`` for its live claim and linking member (TASK-1431,
+  ``check_steer``).
 """
 from __future__ import annotations
 
@@ -27,7 +28,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
 from fastapi import HTTPException
-from sqlalchemy import text as sa_text
 
 from .turn_admission import SystemGateRefused, lock_target
 from .turn_gates import DENY, GateActor, GateBlock, gate_blocks
@@ -72,21 +72,6 @@ class SteerGateRefused(HTTPException):
 
 
 @dataclass(frozen=True)
-class ControlGrant:
-    """A quiesce control steer's claim on one member row (B3). Internal only.
-
-    The public steer route has no field that can carry one. It authorizes
-    nothing by itself: ``check_steer`` re-reads the member under
-    ``lock_target`` and admits only the live claim it names.
-    """
-
-    gate_id: int
-    bot_id: str
-    turn_id: str
-    claim_token: str
-
-
-@dataclass(frozen=True)
 class ControlTarget:
     """The one run a control steer may address: the member's pinned request.
 
@@ -128,7 +113,7 @@ def control_target(member: Mapping[str, Any]) -> ControlTarget | None:
 # gate that expired during the wait would still read as live.
 LIVE_MEMBER_SQL = """
     SELECT m.id, m.gate_id, m.bot_id, m.turn_id, m.disposition, m.control_state,
-           m.control_attempts, m.control_generation, m.backend, m.agent_session_key, m.agent_request_id,
+           m.backend, m.agent_session_key, m.agent_request_id,
            j.caller_turn_id, t.id AS turn_present, t.ended_at IS NOT NULL AS turn_ended,
            t.user_id AS turn_user_id, t.agent_request_id AS turn_request_id,
            t.agent_backend AS turn_backend, t.agent_session_key AS turn_session_key
@@ -144,35 +129,14 @@ LIVE_MEMBER_SQL = """
 class ControlGrantRefused(HTTPException):
     """A control grant that names no live claim (forged, stale or lapsed)."""
 
-    def __init__(self, grant: "ControlGrant | DeliveryControlGrant"):
+    def __init__(self, grant: "DeliveryControlGrant"):
         self.grant = grant
         super().__init__(status_code=409, detail="control_grant_refused")
 
 
-def _admit_grant(conn, grant: ControlGrant) -> ControlTarget:
-    """The grant's pinned run, under the caller's ``lock_target``; else refuse.
-
-    Admits only when the gate is its job's live generation, the member row is
-    (gate, turn, bot), it is ``steering`` under this exact claim token, and
-    the control lease is unexpired. Both expiries are read on the current
-    clock, after the lock wait. Reads only: the member row is not locked,
-    and no turn row is ever locked here.
-    """
-    row = conn.execute(sa_text(LIVE_MEMBER_SQL.format(where=(
-        "m.gate_id = :gate AND m.turn_id = :turn AND m.bot_id = :bot"
-        " AND m.control_state = 'steering' AND m.control_claim_token = :token"
-        " AND m.control_lease_expires_at > clock_timestamp()"
-    ))), {"gate": grant.gate_id, "turn": grant.turn_id, "bot": grant.bot_id,
-          "token": grant.claim_token}).mappings().first()
-    target = control_target(row) if row is not None else None
-    if target is None:
-        raise ControlGrantRefused(grant)
-    return target
-
-
 def check_steer(
     engine, bot_id: str, *, turn_id: str,
-    grant: "ControlGrant | DeliveryControlGrant | None" = None,
+    grant: "DeliveryControlGrant | None" = None,
 ) -> ControlTarget | None:
     """Raise ``SteerGateRefused`` when a live gate covers ``bot_id``.
 
@@ -181,12 +145,11 @@ def check_steer(
     gate activated after the check is harmless: its roster already holds the
     running turn, and stopping that turn is the quiesce owner's job (S1).
 
-    With a ``grant`` (the quiesce control pump only) the gates are not asked:
-    the steer is a gate owner's own request that the run stop, and it is
-    admitted only on a live claim (``_admit_grant``). The return value is
-    the pinned run it may address; any mismatch raises ``ControlGrantRefused``.
-    A ``DeliveryControlGrant`` (a control-lane delivery, TASK-1431) is admitted
-    on its delivery claim and linking member instead (``admit_delivery_grant``).
+    With a ``grant`` (a claimed control-lane delivery only, TASK-1431) the
+    gates are not asked: the steer is a gate owner's own request that the run
+    stop, and it is admitted only on its live delivery claim and linking
+    member (``admit_delivery_grant``). The return value is the pinned run it
+    may address; any mismatch raises ``ControlGrantRefused``.
     """
     if grant is not None and (grant.bot_id != bot_id or grant.turn_id != turn_id):
         raise ControlGrantRefused(grant)
@@ -197,11 +160,9 @@ def check_steer(
     with engine.begin() as conn:
         lock_target(conn, bot_id)
         if grant is not None:
-            from ..inter_bot_control_lane import DeliveryControlGrant, admit_delivery_grant
+            from ..inter_bot_control_lane import admit_delivery_grant
 
-            if isinstance(grant, DeliveryControlGrant):
-                return admit_delivery_grant(conn, grant)
-            return _admit_grant(conn, grant)
+            return admit_delivery_grant(conn, grant)
         block = gate_blocks(conn, bot_id, GateActor("steer", turn_id))
     if block is not None:
         raise SteerGateRefused(block)
@@ -209,7 +170,6 @@ def check_steer(
 
 
 __all__ = [
-    "ControlGrant",
     "ControlGrantRefused",
     "ControlTarget",
     "GATE_DISPOSITIONS",

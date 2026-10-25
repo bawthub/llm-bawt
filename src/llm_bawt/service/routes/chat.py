@@ -16,7 +16,7 @@ from ..logging import get_service_logger
 from ..schemas import ChatCompletionRequest
 
 if TYPE_CHECKING:
-    from ..system_gate_admission import ControlGrant
+    from ...inter_bot_control_lane import DeliveryControlGrant
 
 router = APIRouter()
 log = get_service_logger(__name__)
@@ -180,7 +180,7 @@ async def steer_active_turn(
     steer_request_id: str | None = None,
     author: AuthorReference | None = None,
     wire_suffix: str | None = None,
-    control: "ControlGrant | None" = None,
+    control: "DeliveryControlGrant | None" = None,
 ) -> ChatSteerResponse:
     """Shared steer implementation for public chat and durable inter-bot work.
 
@@ -190,10 +190,10 @@ async def steer_active_turn(
     ``request.message``. The public steer route cannot set it.
 
     Under a live system gate every steer is refused with ``SteerGateRefused``
-    before any bridge RPC (TASK-1233). ``control`` (the quiesce control pump
-    only; the public route cannot set it) is admitted on its live member
-    claim, and then addresses only that member's pinned run: its request id,
-    backend and session, never the bot's current ones.
+    before any bridge RPC (TASK-1233). ``control`` (a claimed control-lane
+    delivery only, TASK-1431; the public route cannot set it) is admitted on
+    its delivery claim and linking member, and then addresses only the pinned
+    run: its request id, backend and session, never the bot's current ones.
     """
     if control is not None and not steer_request_id:
         raise HTTPException(status_code=409, detail="control steer requires a steer_request_id")

@@ -186,14 +186,28 @@ def test_an_ended_pinned_run_is_not_needed_and_never_reserves(rig, end):
 
 
 def test_a_row_no_live_member_links_is_revoked(rig):
+    """The linking member's gate lapsed (a release cancels the row itself: S3 reference-counted release)."""
+    turn_id = _turn(rig)
+    job_id = _open(rig)
+    control, _ = _control(rig, turn_id)
+    _link(rig, job_id, turn_id, control.id)
+    rig.sql("UPDATE system_gates SET expires_at = now() - interval '1 second' WHERE id=:g",
+            g=rig.row(job_id)["quiesce_gate_id"])
+    settled = _claim(rig)
+    assert (settled.status, settled.last_error) == ("CANCELLED", "not_needed:control_revoked")
+
+
+def test_a_release_cancels_the_queued_row_it_alone_linked(rig):
     turn_id = _turn(rig)
     job_id = _open(rig)
     control, _ = _control(rig, turn_id)
     _link(rig, job_id, turn_id, control.id)
     with rig.engine.begin() as conn:
         release_job_gates(conn, job_id)
-    settled = _claim(rig)
-    assert (settled.status, settled.last_error) == ("CANCELLED", "not_needed:control_revoked")
+    row = _row(rig, control.id)
+    assert (row["status"], row["delivery_mode"], row["last_error"]) == (
+        "CANCELLED", "skipped", "not_needed:control_released")
+    assert _claim(rig) is None
 
 
 def test_an_unlinked_row_is_revoked_even_without_a_gate(rig):

@@ -90,15 +90,45 @@ class TurnGates:
 
 
 def cancel_pending_controls(conn, *, gate_ids: Iterable[int]) -> int:
-    """Cancel every not-yet-delivered steer of these generations' members."""
+    """Cancel every not-yet-asked steer of these generations' members (TASK-1431 §3).
+
+    Under each member bot's ``lock_target`` (sorted, as ``activate_hold``), so
+    it is serialized with the producer's link step and the control claim. The
+    members go ``cancelled``; then each control row they linked is released
+    reference-counted: a QUEUED row is cancelled only when no other live
+    member still links it (another job, or this job's next generation). A
+    STEERING row is left to settle; once nothing links it, its grant is
+    refused. Returns the members cancelled.
+    """
+    from ..inter_bot_control_lane import NOT_NEEDED
+    from ..service.system_gate_admission import LIVE_MEMBER_SQL
+    from ..service.turn_admission import lock_target
+
     ids = sorted({int(i) for i in gate_ids})
     if not ids:
         return 0
-    return conn.execute(text(
-        "UPDATE gate_members SET control_state='cancelled', control_changed_at=now(),"
-        " control_claim_token=NULL, control_lease_expires_at=NULL"
+    for bot_id in conn.execute(text(
+        "SELECT DISTINCT bot_id FROM gate_members"
+        " WHERE gate_id = ANY(:ids) AND control_state IN ('pending','steering') ORDER BY bot_id"
+    ), {"ids": ids}).scalars().all():
+        lock_target(conn, bot_id)
+    links = conn.execute(text(
+        "UPDATE gate_members SET control_state='cancelled', control_changed_at=now()"
         " WHERE gate_id = ANY(:ids) AND control_state IN ('pending','steering')"
-    ), {"ids": ids}).rowcount
+        " RETURNING control_delivery_id"
+    ), {"ids": ids}).scalars().all()
+    linked = sorted({delivery for delivery in links if delivery})
+    if linked:
+        still_linked = LIVE_MEMBER_SQL.format(
+            where="m.control_delivery_id = d.id AND m.control_state = 'steering'")
+        conn.execute(text(f"""
+            UPDATE inter_bot_deliveries d SET status='CANCELLED', delivery_mode='skipped',
+                last_error=:reason, next_retry_at=NULL, claim_token=NULL, claim_owner=NULL,
+                lease_expires_at=NULL, updated_at=now()
+            WHERE d.id = ANY(:linked) AND d.lane = 'control' AND d.status = 'QUEUED'
+              AND NOT EXISTS ({still_linked})
+        """), {"linked": linked, "reason": f"{NOT_NEEDED}:control_released"})
+    return len(links)
 
 
 def release_job_gates(conn, job_id: str) -> list[int]:

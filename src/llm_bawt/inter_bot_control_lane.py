@@ -51,6 +51,21 @@ GRANT_REFUSED = "control_grant_refused"
 NOT_NEEDED = "not_needed"
 UNCONFIRMED = "unconfirmed"
 
+# Design §3: a control row ``d`` absorbs its run's ask when it is live, or the
+# run has (or may have) been asked: DELIVERED, transport-accepted, a command
+# that started (any generation: a started command is never reopened), or an
+# uncertain outcome for its current generation. Every path that clears an
+# asked marker does so only on proven non-execution, so a row that matches
+# none of these is dead: terminal and provably never ran.
+ABSORBING_SQL = (
+    "(d.status IN ('QUEUED', 'STEERING', 'DELIVERED')"
+    " OR d.transport_accepted_at IS NOT NULL"
+    " OR jsonb_typeof(d.metadata_json->'steer_started') = 'object'"
+    " OR (jsonb_typeof(d.metadata_json->'steer_uncertain') = 'object'"
+    "     AND d.metadata_json->'steer_uncertain'->>'generation'"
+    "         = COALESCE(d.metadata_json->>'steer_generation', '0')))"
+)
+
 _CONTROL_RELATIONS = {
     "ix_inter_bot_delivery_control_head": """
         CREATE INDEX IF NOT EXISTS ix_inter_bot_delivery_control_head
@@ -118,7 +133,7 @@ def enqueue_control(
     message: str,
     user: str,
 ) -> tuple[DeliveryRecord, bool]:
-    """Admit one control row in the caller's transaction (``DeliverySender`` only).
+    """Admit one control row in the caller's transaction (the quiesce producer only).
 
     The caller is the system principal and holds ``lock_target`` (re-entrant).
     The row is authored by ``system``, steer-only, and waits at the claim like
@@ -334,6 +349,13 @@ class ControlSteerFailure:
     * otherwise → QUEUED with backoff, spending the attempt. The steer
       generation advances only on a definitive rejection before transport
       acceptance (TASK-1251), so an accepted ask is never re-sent under a new id.
+
+    A proven rejection recorded on the claim (``steer_rejected_pending``)
+    makes ``requeue_claim`` refund the attempt, so a run that keeps proving
+    it never ran the command is asked again every backoff without spending
+    ``CONTROL_MAX_ATTEMPTS``. That loop is bounded by its turn ending
+    (``run_ended``) or the last linking member going (``control_revoked``),
+    never by the attempt budget.
     """
 
     @classmethod
@@ -394,7 +416,7 @@ class ControlSteerFailure:
 
 
 __all__ = [
-    "CONTROL_LANE", "CONTROL_MAX_ATTEMPTS", "ControlClaim", "ControlSteerFailure",
+    "ABSORBING_SQL", "CONTROL_LANE", "CONTROL_MAX_ATTEMPTS", "ControlClaim", "ControlSteerFailure",
     "DeliveryControlGrant", "GRANT_REFUSED", "NORMAL_LANE", "admit_delivery_grant",
     "control_metadata", "enqueue_control", "ensure_control_lane_schema", "linked_member",
 ]
