@@ -183,18 +183,34 @@ class AnthropicApiUsageAdapter(UsageAdapter):
         try:
             key = await asyncio.to_thread(self._admin_key)
             amount, anchor, connected_at = await asyncio.to_thread(self._anchor_and_connection)
+            balance_error = None
             if connected_at is None:
-                raise ValueError("Anthropic API connection time is unavailable")
-            since = max((time for time in (anchor, connected_at) if time is not None))
-            local = await asyncio.to_thread(self._local_spend, now, since)
+                # Admin reports do not depend on the inference connection. Its
+                # absence does, however, rule out a trustworthy local debit.
+                if not key:
+                    raise ValueError("Anthropic API connection time is unavailable")
+                local = (Decimal(0),) * 4
+                balance_error = "Anthropic API connection time unavailable; confirm the balance after connecting a key"
+            else:
+                # A replaced/re-saved key gets a new connected_at. If it is
+                # later than the balance anchor, earlier charges may belong to
+                # another account: never silently discard them and overstate
+                # the remaining credit. The operator must re-anchor.
+                if anchor is not None and anchor < connected_at:
+                    balance_error = "API key changed after the balance was confirmed; confirm the balance again"
+                # Calendar spend has its own connection floor; confirming a
+                # balance mid-month must not erase earlier verified API spend.
+                local = await asyncio.to_thread(self._local_spend, now, connected_at)
         except Exception as exc:  # noqa: BLE001 — no fabricated zero-spend on failure
             logger.warning("Anthropic API balance unavailable: %s", type(exc).__name__)
             return self._base(available=False, status=STATUS_ERROR,
                               error="Anthropic API balance or connection time unavailable")
 
         balance = None
-        if amount is not None and anchor is not None:
-            used = local[3]
+        if amount is not None and anchor is not None and balance_error is None:
+            # After a mid-period re-anchor, only later turns debit the balance;
+            # the calendar spend above still includes earlier post-key turns.
+            used = (await asyncio.to_thread(self._local_spend, now, anchor))[3] if anchor > connected_at else local[3]
             balance = UsageBalance(amount_usd=float(amount), remaining_usd=float(amount - used),
                                    used_usd=float(used), as_of=int(anchor.timestamp()))
 
@@ -226,4 +242,5 @@ class AnthropicApiUsageAdapter(UsageAdapter):
         today, seven, month = totals
         spend = UsageSpend(today_usd=float(today), seven_day_usd=float(seven),
                            month_usd=float(month), source=source)
-        return self._base(available=True, status=STATUS_OK, spend=spend, balance=balance, limits=[])
+        return self._base(available=True, status=STATUS_OK, spend=spend, balance=balance,
+                          error=balance_error, limits=[])

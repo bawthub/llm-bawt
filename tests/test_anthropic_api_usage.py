@@ -205,6 +205,27 @@ async def test_rate_limited_admin_report_keeps_fresh_local_balance_not_cached_ol
 
 
 @pytest.mark.asyncio
+async def test_balance_anchor_does_not_truncate_calendar_spend(monkeypatch):
+    from datetime import timedelta
+
+    adapter = AnthropicApiUsageAdapter()
+    now = datetime.now(timezone.utc)
+    connection, anchor = now - timedelta(days=2), now - timedelta(hours=1)
+    monkeypatch.setattr(adapter, "_admin_key", lambda: None)
+    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (Decimal("157"), anchor, connection))
+    floors = []
+    def local_spend(_now, since):
+        floors.append(since)
+        return ((Decimal("10"), Decimal("30"), Decimal("50"), Decimal("80"))
+                if since == connection else (Decimal("2"),) * 4)
+    monkeypatch.setattr(adapter, "_local_spend", local_spend)
+    snapshot = await adapter.fetch()
+    assert floors == [connection, anchor]
+    assert snapshot.spend.month_usd == 50
+    assert snapshot.balance.used_usd == 2 and snapshot.balance.remaining_usd == 155
+
+
+@pytest.mark.asyncio
 async def test_no_admin_key_uses_only_recorded_anthropic_api_cost(monkeypatch):
     adapter = AnthropicApiUsageAdapter()
     monkeypatch.setattr(adapter, "_admin_key", lambda: None)
@@ -273,7 +294,7 @@ def test_missing_connection_timestamp_fails_closed(monkeypatch):
     assert snapshot.status == "error" and snapshot.balance is None and snapshot.spend is None
 
 
-def test_connection_timestamp_is_floor_even_if_anchor_is_older(monkeypatch):
+def test_reconnected_key_after_anchor_refuses_misleading_balance(monkeypatch):
     import asyncio
     from datetime import timedelta
 
@@ -288,4 +309,23 @@ def test_connection_timestamp_is_floor_even_if_anchor_is_older(monkeypatch):
         return (Decimal("0.3"), Decimal("0.3"), Decimal("0.3"), Decimal("0.3"))
     monkeypatch.setattr(adapter, "_local_spend", local_spend)
     snapshot = asyncio.run(adapter.fetch())
-    assert observed == [connection] and snapshot.balance.remaining_usd == 156.70
+    assert observed == [connection]
+    assert snapshot.balance is None
+    assert "confirm the balance again" in snapshot.error
+    assert snapshot.spend.month_usd == 0.3
+
+
+@pytest.mark.asyncio
+async def test_admin_spend_stays_available_without_inference_connection(monkeypatch, report):
+    async def fake_get(self, url, *, params, headers):
+        return httpx.Response(200, json=report, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    adapter = AnthropicApiUsageAdapter()
+    monkeypatch.setattr(adapter, "_admin_key", lambda: "sk-ant-admin01-report")
+    monkeypatch.setattr(adapter, "_anchor_and_connection", lambda: (None, None, None))
+    monkeypatch.setattr(adapter, "_local_spend", lambda *_args: (_ for _ in ()).throw(AssertionError("no connection floor")))
+    snapshot = await adapter.fetch()
+    assert snapshot.status == "ok" and snapshot.spend.source == "anthropic_reported"
+    assert snapshot.balance is None
+    assert "connection time" in snapshot.error
