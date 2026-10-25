@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from llm_bawt.bawthub_auth import service_auth
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +34,7 @@ def reconcile_files(files: list[dict[str, Any]]) -> None:
     url = os.getenv("BAWTHUB_COMMIT_EVIDENCE_URL", "http://frontend-prod:3002")
     try:
         # Only bounded metadata crosses this boundary, never snapshot contents.
-        with httpx.Client(timeout=15, trust_env=False) as client:
+        with httpx.Client(timeout=15, trust_env=False, auth=service_auth()) as client:
             for offset in range(0, min(len(descriptors), 200), 200):
                 response = client.post(
                     f"{url.rstrip('/')}/internal/changed-files/commit-evidence",

@@ -1,5 +1,6 @@
 """Route router collection for app registration."""
 
+from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
 from .bot_tags import router as bot_tags_router
 from .botchat import router as botchat_router
 from .chat import router as chat_router
@@ -83,6 +84,7 @@ all_routers = [
     media_router,
     uploads_router,
     working_memory_router,
+    bawthub_auth_secrets_router,
 ]
 
 __all__ = ["all_routers"]

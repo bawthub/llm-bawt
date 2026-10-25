@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from llm_bawt.bawthub_auth import service_auth
 from llm_bawt.utils.config import DEFAULT_TASK_API_URL
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ def get_client() -> httpx.AsyncClient:
             base_url=BASE_URL,
             timeout=TIMEOUT,
             headers={"Content-Type": "application/json"},
+            auth=service_auth(),  # TASK-1472: BawtHub service bearer
         )
     return _client
 

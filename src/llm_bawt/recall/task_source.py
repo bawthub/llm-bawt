@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import httpx
 
+from llm_bawt.bawthub_auth import service_auth
 from llm_bawt.mcp_server.task_api import API_PREFIX, BASE_URL
 from llm_bawt.mcp_server.task_association import _INTERNAL_URL
 
@@ -15,7 +16,8 @@ class TaskSource(SourceProvider):
     source = "tasks"
 
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
-        async with httpx.AsyncClient(timeout=4.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=4.0, follow_redirects=False,
+                                     auth=service_auth()) as client:
             reader = BoundedHTTP(client, max_calls=15, max_bytes=262_144)
             return await self.search_with(reader, query, scope, task_ids)
 

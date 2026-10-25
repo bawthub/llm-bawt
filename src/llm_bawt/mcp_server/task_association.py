@@ -11,6 +11,7 @@ import httpx
 
 from agent_bridge.mcp_call_context import MCP_REQUEST_CONTEXT_HEADER
 
+from ..bawthub_auth import service_auth
 from ..task_turn_context import (
     TASK_TURN_CONTEXT_HEADER,
     TaskTurnContext,
@@ -155,13 +156,14 @@ async def associate_current_task(task_ref: str) -> dict[str, Any]:
             "source": "AGENT",
         },
     }
-    # TASK-793: no bearer — the internal listener is reachable only inside the
-    # docker network; the network boundary is the auth layer (see the llm-bawt
-    # security model). Trust in WHICH turn is associated still comes from the
-    # signed Fernet capability above, which is a correctness mechanism, not auth.
+    # TASK-1472: the BawtHub service bearer authenticates llm-bawt as a service
+    # caller (BawtHub auth v1 requires it on the internal listener). Trust in
+    # WHICH turn is associated still comes from the signed Fernet capability
+    # above, which is a correctness mechanism, not auth.
     async with httpx.AsyncClient(
         base_url=_INTERNAL_URL,
         timeout=_TIMEOUT,
+        auth=service_auth(),
     ) as client:
         response = await client.put(
             f"/internal/tasks/{task_ref}/associations",

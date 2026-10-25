@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 import httpx
 
+from ..bawthub_auth import service_auth
 from ..bot_tags import BotTags, TagSnapshot
 from .registry import mcp
 from .task_association import current_task_turn_context
@@ -59,7 +60,8 @@ async def initiative_state(
     path = f"/internal/tasks/{task_id}/initiative"
     run = None if action == "get" else _run(await asyncio.to_thread(BotTags().snapshot))
     try:
-        async with httpx.AsyncClient(base_url=_INTERNAL_URL, timeout=10.0) as client:
+        async with httpx.AsyncClient(base_url=_INTERNAL_URL, timeout=10.0,
+                                     auth=service_auth()) as client:
             if action == "get":
                 state = await client.get(path)
                 state.raise_for_status()
