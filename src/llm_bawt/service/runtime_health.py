@@ -1,10 +1,8 @@
 """Read-only capability health for the app-owned delivery and scheduling loops."""
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from time import monotonic
-
-from sqlalchemy import text
 
 from .health_checks import DEGRADED, DOWN, OK, _check
 
@@ -45,27 +43,13 @@ class RuntimeHealthChecks:
         leader = dispatcher._leader_task
         if leader is None or leader.done():
             return _check("deliveries.queue", DOWN, "delivery leadership task is not running")
-        now = now or datetime.now(UTC)
         # Health describes live work, not historical terminal request failures.
         # Failed deliveries remain available in delivery history for diagnosis.
-        # Aggregate the entire queue, not the newest page. Future backoffs are
+        # The whole queue is read, not the newest page. Future backoffs are
         # intentional waits; active work is only suspect after its lease expires.
-        with dispatcher.store.engine.connect() as conn:
-            counts = conn.execute(text("""
-                SELECT
-                  SUM(CASE WHEN status='QUEUED' AND available_at <= :now
-                            AND created_at < :stale THEN 1 ELSE 0 END) AS waiting,
-                  SUM(CASE WHEN status IN ('STEERING','DISPATCHING')
-                            AND lease_expires_at < :now THEN 1 ELSE 0 END) AS expired
-                FROM inter_bot_deliveries
-                WHERE status IN ('QUEUED','STEERING','DISPATCHING')
-            """), {"now": now, "stale": now - timedelta(minutes=2)}).mappings().one()
-        problems = []
-        if counts["waiting"]:
-            problems.append(f"{counts['waiting']} deliveries waiting over 2 minutes (targets may be busy)")
-        if counts["expired"]:
-            problems.append(f"{counts['expired']} active deliveries with expired leases")
-        return _check("deliveries.queue", DEGRADED if problems else OK, "; ".join(problems) or None)
+        from .delivery_queue_health import DeliveryQueueHealth
+
+        return DeliveryQueueHealth(dispatcher.store.engine).check(now or datetime.now(UTC))
 
     def scheduler(self):
         if not self.service.config.SCHEDULER_ENABLED:

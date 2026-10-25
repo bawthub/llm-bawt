@@ -92,29 +92,138 @@ def delivery_host():
     engine = create_engine("sqlite://")
     with engine.begin() as conn:
         conn.execute(text("""CREATE TABLE inter_bot_deliveries (
-            status TEXT, created_at TIMESTAMP, updated_at TIMESTAMP,
+            ordinal INTEGER, id TEXT, status TEXT, target_bot_id TEXT, sender_bot_id TEXT,
+            author_entity_type TEXT, author_entity_id TEXT, task_id TEXT, turn_id TEXT,
+            created_at TIMESTAMP, updated_at TIMESTAMP,
             available_at TIMESTAMP, lease_expires_at TIMESTAMP)"""))
+        conn.execute(text("""CREATE TABLE turn_logs (
+            id TEXT, bot_id TEXT, status TEXT, agent_session_key TEXT,
+            agent_request_id TEXT, user_id TEXT, created_at TIMESTAMP, ended_at TIMESTAMP)"""))
     service = host()
     service._inter_bot_dispatcher = SimpleNamespace(store=SimpleNamespace(engine=engine), _leader_task=task())
     yield service
     engine.dispose()
 
 
-def insert(service, status, *, age=0, delay=0, lease=60):
+_SEQ = iter(range(1, 100_000))
+
+
+def insert(service, status, *, age=0, delay=0, lease=60, target="rook", sender="snark",
+           task_id=None, turn_id=None, author="bot"):
+    n = next(_SEQ)
     with service._inter_bot_dispatcher.store.engine.begin() as conn:
-        conn.execute(text("INSERT INTO inter_bot_deliveries VALUES (:status,:created,:updated,:available,:lease)"),
-                     {"status": status, "created": NOW-timedelta(seconds=age),
+        conn.execute(text("""INSERT INTO inter_bot_deliveries VALUES
+            (:n,:id,:status,:target,:sender,:author,:author_id,:task,:turn,:created,:updated,:available,:lease)"""),
+                     {"n": n, "id": f"delivery-{n}", "status": status, "target": target, "sender": sender,
+                      "author": author, "author_id": "someone" if author == "user" else sender,
+                      "task": task_id, "turn": turn_id or f"turn-delivery-{n}",
+                      "created": NOW-timedelta(seconds=age),
                       "updated": NOW-timedelta(seconds=age), "available": NOW+timedelta(seconds=delay),
                       "lease": NOW+timedelta(seconds=lease)})
+    return f"delivery-{n}"
+
+
+def open_turn(service, bot, *, age=60, status="streaming", turn_id=None):
+    with service._inter_bot_dispatcher.store.engine.begin() as conn:
+        conn.execute(text("INSERT INTO turn_logs VALUES (:id,:bot,:status,NULL,NULL,'u',:created,NULL)"),
+                     {"id": turn_id or f"turn-{bot}-{age}", "bot": bot, "status": status,
+                      "created": NOW-timedelta(seconds=age)})
+
+
+def deliveries(service):
+    return RuntimeHealthChecks(service).deliveries(NOW)
 
 
 def test_backlog_is_not_limited_to_latest_page(delivery_host):
     insert(delivery_host, "QUEUED", age=121)
     for _ in range(210):
         insert(delivery_host, "QUEUED", age=0)
-    result = RuntimeHealthChecks(delivery_host).deliveries(NOW)
+    result = deliveries(delivery_host)
     assert result["status"] == "degraded"
-    assert "1 deliveries waiting" in result["reason"]
+    assert result["reason"].startswith("1 delivery stuck: rook ← snark")
+    assert len(result["items"]) == 1
+
+
+def test_wait_behind_a_busy_target_is_ok_and_named(delivery_host):
+    # TASK-1458: a when_idle/queued send waiting for a live turn is normal.
+    open_turn(delivery_host, "rook", age=900)
+    open_turn(delivery_host, "byte", age=400, status="reserved")
+    insert(delivery_host, "QUEUED", age=840, task_id="TASK-1249")
+    insert(delivery_host, "QUEUED", age=480, target="byte", task_id="TASK-1249")
+    row = deliveries(delivery_host)
+    assert row["status"] == "ok"
+    assert row["reason"] == (
+        "2 queued behind busy or held bots: "
+        "rook ← snark (TASK-1249, 14m, target busy: executing), "
+        "byte ← snark (TASK-1249, 8m, target busy: reserved)")
+    assert [(i["target"], i["wait"], i["degraded"]) for i in row["items"]] == [
+        ("rook", "busy", False), ("byte", "busy", False)]
+    assert row["items"][0]["age_seconds"] == 840
+
+
+def test_wait_for_an_idle_target_is_degraded_and_named(delivery_host):
+    open_turn(delivery_host, "byte", age=60)  # another bot's turn explains nothing
+    insert(delivery_host, "QUEUED", age=300, task_id="TASK-7", author="user")
+    row = deliveries(delivery_host)
+    assert row["status"] == "degraded"
+    assert row["reason"] == "1 delivery stuck: rook ← someone (TASK-7, 5m, target idle, not picked up)"
+    assert row["items"][0]["wait"] == "idle"
+
+
+def test_the_deliverys_own_reservation_is_not_a_busy_target(delivery_host):
+    # Admission classifies the target excluding the head's own turn id.
+    open_turn(delivery_host, "rook", status="reserved", turn_id="turn-own")
+    insert(delivery_host, "QUEUED", age=300, turn_id="turn-own")
+    assert deliveries(delivery_host)["items"][0]["wait"] == "idle"
+
+
+def test_wait_behind_a_turn_no_watchdog_ends_is_degraded(delivery_host):
+    open_turn(delivery_host, "rook", age=3 * 3600)
+    insert(delivery_host, "QUEUED", age=600)
+    row = deliveries(delivery_host)
+    assert row["status"] == "degraded"
+    assert "behind a turn open 3h" in row["reason"]
+    assert row["items"][0]["wait"] == "long_turn"
+
+
+def test_wait_held_by_a_live_gate_is_ok(delivery_host, monkeypatch):
+    from llm_bawt.service import delivery_queue_health
+
+    asked = []
+
+    def gate_blocks(conn, bot_id, actor, **_):
+        asked.append((bot_id, actor.kind, actor.turn_id))
+        return SimpleNamespace(mode="hold", owner_kind="ops", owner_id="quiesce-1")
+
+    monkeypatch.setattr(delivery_queue_health, "gate_blocks", gate_blocks)
+    insert(delivery_host, "QUEUED", age=300, turn_id="turn-q")
+    row = deliveries(delivery_host)
+    assert row["status"] == "ok"
+    assert "held by hold gate (ops quiesce-1)" in row["reason"]
+    assert asked == [("rook", "delivery_claim", "turn-q")]
+
+
+def test_expired_lease_is_degraded_and_named(delivery_host):
+    insert(delivery_host, "DISPATCHING", age=400, lease=-90, target="caid", sender="al", task_id="TASK-9")
+    row = deliveries(delivery_host)
+    assert row["status"] == "degraded"
+    assert row["reason"] == "1 delivery stuck: caid ← al (TASK-9, 6m, lease expired 1m ago)"
+    assert row["items"][0]["wait"] == "lease_expired"
+
+
+def test_named_deliveries_are_capped_at_three(delivery_host):
+    open_turn(delivery_host, "byte")
+    for bot in ("a", "b", "c", "d", "e"):
+        insert(delivery_host, "QUEUED", age=200, target=bot)
+    insert(delivery_host, "QUEUED", age=200, target="byte")
+    row = deliveries(delivery_host)
+    assert row["status"] == "degraded"
+    assert row["reason"] == (
+        "5 deliveries stuck: a ← snark (3m, target idle, not picked up), "
+        "b ← snark (3m, target idle, not picked up), "
+        "c ← snark (3m, target idle, not picked up) +2 more; "
+        "1 queued behind busy or held bots: byte ← snark (3m, target busy: executing)")
+    assert len(row["items"]) == 6
 
 
 def test_deliveries_ignore_future_backoff_valid_lease_and_old_failure(delivery_host):
@@ -138,7 +247,7 @@ def test_deliveries_surface_expired_leases_not_historical_failures(delivery_host
     insert(delivery_host, "FAILED", age=60)
     row = RuntimeHealthChecks(delivery_host).deliveries(NOW)
     assert row["status"] == "degraded"
-    assert "expired leases" in row["reason"]
+    assert "lease expired" in row["reason"]
     assert "failed in the last hour" not in row["reason"]
     delivery_host._inter_bot_dispatcher._leader_task = task(True)
     assert RuntimeHealthChecks(delivery_host).deliveries(NOW)["status"] == "down"

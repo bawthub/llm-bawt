@@ -9,6 +9,10 @@ which expands ``checks`` into child rows::
 
     {"status": "ok"|"degraded"|"down",
      "checks": [{"name": str, "status": str, "reason": str | None}]}
+
+A check may add structured fields after those three (``deliveries.queue``
+adds ``items`` and ``item_count``, TASK-1458); the aggregator ignores keys it
+doesn't know, so ``reason`` must stand on its own.
 """
 
 from __future__ import annotations
