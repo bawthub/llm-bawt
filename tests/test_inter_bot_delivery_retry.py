@@ -23,6 +23,7 @@ from llm_bawt.inter_bot_reply_channel import delivery_reply_channel_note
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.turn_admission import write_reservation
 from tests.pg_isolation import isolated_pg_store
+from tests.pg_lock_wait import wait_blocked_by
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -92,19 +93,7 @@ def test_manual_retry_and_cancel_failed_original_do_not_deadlock(delivery, monke
         retrier.start()
         assert retry_has_row.wait(timeout=2)
         canceller.start()
-        deadline = time.monotonic() + 2
-        blocked = False
-        with store.engine.connect() as observer:
-            while time.monotonic() < deadline:
-                blocked = observer.execute(text("""
-                    SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                    WHERE datname=current_database() AND wait_event_type='Lock'
-                      AND :pid = ANY(pg_blocking_pids(pid)))
-                """), {"pid": retry_pid[0]}).scalar_one()
-                if blocked or not canceller.is_alive():
-                    break
-                time.sleep(0.02)
-        assert blocked and canceller.is_alive(), "cancel never waited on target lock"
+        wait_blocked_by(store.engine, retry_pid[0], canceller)
     finally:
         resume_retry.set()
         retrier.join(timeout=5)

@@ -21,7 +21,8 @@ from llm_bawt.service.inter_bot_claims import turn_admission_claim
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 from llm_bawt.service.turn_admission import SystemGateRefused, TargetBusy, lock_target
 from llm_bawt.service.turn_gates import GateScope, insert_gate, release_gates
-from tests.test_turn_gates_pg import _activate, _spec, _wait_blocked_by, gated  # noqa: F401
+from tests.pg_lock_wait import wait_blocked_by
+from tests.test_turn_gates_pg import _activate, _spec, gated  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
 
@@ -211,7 +212,7 @@ def test_claim_takes_the_shared_target_lock(gated):
             pid = holder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
             worker = threading.Thread(target=lambda: result.update(claimed=_claim(deliveries, bot)))
             worker.start()
-            _wait_blocked_by(store.engine, pid, worker)
+            wait_blocked_by(store.engine, pid, worker, detail=lambda: result)
             assert "claimed" not in result
     worker.join(timeout=10)
     assert result["claimed"] and result["claimed"].id == record.id

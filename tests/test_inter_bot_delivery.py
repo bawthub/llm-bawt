@@ -29,6 +29,7 @@ from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue
 from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.turn_logs import DeliveryTargetBusy, TurnLogStore
 from tests.pg_isolation import isolated_pg_store
+from tests.pg_lock_wait import wait_blocked_by
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -192,20 +193,7 @@ def test_concurrent_same_uuid_conflicts_across_scope(delivery_store, difference)
         worker.start()
         # Confirm the contender is actually blocked on the holder's UUID lock.
         holder_pid = holder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
-        deadline = time.monotonic() + 2
-        with store.engine.connect() as observer:
-            while time.monotonic() < deadline:
-                blocked = observer.execute(sa_text("""
-                    SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                    WHERE datname=current_database() AND wait_event_type='Lock'
-                      AND :pid = ANY(pg_blocking_pids(pid)))
-                """), {"pid": holder_pid}).scalar_one()
-                if blocked:
-                    break
-                if not worker.is_alive():
-                    break
-                time.sleep(0.02)
-        assert blocked and worker.is_alive(), f"contender never waited on UUID lock: {outcomes}"
+        wait_blocked_by(store.engine, holder_pid, worker, detail=lambda: outcomes)
         # Commit a terminal row so the live dispatcher cannot claim the fixture.
         holder.execute(sa_text("UPDATE inter_bot_deliveries SET status='FAILED' WHERE id=:id"),
                        {"id": winner.id})

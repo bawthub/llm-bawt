@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +15,7 @@ from sqlalchemy import text as sa_text
 from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
 from llm_bawt.service.turn_admission import AdmissionClaim, AdmissionFenceLost, TargetBusy
 from tests.pg_isolation import isolated_pg_store
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_turn_admission import _mcp_claim
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
@@ -81,23 +81,7 @@ def _reserve(store, bot, turn_id, *, owner="owner-a", fence=None):
 def _assert_waiting_on_holder(engine, holding_conn, worker, *, timeout=5.0):
     """Observe a real PG lock wait, not merely a thread that has not run yet."""
     holder_pid = holding_conn.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
-    deadline = time.monotonic() + timeout
-    with engine.connect() as observer:
-        while time.monotonic() < deadline:
-            blocked = observer.execute(sa_text("""
-                SELECT EXISTS (
-                    SELECT 1 FROM pg_stat_activity
-                    WHERE datname = current_database() AND wait_event_type = 'Lock'
-                      AND :holder_pid = ANY(pg_blocking_pids(pid))
-                )
-            """), {"holder_pid": holder_pid}).scalar_one()
-            if blocked:
-                assert worker.is_alive(), "worker finished while PostgreSQL reported a lock wait"
-                return
-            if not worker.is_alive():
-                break
-            time.sleep(0.02)
-    pytest.fail("worker did not wait on the holding PostgreSQL transaction")
+    wait_blocked_by(engine, holder_pid, worker, timeout=timeout)
 
 
 @pytest.mark.integration

@@ -23,6 +23,7 @@ from llm_bawt.service.turn_admission import (
     SystemGateRefused,
     TargetBusy,
     activate_hold,
+    lock_target,
 )
 from llm_bawt.service.turn_gates import (
     GateActor,
@@ -37,6 +38,7 @@ from llm_bawt.service.turn_gates import (
     stamp_member_exit,
 )
 from tests.pg_isolation import isolated_pg_store
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_turn_admission import _mcp_claim
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
@@ -191,19 +193,37 @@ def _approval_reservation(store, approvals, bot, request_id):
     return row, turn_id
 
 
-def _wait_blocked_by(engine, holder_pid, worker, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    with engine.connect() as observer:
-        while time.monotonic() < deadline:
-            if observer.execute(sa_text("""
-                SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                    WHERE datname=current_database() AND wait_event_type='Lock'
-                      AND :pid = ANY(pg_blocking_pids(pid)))
-            """), {"pid": holder_pid}).scalar_one():
-                assert worker.is_alive()
-                return
-            time.sleep(0.02)
-    pytest.fail("activation did not wait on the holder's lock")
+@pytest.mark.integration
+def test_lock_wait_observer_sees_a_waiter_that_arrives_after_its_first_poll(gated, monkeypatch):
+    """TASK-1451: pg_stat_activity is snapshotted per transaction. An observer that
+    polls inside one transaction keeps its first, empty view and misses this waiter."""
+    from tests import pg_lock_wait
+
+    bot = gated.bot()
+    first_poll_missed, errors = threading.Event(), []
+
+    def pause():
+        first_poll_missed.set()
+        time.sleep(pg_lock_wait.POLL_INTERVAL_S)
+
+    monkeypatch.setattr(pg_lock_wait, "_pause", pause)
+
+    def waiter():
+        try:
+            assert first_poll_missed.wait(5), "observer never polled"
+            with gated.store.engine.begin() as conn:
+                lock_target(conn, bot)
+        except Exception as exc:  # surfaced by the assert below
+            errors.append(repr(exc))
+
+    with gated.store.engine.begin() as holder:
+        lock_target(holder, bot)
+        pid = holder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+        worker = threading.Thread(target=waiter)
+        worker.start()
+        wait_blocked_by(gated.store.engine, pid, worker, detail=lambda: errors)
+    worker.join(10)
+    assert not worker.is_alive() and not errors, errors
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +289,7 @@ def test_b2_admission_paused_after_the_predicate_lands_in_the_roster(gated, monk
         "gate", _activate(store, _spec(gated.owner(), GateScope.for_bots(bot)))))
     activation.start()
     try:
-        _wait_blocked_by(store.engine, holder["pid"], activation)
+        wait_blocked_by(store.engine, holder["pid"], activation)
     finally:
         proceed.set()
         admission.join(10)
@@ -391,7 +411,7 @@ def test_activation_takes_target_locks_in_sorted_order(gated):
             store, _spec(gated.owner(), GateScope.for_bots(second_bot, first_bot))))
         activation.start()
         try:
-            _wait_blocked_by(store.engine, pid, activation)
+            wait_blocked_by(store.engine, pid, activation)
             # Activation waits on the first bot before it locks any other.
             assert holder.execute(sa_text("SELECT pg_try_advisory_xact_lock(hashtext(:t))"),
                                   {"t": second_bot}).scalar_one() is True
@@ -418,7 +438,7 @@ def test_activation_locks_producers_in_ordinal_order_like_recover_expired(gated)
             store, _spec(gated.owner(), GateScope.for_bots(first_bot, second_bot)))))
         activation.start()
         try:
-            _wait_blocked_by(store.engine, pid, activation)
+            wait_blocked_by(store.engine, pid, activation)
             # recover_expired's next row: free, because activation waits on the
             # lower ordinal before it locks any higher one.
             recover.execute(sa_text("SELECT 1 FROM inter_bot_deliveries WHERE id=:id FOR UPDATE NOWAIT"),
@@ -456,7 +476,7 @@ def test_activation_locks_approvals_in_id_order_like_the_operator_purge(gated):
                 store, _spec(gated.owner(), GateScope.for_bots(first_bot, second_bot)))))
             activation.start()
             try:
-                _wait_blocked_by(store.engine, pid, activation)
+                wait_blocked_by(store.engine, pid, activation)
                 purge.execute(sa_text("SELECT 1 FROM tool_approval_requests WHERE id=:id FOR UPDATE NOWAIT"),
                               {"id": high_id})
             finally:
@@ -979,7 +999,7 @@ def test_capture_waits_for_an_uncommitted_bind_and_reads_its_request(gated):
             "gate", _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate))
         activation.start()
         try:
-            _wait_blocked_by(store.engine, pid, activation)
+            wait_blocked_by(store.engine, pid, activation)
         finally:
             txn.commit()
             activation.join(10)
@@ -997,7 +1017,7 @@ def test_a_bind_behind_an_uncommitted_capture_pins_the_member(gated):
         bind = threading.Thread(target=_bind, args=(store, turn, "req-race"))
         bind.start()
         try:
-            _wait_blocked_by(store.engine, pid, bind)
+            wait_blocked_by(store.engine, pid, bind)
         finally:
             txn.commit()
             bind.join(10)
@@ -1030,7 +1050,7 @@ def test_a_bind_behind_an_uncommitted_rebuild_pins_the_carried_member(gated):
         bind = threading.Thread(target=_bind, args=(store, turn, "req-carry-race"))
         bind.start()
         try:
-            _wait_blocked_by(store.engine, pid, bind)
+            wait_blocked_by(store.engine, pid, bind)
         finally:
             txn.commit()
             bind.join(10)
@@ -1060,7 +1080,7 @@ def test_a_rebuild_waits_for_an_uncommitted_bind_and_carries_its_request(gated):
         rebuilding = threading.Thread(target=rebuild)
         rebuilding.start()
         try:
-            _wait_blocked_by(store.engine, pid, rebuilding)
+            wait_blocked_by(store.engine, pid, rebuilding)
         finally:
             txn.commit()
             rebuilding.join(10)

@@ -17,7 +17,8 @@ from llm_bawt.bot_identities import SYSTEM_BOT_ID
 from llm_bawt.service import delivery_cancel_notice as cn
 from llm_bawt.service.turn_admission import lock_target
 from tests.bot_tag_fixtures import PRIVATE_MODES, clear_tags, make_private
-from tests.test_turn_gates_pg import _wait_blocked_by, gated  # noqa: F401  (gated is a fixture)
+from tests.pg_lock_wait import wait_blocked_by
+from tests.test_turn_gates_pg import gated  # noqa: F401  (gated is a fixture)
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
 
@@ -405,7 +406,7 @@ def test_target_first_lock_order_never_deadlocks_with_cancel_and_a_multibot_gate
         lock_target(gate, sender)
         pid = gate.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
         pump.start()
-        _wait_blocked_by(notices.store.engine, pid, pump)
+        wait_blocked_by(notices.store.engine, pid, pump, detail=lambda: (outcome, errors))
         retried_cancel.start()
         retried_cancel.join(5)
         assert not retried_cancel.is_alive(), "the cancel waited on a row the pump holds"

@@ -26,7 +26,8 @@ from llm_bawt.service.turn_gates import (
     release_gates,
 )
 from tests.test_delivery_claim_gate_pg import _claim, _enqueue, _row
-from tests.test_turn_gates_pg import _activate, _spec, _wait_blocked_by, gated  # noqa: F401  (gated is a fixture)
+from tests.pg_lock_wait import wait_blocked_by
+from tests.test_turn_gates_pg import _activate, _spec, gated  # noqa: F401  (gated is a fixture)
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
 
@@ -313,7 +314,7 @@ def test_a_hold_that_expires_during_the_lock_wait_takes_the_normal_path(gated):
         pid = holder.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
         worker = threading.Thread(target=worker_claim)
         worker.start()
-        _wait_blocked_by(gated.store.engine, pid, worker)
+        wait_blocked_by(gated.store.engine, pid, worker, detail=lambda: (result, errors))
         holder.execute(sa_text(
             "UPDATE system_gates SET expires_at=clock_timestamp()+interval '0.1 seconds' WHERE id=:id"
         ), {"id": gate.id})

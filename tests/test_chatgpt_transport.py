@@ -615,7 +615,20 @@ def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):
     from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapter
     from claude_code_bridge.proxy import retry
     from claude_code_bridge.proxy.request_context import ProxyRequestContext
+    from claude_code_bridge.proxy.chatgpt_transport import ChatGPTStream
     monkeypatch.setattr(retry, "compute_backoff", lambda *args, **kwargs: 0)
+    # "Promptly" means the productive-idle deadline ends each attempt, never
+    # the transport's first-event/idle deadline. Record which deadline fired
+    # instead of timing the call: a loaded runner stretches wall time but
+    # cannot change the phase (TASK-1408).
+    stalls = []
+    original_timeout = ChatGPTStream._timeout
+
+    def record_timeout(self, phase, now):
+        stalls.append((self.transport, phase))
+        return original_timeout(self, phase, now)
+
+    monkeypatch.setattr(ChatGPTStream, "_timeout", record_timeout)
 
     async def run():
         socket = Socket()
@@ -650,8 +663,8 @@ def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):
         adapter.authorize = AsyncMock(return_value=("token", "https://example.test"))
         adapter._chatgpt_transport = ChatGPTResponsesTransport(
             connector=AsyncMock(side_effect=connect),
-            first_event_timeout=.1,
-            idle_timeout=.2,
+            first_event_timeout=5,
+            idle_timeout=10,
             productive_idle_timeout=.025,
         )
         request_client = NS(post=AsyncMock(return_value=HTTPStream()))
@@ -671,11 +684,10 @@ def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):
             "messages": [{"role": "user", "content": "test"}],
         }
         try:
-            started = asyncio.get_running_loop().time()
             chunks = [chunk async for chunk in adapter.call(
                 body, "gpt-6-astra", context,
             )]
-            assert asyncio.get_running_loop().time() - started < .15
+            assert stalls == [("websocket", "productive"), ("sse", "productive")]
             assert b'"type":"api_error"' in b"".join(chunks)
             assert [status["state"] for status in statuses] == ["waiting", "reconnecting"]
             assert socket.close.await_count == 1
