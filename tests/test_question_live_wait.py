@@ -381,7 +381,8 @@ def test_answer_claim_wins_bridge_timeout_without_redis_delivery(store, monkeypa
         )
         cb = bridge._make_can_use_tool(request_id="r", session_key="loopy:nick", seq_holder=[0], question_answer_wait_seconds=30)
         pending = asyncio.create_task(cb("AskUserQuestion", SHIP_INPUT, SimpleNamespace(tool_use_id="t1")))
-        await waiting.wait()
+        # Failure-only bound: a bridge that never reaches its live wait fails, not hangs.
+        await asyncio.wait_for(waiting.wait(), 10)
         assert store.get("t1").status == "awaiting_live"
         assert not bridge._pending_question_futures["t1"][1].done()
         assert store.claim_live_answer("t1", "Ship: Yes", [{"question_id": "Ship", "selected": ["Yes"]}])
