@@ -28,7 +28,7 @@ Conventions
 
 Available MCP Tools (canonical names)
 -------------------------------------
-Tasks: tasks_list, tasks_search_semantic, tasks_get, tasks_get_context,
+Tasks: tasks_list, tasks_board, tasks_search_semantic, tasks_get, tasks_get_context,
        tasks_create, tasks_update, tasks_delete, tasks_add_dependency,
        tasks_remove_dependency, tasks_promote, tasks_regenerate
 Steps: steps_add, steps_update, steps_delete

@@ -23,7 +23,7 @@ SELF_NAMESPACE_TOOLS = frozenset({
 })
 # These are explicitly outside this history boundary (not inferred by a prefix).
 NON_HISTORY_TOOLS = frozenset({
-    "tasks_list", "tasks_search_semantic", "tasks_get", "tasks_reviews_list",
+    "tasks_list", "tasks_board", "tasks_search_semantic", "tasks_get", "tasks_reviews_list",
     "tasks_reviews_add", "tasks_associate_current", "tasks_update", "tasks_delete",
     "tasks_add_dependency", "tasks_remove_dependency", "tasks_promote", "tasks_regenerate",
     "tasks_create", "tasks_get_context", "steps_update", "steps_delete", "steps_add", "steps_set",

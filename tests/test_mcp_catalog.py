@@ -137,7 +137,9 @@ async def test_catalog_token_budgets():
     # 3,860 (+18). One call answers "who is busy/queued/held" for every bot.
     # TASK-1431: bots_send_message names steer_only and keyed targets fan-out:
     # 3,874 (+14). Both change what one call may do, so they stay in-band.
-    assert sum(descriptions) <= 3874, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1460: tasks_board (the board's lanes as /tasks/board draws them):
+    # 3,911 (+37).
+    assert sum(descriptions) <= 3911, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -181,7 +183,10 @@ async def test_catalog_token_budgets():
     # TASK-1431: bots_send_message targets (selector object or bot list),
     # optional target_bot_id and the summary above: 14,281 (+47). One keyed
     # call replaces N single sends.
-    assert total <= 14281, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1460: tasks_board with the board URL's six filters and a row limit:
+    # 14,468 (+187). One call reads the whole board, lanes and counts, in
+    # place of a tasks_list call per status.
+    assert total <= 14468, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

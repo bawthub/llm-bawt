@@ -218,6 +218,57 @@ async def list_tasks(
     return _compact_task_list_payload(payload)
 
 
+@mcp.tool(name="tasks_board")
+async def tasks_board(
+    view: str | None = None,
+    updated: str | None = None,
+    bot: str | None = None,
+    q: str | None = None,
+    project: str | None = None,
+    priority: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """The task board as data: the lanes BawtHub's /tasks/board draws.
+
+    TASK-1460: a thin forwarder to BawtHub's GET /api/tasks/board, which lays
+    the board out with the page's own lane rules, so the same filters give
+    the same lanes, cards and counts as the page. The args are the board
+    URL's params; unknown view/updated values fall back to the board's
+    defaults, and the reply echoes the ones applied.
+
+    Args:
+        view: "kanban" (default) or "status".
+        updated: The Updated time filter: 1h, 6h, 24h, 48h, 7d (default),
+                 30d or all. Applies to windowed lanes only.
+        bot: Assigned bot slug.
+        q: Search over TASK-ID, title, project name and bot.
+        project: Project id (cuid), or "none" for unassigned tasks.
+        priority: One priority, e.g. HIGH.
+        limit: Rows per lane (default 20, max 50); counts stay whole.
+
+    Returns:
+        Dict with view, updated, q, filters, now and lanes: the shown columns
+        in order, each followed by the drawers it shows (`in` names the
+        column). Each lane has id, label, windowed, shown, older (left out by
+        the time filter) and compact rows (shortId, title, status, priority,
+        agentBotId, focusRank, archivedAt, updatedAt, blockedReason).
+        Use tasks_get for a task's description and steps.
+    """
+    params = {
+        key: value
+        for key, value in (
+            ("view", view), ("updated", updated), ("bot", bot),
+            ("q", q), ("project", project), ("priority", priority),
+        )
+        if value
+    }
+    params["limit"] = str(max(1, min(limit, 50)))
+    try:
+        return await _api_get("/board", params=params)
+    except httpx.HTTPStatusError as e:
+        return _http_error(e)
+
+
 @mcp.tool(name="tasks_search_semantic")
 async def search_tasks_semantic(
     query: str,
