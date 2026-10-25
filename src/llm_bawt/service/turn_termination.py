@@ -143,11 +143,9 @@ def settle_open_turn(session: Session, row, *, audit_key: str, audit: dict, now:
     payload[audit_key] = {**audit, "settled_at": now.isoformat()}
     row.request_json = dump_payload(payload)
     row.status, row.end_reason, row.ended_at = "aborted", "aborted", now
-    interrupt_unresolved_tools(session, row.id, now)
     session.add(row)
-    session.flush()
-    from .turn_context_snapshot import record_turn_context
-    record_turn_context(session, row)
+    from .turn_terminal_effects import record_terminal_effects
+    record_terminal_effects(session, row)
     return True
 
 
@@ -207,14 +205,15 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
                 # Not an abort: the stale-reap timeout keeps update_turn's
                 # timeout→completed repair path (turn_logs.update_turn).
                 row.status, row.end_reason, row.ended_at = "timeout", "timeout", now
-                interrupt_unresolved_tools(session, row.id, now)
                 session.add(row)
-                session.flush()
-                from .turn_context_snapshot import record_turn_context
-                record_turn_context(session, row)
-            result.append({"id": row.id, "user_id": row.user_id})
+                from .turn_terminal_effects import record_terminal_effects
+                record_terminal_effects(session, row)
+            result.append({"id": row.id, "user_id": row.user_id, "usage": row.token_usage_json})
         session.commit()
-        return result
+    # turn_complete for each reaped turn pushes its committed balance (TASK-1461).
+    from .usage.balance import balance_update_for_turn
+    return [{"id": r["id"], "user_id": r["user_id"],
+             "balance_update": balance_update_for_turn(store.engine, r["usage"])} for r in result]
 
 
 class TurnAbortCoordinator:

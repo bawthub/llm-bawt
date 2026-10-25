@@ -88,6 +88,9 @@ class ProviderUsage(BaseModel):
     spend: UsageSpend | None = None
     balance: UsageBalance | None = None
     balance_supported: bool = False  # new-server capability; older spend servers must not accept an anchor
+    # True only when PUT/DELETE /v1/usage/{provider}/balance accept a manual anchor
+    # (balance_mode "anchor"); false when the provider's own API is authoritative.
+    manual_balance_supported: bool = False
     raw: dict | None = None        # provider-native payload, for debug/refine
 
 

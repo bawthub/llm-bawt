@@ -553,9 +553,9 @@ class TurnLogStore:
         admission rather than being closed by a guessed timeout. Unresolved
         tools of genuinely reaped legacy turns settle in the same transaction.
 
-        Returns the reaped rows as ``[{"id": ..., "user_id": ...}]`` so the
-        caller can emit a ``turn_complete`` per row to clear UI indicators on
-        the correct ``{bot_id}:{user_id}`` stream. Excludes ``current_turn_id``
+        Returns ``[{"id", "user_id", "balance_update"}]`` so the caller can
+        emit a ``turn_complete`` per row on the correct ``{bot_id}:{user_id}``
+        stream, clearing its indicator and pushing its balance. Excludes ``current_turn_id``
         so the turn that triggered the reap is never closed by it. Newer open
         rows are also preserved: agent session queues can let an older turn
         reach confirmed-start after a newer user message has already been

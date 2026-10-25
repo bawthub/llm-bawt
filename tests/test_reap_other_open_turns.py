@@ -91,7 +91,7 @@ def test_returns_user_id_for_indicator_clear():
 
     reaped = store.reap_other_open_turns(bot_id="byte", current_turn_id="current")
 
-    assert reaped == [{"id": "zombie", "user_id": "someoneelse"}]
+    assert reaped == [{"id": "zombie", "user_id": "someoneelse", "balance_update": None}]
 
 
 def test_does_not_reap_newer_queued_turn_when_older_turn_confirms_late():

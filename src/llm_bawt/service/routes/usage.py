@@ -24,7 +24,7 @@ from ..dependencies import get_service
 from ..usage import (AllUsage, ProviderUsage, clear_balance, get_adapter, get_all, get_usage,
                      has_provider, list_providers, normalize_access_path, set_balance,
                      usage_adapter_for_access_path)
-from ..usage.balance import BALANCE_ANCHOR, BALANCE_PROVIDER
+from ..usage.balance import BALANCE_PROVIDER
 from ..usage.canonical import STATUS_NOT_IMPLEMENTED
 from ..usage.routing import bot_access_path
 
@@ -95,7 +95,7 @@ def _anchored_provider(provider: str):
     adapter = get_adapter(provider)
     if adapter is None:
         raise HTTPException(status_code=404, detail=f"Unknown provider '{provider}'.")
-    if adapter.balance_mode != BALANCE_ANCHOR:
+    if not adapter.capabilities()["manual_balance_supported"]:  # the flag reports advertise
         detail = ("This provider reports its own balance" if adapter.balance_mode == BALANCE_PROVIDER
                   else "This provider has no prepaid API balance")
         raise HTTPException(status_code=409, detail=detail)

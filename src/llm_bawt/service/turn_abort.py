@@ -222,6 +222,8 @@ async def _publish_abort_snapshot(service, turn_id: str) -> None:
         changed_files = store.changed_files_summary(row.id)
     except Exception:
         changed_files = None
+    from .usage.balance import balance_update_for_turn
+    balance_update = balance_update_for_turn(store.engine, row.token_usage_json)
     await subscriber.publish_tool_event(row.bot_id, row.user_id or "nick", {
         "_type": "turn_complete", "turn_id": row.id,
         "trigger_message_id": row.trigger_message_id,
@@ -232,5 +234,5 @@ async def _publish_abort_snapshot(service, turn_id: str) -> None:
         "status": {"aborted": "cancelled", "ok": "completed"}.get(row.status, row.status),
         "end_reason": row.end_reason or "aborted",
         "response_text": row.response_text, "changed_files": changed_files,
-        "ts": time.time(),
+        "balance_update": balance_update, "ts": time.time(),
     })

@@ -32,13 +32,20 @@ The registry currently includes:
 - `zai`
 - `openai_chatgpt`
 - `xai` (`xai-chat`/`xai-responses` prepaid balance, anchor mode)
+- `openai_api` (`openai-api`/`openai-responses` prepaid balance, anchor mode)
+- `openrouter` (`openrouter-anthropic` prepaid balance, anchor mode: its credit
+  endpoint needs a management key, and the connected key is an inference key)
 - `moonshot` (`moonshot-anthropic` prepaid balance from Moonshot's balance API;
   registered only when a Moonshot OpenPlatform key is configured)
 
 Support level differs by adapter. The canonical response carries `kind`:
 `subscription_windows` uses `limits[]`, while `balance` uses `balance` (and
-`spend` where reported) with `balance_supported=true`. Unrecognized paths are
-unavailable; a model name alone never selects a subscription credential.
+`spend` where reported) with `balance_supported=true`. Every report, including
+error and no-balance reports, also carries `manual_balance_supported`: true
+only when the balance write routes accept an anchor (anchor mode). Unrecognized
+paths are unavailable; a model name alone never selects a subscription
+credential. Local engines and the custom `openai-compatible` path have no
+known billing account and stay unavailable.
 
 ## Prepaid API balances (TASK-1461)
 
@@ -46,7 +53,10 @@ Implemented in
 [src/llm_bawt/service/usage/balance.py](../src/llm_bawt/service/usage/balance.py).
 An adapter declares `balance_mode`:
 
-- `anchor`: the user enters the remaining credit; `api_balances` holds one row
+- `anchor`: the user enters the remaining credit. A connected pay-per-token API
+  key without a balance API it can read is one data-only `ApiKeyBalanceAdapter`
+  subclass (provider connection id, access paths); its report is `ok` once that
+  key is connected. `api_balances` holds one row
   per provider (`anchor_usd`, server-stamped `anchor_at`, `spent_usd`,
   `unpriced_turns`). `remaining_usd = anchor_usd - spent_usd` is read from that
   row on every request; it is never cached and never computed by scanning
@@ -55,19 +65,34 @@ An adapter declares `balance_mode`:
   locally. Its `balance` has `source=provider_reported`, and `amount_usd`,
   `used_usd` and `as_of` are `null` (never invented).
 
-`spent_usd` moves only in `TurnLogStore.update_turn`'s transaction for a
-terminal turn, by the change in that turn's `api_balance_ledger` row
-(`turn_id` primary key). A replayed finalize charges nothing; a revised cost
-charges the difference. Only turns created after `anchor_at` whose usage
-carries a frozen `access_path` of that provider count. A counted turn without
-a valid `total_cost_usd` is never charged a guess: it increments
-`unpriced_turns` and the balance reads as unknown until it is set again. A key
-reconnected after the anchor also voids the balance.
+`spent_usd` moves only inside the transaction that ends a turn, by the change in
+that turn's `api_balance_ledger` row (`turn_id` primary key). Every terminal
+writer charges: `TurnLogStore.update_turn`, Stop/recovery `settle_open_turn`
+and the stale-turn reap (all through `record_terminal_effects`), and the
+expired-delivery settle (`charge_settled_turns`), so a checkpointed cost on a
+turn that never finalizes normally still counts. A replayed finalize charges
+nothing; a revised cost charges the difference. Only turns created after
+`anchor_at` whose usage carries a frozen `access_path` of that provider count.
+Charges and anchor writes take one per-provider transaction lock, and setting
+the anchor recounts the ledger after `anchor_at`, so a turn finishing while the
+anchor commits is never missed. A counted turn without a valid
+`total_cost_usd` is never charged a guess: it increments `unpriced_turns` and
+the balance reads as unknown until it is set again. A key reconnected after the
+anchor also voids the balance.
 
-`turn_complete` carries `balance_update = {provider, access_path_key, balance,
-updated_at}` for a turn on a balance path; provider mode sends
-`balance: null, refresh: true` so readers refetch. `balance.updated_at` is a
-fractional epoch that orders updates.
+Every app-owned `turn_complete` (streaming finalize, non-streaming
+completed/cancelled/error, Stop snapshot, stale reap, maintenance release)
+carries `balance_update`, built by `usage.balance.balance_update_for_turn`
+from the committed turn row:
+
+- `null`: the turn's usage names no balance path, so no balance moved;
+- anchor mode: `{provider, access_path_key, balance, updated_at}`, where
+  `balance` is the committed counter (or `null` when unknown);
+- provider mode, or an anchor read that failed: `{provider, access_path_key,
+  balance: null, updated_at, refresh: true}`, so readers refetch the report once.
+
+`updated_at` and `balance.updated_at` are fractional epochs that order updates.
+Passive OpenClaw runs have no app turn and move no balance.
 
 The turn-log scan (`backfill_ledger`) runs only on ledger creation, legacy
 migration (the retired `anthropic_api_balance_anchor` runtime setting moves into

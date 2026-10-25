@@ -19,6 +19,7 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 
+from .balance import BALANCE_ANCHOR
 from .canonical import ProviderUsage, STATUS_NOT_IMPLEMENTED
 
 
@@ -45,17 +46,25 @@ class UsageAdapter(ABC):
         """When the billed credential was last connected; an older anchor is void."""
         return None
 
+    def capabilities(self) -> dict[str, bool]:
+        """Balance capability flags every report of this adapter carries."""
+        return {"balance_supported": bool(self.balance_mode),
+                "manual_balance_supported": self.balance_mode == BALANCE_ANCHOR}
+
     # -- helpers for subclasses ------------------------------------------
 
     def _base(self, **overrides) -> ProviderUsage:
-        """Build a ProviderUsage pre-filled with this adapter's identity."""
+        """Build a ProviderUsage pre-filled with this adapter's identity.
+
+        Every report, including the registry's fetch-error report, is built here.
+        """
         fields = dict(
             provider=self.provider,
             display_name=self.display_name,
             backend=self.backend,
             kind=self.kind,
-            balance_supported=bool(self.balance_mode),
             fetched_at=int(time.time()),
+            **self.capabilities(),
         )
         fields.update(overrides)
         return ProviderUsage(**fields)

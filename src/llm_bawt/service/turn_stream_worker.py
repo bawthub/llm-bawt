@@ -507,6 +507,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                                     # per-bot activeTurns by turn_id) still
                                     # clears the indicator on null session_id.
                                     "session_id": None,
+                                    "balance_update": _rt.get("balance_update"),
                                     "status": "timeout",
                                     "end_reason": "timeout",
                                     "ts": time.time(),

@@ -38,7 +38,9 @@ from .adapters import (
     ClaudeUsageAdapter,
     KimiCodingUsageAdapter,
     MoonshotUsageAdapter,
+    OpenAIApiUsageAdapter,
     OpenAIChatGPTUsageAdapter,
+    OpenRouterUsageAdapter,
     XaiUsageAdapter,
     ZaiUsageAdapter,
 )
@@ -91,6 +93,9 @@ register(AnthropicApiUsageAdapter())
 register(ZaiUsageAdapter())
 register(OpenAIChatGPTUsageAdapter())
 register(XaiUsageAdapter())
+# Pay-per-token API keys counted down from a manual anchor (TASK-1461).
+register(OpenAIApiUsageAdapter())
+register(OpenRouterUsageAdapter())
 # Moonshot OpenPlatform and Kimi For Coding are separate products. Do not
 # surface an unauthorized Moonshot card when only the Kimi subscription is
 # configured; register OpenPlatform usage once its own key exists.
@@ -128,7 +133,6 @@ def _with_anchored_balance(adapter: UsageAdapter, snap: ProviderUsage) -> Provid
     from .balance import anchored_balance
 
     out = snap.model_copy(deep=True)
-    out.balance_supported = True
     try:
         balance, reason = anchored_balance(_balance_store().read(adapter.provider),
                                            adapter.credential_connected_at())
@@ -198,17 +202,7 @@ async def _report(adapter: UsageAdapter, *, force: bool) -> ProviderUsage:
                 stale = _cached_copy(hit[1])
                 stale.error = f"refresh failed: {e}"
                 return stale
-            return ProviderUsage(
-                provider=provider,
-                display_name=adapter.display_name,
-                backend=adapter.backend,
-                kind=adapter.kind,
-                balance_supported=bool(adapter.balance_mode),
-                available=False,
-                status=STATUS_ERROR,
-                error=str(e),
-                fetched_at=int(time.time()),
-            )
+            return adapter._base(available=False, status=STATUS_ERROR, error=str(e))
 
         # Cache only authoritative snapshots; on a transient 429, prefer the
         # last-good snapshot if we have one.

@@ -499,7 +499,8 @@ def test_reaper_bounds_unacknowledged_cancel_without_live_owner(store, monkeypat
 
 
 def test_reaper_settles_unknown_tools(store):
-    assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == [{"id": "A", "user_id": "nick"}]
+    assert store.reap_other_open_turns(bot_id="test", current_turn_id="B") == [
+        {"id": "A", "user_id": "nick", "balance_update": None}]
     with Session(store.engine) as session:
         row = session.get(ToolCallRecord, 1)
         assert row.ended_at is not None and row.result_text is None and row.result_complete is False

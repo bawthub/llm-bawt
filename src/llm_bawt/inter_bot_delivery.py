@@ -495,6 +495,7 @@ class InterBotDeliveryStore:
             """)).mappings().all()
             for row in rows:
                 from .service.session_lifecycle.recovery import NewSessionRecovery
+                from .service.usage.balance import charge_settled_turns
 
                 if NewSessionRecovery.is_reset(row):
                     conn.execute(sa_text("""
@@ -502,14 +503,12 @@ class InterBotDeliveryStore:
                         SET metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}', 'true'::jsonb)
                         WHERE id=:id
                     """), {"id": row["id"]})
-                conn.execute(sa_text("""
+                charge_settled_turns(conn, conn.execute(sa_text("""
                     UPDATE turn_logs SET status='error', end_reason='error',
                         error_text=:error, ended_at=COALESCE(ended_at, now())
                     WHERE id=:turn_id AND ended_at IS NULL
-                """), {
-                    "turn_id": row["turn_id"],
-                    "error": row["last_error"],
-                })
+                    RETURNING id, created_at, token_usage_json
+                """), {"turn_id": row["turn_id"], "error": row["last_error"]}))
         return [DeliveryRecord.from_mapping(row) for row in rows]
 
     def eligible_targets(self, limit: int = 100) -> list[str]:

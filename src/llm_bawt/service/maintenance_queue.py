@@ -121,6 +121,9 @@ class MaintenanceQueue:
             return
         delivery_id, source = pending
         status = source.get("status")
+        from .usage.balance import balance_update_for_turn
+        balance_update = await asyncio.to_thread(
+            balance_update_for_turn, self.store.engine, source.get("token_usage_json"))
         event = {
             "_type": "turn_complete", "turn_id": source["id"],
             "trigger_message_id": source.get("trigger_message_id"),
@@ -131,7 +134,8 @@ class MaintenanceQueue:
                        "cancelled" if status in {"aborted", "cancelled"} else status),
             "end_reason": source.get("end_reason"), "error_text": source.get("error_text"),
             "response_text": source.get("response_text"), "model": source.get("model"),
-            "token_usage": as_dict(source.get("token_usage_json")), "ts": time.time(),
+            "token_usage": as_dict(source.get("token_usage_json")),
+            "balance_update": balance_update, "ts": time.time(),
         }
         subscriber = self.service._redis_subscriber
         published = await subscriber.publish_tool_event(target, source["user_id"], event)

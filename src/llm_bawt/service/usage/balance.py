@@ -7,12 +7,14 @@ Every pay-per-token usage adapter declares ``balance_mode``:
 * ``"provider"``: the provider's own balance API is authoritative. Turns are
   still ledgered (for spend detail), but nothing is counted down locally.
 
-``spent_usd`` moves only inside the transaction that finalizes a turn's cost
-(``record_turn_charge``, called from ``TurnLogStore.update_turn``). The ledger
-holds the cost already charged for each turn, so a replayed finalize changes
-nothing and a revised cost charges only the difference. Only turns created
-after ``anchor_at`` whose usage carries a frozen ``access_path`` count: a model
-alias is catalog intent, not proof of the credential used.
+``spent_usd`` moves only inside the transaction that ends a turn
+(``record_turn_charge``, from every terminal writer: ``turn_terminal_effects``
+and ``charge_settled_turns``). The ledger holds the cost already charged for
+each turn, so a replayed finalize changes nothing and a revised cost charges
+only the difference. Only turns created after ``anchor_at`` whose usage carries
+a frozen ``access_path`` count: a model alias is catalog intent, not proof of
+the credential used. Charges and anchor writes serialize on one per-provider
+transaction lock.
 
 A counted turn with no recorded cost is never charged a guess. It increments
 ``unpriced_turns`` and the balance reports as unknown until it is set again.
@@ -121,6 +123,16 @@ def _upsert_ledger(conn, *, turn_id: str, provider: str, path: str,
            "cost": cost, "now": datetime.now(timezone.utc)})
 
 
+def _lock_provider(conn, provider: str) -> None:
+    """Serialize a provider's charges with its anchor writes until commit.
+
+    A row lock cannot do this: before the first anchor commits there is no row
+    to lock, so a charge would miss an anchor whose ``anchor_at`` precedes it.
+    """
+    if conn.dialect.name == "postgresql":
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"api_balance:{provider}"})
+
+
 def record_turn_charge(conn, *, turn_id: str, created_at: datetime, token_usage_json: Any) -> None:
     """Ledger a terminal turn's cost and move its provider's counter by the change.
 
@@ -144,10 +156,11 @@ def record_turn_charge(conn, *, turn_id: str, created_at: datetime, token_usage_
     prior = prior_row()
     if prior is not None and prior.cost_usd == cost:
         return  # replayed finalize: already charged exactly this, so take no lock
-    # Lock the counter before the ledger row (repair takes them in this order
-    # too), then re-read: a repair may have ledgered this turn meanwhile.
+    # Take the provider lock before the ledger row (anchor writes and repair
+    # take it first too), then re-read: a repair may have ledgered this turn.
+    _lock_provider(conn, provider)
     counted = adapter.balance_mode == BALANCE_ANCHOR and conn.execute(text(
-        "SELECT 1 FROM api_balances WHERE provider=:p AND anchor_at < :created FOR UPDATE"
+        "SELECT 1 FROM api_balances WHERE provider=:p AND anchor_at < :created"
     ), {"p": provider, "created": created_at}).first() is not None
     prior = prior_row()
     if prior is not None and prior.cost_usd == cost:
@@ -163,6 +176,12 @@ def record_turn_charge(conn, *, turn_id: str, created_at: datetime, token_usage_
         WHERE provider = :p
     """), {"p": provider, "delta": (cost or Decimal(0)) - (prior_cost or Decimal(0)),
            "unpriced": int(cost is None) - int(was_unpriced), "now": datetime.now(timezone.utc)})
+
+
+def charge_settled_turns(conn, rows) -> None:
+    """Charge turns a raw-SQL writer ended (``RETURNING id, created_at, token_usage_json``)."""
+    for turn_id, created_at, token_usage_json in list(rows):  # drain before charging on conn
+        record_turn_charge(conn, turn_id=turn_id, created_at=created_at, token_usage_json=token_usage_json)
 
 
 def backfill_ledger(conn, *, provider: str | None = None, since: datetime | None = None) -> int:
@@ -228,6 +247,7 @@ def _migrate_legacy_anchors(conn) -> None:
         except (InvalidOperation, TypeError, ValueError):
             amount, anchor_at = Decimal(0), None
         if anchor_at is not None and anchor_at.tzinfo is not None and amount.is_finite() and amount > 0:
+            _lock_provider(conn, adapter.provider)
             conn.execute(text("""
                 INSERT INTO api_balances (provider, anchor_usd, anchor_at, spent_usd, unpriced_turns, updated_at)
                 VALUES (:p, :amount, :at, 0, 0, :now) ON CONFLICT (provider) DO NOTHING
@@ -256,18 +276,27 @@ class ApiBalanceStore:
             raise RuntimeError("balance database unavailable")
         self.engine = engine
 
+    @staticmethod
+    def _select(conn, provider: str):
+        return conn.execute(text(
+            "SELECT provider, anchor_usd, anchor_at, spent_usd, unpriced_turns, updated_at"
+            " FROM api_balances WHERE provider=:p"
+        ), {"p": provider}).first()
+
     def read(self, provider: str) -> BalanceRow | None:
         with self.engine.connect() as conn:
-            row = conn.execute(text(
-                "SELECT provider, anchor_usd, anchor_at, spent_usd, unpriced_turns, updated_at"
-                " FROM api_balances WHERE provider=:p"
-            ), {"p": provider}).first()
+            row = self._select(conn, provider)
         return BalanceRow(*row) if row is not None else None
 
     def set_anchor(self, provider: str, amount: Decimal) -> BalanceRow:
-        """Anchor = amount as of now (app clock, like turn created_at); counter restarts."""
-        now = datetime.now(timezone.utc)
+        """Anchor = amount as of now (app clock, like turn created_at); counter restarts.
+
+        The recount charges any turn created after ``anchor_at`` that finished
+        while this write waited for the provider lock.
+        """
         with self.engine.begin() as conn:
+            _lock_provider(conn, provider)
+            now = datetime.now(timezone.utc)
             conn.execute(text("""
                 INSERT INTO api_balances (provider, anchor_usd, anchor_at, spent_usd, unpriced_turns, updated_at)
                 VALUES (:p, :amount, :now, 0, 0, :now)
@@ -275,17 +304,20 @@ class ApiBalanceStore:
                     anchor_at = EXCLUDED.anchor_at, spent_usd = 0, unpriced_turns = 0,
                     updated_at = EXCLUDED.updated_at
             """), {"p": provider, "amount": amount, "now": now})
-        return BalanceRow(provider, amount, now, Decimal(0), 0, now)
+            _recount(conn, provider)
+            return BalanceRow(*self._select(conn, provider))
 
     def clear(self, provider: str) -> bool:
         with self.engine.begin() as conn:
+            _lock_provider(conn, provider)
             return conn.execute(text("DELETE FROM api_balances WHERE provider=:p"),
                                 {"p": provider}).rowcount > 0
 
     def repair(self, provider: str) -> BalanceRow | None:
         """Re-ledger turns since the anchor from turn logs, then recount (repair/tests only)."""
         with self.engine.begin() as conn:
-            row = conn.execute(text("SELECT anchor_at FROM api_balances WHERE provider=:p FOR UPDATE"),
+            _lock_provider(conn, provider)
+            row = conn.execute(text("SELECT anchor_at FROM api_balances WHERE provider=:p"),
                                {"p": provider}).first()
             if row is None:
                 return None
@@ -325,16 +357,43 @@ def anchored_balance(row: BalanceRow | None, connected_at: datetime | None) -> t
 
 
 def balance_update_for_turn(engine, token_usage_json: Any) -> dict | None:
-    """``turn_complete.balance_update`` for a finished turn on a balance provider."""
+    """``turn_complete.balance_update``: the one builder every producer calls.
+
+    ``None`` means the turn's committed usage names no balance path, so it moved
+    no balance. Never raises: a balance read that fails degrades to the
+    ``refresh`` form (readers refetch once) instead of dropping turn_complete.
+    """
     path = _frozen_path(_usage(token_usage_json))
     adapter = balance_adapter_for_path(path)
     if adapter is None:
         return None
     update: dict[str, Any] = {"provider": adapter.provider, "access_path_key": path}
+    refresh = {**update, "balance": None, "updated_at": time.time(), "refresh": True}
     if adapter.balance_mode == BALANCE_PROVIDER:
-        # Only the provider knows what is left: readers fetch it after this.
-        return {**update, "balance": None, "updated_at": time.time(), "refresh": True}
-    row = ApiBalanceStore(engine).read(adapter.provider)
-    balance, _reason = anchored_balance(row, adapter.credential_connected_at())
+        return refresh  # only the provider knows what is left
+    try:
+        row = ApiBalanceStore(engine).read(adapter.provider)
+        balance, _reason = anchored_balance(row, adapter.credential_connected_at())
+    except Exception:
+        logger.warning("balance_update read failed for %s; sending refresh", adapter.provider, exc_info=True)
+        return refresh
     updated = row.updated_at.timestamp() if row is not None else time.time()
     return {**update, "balance": balance.model_dump() if balance else None, "updated_at": updated}
+
+
+def balance_update_for_turn_id(engine, turn_id: str) -> dict | None:
+    """``balance_update_for_turn`` for a producer that holds only the turn id.
+
+    Reads the committed ``token_usage_json``; ``None`` without a database or if
+    that read fails (logged).
+    """
+    if engine is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            raw = conn.execute(text("SELECT token_usage_json FROM turn_logs WHERE id=:id"),
+                               {"id": turn_id}).scalar()
+    except Exception:
+        logger.warning("balance_update could not read turn %s", turn_id, exc_info=True)
+        return None
+    return balance_update_for_turn(engine, raw)

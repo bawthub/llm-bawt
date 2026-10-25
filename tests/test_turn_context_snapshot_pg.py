@@ -322,7 +322,7 @@ def test_orphan_reap_invalidates_older_session_snapshot(rig):
             """), {"id": turn_id, "minutes": minutes, "bot": bot,
                    "user": user, "message": message_id})
     assert store.reap_other_open_turns(bot_id=bot, current_turn_id=current) == [
-        {"id": abandoned, "user_id": user}
+        {"id": abandoned, "user_id": user, "balance_update": None}
     ]
     health = job.context.health(bot_id=bot, user_id=user, backend="claude-code",
                                 configured_ceiling=372000)

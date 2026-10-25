@@ -1,7 +1,8 @@
 """Private PostgreSQL contract for the per-provider API balance counter (TASK-1461).
 
-The counter moves only in ``update_turn``'s transaction, by the change in a
-turn's ledgered cost: replay is a no-op, a revision charges the difference,
+The counter moves only in the transaction that ends a turn (every terminal
+writer), by the change in a turn's ledgered cost: replay is a no-op, a
+revision charges the difference,
 turns before the anchor or on other paths never count, and an unpriced turn
 makes the balance unknown instead of charging a guess. Repair, re-anchor,
 creation backfill and legacy-setting migration rebuild the same numbers.
@@ -244,3 +245,112 @@ def test_invalid_legacy_anchor_is_dropped_not_trusted(rig):
         bootstrap_balance_schema(conn)
     assert rig[1].read(PROVIDER) is None
     assert "anthropic_api_balance_anchor" not in settings.get_scope_settings("global", "*")
+
+
+# -- every terminal writer charges (Loopy r1 Blocker 1) ------------------------
+
+
+def test_stop_or_recovery_settle_charges_the_checkpointed_cost(rig):
+    from sqlmodel import Session, select
+
+    from llm_bawt.service.turn_logs import TurnLog
+    from llm_bawt.service.turn_termination import settle_open_turn
+
+    store, balances, _bot = rig
+    balances.set_anchor(PROVIDER, Decimal("100"))
+    turn = _open_turn(rig)
+    store.update_turn(turn_id=turn, token_usage=_usage(1.25))  # partial checkpoint
+    with Session(store.engine) as session:
+        row = session.exec(select(TurnLog).where(TurnLog.id == turn).with_for_update()).one()
+        assert settle_open_turn(session, row, audit_key="recovery", audit={"cause": "orphaned_by_restart"},
+                                now=datetime.now(timezone.utc))
+        session.commit()
+    assert _counter(rig) == (Decimal("1.25"), 0)
+    _finish(rig, turn, _usage(1.25))  # the late worker finalize replays: no double charge
+    assert _counter(rig) == (Decimal("1.25"), 0)
+
+
+def test_stale_reap_charges_and_returns_the_balance_update(rig, monkeypatch):
+    from llm_bawt.service import usage as usage_registry
+
+    monkeypatch.setattr(usage_registry.get_adapter(PROVIDER), "credential_connected_at", lambda: None)
+    store, balances, bot = rig
+    balances.set_anchor(PROVIDER, Decimal("100"))
+    stale = _open_turn(rig)
+    store.update_turn(turn_id=stale, token_usage=_usage(3))
+    current = _open_turn(rig, datetime.now(timezone.utc) + timedelta(seconds=1))
+    [reaped] = store.reap_other_open_turns(bot_id=bot, current_turn_id=current)
+    assert reaped["id"] == stale and _counter(rig) == (Decimal(3), 0)
+    assert reaped["balance_update"]["balance"]["remaining_usd"] == 97.0
+
+
+def test_expired_delivery_settle_charges_the_checkpointed_cost(rig):
+    from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+
+    store, balances, bot = rig
+    deliveries = InterBotDeliveryStore(require_test_db_config())
+    balances.set_anchor(PROVIDER, Decimal("100"))
+    turn = _open_turn(rig)
+    store.update_turn(turn_id=turn, token_usage=_usage(0.5))
+    delivery = f"bal-{uuid.uuid4().hex}"
+    with store.engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO inter_bot_deliveries (id, sender_bot_id, target_bot_id, message, user_message_id,
+                turn_id, status, author_entity_id, transport_accepted_at)
+            VALUES (:id, 'sender', :bot, 'm', :msg, :turn, 'QUEUED', 'sender', now() - interval '8 days')
+        """), {"id": delivery, "bot": bot, "msg": f"msg-{delivery}", "turn": turn})
+    try:
+        assert delivery in [r.id for r in deliveries.fail_expired_accepted_queued()]
+        assert store.get_turn(turn).ended_at is not None
+        assert _counter(rig) == (Decimal("0.5"), 0)
+    finally:
+        with store.engine.begin() as conn:
+            conn.execute(text("DELETE FROM inter_bot_deliveries WHERE id=:id"), {"id": delivery})
+
+
+# -- an anchor write never misses a racing charge (Loopy r1 Blocker 2) ---------
+
+
+def test_a_turn_finishing_while_the_first_anchor_commits_is_charged(rig, monkeypatch):
+    from threading import Event, Thread
+
+    from llm_bawt.service.usage import balance as balance_module
+
+    store, balances, _bot = rig
+    inserted, resume, errors = Event(), Event(), []
+    real_recount = balance_module._recount
+
+    def paused_recount(conn, provider):
+        inserted.set()  # anchor_at taken and the row inserted; the provider lock is held
+        if not resume.wait(10):
+            raise TimeoutError("anchor did not resume")
+        real_recount(conn, provider)
+
+    monkeypatch.setattr(balance_module, "_recount", paused_recount)
+
+    def run(fn):
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — surfaced by the assertion below
+            errors.append(exc)
+
+    anchor = Thread(target=run, args=(lambda: balances.set_anchor(PROVIDER, Decimal("100")),))
+    anchor.start()
+    assert inserted.wait(10)
+    turn = _open_turn(rig)  # created after anchor_at, before the anchor row is visible
+    finish = Thread(target=run, args=(lambda: _finish(rig, turn, _usage(2)),))
+    finish.start()
+    finish.join(1)
+    assert finish.is_alive()  # waits on the provider lock instead of missing the anchor
+    resume.set()
+    anchor.join(10)
+    finish.join(10)
+    assert not errors and not anchor.is_alive() and not finish.is_alive()
+    assert _counter(rig) == (Decimal(2), 0)
+
+
+def test_anchor_counts_a_turn_already_ledgered_after_its_timestamp(rig):
+    # A turn stamped after anchor_at (another process's clock) that finished first.
+    _turn(rig, _usage(2), datetime.now(timezone.utc) + timedelta(minutes=1))
+    row = rig[1].set_anchor(PROVIDER, Decimal("100"))
+    assert (row.spent_usd, row.unpriced_turns) == _counter(rig) == (Decimal(2), 0)

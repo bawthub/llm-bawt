@@ -47,6 +47,13 @@ class ChatNonStreamMixin:
         subscriber = getattr(self, "_redis_subscriber", None)
         if subscriber is None:
             return
+        if event.get("_type") == "turn_complete":
+            # TASK-1461: every turn_complete pushes the committed API balance.
+            from .usage.balance import balance_update_for_turn_id
+
+            engine = getattr(getattr(self, "_turn_log_store", None), "engine", None)
+            event = {**event, "balance_update": await asyncio.to_thread(
+                balance_update_for_turn_id, engine, event["turn_id"])}
         try:
             await subscriber.publish_tool_event(bot_id, user_id, event)
         except Exception as exc:

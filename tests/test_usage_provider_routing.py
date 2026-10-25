@@ -87,7 +87,11 @@ def test_usage_adapter_ownership_is_exact_and_unimplemented_routes_are_unknown()
     assert usage_adapter_for_access_path("anthropic-api").provider == "anthropic_api"
     assert usage_adapter_for_access_path("anthropic-oauth").provider == "claude"
     assert usage_adapter_for_access_path("openai-oauth").provider == "openai_chatgpt"
-    assert usage_adapter_for_access_path("openai-api") is None
+    # TASK-1461: every connected pay-per-token API key path has a balance report.
+    assert usage_adapter_for_access_path("openai-api").provider == "openai_api"
+    assert usage_adapter_for_access_path("openai-responses").provider == "openai_api"
+    assert usage_adapter_for_access_path("openrouter-anthropic").provider == "openrouter"
+    assert usage_adapter_for_access_path("openai-compatible") is None  # custom endpoint, no known account
     assert usage_adapter_for_access_path("local-vllm") is None
     assert usage_adapter_for_access_path("unknown") is None
 

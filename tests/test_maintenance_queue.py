@@ -106,6 +106,17 @@ def test_terminal_status_alone_never_releases_before_publication(rig, status):
     assert rig.subscriber.publish_tool_event.await_count == 1
 
 
+def test_completion_event_carries_the_committed_balance(rig, monkeypatch):
+    from llm_bawt.service.usage import balance as balance_module
+
+    monkeypatch.setattr(balance_module, "balance_update_for_turn",
+                        lambda engine, usage: {"engine": engine is rig.engine, "usage": usage})
+    finish(rig)
+    asyncio.run(rig.queue.publish_ready("fixture"))
+    event = rig.subscriber.publish_tool_event.await_args.args[2]
+    assert event["balance_update"] == {"engine": True, "usage": None}  # TASK-1461
+
+
 def test_receipt_survives_process_restart_before_successor_claim(rig):
     finish(rig)
     asyncio.run(rig.queue.publish_ready("fixture"))

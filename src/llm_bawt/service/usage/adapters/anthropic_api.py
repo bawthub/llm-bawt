@@ -18,9 +18,8 @@ from typing import Any
 
 import httpx
 
-from ..balance import BALANCE_ANCHOR
-from ..base import UsageAdapter
 from ..canonical import STATUS_ERROR, STATUS_OK, STATUS_RATE_LIMITED, STATUS_UNAUTHORIZED, UsageSpend
+from .api_key_balance import ApiKeyBalanceAdapter, utc_datetime
 
 logger = logging.getLogger(__name__)
 COST_URL = "https://api.anthropic.com/v1/organizations/cost_report"
@@ -37,14 +36,6 @@ def _decimal(value: Any) -> Decimal:
         return Decimal(0)
 
 
-def _utc_date(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
-    except (ValueError, TypeError):
-        return None
-
-
 def _windows(now: datetime) -> tuple[datetime, datetime, datetime]:
     today = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     return today, today - timedelta(days=6), today.replace(day=1)
@@ -55,7 +46,7 @@ def cost_totals(buckets: list[dict], *, now: datetime) -> tuple[Decimal, Decimal
     today_start, seven_start, month_start = _windows(now)
     totals = [Decimal(0), Decimal(0), Decimal(0)]
     for bucket in buckets:
-        started = _utc_date(bucket.get("starting_at"))
+        started = utc_datetime(bucket.get("starting_at"))
         if started is None or started > now:
             continue
         for result in bucket.get("results") or []:
@@ -96,13 +87,14 @@ async def _pages(client: httpx.AsyncClient, url: str, key: str, params: dict[str
     raise ValueError("Anthropic report exceeded pagination limit")
 
 
-class AnthropicApiUsageAdapter(UsageAdapter):
+class AnthropicApiUsageAdapter(ApiKeyBalanceAdapter):
+    """The generic anchored API key, plus Anthropic spend detail."""
+
     provider = "anthropic_api"
     display_name = "Anthropic API"
     backend = "claude-code"
     access_path_keys = ("anthropic-api",)
-    kind = "balance"
-    balance_mode = BALANCE_ANCHOR
+    connection_id = INFERENCE_CONNECTION
     legacy_balance_setting = "anthropic_api_balance_anchor"
 
     def _admin_key(self) -> str | None:
@@ -114,13 +106,6 @@ class AnthropicApiUsageAdapter(UsageAdapter):
             return None
         key = record.secret.get("admin_key")
         return key if isinstance(key, str) and key.startswith("sk-ant-admin") else None
-
-    def credential_connected_at(self) -> datetime | None:
-        from ...dependencies import get_service
-        from ...providers.base import CredentialStore
-
-        connection = CredentialStore(get_service().config).load(INFERENCE_CONNECTION)
-        return _utc_date(connection.connected_at) if connection else None
 
     def _ledger_spend(self, now: datetime, since: datetime) -> tuple[Decimal, ...]:
         from .. import _balance_store

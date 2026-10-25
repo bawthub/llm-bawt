@@ -369,3 +369,145 @@ def test_balance_update_for_an_anchored_turn_carries_the_committed_counter(monke
                                    {"access_path": {"key": "anthropic-oauth"}}])
 def test_turns_off_balance_paths_get_no_balance_update(usage):
     assert balance_update_for_turn(None, usage) is None
+
+
+def test_a_failed_balance_read_degrades_to_a_refresh_not_a_dropped_event(monkeypatch):
+    from llm_bawt.service.usage import balance as balance_module
+
+    class Broken:
+        def __init__(self, _engine):
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(balance_module, "ApiBalanceStore", Broken)
+    update = balance_update_for_turn(object(), {"access_path": {"key": "anthropic-api"}})
+    assert update["provider"] == "anthropic_api" and update["refresh"] is True and update["balance"] is None
+
+
+def test_balance_update_for_turn_id_reads_nothing_without_a_database():
+    from llm_bawt.service.usage.balance import balance_update_for_turn_id
+
+    assert balance_update_for_turn_id(None, "turn") is None
+
+
+# -- every turn_complete producer carries balance_update ------------------------
+
+
+@pytest.mark.asyncio
+async def test_nonstream_turn_complete_carries_the_committed_balance(monkeypatch):
+    from types import SimpleNamespace
+
+    from llm_bawt.service.chat_nonstream import ChatNonStreamMixin
+    from llm_bawt.service.usage import balance as balance_module
+
+    published = []
+
+    class Subscriber:
+        async def publish_tool_event(self, _bot, _user, event):
+            published.append(event)
+
+    monkeypatch.setattr(balance_module, "balance_update_for_turn_id",
+                        lambda engine, turn_id: {"engine": engine, "turn": turn_id})
+    service = SimpleNamespace(_redis_subscriber=Subscriber(), _turn_log_store=SimpleNamespace(engine="db"))
+    for kind in ("text_delta", "turn_complete"):
+        await ChatNonStreamMixin._publish_nonstream_turn_event(
+            service, bot_id="b", user_id="u", event={"_type": kind, "turn_id": "T"})
+    assert "balance_update" not in published[0]
+    assert published[1]["balance_update"] == {"engine": "db", "turn": "T"}
+
+
+@pytest.mark.asyncio
+async def test_abort_snapshot_turn_complete_carries_the_committed_balance(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from llm_bawt.service import turn_abort
+    from llm_bawt.service.usage import balance as balance_module
+
+    row = SimpleNamespace(id="T", bot_id="b", user_id="u", trigger_message_id=None, assistant_message_id=None,
+                          status="aborted", end_reason="aborted", response_text="", token_usage_json="{usage}")
+    store = SimpleNamespace(engine="db", get_turn=lambda _t: row, changed_files_summary=lambda _t: None)
+    subscriber = SimpleNamespace(publish_tool_event=AsyncMock(return_value="1-0"))
+    monkeypatch.setattr(balance_module, "balance_update_for_turn",
+                        lambda engine, usage: {"engine": engine, "usage": usage})
+    await turn_abort._publish_abort_snapshot(
+        SimpleNamespace(_turn_log_store=store, _redis_subscriber=subscriber), "T")
+    event = subscriber.publish_tool_event.await_args.args[2]
+    assert event["_type"] == "turn_complete"
+    assert event["balance_update"] == {"engine": "db", "usage": "{usage}"}
+
+
+# -- generic pay-per-token API keys and the manual-balance capability -----------
+
+
+def test_reports_say_whether_a_manual_balance_is_accepted():
+    flags = {name: usage_registry.get_adapter(name).capabilities()
+             for name in ("anthropic_api", "xai", "openai_api", "openrouter", "claude", "zai")}
+    flags["moonshot"] = MoonshotUsageAdapter().capabilities()
+    manual = {"balance_supported": True, "manual_balance_supported": True}
+    assert {name: flags[name] for name in ("anthropic_api", "xai", "openai_api", "openrouter")} == dict.fromkeys(
+        ("anthropic_api", "xai", "openai_api", "openrouter"), manual)
+    assert flags["moonshot"] == {"balance_supported": True, "manual_balance_supported": False}
+    assert flags["claude"] == flags["zai"] == {"balance_supported": False, "manual_balance_supported": False}
+
+
+@pytest.mark.asyncio
+async def test_error_and_no_balance_reports_keep_the_capability_flags(monkeypatch):
+    from llm_bawt.service.usage.adapters import OpenRouterUsageAdapter
+
+    for env in ("MOONSHOT_API_KEY", "LLM_BAWT_MOONSHOT_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    native = await MoonshotUsageAdapter().fetch()
+    assert native.balance is None and native.balance_supported and not native.manual_balance_supported
+
+    adapter = OpenRouterUsageAdapter()
+
+    async def boom():
+        raise RuntimeError("upstream exploded")
+
+    monkeypatch.setattr(adapter, "fetch", boom)
+    monkeypatch.delitem(usage_registry._cache, adapter.provider, raising=False)
+    failed = await usage_registry._report(adapter, force=True)
+    assert failed.status == "error" and failed.provider == "openrouter"
+    assert failed.balance_supported and failed.manual_balance_supported
+
+
+@pytest.mark.parametrize("provider,paths", [
+    ("openai_api", ("openai-api", "openai-responses")),
+    ("openrouter", ("openrouter-anthropic",)),
+    ("xai", ("xai-chat", "xai-responses")),
+    ("anthropic_api", ("anthropic-api",)),
+])
+def test_every_pay_per_token_api_key_path_reports_an_anchored_balance(provider, paths):
+    from llm_bawt.service.usage.adapters import ApiKeyBalanceAdapter
+    from llm_bawt.service.usage.balance import BALANCE_ANCHOR, balance_adapter_for_path
+
+    adapter = usage_registry.get_adapter(provider)
+    assert isinstance(adapter, ApiKeyBalanceAdapter) and adapter.kind == "balance"
+    assert adapter.balance_mode == BALANCE_ANCHOR
+    for path in paths:
+        assert balance_adapter_for_path(path) is adapter
+
+
+@pytest.mark.asyncio
+async def test_api_key_report_follows_the_connected_credential(monkeypatch):
+    from types import SimpleNamespace
+
+    from llm_bawt.service.providers.base import STATUS_CONNECTED
+    from llm_bawt.service.usage.adapters import OpenAIApiUsageAdapter, OpenRouterUsageAdapter
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")  # never another provider's key
+    openrouter = OpenRouterUsageAdapter()
+    monkeypatch.setattr(openrouter, "_connection", lambda: None)
+    missing = await openrouter.fetch()
+    assert missing.status == "unauthorized" and not missing.available and missing.manual_balance_supported
+
+    connected = SimpleNamespace(status=STATUS_CONNECTED, connected_at="2026-10-25T12:00:00Z")
+    monkeypatch.setattr(openrouter, "_connection", lambda: connected)
+    snap = await openrouter.fetch()
+    assert snap.status == "ok" and snap.available and snap.limits == []
+    assert openrouter.credential_connected_at() == datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+
+    openai = OpenAIApiUsageAdapter()
+    monkeypatch.setattr(openai, "_connection", lambda: None)
+    assert (await openai.fetch()).status == "ok"  # the clients' legacy env key still pays
+    assert openai.credential_connected_at() is None

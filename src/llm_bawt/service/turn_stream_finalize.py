@@ -426,13 +426,9 @@ class TurnStreamFinalizer:
             else None
         )
         # TASK-1461: push the committed API balance with the turn, never poll.
-        try:
-            from .usage.balance import balance_update_for_turn
-            balance_update = (balance_update_for_turn(svc._turn_log_store.engine, current.token_usage_json)
-                              if current is not None else None)
-        except Exception as balance_err:
-            balance_update = None
-            log.warning("turn_complete balance_update failed for %s: %s", ctx.turn_log_id, balance_err)
+        from .usage.balance import balance_update_for_turn
+        balance_update = (balance_update_for_turn(svc._turn_log_store.engine, current.token_usage_json)
+                          if current is not None else None)
         self._publish_event_direct({
             "_type": "turn_complete",
             "turn_id": ctx.turn_log_id,

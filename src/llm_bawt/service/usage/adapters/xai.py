@@ -9,49 +9,23 @@ Coding Plan). The adapter still registers under the ``xai`` provider id so:
      popup show the Anthropic sunburst + 5h/weekly Max limits for Grok).
   2. The all-providers view and ProviderIcon can identify the backend.
 
-The snapshot always returns ``status=ok`` with an empty ``limits`` list. The
-UI treats that as "API usage only" and hides the subscription section.
+The snapshot returns ``status=ok`` with an empty ``limits`` list once a key is
+connected. The UI treats that as "API usage only" and hides the subscription
+section.
 """
 
 from __future__ import annotations
 
-import os
-
-from ..balance import BALANCE_ANCHOR
-from ..base import UsageAdapter
-from ..canonical import STATUS_OK, STATUS_UNAUTHORIZED
+from .api_key_balance import ApiKeyBalanceAdapter
 
 
-class XaiUsageAdapter(UsageAdapter):
+class XaiUsageAdapter(ApiKeyBalanceAdapter):
     """API-key Grok — no plan limits; a user-set balance counted down per turn."""
 
+    # No xAI balance API is wired yet (TASK-1473); until then a manual anchor.
     provider = "xai"
     display_name = "xAI · Grok"
     backend = "claude-code"  # typically reached via the claude-code bridge proxy
     access_path_keys = ("xai-chat", "xai-responses")
-    kind = "balance"
-    # No xAI balance API is wired yet (TASK-1473); until then a manual anchor.
-    balance_mode = BALANCE_ANCHOR
-
-    def _has_key(self) -> bool:
-        for env in ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY"):
-            if os.getenv(env):
-                return True
-        return False
-
-    async def fetch(self):
-        if not self._has_key():
-            return self._base(
-                available=False,
-                status=STATUS_UNAUTHORIZED,
-                error=(
-                    "No xAI API key configured "
-                    "(set XAI_API_KEY / LLM_BAWT_XAI_API_KEY)."
-                ),
-                limits=[],
-            )
-        return self._base(
-            available=True,
-            status=STATUS_OK,
-            limits=[],  # pay-per-token; no plan windows
-        )
+    connection_id = "xai"
+    key_env_vars = ("XAI_API_KEY", "LLM_BAWT_XAI_API_KEY", "GROK_API_KEY")
