@@ -200,6 +200,19 @@ def test_an_unpinned_member_writes_nothing_and_asks_for_a_recheck(rig):
     assert _controls(rig)[0]["idempotency_key"] == _run_key(turn_id, "req-late")
 
 
+def test_unpinned_members_never_starve_a_pinned_one_behind_them(rig):
+    """A full batch of unpinned members stays due forever; pinned ones go first (Codex S3 S1)."""
+    unpinned = _turn(rig, request=None)
+    pinned = _turn(rig)
+    _open(rig)
+    assert _member(rig, unpinned)["id"] < _member(rig, pinned)["id"]
+    producer = _producer(rig)
+    producer.BATCH = 1
+    assert producer.run_pass().enqueued == 1
+    assert _member(rig, pinned)["control_state"] == "steering"
+    assert _member(rig, unpinned)["control_state"] == "pending"
+
+
 def test_a_job_that_left_quiescing_produces_nothing(rig):
     turn_id = _turn(rig)
     job_id = _open(rig)

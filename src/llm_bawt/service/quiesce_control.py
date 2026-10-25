@@ -116,12 +116,18 @@ class QuiesceControlProducer:
     # --- reads -------------------------------------------------------------
 
     def due(self) -> list[tuple[int, str]]:
-        """(member id, bot id) of every live member needing a link, oldest first. No locks."""
+        """(member id, bot id) of live members needing a link: pinned first, then oldest. No locks.
+
+        An unpinned member writes nothing and stays due, so it is ordered
+        after every pinned one: a batch full of unpinned members would
+        otherwise starve the pinned members behind them (Codex S3 S1).
+        """
         with self.engine.connect() as conn:
             if not conn.execute(sa_text(_TABLES)).scalar():
                 return []
             rows = conn.execute(sa_text(
-                LIVE_MEMBER_SQL.format(where=NEEDS_LINK_SQL) + " ORDER BY m.id LIMIT :limit"
+                LIVE_MEMBER_SQL.format(where=NEEDS_LINK_SQL)
+                + " ORDER BY (m.agent_request_id IS NULL), m.id LIMIT :limit"
             ), {"limit": self.BATCH}).mappings().all()
         return [(int(row["id"]), row["bot_id"]) for row in rows]
 
