@@ -165,6 +165,34 @@ def test_asgi_middleware_binds_and_resets_capability() -> None:
     assert task_association.current_mcp_request_context() is None
 
 
+@pytest.mark.parametrize("raw, present", [
+    (None, False),
+    (b"", True),
+    (b"   ", True),
+    ("caf\u00e9".encode(), True),
+    (b"opaque-value", True),
+], ids=["absent", "empty", "blank", "non-ascii", "value"])
+def test_middleware_records_header_presence_apart_from_its_value(raw, present) -> None:
+    """TASK-1362: a blank or undecodable header binds no capability but is presented."""
+    observed: list[tuple[str | None, bool]] = []
+
+    async def app(scope, receive, send):
+        observed.append((task_association.current_task_turn_capability(),
+                         task_association.task_turn_capability_header_present()))
+
+    headers = [] if raw is None else [(b"X-LLM-Bawt-Task-Turn-Context", raw)]
+
+    async def noop(*_args):
+        return None
+
+    asyncio.run(task_association.TaskTurnCapabilityMiddleware(app)(
+        {"type": "http", "headers": headers}, noop, noop))
+
+    expected_value = "opaque-value" if raw == b"opaque-value" else None
+    assert observed == [(expected_value, present)]
+    assert task_association.task_turn_capability_header_present() is False
+
+
 def test_association_posts_only_verified_server_context(
     fernet: Fernet,
     monkeypatch: pytest.MonkeyPatch,

@@ -17,11 +17,14 @@ and lost it, so guessing an identity for it would be wrong.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from ..task_turn_context import TaskTurnContextError
+
+logger = logging.getLogger(__name__)
 
 # Placeholders that mean "nobody". They never count as an explicit sender.
 _UNATTRIBUTED = frozenset({"", "unknown"})
@@ -56,7 +59,7 @@ def _signed_caller() -> _SignedCaller:
     capability, so its original caller travels in the approval context.
     """
     from .approval_interceptor import current_approved_caller_context
-    from .task_association import current_task_turn_capability, current_task_turn_context
+    from .task_association import current_task_turn_context, task_turn_capability_header_present
 
     approved = current_approved_caller_context()
     if approved is not None and _normalize(approved.bot_id):
@@ -64,8 +67,9 @@ def _signed_caller() -> _SignedCaller:
     try:
         return _SignedCaller(_normalize(current_task_turn_context().bot_id) or None)
     except TaskTurnContextError:
-        presented = bool(str(current_task_turn_capability() or "").strip())
-        return _SignedCaller(None, capability_rejected=presented)
+        # A blank or undecodable header binds as no capability but still
+        # counts as presented.
+        return _SignedCaller(None, capability_rejected=task_turn_capability_header_present())
 
 
 def _external_default_from(tags) -> str:
@@ -140,4 +144,9 @@ async def resolve_message_sender(claimed: str | None, policy: Callable[[], Any])
         access = await policy().resolve()
     except BotAccessError:
         raise SenderIdentityError(_REQUIRED_MESSAGE) from None
-    return _external_default_from(access.tags)
+    sender = _external_default_from(access.tags)
+    # Never silent: a family bot that lost its header path would otherwise be
+    # stamped as the outside agent without a trace.
+    logger.info("bots_send_message: no capability header and no sender_bot_id; "
+                "sending as outside-agent bot %r", sender)
+    return sender

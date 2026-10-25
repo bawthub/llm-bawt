@@ -35,6 +35,12 @@ _current_mcp_request_context: ContextVar[str | None] = ContextVar(
     "mcp_request_context",
     default=None,
 )
+# TASK-1362: whether the request carried the capability header at all, even a
+# blank or undecodable one that binds as no capability.
+_capability_header_present: ContextVar[bool] = ContextVar(
+    "task_turn_context_header_present",
+    default=False,
+)
 
 
 def set_current_task_turn_capability(value: str | None) -> Token:
@@ -49,6 +55,11 @@ def reset_current_task_turn_capability(token: Token) -> None:
 def current_task_turn_capability() -> str | None:
     """Return the opaque capability bound to this HTTP request, if any."""
     return _current_capability.get()
+
+
+def task_turn_capability_header_present() -> bool:
+    """True when this request sent the capability header, valid or not."""
+    return _capability_header_present.get() or bool(current_task_turn_capability())
 
 
 def current_mcp_request_context() -> str | None:
@@ -83,6 +94,11 @@ def _header_from_asgi_scope(scope: dict[str, Any], header: bytes) -> str | None:
     return None
 
 
+def capability_header_in_asgi_scope(scope: dict[str, Any]) -> bool:
+    """True when the capability header is present, whatever its value."""
+    return any(raw_name.lower() == _HEADER_BYTES for raw_name, _ in scope.get("headers") or [])
+
+
 def capability_from_asgi_scope(scope: dict[str, Any]) -> str | None:
     """Extract the single opaque capability header from an ASGI HTTP scope."""
     return _header_from_asgi_scope(scope, _HEADER_BYTES)
@@ -104,6 +120,7 @@ class TaskTurnCapabilityMiddleware:
             await self.app(scope, receive, send)
             return
         binding = set_current_task_turn_capability(capability_from_asgi_scope(scope))
+        present_binding = _capability_header_present.set(capability_header_in_asgi_scope(scope))
         request_binding = set_current_mcp_request_context(
             request_context_from_asgi_scope(scope)
         )
@@ -111,6 +128,7 @@ class TaskTurnCapabilityMiddleware:
             await self.app(scope, receive, send)
         finally:
             reset_current_mcp_request_context(request_binding)
+            _capability_header_present.reset(present_binding)
             reset_current_task_turn_capability(binding)
 
 

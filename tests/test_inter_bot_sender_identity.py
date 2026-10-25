@@ -150,6 +150,27 @@ def test_rejected_capability_never_falls_back_to_the_outside_agent(monkeypatch) 
     assert policy.reads == 0
 
 
+def test_a_blank_header_counts_as_presented(monkeypatch) -> None:
+    """A blank header binds no capability; it still never reaches the default."""
+    _signed(monkeypatch, None)
+    token = task_association._capability_header_present.set(True)
+    try:
+        policy = _Policy(_OUTSIDE)
+        with pytest.raises(SenderIdentityError, match="sender_bot_id is required"):
+            _message_sender(None, policy)
+        assert policy.reads == 0
+    finally:
+        task_association._capability_header_present.reset(token)
+
+
+def test_the_outside_agent_default_is_logged(monkeypatch, caplog) -> None:
+    _signed(monkeypatch, None)
+    with caplog.at_level("INFO", logger="llm_bawt.mcp_server.inter_bot_sender"):
+        assert _message_sender(None, _Policy(_OUTSIDE)) == "outside"
+    assert any("bots_send_message" in r.getMessage() and "'outside'" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_rejected_capability_still_accepts_an_explicit_sender(monkeypatch) -> None:
     _rejected_capability(monkeypatch)
     policy = _Policy(_OUTSIDE)
