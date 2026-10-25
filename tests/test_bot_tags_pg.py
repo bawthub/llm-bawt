@@ -18,7 +18,7 @@ from sqlmodel import SQLModel
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.policy import TrustedCaller
 from llm_bawt.bot_tags import BehaviorTag, BotTags, sql_allowed
-from llm_bawt.bot_tags.vocabulary import LEGACY_FLAG_ASSIGNER, MIGRATION_ASSIGNER
+from llm_bawt.bot_tags.vocabulary import BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, MIGRATION_ASSIGNER
 from llm_bawt.orphan_partitions import protected_storage_ids, read_protected_slugs
 from llm_bawt.runtime_settings import BotProfile, BotProfileStore
 from tests.bot_tag_fixtures import PRIVATE_MODES, make_private, tag
@@ -148,18 +148,27 @@ def test_catalog_constraints_refuse_a_referenced_delete_and_a_system_role(rig):
 
 def test_seeds_are_idempotent_and_restore_behaviour_rows_from_code(rig):
     rig.store()
+    # TASK-1249: a fresh catalog holds exactly the behaviour tags; no role is seeded.
+    assert rig.scalar("SELECT array_agg(slug::text ORDER BY slug) FROM bot_tag_catalog") == sorted(
+        str(t.slug) for t in BEHAVIOR_TAGS)
     with rig.engine.begin() as conn:
         conn.exec_driver_sql("UPDATE bot_tag_catalog SET name='Wrong', description='edited' "
                              "WHERE slug='private'")
-        conn.exec_driver_sql("UPDATE bot_tag_catalog SET name='Operator coder' WHERE slug='coder'")
+        conn.exec_driver_sql("INSERT INTO bot_tag_catalog (slug, name, description, kind) "
+                             "VALUES ('fixture_role', 'Operator role', 'operator text', 'role')")
+        conn.exec_driver_sql("INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_by) "
+                             "VALUES ('fixture_bot', 'fixture_role', 'operator')")
     rig.store()
 
-    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog") == 6
+    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog") == len(BEHAVIOR_TAGS) + 1
     assert rig.scalar("SELECT name FROM bot_tag_catalog WHERE slug='private'") == "Private"
     # TASK-1362: the opt-in behaviour tag is seeded from code like the others.
     assert rig.scalar("SELECT kind FROM bot_tag_catalog WHERE slug='external' AND system") == "behavior"
-    # Roles are operator data after their first seed.
-    assert rig.scalar("SELECT name FROM bot_tag_catalog WHERE slug='coder'") == "Operator coder"
+    # Roles are operator data: a re-bootstrap leaves the row and its assignment alone.
+    assert rig.scalar("SELECT name || '|' || description FROM bot_tag_catalog "
+                      "WHERE slug='fixture_role'") == "Operator role|operator text"
+    assert rig.scalar("SELECT assigned_by FROM bot_profile_tags "
+                      "WHERE bot_slug='fixture_bot' AND tag_slug='fixture_role'") == "operator"
 
 
 # --- §10.9 tenant schemas ---------------------------------------------------
@@ -204,7 +213,7 @@ def test_a_completely_empty_schema_gets_every_table_and_copies_nothing(rig):
                         "WHERE n.nspname='fresh' AND c.relkind='r'")
     assert {"bot_profiles", "bot_tag_catalog", "bot_profile_tags"} <= set(tables)
     assert rig.scalar("SELECT count(*) FROM fresh.bot_profile_tags") == 0
-    assert rig.scalar("SELECT count(*) FROM fresh.bot_tag_catalog") == 6
+    assert rig.scalar("SELECT count(*) FROM fresh.bot_tag_catalog") == len(BEHAVIOR_TAGS)
 
 
 # --- §10.7 the intermediate deploy (S1–S4, legacy writers only) -------------

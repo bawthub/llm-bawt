@@ -14,7 +14,7 @@ from sqlalchemy import text
 from .errors import TagSetChanged, TagValidationError
 from .vocabulary import (
     API_ASSIGNER, BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, LEGACY_PRIVATE_TAGS, MIGRATION_ASSIGNER,
-    SEEDED_ROLES, TAG_SLUG, BehaviorTag,
+    TAG_SLUG, BehaviorTag,
 )
 
 CATALOG_TABLE = "bot_tag_catalog"
@@ -89,7 +89,8 @@ def ensure_schema(conn) -> None:
 
 
 def seed(conn) -> None:
-    """Upsert behaviour rows from code; insert seeded roles once. No assignments."""
+    """Upsert behaviour rows from code. Roles are operator data: none are
+    seeded and existing role rows are never touched. No assignments."""
     for tag in BEHAVIOR_TAGS:
         conn.execute(text("""
             INSERT INTO bot_tag_catalog (slug, name, description, kind, system)
@@ -105,12 +106,6 @@ def seed(conn) -> None:
                    (EXCLUDED.name, EXCLUDED.description, 'behavior', TRUE, NULL::varchar,
                     '[]'::jsonb)
         """), {"slug": str(tag.slug), "name": tag.name, "description": tag.description})
-    for role in SEEDED_ROLES:
-        conn.execute(text("""
-            INSERT INTO bot_tag_catalog (slug, name, description, kind)
-            VALUES (:slug, :name, :description, 'role')
-            ON CONFLICT (slug) DO NOTHING
-        """), {"slug": role.slug, "name": role.name, "description": role.description})
 
 
 def migrate_legacy_flag(conn) -> int:

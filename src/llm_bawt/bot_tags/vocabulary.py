@@ -2,7 +2,8 @@
 
 Code checks these tag names, never bot slugs. Behaviour rows are seeded from
 here on every bootstrap, so code is the source of truth for their names and
-descriptions; role rows are operator data and only the first two are seeded.
+descriptions. Role rows are operator data: code seeds none and never names
+one (TASK-1249, guarded by tests/test_no_custom_tag_literals.py).
 """
 from __future__ import annotations
 
@@ -59,11 +60,6 @@ BEHAVIOR_TAGS: tuple[TagDefinition, ...] = (
         "today only the bots_send_message default sender honours it.",
         "behavior",
     ),
-)
-
-SEEDED_ROLES: tuple[TagDefinition, ...] = (
-    TagDefinition("coder", "Coder", "Takes implementation work.", "role"),
-    TagDefinition("reviewer", "Reviewer", "Reviews other bots' work.", "role"),
 )
 
 # What ``include_in_global_search = false`` has meant since TASK-1222.
