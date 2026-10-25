@@ -228,13 +228,16 @@ async def tasks_board(
     priority: str | None = None,
     limit: int = 20,
 ) -> dict:
-    """The task board as data: the lanes BawtHub's /tasks/board draws.
+    """The task board as data: the lanes BawtHub's /tasks/board lays out.
 
     TASK-1460: a thin forwarder to BawtHub's GET /api/tasks/board, which lays
     the board out with the page's own lane rules, so the same filters give
-    the same lanes, cards and counts as the page. The args are the board
-    URL's params; unknown view/updated values fall back to the board's
-    defaults, and the reply echoes the ones applied.
+    the same lanes, cards and counts as the page with every column shown.
+    Hiding a column is a browser preference the endpoint never sees, so a
+    column the page hides by default (the status view's Cancelled) is
+    included. The args are the board URL's params; unknown view/updated
+    values fall back to the board's defaults, and the reply echoes the ones
+    applied.
 
     Args:
         view: "kanban" (default) or "status".
@@ -247,8 +250,8 @@ async def tasks_board(
         limit: Rows per lane (default 20, max 50); counts stay whole.
 
     Returns:
-        Dict with view, updated, q, filters, now and lanes: the shown columns
-        in order, each followed by the drawers it shows (`in` names the
+        Dict with view, updated, q, filters, now and lanes: every column in
+        order, each followed by the drawers it shows (`in` names the
         column). Each lane has id, label, windowed, shown, older (left out by
         the time filter) and compact rows (shortId, title, status, priority,
         agentBotId, focusRank, archivedAt, updatedAt, blockedReason).
