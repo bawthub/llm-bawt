@@ -265,9 +265,11 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
         assert request(runtime.http, "/health/live") == (200, {"status": "ok"})
         assert request(runtime.http, "/health/ready")[0] == 503
         assert request(runtime.http, "/v1/health/containers")[0] == 503
+        # timing-ok: real HTTP requests answer from cached state; waiting on the stalled collectors takes 10s
         assert time.monotonic() - before < 1
         before = time.monotonic()
         runtime.close()
+        # timing-ok: real thread joins: close's 2s worker deadline vs collectors stalled for 10s
         assert time.monotonic() - before < 3.5
         assert not runtime.http.thread.is_alive()
         assert len(runtime.workers) == 3
@@ -408,6 +410,7 @@ def test_http_shutdown_is_bounded_even_if_request_handler_stalls():
         assert entered.wait(1)
         before = time.monotonic()
         server.close()
+        # timing-ok: real server thread; close joins it for at most 2s, the stalled handler holds for 10s
         assert time.monotonic() - before < 2.5
     finally:
         release.set()

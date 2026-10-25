@@ -30,6 +30,7 @@ from agent_bridge.send_admission import RunOutcome, admit_send
 from agent_bridge.session_queue import RequestPhase, SessionQueue
 from agent_bridge.subscriber import RedisSubscriber, _run_terminal_event
 from claude_code_bridge.bridge import ClaudeCodeBridge
+from claude_code_bridge import run_teardown
 from claude_code_bridge.run_teardown import RunTeardown
 from claude_code_bridge.run_terminal import RunTerminalLatch
 from codex_bridge.process_ledger import ProcessLedger, bind_ledger, register_process
@@ -37,6 +38,7 @@ from local_model_bridge.bridge import LocalModelBridge
 from openclaw_bridge.bridge import SessionBridge
 from openclaw_bridge.ingest import EventIngestPipeline
 from openclaw_bridge.ws_client import is_run_terminal
+from tests import virtual_clock
 from tests.test_claude_code_send_boundaries import SESSION, _SDKStream, _SendHarness
 
 REAPED = TeardownReport("ok", "none", True)
@@ -472,8 +474,8 @@ def test_claude_teardown_measures_its_own_wall_time():
     async def run():
         return await RunTeardown(_Client()).run_owned()
 
-    outcome = asyncio.run(run())
-    assert outcome.exited is None and 50 <= outcome.elapsed_ms < 5000
+    outcome = virtual_clock.run(run(), follow=[run_teardown])
+    assert outcome.exited is None and outcome.elapsed_ms == 50
 
 
 def test_claude_latch_publishes_once():
@@ -505,6 +507,7 @@ def test_claude_done_follows_the_teardown(monkeypatch):
         harness._publisher.publish_run_done.assert_called_once()
         teardown = harness._publisher.publish_run_done.call_args.kwargs["teardown"]
         assert (teardown.disconnect, teardown.signal, teardown.exited) == ("ok", "none", False)
+        # timing-ok: a unit check (milliseconds, not s or us); 100x headroom over the 50ms hold
         assert 50 <= teardown.elapsed_ms < 5000
         assert harness._run_terminals == {}
     asyncio.run(asyncio.wait_for(run(), timeout=5))

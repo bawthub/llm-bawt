@@ -330,6 +330,7 @@ def test_same_sender_batches_on_one_loop_serialize_without_blocking_it(batches):
     batches.submit("k2")
     started = time.monotonic()
     (first, accepted), (second, refused) = batches.on_one_loop("k3", "k4")
+    # timing-ok: hang guard: a deadlocked loop never returns; a pass takes milliseconds
     assert time.monotonic() - started < 5
     assert first == 202 and len(accepted["deliveries"]) == 3
     assert second == 429 and refused["error"] == "fanout_rate_limited"
@@ -353,6 +354,7 @@ def test_a_batch_held_by_another_process_is_refused_busy_not_waited_on(batches):
         started = time.monotonic()
         with pytest.raises(batches.send.DeliveryRefused) as refused:
             batches.submit("k1")
+        # timing-ok: hang guard on a real PG lock: waiting blocks while `other` holds it; a refusal is immediate
         assert time.monotonic() - started < 5
     assert refused.value.status_code == 429
     assert refused.value.detail["error"] == "fanout_busy"

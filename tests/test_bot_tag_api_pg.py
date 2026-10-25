@@ -10,7 +10,6 @@ effects, which are recorded. Fixture bots only, one private DB per test.
 from __future__ import annotations
 
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -27,7 +26,12 @@ from llm_bawt.service.routes import bot_tags as bot_tag_routes
 from llm_bawt.service.routes import models as model_routes
 from llm_bawt.service.routes import settings
 from tests.bot_tag_fixtures import tag
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_bot_tags_pg import LEGACY, legacy_profiles, rig, upsert  # noqa: F401
+
+
+def _backend_pid(conn) -> int:
+    return conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
 
 pytestmark = pytest.mark.integration
 
@@ -165,12 +169,7 @@ def test_concurrent_full_set_replaces_serialize_instead_of_committing_a_union(ap
         catalog.lock_bot(holder, "fixture-bot")
         catalog.replace_assignments(holder, "fixture-bot", ["no_global_search"], "fixture-holder")
         racer = pool.submit(upsert, api.store, "fixture-bot", tags=["private"])
-        deadline = time.monotonic() + 10
-        while not api.rig.scalar(
-                "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted"):
-            assert time.monotonic() < deadline, "the racing replace never waited on the bot lock"
-            assert not racer.done(), "the racing replace ran without the bot lock"
-            time.sleep(0.05)
+        wait_blocked_by(api.rig.engine, _backend_pid(holder), racer, timeout=10)
         holder.commit()
         racer.result(timeout=10)
 
@@ -233,12 +232,7 @@ def test_two_adds_from_one_read_keep_both_tags_instead_of_dropping_private(api):
         catalog.replace_assignments(holder, "fixture-bot", ["inactive", "private"], "fixture-holder")
         racer = pool.submit(api.patch, "fixture-bot",
                             tags=["inactive", "no_global_search"], expected_tags=["inactive"])
-        deadline = time.monotonic() + 10
-        while not api.rig.scalar(
-                "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted"):
-            assert time.monotonic() < deadline, "the racing PATCH never waited on the bot lock"
-            assert not racer.done(), "the racing PATCH ran without the bot lock"
-            time.sleep(0.05)
+        wait_blocked_by(api.rig.engine, _backend_pid(holder), racer, timeout=10)
         holder.commit()
         stale = racer.result(timeout=10)
 

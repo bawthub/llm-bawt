@@ -191,19 +191,24 @@ def test_worker_interrupted_during_action_is_lost_not_replayed(tmp_path, monkeyp
 
 
 def test_real_execution_deadline_not_stop_grace(tmp_path, monkeypatch):
-    import time
+    from threading import Event
     executor, _, snapshot = setup(tmp_path, monkeypatch)
     snapshot["execution"]["timeout_seconds"] = 0.02
     executor.dispatch(job_id=JOB, snapshot=snapshot)
     request = tmp_path / JOB / "request.json"
     digest = hashlib.sha256(request.read_bytes()).hexdigest()
+    release, finished = Event(), Event()
     class SlowAPI(FakeAPI):
         def execute(self, spec, args):
             self.side_effect_started = True
-            time.sleep(2)
-    start = time.monotonic()
-    assert run(request, digest, api_factory=SlowAPI, sleep=lambda _: None) == 1
-    assert time.monotonic() - start < 1
+            release.wait(30)  # outlives the 0.02s deadline until the test lets go
+            finished.set()
+    try:
+        assert run(request, digest, api_factory=SlowAPI, sleep=lambda _: None) == 1
+        # The deadline ended the run while the side effect was still in flight.
+        assert not finished.is_set()
+    finally:
+        release.set()
     receipt = json.loads(request.with_name("receipt.json").read_text())
     assert receipt["state"] == "timed_out"
     assert receipt["side_effect_unknown"] is True

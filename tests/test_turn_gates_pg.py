@@ -843,6 +843,7 @@ def test_drop_columns_behind_an_open_reader_is_skipped_and_retried_next_time(gat
                     conn.execute(sa_text("SET LOCAL lock_timeout = '10s'"))
                     started = time.monotonic()
                     assert drop_columns(conn, table, ["retired"], lock_timeout="200ms") == []
+                    # timing-ok: real PG lock_timeout: its own 200ms vs the caller's 10s
                     assert time.monotonic() - started < 3  # its own timeout, not the caller's 10s
                     assert conn.execute(sa_text("SELECT current_setting('lock_timeout')")).scalar_one() == "10s"
                     conn.execute(sa_text(f"SELECT retired FROM {table}"))  # the txn is still usable

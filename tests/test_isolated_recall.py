@@ -538,14 +538,12 @@ def test_elision_considers_overlapping_first_fragment_starts():
     assert ground_quote("a a a ... b c d", "a a a a b c d") == "a a a b c d"
 
 
-def test_successful_chain_on_adversarial_repetition_is_linear():
-    import time as _time
+def test_successful_chain_on_adversarial_repetition_is_linear(monkeypatch):
     from llm_bawt.recall.grounding import ground_quote
     text = _repetitive_excerpt() + " closing words end"
-    started = _time.perf_counter()
-    for _ in range(5):
-        assert ground_quote("the bot said ... the bot said ... closing words end", text)
-    assert _time.perf_counter() - started < 0.05
+    scanned = _count_scanned(monkeypatch)
+    assert ground_quote("the bot said ... the bot said ... closing words end", text)
+    _assert_linear(scanned, text, fragments=3)
 
 
 @pytest.mark.asyncio
@@ -560,21 +558,54 @@ async def test_literal_ellipsis_in_source_is_not_an_elision_point():
 
 # Snark r3 P1/P2: elision grounding must be linear (it runs on the MCP event
 # loop, which asyncio.timeout cannot interrupt) and return the tightest span.
+def _count_scanned(monkeypatch) -> list[int]:
+    """Count the characters grounding's regex searches cover, from each search's
+    start to its match end (or the end of the text). Linear work is a few passes
+    per fragment; rescanning from every candidate start is one pass per start.
+    This measures the work itself, so a slow runner can't fail it."""
+    import re
+    from llm_bawt.recall import grounding
+
+    scanned = [0]
+
+    class Counting:
+        def __init__(self, pattern):
+            self.pattern = pattern
+
+        def search(self, text, pos=0):
+            found = self.pattern.search(text, pos)
+            scanned[0] += (found.end() if found else len(text)) - pos
+            return found
+
+    class CountingRe:
+        def __getattr__(self, name):
+            return getattr(re, name)
+
+        def compile(self, pattern, flags=0):
+            return Counting(re.compile(pattern, flags))
+
+    monkeypatch.setattr(grounding, "re", CountingRe())
+    return scanned
+
+
+def _assert_linear(scanned: list[int], text: str, fragments: int) -> None:
+    passes = scanned[0] / len(text)
+    assert passes <= 2 * fragments, f"{passes:.1f} passes over the text for {fragments} fragments"
+
+
 def _repetitive_excerpt():
     from llm_bawt.recall.budgets import clip
     return clip("the bot said the bot said the bot " * 400, 511)
 
 
 @pytest.mark.parametrize("fragments", [3, 4])
-def test_elision_grounding_is_linear_on_repetitive_text(fragments):
-    import time as _time
+def test_elision_grounding_is_linear_on_repetitive_text(fragments, monkeypatch):
     from llm_bawt.recall.grounding import ground_quote
     text = _repetitive_excerpt()
     quote = " ... ".join(["the bot said"] * (fragments - 1) + ["absent words here"])
-    started = _time.perf_counter()
-    for _ in range(5):
-        assert ground_quote(quote, text) is None
-    assert _time.perf_counter() - started < 0.5
+    scanned = _count_scanned(monkeypatch)
+    assert ground_quote(quote, text) is None
+    _assert_linear(scanned, text, fragments)
 
 
 @pytest.mark.parametrize("fragments", [5, 6])

@@ -499,6 +499,7 @@ def test_stop_group_kills_a_descendant_that_outlives_its_leader(tmp_path):
         assert proc.poll() is not None
         assert not live(child), f"descendant {child} survived stop_group"
         assert not snap.group_alive(proc.pid)
+        # timing-ok: real process group: stop_group's own waits plus 1s headroom; a stuck group never returns
         assert time.monotonic() - started < 0.2 + 0.2 + 5 + 1
     finally:
         try:
@@ -535,3 +536,46 @@ def test_a_patch_that_changes_the_runner_is_flagged(repo, root, tmp_path):
     assert code == 0 and receipt["runner_touched"] == ["Makefile"]
     unflagged = make_patch(repo, tmp_path, "plain.patch", x2)
     assert run_cli(repo, root, "--patch", str(unflagged))[1]["runner_touched"] == []
+
+
+# -- SHIP gate receipt (TASK-1457) -------------------------------------------
+
+
+def test_the_gate_suite_stresses_from_the_pinned_base():
+    assert snap.suite_command("gate", [], "abc123") == [
+        "make", "--no-print-directory", "test-gate", "STRESS_BASE=abc123"]
+    assert snap.suite_command("sweep", []) == ["make", "--no-print-directory", "test-sweep"]
+
+
+def gate_receipt(repo: Path, root: Path, rev: str, capsys) -> tuple[int, str]:
+    capsys.readouterr()
+    code = snap.main(["--repo", str(repo), "--root", str(root), "--receipt-for", rev])
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
+
+
+def test_a_ship_reads_the_newest_unpatched_gate_receipt_for_the_exact_tip(repo, root, tmp_path, capsys):
+    head = git(repo, "rev-parse", "HEAD").strip()
+    code, output = gate_receipt(repo, root, "HEAD", capsys)
+    assert code == snap.EXIT_REFUSED and f"none for {head}" in output
+
+    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", "HEAD", suite=check("pass"))
+    assert code == snap.EXIT_PASSED
+    assert (receipt["suite"], receipt["mode"], receipt["base"], receipt["stress_base"]) == (
+        "gate", "base", head, head)
+    code, output = gate_receipt(repo, root, "HEAD", capsys)
+    assert code == snap.EXIT_PASSED and "PASSED" in output and f"stress range {head[:12]}" in output
+
+    # A later failing gate at the same tip is the answer, not the earlier pass.
+    code, _ = run_cli(repo, root, "--suite", "gate", "--stress-base", "HEAD", suite=check("raise SystemExit(1)"))
+    assert code == snap.EXIT_FAILED
+    code, output = gate_receipt(repo, root, "HEAD", capsys)
+    assert code == snap.EXIT_FAILED and "FAILED" in output
+
+    # A PATCHES trial at that tip tests other bytes, so it never counts.
+    patch = make_patch(repo, tmp_path, "x2.patch", x2)
+    code, receipt = run_cli(repo, root, "--suite", "gate", "--stress-base", "HEAD", "--patch", str(patch),
+                            suite=check("pass"))
+    assert code == snap.EXIT_PASSED and receipt["mode"] != "base"
+    code, _ = gate_receipt(repo, root, "HEAD", capsys)
+    assert code == snap.EXIT_FAILED

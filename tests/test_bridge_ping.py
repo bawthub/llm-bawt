@@ -18,6 +18,7 @@ import pytest
 
 from agent_bridge.abort_contract import process_boot_id
 from agent_bridge.ping import (
+    _CLEANUP_RESERVE_S,
     PING_METHOD,
     PingProbe,
     PingReplyError,
@@ -28,8 +29,11 @@ from agent_bridge.ping import (
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from tests.test_claude_code_send_boundaries import _SendHarness
 from tests.test_other_bridge_abort_targeting import make_bridge
+from tests import virtual_clock
 
 BUDGET = 0.8
+# An unanswered probe stops reading here, keeping the rest for cleanup.
+READ_UNTIL = BUDGET - _CLEANUP_RESERVE_S
 
 
 class FakeRedis:
@@ -160,6 +164,7 @@ def _good(request_id: str, params: dict, /, **overrides) -> dict:
 
 
 def _probe(fake: FakeRedis, backend: str = "claude-code", budget: float = BUDGET):
+    """Probe on a virtual clock: ``elapsed`` is the probe's own time, not the runner's."""
     async def run():
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -171,7 +176,7 @@ def _probe(fake: FakeRedis, backend: str = "claude-code", budget: float = BUDGET
             task.cancel()
         return result, elapsed
 
-    return asyncio.run(run())
+    return virtual_clock.run(run())
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +192,7 @@ def test_ready_when_the_live_claude_code_consumer_answers():
     assert result.backend == "claude-code"
     assert result.instance == process_boot_id()
     assert result.detail == "claude-code bridge answered ping v1"
-    assert elapsed < BUDGET
+    assert elapsed < BUDGET  # timing-ok: virtual clock (tests/virtual_clock.py), exact and runner-independent
     (command_id, command), = fake.streams[COMMANDS_STREAM]
     assert command["method"] == PING_METHOD and command["backend"] == "claude-code"
     assert command["request_id"].startswith("ping_")
@@ -203,7 +208,7 @@ def test_not_ready_when_no_bridge_is_reading():
     assert result.ready is False
     assert result.instance is None
     assert result.detail == f"no reply from the claude-code bridge within {BUDGET:.1f}s"
-    assert elapsed <= BUDGET + 0.1
+    assert elapsed == pytest.approx(READ_UNTIL)
     assert len(fake.xdeleted) == 1 and fake.xdeleted[0][0] == COMMANDS_STREAM
     assert fake.streams[COMMANDS_STREAM] == []  # unanswered probe retracted
     assert fake.closed
@@ -217,7 +222,7 @@ def test_not_ready_with_a_stale_consumer_record_and_no_live_subscriber():
 
     assert result.ready is False
     assert result.detail.startswith("no reply from the claude-code bridge within")
-    assert elapsed <= BUDGET + 0.1
+    assert elapsed == pytest.approx(READ_UNTIL)
     assert fake.streams[COMMANDS_STREAM] == []
 
 
@@ -301,7 +306,7 @@ def test_bridge_predating_ping_fails_fast_with_its_refusal():
 
     assert result.ready is False
     assert result.detail == "claude-code bridge rejected ping: unknown method: bridge.ping"
-    assert elapsed < budget / 2
+    assert elapsed < budget / 2  # timing-ok: virtual clock (tests/virtual_clock.py), exact and runner-independent
 
 
 @pytest.mark.parametrize("build, reason", [
@@ -349,7 +354,7 @@ def test_slow_publish_counts_against_the_budget():
 
     assert result.ready is False
     assert result.detail == "Redis unavailable: timed out during publish"
-    assert elapsed <= BUDGET + 0.1
+    assert elapsed == pytest.approx(BUDGET)
 
 
 def test_publish_and_reply_together_cannot_exceed_the_budget():
@@ -357,7 +362,7 @@ def test_publish_and_reply_together_cannot_exceed_the_budget():
     result, elapsed = _probe(fake)
 
     assert result.ready is False
-    assert elapsed <= BUDGET + 0.1
+    assert elapsed == pytest.approx(READ_UNTIL)
 
 
 def test_slow_cleanup_does_not_lose_a_ready_answer():
@@ -365,7 +370,7 @@ def test_slow_cleanup_does_not_lose_a_ready_answer():
     result, elapsed = _probe(fake)
 
     assert result.ready is True
-    assert elapsed <= BUDGET + 0.1
+    assert elapsed <= BUDGET  # timing-ok: virtual clock (tests/virtual_clock.py), exact and runner-independent
 
 
 def test_redis_connection_error_is_not_ready():

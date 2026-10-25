@@ -307,6 +307,7 @@ def test_a_write_blocked_past_the_pass_deadline_ends_and_never_lands_later(sweep
     with _TurnLock(sweep.engine, turn_id):
         started = time.monotonic()
         assert sweep.run_once() == {WRITE_DEADLINE: 1}
+        # timing-ok: real PG lock: the 1.5s budget vs the 30s lock hold
         assert time.monotonic() - started < 3.0  # budget 1.5s; the lock is held for 30s
     time.sleep(0.5)  # the lock is gone: nothing still in flight may now commit
     assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
@@ -393,6 +394,7 @@ def test_two_lock_waits_share_one_absolute_write_deadline(sweep, monkeypatch):
     drained = sweep.drain(gate_id)[turn_id]
     assert counts == {WRITE_DEADLINE: 1}, (counts, elapsed, drained)
     # The UPDATE's lock wait gets only the time left (~0.4s), not a fresh 1s.
+    # timing-ok: real PG lock_timeout: the remaining ~0.4s vs a fresh 1s (>=1.4s total)
     assert elapsed < 1.2, elapsed
     assert drained == (False, "no_execution_exit")
 

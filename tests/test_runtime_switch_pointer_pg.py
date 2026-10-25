@@ -1,7 +1,6 @@
 """Runtime changes preserve bot-pointer ownership and atomic rotation."""
 from __future__ import annotations
 
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -12,6 +11,7 @@ from sqlalchemy import text
 from llm_bawt.memory.session_reset_lineage import SessionResetLineage
 from llm_bawt.service.runtime_switch_rotation import rotate_active_threads
 from llm_bawt.service.turn_admission import lock_target
+from tests.pg_lock_wait import wait_blocked_by
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -69,18 +69,8 @@ def test_runtime_switch_takes_target_lock_before_selecting_sessions(rig):
             lock_target(conn, rig.bot)
             pending = pool.submit(rotate)
             assert started.wait(timeout=2)
-            deadline = time.monotonic() + 3
-            observed_wait = False
-            while time.monotonic() < deadline:
-                with rig.engine.connect() as check:
-                    observed_wait = check.execute(text("""
-                        SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                            WHERE datname=current_database() AND wait_event='advisory')
-                    """)).scalar_one()
-                if observed_wait:
-                    break
-                time.sleep(0.02)
-            assert observed_wait and not pending.done()
+            holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            wait_blocked_by(rig.engine, holder_pid, pending)
             assert conn.execute(text("SELECT last_session_id FROM bot_profiles WHERE slug=:bot"),
                                 {"bot": rig.bot}).scalar_one() == rig.session_id
         successors = dict(pending.result(timeout=5))

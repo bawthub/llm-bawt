@@ -354,6 +354,7 @@ def test_real_native_worker_finalizes_within_the_grace_and_stop_confirms_it(stor
         owner.cancel_event.set()
         thread.join(5)
     assert result == "aborted:worker_finalized"
+    # timing-ok: a real worker thread; the result names worker_finalized, and 1s vs the 5s grace shows it was not waited out
     assert elapsed < turn_abort.WORKER_FINALIZE_GRACE_SECONDS / 5
     stop = json.loads(store.get_turn("A").request_json)["user_stop"]
     assert (stop["bridge_state"], stop["confirmed"], stop["settled"]) == ("worker_finalized", True, False)

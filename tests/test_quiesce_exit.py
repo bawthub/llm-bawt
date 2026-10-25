@@ -254,6 +254,7 @@ def test_a_hung_probe_ends_at_the_member_deadline_and_is_ambiguous(monkeypatch):
     sweep.budget_seconds, sweep.write_reserve_seconds = 1.0, 0.0
     started = time.monotonic()
     assert asyncio.run(sweep.run_once()) == {"ambiguous": 1}
+    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
     assert time.monotonic() - started < 0.5
 
 
@@ -315,6 +316,7 @@ def test_status_publication_is_inside_the_probe_timeout():
     started = time.monotonic()
     reply, result = asyncio.run(_bounded(BridgeRunProbe(lambda: sub, timeout_seconds=0.05).status(
         backend="claude-code", session_key="s", request_id="req-1")))
+    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
     assert reply is None and result.state == "timeout" and time.monotonic() - started < 0.5
 
 
@@ -539,6 +541,7 @@ def test_an_abort_holds_no_probe_slot_and_no_budget(monkeypatch):
         return counts, elapsed
 
     counts, elapsed = asyncio.run(one_pass())
+    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
     assert counts == {"absent_unaccepted": 3} and elapsed < 0.5
     assert sorted(c[1] for c in rpc.calls if c[0] == "chat.abort") == ["req-1", "req-2", "req-3"]
 
@@ -591,6 +594,7 @@ def test_the_probe_abort_bound_covers_publication(monkeypatch):
         return reply, time.monotonic() - started
 
     reply, elapsed = asyncio.run(_bounded(run()))
+    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
     assert reply is None and elapsed < 0.5
 
 

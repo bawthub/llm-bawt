@@ -9,8 +9,9 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import tempfile
@@ -31,21 +32,28 @@ def pytest_args(marker: str, *extra: str) -> list[str]:
             "--strict-markers", *extra]
 
 
-def worker_count() -> int:
-    """Parallel pytest-xdist workers for heavy suites; LLM_BAWT_TEST_WORKERS=1 runs serially."""
-    configured = os.environ.get("LLM_BAWT_TEST_WORKERS")
+WORKERS_ENV = "LLM_BAWT_TEST_WORKERS"
+
+
+def worker_count(configured: str | None = None) -> int:
+    """Parallel pytest-xdist workers for heavy suites; LLM_BAWT_TEST_WORKERS=1 runs serially.
+
+    ``configured`` overrides the environment (the stress step passes CI's value).
+    """
+    if configured is None:
+        configured = os.environ.get(WORKERS_ENV)
     if configured:
         if not configured.isdigit() or int(configured) < 1:
-            raise RuntimeError(f"LLM_BAWT_TEST_WORKERS must be a positive integer, got {configured!r}")
+            raise RuntimeError(f"{WORKERS_ENV} must be a positive integer, got {configured!r}")
         return int(configured)
     # Leave headroom: the unit gate's 1s budget measures wall time per case.
     return max(1, min(8, (os.cpu_count() or 2) // 2))
 
 
-def parallel(dist: str) -> tuple[str, ...]:
+def parallel(dist: str, workers: int | None = None) -> tuple[str, ...]:
     """xdist arguments. ``loadscope`` keeps a module on one worker so each private-PG
     module database is created once; ``load`` balances independent unit cases."""
-    workers = worker_count()
+    workers = worker_count() if workers is None else workers
     return () if workers == 1 else ("-n", str(workers), "--dist", dist)
 
 
@@ -111,7 +119,7 @@ UNIT_TIME_BUDGET_ENV = "LLM_BAWT_UNIT_TIME_BUDGET_SECONDS"
 UNIT_TIME_BUDGET_DEFAULT_S = 1.0
 
 
-def unit_time_budget_seconds() -> float:
+def unit_time_budget_seconds(configured: str | None = None) -> float:
     """Wall-clock bound per unit case (setup + call + teardown).
 
     The 1s default is the standard every commit meets on echo through
@@ -120,8 +128,11 @@ def unit_time_budget_seconds() -> float:
     virtual disk, where a case that takes 0.8s here by fixed waits exceeds 1s
     with no regression. The workflow widens the bound there so CI still fails
     on hangs and new sleeps without failing on runner noise (TASK-1312).
+    ``configured`` overrides the environment (the stress step passes CI's value).
     """
-    configured = os.environ.get(UNIT_TIME_BUDGET_ENV, "").strip()
+    if configured is None:
+        configured = os.environ.get(UNIT_TIME_BUDGET_ENV, "")
+    configured = configured.strip()
     if not configured:
         return UNIT_TIME_BUDGET_DEFAULT_S
     try:
@@ -136,6 +147,168 @@ def unit_time_budget_seconds() -> float:
 def unit_gate() -> tuple[str, ...]:
     """Arguments that make the unit suite a gate: per-case budget, zero skips, parallel."""
     return (f"--unit-time-budget={unit_time_budget_seconds()}", "--require-no-skips", *parallel("load"))
+
+
+# ── Stress: changed tests under CI's conditions (TASK-1457) ─────────────────
+#
+# Echo is fast enough that a timing-dependent test passes here and fails on
+# GitHub's runner. The stress step reruns tests under CI's conditions: CI's
+# worker count and unit budget, read from the workflow itself so the two can't
+# drift, with this process, its pytest children and the private PostgreSQL
+# container all pinned to STRESS_CPUS CPUs. CI derives its 2 workers from 4
+# vCPUs; echo's cores are much faster, so 2 pinned CPUs is the closer match.
+
+WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
+CI_GATE_STEP = "make test-all"
+CI_ENV_KEYS = (WORKERS_ENV, UNIT_TIME_BUDGET_ENV)
+PG_CPUSET_ENV = "LLM_BAWT_TEST_PG_CPUSET"
+STRESS_CPUS = 2
+STRESS_REPEAT_DEFAULT = 10
+STRESS_REPEAT_MAX = 100
+STRESS_BASE_DEFAULT = "origin/master"
+
+
+def ci_env(workflow: Path = WORKFLOW) -> dict[str, str]:
+    """The environment CI runs ``make test-all`` with, read from the workflow."""
+    import yaml
+
+    data = yaml.safe_load(workflow.read_text()) or {}
+    steps = [step for job in (data.get("jobs") or {}).values() for step in job.get("steps") or []
+             if CI_GATE_STEP in str(step.get("run", ""))]
+    if len(steps) != 1:
+        raise RuntimeError(f"{workflow.name} must run `{CI_GATE_STEP}` in exactly one step, found {len(steps)}")
+    env = {str(key): str(value) for key, value in (steps[0].get("env") or {}).items()}
+    missing = [key for key in CI_ENV_KEYS if key not in env]
+    if missing:
+        raise RuntimeError(f"{workflow.name}'s `{CI_GATE_STEP}` step must set {missing}")
+    return env
+
+
+@contextmanager
+def pinned_cpus(count: int = STRESS_CPUS):
+    """Pin this process (and every child it starts) to ``count`` CPUs.
+
+    Docker doesn't inherit affinity, so the cpuset is also exported for the
+    private PostgreSQL fixture, which passes it to ``docker run --cpuset-cpus``.
+    """
+    if not hasattr(os, "sched_setaffinity"):
+        raise RuntimeError("the stress step needs Linux CPU affinity")
+    previous = os.sched_getaffinity(0)
+    if len(previous) < count:
+        raise RuntimeError(f"the stress step needs {count} CPUs, this process has {len(previous)}")
+    chosen = set(sorted(previous)[-count:])
+    previous_env = os.environ.get(PG_CPUSET_ENV)
+    cpuset = ",".join(str(cpu) for cpu in sorted(chosen))
+    os.sched_setaffinity(0, chosen)
+    os.environ[PG_CPUSET_ENV] = cpuset
+    try:
+        yield cpuset
+    finally:
+        os.sched_setaffinity(0, previous)
+        if previous_env is None:
+            os.environ.pop(PG_CPUSET_ENV, None)
+        else:
+            os.environ[PG_CPUSET_ENV] = previous_env
+
+
+def git(*args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def is_test_file(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return path.startswith("tests/") and name.startswith("test_") and name.endswith(".py")
+
+
+def changed_test_files(base: str) -> tuple[str, list[str]]:
+    """Test files added or modified since ``base`` forked: the commits in
+    ``base..HEAD`` plus anything staged or changed in this tree (a snapshot's
+    applied patches). Deleted files can't run; untracked files aren't counted."""
+    merge_base = git("merge-base", base, "HEAD")
+    names = git("diff", "--name-only", "--no-renames", "--diff-filter=AM", merge_base, "--", "tests")
+    return merge_base, sorted(name for name in names.splitlines() if is_test_file(name))
+
+
+@dataclass(frozen=True)
+class StressPart:
+    name: str
+    marker: str
+    selectors: tuple[str, ...]
+    gate: tuple[str, ...]
+    dist: str
+
+
+def _files_of(nodes: set[str]) -> tuple[str, ...]:
+    return tuple(sorted({node.split("::", 1)[0] for node in nodes}))
+
+
+def stress_plan(files: list[str], budget: float) -> list[StressPart]:
+    """The offline gate's partitions, narrowed to ``files``. Each test runs in
+    the partition (and with the gate flags) it gets in ``make test-all``."""
+    wanted = set(files)
+    pg_selectors = tuple(s for s in PG_SELECTORS if s.split("::", 1)[0] in wanted)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        every = pool.submit(collect, OFFLINE, *files, allow_empty=True)
+        unit = pool.submit(collect, UNIT, *files, allow_empty=True)
+        pg = pool.submit(collect, PG, *pg_selectors, allow_empty=True) if pg_selectors else None
+        local = pool.submit(collect, LOCAL, *files, allow_empty=True)
+        every_nodes, unit_nodes, local_nodes = every.result(), unit.result(), local.result()
+        pg_nodes = pg.result() if pg else set()
+    missing = every_nodes - unit_nodes - pg_nodes - local_nodes
+    if missing:
+        raise RuntimeError("changed integration tests aren't in a gate suite (register them in "
+                           f"tests/suite_manifest.py): {sorted(missing)}")
+    parts = [
+        StressPart("unit", UNIT, _files_of(unit_nodes),
+                   (f"--unit-time-budget={budget}", "--require-no-skips"), "load"),
+        StressPart("private-pg", PG, pg_selectors if pg_nodes else (), ("--require-no-skips",), "loadscope"),
+        StressPart("local-integration", LOCAL, _files_of(local_nodes), ("--require-no-skips",), "load"),
+    ]
+    return [part for part in parts if part.selectors]
+
+
+def full_plan(budget: float) -> list[StressPart]:
+    """Every offline test, partitioned exactly as ``make test-all`` runs it."""
+    verify_offline_partition()
+    return [
+        StressPart("unit", UNIT, ("tests",), (f"--unit-time-budget={budget}", "--require-no-skips"), "load"),
+        StressPart("private-pg", PG, PG_SELECTORS, ("--require-pg-acceptance",), "loadscope"),
+        StressPart("local-integration", LOCAL, ("tests",), ("--require-no-skips",), "load"),
+    ]
+
+
+def stress(base: str, repeat: int, files: list[str] | None = None, everything: bool = False) -> None:
+    if not 1 <= repeat <= STRESS_REPEAT_MAX:
+        raise RuntimeError(f"stress repeat must be 1-{STRESS_REPEAT_MAX}, got {repeat}")
+    ci = ci_env()
+    workers = worker_count(ci[WORKERS_ENV])
+    budget = unit_time_budget_seconds(ci[UNIT_TIME_BUDGET_ENV])
+    if everything:
+        scope = "the whole offline suite"
+    elif files:
+        scope = f"{len(files)} named test file(s)"
+    else:
+        merge_base, files = changed_test_files(base)
+        scope = f"{len(files)} changed test file(s) in {merge_base[:12]}..HEAD"
+    print(f"Stress: {scope}{': ' + ' '.join(files) if files and not everything else ''}", flush=True)
+    if not everything and not files:
+        print("Stress: PASSED (no changed test files to stress)", flush=True)
+        return
+    with pinned_cpus() as cpuset:
+        plan = full_plan(budget) if everything else stress_plan(files, budget)
+        print(f"Stress: {repeat} round(s) on CPUs {cpuset} with CI's {workers} worker(s) and "
+              f"{budget}s unit budget; parts: {', '.join(part.name for part in plan)}", flush=True)
+        for number in range(1, repeat + 1):
+            for part in plan:
+                try:
+                    run(part.marker, *part.gate, *parallel(part.dist, workers), *part.selectors)
+                except RuntimeError as exc:
+                    raise RuntimeError(f"stress round {number}/{repeat} failed in {part.name}: {exc}") from exc
+            print(f"Stress: round {number}/{repeat} passed", flush=True)
+    print(f"Stress: PASSED ({repeat} round(s))", flush=True)
 
 
 @contextmanager
@@ -175,15 +348,26 @@ def runner_lock(wait_seconds: float | None = None, poll_seconds: float = 1.0):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("unit", "pg", "offline-integration", "sdk-probe", "integration",
-                                           "offline", "target", "profile", "coverage", "service", "paid"))
-    parser.add_argument("node", nargs="*", help="target only: explicit tests/... node IDs")
+                                           "offline", "target", "profile", "coverage", "stress", "gate",
+                                           "service", "paid"))
+    parser.add_argument("node", nargs="*",
+                        help="target: explicit tests/... node IDs; stress: test files instead of the changed ones")
     parser.add_argument("--keyword", help="profile only: pytest -k expression")
+    parser.add_argument("--stress-base", default=STRESS_BASE_DEFAULT,
+                        help="stress/gate: stress test files changed since this ref forked")
+    parser.add_argument("--repeat", type=int, default=STRESS_REPEAT_DEFAULT, help="stress/gate: rounds")
+    parser.add_argument("--all", action="store_true", dest="everything",
+                        help="stress only: the whole offline suite instead of changed files")
     args = parser.parse_args(argv)
     if args.suite in {"service", "paid"}:
         parser.error("external CLI/LLM tests are disabled until an independently provisioned "
                      "isolated service and credential scope can be verified; never use live :8642")
-    if args.node and args.suite != "target":
-        parser.error("node IDs require the target suite")
+    if args.node and args.suite not in {"target", "stress"}:
+        parser.error("node IDs require the target or stress suite")
+    if args.everything and (args.suite != "stress" or args.node):
+        parser.error("--all is only for the stress suite, without files")
+    if args.suite == "stress" and any(not is_test_file(node) or ".." in node for node in args.node):
+        parser.error("stress files must be tests/.../test_*.py files")
     if args.keyword and args.suite != "profile":
         parser.error("--keyword is only supported for unit profiling")
     if args.suite == "target" and (not args.node or any(
@@ -196,11 +380,15 @@ def main(argv: list[str] | None = None) -> int:
         # The wait is the runner's own setting; the tests it launches never inherit it.
         os.environ.pop(LOCK_WAIT_ENV, None)
         with runner_lock(wait):
-            if args.suite == "offline":
+            if args.suite in {"offline", "gate"}:
                 verify_offline_partition()
                 run(UNIT, *unit_gate())
                 run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)
                 run(LOCAL, "--require-no-skips", *parallel("load"))
+                if args.suite == "gate":
+                    stress(args.stress_base, args.repeat)
+            elif args.suite == "stress":
+                stress(args.stress_base, args.repeat, args.node, args.everything)
             elif args.suite == "integration":
                 verify_offline_partition()
                 run(PG, "--require-pg-acceptance", *parallel("loadscope"), *PG_SELECTORS)

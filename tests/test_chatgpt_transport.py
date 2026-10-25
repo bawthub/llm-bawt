@@ -9,6 +9,7 @@ import httpx
 import pytest
 from websockets.exceptions import InvalidStatus
 
+from claude_code_bridge.proxy import chatgpt_transport
 from claude_code_bridge.proxy.chatgpt_transport import (
     ChatGPTEventTimeout, ChatGPTResponsesTransport, LITE_HEADER, TURN_HEADER,
     lite_request,
@@ -16,6 +17,7 @@ from claude_code_bridge.proxy.chatgpt_transport import (
 from claude_code_bridge.proxy.stream import (
     IncompleteResponseStreamError, responses_to_anthropic_sse,
 )
+from tests import virtual_clock
 
 BODY = {"model": "gpt-6-astra", "instructions": "Be helpful", "input": [
     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
@@ -136,7 +138,7 @@ def test_first_event_timeout_then_idle_timeout_and_keepalive_expiry():
         started = asyncio.get_running_loop().time()
         with pytest.raises(ChatGPTEventTimeout, match="first"):
             await anext(stream)
-        assert asyncio.get_running_loop().time() - started < .06
+        assert asyncio.get_running_loop().time() - started < .06  # timing-ok: virtual clock (tests/virtual_clock.py), exact and runner-independent
         await stream.close()
         assert socket.close.await_count == 1
         await client.close()
@@ -170,7 +172,7 @@ def test_first_event_timeout_then_idle_timeout_and_keepalive_expiry():
         assert not client._idle
         assert socket.close.await_count == 1
         await client.close()
-    asyncio.run(run())
+    virtual_clock.run(run(), follow=[chatgpt_transport])
 
 
 @pytest.mark.parametrize(

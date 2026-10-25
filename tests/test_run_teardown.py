@@ -12,6 +12,7 @@ from agent_bridge.abort_contract import (
     TEARDOWN_DISCONNECT_BACKSTOP_S,
     TEARDOWN_KILL_WAIT_S,
 )
+from claude_code_bridge import run_teardown
 from claude_code_bridge.run_teardown import (
     VERIFIED_SDK_VERSIONS,
     ProcTable,
@@ -20,6 +21,7 @@ from claude_code_bridge.run_teardown import (
     cli_process,
     loaded_sdk_version,
 )
+from tests import virtual_clock
 
 CLI, CHILD, GRANDCHILD = 100, 200, 300
 
@@ -317,9 +319,9 @@ def test_teardown_stays_within_its_bound_when_everything_hangs():
         loop = asyncio.get_running_loop()
         start = loop.time()
         outcome = await bounded(_teardown(client, os_, disconnect_backstop_s=0.05, kill_wait_s=0.1), 0.5)
-        assert loop.time() - start < 0.5
+        assert loop.time() - start < 0.5  # timing-ok: virtual clock (tests/virtual_clock.py), exact and runner-independent
         assert outcome == TeardownOutcome("timeout", "sigkill", False, CLI, (CLI, CHILD))
-    run(go())
+    virtual_clock.run(go(), follow=[run_teardown])
 
 
 def test_real_proc_table_reads_this_process(tmp_path):

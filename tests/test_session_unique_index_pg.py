@@ -6,7 +6,6 @@ regressions never connect to or modify an operational/shared test database.
 
 from __future__ import annotations
 
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,6 +14,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError
 
 from tests.pg_isolation import require_test_db_config
+from tests.pg_lock_wait import wait_blocked_by
 from tests.private_postgres import PORT, private_url
 
 pytestmark = pytest.mark.integration
@@ -253,20 +253,13 @@ def test_cancelled_concurrent_build_restores_pool_and_requires_explicit_next_act
                 future = workers.submit(upgrade_sessions_one_active_index, engine)
                 try:
                     assert started.wait(timeout=8), "concurrent build did not start"
-                    deadline = time.monotonic() + 3.5  # Before the test's 5s lock timeout.
-                    while time.monotonic() < deadline:
-                        with setup_engine.connect() as observer:
-                            activity = observer.execute(text("""
-                                SELECT wait_event_type, query FROM pg_stat_activity WHERE pid=:pid
-                            """), {"pid": original[0]}).one()
-                            if (activity[0] == "Lock" and
-                                    activity[1].startswith("CREATE UNIQUE INDEX CONCURRENTLY")):
-                                assert observer.execute(text("SELECT pg_cancel_backend(:pid)"),
-                                                        {"pid": original[0]}).scalar_one()
-                                break
-                        time.sleep(0.01)
-                    else:
-                        pytest.fail("concurrent index build did not enter a cancellable lock wait")
+                    # The build is the only session that can wait on the blocker's open
+                    # transaction. Observe that wait before the test's 5s lock timeout.
+                    blocker_pid = blocker.execute(text("SELECT pg_backend_pid()")).scalar_one()
+                    wait_blocked_by(setup_engine, blocker_pid, future, timeout=3.5)
+                    with setup_engine.connect() as observer:
+                        assert observer.execute(text("SELECT pg_cancel_backend(:pid)"),
+                                                {"pid": original[0]}).scalar_one()
                     with pytest.raises(Exception) as cancelled:
                         future.result(timeout=8)
                     assert getattr(getattr(cancelled.value, "orig", cancelled.value), "pgcode", None) == "57014"

@@ -7,6 +7,8 @@ A unique container ID is retained and removed in fixture teardown.
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import time
@@ -22,6 +24,19 @@ from tests.pg_connection_guard import private_cluster_socket
 
 IMAGE = "pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b"
 PORT = "55439"
+# The stress step (scripts/test_suite.py) pins the tests to a few CPUs. A
+# container doesn't inherit that affinity, so the cpuset arrives here instead.
+CPUSET_ENV = "LLM_BAWT_TEST_PG_CPUSET"
+_CPUSET = re.compile(r"\d+(?:,\d+)*")
+
+
+def cpuset_args() -> list[str]:
+    cpuset = os.environ.get(CPUSET_ENV, "").strip()
+    if not cpuset:
+        return []
+    if not _CPUSET.fullmatch(cpuset):
+        raise RuntimeError(f"{CPUSET_ENV} must be a comma-separated CPU list, got {cpuset!r}")
+    return ["--cpuset-cpus", cpuset]
 
 
 def private_url(socket: Path, database: str) -> URL:
@@ -47,6 +62,7 @@ def private_pg(tmp_path_factory):
                "--env", "POSTGRES_HOST_AUTH_METHOD=trust",
                "--env", "POSTGRES_USER=test_user",
                "--env", "POSTGRES_DB=llm_bawt_test",
+               *cpuset_args(),
                IMAGE, "-c", "listen_addresses=", "-c", f"port={PORT}"]
     container_id = None
     try:

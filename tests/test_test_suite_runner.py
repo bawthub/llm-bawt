@@ -152,3 +152,158 @@ def test_the_unit_gate_passes_the_configured_budget_to_pytest(monkeypatch, confi
     monkeypatch.setattr(suite, "run", lambda marker, *extra: seen.append((marker, extra)))
     assert suite.main(["unit"]) == 0
     assert seen == [(suite.UNIT, (flag, "--require-no-skips", *suite.parallel("load")))]
+
+
+# -- stress step (TASK-1457) -------------------------------------------------
+
+
+def test_stress_reads_ci_conditions_from_the_real_workflow():
+    env = suite.ci_env()
+    assert suite.worker_count(env[suite.WORKERS_ENV]) == 2
+    assert suite.unit_time_budget_seconds(env[suite.UNIT_TIME_BUDGET_ENV]) == 3.0
+
+
+@pytest.mark.parametrize(("steps", "error"), [
+    ("- run: make test-all\n  env: {LLM_BAWT_TEST_WORKERS: '2'}\n", "must set"),
+    ("- run: make test-all\n- run: make test-all\n", "exactly one step, found 2"),
+    ("- run: make lint\n", "exactly one step, found 0"),
+])
+def test_a_workflow_without_one_complete_gate_step_fails_closed(tmp_path, steps, error):
+    workflow = tmp_path / "tests.yml"
+    workflow.write_text("jobs:\n  t:\n    steps:\n" + "".join(f"      {line}\n" for line in steps.splitlines()))
+    with pytest.raises(RuntimeError, match=error):
+        suite.ci_env(workflow)
+
+
+def test_pinning_narrows_this_process_and_postgres_then_restores_both(monkeypatch):
+    monkeypatch.setenv(suite.PG_CPUSET_ENV, "previous")
+    before = os.sched_getaffinity(0)
+    with suite.pinned_cpus(2) as cpuset:
+        pinned = os.sched_getaffinity(0)
+        assert len(pinned) == 2 and pinned <= before
+        assert os.environ[suite.PG_CPUSET_ENV] == cpuset == ",".join(map(str, sorted(pinned)))
+    assert os.sched_getaffinity(0) == before
+    assert os.environ[suite.PG_CPUSET_ENV] == "previous"
+
+
+def test_pinning_refuses_a_machine_with_fewer_cpus(monkeypatch):
+    monkeypatch.setattr(suite.os, "sched_getaffinity", lambda pid: {0})
+    with pytest.raises(RuntimeError, match="needs 2 CPUs, this process has 1"), suite.pinned_cpus(2):
+        pass
+
+
+def test_changed_tests_are_added_or_modified_test_modules_since_the_fork(monkeypatch):
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        return "abc123" if args[0] == "merge-base" else (
+            "tests/test_b.py\ntests/helpers.py\ntests/test_a.py\ntests/data/test_x.json\n")
+
+    monkeypatch.setattr(suite, "git", git)
+    assert suite.changed_test_files("origin/master") == ("abc123", ["tests/test_a.py", "tests/test_b.py"])
+    assert calls == [("merge-base", "origin/master", "HEAD"),
+                     ("diff", "--name-only", "--no-renames", "--diff-filter=AM", "abc123", "--", "tests")]
+
+
+def _collect_from(nodes):
+    def collect(marker, *selectors, allow_empty=False):
+        wanted = {selector.split("::", 1)[0] for selector in selectors}
+        return {node for node in nodes[marker] if node.split("::", 1)[0] in wanted}
+    return collect
+
+
+def test_a_stress_plan_runs_each_changed_test_in_its_gate_partition(monkeypatch):
+    nodes = {
+        suite.OFFLINE: {"tests/test_u.py::a", "tests/test_p.py::b", "tests/test_l.py::c"},
+        suite.UNIT: {"tests/test_u.py::a"},
+        suite.PG: {"tests/test_p.py::b"},
+        suite.LOCAL: {"tests/test_l.py::c"},
+    }
+    monkeypatch.setattr(suite, "PG_SELECTORS", ("tests/test_p.py", "tests/test_other_pg.py"))
+    monkeypatch.setattr(suite, "collect", _collect_from(nodes))
+    plan = suite.stress_plan(["tests/test_l.py", "tests/test_p.py", "tests/test_u.py"], 3.0)
+    assert [(part.name, part.selectors, part.gate) for part in plan] == [
+        ("unit", ("tests/test_u.py",), ("--unit-time-budget=3.0", "--require-no-skips")),
+        ("private-pg", ("tests/test_p.py",), ("--require-no-skips",)),
+        ("local-integration", ("tests/test_l.py",), ("--require-no-skips",)),
+    ]
+    assert [part.name for part in suite.stress_plan(["tests/test_u.py"], 3.0)] == ["unit"]
+
+
+def test_a_changed_integration_test_outside_every_gate_suite_fails_the_plan(monkeypatch):
+    nodes = {suite.OFFLINE: {"tests/test_p.py::b"}, suite.UNIT: set(), suite.PG: set(), suite.LOCAL: set()}
+    monkeypatch.setattr(suite, "PG_SELECTORS", ())
+    monkeypatch.setattr(suite, "collect", _collect_from(nodes))
+    with pytest.raises(RuntimeError, match=r"register them in tests/suite_manifest.py.*test_p.py::b"):
+        suite.stress_plan(["tests/test_p.py"], 3.0)
+
+
+def _stress_harness(monkeypatch, fail_at=None):
+    ran = []
+    plan = [suite.StressPart("unit", suite.UNIT, ("tests/test_u.py",), ("--g",), "load"),
+            suite.StressPart("private-pg", suite.PG, ("tests/test_p.py",), (), "loadscope")]
+
+    def run(marker, *extra):
+        ran.append((marker, extra))
+        if len(ran) == fail_at:
+            raise RuntimeError("test suite failed (exit 1)")
+
+    monkeypatch.setattr(suite, "ci_env", lambda: {suite.WORKERS_ENV: "2", suite.UNIT_TIME_BUDGET_ENV: "3"})
+    monkeypatch.setattr(suite, "pinned_cpus", lambda: nullcontext("14,15"))
+    monkeypatch.setattr(suite, "stress_plan", lambda files, budget: plan)
+    monkeypatch.setattr(suite, "run", run)
+    return ran
+
+
+def test_stress_repeats_every_part_with_ci_workers(monkeypatch, capsys):
+    ran = _stress_harness(monkeypatch)
+    suite.stress("origin/master", 2, ["tests/test_u.py", "tests/test_p.py"])
+    assert ran == [(suite.UNIT, ("--g", *suite.parallel("load", 2), "tests/test_u.py")),
+                   (suite.PG, (*suite.parallel("loadscope", 2), "tests/test_p.py"))] * 2
+    out = capsys.readouterr().out
+    assert "2 round(s) on CPUs 14,15 with CI's 2 worker(s) and 3.0s unit budget" in out
+    assert "Stress: PASSED (2 round(s))" in out
+
+
+def test_stress_stops_at_the_first_failing_round_and_names_it(monkeypatch):
+    ran = _stress_harness(monkeypatch, fail_at=4)
+    with pytest.raises(RuntimeError, match=r"stress round 2/3 failed in private-pg: test suite failed"):
+        suite.stress("origin/master", 3, ["tests/test_u.py", "tests/test_p.py"])
+    assert len(ran) == 4
+
+
+def test_stress_with_no_changed_tests_passes_without_pinning(monkeypatch, capsys):
+    monkeypatch.setattr(suite, "ci_env", lambda: {suite.WORKERS_ENV: "2", suite.UNIT_TIME_BUDGET_ENV: "3"})
+    monkeypatch.setattr(suite, "changed_test_files", lambda base: ("abc123def456", []))
+    monkeypatch.setattr(suite, "pinned_cpus", lambda: pytest.fail("pinned with nothing to run"))
+    suite.stress("origin/master", 10)
+    assert "Stress: PASSED (no changed test files to stress)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("repeat", [0, 101])
+def test_stress_repeat_is_bounded(repeat):
+    with pytest.raises(RuntimeError, match="repeat must be 1-100"):
+        suite.stress("origin/master", repeat)
+
+
+@pytest.mark.parametrize("argv", [
+    ["stress", "scripts/test_suite.py"],
+    ["stress", "tests/../tests/test_a.py"],
+    ["stress", "--all", "tests/test_a.py"],
+    ["unit", "--all"],
+    ["unit", "tests/test_a.py"],
+])
+def test_bad_stress_arguments_are_refused(argv):
+    with pytest.raises(SystemExit, match="2"):
+        suite.main(argv)
+
+
+def test_the_gate_runs_the_offline_suite_then_stresses_the_push_range(monkeypatch):
+    seen = []
+    monkeypatch.setattr(suite, "runner_lock", lambda wait: nullcontext())
+    monkeypatch.setattr(suite, "verify_offline_partition", lambda: seen.append("partition"))
+    monkeypatch.setattr(suite, "run", lambda marker, *extra: seen.append(marker))
+    monkeypatch.setattr(suite, "stress", lambda base, repeat, *rest: seen.append(("stress", base, repeat, rest)))
+    assert suite.main(["gate", "--stress-base", "abc123"]) == 0
+    assert seen == ["partition", suite.UNIT, suite.PG, suite.LOCAL, ("stress", "abc123", 10, ())]

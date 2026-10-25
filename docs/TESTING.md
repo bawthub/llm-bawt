@@ -18,6 +18,10 @@ Do not use `pytest -m ""`: that bypasses the external-target boundary.
 | `make test-profile` | Detailed hermetic setup/call/teardown timings | Python only |
 | `make test-target NODES=tests/test_file.py::test_name` | Explicit offline target, no skips | Relevant private fixtures |
 | `make test-snapshot PATHS="…" AUTHOR=<bot>` / `PATCHES="…"` | `test-all` (or `test-target` with `NODES`) on exactly BASE + patches in a throwaway worktree | Test host only; see below |
+| `make test-stress [STRESS_BASE=origin/master] [REPEAT=10] [FILES="…"]` | Test files added or modified since `STRESS_BASE` forked, `REPEAT` times under CI's conditions | Linux, 2+ CPUs; see below |
+| `make test-gate` | `test-all`, then `test-stress` | Docker + loopback |
+| `make gate REV=<sha> AUTHOR=<bot>` / `make gate-receipt REV=<sha>` | The llm-bawt SHIP gate (`test-gate` on exactly `REV`) / its newest receipt | Test host only; see below |
+| `make test-sweep` | One round of every offline test under CI's conditions | Docker + loopback |
 | `make test-service` / `make test-paid` | **Refuse** until a disposable service/DB and credential scope are provisioned and verified | Never run against live :8642 |
 
 ## Unit time budget (TASK-1312)
@@ -35,6 +39,47 @@ default. Fixtures that need a file-backed SQLite engine use
 (`PRAGMA synchronous = OFF`); that is the dominant cost of such fixtures on a
 virtual disk and no test relies on durability across a power loss.
 
+## CI's conditions on echo: the stress step (TASK-1457)
+
+echo is fast enough that a timing-dependent test passes there and fails on
+GitHub's 4-vCPU runner. `make test-stress` reruns the tests a push adds or
+changes the way CI runs them: this process, its pytest workers and the private
+PostgreSQL container pinned to 2 CPUs (the container through
+`docker run --cpuset-cpus`, from `LLM_BAWT_TEST_PG_CPUSET`), with CI's worker
+count and unit budget read from the `make test-all` step's `env` in
+`.github/workflows/tests.yml`, so the two can't drift. Each changed file runs in
+the partition and with the flags `make test-all` gives it; a changed
+integration test that isn't in a gate suite fails the step. Any failure in any
+of the `REPEAT` rounds (default 10) fails it, naming the round and partition.
+
+**SHIP gate.** An llm-bawt SHIP needs a PASSED `make gate REV=<tip> AUTHOR=<bot>`
+receipt for the exact commit being pushed. It runs `make test-gate` on exactly
+`REV` in a throwaway worktree, stressing `origin/master..REV` (the base is
+pinned to a SHA in the receipt). `make gate-receipt REV=<tip>` prints the newest
+such receipt and exits 0 only if it passed (1 failed, 2 none). A `PATCHES`
+trial never counts: it tested other bytes.
+
+## Timing patterns the guard rejects (TASK-1457)
+
+`tests/test_timing_guard.py` (scanner: `tests/timing_guard.py`) fails on the
+two patterns behind most CI-only failures:
+
+- **Hand-rolled `pg_stat_activity` polling.** PostgreSQL snapshots that view
+  once per transaction, so a loop polling inside one keeps its first view. Wait
+  for a lock with `tests/pg_lock_wait.py::wait_blocked_by(engine, holder_pid,
+  worker)`.
+- **A fixed upper bound on wall-clock time** (`assert elapsed < 0.5`,
+  `assert time.monotonic() < deadline`). Prove the behaviour instead: an event
+  or barrier, the call's own timeout result, a count of the work done, or, for
+  asyncio code, `tests/virtual_clock.py::run`, whose clock jumps to the next
+  timer so elapsed time is exact and takes no real time (`follow=[module]` makes
+  a module's own `time` reads follow it).
+
+A justified exception carries `# timing-ok: <reason>` on the statement or the
+line above. The reason is what a reviewer judges: typically a hang guard on a
+real thread, process or PostgreSQL lock whose bound is far from both the normal
+cost and the failure it rules out.
+
 ## Exact-bytes gate: `make test-snapshot` (TASK-1137)
 
 The shared checkout carries other bots' uncommitted work, so `make test-all`
@@ -50,7 +95,7 @@ inside a container.
 | `PATHS="a.py b.py"` + `AUTHOR=<bot>` | Build the patch from this checkout's working tree for exactly these files (new, modified or deleted) vs HEAD. BASE must be HEAD. |
 | `PATCHES="/abs/one.patch /abs/two.patch"` | Apply these patch files in order with `git apply --index` (no fuzz; any reject fails the run). |
 | `BASE=<commit>` | Default `HEAD`. |
-| `NODES="tests/…"` / `SUITE=offline\|target` | `NODES` alone selects `test-target`; the default is `test-all`. |
+| `NODES="tests/…"` / `SUITE=offline\|target\|gate\|sweep` | `NODES` alone selects `test-target`; the default is `test-all`. `gate` adds the stress step (`STRESS_BASE`, default `origin/master`); `sweep` is `test-sweep`. |
 | `LOCK_WAIT=<s>` | How long to wait for another suite to finish (default 1800). The runner lock is never bypassed. |
 
 **Ownership.** `PATHS` refuses a file unless its uncommitted bytes provably

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import time
 
 import pytest
 
 from claude_code_bridge import playwright_preflight as preflight
+from tests import virtual_clock
 
 
 @pytest.fixture
@@ -156,11 +156,17 @@ def test_parser_cleanup_is_bounded_when_communicate_hangs_after_kill(monkeypatch
 
     monkeypatch.setattr(preflight.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(preflight, "_PARSE_TIMEOUT_S", 0.01)
-    start = time.monotonic()
-    assert asyncio.run(preflight.playwright_syntax_error(
-        "mcp__playwright__browser_evaluate", {"function": "() => 1"},
-    )) is None
-    assert time.monotonic() - start < 1.0
+    async def check():
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        result = await preflight.playwright_syntax_error(
+            "mcp__playwright__browser_evaluate", {"function": "() => 1"},
+        )
+        return result, loop.time() - start
+
+    result, elapsed = virtual_clock.run(check())
+    assert result is None
+    assert elapsed < 1.0  # timing-ok: virtual clock (tests/virtual_clock.py), exact and runner-independent
     assert process.killed and process.cleanup_cancelled
 
 

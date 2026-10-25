@@ -20,7 +20,10 @@ jobs:
       # (make test-snapshot) before it is pushed. This shared runner has fewer,
       # slower cores, cold caches and a virtual disk, so the same bound is
       # widened here: it still fails on hangs and new sleeps, not on runner
-      # noise (TASK-1312).
+      # noise (TASK-1312). The worker count is pinned to what this runner's
+      # 4 vCPUs give by default. `make test-stress` reads both values from
+      # this step, so the local stress gate matches CI (TASK-1457).
       - run: make test-all
         env:
           LLM_BAWT_UNIT_TIME_BUDGET_SECONDS: "3"
+          LLM_BAWT_TEST_WORKERS: "2"

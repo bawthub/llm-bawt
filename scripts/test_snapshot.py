@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 import datetime as dt
 import hashlib
 import io
@@ -50,14 +50,17 @@ RUN_RETENTION_S = 14 * 24 * 3600
 RUNNER_FILES = ("Makefile", "pyproject.toml", "uv.lock", "scripts/test_suite.py",
                 "scripts/test_snapshot.py", "tests/conftest.py", "tests/suite_manifest.py")
 PROVENANCE_WINDOW_DAYS = 14
-SUITE_TARGETS = {"offline": "test-all", "target": "test-target"}
+SUITE_TARGETS = {"offline": "test-all", "target": "test-target", "gate": "test-gate",
+                 "sweep": "test-sweep"}
+# gate = test-all plus the stress step on test files changed since this ref (TASK-1457).
+DEFAULT_STRESS_BASE = "origin/master"
 LOCK_WAIT_ENV = "LLM_BAWT_TEST_LOCK_WAIT_SECONDS"
 # Never inherit a caller's Make or git context into the snapshot.
 SCRUBBED_ENV = ("MAKEFLAGS", "MAKELEVEL", "MFLAGS", "MAKEOVERRIDES", "GIT_DIR",
                 "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX")
 EXIT_PASSED, EXIT_FAILED, EXIT_REFUSED, EXIT_INTERRUPTED = 0, 1, 2, 130
 SUMMARY_RE = re.compile(r"\b\d+ (?:passed|failed|errors?|skipped|deselected)\b.* in [\d.]+s")
-RUNNER_RE = re.compile(r"^(?:Offline coverage|Target selection|Test runner lock|Test runner):")
+RUNNER_RE = re.compile(r"^(?:Offline coverage|Target selection|Test runner lock|Test runner|Stress):")
 
 
 class Refused(Exception):
@@ -131,6 +134,7 @@ class Receipt:
     runner_touched: list[str] = field(default_factory=list)
     suite: str = "offline"
     nodes: list[str] = field(default_factory=list)
+    stress_base: str | None = None
     suite_exit: int | None = None
     runner: list[str] = field(default_factory=list)
     summaries: list[str] = field(default_factory=list)
@@ -152,6 +156,8 @@ class Receipt:
                  f"  run:     {self.run_id}",
                  f"  base:    {self.base}  mode={self.mode}"
                  + (f" author={self.author}" if self.author else "")]
+        if self.stress_base:
+            lines.append(f"  suite:   {self.suite}; stress range {self.stress_base[:12]}..{(self.base or '?')[:12]}")
         for patch in self.patches:
             lines.append(f"  patch:   sha256:{patch.sha256[:16]}  {patch.saved_as}")
         if self.diff_sha256:
@@ -490,10 +496,12 @@ def pin_patches(sources: list[Path], run_dir: Path) -> list[PatchRecord]:
 # ── Suite ──────────────────────────────────────────────────────────────────
 
 
-def suite_command(suite: str, nodes: list[str]) -> list[str]:
+def suite_command(suite: str, nodes: list[str], stress_base: str | None = None) -> list[str]:
     command = ["make", "--no-print-directory", SUITE_TARGETS[suite]]
     if suite == "target":
         command.append("NODES=" + " ".join(nodes))
+    if suite == "gate" and stress_base:
+        command.append("STRESS_BASE=" + stress_base)
     return command
 
 
@@ -609,6 +617,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--author", default="", help="bot id; required with --path")
     parser.add_argument("--suite", choices=sorted(SUITE_TARGETS), default="offline")
     parser.add_argument("--node", action="append", default=[], help="repeatable; suite=target")
+    parser.add_argument("--stress-base", default=DEFAULT_STRESS_BASE,
+                        help="suite=gate: stress test files changed since this ref forked")
+    parser.add_argument("--receipt-for", metavar="REV",
+                        help="print the newest gate receipt for REV and exit (0 only if it PASSED)")
     parser.add_argument("--lock-wait", type=int, default=DEFAULT_LOCK_WAIT_S)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--repo", type=Path, default=REPO)
@@ -681,6 +693,9 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
     receipt.base = git.out("rev-parse", "--verify", f"{args.base}^{{commit}}")
     receipt.canonical_head = git.out("rev-parse", "HEAD")
     receipt.suite, receipt.nodes, receipt.author = args.suite, args.node, args.author or None
+    if args.suite == "gate":
+        # Pinned to a SHA so the receipt says exactly which range was stressed.
+        receipt.stress_base = git.out("rev-parse", "--verify", f"{args.stress_base}^{{commit}}")
     swept = sweep_stale(root)
     if swept:
         print(f"Snapshot: removed {len(swept)} stale snapshot(s): {', '.join(swept)}", flush=True)
@@ -724,7 +739,7 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
         if snap.run("diff", "--quiet", check=False).returncode:
             raise RuntimeError("snapshot working tree differs from its index after apply")
         command = (json.loads(args.suite_command) if args.suite_command
-                   else suite_command(args.suite, args.node))
+                   else suite_command(args.suite, args.node, receipt.stress_base))
         print(f"Snapshot: {receipt.base[:12]} + {len(receipt.patches)} patch(es), "
               f"diff sha256:{receipt.diff_sha256_short}; running {' '.join(command)}", flush=True)
         receipt.suite_exit = run_suite(command, worktree, Path(receipt.log or run_dir / "test.log"),
@@ -737,10 +752,44 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
     return EXIT_FAILED
 
 
+def find_gate_receipt(root: Path, sha: str) -> dict[str, Any] | None:
+    """Newest gate run at exactly ``sha`` with no patches (a PATCHES trial doesn't count)."""
+    newest: dict[str, Any] | None = None
+    for path in (root / "runs").glob("*/receipt.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (data.get("suite") == "gate" and data.get("mode") == "base" and data.get("base") == sha
+                and (newest is None or data.get("started_at", "") > newest.get("started_at", ""))):
+            newest = data
+    return newest
+
+
+def show_gate_receipt(args: argparse.Namespace) -> int:
+    try:
+        sha = Git(args.repo).out("rev-parse", "--verify", f"{args.receipt_for}^{{commit}}")
+    except Refused as exc:
+        print(f"Gate receipt: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    data = find_gate_receipt(args.root, sha)
+    if data is None:
+        print(f"Gate receipt: none for {sha} under {args.root / 'runs'}; "
+              f"run make gate REV={sha} AUTHOR=<bot> on the test host", file=sys.stderr)
+        return EXIT_REFUSED
+    known = {item.name for item in fields(Receipt)}
+    receipt = Receipt(**{key: value for key, value in data.items() if key in known})
+    receipt.patches = [PatchRecord(**patch) for patch in data.get("patches", [])]
+    print(receipt.summary())
+    return EXIT_PASSED if receipt.status == "passed" else EXIT_FAILED
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     args.repo = args.repo.resolve()
     args.root = args.root.resolve()
+    if args.receipt_for:
+        return show_gate_receipt(args)
     if args.root == args.repo or args.repo in args.root.parents:
         print(f"Snapshot refused: root {args.root} must be outside the repository", file=sys.stderr)
         return EXIT_REFUSED

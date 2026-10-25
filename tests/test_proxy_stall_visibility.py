@@ -1,14 +1,15 @@
 """TASK-1079: stalls are detected early, shown honestly, and never run ``{}``."""
 import asyncio
 import json
-import time
 from types import SimpleNamespace as NS
 
 import pytest
 
+from claude_code_bridge.proxy import chatgpt_transport
 from claude_code_bridge.proxy.chatgpt_transport import ChatGPTEventTimeout
 from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
 from tests.test_proxy_progress_recovery import THINKING, TOOL, Harness, success_frames
+from tests import virtual_clock
 from tests.test_turn_phase import _phases, _ProxyHarness, _tracker
 
 
@@ -76,13 +77,15 @@ def test_whitespace_argument_runaway_times_out_before_productive_idle():
     async def run():
         added = NS(type="response.output_item.added", item=NS(type="function_call"))
         blank = NS(type="response.function_call_arguments.delta", delta="  \n")
-        started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         stream = _stream(_chatter(added, item=blank), whitespace_runaway_timeout=.05)
         with pytest.raises(ChatGPTEventTimeout) as error:
             await _drain(stream)
         assert error.value.phase == "whitespace"
-        assert time.monotonic() - started < 1
-    asyncio.run(run())
+        # The runaway clock starts at the first blank delta, one chatter step in.
+        assert loop.time() - started == pytest.approx(.002 + .05)
+    virtual_clock.run(run(), follow=[chatgpt_transport])
 
 
 def test_stall_notice_reports_once_then_recovers_on_the_same_stream():
@@ -94,15 +97,16 @@ def test_stall_notice_reports_once_then_recovers_on_the_same_stream():
             yield NS(type="response.completed", response=NS(usage=None, status="completed"))
 
         statuses = []
-        before = time.time()
+        before = chatgpt_transport.time.time()  # the stream's own (virtual) wall clock
         stream = _stream(events(), statuses, stall_notice_after=.03)
         kinds = [event.type for event in await _drain(stream)]
         assert kinds[-1] == "response.completed"
         assert [s["state"] for s in statuses] == ["stalled", "recovered"]
         stalled = statuses[0]
         assert stalled["message"] == "Waiting on model; no output yet"
-        assert before - .01 <= stalled["since"] <= before + .05
-    asyncio.run(run())
+        # The silence began when the stream opened, not when the notice fired.
+        assert stalled["since"] == pytest.approx(before)
+    virtual_clock.run(run(), follow=[chatgpt_transport])
 
 
 def test_stall_notice_waits_for_header_timeout_rather_than_failing():

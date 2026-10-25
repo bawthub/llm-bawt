@@ -200,6 +200,7 @@ def test_a_shutdown_signal_reaches_both_services_and_exits_cleanly(stack, sig):
     assert proc.returncode == 0, out
     # The trap fires during `wait` on the monitor's background sleep, not
     # after the old foreground `sleep 10` finished.
+    # timing-ok: a real shell trap: under 3s vs the 10s foreground sleep it must interrupt
     assert elapsed < 3, (elapsed, out)
     assert (fake / "service.term").exists() and (fake / "mcp.term").exists()
     assert not _alive(service_pid) and not _alive(mcp_pid)
@@ -224,6 +225,7 @@ def test_a_service_that_ignores_sigterm_is_killed_after_the_wait_and_exit_is_non
     elapsed = time.monotonic() - sent
 
     assert proc.returncode == 1, out
+    # timing-ok: a real shell escalation: 1s TERM grace, then KILL, vs the stubborn child's 10s
     assert 1 <= elapsed < 4, (elapsed, out)
     assert (fake / "service.term").exists(), "the stubborn service still got TERM first"
     assert f"force killing: {service_pid}" in out
