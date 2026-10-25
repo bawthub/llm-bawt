@@ -201,9 +201,14 @@ class PromptSectionsMixin:
         failure skips the section; it never fails the prompt build."""
         from ..bot_tags.context import TEMPLATE_KEY, load_tag_context
 
-        resolved = self.config_resolver.resolve_body(
-            TEMPLATE_KEY, scope_type="bot", scope_id=self.bot_id
-        )
+        try:
+            resolved = self.config_resolver.resolve_body(
+                TEMPLATE_KEY, scope_type="bot", scope_id=self.bot_id
+            )
+        except Exception:
+            logger.warning("tag context: template %s unreadable; section skipped",
+                           TEMPLATE_KEY, exc_info=True)
+            return
         template = resolved.body if resolved else None
         if not template or not template.strip():
             return

@@ -7,6 +7,7 @@ transaction; nothing here commits. Existence checks are pinned to
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 
 from sqlalchemy import text
@@ -20,6 +21,9 @@ from .vocabulary import (
 CATALOG_TABLE = "bot_tag_catalog"
 ASSIGNMENT_TABLE = "bot_profile_tags"
 ASSIGNMENT_INDEX = "bot_profile_tags_tag_idx"
+PROMPT_KEY_INDEX = "bot_tag_catalog_prompt_key_key"
+
+logger = logging.getLogger(__name__)
 
 _OWNED = text("""
     SELECT EXISTS (
@@ -61,6 +65,17 @@ CREATE TABLE IF NOT EXISTS bot_profile_tags (
 
 _INDEX_DDL = "CREATE INDEX IF NOT EXISTS bot_profile_tags_tag_idx ON bot_profile_tags (tag_slug)"
 
+# A prompt_key belongs to one tag: saving instructions writes that prompt, so a
+# shared key would let one tag overwrite another's instructions (TASK-1249).
+_PROMPT_KEY_INDEX_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS bot_tag_catalog_prompt_key_key "
+    "ON bot_tag_catalog (prompt_key) WHERE prompt_key IS NOT NULL"
+)
+_SHARED_PROMPT_KEYS = text("""
+    SELECT prompt_key FROM bot_tag_catalog WHERE prompt_key IS NOT NULL
+    GROUP BY prompt_key HAVING count(*) > 1 ORDER BY prompt_key
+""")
+
 
 def owned(conn, rel: str, kinds: str = "rp") -> bool:
     """Whether ``current_schema()`` itself holds relation ``rel``."""
@@ -86,6 +101,15 @@ def ensure_schema(conn) -> None:
         conn.execute(text(_ASSIGNMENT_DDL))
     if not owned(conn, ASSIGNMENT_INDEX, "i"):
         conn.execute(text(_INDEX_DDL))
+    if not owned(conn, PROMPT_KEY_INDEX, "i"):
+        shared = list(conn.execute(_SHARED_PROMPT_KEYS).scalars())
+        if shared:
+            # Operator data predates the rule; don't fail startup or pick a
+            # winner. The store still refuses writes through a shared key.
+            logger.warning("bot tags: prompt keys shared by several tags, unique index "
+                           "not created until they are fixed: %s", ", ".join(shared))
+        else:
+            conn.execute(text(_PROMPT_KEY_INDEX_DDL))
 
 
 def seed(conn) -> None:

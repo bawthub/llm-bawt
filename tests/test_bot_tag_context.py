@@ -178,3 +178,25 @@ def test_unreadable_facts_skip_the_section(facts):
     facts["context"] = RuntimeError("db down")
 
     assert _section(_Owner({"agents.tag_context": "{bot_roster}"})) is None
+
+
+def test_an_unreadable_template_skips_the_section_before_any_facts_load(facts):
+    owner = _Owner({})
+
+    def down(*_args, **_kwargs):
+        raise RuntimeError("registry down")
+
+    owner.config_resolver = SimpleNamespace(resolve_body=down)
+
+    assert _section(owner) is None
+    assert facts["loads"] == 0
+
+
+def test_capability_order_never_changes_the_bytes():
+    shuffled = [replace(role, capabilities=tuple(reversed(role.capabilities)) + ("audit",))
+                for role in _ROLES]
+    sorted_caps = [replace(role, capabilities=tuple(sorted(role.capabilities + ("audit",))))
+                   for role in _ROLES]
+
+    assert _render(roles=shuffled).tag_catalog == _render(roles=sorted_caps).tag_catalog
+    assert "capabilities audit, review." in _render(roles=shuffled).tag_catalog

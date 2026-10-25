@@ -194,6 +194,64 @@ def test_a_key_taken_after_allocation_is_a_conflict_and_never_overwritten(tags, 
     assert tags.prompts() == [("role.fixture_role", "Theirs.", None, 0)]
 
 
+def test_a_key_held_by_another_tag_is_refused_on_create_and_patch(tags):
+    """Rook r1 Blocker: a shared key let one tag's save overwrite another's prompt."""
+    tags.instructions("fixture_role", "Mine.")
+    tags.client.post("/v1/bot-tags", json={"slug": "fixture_other", "name": "Other"})
+
+    created = tags.client.post("/v1/bot-tags", json={
+        "slug": "fixture_thief", "name": "Thief", "prompt_key": "role.fixture_role"})
+    patched = tags.client.patch("/v1/bot-tags/fixture_other",
+                                json={"prompt_key": "role.fixture_role"})
+
+    assert (created.status_code, patched.status_code) == (409, 409), (created.text, patched.text)
+    assert _tag(tags, "fixture_thief") is None
+    assert _tag(tags, "fixture_other")["prompt_key"] is None
+    assert tags.instructions("fixture_other", "Theirs.").json()["prompt_key"] == "role.fixture_other"
+    assert ("role.fixture_role", "Mine.", "bot_tag", 1) in tags.prompts()
+
+
+def test_a_tag_may_keep_or_reset_its_own_key(tags):
+    tags.instructions("fixture_role", "Mine.")
+
+    same = tags.client.patch("/v1/bot-tags/fixture_role", json={"prompt_key": "role.fixture_role"})
+
+    assert same.status_code == 200, same.text
+
+
+def test_the_database_holds_each_key_to_one_tag(tags):
+    from sqlalchemy.exc import IntegrityError
+
+    tags.instructions("fixture_role", "Mine.")
+
+    with pytest.raises(IntegrityError, match="bot_tag_catalog_prompt_key_key"):
+        with tags.rig.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO bot_tag_catalog (slug, name, kind, prompt_key, system)"
+                " VALUES ('fixture_dup', 'Dup', 'role', 'role.fixture_role', FALSE)"))
+
+
+def test_a_key_shared_before_the_index_blocks_saves_and_startup_survives(tags, caplog):
+    from llm_bawt.bot_tags import catalog
+
+    tags.instructions("fixture_role", "Mine.")
+    with tags.rig.engine.begin() as conn:
+        conn.execute(text(f"DROP INDEX {catalog.PROMPT_KEY_INDEX}"))
+        conn.execute(text(
+            "INSERT INTO bot_tag_catalog (slug, name, kind, prompt_key, system)"
+            " VALUES ('fixture_dup', 'Dup', 'role', 'role.fixture_role', FALSE)"))
+
+    with tags.rig.engine.begin() as conn:
+        catalog.ensure_schema(conn)
+        assert not catalog.owned(conn, catalog.PROMPT_KEY_INDEX, "i")
+    assert "role.fixture_role" in caplog.text
+
+    response = tags.instructions("fixture_dup", "Overwrite?")
+
+    assert response.status_code == 409, response.text
+    assert ("role.fixture_role", "Mine.", "bot_tag", 1) in tags.prompts()
+
+
 # --- the tag-context facts --------------------------------------------------------
 
 

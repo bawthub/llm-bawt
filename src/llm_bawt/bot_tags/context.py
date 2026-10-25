@@ -88,7 +88,7 @@ def render_tag_context(
     catalog = []
     for slug in role_slugs:
         role = roles_by_slug[slug]
-        line = f"- `{slug}` ({role.name}): capabilities {', '.join(role.capabilities) or NONE}"
+        line = f"- `{slug}` ({role.name}): capabilities {', '.join(sorted(role.capabilities)) or NONE}"
         if role.description.strip():
             line += f". {role.description.strip()}"
         catalog.append(line)

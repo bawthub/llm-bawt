@@ -9,6 +9,7 @@ reaches the assignments of a bot whose profile row is gone (BOT_TAGS.md §6).
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -146,6 +147,18 @@ class RoleFields:
         return value
 
 
+@contextmanager
+def _prompt_key_conflicts(key: str | None):
+    """A concurrent writer that took the same ``prompt_key`` is a conflict, not a 500."""
+    try:
+        yield
+    except IntegrityError as exc:
+        if catalog.PROMPT_KEY_INDEX not in str(exc.orig):
+            raise
+        raise TagConflict(f"prompt key {key!r} belongs to another bot tag; "
+                          "each tag needs its own") from exc
+
+
 class BotTagStore:
     """Catalog and assignment writes on one engine; every write is one transaction."""
 
@@ -198,7 +211,8 @@ class BotTagStore:
             "prompt_key": RoleFields.prompt_key(prompt_key),
             "capabilities": json.dumps(RoleFields.capabilities(capabilities)),
         }
-        with self.engine.begin() as conn:
+        with _prompt_key_conflicts(values["prompt_key"]), self.engine.begin() as conn:
+            self._require_free_prompt_key(conn, values["prompt_key"], values["slug"])
             created = conn.execute(text("""
                 INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key,
                                              capabilities, system)
@@ -220,11 +234,13 @@ class BotTagStore:
         if "capabilities" in values:
             values["capabilities"] = json.dumps(values["capabilities"])
         new_slug = values.pop("slug", slug)
-        with self.engine.begin() as conn:
+        with _prompt_key_conflicts(values.get("prompt_key")), self.engine.begin() as conn:
             self._lock_role(conn, slug)
             if new_slug != slug:
                 self._rename(conn, slug, new_slug)
                 slug = new_slug
+            if "prompt_key" in values:
+                self._require_free_prompt_key(conn, values["prompt_key"], slug)
             if values:
                 sets = ", ".join(
                     "capabilities = CAST(:capabilities AS jsonb)" if key == "capabilities"
@@ -258,6 +274,9 @@ class BotTagStore:
                 ), {"slug": slug}).mappings().one()
                 fresh = row["prompt_key"] is None
                 key = self._allocate_prompt_key(conn, slug) if fresh else row["prompt_key"]
+                # Data from before the unique index may still share a key;
+                # never write a prompt another tag also points at.
+                self._require_free_prompt_key(conn, key, slug)
                 stage_prompt_upsert(
                     session, key=key, body=body, scope_type="global",
                     title=f"Bot tag: {row['name']}", category=INSTRUCTIONS_CATEGORY,
@@ -349,12 +368,13 @@ class BotTagStore:
         """Insert the new row, move assignments onto it, delete the old row.
 
         The caller holds the old row ``FOR UPDATE``. Assignments move with an
-        UPDATE that the FK accepts because the new row already exists.
+        UPDATE that the FK accepts because the new row already exists. The
+        ``prompt_key`` moves last: it is unique, so both rows can't hold it.
         """
         created = conn.execute(text("""
             INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key,
                                          capabilities, system, created_at, updated_at)
-            SELECT :new, name, description, kind, prompt_key, capabilities, FALSE,
+            SELECT :new, name, description, kind, NULL, capabilities, FALSE,
                    created_at, now()
             FROM bot_tag_catalog WHERE slug = :old
             ON CONFLICT (slug) DO NOTHING
@@ -364,7 +384,24 @@ class BotTagStore:
             raise TagConflict(f"bot tag {new!r} already exists")
         conn.execute(text("UPDATE bot_profile_tags SET tag_slug = :new WHERE tag_slug = :old"),
                      {"old": old, "new": new})
-        conn.execute(text("DELETE FROM bot_tag_catalog WHERE slug = :old"), {"old": old})
+        key = conn.execute(text("DELETE FROM bot_tag_catalog WHERE slug = :old RETURNING prompt_key"),
+                           {"old": old}).scalar_one()
+        if key is not None:
+            conn.execute(text("UPDATE bot_tag_catalog SET prompt_key = :key WHERE slug = :new"),
+                         {"key": key, "new": new})
+
+    @staticmethod
+    def _require_free_prompt_key(conn, key: str | None, slug: str) -> None:
+        """Refuse a ``prompt_key`` that another tag already points at."""
+        if key is None:
+            return
+        holder = conn.execute(text("""
+            SELECT slug FROM bot_tag_catalog
+            WHERE prompt_key = :key AND slug <> :slug ORDER BY slug LIMIT 1
+        """), {"key": key, "slug": slug}).scalar_one_or_none()
+        if holder is not None:
+            raise TagConflict(f"prompt key {key!r} belongs to bot tag {holder!r}; "
+                              "each tag needs its own")
 
     @staticmethod
     def _allocate_prompt_key(conn, slug: str) -> str:
