@@ -23,6 +23,7 @@ from sqlalchemy.engine import Connection, Engine
 from .agent_context import SessionPolicy
 from .message_authorship import AuthorReference
 from .maintenance_delivery import MaintenanceBarrier
+from .inter_bot_control_lane import ensure_control_lane_schema
 from .service.dispatcher_leadership import (
     LOCK_NAME_INFO_KEY,
     build_lock_engine,
@@ -271,6 +272,7 @@ class InterBotDeliveryStore:
                 ON inter_bot_deliveries (available_at, ordinal)
                 WHERE status = 'QUEUED'
             """))
+            ensure_control_lane_schema(conn)  # TASK-1431 control lane
 
         self._schema_guard.run(self.engine, "inter-bot-deliveries", bootstrap)
         # The delivery claim asks the system gate under the target lock (TASK-1233).

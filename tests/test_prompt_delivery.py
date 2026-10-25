@@ -118,7 +118,7 @@ def rig(tmp_path, monkeypatch):
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP, available_at TEXT DEFAULT CURRENT_TIMESTAMP,
             transport_accepted_at TEXT, last_error TEXT, response_model TEXT, response_chars INTEGER,
             next_retry_at TEXT, claim_token TEXT, claim_owner TEXT, lease_expires_at TEXT,
-            session_policy TEXT DEFAULT 'continue')"""))
+            session_policy TEXT DEFAULT 'continue', lane TEXT DEFAULT 'normal')"""))
         conn.execute(text("INSERT INTO sessions(id,bot_id,user_id,status) VALUES ('personal',:bot,:owner,'active')"),
                      {"bot": BOT, "owner": OWNER})
     delivery = LocalDeliveryStore(engine)

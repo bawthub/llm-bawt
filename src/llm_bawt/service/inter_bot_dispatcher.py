@@ -487,10 +487,14 @@ class InterBotDeliveryDispatcher:
         self._wake_event.set()
 
     async def _steer(self, record: DeliveryRecord) -> None:
+        from ..inter_bot_control_lane import ControlSteerFailure, DeliveryControlGrant
         from ..inter_bot_reply_channel import delivery_reply_channel_note
         from .routes.chat import ChatSteerRequest, steer_active_turn
         from .system_gate_admission import SteerGateRefused
 
+        # TASK-1431: a control row steers under its delivery grant, and a miss
+        # settles there; it never falls back to a turn.
+        control = DeliveryControlGrant.of(record)
         claim_token = record.claim_token or ""
         payload = self.store.payload(record.id) or {}
         message = str((payload.get("messages") or [{}])[-1].get("content") or record.message)
@@ -518,6 +522,7 @@ class InterBotDeliveryDispatcher:
                 steer_request_id=steer.request_id,
                 author=record.author,
                 wire_suffix=delivery_reply_channel_note(record),
+                control=control,
             )
             if response.ok:
                 self.store.mark_transport_accepted(record.id, claim_token)
@@ -530,6 +535,12 @@ class InterBotDeliveryDispatcher:
                 )
                 if delivered:
                     await self._emit(delivered)
+            elif control is not None:
+                settled = ControlSteerFailure.settle(
+                    self.store, record, response.detail or "steer_not_persisted",
+                )
+                if settled:
+                    await self._emit(settled)
             else:
                 queued = self.store.requeue(
                     record.id,
@@ -555,6 +566,11 @@ class InterBotDeliveryDispatcher:
                 await self._emit(queued)
         except Exception as exc:
             error = str(getattr(exc, "detail", None) or exc or exc.__class__.__name__)
+            if control is not None:
+                settled = ControlSteerFailure.settle(self.store, record, error)
+                if settled:
+                    await self._emit(settled)
+                return
             current = self.store.get(record.id) or record
             accepted = current.transport_accepted_at is not None
             not_ready_count = steer.not_ready_count_for(target_turn_id)

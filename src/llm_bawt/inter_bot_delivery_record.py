@@ -59,6 +59,8 @@ class DeliveryRecord:
     assistant_message_id: str | None = None
     # TASK-1300: bumped by the database on every UPDATE (commit order).
     revision: int = 0
+    # TASK-1431: 'control' rows steer one pinned run past a held FIFO head.
+    lane: str = "normal"
 
     @classmethod
     def from_mapping(cls, row: Any) -> "DeliveryRecord":
@@ -115,6 +117,7 @@ class DeliveryRecord:
             overflow_recovery_count=int(row.get("overflow_recovery_count") or 0),
             assistant_message_id=payload.get("assistant_message_id") if isinstance(payload, dict) else None,
             revision=int(row.get("revision") or 0),
+            lane=row.get("lane") or "normal",
         )
 
     @property

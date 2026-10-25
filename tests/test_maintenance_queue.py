@@ -55,13 +55,13 @@ def rig():
                           "response_text TEXT, trigger_message_id TEXT, assistant_message_id TEXT)"))
         conn.execute(text("CREATE TABLE inter_bot_deliveries (id TEXT PRIMARY KEY, target_bot_id TEXT, "
                           "ordinal INTEGER, status TEXT, turn_id TEXT, metadata_json TEXT, "
-                          "delivery_mode TEXT, transport_accepted_at TEXT)"))
+                          "delivery_mode TEXT, transport_accepted_at TEXT, lane TEXT DEFAULT 'normal')"))
         conn.execute(text("CREATE TABLE messages (bot_id TEXT, id TEXT, session_id TEXT)"))
         conn.execute(text("INSERT INTO turn_logs VALUES ('compact','fixture','user','/compact',1,NULL,"
                           "'streaming','compaction result','trigger','assistant')"))
         conn.execute(text("INSERT INTO messages VALUES ('fixture','trigger','original-session')"))
         conn.execute(text("INSERT INTO inter_bot_deliveries VALUES "
-                          "('one','fixture',1,'QUEUED','next','{}',NULL,NULL)"))
+                          "('one','fixture',1,'QUEUED','next','{}',NULL,NULL,'normal')"))
     subscriber = SimpleNamespace(publish_tool_event=AsyncMock(return_value="1-0"))
     store = SimpleNamespace(engine=engine, config=None)
     service = SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=store), _redis_subscriber=subscriber)
@@ -156,7 +156,7 @@ def test_crash_after_publish_replays_snapshot_not_work(rig, monkeypatch):
 def test_fifo_heads_keep_independent_publication_receipts(rig):
     with rig.engine.begin() as conn:
         conn.execute(text("INSERT INTO inter_bot_deliveries VALUES "
-                          "('two','fixture',2,'QUEUED','later','{}',NULL,NULL)"))
+                          "('two','fixture',2,'QUEUED','later','{}',NULL,NULL,'normal')"))
     finish(rig)
     assert rig.queue._pending("fixture")[0] == "one"
     asyncio.run(rig.queue.publish_ready("fixture"))

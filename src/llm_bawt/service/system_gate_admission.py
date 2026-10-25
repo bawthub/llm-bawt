@@ -24,13 +24,16 @@ What a live gate does at each edge:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from fastapi import HTTPException
 from sqlalchemy import text as sa_text
 
 from .turn_admission import SystemGateRefused, lock_target
 from .turn_gates import DENY, GateActor, GateBlock, gate_blocks
+
+if TYPE_CHECKING:
+    from ..inter_bot_control_lane import DeliveryControlGrant
 
 ON_GATE_DENY = "deny"
 ON_GATE_HOLD = "hold"
@@ -141,7 +144,7 @@ LIVE_MEMBER_SQL = """
 class ControlGrantRefused(HTTPException):
     """A control grant that names no live claim (forged, stale or lapsed)."""
 
-    def __init__(self, grant: ControlGrant):
+    def __init__(self, grant: "ControlGrant | DeliveryControlGrant"):
         self.grant = grant
         super().__init__(status_code=409, detail="control_grant_refused")
 
@@ -167,7 +170,10 @@ def _admit_grant(conn, grant: ControlGrant) -> ControlTarget:
     return target
 
 
-def check_steer(engine, bot_id: str, *, turn_id: str, grant: ControlGrant | None = None) -> ControlTarget | None:
+def check_steer(
+    engine, bot_id: str, *, turn_id: str,
+    grant: "ControlGrant | DeliveryControlGrant | None" = None,
+) -> ControlTarget | None:
     """Raise ``SteerGateRefused`` when a live gate covers ``bot_id``.
 
     Its own short transaction under ``lock_target``. Only this check is
@@ -179,6 +185,8 @@ def check_steer(engine, bot_id: str, *, turn_id: str, grant: ControlGrant | None
     the steer is a gate owner's own request that the run stop, and it is
     admitted only on a live claim (``_admit_grant``). The return value is
     the pinned run it may address; any mismatch raises ``ControlGrantRefused``.
+    A ``DeliveryControlGrant`` (a control-lane delivery, TASK-1431) is admitted
+    on its delivery claim and linking member instead (``admit_delivery_grant``).
     """
     if grant is not None and (grant.bot_id != bot_id or grant.turn_id != turn_id):
         raise ControlGrantRefused(grant)
@@ -189,6 +197,10 @@ def check_steer(engine, bot_id: str, *, turn_id: str, grant: ControlGrant | None
     with engine.begin() as conn:
         lock_target(conn, bot_id)
         if grant is not None:
+            from ..inter_bot_control_lane import DeliveryControlGrant, admit_delivery_grant
+
+            if isinstance(grant, DeliveryControlGrant):
+                return admit_delivery_grant(conn, grant)
             return _admit_grant(conn, grant)
         block = gate_blocks(conn, bot_id, GateActor("steer", turn_id))
     if block is not None:

@@ -188,6 +188,7 @@ def ensure_gate_schema(engine) -> None:
 def _bootstrap(conn) -> None:
     ensure_relations(conn, _GATE_RELATIONS)
     ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS)
+    ensure_relations(conn, _MEMBER_ADDED_RELATIONS)
 
 
 # Created only when the catalog lacks them (``ensure_relations``): even a no-op
@@ -266,6 +267,18 @@ _MEMBER_ADDED_COLUMNS = {
     # B3: the steer RPC generation (NULL = 0). It advances only when the
     # bridge definitively rejected that generation before accepting it.
     "control_generation": ("INTEGER", None),
+    # TASK-1431: the control-lane delivery that asks this member's pinned run.
+    # Authority is this link, read at claim and at grant; never a ref stored
+    # on the delivery.
+    "control_delivery_id": ("VARCHAR(96)", None),
+}
+
+# Indexes over added columns, created after ``_MEMBER_ADDED_COLUMNS``.
+_MEMBER_ADDED_RELATIONS = {
+    "ix_gate_members_control_delivery": """
+        CREATE INDEX IF NOT EXISTS ix_gate_members_control_delivery
+        ON gate_members (control_delivery_id) WHERE control_delivery_id IS NOT NULL
+    """,
 }
 
 

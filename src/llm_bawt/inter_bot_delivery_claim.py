@@ -40,8 +40,16 @@ class DeliveryClaim:
             # The one per-bot admission lock, so a claim linearizes with gate
             # activation and every other admission edge (TASK-1233).
             lock_target(conn, target)
+            from .inter_bot_control_lane import ControlClaim
             from .inter_bot_preclaim import load_claim_head, load_user_bypass
 
+            # TASK-1431: a control row steers its pinned run past a held head.
+            # It reserves nothing; a head settled here comes back terminal.
+            control = ControlClaim.claim(
+                conn, target, claim_owner=claim_owner, lease_seconds=lease_seconds,
+            )
+            if control is not None:
+                return control
             # A user-Stop hold lets the user's own chat run ahead of the held
             # backlog; every other gate still applies to it (TASK-1327).
             head, exempt_owner = None, None

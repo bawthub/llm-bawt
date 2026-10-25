@@ -37,14 +37,14 @@ def load_user_bypass(conn, target: str, config):
     """
     candidate = conn.execute(text(f"""
         SELECT c.id FROM inter_bot_deliveries c
-        WHERE c.target_bot_id=:target AND c.status='QUEUED'
+        WHERE c.target_bot_id=:target AND c.status='QUEUED' AND c.lane='normal'
           AND c.author_entity_type='user'
           AND c.metadata_json->'ordinary_chat' IS NOT NULL
           AND c.metadata_json->'prompt_schedule' IS NULL
           AND c.available_at <= clock_timestamp()
           AND NOT EXISTS (
               SELECT 1 FROM inter_bot_deliveries d
-              WHERE d.target_bot_id=:target
+              WHERE d.target_bot_id=:target AND d.lane='normal'
                 AND d.status IN ('STEERING','DISPATCHING')
                 AND NOT ({_ACCEPTED_OPEN_DISPATCH})
           )
@@ -76,7 +76,7 @@ def load_claim_head(conn, target: str, config):
     """
     candidate = conn.execute(text(f"""
         SELECT d.* FROM inter_bot_deliveries d
-        WHERE d.target_bot_id=:target
+        WHERE d.target_bot_id=:target AND d.lane='normal'
           AND d.status IN ('QUEUED','STEERING','DISPATCHING')
           AND NOT ({_ACCEPTED_OPEN_DISPATCH})
         ORDER BY d.ordinal ASC LIMIT 1
