@@ -9,6 +9,7 @@ same ``no_match`` as an empty in-scope bot.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from functools import lru_cache
@@ -64,11 +65,18 @@ def parse_find_time(field: str, value: str | float | None, *, now: float | None 
             if not 1 <= count <= _RELATIVE_MAX[unit]:
                 raise InvalidTime(field)
             return (time.time() if now is None else now) - count * _UNIT_SECONDS[unit]
+    if value is None:
+        return None
     from .server import _parse_timestamp
     try:
-        return _parse_timestamp(value)
-    except ValueError:
+        parsed = _parse_timestamp(value)
+    except (ValueError, OverflowError):
         raise InvalidTime(field) from None
+    # A value was given: blank, an unsupported type or a NaN/inf bound would
+    # silently widen the search, so each is a bad request, not "omitted".
+    if parsed is None or not math.isfinite(parsed):
+        raise InvalidTime(field)
+    return parsed
 
 
 def invalid_time(field: str) -> str:

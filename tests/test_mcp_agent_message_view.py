@@ -122,19 +122,27 @@ def test_find_time_accepts_relative_iso_and_unix(value, expected):
 
 
 @pytest.mark.parametrize("value", ["0h", "0d", "366d", "8761h", "3w", "-2d", "1.5d", "yesterday",
-                                   "2026-13-01", "10000d"])
+                                   "2026-13-01", "10000d", "", "   ", "nan", "NaN", "inf",
+                                   "-Infinity", float("nan"), float("inf"), "1e400"])
 def test_find_time_rejects_out_of_range_and_unknown(value):
     with pytest.raises(find_tools.InvalidTime) as caught:
         find_tools.parse_find_time("until", value, now=NOW)
     assert caught.value.field == "until"
 
 
-def test_bad_time_answer_names_the_field_and_accepted_formats(monkeypatch):
+@pytest.mark.parametrize("field", ["since", "until"])
+@pytest.mark.parametrize("bad", ["yesterday", "", "  ", "nan", float("inf"), "0h"])
+def test_bad_time_answer_names_the_field_and_accepted_formats(monkeypatch, field, bad):
     monkeypatch.setattr(find_tools, "trusted_caller",
                         lambda name, arguments: SimpleNamespace(kind="service", bot_id="b", user_id=None))
-    answer = json.loads(asyncio.run(find_tools.messages_find(query="x", since="yesterday")))
+
+    def no_search():
+        raise AssertionError("a bad time must answer before any search runs")
+
+    monkeypatch.setattr(find_tools, "_runtime", no_search)
+    answer = json.loads(asyncio.run(find_tools.messages_find(query="x", **{field: bad})))
     assert answer["status"] == "unavailable"
     assert answer["reason"] == "invalid_request"
-    assert answer["field"] == "since"
+    assert answer["field"] == field
     assert answer["accepted"] == list(find_tools.ACCEPTED_TIME_FORMATS)
     assert any("24h" in fmt for fmt in answer["accepted"])
