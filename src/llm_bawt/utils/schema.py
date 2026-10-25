@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from weakref import WeakKeyDictionary, WeakSet
 
 from sqlalchemy import text
@@ -123,6 +123,28 @@ def ensure_columns(conn: Connection, table: str, columns: Mapping[str, tuple[str
     for statement in ddl:
         conn.execute(text(statement))
     return ddl
+
+
+def drop_columns(conn: Connection, table: str, names: Iterable[str]) -> list[str]:
+    """Drop the retired columns ``table`` still has; return the DDL run.
+
+    The contract half of an expand/contract migration. Like ``ensure_columns``,
+    one catalog read decides, so a table already contracted gets no ALTER (a
+    no-op ``DROP COLUMN IF EXISTS`` still requests ACCESS EXCLUSIVE). Every
+    present column goes in one statement: one lock, one catalog change.
+    """
+    wanted = list(names)
+    present = {row[0] for row in conn.execute(text("""
+        SELECT attname FROM pg_attribute
+        WHERE attrelid = to_regclass(:table) AND attnum > 0 AND NOT attisdropped
+          AND attname = ANY(CAST(:names AS text[]))
+    """), {"table": table, "names": wanted})}
+    drops = [name for name in wanted if name in present]
+    if not drops:
+        return []
+    statement = f"ALTER TABLE {table} " + ", ".join(f"DROP COLUMN IF EXISTS {name}" for name in drops)
+    conn.execute(text(statement))
+    return [statement]
 
 
 def reset_schema_guards_for_tests(engine: Engine | None = None) -> None:

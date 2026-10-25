@@ -32,7 +32,7 @@ from typing import Any, Mapping
 from sqlalchemy import text as sa_text
 
 from ..bot_types import normalize_bot_type
-from ..utils.schema import SchemaBootstrapGuard, ensure_columns, ensure_relations
+from ..utils.schema import SchemaBootstrapGuard, drop_columns, ensure_columns, ensure_relations
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,7 @@ def _bootstrap(conn) -> None:
     ensure_relations(conn, _GATE_RELATIONS)
     ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS)
     ensure_relations(conn, _MEMBER_ADDED_RELATIONS)
+    drop_columns(conn, "gate_members", _MEMBER_RETIRED_COLUMNS)
 
 
 # Created only when the catalog lacks them (``ensure_relations``): even a no-op
@@ -234,10 +235,6 @@ _GATE_RELATIONS = {
             control_state VARCHAR(16) NOT NULL DEFAULT 'pending'
               CHECK (control_state IN ('pending','steering','steered','unsupported',
                                        'not_needed','self','unconfirmed','cancelled')),
-            control_request_id VARCHAR(255),
-            control_claim_token VARCHAR(128),
-            control_lease_expires_at TIMESTAMPTZ,
-            control_attempts INTEGER NOT NULL DEFAULT 0,
             control_error TEXT,
             ack_status VARCHAR(32),
             ack_note TEXT,
@@ -261,17 +258,25 @@ _MEMBER_ADDED_COLUMNS = {
     # test_Z (b): the exit evidence home when the member's turn row is gone
     # (``stamp_member_exit``); the same record shape as the turn-row stamp.
     "execution_exit": ("JSONB", None),
-    # B3: the quiesce control pump's backoff. A pending member is not retried
-    # before it; NULL means now. Bookkeeping only: never stamps control_changed_at.
-    "control_next_attempt_at": ("TIMESTAMPTZ", None),
-    # B3: the steer RPC generation (NULL = 0). It advances only when the
-    # bridge definitively rejected that generation before accepting it.
-    "control_generation": ("INTEGER", None),
     # TASK-1431: the control-lane delivery that asks this member's pinned run.
     # Authority is this link, read at claim and at grant; never a ref stored
     # on the delivery.
     "control_delivery_id": ("VARCHAR(96)", None),
 }
+
+# The TASK-1233 B3 pump's own claim, lease, retry and generation, retired by
+# the TASK-1431 control lane (S3: the delivery dispatcher owns retry and the
+# member's link is ``control_delivery_id``). Dropped once a build that no longer
+# reads them was loaded and verified (S4). An already-contracted table takes no
+# ALTER. Rolling back past S3 needs these columns back: re-add them first.
+_MEMBER_RETIRED_COLUMNS = (
+    "control_request_id",
+    "control_claim_token",
+    "control_lease_expires_at",
+    "control_attempts",
+    "control_next_attempt_at",
+    "control_generation",
+)
 
 # Indexes over added columns, created after ``_MEMBER_ADDED_COLUMNS``.
 _MEMBER_ADDED_RELATIONS = {

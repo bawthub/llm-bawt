@@ -738,13 +738,19 @@ def _drain(store, gate_id):
     "UPDATE gate_members SET ack_note = ack_note WHERE false",  # an open writer
 ])
 def test_bootstrap_on_a_migrated_schema_waits_on_no_open_transaction(gated, holder_sql):
-    from llm_bawt.service.turn_gates import _GATE_RELATIONS, _MEMBER_ADDED_COLUMNS, _bootstrap
-    from llm_bawt.utils.schema import SchemaBootstrapGuard, ensure_columns, ensure_relations
+    from llm_bawt.service.turn_gates import (
+        _GATE_RELATIONS,
+        _MEMBER_ADDED_COLUMNS,
+        _MEMBER_RETIRED_COLUMNS,
+        _bootstrap,
+    )
+    from llm_bawt.utils.schema import SchemaBootstrapGuard, drop_columns, ensure_columns, ensure_relations
 
     engine = gated.store.engine
     with engine.begin() as conn:  # the declared defaults are spelled as the catalog reports them
         assert ensure_relations(conn, _GATE_RELATIONS) == []
         assert ensure_columns(conn, "gate_members", _MEMBER_ADDED_COLUMNS) == []
+        assert drop_columns(conn, "gate_members", _MEMBER_RETIRED_COLUMNS) == []
 
     def bootstrap(conn):
         conn.execute(sa_text("SET LOCAL lock_timeout = '300ms'"))
@@ -782,6 +788,55 @@ def test_ensure_columns_adds_null_columns_and_repairs_only_a_drifted_default(gat
         index = {"caid_ensure_ix": "CREATE INDEX IF NOT EXISTS caid_ensure_ix ON caid_ensure (id)"}
         assert ensure_relations(conn, index) == ["caid_ensure_ix"]
         assert ensure_relations(conn, index) == []
+
+
+@pytest.mark.integration
+def test_drop_columns_drops_only_what_the_table_still_has_in_one_statement(gated):
+    from llm_bawt.utils.schema import drop_columns
+
+    with gated.store.engine.begin() as conn:
+        conn.execute(sa_text("CREATE TEMP TABLE caid_drop (id INT, a INT, b TEXT, keep INT) ON COMMIT DROP"))
+        assert drop_columns(conn, "caid_drop", ["a", "gone", "b"]) == [
+            "ALTER TABLE caid_drop DROP COLUMN IF EXISTS a, DROP COLUMN IF EXISTS b"]
+        left = [r[0] for r in conn.execute(sa_text(
+            "SELECT attname FROM pg_attribute WHERE attrelid = 'caid_drop'::regclass"
+            " AND attnum > 0 AND NOT attisdropped ORDER BY attnum")).all()]
+        assert left == ["id", "keep"]
+        assert drop_columns(conn, "caid_drop", ["a", "gone", "b"]) == []
+
+
+def _member_columns(conn):
+    return {r[0] for r in conn.execute(sa_text(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'gate_members'::regclass"
+        " AND attnum > 0 AND NOT attisdropped")).all()}
+
+
+@pytest.mark.integration
+def test_bootstrap_contracts_a_pre_s4_roster_and_keeps_its_rows(gated):
+    """TASK-1431 S4: a table still carrying the B3 pump's six columns loses them; rows survive."""
+    from llm_bawt.service.turn_gates import _MEMBER_RETIRED_COLUMNS, _bootstrap
+
+    store, bot = gated.store, gated.bot()
+    turn = _open(store, bot)
+    gate = _activate(store, _spec(gated.owner(), GateScope.for_bots(bot))).gate
+    with store.engine.connect() as conn:
+        txn = conn.begin()  # DDL is transactional: the rollback restores the shared table
+        try:
+            assert not set(_MEMBER_RETIRED_COLUMNS) & _member_columns(conn)
+            conn.execute(sa_text(
+                "ALTER TABLE gate_members ADD COLUMN control_request_id VARCHAR(255),"
+                " ADD COLUMN control_claim_token VARCHAR(128),"
+                " ADD COLUMN control_lease_expires_at TIMESTAMPTZ,"
+                " ADD COLUMN control_attempts INTEGER NOT NULL DEFAULT 0,"
+                " ADD COLUMN control_next_attempt_at TIMESTAMPTZ,"
+                " ADD COLUMN control_generation INTEGER"))
+            _bootstrap(conn)
+            assert not set(_MEMBER_RETIRED_COLUMNS) & _member_columns(conn)
+            assert conn.execute(sa_text(
+                "SELECT control_state FROM gate_members WHERE gate_id=:g AND turn_id=:t"),
+                {"g": gate.id, "t": turn}).scalar_one() == "pending"
+        finally:
+            txn.rollback()
 
 
 @pytest.mark.integration
