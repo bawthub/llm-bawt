@@ -21,11 +21,16 @@ from .errors import TagConflict, TagNotFound, TagValidationError
 from .vocabulary import TAG_SLUG, BehaviorTag, is_canonical_bot_slug
 
 ROLE_FIELDS = frozenset({"name", "description", "prompt_key", "capabilities"})
+# ``slug`` is editable too, as an atomic rename (TASK-1249); it is not a column write.
+EDITABLE_FIELDS = ROLE_FIELDS | {"slug"}
 MAX_NAME = 128
 MAX_DESCRIPTION = 2000
 MAX_PROMPT_KEY = 160
 MAX_CAPABILITY = 64
+MAX_INSTRUCTIONS = 20000
 ROLE_PROMPT_PREFIX = "role."
+# Registry category for tag instruction prompts (operator data, global scope).
+INSTRUCTIONS_CATEGORY = "bot_tag"
 
 _CATALOG_SQL = """
     SELECT c.slug, c.name, c.description, c.kind, c.prompt_key, c.capabilities, c.system,
@@ -133,6 +138,13 @@ class RoleFields:
             raise TagValidationError("capabilities must not repeat")
         return list(value)
 
+    @staticmethod
+    def instructions(value: object) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_INSTRUCTIONS:
+            raise TagValidationError(
+                f"instructions must be 1-{MAX_INSTRUCTIONS} characters and not blank")
+        return value
+
 
 class BotTagStore:
     """Catalog and assignment writes on one engine; every write is one transaction."""
@@ -168,6 +180,14 @@ class BotTagStore:
                 SELECT tag_slug FROM bot_profile_tags WHERE bot_slug = :bot ORDER BY tag_slug
             """), {"bot": bot}).scalars())
 
+    def capabilities_by_tag(self) -> dict[str, tuple[str, ...]]:
+        """Each role tag's capability tokens. Code never interprets a token."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT slug, capabilities FROM bot_tag_catalog WHERE kind = 'role' ORDER BY slug
+            """)).mappings()
+            return {row["slug"]: tuple(row["capabilities"] or ()) for row in rows}
+
     # --- role catalog writes ---------------------------------------------
 
     def create_role(self, slug: object, name: object, description: object = "",
@@ -192,20 +212,77 @@ class BotTagStore:
             return self._get(conn, created)
 
     def update_role(self, slug: str, changes: Mapping[str, object]) -> CatalogTag:
-        unknown = sorted(set(changes) - ROLE_FIELDS)
+        """Edit a role tag in one transaction; a ``slug`` change renames it first."""
+        unknown = sorted(set(changes) - EDITABLE_FIELDS)
         if unknown:
             raise TagValidationError(f"not editable on a tag: {', '.join(unknown)}")
         values = {key: getattr(RoleFields, key)(value) for key, value in changes.items()}
         if "capabilities" in values:
             values["capabilities"] = json.dumps(values["capabilities"])
+        new_slug = values.pop("slug", slug)
         with self.engine.begin() as conn:
             self._lock_role(conn, slug)
+            if new_slug != slug:
+                self._rename(conn, slug, new_slug)
+                slug = new_slug
             if values:
                 sets = ", ".join(
                     "capabilities = CAST(:capabilities AS jsonb)" if key == "capabilities"
                     else f"{key} = :{key}" for key in sorted(values))
                 conn.execute(text(f"UPDATE bot_tag_catalog SET {sets}, updated_at = now() "
                                   "WHERE slug = :slug"), {**values, "slug": slug})
+            return self._get(conn, slug)
+
+    def rename_role(self, old: str, new: object) -> CatalogTag:
+        """Atomic slug rename: assignments, ``prompt_key`` and capabilities move with it."""
+        return self.update_role(old, {"slug": new})
+
+    def save_instructions(self, slug: str, body: object, updated_by: str | None) -> CatalogTag:
+        """Write a role tag's instructions to the prompt registry, in one transaction.
+
+        The first save allocates an opaque ``prompt_key`` (``role.<slug>``, or the
+        first free ``_N`` suffix). It is never re-derived from the slug, so a
+        renamed tag keeps its key and its prompt's version history.
+        """
+        from sqlmodel import Session
+
+        from ..prompt_registry import PromptKeyTaken, stage_prompt_upsert
+
+        body = RoleFields.instructions(body)
+        try:
+            with Session(self.engine) as session:
+                conn = session.connection()
+                self._lock_role(conn, slug)
+                row = conn.execute(text(
+                    "SELECT name, prompt_key FROM bot_tag_catalog WHERE slug = :slug"
+                ), {"slug": slug}).mappings().one()
+                fresh = row["prompt_key"] is None
+                key = self._allocate_prompt_key(conn, slug) if fresh else row["prompt_key"]
+                stage_prompt_upsert(
+                    session, key=key, body=body, scope_type="global",
+                    title=f"Bot tag: {row['name']}", category=INSTRUCTIONS_CATEGORY,
+                    updated_by=updated_by, change_note=f"Instructions for bot tag {slug}",
+                    create_only=fresh)
+                if fresh:
+                    conn.execute(text("""
+                        UPDATE bot_tag_catalog SET prompt_key = :key, updated_at = now()
+                        WHERE slug = :slug
+                    """), {"key": key, "slug": slug})
+                session.commit()
+        except (IntegrityError, PromptKeyTaken) as exc:
+            # Another writer took the allocated key: refuse rather than overwrite its prompt.
+            raise TagConflict(f"prompt key for bot tag {slug!r} was taken concurrently; "
+                              "retry") from exc
+        return self.get(slug)
+
+    def clear_instructions(self, slug: str) -> CatalogTag:
+        """Detach the tag's instructions; the registry prompt and its history stay."""
+        with self.engine.begin() as conn:
+            self._lock_role(conn, slug)
+            conn.execute(text("""
+                UPDATE bot_tag_catalog SET prompt_key = NULL, updated_at = now()
+                WHERE slug = :slug AND prompt_key IS NOT NULL
+            """), {"slug": slug})
             return self._get(conn, slug)
 
     def delete_role(self, slug: str) -> None:
@@ -266,6 +343,41 @@ class BotTagStore:
         if row is None:
             raise TagNotFound(f"bot tag {slug!r} not found")
         return CatalogTag.from_row(row)
+
+    @staticmethod
+    def _rename(conn, old: str, new: str) -> None:
+        """Insert the new row, move assignments onto it, delete the old row.
+
+        The caller holds the old row ``FOR UPDATE``. Assignments move with an
+        UPDATE that the FK accepts because the new row already exists.
+        """
+        created = conn.execute(text("""
+            INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key,
+                                         capabilities, system, created_at, updated_at)
+            SELECT :new, name, description, kind, prompt_key, capabilities, FALSE,
+                   created_at, now()
+            FROM bot_tag_catalog WHERE slug = :old
+            ON CONFLICT (slug) DO NOTHING
+            RETURNING slug
+        """), {"old": old, "new": new}).scalar_one_or_none()
+        if created is None:
+            raise TagConflict(f"bot tag {new!r} already exists")
+        conn.execute(text("UPDATE bot_profile_tags SET tag_slug = :new WHERE tag_slug = :old"),
+                     {"old": old, "new": new})
+        conn.execute(text("DELETE FROM bot_tag_catalog WHERE slug = :old"), {"old": old})
+
+    @staticmethod
+    def _allocate_prompt_key(conn, slug: str) -> str:
+        """``role.<slug>`` unless a prompt or another tag holds it; then ``_2``, ``_3``…"""
+        taken = set(conn.execute(text("""
+            SELECT key FROM prompt_templates WHERE key LIKE 'role.%'
+            UNION SELECT prompt_key FROM bot_tag_catalog WHERE prompt_key IS NOT NULL
+        """)).scalars())
+        base = f"{ROLE_PROMPT_PREFIX}{slug}"
+        key, suffix = base, 2
+        while key in taken:
+            key, suffix = f"{base}_{suffix}", suffix + 1
+        return key
 
     @staticmethod
     def _lock_role(conn, slug: str) -> None:

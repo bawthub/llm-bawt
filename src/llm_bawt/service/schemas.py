@@ -884,5 +884,6 @@ from .schemas_bots import (  # noqa: E402,F401
     BotTagCatalogResponse,
     BotTagCreateRequest,
     BotTagPatchRequest,
+    BotTagInstructionsRequest,
     BotTagAssignmentRemovedResponse,
 )

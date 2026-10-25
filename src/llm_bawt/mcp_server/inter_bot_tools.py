@@ -742,6 +742,21 @@ def _profile_rows() -> list:
         raise BotAccessError("policy_unavailable") from None
 
 
+def _role_capabilities() -> dict[str, tuple[str, ...]]:
+    """Each role tag's capability tokens (TASK-1249); an unreadable catalog fails closed."""
+    from llm_bawt.bot_tags.store import BotTagStore
+    from llm_bawt.runtime_settings import BotProfileStore
+    from llm_bawt.utils.config import Config
+
+    try:
+        engine = BotProfileStore(Config()).engine
+        if engine is None:
+            raise RuntimeError("bot profiles unavailable")
+        return BotTagStore(engine).capabilities_by_tag()
+    except Exception:
+        raise BotAccessError("policy_unavailable") from None
+
+
 def _live_states(profiles: list) -> dict[str, dict]:
     from llm_bawt.bot_live_state import BotIdentity, BotLiveStateReader
     from llm_bawt.utils.config import Config
@@ -760,6 +775,9 @@ def _live_states(profiles: list) -> dict[str, dict]:
 @mcp.tool(name="bots_list_available")
 async def list_available_bots(
     tag: Annotated[str | None, Field(description="Only bots with this tag.")] = None,
+    capability: Annotated[str | None, Field(
+        description="Only bots whose tags grant this capability."
+    )] = None,
     include_state: Annotated[bool, Field(
         description="Add state.turn.kind (idle/reserved/executing/ambiguous) and the other live fields."
     )] = True,
@@ -770,6 +788,10 @@ async def list_available_bots(
     unreadable policy or profile table raises ``policy_unavailable``, never an
     unfiltered or partial list. An unknown ``tag`` raises instead of matching
     nothing.
+
+    ``capabilities`` (TASK-1249) is the sorted union of the capability tokens
+    of the bot's tags; ``capability`` filters on it. Tokens are operator data
+    and opaque here. An unknown ``capability`` raises like an unknown tag.
 
     ``state`` (TASK-1400) is an advisory, unlocked read: turn comes from the
     admission classifier, so it matches what a send would see at that moment.
@@ -783,10 +805,21 @@ async def list_available_bots(
         wanted = tag.strip().lower()
         if wanted not in access.tags.catalog:
             raise ValueError(f"unknown tag {tag!r}")
+    by_tag = await asyncio.to_thread(_role_capabilities)
+
+    def capabilities_of(slug: str) -> list[str]:
+        return sorted({c for t in access.tags.tags.get(slug, ()) for c in by_tag.get(t, ())})
+
+    wanted_capability = None
+    if capability is not None:
+        wanted_capability = capability.strip()
+        if not any(wanted_capability in caps for caps in by_tag.values()):
+            raise ValueError(f"unknown capability {capability!r}")
     profiles = [
         row for row in await asyncio.to_thread(_profile_rows)
         if access.tags.excluded_reason(row.slug) is None
         and (wanted is None or wanted in access.tags.tags.get(row.slug, ()))
+        and (wanted_capability is None or wanted_capability in capabilities_of(row.slug))
     ]
     states = await asyncio.to_thread(_live_states, profiles) if include_state and profiles else {}
     listed = []
@@ -799,6 +832,7 @@ async def list_available_bots(
             "default_model": row.default_model or "",
             "agent_backend": row.agent_backend,
             "tags": sorted(access.tags.tags.get(row.slug, ())),
+            "capabilities": capabilities_of(row.slug),
         }
         if include_state:
             entry["state"] = states[row.slug]

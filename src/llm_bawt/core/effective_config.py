@@ -26,6 +26,8 @@ def describe_effective_config(owner: Any, prompt: str = "") -> dict[str, Any]:
                 "char_len": len(section.content),
                 "source": metadata.get("source", "unknown"),
                 "gate": metadata.get("gate", "unknown"),
+                # TASK-1249: only when present, so existing sections stay byte-identical.
+                **({"provenance": metadata["provenance"]} if metadata.get("provenance") else {}),
             }
         )
 

@@ -155,6 +155,97 @@ def extract_placeholders(body: str) -> list[str]:
     return names
 
 
+class PromptKeyTaken(Exception):
+    """A create-only prompt write found its key already taken."""
+
+
+def stage_prompt_upsert(
+    session: Session,
+    *,
+    key: str,
+    body: str,
+    scope_type: str = "global",
+    scope_id: str | None = None,
+    title: str | None = None,
+    category: str | None = None,
+    format: str = "plain_text",
+    required_vars: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    updated_by: str | None = None,
+    change_note: str | None = None,
+    create_only: bool = False,
+) -> PromptTemplate:
+    """Stage one prompt write and its version row in ``session``; never commits.
+
+    :meth:`PromptTemplateStore.upsert` commits it alone. A caller that must
+    write a prompt together with its own rows (TASK-1249: a bot tag's
+    instructions and its ``prompt_key``) stages it in that caller's transaction.
+    ``create_only`` raises :class:`PromptKeyTaken` instead of overwriting a row
+    that appeared after the caller chose the key; a concurrent insert of the
+    same key still fails on the unique constraint at commit.
+    """
+    normalized_type, normalized_id = _normalize_scope(scope_type, scope_id)
+    required_vars = [str(item) for item in (required_vars or []) if str(item).strip()]
+    metadata = metadata or {}
+    now = datetime.now(timezone.utc)
+    row = session.exec(
+        select(PromptTemplate).where(
+            PromptTemplate.key == key,
+            PromptTemplate.scope_type == normalized_type,
+            PromptTemplate.scope_id == normalized_id,
+        )
+    ).first()
+    if create_only and row is not None:
+        raise PromptKeyTaken(key)
+    version_statement = select(PromptTemplateVersion).where(
+        PromptTemplateVersion.key == key,
+        PromptTemplateVersion.scope_type == normalized_type,
+        PromptTemplateVersion.scope_id == normalized_id,
+    )
+    existing_versions = list(session.exec(version_statement).all())
+    next_version = (max((v.version for v in existing_versions), default=0) + 1)
+
+    if row is None:
+        row = PromptTemplate(
+            key=key,
+            scope_type=normalized_type,
+            scope_id=normalized_id,
+            title=title,
+            category=category,
+            format=format,
+            body=body,
+            required_vars_json=json.dumps(required_vars) if required_vars else None,
+            metadata_json=json.dumps(metadata) if metadata else None,
+            updated_by=updated_by,
+            created_at=now,
+            updated_at=now,
+        )
+    else:
+        row.title = title
+        row.category = category
+        row.format = format
+        row.body = body
+        row.required_vars_json = json.dumps(required_vars) if required_vars else None
+        row.metadata_json = json.dumps(metadata) if metadata else None
+        row.updated_by = updated_by
+        row.updated_at = now
+
+    session.add(row)
+    session.add(
+        PromptTemplateVersion(
+            key=key,
+            scope_type=normalized_type,
+            scope_id=normalized_id,
+            version=next_version,
+            body=body,
+            change_note=change_note,
+            created_by=updated_by,
+            created_at=now,
+        )
+    )
+    return row
+
+
 class PromptTemplateStore:
     """Database access for prompt templates."""
 
@@ -335,63 +426,11 @@ class PromptTemplateStore:
     ) -> PromptTemplate:
         if self.engine is None:
             raise RuntimeError("Prompt template DB unavailable")
-        normalized_type, normalized_id = _normalize_scope(scope_type, scope_id)
-        required_vars = [str(item) for item in (required_vars or []) if str(item).strip()]
-        metadata = metadata or {}
-        now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
-            row = session.exec(
-                select(PromptTemplate).where(
-                    PromptTemplate.key == key,
-                    PromptTemplate.scope_type == normalized_type,
-                    PromptTemplate.scope_id == normalized_id,
-                )
-            ).first()
-            version_statement = select(PromptTemplateVersion).where(
-                PromptTemplateVersion.key == key,
-                PromptTemplateVersion.scope_type == normalized_type,
-                PromptTemplateVersion.scope_id == normalized_id,
-            )
-            existing_versions = list(session.exec(version_statement).all())
-            next_version = (max((v.version for v in existing_versions), default=0) + 1)
-
-            if row is None:
-                row = PromptTemplate(
-                    key=key,
-                    scope_type=normalized_type,
-                    scope_id=normalized_id,
-                    title=title,
-                    category=category,
-                    format=format,
-                    body=body,
-                    required_vars_json=json.dumps(required_vars) if required_vars else None,
-                    metadata_json=json.dumps(metadata) if metadata else None,
-                    updated_by=updated_by,
-                    created_at=now,
-                    updated_at=now,
-                )
-            else:
-                row.title = title
-                row.category = category
-                row.format = format
-                row.body = body
-                row.required_vars_json = json.dumps(required_vars) if required_vars else None
-                row.metadata_json = json.dumps(metadata) if metadata else None
-                row.updated_by = updated_by
-                row.updated_at = now
-
-            session.add(row)
-            session.add(
-                PromptTemplateVersion(
-                    key=key,
-                    scope_type=normalized_type,
-                    scope_id=normalized_id,
-                    version=next_version,
-                    body=body,
-                    change_note=change_note,
-                    created_by=updated_by,
-                    created_at=now,
-                )
+            row = stage_prompt_upsert(
+                session, key=key, body=body, scope_type=scope_type, scope_id=scope_id,
+                title=title, category=category, format=format, required_vars=required_vars,
+                metadata=metadata, updated_by=updated_by, change_note=change_note,
             )
             session.commit()
             session.refresh(row)

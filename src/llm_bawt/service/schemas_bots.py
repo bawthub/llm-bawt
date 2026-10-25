@@ -218,13 +218,26 @@ class BotTagCreateRequest(BaseModel):
 
 
 class BotTagPatchRequest(BaseModel):
-    """Edit a role tag; only provided fields change. ``prompt_key: null`` clears it."""
+    """Edit a role tag; only provided fields change. ``prompt_key: null`` clears it.
+
+    A new ``slug`` renames the tag atomically: assignments, ``prompt_key`` and
+    capabilities move with it.
+    """
     model_config = ConfigDict(extra="forbid")
 
+    slug: str | None = None
     name: str | None = None
     description: str | None = None
     prompt_key: str | None = None
     capabilities: list[str] | None = None
+
+
+class BotTagInstructionsRequest(BaseModel):
+    """Save a role tag's instructions (a versioned prompt-registry row)."""
+    model_config = ConfigDict(extra="forbid")
+
+    body: str
+    updated_by: str | None = None
 
 
 class BotTagAssignmentRemovedResponse(BaseModel):

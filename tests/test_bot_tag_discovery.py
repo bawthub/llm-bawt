@@ -58,8 +58,15 @@ def policy(monkeypatch):
         state["state_reads"].append([row.slug for row in profiles])
         return {row.slug: {"turn": {"kind": "idle"}, "fixture": row.slug} for row in profiles}
 
+    def role_capabilities():
+        state["order"].append("capabilities")
+        return state["capabilities"]
+
     state["state_reads"] = []
+    # Stored order is the operator's; discovery reports the sorted union.
+    state["capabilities"] = {"coder": ("implement",), "reviewer": ("review", "implement")}
     monkeypatch.setattr(tools, "_policy_resolver", _Resolver)
+    monkeypatch.setattr(tools, "_role_capabilities", role_capabilities)
     monkeypatch.setattr(tools, "_profile_rows", profile_rows)
     monkeypatch.setattr(tools, "_live_states", live_states)
     return state
@@ -71,16 +78,18 @@ def test_discovery_lists_only_public_and_quiet_bots_with_their_tags(policy):
     assert [bot["slug"] for bot in listed] == ["fixture-public", "fixture-quiet"]
     assert listed[0] == {"slug": "fixture-public", "name": "Fixture-Public", "bot_type": "agent",
                          "description": "", "default_model": "fixture-model",
-                         "agent_backend": "claude-code", "tags": ["reviewer"]}
+                         "agent_backend": "claude-code", "tags": ["reviewer"],
+                         "capabilities": ["implement", "review"]}
     assert listed[1]["tags"] == ["no_global_search"]
-    assert policy["order"] == ["policy", "profiles"]
+    assert listed[1]["capabilities"] == []
+    assert policy["order"] == ["policy", "capabilities", "profiles"]
     assert policy["state_reads"] == []
 
 
 def test_state_is_read_once_for_the_visible_bots_only(policy):
     listed = asyncio.run(tools.list_available_bots())
 
-    assert policy["order"] == ["policy", "profiles", "state"]
+    assert policy["order"] == ["policy", "capabilities", "profiles", "state"]
     assert policy["state_reads"] == [["fixture-public", "fixture-quiet"]]
     assert [bot["state"]["fixture"] for bot in listed] == ["fixture-public", "fixture-quiet"]
 
@@ -107,6 +116,38 @@ def test_an_unknown_tag_raises_before_reading_profiles(policy):
     with pytest.raises(ValueError, match="unknown tag"):
         asyncio.run(tools.list_available_bots(tag="no-such-tag"))
     assert policy["order"] == ["policy"]
+
+
+@pytest.mark.parametrize("capability", ["review", " review "])
+def test_the_capability_filter_keeps_bots_whose_tags_grant_it(policy, capability):
+    listed = asyncio.run(tools.list_available_bots(capability=capability, include_state=False))
+
+    assert [bot["slug"] for bot in listed] == ["fixture-public"]
+
+
+def test_a_capability_follows_the_tag_not_the_bot(policy):
+    """A token moved to another tag (or a renamed tag) changes who it finds."""
+    policy["capabilities"] = {"coder": ("review",), "reviewer": ()}
+
+    assert asyncio.run(tools.list_available_bots(capability="review")) == []
+    assert asyncio.run(tools.list_available_bots(include_state=False))[0]["capabilities"] == []
+
+
+def test_an_unknown_capability_raises_before_reading_profiles(policy):
+    with pytest.raises(ValueError, match="unknown capability"):
+        asyncio.run(tools.list_available_bots(capability="no-such-capability"))
+    assert policy["order"] == ["policy", "capabilities"]
+
+
+def test_unreadable_capabilities_are_policy_unavailable(monkeypatch):
+    class _Store:
+        def __init__(self, _config):
+            self.engine = None
+
+    monkeypatch.setattr("llm_bawt.runtime_settings.BotProfileStore", _Store)
+
+    with pytest.raises(BotAccessError, match="policy_unavailable"):
+        tools._role_capabilities()
 
 
 def test_a_profile_created_after_the_snapshot_is_hidden(policy):

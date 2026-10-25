@@ -186,7 +186,9 @@ async def test_catalog_token_budgets():
     # TASK-1460: tasks_board with the board URL's six filters and a row limit:
     # 14,468 (+187). One call reads the whole board, lanes and counts, in
     # place of a tasks_list call per status.
-    assert total <= 14468, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1249: bots_list_available optional capability filter: 14,499 (+31).
+    # Finds a bot by what its role tags can do without naming a custom tag.
+    assert total <= 14499, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

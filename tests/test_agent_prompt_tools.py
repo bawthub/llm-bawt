@@ -57,6 +57,9 @@ class _PromptProbe:
     def _sec_agent_global_prompt(self, builder: PromptBuilder, prompt: str) -> None:
         return None
 
+    def _sec_tag_context(self, builder: PromptBuilder, prompt: str) -> None:
+        return None
+
 
 @pytest.mark.parametrize(
     ("model_type", "harness"),

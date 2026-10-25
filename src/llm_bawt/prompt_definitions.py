@@ -303,6 +303,24 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             ),
         },
     ),
+    "agents.tag_context": PromptDefinition(
+        key="agents.tag_context",
+        title="Agent Bot Tags and Roster",
+        category="agent_execution",
+        required_vars=(),
+        loader=None,
+        metadata={
+            "notes": (
+                "Bot-tag section for AGENT backends (TASK-1249). Optional variables: "
+                "{own_tag_instructions} (instructions of this bot's role tags, or "
+                "their descriptions), {bot_roster} (visible agent bots: tags, "
+                "endpoint ref, provider) and {tag_catalog} (role tags: name, "
+                "description, capabilities). Literal braces must be doubled. The "
+                "default body is empty, which injects nothing. Supports per-bot "
+                "overrides via scope_type=bot."
+            ),
+        },
+    ),
     "agents.task_spec": PromptDefinition(
         key="agents.task_spec",
         title="Agent Task Spec (Planning Mode)",

@@ -20,6 +20,7 @@ from ..schemas import (
     BotTagAssignmentRemovedResponse,
     BotTagCatalogResponse,
     BotTagCreateRequest,
+    BotTagInstructionsRequest,
     BotTagPatchRequest,
     BotTagResponse,
     BotTagUse,
@@ -71,12 +72,41 @@ async def create_bot_tag(request: BotTagCreateRequest):
     return _response(tag)
 
 
+async def _announce_assignments_changed(tag: CatalogTag) -> None:
+    """Cached Bot objects carry tag slugs; refresh them and tell each holder's UI."""
+    service = get_service()
+    await asyncio.to_thread(profile_routes._reload_bot_registry)
+    for use in tag.used_by:
+        await profile_routes._publish_bot_profile_changed(service, use.bot)
+
+
 @router.patch("/v1/bot-tags/{slug}", response_model=BotTagResponse, tags=["System"])
 async def patch_bot_tag(slug: str, request: BotTagPatchRequest):
-    """Edit a role tag's name, description, prompt_key or capabilities. System rows → 409."""
+    """Edit a role tag; a new ``slug`` renames it with its assignments. System rows → 409."""
     store = bot_tag_store()
     changes = {name: getattr(request, name) for name in request.model_fields_set}
-    return _response(await _run(store.update_role, slug, changes))
+    tag = await _run(store.update_role, slug, changes)
+    if tag.slug != slug:
+        await _announce_assignments_changed(tag)
+    return _response(tag)
+
+
+@router.put("/v1/bot-tags/{slug}/instructions", response_model=BotTagResponse, tags=["System"])
+async def put_bot_tag_instructions(slug: str, request: BotTagInstructionsRequest):
+    """Save a role tag's instructions as a versioned global prompt.
+
+    The first save allocates the tag's ``prompt_key``; later saves add versions.
+    """
+    store = bot_tag_store()
+    return _response(await _run(store.save_instructions, slug, request.body, request.updated_by))
+
+
+@router.delete("/v1/bot-tags/{slug}/instructions", response_model=BotTagResponse,
+               tags=["System"])
+async def delete_bot_tag_instructions(slug: str):
+    """Detach a role tag's instructions; the registry prompt and its history stay."""
+    store = bot_tag_store()
+    return _response(await _run(store.clear_instructions, slug))
 
 
 @router.delete("/v1/bot-tags/{slug}", tags=["System"])

@@ -63,5 +63,7 @@ PROMPT_MANIFEST: tuple[SectionSpec, ...] = (
     SectionSpec("cold_start_memory", PER_TURN, "_sec_cold_start_memory"),
     SectionSpec("tts_output", PER_TURN, "_sec_tts_output", applies_to=("chat",)),
     SectionSpec("agent_global_prompt", PER_TURN, "_sec_agent_global_prompt", applies_to=("agent",)),
+    # TASK-1249: same position as agent_global_prompt; walk order puts it after.
+    SectionSpec("tag_context", PER_TURN, "_sec_tag_context", applies_to=("agent",)),
     SectionSpec("working_memory", PER_TURN, "_sec_working_memory", applies_to=("agent",)),
 )

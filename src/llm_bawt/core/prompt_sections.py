@@ -193,6 +193,52 @@ class PromptSectionsMixin:
                     },
                 )
 
+    def _sec_tag_context(self, builder: PromptBuilder, prompt: str) -> None:
+        """TASK-1249 bot-tag section (agent backends only): this bot's role-tag
+        instructions and the family roster, rendered into the operator's
+        ``agents.tag_context`` template. The default body is empty, so nothing
+        is read or injected until an operator writes one. A template or data
+        failure skips the section; it never fails the prompt build."""
+        from ..bot_tags.context import TEMPLATE_KEY, load_tag_context
+
+        resolved = self.config_resolver.resolve_body(
+            TEMPLATE_KEY, scope_type="bot", scope_id=self.bot_id
+        )
+        template = resolved.body if resolved else None
+        if not template or not template.strip():
+            return
+        try:
+            from ..utils.db import get_shared_engine
+
+            def instructions(key: str) -> str | None:
+                found = self.config_resolver.resolve_body(key)
+                return found.body if found else None
+
+            context = load_tag_context(
+                get_shared_engine(self.config), self.config, self.bot_id, instructions
+            )
+            body = template.format(**context.variables())
+        except (KeyError, IndexError, ValueError) as exc:
+            logger.warning("tag context: template %s does not render: %s", TEMPLATE_KEY, exc)
+            return
+        except Exception:
+            logger.warning("tag context: facts unavailable; section skipped", exc_info=True)
+            return
+        if not body.strip():
+            return
+        metadata = {
+            "source": f"registry:{resolved.source}",
+            "gate": "agent_backend & agents.tag_context template",
+        }
+        if context.flags:
+            metadata["provenance"] = list(context.flags)
+        builder.add_section(
+            "tag_context",
+            body,
+            position=SectionPosition.GLOBAL_INSTRUCTIONS,
+            metadata=metadata,
+        )
+
     def _sec_working_memory(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-1281 working-memory section, rendered per turn by the dispatch path."""
         if self._working_memory_section:
