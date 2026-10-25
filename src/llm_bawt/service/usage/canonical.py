@@ -52,9 +52,17 @@ class UsageSpend(BaseModel):
     today_usd: float
     seven_day_usd: float
     month_usd: float
-    monthly_budget_usd: float | None = None
-    monthly_used_pct: float | None = None
     source: str  # anthropic_reported | bawt_recorded_estimate
+
+
+class UsageBalance(BaseModel):
+    """Manual prepaid balance minus app-recorded charges after its anchor."""
+
+    amount_usd: float
+    remaining_usd: float
+    used_usd: float
+    as_of: int  # unix seconds; the anchor is stamped on the server
+    source: str = "bawt_recorded_estimate"
 
 
 class ProviderUsage(BaseModel):
@@ -71,6 +79,8 @@ class ProviderUsage(BaseModel):
     cached: bool = False           # True if served from cache / stale
     limits: list[UsageLimit] = Field(default_factory=list)
     spend: UsageSpend | None = None
+    balance: UsageBalance | None = None
+    balance_supported: bool = False  # new-server capability; older spend servers must not accept an anchor
     raw: dict | None = None        # provider-native payload, for debug/refine
 
 

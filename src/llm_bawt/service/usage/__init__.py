@@ -70,6 +70,11 @@ def get_cached(provider: str) -> ProviderUsage | None:
     return _cached_copy(hit[1]) if hit else None
 
 
+def invalidate_cache(provider: str) -> None:
+    """Discard a report after its runtime settings change."""
+    _cache.pop(provider, None)
+
+
 # Default registrations. Add a provider = create the adapter, import it here,
 # register an instance.
 register(ClaudeUsageAdapter())
@@ -152,7 +157,9 @@ async def get_usage(provider: str, *, force: bool = False) -> ProviderUsage | No
         # last-good snapshot if we have one.
         if snap.status == STATUS_OK:
             _cache[provider] = (time.monotonic(), snap)
-        elif snap.status == STATUS_RATE_LIMITED and hit is not None:
+        elif snap.status == STATUS_RATE_LIMITED and hit is not None and snap.balance is None:
+            # Keep a freshly computed local balance even if its separate Admin
+            # cost report hit a rate limit; a cached balance would be stale.
             stale = _cached_copy(hit[1])
             stale.error = "rate-limited; showing last cached snapshot"
             return stale
@@ -178,6 +185,7 @@ __all__ = [
     "register",
     "usage_adapter_for_access_path",
     "get_cached",
+    "invalidate_cache",
     "list_providers",
     "has_provider",
     "get_usage",
