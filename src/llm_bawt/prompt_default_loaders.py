@@ -109,6 +109,12 @@ def load_inter_bot_reply_channel_async() -> str:
     return DEFAULT_REPLY_CHANNEL_ASYNC
 
 
+def load_inter_bot_reply_channel_waited_no_return() -> str:
+    from .inter_bot_reply_channel import DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN
+
+    return DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN
+
+
 def load_inter_bot_restart_retry_continue() -> str:
     from .inter_bot_delivery_retry import DEFAULT_RESTART_RETRY_CONTINUE
 

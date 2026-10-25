@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 REPLY_CHANNEL_WAITED_KEY = "inter_bot.reply_channel.waited"
 REPLY_CHANNEL_ASYNC_KEY = "inter_bot.reply_channel.async"
+REPLY_CHANNEL_WAITED_NO_RETURN_KEY = "inter_bot.reply_channel.waited_no_return"
 
 DEFAULT_REPLY_CHANNEL_WAITED = (
     "[Reply channel: awaited delivery. Your final response on this turn "
@@ -38,10 +39,35 @@ DEFAULT_REPLY_CHANNEL_ASYNC = (
     "no response is needed, do not send one.]"
 )
 
+# TASK-1362: an inactive sender (the outside-agent bot) cannot receive a bot
+# message, so its waited note drops the separate follow-up, and an async
+# delivery from it gets no note at all.
+DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN = (
+    "[Reply channel: awaited delivery. Your final response on this turn "
+    "is the answer to the sending agent's tool call (or its durable receipt "
+    "if the wait times out). Give the answer in your final response. The "
+    "sender cannot receive bot messages, so do not send one back.]"
+)
+
 _KEY_BY_MODE = {
     "waited": (REPLY_CHANNEL_WAITED_KEY, DEFAULT_REPLY_CHANNEL_WAITED),
     "async": (REPLY_CHANNEL_ASYNC_KEY, DEFAULT_REPLY_CHANNEL_ASYNC),
+    "waited_no_return": (REPLY_CHANNEL_WAITED_NO_RETURN_KEY, DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN),
 }
+# Delivery reply modes; ``waited_no_return`` is chosen from the sender's tags.
+_DELIVERY_MODES = frozenset({"waited", "async"})
+
+
+def _sender_is_inactive(sender_bot_id: str) -> bool:
+    """True only when a readable tag snapshot says the sender is inactive.
+
+    An unreadable snapshot keeps today's note: a spare reply instruction is
+    harmless, a missing one loses an answer.
+    """
+    from .bot_tags import BehaviorTag, BotTags
+
+    snapshot = BotTags().snapshot()
+    return snapshot.available and snapshot.has(sender_bot_id, BehaviorTag.INACTIVE)
 
 
 def resolve_reply_channel_note(reply_mode: str, *, sender_bot_id: str, target_bot_id: str | None) -> str:
@@ -75,7 +101,8 @@ def delivery_reply_channel_note(record: Any) -> str | None:
     steer wire text); the stored payload, history row and timeline stay clean.
     Only bot-authored conversational deliveries get one: a user or reserved
     (``system``) author has no reply channel, and context maintenance is a bare harness command
-    (``/compact``) that any trailing text would break.
+    (``/compact``) that any trailing text would break. An inactive sender
+    cannot be messaged back, so its async delivery gets no note either.
     """
     if record is None or record.message_kind == "CONTEXT_MAINTENANCE":
         return None
@@ -96,9 +123,13 @@ def delivery_reply_channel_note(record: Any) -> str | None:
         sender = None
     if sender is None:
         return None
+    mode = record.reply_mode if record.reply_mode in _DELIVERY_MODES else "async"
+    if _sender_is_inactive(sender):
+        if mode == "async":
+            return None
+        mode = "waited_no_return"
     return resolve_reply_channel_note(
-        record.reply_mode if record.reply_mode in _KEY_BY_MODE else "async",
-        sender_bot_id=sender, target_bot_id=record.target_bot_id,
+        mode, sender_bot_id=sender, target_bot_id=record.target_bot_id,
     )
 
 

@@ -11,6 +11,7 @@ from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.policy import TrustedCaller
 from llm_bawt.bot_tags import BehaviorTag, BotTags, TagPolicyUnavailable, TagSnapshot, sql_allowed
 from llm_bawt.bot_tags import facade
+from llm_bawt.bot_tags.vocabulary import OPT_IN_BEHAVIOR_TAGS
 
 CATALOG = ["coder", "inactive", "no_global_search", "private", "reviewer"]
 TAGS = {
@@ -76,7 +77,9 @@ def test_an_unknown_tag_raises_instead_of_answering(snap):
 def test_unavailable_is_private_and_inactive_for_everyone():
     snap = TagSnapshot.unavailable()
     for bot in ("fixture-public", "fixture-unknown"):
-        assert all(snap.has(bot, tag) for tag in BehaviorTag)
+        assert all(snap.has(bot, tag) for tag in BehaviorTag if tag not in OPT_IN_BEHAVIOR_TAGS)
+        # An opt-in grant fails closed the other way (TASK-1362).
+        assert not snap.has(bot, BehaviorTag.EXTERNAL)
         assert snap.excluded_reason(bot) == "private bot"
     assert snap.searchable_bots == frozenset()
     # A role answer would be a guess: it raises.
@@ -115,6 +118,33 @@ def test_a_catalog_missing_a_behaviour_tag_or_a_duplicate_bot_is_refused():
     row = {"slug": "fixture-public", "include_in_global_search": True}
     with pytest.raises(TagPolicyUnavailable, match="malformed"):
         TagSnapshot.from_rows([row, dict(row)])
+
+
+def test_a_catalog_not_yet_seeded_with_an_opt_in_tag_grants_it_to_nobody(snap):
+    """Code ahead of the seed (or a rollback window) must not poison the snapshot."""
+    assert "external" not in CATALOG
+    assert snap.available
+    assert not any(snap.has(bot, BehaviorTag.EXTERNAL) for bot in [*TAGS, "fixture-unknown"])
+    assert snap.has("fixture-inactive", BehaviorTag.INACTIVE)
+
+
+def test_an_opt_in_tag_is_granted_only_where_assigned():
+    catalog = sorted([*CATALOG, "external"])
+    snap = TagSnapshot.from_rows([
+        {"slug": "fixture-outside", "include_in_global_search": True,
+         "tags": ["external", "inactive"], "catalog": catalog},
+        {"slug": "fixture-public", "include_in_global_search": True, "tags": [], "catalog": catalog},
+    ])
+    assert snap.has("fixture-outside", BehaviorTag.EXTERNAL)
+    assert not snap.has("fixture-public", BehaviorTag.EXTERNAL)
+    # An unknown bot is private, never external.
+    assert not snap.has("fixture-unknown", BehaviorTag.EXTERNAL)
+
+
+def test_an_opt_in_tag_still_must_be_in_the_catalog_to_be_assigned():
+    with pytest.raises(TagPolicyUnavailable, match="unknown tag"):
+        TagSnapshot.from_rows([{"slug": "fixture-outside", "include_in_global_search": True,
+                                "tags": ["external"], "catalog": CATALOG}])
 
 
 def test_more_than_the_bound_is_refused():

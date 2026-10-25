@@ -22,7 +22,7 @@ from .inter_bot_send_mode import (
     STEER_ONLY, STEER_OR_IDLE, WHEN_IDLE, SendMode, SendModeError,
     require_one_recipient, resolve_send_mode,
 )
-from .inter_bot_sender import SenderIdentityError, resolve_sender_bot_id
+from .inter_bot_sender import SenderIdentityError, resolve_message_sender, resolve_sender_bot_id
 from .server import _get_storage, mcp
 from ..task_turn_context import TaskTurnContextError, is_delivery_turn_id
 
@@ -400,11 +400,12 @@ async def send_message_to_bot(
     target received anything.
 
     ``sender_bot_id`` is optional: the sender is taken from your signed turn.
-    Passing a different bot id is rejected. Callers without a signed turn must
-    pass their own bot id.
+    Passing a different bot id is rejected. Callers without a signed turn pass
+    their own bot id; an agent outside the family with no bot of its own may
+    omit it, and the one bot tagged ``external`` and ``inactive`` sends for it.
     """
     try:
-        sender_bot_id = resolve_sender_bot_id(sender_bot_id)
+        sender_bot_id = await resolve_message_sender(sender_bot_id, _policy_resolver)
     except SenderIdentityError as exc:
         return {
             "success": False,

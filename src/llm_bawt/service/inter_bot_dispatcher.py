@@ -508,6 +508,8 @@ class InterBotDeliveryDispatcher:
             name=f"inter-bot-steer-heartbeat:{record.id}",
         )
         try:
+            # Registry and tag reads are synchronous DB work; keep them off the loop.
+            wire_suffix = await asyncio.to_thread(delivery_reply_channel_note, record)
             response = await steer_active_turn(
                 self.service,
                 ChatSteerRequest(
@@ -522,7 +524,7 @@ class InterBotDeliveryDispatcher:
                 ),
                 steer_request_id=steer.request_id,
                 author=record.author,
-                wire_suffix=delivery_reply_channel_note(record),
+                wire_suffix=wire_suffix,
                 control=control,
             )
             if response.ok:

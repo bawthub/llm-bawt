@@ -8,7 +8,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from llm_bawt.inter_bot_reply_channel import (
-    DEFAULT_REPLY_CHANNEL_ASYNC, DEFAULT_REPLY_CHANNEL_WAITED, append_request_reply_channel_note,
+    DEFAULT_REPLY_CHANNEL_ASYNC, DEFAULT_REPLY_CHANNEL_WAITED, DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN,
+    append_request_reply_channel_note,
     delivery_reply_channel_note,
     request_reply_channel_note, resolve_reply_channel_note,
 )
@@ -70,6 +71,68 @@ def test_async_delivery_note_names_the_sender_to_call_back() -> None:
 ], ids=["none", "user", "unknown", "system-notice", "maintenance"])
 def test_no_note_without_a_bot_reply_channel_or_for_maintenance(record) -> None:
     assert delivery_reply_channel_note(record) is None
+
+
+class _Tags:
+    """``BotTags`` double: one snapshot for every read."""
+
+    def __init__(self, snapshot):
+        self._snapshot = snapshot
+
+    def __call__(self):
+        return self
+
+    def snapshot(self):
+        return self._snapshot
+
+
+def _tags(**bot_tags):
+    from llm_bawt.bot_tags import BehaviorTag, TagSnapshot
+
+    catalog = sorted(str(tag) for tag in BehaviorTag)
+    return _Tags(TagSnapshot.from_rows([
+        {"slug": slug, "include_in_global_search": True, "tags": tags, "catalog": catalog}
+        for slug, tags in sorted(bot_tags.items())
+    ]))
+
+
+def test_async_delivery_from_an_inactive_sender_has_no_note(monkeypatch) -> None:
+    """The outside-agent bot cannot be messaged back (TASK-1362)."""
+    monkeypatch.setattr("llm_bawt.bot_tags.BotTags", _tags(vex=["external", "inactive"]))
+    assert delivery_reply_channel_note(_record("async")) is None
+
+
+def test_waited_delivery_from_an_inactive_sender_drops_the_follow_up(monkeypatch) -> None:
+    monkeypatch.setattr("llm_bawt.bot_tags.BotTags", _tags(vex=["external", "inactive"]))
+    note = delivery_reply_channel_note(_record("waited"))
+    assert note == DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN
+    assert "Give the answer in your final response" in note
+    assert "bots_send_message" not in note and "separate_message_reason" not in note
+
+
+def test_waited_no_return_note_is_resolved_from_the_registry(monkeypatch) -> None:
+    resolver = _Resolver("[Custom no-return]")
+    monkeypatch.setattr("llm_bawt.prompt_registry.get_prompt_resolver", lambda: resolver)
+    monkeypatch.setattr("llm_bawt.bot_tags.BotTags", _tags(vex=["inactive"]))
+    assert delivery_reply_channel_note(_record("waited")) == "[Custom no-return]"
+    assert resolver.calls == [("inter_bot.reply_channel.waited_no_return", "bot", "loopy")]
+
+
+@pytest.mark.parametrize("reply_mode", ["async", "waited"])
+def test_active_sender_keeps_todays_note(monkeypatch, reply_mode) -> None:
+    monkeypatch.setattr("llm_bawt.bot_tags.BotTags", _tags(vex=["external"]))
+    expected = {"async": DEFAULT_REPLY_CHANNEL_ASYNC.replace("{sender_bot_id}", "vex"),
+                "waited": DEFAULT_REPLY_CHANNEL_WAITED}[reply_mode]
+    assert delivery_reply_channel_note(_record(reply_mode)) == expected
+
+
+@pytest.mark.parametrize("reply_mode", ["async", "waited"])
+def test_unreadable_tags_keep_todays_note(monkeypatch, reply_mode) -> None:
+    """An unavailable snapshot reads as inactive everywhere; it must not drop the note."""
+    from llm_bawt.bot_tags import TagSnapshot
+
+    monkeypatch.setattr("llm_bawt.bot_tags.BotTags", _Tags(TagSnapshot.unavailable()))
+    assert delivery_reply_channel_note(_record(reply_mode)) is not None
 
 
 class _Store:
@@ -155,6 +218,9 @@ def test_reply_channel_keys_are_registered_with_seed_bodies() -> None:
     assert waited.default_body() == DEFAULT_REPLY_CHANNEL_WAITED
     assert async_.default_body() == DEFAULT_REPLY_CHANNEL_ASYNC
     assert async_.required_vars == ("sender_bot_id",)
+    no_return = DEFAULT_PROMPT_DEFINITIONS["inter_bot.reply_channel.waited_no_return"]
+    assert no_return.default_body() == DEFAULT_REPLY_CHANNEL_WAITED_NO_RETURN
+    assert no_return.category == "agent_execution"
 
 
 @pytest.mark.parametrize("options", [

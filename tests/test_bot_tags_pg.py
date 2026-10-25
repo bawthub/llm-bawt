@@ -154,8 +154,10 @@ def test_seeds_are_idempotent_and_restore_behaviour_rows_from_code(rig):
         conn.exec_driver_sql("UPDATE bot_tag_catalog SET name='Operator coder' WHERE slug='coder'")
     rig.store()
 
-    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog") == 5
+    assert rig.scalar("SELECT count(*) FROM bot_tag_catalog") == 6
     assert rig.scalar("SELECT name FROM bot_tag_catalog WHERE slug='private'") == "Private"
+    # TASK-1362: the opt-in behaviour tag is seeded from code like the others.
+    assert rig.scalar("SELECT kind FROM bot_tag_catalog WHERE slug='external' AND system") == "behavior"
     # Roles are operator data after their first seed.
     assert rig.scalar("SELECT name FROM bot_tag_catalog WHERE slug='coder'") == "Operator coder"
 
@@ -202,7 +204,7 @@ def test_a_completely_empty_schema_gets_every_table_and_copies_nothing(rig):
                         "WHERE n.nspname='fresh' AND c.relkind='r'")
     assert {"bot_profiles", "bot_tag_catalog", "bot_profile_tags"} <= set(tables)
     assert rig.scalar("SELECT count(*) FROM fresh.bot_profile_tags") == 0
-    assert rig.scalar("SELECT count(*) FROM fresh.bot_tag_catalog") == 5
+    assert rig.scalar("SELECT count(*) FROM fresh.bot_tag_catalog") == 6
 
 
 # --- §10.7 the intermediate deploy (S1–S4, legacy writers only) -------------

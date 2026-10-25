@@ -4,7 +4,9 @@ Effective rules, everywhere (BOT_TAGS.md §3, §4.1, §5.2):
 - private = ``private`` tag OR ``include_in_global_search = false``;
 - private implies no_global_search;
 - a bot with no profile row is private;
-- a snapshot that could not be read treats every bot as private AND inactive.
+- a snapshot that could not be read treats every bot as private AND inactive;
+- an opt-in tag (``external``) fails closed the other way: an unread snapshot,
+  or a catalog not yet seeded with it, grants it to nobody (TASK-1362).
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from types import MappingProxyType
 
 from sqlalchemy import text
 
-from .vocabulary import TAG_SLUG, BehaviorTag, is_canonical_bot_slug
+from .vocabulary import OPT_IN_BEHAVIOR_TAGS, TAG_SLUG, BehaviorTag, is_canonical_bot_slug
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,10 @@ _PRIVATE = BehaviorTag.PRIVATE
 _NO_GLOBAL = BehaviorTag.NO_GLOBAL_SEARCH
 _INACTIVE = BehaviorTag.INACTIVE
 _BEHAVIOR = frozenset(str(t) for t in BehaviorTag)
+_OPT_IN = frozenset(str(t) for t in OPT_IN_BEHAVIOR_TAGS)
+# The catalog must carry every restricting tag. An opt-in tag may be missing
+# (code ahead of the seed, or a rollback window) without poisoning the snapshot.
+_REQUIRED = _BEHAVIOR - _OPT_IN
 # Qualified only: an unqualified column inside the correlated subqueries would
 # bind to the subquery's own table (bot_profiles.slug) and admit every row.
 _COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
@@ -75,7 +81,7 @@ class TagSnapshot:
         catalog = _BEHAVIOR
         if rows and "catalog" in rows[0]:
             catalog = cls._slugs(rows[0]["catalog"])
-            if not _BEHAVIOR <= catalog:
+            if not _REQUIRED <= catalog:
                 raise TagPolicyUnavailable("behaviour tags missing from the catalog")
         tags: dict[str, frozenset[str]] = {}
         column_private: set[str] = set()
@@ -124,6 +130,9 @@ class TagSnapshot:
     def has(self, bot: str, tag: str) -> bool:
         """Effective tag check. An unknown tag slug raises, never answers."""
         tag = str(tag)
+        if tag in _OPT_IN and (not self.available or tag not in self.catalog):
+            # An opt-in grant fails closed by granting nothing.
+            return False
         if not self.available:
             # No catalog to validate against: behaviour tags fail closed and a
             # role answer would be a guess.

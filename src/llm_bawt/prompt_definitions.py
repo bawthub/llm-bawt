@@ -36,6 +36,7 @@ from .prompt_default_loaders import (
     load_inter_bot_reply_channel_async,
     load_inter_bot_restart_retry_continue,
     load_inter_bot_reply_channel_waited,
+    load_inter_bot_reply_channel_waited_no_return,
     load_history_summarization_batch,
     load_history_summarization_single,
     load_media_prompt_expansion_video,
@@ -404,6 +405,19 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "any requested answer must be sent back with bots_send_message. "
             "{sender_bot_id} is substituted by plain replacement (never .format()). "
             "Resolved per delivery; target-bot overrides supported."
+        )},
+    ),
+    "inter_bot.reply_channel.waited_no_return": PromptDefinition(
+        key="inter_bot.reply_channel.waited_no_return",
+        title="Inter-Bot Reply Channel: Waited, Sender Unreachable",
+        category="agent_execution",
+        loader=load_inter_bot_reply_channel_waited_no_return,
+        metadata={"notes": (
+            "Replaces the waited note when the sender is an inactive bot (such as "
+            "the external outside-agent bot, TASK-1362), which cannot receive bot "
+            "messages. Same contract minus the separate follow-up. An async "
+            "delivery from an inactive sender gets no note. Resolved per "
+            "delivery; target-bot overrides supported."
         )},
     ),
     "inter_bot.restart_retry.continue": PromptDefinition(

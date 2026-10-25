@@ -15,6 +15,14 @@ class BehaviorTag(StrEnum):
     PRIVATE = "private"
     NO_GLOBAL_SEARCH = "no_global_search"
     INACTIVE = "inactive"
+    EXTERNAL = "external"
+
+
+# Behaviour tags that GRANT something instead of restricting it (TASK-1362).
+# Restricting tags fail closed by applying to every bot; an opt-in grant fails
+# closed by applying to none. A catalog that has not been seeded with one yet
+# means nobody has opted in, not that the whole snapshot is untrustworthy.
+OPT_IN_BEHAVIOR_TAGS: frozenset[BehaviorTag] = frozenset({BehaviorTag.EXTERNAL})
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,12 @@ BEHAVIOR_TAGS: tuple[TagDefinition, ...] = (
         BehaviorTag.INACTIVE, "Inactive",
         "Hidden from bot lists, discovery and routing; excluded from dispatch, idle "
         "jobs and initiative. New bot messages to it are refused. Data stays intact.",
+        "behavior",
+    ),
+    TagDefinition(
+        BehaviorTag.EXTERNAL, "External",
+        "Stands in for agents outside the family. Must also be inactive. Opt-in: "
+        "today only the bots_send_message default sender honours it.",
         "behavior",
     ),
 )
