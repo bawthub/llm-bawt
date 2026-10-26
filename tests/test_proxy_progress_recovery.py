@@ -111,11 +111,14 @@ class Harness:
             responses_transport=mode, status_callback=on_status,
         )
         self.frames = []
+        self.thinking_forwarded = asyncio.Event()
         self.mode = mode
 
     async def collect(self):
         async for frame in self.adapter.call(copy.deepcopy(BODY), MODEL, self.context):
             self.frames.append(frame)
+            if b"thinking_delta" in frame:
+                self.thinking_forwarded.set()
 
     @property
     def attempts(self):
@@ -270,10 +273,7 @@ def test_cancelled_thinking_is_not_retried(monkeypatch, mode):
         h = Harness(monkeypatch, mode, [THINKING], success_frames())
         task = asyncio.create_task(h.collect())
         try:
-            for _ in range(100):
-                if b"thinking_delta" in b"".join(h.frames):
-                    break
-                await asyncio.sleep(.001)
+            await h.thinking_forwarded.wait()
             assert b"thinking_delta" in b"".join(h.frames)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
