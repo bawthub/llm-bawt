@@ -247,8 +247,15 @@ class CountsFuturesNotWorkers(Observed):
     """looptime's rule: the worker counts until its asyncio Future is done."""
 
     def run_in_executor(self, executor, func, *args):
-        # asyncio's own run_in_executor, skipping TimingLoop's worker count
-        future = asyncio.BaseEventLoop.run_in_executor(self, executor, func, *args)
+        # asyncio's own run_in_executor, skipping TimingLoop's worker count.
+        # It calls asyncio.futures.wrap_future, which the timing report
+        # tracks; the mutant wraps with asyncio's own so that stays out.
+        saved = asyncio.futures.wrap_future
+        asyncio.futures.wrap_future = virtual_clock._REAL_WRAP_FUTURE
+        try:
+            future = asyncio.BaseEventLoop.run_in_executor(self, executor, func, *args)
+        finally:
+            asyncio.futures.wrap_future = saved
         with self._workers_lock:
             self._workers += 1
 
@@ -314,10 +321,16 @@ def test_a_worker_cancelled_before_it_starts_is_released():
         queued = loop.run_in_executor(pool, gate.wait, 30)
         assert loop._workers == 2
         queued.cancel()
+        # Turn 1: asyncio forwards the cancel to the pool's future, which
+        # queues the release. Turn 2: the release runs.
+        await asyncio.sleep(0)
         await asyncio.sleep(0)
         assert loop._workers == 1
         gate.set()
         assert await busy is True
+        # The pool thread queues the release just after the result; once it
+        # is joined, one turn runs whatever it queued.
+        pool.shutdown(wait=True)
         await asyncio.sleep(0)
         return loop._workers
 
@@ -401,3 +414,102 @@ def test_the_policy_makes_every_new_loop_a_timing_loop():
         assert isinstance(loop, virtual_clock.TimingLoop) and loop._step == 500_000
     finally:
         loop.close()
+
+
+def _private_pool_work(wrap) -> tuple[str | None, bool, str | None]:
+    """Await a private pool's future through ``wrap``; return what the loop
+    saw while the worker was blocked, its result, and what it saw after."""
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    gate = threading.Event()
+
+    async def main():
+        loop = asyncio.get_running_loop()
+        waiter = wrap(pool.submit(gate.wait, 30), loop=loop)
+        while_blocked = loop.real_work()
+        gate.set()
+        result = await waiter
+        return while_blocked, result, loop.real_work()
+
+    try:
+        return Run()(main)
+    finally:
+        gate.set()
+        pool.shutdown(wait=True)
+
+
+def test_a_private_pool_future_is_real_work_until_its_function_returns():
+    # BoundedWorker's shape: its own pool, awaited through asyncio.wrap_future.
+    before = asyncio.wrap_future
+    with virtual_clock.follow_wrapped_futures():
+        assert _private_pool_work(lambda future, loop: asyncio.wrap_future(future, loop=loop)) == (
+            "executor", True, None)
+    assert asyncio.wrap_future is before and asyncio.futures.wrap_future is before
+    # Mutant: asyncio's own wrap_future. The loop can't see the worker, so it
+    # would jump past a deadline the worker is about to meet.
+    assert _private_pool_work(virtual_clock._REAL_WRAP_FUTURE) == (None, True, None)
+
+
+class ReleasesOnDone(virtual_clock.TimingLoop):
+    """The old rule: release the worker as soon as it is done, before its
+    result is on the loop."""
+
+    def track(self, future):
+        with self._workers_lock:
+            self._workers += 1
+        future.add_done_callback(lambda _: self._release_worker())
+
+
+def _between_done_and_delivered(loop_class):
+    async def main():
+        loop = asyncio.get_running_loop()
+        inner = concurrent.futures.Future()
+        assert inner.set_running_or_notify_cancel()
+        wrapped = virtual_clock._REAL_WRAP_FUTURE(inner, loop=loop)
+        loop.track(inner)
+        inner.set_result("done")  # the worker returned; its result is not on the loop yet
+        between = (wrapped.done(), loop.real_work())
+        return between, await wrapped, loop.real_work()
+
+    return Run(loop_class)(main)
+
+
+def test_a_worker_counts_until_its_result_is_on_the_loop():
+    # Released earlier, the loop sees no real work and nothing ready, and
+    # jumps to the next timer (a wait_for deadline) ahead of the result.
+    assert _between_done_and_delivered(virtual_clock.TimingLoop) == ((False, "executor"), "done", None)
+    assert _between_done_and_delivered(ReleasesOnDone) == ((False, None), "done", None)
+
+
+def test_the_default_pool_is_joined_when_the_run_ends():
+    # asyncio.run joins the default pool on a thread of its own, bounded at
+    # 300s. Uncounted, the clock jumped past that bound at once: a warning,
+    # and the pool's threads left running.
+    seen = {}
+
+    async def main():
+        await asyncio.to_thread(lambda: None)
+        seen["pool"] = asyncio.get_running_loop()._default_executor
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        virtual_clock.run_timing(main())
+    assert not [w for w in caught if "did not finishing joining" in str(w.message)]
+    assert seen["pool"]._threads and not any(thread.is_alive() for thread in seen["pool"]._threads)
+
+
+def test_run_timing_uses_the_installed_report_loop_or_a_plain_timing_loop():
+    async def step():
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(3600)  # code's own deadlines read the loop's clock
+        return type(loop), loop._step, time.monotonic() == loop.time()
+
+    saved = asyncio.get_event_loop_policy()
+    try:
+        asyncio.set_event_loop_policy(None)
+        assert virtual_clock.run_timing(step()) == (virtual_clock.TimingLoop, 0, True)
+        asyncio.set_event_loop_policy(virtual_clock.TimingLoopPolicy(step_cost=0.5))
+        assert virtual_clock.run_timing(step()) == (virtual_clock.TimingLoop, 500_000, True)
+    finally:
+        asyncio.set_event_loop_policy(saved)

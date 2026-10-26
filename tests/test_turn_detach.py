@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -28,28 +27,30 @@ from llm_bawt.service.turn_execution import (
 )
 from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
 from llm_bawt.service.tool_call_store import ToolCallRecord
+from tests import virtual_clock
 from tests.sqlite_support import fast_sqlite_engine
 
 
-def _until(predicate, timeout=1.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.005)
-    return predicate()
+# Real threads are released by events; this bound only stops a regression from
+# hanging the suite. It never decides an outcome.
+HANG_GUARD_S = 10.0
 
 
 # ── subscribe_run(should_stop=) ─────────────────────────────────────────────
 
 
 class _Redis:
-    """XREAD stand-in: ``batches`` are returned in order, then empty blocks."""
+    """XREAD stand-in: ``batches`` are returned in order, then empty blocks.
 
-    def __init__(self, batches=(), block_s=0.0, on_xread=None):
+    With ``hold``, every empty XREAD sets ``entered`` and blocks (off the loop)
+    until the test sets ``hold``, so the test decides when the read ends."""
+
+    def __init__(self, batches=(), block_s=0.0, on_xread=None, hold: threading.Event | None = None):
         self.batches = list(batches)
         self.block_s = block_s
         self.on_xread = on_xread
+        self.hold = hold
+        self.entered = threading.Event()
         self.calls = 0
 
     async def xread(self, streams, count=None, block=None):
@@ -58,7 +59,11 @@ class _Redis:
             self.on_xread(self.calls)
         if self.batches:
             return self.batches.pop(0)
-        await asyncio.sleep(self.block_s)
+        self.entered.set()
+        if self.hold is not None:
+            await asyncio.to_thread(self.hold.wait, HANG_GUARD_S)
+        else:
+            await asyncio.sleep(self.block_s)
         return []
 
 
@@ -154,18 +159,22 @@ def _consume(backend, execution, outcome, **config):
 
 
 def test_a_silent_run_detaches_promptly_without_cancelling_the_bridge_run(monkeypatch):
-    redis = _Redis(block_s=0.01)
+    # The bridge read stays empty until after detach: the run is silent for
+    # as long as the test wants, and its end comes from the detach check, not
+    # from the inactivity bound (which a regression would hit instead).
+    released = threading.Event()
+    redis = _Redis(hold=released)
     backend, calls = _bridge(monkeypatch, redis)
     execution, outcome = _execution(), {}
-    # Daemon + a short inactivity bound: a regression that ignores detach then
-    # fails this test instead of hanging the run for the 600s default.
     consumer = threading.Thread(target=_consume, args=(backend, execution, outcome),
-                                kwargs={"timeout_seconds": 3}, daemon=True)
+                                kwargs={"timeout_seconds": HANG_GUARD_S}, daemon=True)
     consumer.start()
-    assert _until(lambda: redis.calls >= 1)
-
-    execution.detach()
-    consumer.join(1.0)
+    try:
+        assert redis.entered.wait(HANG_GUARD_S)
+        execution.detach()
+    finally:
+        released.set()
+    consumer.join(HANG_GUARD_S)
 
     assert not consumer.is_alive()
     assert isinstance(outcome.get("error"), TurnExecutionDetached)
@@ -249,22 +258,23 @@ def test_the_worker_does_not_return_while_the_stream_thread_hangs_in_close(monke
 def test_confirmed_stopped_needs_the_worker_returned_and_the_stream_thread_dead():
     execution = _execution()
     release_worker, release_thread = threading.Event(), threading.Event()
-    stream_thread = threading.Thread(target=release_thread.wait, args=(2,))
+    stream_thread = threading.Thread(target=release_thread.wait, args=(HANG_GUARD_S,))
     stream_thread.start()
     execution.attach_stream_thread(stream_thread)
 
     async def run():
         loop = asyncio.get_running_loop()
-        future = execution.launch_worker(loop, lambda: release_worker.wait(2))
+        future = execution.launch_worker(loop, lambda: release_worker.wait(HANG_GUARD_S))
         try:
             # I1: cancelling the asyncio future makes it "done" but proves nothing.
             future.cancel()
             assert future.done() and not execution.confirmed_stopped()
             release_worker.set()
-            assert await asyncio.to_thread(_until, execution._worker_exited.is_set)
+            assert await asyncio.to_thread(execution._worker_exited.wait, HANG_GUARD_S)
             assert not execution.confirmed_stopped()  # the stream thread still runs
             release_thread.set()
-            stream_thread.join(1)
+            stream_thread.join(HANG_GUARD_S)
+            assert not stream_thread.is_alive()
             assert execution.confirmed_stopped()
         finally:
             release_worker.set()  # asyncio.run waits for executor threads on exit
@@ -420,9 +430,11 @@ def _stopping_dispatcher(order):
     return dispatcher
 
 
-def test_stop_releases_only_confirmed_workers_after_cancelling_dispatch_and_before_unlock(
-        monkeypatch, registry):
-    monkeypatch.setattr(InterBotDeliveryDispatcher, "DETACH_CONFIRM_SECONDS", 0.2)
+def test_stop_releases_only_confirmed_workers_after_cancelling_dispatch_and_before_unlock(registry):
+    # The stuck worker stays blocked for the whole bound. Once the quick one
+    # has exited, the virtual clock is taken past the bound, so the outcome
+    # never depends on how fast a real thread gets there and costs no wall time.
+    bound = InterBotDeliveryDispatcher.DETACH_CONFIRM_SECONDS
     order: list[str] = []
     dispatcher = _stopping_dispatcher(order)
     quick, stuck = _execution("turn-quick"), _execution("turn-stuck")
@@ -430,8 +442,8 @@ def test_stop_releases_only_confirmed_workers_after_cancelling_dispatch_and_befo
 
     async def run():
         loop = asyncio.get_running_loop()
-        for execution, wait in ((quick, lambda: _until(quick.detach_requested)),
-                                (stuck, lambda: stuck_release.wait(2))):
+        for execution, wait in ((quick, lambda: quick._detach.wait(HANG_GUARD_S)),
+                                (stuck, lambda: stuck_release.wait(HANG_GUARD_S))):
             registry.register(execution)
             execution.launch_worker(loop, wait)
 
@@ -444,14 +456,23 @@ def test_stop_releases_only_confirmed_workers_after_cancelling_dispatch_and_befo
                 order.append("dispatch-cancelled" if detached else "cancelled-before-detach")
                 raise
 
+        async def expire_the_bound(stopping):
+            assert await asyncio.to_thread(quick._worker_exited.wait, HANG_GUARD_S)
+            # Only until the confirmed claim is expired: the unlock's own
+            # bound is armed after that, and must not be taken past.
+            while not stopping.done() and "expire" not in order:
+                loop.advance(bound)
+                await asyncio.sleep(0)
+
         dispatcher._dispatch_tasks.add(asyncio.create_task(dispatch()))
         await asyncio.sleep(0)
         try:
-            await dispatcher.stop()
+            stopping = asyncio.create_task(dispatcher.stop())
+            await asyncio.gather(stopping, expire_the_bound(stopping))
         finally:
             stuck_release.set()  # asyncio.run waits for executor threads on exit
 
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
     # I1: the worker still running after the bound keeps its lease.
     assert dispatcher.store.expired == [("dispatcher-old", ["turn-quick"])]
     assert order == ["dispatch-cancelled", "expire", "unlock"]
@@ -495,7 +516,7 @@ def test_stop_releases_nothing_while_a_detached_worker_is_still_finalizing(monke
 
     async def run():
         registry.register(finalizing)
-        finalizing.launch_worker(asyncio.get_running_loop(), lambda: release.wait(2))
+        finalizing.launch_worker(asyncio.get_running_loop(), lambda: release.wait(HANG_GUARD_S))
         try:
             await dispatcher.stop()
         finally:

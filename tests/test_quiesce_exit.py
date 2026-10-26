@@ -18,6 +18,7 @@ from llm_bawt.ops.quiesce_exit import SweepMember, WriteDeadline, judge
 from llm_bawt.service import quiesce_exit_sweep
 from llm_bawt.service.quiesce_exit_sweep import QuiesceExitSweep
 from llm_bawt.service.recovery.orphan_turns import BridgeRunProbe
+from tests import virtual_clock
 
 SIGHTED = RunSighting("req-1", "claude-code", "boot-a", pid1=True)
 
@@ -194,24 +195,41 @@ def test_two_bounded_passes_fit_the_contract_interval():
     assert quiesce_exit_sweep.PASS_CAPACITY == 32
 
 
-def test_a_pass_where_every_probe_times_out_covers_exactly_its_capacity(monkeypatch):
-    """Vex r2 R1: the real run_once at 1/100 scale, every probe taking the full timeout."""
-    timeout = quiesce_exit_sweep.PROBE_TIMEOUT_SECONDS / 100
-    budget = quiesce_exit_sweep.PASS_BUDGET_SECONDS / 100
-    reserve = quiesce_exit_sweep.WRITE_RESERVE_SECONDS / 100
+PROBE_S = quiesce_exit_sweep.PROBE_TIMEOUT_SECONDS
+HANG_GUARD_S = 10.0
+"""Real seconds a test thread waits for its partner before it fails instead of hanging."""
 
+
+async def _hang(**kwargs):
+    await asyncio.Event().wait()
+
+
+def _timed(main):
+    """Run ``main()`` on the virtual clock (the sweep's own ``time.monotonic``
+    reads it too) at the production timeouts; return its result and the
+    virtual seconds it took."""
+    async def timed():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await main()
+        return result, loop.time() - started
+
+    return virtual_clock.run_timing(timed())
+
+
+def test_a_pass_where_every_probe_times_out_covers_exactly_its_capacity(monkeypatch):
+    """Vex r2 R1: the real run_once at the real timeouts, every probe taking the full timeout."""
     class TimesOut:
-        async def status(self, **kwargs):
-            await asyncio.sleep(timeout)
-            return None, None
+        status = staticmethod(_hang)
 
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(60))
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", timeout)
     sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=TimesOut())
-    sweep.budget_seconds, sweep.write_reserve_seconds = budget, reserve
-    capacity = quiesce_exit_sweep.pass_capacity(budget, timeout, quiesce_exit_sweep.CONCURRENCY, reserve)
-    assert capacity == quiesce_exit_sweep.PASS_CAPACITY
-    assert asyncio.run(sweep.run_once()) == {"ambiguous": capacity, "deferred": 60 - capacity}
+    capacity = quiesce_exit_sweep.PASS_CAPACITY
+    assert capacity == 32
+    counts, elapsed = _timed(sweep.run_once)
+    assert counts == {"ambiguous": capacity, "deferred": 60 - capacity}
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert elapsed <= quiesce_exit_sweep.PASS_BUDGET_SECONDS
 
 
 def _members(n):
@@ -219,56 +237,57 @@ def _members(n):
 
 
 def test_a_pass_stops_at_its_budget_and_the_left_out_member_leads_the_next(monkeypatch):
-    members = _members(3)
+    # One slot, every probe timing out: probes start at 0, T, 2T, 3T and the
+    # next would start after the last start time (budget - T - reserve).
+    fit = quiesce_exit_sweep.pass_capacity(quiesce_exit_sweep.PASS_BUDGET_SECONDS, PROBE_S, 1,
+                                           quiesce_exit_sweep.WRITE_RESERVE_SECONDS)
+    assert fit == 4
+    members = _members(fit + 1)
     asked = []
 
-    class Slow:
+    class TimesOut:
         async def status(self, *, backend, session_key, request_id, label=None):
             asked.append(request_id)
-            await asyncio.sleep(0.2)
-            return None, None
+            await _hang()
 
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: list(members))
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.2)
-    sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=Slow(), concurrency=1)
-    sweep.budget_seconds, sweep.write_reserve_seconds = 0.5, 0.0  # probes may start until 0.3s: two of three fit
+    sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=TimesOut(), concurrency=1)
 
     async def two_passes():
         return await sweep.run_once(), await sweep.run_once()
 
-    first, second = asyncio.run(two_passes())
-    assert first == {"ambiguous": 2, "deferred": 1}
-    assert second == {"ambiguous": 2, "deferred": 1}
+    (first, second), _elapsed = _timed(two_passes)
+    assert first == second == {"ambiguous": fit, "deferred": 1}
     # Pass 2 leads with the member pass 1 left out, then the least recently probed.
-    assert asked == ["req-1", "req-2", "req-3", "req-1"]
+    assert asked == ["req-1", "req-2", "req-3", "req-4", "req-5", "req-1", "req-2", "req-3"]
 
 
 def test_a_hung_probe_ends_at_the_member_deadline_and_is_ambiguous(monkeypatch):
     class Hung:
-        async def status(self, **kwargs):
-            await asyncio.sleep(10)
+        status = staticmethod(_hang)
 
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(1))
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.05)
     sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=Hung())
-    sweep.budget_seconds, sweep.write_reserve_seconds = 1.0, 0.0
-    started = time.monotonic()
-    assert asyncio.run(sweep.run_once()) == {"ambiguous": 1}
-    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
-    assert time.monotonic() - started < 0.5
+    counts, elapsed = _timed(sweep.run_once)
+    # The probe never answers: the pass ends at the member deadline, not the budget.
+    assert counts == {"ambiguous": 1}
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert PROBE_S <= elapsed < quiesce_exit_sweep.PASS_BUDGET_SECONDS
 
 
 def test_a_member_still_probing_at_the_budget_is_cut(monkeypatch):
     """Only scheduling drift gets a member here; it is cancelled and writes nothing."""
     class Hung:
-        async def status(self, **kwargs):
-            await asyncio.sleep(10)
+        status = staticmethod(_hang)
 
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(1))
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.5)
     sweep = QuiesceExitSweep(None, subscriber=lambda: None, probe=Hung())
-    sweep.budget_seconds, sweep.write_reserve_seconds = 0.1, -1.0  # starts anyway, still probing at 0.1s
-    assert asyncio.run(sweep.run_once()) == {"cut": 1}
+    # A budget shorter than one probe, and a reserve that still lets it start.
+    sweep.budget_seconds, sweep.write_reserve_seconds = PROBE_S / 2, -PROBE_S
+    counts, elapsed = _timed(sweep.run_once)
+    assert counts == {"cut": 1}
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert sweep.budget_seconds <= elapsed < PROBE_S
 
 
 def test_the_terminal_read_is_inside_the_member_deadline(monkeypatch):
@@ -278,27 +297,25 @@ def test_the_terminal_read_is_inside_the_member_deadline(monkeypatch):
     class Probe:
         async def status(self, **kwargs):
             asked.append(kwargs["request_id"])
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(PROBE_S * 0.8)
             return RunStatusReply("claude-code", "boot-a", kwargs["request_id"], RunState.NOT_FOUND), None
 
     class Subscriber:
         async def read_run_terminal(self, request_id):
-            await asyncio.sleep(0.12)
-            return None
+            await _hang()
 
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(40))
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.05)
     sweep = QuiesceExitSweep(None, subscriber=lambda: Subscriber(), probe=Probe())
-    sweep.budget_seconds, sweep.write_reserve_seconds = 0.25, 0.01
-    capacity = quiesce_exit_sweep.pass_capacity(0.25, 0.05, quiesce_exit_sweep.CONCURRENCY, 0.01)
-    counts = asyncio.run(sweep.run_once())
+    capacity = quiesce_exit_sweep.PASS_CAPACITY
+    counts, _elapsed = _timed(sweep.run_once)
     assert capacity == 32 and len(asked) == capacity
     # not_found without its terminal read is no judgement: no abort, no evidence.
     assert counts == {"ambiguous": capacity, "deferred": 40 - capacity} and sweep._aborts == {}
 
 
-async def _bounded(awaitable, seconds=2.0):
-    """A stalled-publication test fails, not hangs, when the bound under test is missing."""
+async def _bounded(awaitable, seconds=600.0):
+    """A stalled-publication test fails, not hangs, when the bound under test
+    is missing. Virtual seconds: far past every bound under test, and free."""
     try:
         return await asyncio.wait_for(awaitable, seconds)
     except TimeoutError:
@@ -313,11 +330,11 @@ def test_status_publication_is_inside_the_probe_timeout():
 
     sub = RedisSubscriber.__new__(RedisSubscriber)
     sub._pub_redis = Redis()
-    started = time.monotonic()
-    reply, result = asyncio.run(_bounded(BridgeRunProbe(lambda: sub, timeout_seconds=0.05).status(
+    (reply, result), elapsed = _timed(lambda: _bounded(BridgeRunProbe(lambda: sub, timeout_seconds=PROBE_S).status(
         backend="claude-code", session_key="s", request_id="req-1")))
-    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
-    assert reply is None and result.state == "timeout" and time.monotonic() - started < 0.5
+    assert reply is None and result.state == "timeout"
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert PROBE_S <= elapsed < 2 * PROBE_S
 
 
 def test_a_member_writing_at_the_budget_is_waited_for_never_cut(monkeypatch):
@@ -327,26 +344,36 @@ def test_a_member_writing_at_the_budget_is_waited_for_never_cut(monkeypatch):
 
     def blocked_stamp(engine, member, record, *, deadline):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(HANG_GUARD_S)
         writes.append(record)
         return True
 
     monkeypatch.setattr(quiesce_exit_sweep, "stamp", blocked_stamp)
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: [_member()])
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.02)
     sweep = QuiesceExitSweep(None, subscriber=lambda: _Rpc(_wire("not_found")))
-    sweep.budget_seconds, sweep.write_reserve_seconds = 0.08, 0.0
+    real_cut = sweep._cut
 
     async def run():
+        loop = asyncio.get_running_loop()
+        cut = asyncio.Event()
+
+        def cut_at_the_budget(tasks):
+            real_cut(tasks)
+            cut.set()
+
+        sweep._cut = cut_at_the_budget
         task = asyncio.create_task(sweep.run_once())
-        await asyncio.to_thread(entered.wait, 1)
-        await asyncio.sleep(0.15)  # well past the budget
+        assert await asyncio.to_thread(entered.wait, HANG_GUARD_S)
+        # The write thread is real work, so the clock follows real time; take
+        # the pass's deadline past it instead of waiting the budget out.
+        loop.advance(sweep.budget_seconds)
+        await cut.wait()
         assert not task.done(), "the pass returned while its write was still running"
         release.set()
         return await task
 
     try:
-        assert asyncio.run(run()) == {"restart": 1}
+        assert virtual_clock.run_timing(run()) == {"restart": 1}
     finally:
         release.set()
     assert len(writes) == 1
@@ -365,28 +392,42 @@ def test_a_write_past_its_deadline_writes_nothing(monkeypatch):
             pass
 
 
-def test_a_connection_checked_out_past_the_deadline_runs_nothing():
+class _Clock:
+    """quiesce_exit's ``time``: monotonic stands still until a test moves it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+def test_a_connection_checked_out_past_the_deadline_runs_nothing(monkeypatch):
     """The time left is measured after the pool checkout, which can itself wait."""
     from contextlib import contextmanager
 
+    clock = _Clock()
+    monkeypatch.setattr(quiesce_exit, "time", clock)
     executed = []
 
     class Engine:
         @contextmanager
         def begin(self):
-            time.sleep(0.05)  # the checkout outlasts the deadline
+            clock.now += 1  # the checkout outlasts the deadline
             yield SimpleNamespace(dialect=SimpleNamespace(name="postgresql"),
                                   execute=lambda *args: executed.append(args))
 
     with pytest.raises(WriteDeadline):
-        with quiesce_exit._transaction(Engine(), time.monotonic() + 0.02):
+        with quiesce_exit._transaction(Engine(), clock.now + 0.5):
             executed.append("body")
     assert executed == []
 
 
-def test_a_transaction_past_its_deadline_rolls_back_instead_of_committing():
+def test_a_transaction_past_its_deadline_rolls_back_instead_of_committing(monkeypatch):
     from contextlib import contextmanager
 
+    clock = _Clock()
+    monkeypatch.setattr(quiesce_exit, "time", clock)
     outcome = []
 
     class Engine:
@@ -400,8 +441,8 @@ def test_a_transaction_past_its_deadline_rolls_back_instead_of_committing():
             outcome.append("commit")
 
     with pytest.raises(WriteDeadline):
-        with quiesce_exit._transaction(Engine(), time.monotonic() + 0.02):
-            time.sleep(0.05)  # the body's statements outlast the deadline
+        with quiesce_exit._transaction(Engine(), clock.now + 0.5):
+            clock.now += 1  # the body's statements outlast the deadline
     assert outcome == ["rollback"]
 
 
@@ -527,22 +568,23 @@ def test_the_sweep_aborts_once_per_member_and_boot_with_the_abort_timeout(monkey
 
 def test_an_abort_holds_no_probe_slot_and_no_budget(monkeypatch):
     """The abort waits on the bridge's teardown; the pass must not."""
-    rpc = _AbortRpc(delay=10)
+    from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
+
+    rpc = _AbortRpc(delay=10 * ABORT_RPC_TIMEOUT_S)  # the bridge never answers the abort in time
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: _members(3))
-    monkeypatch.setattr(quiesce_exit_sweep, "PROBE_TIMEOUT_SECONDS", 0.2)
     sweep = QuiesceExitSweep(None, subscriber=lambda: rpc, concurrency=1)
-    sweep.budget_seconds, sweep.write_reserve_seconds = 1.0, 0.0  # probes start by 0.8s; each abort alone would take 10s
 
     async def one_pass():
-        started = asyncio.get_running_loop().time()
-        counts = await sweep.run_once()
-        elapsed = asyncio.get_running_loop().time() - started
-        await sweep.aclose()
-        return counts, elapsed
+        try:
+            return await sweep.run_once()
+        finally:
+            await sweep.aclose()
 
-    counts, elapsed = asyncio.run(one_pass())
-    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
-    assert counts == {"absent_unaccepted": 3} and elapsed < 0.5
+    counts, elapsed = _timed(one_pass)
+    # One slot, three members, three aborts each bounded at 30s: the pass
+    # took none of that, not even one probe timeout.
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert counts == {"absent_unaccepted": 3} and elapsed < PROBE_S
     assert sorted(c[1] for c in rpc.calls if c[0] == "chat.abort") == ["req-1", "req-2", "req-3"]
 
 
@@ -583,29 +625,23 @@ def _stalled_subscriber(published: asyncio.Event | None = None):
 
 
 def test_the_probe_abort_bound_covers_publication(monkeypatch):
-    import agent_bridge.abort_contract as contract
+    from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
 
-    monkeypatch.setattr(contract, "ABORT_RPC_TIMEOUT_S", 0.02)
     sub = _stalled_subscriber()
-
-    async def run():
-        started = time.monotonic()
-        reply = await BridgeRunProbe(lambda: sub).abort(backend="claude-code", session_key="s", request_id="req-1")
-        return reply, time.monotonic() - started
-
-    reply, elapsed = asyncio.run(_bounded(run()))
-    # timing-ok: hang guard: the sweep uses asyncio.to_thread, so no virtual clock; 10x the probe timeout vs a 10s hang
-    assert reply is None and elapsed < 0.5
+    reply, elapsed = _timed(lambda: _bounded(
+        BridgeRunProbe(lambda: sub).abort(backend="claude-code", session_key="s", request_id="req-1")))
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert reply is None and ABORT_RPC_TIMEOUT_S <= elapsed < 2 * ABORT_RPC_TIMEOUT_S
 
 
 def test_a_detached_abort_ends_by_its_deadline_even_when_publication_stalls(monkeypatch):
     """Loopy r1 B1: the real BridgeRunProbe.abort over RedisSubscriber.send_rpc, XADD stalled."""
-    import agent_bridge.abort_contract as contract
+    from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
 
-    monkeypatch.setattr(contract, "ABORT_RPC_TIMEOUT_S", 0.02)
     members = _members(1)
 
     async def run():
+        loop = asyncio.get_running_loop()
         published = asyncio.Event()
         sub = _stalled_subscriber(published)
 
@@ -616,21 +652,26 @@ def test_a_detached_abort_ends_by_its_deadline_even_when_publication_stalls(monk
         monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: list(members))
         sweep = QuiesceExitSweep(None, subscriber=lambda: sub, probe=Probe(lambda: sub))
         try:
+            started = loop.time()
             assert await sweep.run_once() == {"absent_unaccepted": 1}
             await published.wait()
-            await asyncio.sleep(0.08)  # 4x the abort deadline; the member is still held
-            assert [t for t in sweep._aborts.values() if not t.done()] == []
+            (abort,) = sweep._aborts.values()
+            await abort  # the member is still held; its abort ends anyway
+            # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+            assert ABORT_RPC_TIMEOUT_S <= loop.time() - started < 2 * ABORT_RPC_TIMEOUT_S
             assert await sweep.run_once() == {"absent_unaccepted": 1}  # still once per member and boot
             assert len(sweep._aborts) == 1
         finally:
             await sweep.aclose()
 
-    asyncio.run(_bounded(run()))
+    virtual_clock.run_timing(_bounded(run()))
 
 
 def test_the_abort_of_a_member_no_longer_held_is_retired(monkeypatch):
     """The sweep owns every detached abort: the member's release cancels it at the next pass."""
-    rpc = _AbortRpc(delay=10)
+    from agent_bridge.abort_contract import ABORT_RPC_TIMEOUT_S
+
+    rpc = _AbortRpc(delay=10 * ABORT_RPC_TIMEOUT_S)
     members = _members(1)
     monkeypatch.setattr(quiesce_exit_sweep, "undrained_members", lambda engine: list(members))
     sweep = QuiesceExitSweep(None, subscriber=lambda: rpc)
@@ -638,11 +679,11 @@ def test_the_abort_of_a_member_no_longer_held_is_retired(monkeypatch):
     async def run():
         assert await sweep.run_once() == {"absent_unaccepted": 1}
         (task,) = sweep._aborts.values()
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(ABORT_RPC_TIMEOUT_S / 2)  # in flight: sent, inside its bound
         assert not task.done()
         members.clear()  # the job released or expired
         assert await sweep.run_once() == {}
         return task
 
-    task = asyncio.run(run())
+    task = virtual_clock.run_timing(run())
     assert task.cancelled() and sweep._aborts == {}

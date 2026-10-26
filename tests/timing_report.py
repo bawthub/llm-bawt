@@ -7,6 +7,8 @@ normal suite and ``make gate`` never import it. For one unit run it:
   (JUMP/FOLLOW virtual clock, ``LLM_BAWT_TIMING_STEP_COST`` seconds charged per
   scheduler turn) and makes ``time.monotonic/perf_counter/time`` read that
   clock on the loop's thread. A test that fails here depends on timing.
+  A private pool's future awaited through ``asyncio.wrap_future`` counts as
+  real work too (``follow_wrapped_futures``).
 - FOLLOW: records, per test, which real work kept the loop on real time and
   how many real seconds it spent there.
 - D3: records ``time.sleep`` on the test's main thread and every subprocess
@@ -47,6 +49,7 @@ _PROPERTY = "task1457_timing"
 _current: dict[str, Any] = {}
 _saved: list[tuple[Any, str, Any]] = []
 _follow_time = virtual_clock.follow_time()
+_follow_futures = virtual_clock.follow_wrapped_futures()
 
 
 def _record(kind: str, detail: str) -> None:
@@ -72,6 +75,7 @@ def _install() -> None:
     asyncio.set_event_loop_policy(virtual_clock.TimingLoopPolicy(
         step_cost=float(os.environ.get(STEP_COST_ENV) or 0), observer=_observe))
     _follow_time.__enter__()
+    _follow_futures.__enter__()
     real_sleep, real_popen_init = time.sleep, subprocess.Popen.__init__
 
     def sleep(seconds: float) -> None:
@@ -92,6 +96,7 @@ def _uninstall() -> None:
     while _saved:
         owner, name, original = _saved.pop()
         setattr(owner, name, original)
+    _follow_futures.__exit__(None, None, None)
     _follow_time.__exit__(None, None, None)
     asyncio.set_event_loop_policy(None)
 

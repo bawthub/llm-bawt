@@ -147,6 +147,7 @@ def run(main: Awaitable[T], *, follow: Iterable[ModuleType] = ()) -> T:
 _REAL_MONOTONIC = real_time.monotonic
 _REAL_TIME = real_time.time
 _REAL_PERF_COUNTER = real_time.perf_counter
+_REAL_WRAP_FUTURE = asyncio.wrap_future
 TICKS_PER_SECOND = 1_000_000
 IDLE_LIMIT_S = 30.0
 Observer = Callable[[str, float], None]
@@ -271,30 +272,53 @@ class TimingLoop(asyncio.SelectorEventLoop):
                 executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="asyncio")
                 self._default_executor = executor
 
-        def released() -> None:
-            with self._workers_lock:
-                self._workers -= 1
-            if not self.is_closed():
-                with contextlib.suppress(Exception):
-                    self._write_to_self()
+        inner = executor.submit(func, *args)
+        wrapped = _REAL_WRAP_FUTURE(inner, loop=self)
+        self.track(inner)
+        return wrapped
 
-        def worker():
-            try:
-                return func(*args)
-            finally:
-                released()
+    def track(self, future: concurrent.futures.Future) -> None:
+        """Count a worker as real work until its outcome is on the loop.
 
+        A concurrent future is done only when its function returned or it was
+        cancelled before starting, so this counts the worker, not an asyncio
+        wrapper (``wait_for`` cancelling the wrapper leaves the thread running).
+        Call it after ``wrap_future``: done callbacks run in the order they
+        were added, so the release is queued on the loop behind the result.
+        Released any earlier, the loop could see no real work and nothing
+        ready, and jump to the next timer before the result arrives."""
         with self._workers_lock:
             self._workers += 1
+        future.add_done_callback(lambda _: self._release_on_loop())
+
+    async def shutdown_default_executor(self, timeout=None):
+        # asyncio joins the pool on a plain thread of its own; count it, or
+        # the clock jumps past ``timeout`` and leaves the pool unjoined.
+        if self._default_executor is not None:
+            with self._workers_lock:
+                self._workers += 1  # released by _do_shutdown
+        await super().shutdown_default_executor(timeout)
+
+    def _do_shutdown(self, future):
         try:
-            inner = executor.submit(worker)
-        except BaseException:
-            released()
-            raise
-        # A worker that never starts (cancelled first, or the pool shut down
-        # with cancel_futures) is released here; one that ran released itself.
-        inner.add_done_callback(lambda done: done.cancelled() and released())
-        return asyncio.wrap_future(inner, loop=self)
+            super()._do_shutdown(future)  # type: ignore[misc]
+        finally:
+            self._release_on_loop()  # queued behind the result it just sent
+
+    def _release_on_loop(self) -> None:
+        """Release one worker on the loop, after whatever the worker's thread
+        already queued there (its result)."""
+        try:
+            self.call_soon_threadsafe(self._release_worker)
+        except RuntimeError:  # the loop is closed: nothing left to wake
+            self._release_worker()
+
+    def _release_worker(self) -> None:
+        with self._workers_lock:
+            self._workers -= 1
+        if not self.is_closed():
+            with contextlib.suppress(Exception):
+                self._write_to_self()
 
     async def _make_subprocess_transport(self, *args, **kwargs):
         transport = await super()._make_subprocess_transport(*args, **kwargs)  # type: ignore[misc]
@@ -312,6 +336,42 @@ class TimingLoopPolicy(asyncio.DefaultEventLoopPolicy):
 
     def new_event_loop(self) -> TimingLoop:
         return TimingLoop(step_cost=self.step_cost, observer=self.observer)
+
+
+def run_timing(main: Awaitable[T]) -> T:
+    """``asyncio.run`` on a :class:`TimingLoop`, for a test that holds real
+    work blocked and takes a deadline past it with ``loop.advance()``, or
+    runs code at its real timeouts without waiting for them. Code on the loop
+    thread that reads ``time.monotonic()`` for its own deadlines reads the
+    same clock (``follow_time``). Under the timing report it is the report's
+    loop (same step cost), so D2 still covers the test."""
+    policy = asyncio.get_event_loop_policy()
+    factory = policy.new_event_loop if isinstance(policy, TimingLoopPolicy) else TimingLoop
+    with follow_time(), follow_wrapped_futures():
+        return asyncio.run(main, loop_factory=factory)
+
+
+def _tracking_wrap_future(future, *, loop=None):
+    wrapped = _REAL_WRAP_FUTURE(future, loop=loop)
+    if isinstance(future, concurrent.futures.Future) and not future.done():
+        target = loop if loop is not None else asyncio._get_running_loop()
+        if isinstance(target, TimingLoop):
+            target.track(future)  # after the wrap: its result is queued first
+    return wrapped
+
+
+@contextlib.contextmanager
+def follow_wrapped_futures() -> Iterator[None]:
+    """While active, a concurrent future awaited through ``asyncio.wrap_future``
+    on a TimingLoop counts as real work (FOLLOW) until it is done. Code with
+    its own ThreadPoolExecutor (``BoundedWorker``) never calls run_in_executor,
+    so without this the loop would jump past a worker it is waiting on."""
+    saved = (asyncio.wrap_future, asyncio.futures.wrap_future)
+    asyncio.wrap_future = asyncio.futures.wrap_future = _tracking_wrap_future
+    try:
+        yield
+    finally:
+        asyncio.wrap_future, asyncio.futures.wrap_future = saved
 
 
 def _running_timing_loop() -> TimingLoop | None:

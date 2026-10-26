@@ -269,15 +269,23 @@ def test_a_deleted_turn_is_stamped_on_its_member_row(sweep):
 class _TurnLock:
     """Holds the turn row ``FOR UPDATE`` on its own connection and thread until released."""
 
+    HOLD_GUARD_S = 30.0
+
     def __init__(self, engine, turn_id):
         self._locked, self._release = Event(), Event()
+        self._released_in_time: bool | None = None
         self._thread = threading.Thread(target=self._hold, args=(engine, turn_id), daemon=True)
 
     def _hold(self, engine, turn_id):
         with engine.begin() as conn:
             conn.execute(text("SELECT 1 FROM turn_logs WHERE id=:t FOR UPDATE"), {"t": turn_id})
-            self._locked.set()
-            self._release.wait(30)
+            self._hold_until_released()
+
+    def _hold_until_released(self):
+        """Hold the lock until released. Checked in __exit__: a lock that let
+        go on its hang guard instead of the test's release fails the test."""
+        self._locked.set()
+        self._released_in_time = self._release.wait(self.HOLD_GUARD_S)
 
     def __enter__(self):
         self._thread.start()
@@ -290,6 +298,9 @@ class _TurnLock:
     def __exit__(self, *exc):
         self._release.set()
         self._thread.join(10)
+        if exc[0] is None:  # never mask the test's own failure
+            assert not self._thread.is_alive(), "the lock holder never let go"
+            assert self._released_in_time, "the lock let go on its hang guard, not the test's release"
 
 
 def _deadlines(sweep, monkeypatch, *, probe=0.2, budget=1.5, reserve=0.5):
@@ -374,8 +385,7 @@ class _ShareTableLock(_TurnLock):
     def _hold(self, engine, turn_id):
         with engine.begin() as conn:
             conn.execute(text("LOCK TABLE turn_logs IN SHARE MODE"))
-            self._locked.set()
-            self._release.wait(10)
+            self._hold_until_released()
 
 
 def test_two_lock_waits_share_one_absolute_write_deadline(sweep, monkeypatch):
