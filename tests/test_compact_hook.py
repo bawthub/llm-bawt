@@ -75,6 +75,7 @@ def registry_server():
     finally:
         server.shutdown()
         thread.join(timeout=5)
+        assert not thread.is_alive()
         server.server_close()
 
 

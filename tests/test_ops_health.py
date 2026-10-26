@@ -19,6 +19,19 @@ from llm_bawt.ops.health_runtime import OpsHealthRuntime
 from llm_bawt.ops.health_state import HealthSample, OpsHealthState
 from llm_bawt.ops.reconciler import OpsReconciler
 
+HANG_GUARD_S = 10.0  # thread handshakes; only reached if one hangs
+STALL_S = 10.0  # a stalled collector/handler: well past close()'s 2s join deadline
+
+
+def _stall(entered, release):
+    entered.set()
+    # timing-ok: deliberate stall; returning on timeout only lets the thread exit
+    release.wait(STALL_S)
+
+
+def _until_stopped(stop):
+    assert stop.wait(HANG_GUARD_S), "runtime never signalled stop"
+
 
 class Clock:
     def __init__(self):
@@ -250,8 +263,7 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
     release = Event()
 
     def block(*_args):
-        entered.set()
-        release.wait(10)
+        _stall(entered, release)
 
     collectors = SimpleNamespace(run=OpsHealthCollector.run, collect_database=block, collect_docker=block)
     runtime = OpsHealthRuntime(state=state, collector=collectors,
@@ -259,7 +271,7 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
                               address=("127.0.0.1", 0))
     runtime.start()
     try:
-        assert entered.wait(1)
+        assert entered.wait(HANG_GUARD_S)
         clock.advance(31)
         before = time.monotonic()
         assert request(runtime.http, "/health/live") == (200, {"status": "ok"})
@@ -276,7 +288,8 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
     finally:
         release.set()
         for worker in runtime.workers:
-            worker.join(timeout=1)
+            worker.join(HANG_GUARD_S)
+            assert not worker.is_alive()
 
 
 def test_compose_has_internal_only_listener_and_readiness_healthcheck():
@@ -344,26 +357,26 @@ def test_bootstrap_failure_recovers_without_restarting_http():
         if len(attempts) == 1:
             failed.set()
             raise RuntimeError("private bootstrap error")
-        retry.wait(2)
+        assert retry.wait(HANG_GUARD_S), "test never allowed the retry"
         return SimpleNamespace(run=run)
 
     def run(stop, health):
         health.publish("reconciler.loop", HealthSample(health.sample_time(), "ok"))
         recovered.set()
-        stop.wait(2)
+        _until_stopped(stop)
 
-    collectors = SimpleNamespace(run=lambda _collect, stop: stop.wait(2),
+    collectors = SimpleNamespace(run=lambda _collect, stop: _until_stopped(stop),
                                  collect_database=None, collect_docker=None)
     runtime = OpsHealthRuntime(state=state, collector=collectors, interval=0.01,
                               reconciler_factory=build, address=("127.0.0.1", 0))
     runtime.start()
     try:
-        assert failed.wait(1)
+        assert failed.wait(HANG_GUARD_S)
         assert request(runtime.http, "/health/live")[0] == 200
         body = request(runtime.http, "/health/ready")[1]
         assert "private" not in json.dumps(body)
         retry.set()
-        assert recovered.wait(1)
+        assert recovered.wait(HANG_GUARD_S)
         assert request(runtime.http, "/health/ready")[1]["checks"][-1]["status"] == "ok"
         assert len(attempts) == 2
     finally:
@@ -400,18 +413,15 @@ def test_http_shutdown_is_bounded_even_if_request_handler_stalls():
     server = OpsHealthServer(Clock().state(), ("127.0.0.1", 0))
     entered, release = Event(), Event()
 
-    def stall():
-        entered.set()
-        release.wait(10)
-
-    server.server.handle_request = stall
+    server.server.handle_request = lambda: _stall(entered, release)
     server.start()
     try:
-        assert entered.wait(1)
+        assert entered.wait(HANG_GUARD_S)
         before = time.monotonic()
         server.close()
         # timing-ok: real server thread; close joins it for at most 2s, the stalled handler holds for 10s
         assert time.monotonic() - before < 2.5
     finally:
         release.set()
-        server.thread.join(timeout=1)
+        server.thread.join(HANG_GUARD_S)
+        assert not server.thread.is_alive()

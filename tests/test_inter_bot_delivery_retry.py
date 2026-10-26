@@ -65,7 +65,7 @@ def test_manual_retry_and_cancel_failed_original_do_not_deadlock(delivery, monke
         conn.execute(text("SET LOCAL lock_timeout = '4s'"))
         retry_pid.append(conn.execute(text("SELECT pg_backend_pid()")).scalar_one())
         retry_has_row.set()  # retry holds target then original row before admission
-        if not resume_retry.wait(timeout=3):
+        if not resume_retry.wait(timeout=10):
             raise TimeoutError("cancel never reached the original row")
         return enqueue(**kwargs)
 
@@ -91,16 +91,17 @@ def test_manual_retry_and_cancel_failed_original_do_not_deadlock(delivery, monke
     canceller = threading.Thread(target=cancel)
     try:
         retrier.start()
-        assert retry_has_row.wait(timeout=2)
+        assert retry_has_row.wait(timeout=10)
         canceller.start()
         wait_blocked_by(store.engine, retry_pid[0], canceller)
     finally:
         resume_retry.set()
-        retrier.join(timeout=5)
+        retrier.join(timeout=10)
+        assert not retrier.is_alive()
         if canceller.ident is not None:
-            canceller.join(timeout=5)
+            canceller.join(timeout=10)
+            assert not canceller.is_alive()
         event.remove(store.engine, "begin", set_lock_timeout)
-    assert not retrier.is_alive() and not canceller.is_alive()
     assert len(retry_result) == 1 and isinstance(retry_result[0], tuple), retry_result
     child, duplicate = retry_result[0]
     assert not duplicate and child.id != original.id

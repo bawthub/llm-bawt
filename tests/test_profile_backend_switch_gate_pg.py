@@ -22,6 +22,7 @@ from llm_bawt.runtime_settings import BotProfileStore
 from llm_bawt.service.routes import settings
 from llm_bawt.service.turn_admission import activate_hold, lock_target
 from llm_bawt.service.turn_gates import GateActor, GateScope, GateSpec, ensure_gate_schema, gate_blocks
+from tests.pg_lock_wait import wait_blocked_by
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -167,10 +168,12 @@ def test_the_save_takes_the_admission_lock_before_its_row_lock(rig):
         lock_target(conn, agent)
         worker = threading.Thread(target=save)
         worker.start()
-        assert not done.wait(0.5)  # parked on the admission lock
+        holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        wait_blocked_by(rig.engine, holder_pid, worker)  # parked on the admission lock
         # ...without holding the profile row: a row lock now is still free.
         conn.execute(text("SELECT 1 FROM bot_profiles WHERE slug=:b FOR UPDATE NOWAIT"), {"b": agent})
         txn.commit()
     worker.join(10)
+    assert not worker.is_alive()
     assert done.is_set() and errors == []
     assert rig.runtime(agent) == ("agent", rig.held)

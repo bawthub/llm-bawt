@@ -59,7 +59,7 @@ def _after_lock_wait(gated, bot, gate_id, probe):
         lock_target(conn, bot)
         thread = threading.Thread(target=waiter)
         thread.start()
-        assert began.wait(2)
+        assert began.wait(10)
         conn.execute(sa_text(
             "UPDATE system_gates SET expires_at=clock_timestamp()+interval '0.1 seconds' WHERE id=:id"
         ), {"id": gate_id})

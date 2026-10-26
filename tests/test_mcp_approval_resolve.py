@@ -427,9 +427,11 @@ def test_ensure_tools_registered_populates_bare_app_process_singleton():
         assert parent.poll(10), "isolated MCP registration child timed out"
         assert parent.recv() is None
     finally:
-        process.join(timeout=1)
-        if process.is_alive():
+        process.join(timeout=10)
+        hung = process.is_alive()
+        if hung:
             process.kill()
-            process.join(timeout=1)
+            process.join()
         parent.close()
+    assert not hung, "isolated MCP registration child did not exit"
     assert process.exitcode == 0

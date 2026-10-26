@@ -201,7 +201,8 @@ def test_real_execution_deadline_not_stop_grace(tmp_path, monkeypatch):
     class SlowAPI(FakeAPI):
         def execute(self, spec, args):
             self.side_effect_started = True
-            release.wait(30)  # outlives the 0.02s deadline until the test lets go
+            # timing-ok: deliberate stall; it outlives the 0.02s deadline until the test lets go
+            release.wait(30)
             finished.set()
     try:
         assert run(request, digest, api_factory=SlowAPI, sleep=lambda _: None) == 1

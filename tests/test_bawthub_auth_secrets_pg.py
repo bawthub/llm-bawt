@@ -53,6 +53,7 @@ def _race(write, count: int = WRITERS) -> list[tuple[str, bool]]:
         thread.start()
     for thread in threads:
         thread.join(timeout=30)
+        assert not thread.is_alive()
     assert not errors, errors
     assert len(results) == count
     return results

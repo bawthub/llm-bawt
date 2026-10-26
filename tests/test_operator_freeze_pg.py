@@ -207,6 +207,7 @@ def test_concurrent_freezes_by_one_actor_have_one_winner(fz):
         thread.start()
     for thread in threads:
         thread.join(timeout=30)
+        assert not thread.is_alive()
     assert not errors, errors
     assert sorted(codes) == [201] + [409] * (count - 1)
     with fz.engine.connect() as conn:

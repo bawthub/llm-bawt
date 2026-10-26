@@ -23,6 +23,7 @@ from llm_bawt.ops.models import JOB_CANCELLED, JOB_DISPATCHING, JOB_QUIESCING, _
 from llm_bawt.ops.quiesce import cancel_quiesce_job
 from llm_bawt.ops.quiesce_status import attach_members, live_holds
 from llm_bawt.service.turn_gates import _bootstrap
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_ops_quiesce_pg import _as_caller, _receipt_deliveries, rig  # noqa: F401  (fixture)
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -267,11 +268,12 @@ def test_a_cancelled_unopened_job_ignores_a_late_preflight_note(rig):
 def test_a_cancel_waits_for_a_step_that_is_mid_open_then_releases_its_new_gate(rig):
     rig.turn()
     job_id = rig.job()
-    opened, proceed = threading.Event(), threading.Event()
+    opened, proceed, holder = threading.Event(), threading.Event(), {}
     activate = rig.gates.activate
 
     def paused(conn, spec, predecessor):
         activated = activate(conn, spec, predecessor)
+        holder["pid"] = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
         opened.set()  # the gate row exists, uncommitted, inside the step's transaction
         assert proceed.wait(10)
         return activated
@@ -284,11 +286,12 @@ def test_a_cancel_waits_for_a_step_that_is_mid_open_then_releases_its_new_gate(r
     step.start()
     assert opened.wait(10)
     cancel.start()
-    cancel.join(0.5)
-    assert cancel.is_alive()  # blocked behind the step's locks, not racing past it
+    # blocked behind the step's locks, not racing past it
+    wait_blocked_by(rig.engine, holder["pid"], cancel)
     proceed.set()
     step.join(10)
     cancel.join(10)
+    assert not step.is_alive() and not cancel.is_alive()
     assert results == {"step": "opened", "cancel": ("cancelled", JOB_CANCELLED)}
     [gate] = rig.gates_of(job_id)
     assert gate["released_at"] is not None and not rig.held()

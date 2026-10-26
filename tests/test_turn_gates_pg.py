@@ -294,6 +294,8 @@ def test_b2_admission_paused_after_the_predicate_lands_in_the_roster(gated, monk
         proceed.set()
         admission.join(10)
         activation.join(10)
+        assert not admission.is_alive()
+        assert not activation.is_alive()
     assert outcomes["saved"] == turn_id
     members = _members(store, outcomes["gate"].gate.id)
     assert members[turn_id]["disposition"] == "running"
@@ -418,6 +420,7 @@ def test_activation_takes_target_locks_in_sorted_order(gated):
         finally:
             txn.rollback()
             activation.join(10)
+            assert not activation.is_alive()
 
 
 @pytest.mark.integration
@@ -446,6 +449,7 @@ def test_activation_locks_producers_in_ordinal_order_like_recover_expired(gated)
         finally:
             txn.rollback()
             activation.join(10)
+            assert not activation.is_alive()
     members = _members(store, outcomes["gate"].gate.id)
     assert {members[c.turn_id]["disposition"] for c in (low, high)} == {"revoked_unstarted"}
     assert {deliveries.get(c.id).status for c in (low, high)} == {"QUEUED"}
@@ -482,6 +486,7 @@ def test_activation_locks_approvals_in_id_order_like_the_operator_purge(gated):
             finally:
                 txn.rollback()
                 activation.join(10)
+                assert not activation.is_alive()
         members = _members(store, outcomes["gate"].gate.id)
         assert {members[t]["disposition"] for t in (low_turn, high_turn)} == {"revoked_unstarted"}
         for row in (low, high):
@@ -1004,6 +1009,7 @@ def test_capture_waits_for_an_uncommitted_bind_and_reads_its_request(gated):
         finally:
             txn.commit()
             activation.join(10)
+            assert not activation.is_alive()
     assert _members(store, result["gate"].id)[turn]["agent_request_id"] == "req-race"
 
 
@@ -1022,6 +1028,7 @@ def test_a_bind_behind_an_uncommitted_capture_pins_the_member(gated):
         finally:
             txn.commit()
             bind.join(10)
+            assert not bind.is_alive()
     assert _members(store, gate.id)[turn]["agent_request_id"] == "req-race"
 
 
@@ -1055,6 +1062,7 @@ def test_a_bind_behind_an_uncommitted_rebuild_pins_the_carried_member(gated):
         finally:
             txn.commit()
             bind.join(10)
+            assert not bind.is_alive()
     assert _members(store, rebuilt.id)[turn]["agent_request_id"] == "req-carry-race"
     _delete_turns(store, turn)
     assert _drain(store, rebuilt.id)[turn] == (False, "turn_missing:no_execution_exit")  # never never_bound
@@ -1085,4 +1093,5 @@ def test_a_rebuild_waits_for_an_uncommitted_bind_and_carries_its_request(gated):
         finally:
             txn.commit()
             rebuilding.join(10)
+            assert not rebuilding.is_alive()
     assert _members(store, result["gate"].id)[turn]["agent_request_id"] == "req-carry-race"

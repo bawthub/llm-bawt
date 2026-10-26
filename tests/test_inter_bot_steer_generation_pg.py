@@ -320,6 +320,7 @@ def test_concurrent_batches_cannot_both_take_the_last_slot(batches):
         thread.start()
     for thread in threads:
         thread.join(timeout=30)
+        assert not thread.is_alive()
     assert sorted(outcomes) == [202, 429]
     assert batches.count() == 9
 

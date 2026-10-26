@@ -264,7 +264,7 @@ def test_registry_lock_fences_concurrent_writer_after_final_check(orphan_db, tmp
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 with pytest.raises(OperationalError) as blocked:
-                    pool.submit(register).result(timeout=3)
+                    pool.submit(register).result(timeout=10)
                 assert blocked.value.orig.pgcode == "55P03"
 
     event.listen(orphan_db, "before_cursor_execute", observe)
@@ -376,7 +376,7 @@ def test_tag_lock_fences_a_concurrent_private_assignment(orphan_db, tmp_path):
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 with pytest.raises(OperationalError) as blocked:
-                    pool.submit(assign).result(timeout=3)
+                    pool.submit(assign).result(timeout=10)
                 assert blocked.value.orig.pgcode == "55P03"
 
     event.listen(orphan_db, "before_cursor_execute", observe)

@@ -200,7 +200,7 @@ async def test_timeout_retains_slot_until_underlying_call_finishes(monkeypatch):
 
     def blocked(*args, **kwargs):
         started.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=10)
         return SimpleNamespace(content="{}")
 
     monkeypatch.setattr(module, "complete_utility", blocked)
@@ -229,7 +229,7 @@ async def test_caller_cancellation_does_not_release_running_slot(monkeypatch):
 
     def blocked(*args, **kwargs):
         started.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=10)
         return SimpleNamespace(content="{}")
 
     monkeypatch.setattr(module, "complete_utility", blocked)

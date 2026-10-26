@@ -521,6 +521,7 @@ def test_delivery_claim_fence_locks_out_concurrent_requeue(pg_turns):
     finally:
         if worker and worker.is_alive():
             worker.join(5)
+            assert not worker.is_alive()
         with deliveries.engine.begin() as conn:
             conn.execute(sa_text("DELETE FROM inter_bot_deliveries WHERE sender_bot_id=:sender"),
                          {"sender": sender})

@@ -425,7 +425,7 @@ def test_the_purge_lock_blocks_a_concurrent_assignment_until_commit(rig, purge):
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 with pytest.raises(OperationalError) as blocked:
-                    pool.submit(assign).result(timeout=3)
+                    pool.submit(assign).result(timeout=10)
                 assert blocked.value.orig.pgcode == "55P03"
 
     event.listen(rig.engine, "before_cursor_execute", observe)

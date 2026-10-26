@@ -215,6 +215,7 @@ def test_claim_takes_the_shared_target_lock(gated):
             wait_blocked_by(store.engine, pid, worker, detail=lambda: result)
             assert "claimed" not in result
     worker.join(timeout=10)
+    assert not worker.is_alive()
     assert result["claimed"] and result["claimed"].id == record.id
 
 

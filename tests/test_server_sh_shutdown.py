@@ -153,7 +153,7 @@ def stack(tmp_path):
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        proc.wait(timeout=5)
+        proc.wait(timeout=5)  # timing-ok: Popen.wait raises TimeoutExpired, never passes silently
     for name in ("service.pid", "mcp.pid"):
         pid_file = fake / name
         if pid_file.exists():

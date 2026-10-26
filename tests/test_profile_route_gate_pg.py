@@ -29,6 +29,7 @@ from llm_bawt.service import profile_route_gate
 from llm_bawt.service.routes import settings
 from llm_bawt.service.turn_admission import activate_hold, lock_target
 from llm_bawt.service.turn_gates import GateScope, GateSpec, ensure_gate_schema
+from tests.pg_lock_wait import wait_blocked_by
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -178,11 +179,13 @@ def test_a_stale_save_cannot_restore_a_dead_route_over_a_newer_one(rig):
         lock_target(conn, agent)
         worker = threading.Thread(target=stale_save)
         worker.start()
-        assert not done.wait(0.5)  # parked on the admission lock
+        holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        wait_blocked_by(rig.engine, holder_pid, worker)  # parked on the admission lock
         conn.execute(text("UPDATE bot_profiles SET endpoint_id=:e WHERE slug=:b"),
                      {"e": rig.endpoints["live"], "b": agent})
         txn.commit()
     worker.join(10)
+    assert not worker.is_alive()
 
     assert done.is_set() and len(outcome) == 1
     refused = outcome[0]

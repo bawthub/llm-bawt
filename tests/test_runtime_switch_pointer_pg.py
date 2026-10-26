@@ -68,7 +68,7 @@ def test_runtime_switch_takes_target_lock_before_selecting_sessions(rig):
         with rig.engine.begin() as conn:
             lock_target(conn, rig.bot)
             pending = pool.submit(rotate)
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=10)
             holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
             wait_blocked_by(rig.engine, holder_pid, pending)
             assert conn.execute(text("SELECT last_session_id FROM bot_profiles WHERE slug=:bot"),

@@ -25,6 +25,7 @@ from llm_bawt.service.usage.balance import (
     bootstrap_balance_schema,
 )
 from tests.pg_isolation import require_test_db_config
+from tests.pg_lock_wait import wait_blocked_by
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -317,10 +318,11 @@ def test_a_turn_finishing_while_the_first_anchor_commits_is_charged(rig, monkeyp
     from llm_bawt.service.usage import balance as balance_module
 
     store, balances, _bot = rig
-    inserted, resume, errors = Event(), Event(), []
+    inserted, resume, errors, holder = Event(), Event(), [], {}
     real_recount = balance_module._recount
 
     def paused_recount(conn, provider):
+        holder["pid"] = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
         inserted.set()  # anchor_at taken and the row inserted; the provider lock is held
         if not resume.wait(10):
             raise TimeoutError("anchor did not resume")
@@ -340,8 +342,8 @@ def test_a_turn_finishing_while_the_first_anchor_commits_is_charged(rig, monkeyp
     turn = _open_turn(rig)  # created after anchor_at, before the anchor row is visible
     finish = Thread(target=run, args=(lambda: _finish(rig, turn, _usage(2)),))
     finish.start()
-    finish.join(1)
-    assert finish.is_alive()  # waits on the provider lock instead of missing the anchor
+    # waits on the provider lock instead of missing the anchor
+    wait_blocked_by(store.engine, holder["pid"], finish)
     resume.set()
     anchor.join(10)
     finish.join(10)

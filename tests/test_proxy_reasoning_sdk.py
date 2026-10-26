@@ -110,6 +110,7 @@ def test_cli_persists_and_replays_opaque_reasoning_on_resume(tmp_path, monkeypat
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        assert not thread.is_alive()
     assert len(requests) >= 2
     signatures = [block.get("signature") for message in requests[-1]["messages"]
                   for block in message.get("content", []) if isinstance(block, dict)

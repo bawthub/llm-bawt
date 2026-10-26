@@ -12,13 +12,14 @@ import asyncio
 import threading
 
 import pytest
-from sqlalchemy import text as sa_text
+from sqlalchemy import event, text as sa_text
 
 import llm_bawt.inter_bot_delivery as delivery_module
 from llm_bawt.inter_bot_delivery import DELIVERED, DISPATCHING, QUEUED, STEERING
 from llm_bawt.inter_bot_delivery_steer_fence import IGNORED, PENDING, REOPENED, steer_uncertain
 from llm_bawt.service.inter_bot_dispatcher_steer import SteerGeneration
 from llm_bawt.service.inter_bot_steer_lifecycle import STARTED, UNCERTAIN, apply_bot_steer_lifecycle
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_inter_bot_delivery import delivery_store  # noqa: F401  (fixture)
 from tests.test_inter_bot_steer_generation_pg import _claim, _end_turn, _steer, rig  # noqa: F401
 
@@ -206,22 +207,31 @@ def test_a_rejection_racing_mark_delivered_still_reopens_the_steer(life, monkeyp
     assert steering.status == STEERING
     original = delivery_module.pending_rejection
     racer: dict = {}
+    checked_out: dict[int, int] = {}  # thread -> backend pid of its latest pool checkout
+
+    def note_checkout(dbapi_connection, _record, _proxy):
+        checked_out[threading.get_ident()] = dbapi_connection.get_backend_pid()
 
     def check_while_a_rejection_races(row):
         if "thread" not in racer:
+            holder_pid = checked_out[threading.get_ident()]  # mark_delivered's own connection
             racer["thread"] = threading.Thread(target=lambda: racer.setdefault(
                 "outcome", _apply(life, steering, "cancelled", proof="sweep_receipt")))
             racer["thread"].start()
-            racer["thread"].join(timeout=0.5)
-            racer["blocked"] = racer["thread"].is_alive()
+            # it waits on the claim's row lock
+            wait_blocked_by(life.store.engine, holder_pid, racer["thread"])
         return original(row)
 
     monkeypatch.setattr(delivery_module, "pending_rejection", check_while_a_rejection_races)
-    settled = life.store.mark_delivered(
-        steering.id, steering.claim_token or "", response_model=None, response_chars=0,
-    )
+    event.listen(life.store.engine, "checkout", note_checkout)
+    try:
+        settled = life.store.mark_delivered(
+            steering.id, steering.claim_token or "", response_model=None, response_chars=0,
+        )
+    finally:
+        event.remove(life.store.engine, "checkout", note_checkout)
     racer["thread"].join(timeout=10)
-    assert racer["blocked"]  # it waited on the claim's row lock
+    assert not racer["thread"].is_alive()
     assert settled.status == DELIVERED
     assert racer["outcome"] == REOPENED
     _assert_reopened(life.store.get(steering.id), attempts=steering.attempt_count - 1)
