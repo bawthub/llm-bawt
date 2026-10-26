@@ -257,6 +257,40 @@ any other state (dispatched, running, terminal, or not a quiesce job) is 409
 `not_cancellable` with the state; unknown is 404. The cancelled job's receipt
 goes out on the normal paths (approval continuation, or the receipt loop above).
 
+## Operator freeze (TASK-1233)
+
+A freeze is an operator DENY gate owned by `freeze:<actor>`
+(`service/operator_freeze.py`). Every admission edge refuses under it with 503
+`system_frozen`. Opening one revokes reservations that never started; runs
+already executing are not cancelled. Every route takes the TASK-1472 service
+bearer, checked before the body is read (401 with no or a wrong bearer, 503
+`service_token_unconfigured` when no token is configured). BawtHub's server is
+the only caller, since bots don't hold the token. `actor` is the person BawtHub
+signed in.
+
+- **`GET /v1/admin/gates`**: `{frozen, freezes: [{gate_id, actor, reason,
+  scope, created_at, expires_at}], max_ttl_seconds}`, live freezes only.
+- **`POST /v1/admin/gates`** with `{actor, reason, ttl_seconds, scope?}`
+  freezes. `ttl_seconds` is required, 60 to 43200 (12 h). `scope` is
+  `{all_agents: true}` (the default), `{bots: [...]}` or `{backends: [...]}`.
+  The result is 201 `{freeze}`. One live freeze per actor: a second one is 409
+  `already_frozen` with the live freeze.
+- **`POST /v1/admin/gates/{gate_id}/thaw`** with `{actor, override?}` thaws.
+  - The owner thaws their own freeze. Another actor gets 403 `not_owner`
+    unless `override` is set; BawtHub decides who may override, and the log
+    records it.
+  - The result is 200 `{freeze, released, override}`. `released` is false when
+    the freeze was already released or had lapsed, so a repeated thaw is not
+    an error.
+  - Anything that isn't a freeze (a job gate or a user-Stop hold) is 404,
+    even with `override` set.
+  - A thaw that releases a freeze wakes the delivery dispatcher.
+
+A freeze expires on the DB clock with the gate predicate, so a forgotten
+freeze lifts on its own with nothing running. None of these routes is an
+admission edge, so a freeze never blocks its own status or thaw. Freezes are
+also listed in `GET /v1/ops/holds` (operator-owned, `job` null).
+
 ## Deployment setup checklist (original TASK-861 setup; installed on echo)
 
 The base compose app mounts Docker's socket and `./.logs:/app/.logs`; the dev

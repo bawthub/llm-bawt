@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
-from llm_bawt.bawthub_auth import TokenCheck, service_token_source
 from llm_bawt.bawthub_auth.secret_store import (
     MAX_VALUE_CHARS,
     BawtHubAuthSecretStore,
@@ -26,18 +25,10 @@ from llm_bawt.bawthub_auth.secret_store import (
 from llm_bawt.service.dependencies import get_service
 from llm_bawt.utils.db import get_shared_engine
 
+from .service_auth import NO_STORE, require_service_token
+
 logger = logging.getLogger(__name__)
 PREFIX = "/v1/internal/secrets/bawthub-auth"
-NO_STORE = {"Cache-Control": "no-store"}
-
-
-def require_service_token(authorization: str | None = Header(default=None)) -> None:
-    result = service_token_source().check(authorization)
-    if result is TokenCheck.OK:
-        return
-    if result is TokenCheck.UNCONFIGURED:
-        raise HTTPException(503, "service_token_unconfigured", headers=NO_STORE)
-    raise HTTPException(401, "unauthorized", headers={**NO_STORE, "WWW-Authenticate": "Bearer"})
 
 
 def get_secret_store() -> BawtHubAuthSecretStore:
