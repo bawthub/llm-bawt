@@ -803,6 +803,66 @@ class RedisSubscriber(CommandPublisherMixin):
             "updated_at": events[0].get("ts"),
         }
 
+    async def turn_text_offset(
+        self,
+        bot_id: str,
+        user_id: str,
+        turn_id: str,
+        *,
+        batch_size: int = 500,
+        hard_cap: int = UNIFIED_STREAM_MAXLEN,
+    ) -> int | None:
+        """UTF-16 length of the assistant text one live turn has emitted so far.
+
+        Reads newest→oldest and stops at the first event of ``turn_id`` that
+        fixes a text position: a ``text_delta`` ends at ``text_offset`` plus its
+        own length, and a ``tool_start`` sits at its ``text_offset``. Both use
+        the turn worker's UTF-16 counter, which is the unit the UI slices by.
+        Reaching the turn's own ``turn_start`` first means it has emitted no
+        text yet (0).
+
+        Unlike :meth:`latest_activity`, this never needs ``turn_start``. The
+        stream is capped at ``UNIFIED_STREAM_MAXLEN`` and long turns flood it
+        with reasoning deltas, so their ``turn_start`` is often trimmed before a
+        mid-turn message arrives (TASK-1509). Returns ``None`` when no position
+        for this turn is still in the stream; callers must not guess one.
+        """
+        stream_key = f"{UNIFIED_EVENTS_PREFIX}{bot_id}:{user_id}"
+        max_id = "+"
+        scanned = 0
+        try:
+            while scanned < hard_cap:
+                batch = await self._pub_redis.xrevrange(
+                    stream_key, max_id, "-", count=batch_size
+                )
+                if not batch:
+                    return None
+                for _id, fields in batch:
+                    try:
+                        ev = json.loads(fields.get("payload") or "")
+                    except Exception:
+                        continue
+                    if not isinstance(ev, dict) or ev.get("turn_id") != turn_id:
+                        continue
+                    kind = ev.get("_type")
+                    offset = ev.get("text_offset")
+                    if kind == "text_delta" and isinstance(offset, int):
+                        delta = ev.get("delta") or ""
+                        return offset + len(delta.encode("utf-16-le", errors="surrogatepass")) // 2
+                    if (
+                        kind == "tool_event"
+                        and ev.get("event") == "tool_start"
+                        and isinstance(offset, int)
+                    ):
+                        return offset
+                    if kind == "turn_start":
+                        return 0
+                scanned += len(batch)
+                max_id = f"({batch[-1][0]}"
+        except Exception:
+            logger.exception("turn_text_offset read failed for %s", stream_key)
+        return None
+
     async def cleanup_stale_groups(
         self,
         stream_key: str,

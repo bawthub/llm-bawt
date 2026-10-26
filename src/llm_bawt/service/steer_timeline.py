@@ -43,10 +43,13 @@ class SteerTimeline:
             return existing["interrupt_content_offset"]
         if requested is not None:
             return requested
-        snapshot = await subscriber.latest_activity(self.bot_id, self.user_id)
-        if snapshot and snapshot.get("turn_id") == self.turn_id:
-            # UI interrupt offsets index JavaScript strings, i.e. UTF-16 units.
-            return len(snapshot["full_text"].encode("utf-16-le")) // 2
+        # Read this turn's own newest text position. A full snapshot needs the
+        # turn's start event, which long turns lose to the capped stream; that
+        # left inter-bot steers unanchored and rendered below the reply
+        # (TASK-1509). Offsets are UTF-16 units, the unit the UI slices by.
+        offset = await subscriber.turn_text_offset(self.bot_id, self.user_id, self.turn_id)
+        if offset is not None:
+            return offset
         # Do not attach a message to a different turn's text or guess from the
         # often-empty in-flight turn-log response. It can still render top-level.
         log.warning("No live timeline anchor for steer %s in %s", self.message_id, self.turn_id)

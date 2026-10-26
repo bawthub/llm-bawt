@@ -36,29 +36,26 @@ def persist(timeline, offset=12):
 
 
 def test_infers_live_offset_without_waiting_for_turn_end(timeline):
-    subscriber = SimpleNamespace(latest_activity=AsyncMock(return_value={
-        "turn_id": "turn-live", "streaming": True, "full_text": "Hello 👀",
-    }))
+    subscriber = SimpleNamespace(turn_text_offset=AsyncMock(return_value=8))
     assert asyncio.run(timeline.content_offset(subscriber, None)) == 8
-    subscriber.latest_activity.assert_awaited_once_with("target", "nick")
+    subscriber.turn_text_offset.assert_awaited_once_with("target", "nick", "turn-live")
 
 
-def test_browser_offset_is_preserved_without_snapshot_lookup(timeline):
-    subscriber = SimpleNamespace(latest_activity=AsyncMock())
+def test_browser_offset_is_preserved_without_stream_lookup(timeline):
+    subscriber = SimpleNamespace(turn_text_offset=AsyncMock())
     assert asyncio.run(timeline.content_offset(subscriber, 0)) == 0
-    subscriber.latest_activity.assert_not_awaited()
+    subscriber.turn_text_offset.assert_not_awaited()
 
 
 def test_delivery_retry_cannot_move_existing_anchor(timeline):
     persist(timeline, offset=12)
-    subscriber = SimpleNamespace(latest_activity=AsyncMock())
+    subscriber = SimpleNamespace(turn_text_offset=AsyncMock())
     assert asyncio.run(timeline.content_offset(subscriber, 999)) == 12
-    subscriber.latest_activity.assert_not_awaited()
+    subscriber.turn_text_offset.assert_not_awaited()
 
 
-@pytest.mark.parametrize("snapshot", [None, {"turn_id": "other-turn", "full_text": "wrong turn"}])
-def test_missing_or_wrong_turn_snapshot_never_invents_an_anchor(timeline, snapshot):
-    subscriber = SimpleNamespace(latest_activity=AsyncMock(return_value=snapshot))
+def test_unknown_turn_position_never_invents_an_anchor(timeline):
+    subscriber = SimpleNamespace(turn_text_offset=AsyncMock(return_value=None))
     assert asyncio.run(timeline.content_offset(subscriber, None)) is None
 
 
