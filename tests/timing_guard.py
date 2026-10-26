@@ -238,10 +238,13 @@ def scan_tree(root: Path, skip: frozenset[str] = frozenset()) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
-# Report-only scanners (TASK-1457 phase a): ``make test-timing-report`` lists
-# what these find; no test enforces them yet.
-#   D4: a thread-side wait that can time out silently, or with a short budget.
-#   D7: src/ binding a clock function by name, which follow_time can't redirect.
+# Static scanners (TASK-1457): ``make test-timing-report`` lists what these find.
+#   D4: a thread-side wait that can time out silently, or with a short budget
+#       (report-only).
+#   D7: src/ binding a clock function or sleep by name, which follow_time (or a
+#       test patching ``time``) can't redirect. Enforced by test_timing_guard.
+#       An injected ``clock=time.monotonic`` default is the sanctioned seam
+#       and is not flagged.
 # Awaited calls and asyncio.* are loop-side: the virtual clock (D1) covers them.
 # ---------------------------------------------------------------------------
 
@@ -361,16 +364,20 @@ def scan_thread_waits(source: str, path: str) -> list[Finding]:
     return sorted(findings)
 
 
+BOUND_TIME_NAMES = CLOCK_CALLS | {"sleep"}
+
+
 def scan_clock_imports(source: str, path: str) -> list[Finding]:
-    """D7: ``from time import monotonic`` binds the function at import, so the
-    report's virtual clock (and any test patching ``time.monotonic``) can't
-    reach that module. Use ``import time`` and ``time.monotonic()``."""
+    """D7: ``from time import monotonic`` (or ``sleep``) binds the function at
+    import, so the report's virtual clock (and any test patching
+    ``time.monotonic``/``time.sleep``) can't reach that module. Use
+    ``import time`` and ``time.monotonic()``."""
     if "from time import" not in source:
         return []
     return sorted({Finding(path, node.lineno, f"from time import {alias.name}; use time.{alias.name}()")
                    for node in ast.walk(ast.parse(source))
                    if isinstance(node, ast.ImportFrom) and node.module == "time"
-                   for alias in node.names if alias.name in CLOCK_CALLS})
+                   for alias in node.names if alias.name in BOUND_TIME_NAMES})
 
 
 def report_findings(repo: Path, skip: frozenset[str] = frozenset()) -> dict[str, list[Finding]]:

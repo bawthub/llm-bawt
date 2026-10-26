@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from threading import Event, Thread
-from time import monotonic
+import time
 
 from .health_collector import OpsHealthCollector
 from .health_http import OpsHealthServer
@@ -79,6 +79,6 @@ class OpsHealthRuntime:
         self.http.close()
         # A stuck RPC cannot hold SIGTERM indefinitely. One fixed daemon per
         # producer; never spawn replacement threads for a blocked collector.
-        deadline = monotonic() + 2
+        deadline = time.monotonic() + 2
         for worker in self.workers:
-            worker.join(timeout=max(0, deadline - monotonic()))
+            worker.join(timeout=max(0, deadline - time.monotonic()))

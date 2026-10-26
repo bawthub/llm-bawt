@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from time import perf_counter
+import time
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import bindparam, text
@@ -81,7 +81,7 @@ def _session_ids_by_turn(session: Session, rows: list[TurnChangedFile]) -> dict[
     tags=["Debug"],
 )
 def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProvenanceResponse:
-    started = perf_counter()
+    started = time.perf_counter()
     current_files = [CurrentWorkspaceFile(
         repo_id=item.repo_id,
         repo_key=item.repo_key,
@@ -111,15 +111,15 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
             since_hours=payload.lookback_hours,
             limit=MAX_PROVENANCE_ROWS,
         )
-        metadata_at = perf_counter()
+        metadata_at = time.perf_counter()
         # Retain the global newest-2k safety cap; filter its metadata with the
         # SAME repo/path rules used by attribution before any blob or turn read.
         rows = [row for row in recent if any(
             matches_snapshot_location(current, row) for current in current_files
         )]
-        filtered_at = perf_counter()
+        filtered_at = time.perf_counter()
         content = changed_store.content_for_rows(rows)
-        content_at = perf_counter()
+        content_at = time.perf_counter()
     except Exception as error:
         raise HTTPException(status_code=503, detail="Changed-file provenance unavailable") from error
 
@@ -133,7 +133,7 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
         except Exception:
             # Session links are a navigation nicety; attribution must not fail on them.
             session_ids = {}
-    linked_at = perf_counter()
+    linked_at = time.perf_counter()
     turns_by_id = {row.id: row for row in turn_rows}
 
     snapshots: list[TurnFileSnapshot] = []
@@ -211,7 +211,7 @@ def workspace_provenance(payload: WorkspaceProvenanceRequest) -> WorkspaceProven
         for summary in sorted(turn_summaries, key=lambda item: item.created_at, reverse=True)
     }
 
-    finished_at = perf_counter()
+    finished_at = time.perf_counter()
     logger.info(
         "workspace provenance files=%d metadata_rows=%d matched_rows=%d "
         "metadata_ms=%.1f filter_ms=%.1f content_ms=%.1f links_ms=%.1f "

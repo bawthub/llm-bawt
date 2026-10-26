@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from time import monotonic
+import time
 
 from .health_checks import DEGRADED, DOWN, OK, _check
 
@@ -11,11 +11,11 @@ class LoopHealth:
     """Records actual completed sweeps, not a timer claiming the worker is alive."""
 
     def __init__(self):
-        self.last_success = monotonic()
+        self.last_success = time.monotonic()
         self.error: str | None = None
 
     def succeeded(self):
-        self.last_success = monotonic()
+        self.last_success = time.monotonic()
         self.error = None
 
     def failed(self, exc: Exception):
@@ -26,7 +26,7 @@ class LoopHealth:
             return _check(name, DOWN, "worker task is not running")
         if self.error:
             return _check(name, DEGRADED, f"last sweep failed: {self.error}")
-        age = monotonic() - self.last_success
+        age = time.monotonic() - self.last_success
         if age > stale_seconds:
             return _check(name, DEGRADED, f"no completed sweep for {int(age)}s (busy or stalled)")
         return _check(name, OK)

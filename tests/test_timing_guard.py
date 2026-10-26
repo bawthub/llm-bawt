@@ -194,7 +194,27 @@ def test_d7_flags_clock_functions_bound_by_name():
     """), "src/sample.py")
     assert [(finding.line, finding.kind) for finding in findings] == [
         (2, "from time import monotonic; use time.monotonic()"),
+        (2, "from time import sleep; use time.sleep()"),
         (3, "from time import perf_counter; use time.perf_counter()")]
+
+
+def test_d7_leaves_an_injected_clock_default_alone():
+    assert scan_clock_imports(textwrap.dedent("""
+        import time
+        class Watchdog:
+            def __init__(self, clock=time.monotonic):
+                self.clock = clock
+    """), "src/sample.py") == []
+
+
+def test_src_binds_no_clock_or_sleep_by_name():
+    """Enforced D7: every src/ module reads the clock through ``time.`` so the
+    virtual clock and ``time`` patches reach it."""
+    src = TESTS.parent / "src"
+    findings = [str(finding) for path in sorted(src.rglob("*.py"))
+                for finding in scan_clock_imports(path.read_text(),
+                                                  path.relative_to(TESTS.parent).as_posix())]
+    assert findings == []
 
 
 def test_report_findings_scans_tests_for_d4_and_src_for_d7(tmp_path):

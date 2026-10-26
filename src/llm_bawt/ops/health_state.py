@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
-from time import monotonic
+import time
 
 STALE_SECONDS = 30.0
 FUTURE_TOLERANCE_SECONDS = 5.0
@@ -44,7 +44,7 @@ class HealthSample:
 class OpsHealthState:
     """Locks protect pointer swaps only, never probing or serialization."""
 
-    def __init__(self, *, clock=monotonic, utcnow=lambda: datetime.now(UTC)):
+    def __init__(self, *, clock=time.monotonic, utcnow=lambda: datetime.now(UTC)):
         self.clock, self.utcnow = clock, utcnow
         self._lock = Lock()
         initial = HealthSample(self.sample_time(), "down", "not yet collected")
