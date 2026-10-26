@@ -145,13 +145,35 @@ class BotProfilePatchRequest(BaseModel):
                     "(TASK-1329). [] clears every tag; null is refused.")
     updated_by: str | None = Field(
         default=None, min_length=1, max_length=128,
-        description="Who made this change; recorded as assigned_by on new tag assignments.")
+        description="Who made this change; recorded as assigned_by on new tag assignments "
+                    "and as changed_by on the audit row.")
     expected_tags: list[str] | None = Field(
         default=None,
         description="Optional compare-and-set for tags (TASK-1398): the set the caller "
                     "read. If the bot's tags differ, the PATCH returns 409 "
                     "{code: 'tags_changed', current_tags} and writes nothing. Absent "
-                    "keeps the unconditional replace.")
+                    "keeps the unconditional replace. Valid with or without tags.")
+    expected_fields: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional compare-and-set for profile fields (TASK-1521): the values the "
+                    "caller read. If any differs, the PATCH returns 409 "
+                    "{code: 'fields_changed', current} and writes nothing.")
+    change_note: str | None = Field(
+        default=None, max_length=1000,
+        description="Why this change was made; stored on the bot_profile_changes audit row.")
+
+    @field_validator("expected_fields")
+    @classmethod
+    def _expected_fields_known(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        from ..bot_profile_changes import AUDITED_FIELDS
+
+        if value is None:
+            raise ValueError("expected_fields must be an object; omit it for an unconditional write")
+        unknown = sorted(set(value) - set(AUDITED_FIELDS))
+        if unknown:
+            raise ValueError(f"expected_fields has fields that are not profile fields: {unknown}; "
+                             "use expected_tags for tags")
+        return value
 
     @field_validator("expected_tags")
     @classmethod

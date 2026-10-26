@@ -192,6 +192,8 @@ class BotProfileStore:
                 logger.warning("Bot tags: migrated %d legacy private assignments", migrated)
             from .bot_session_state import BotSessionState
             BotSessionState.ensure_schema(conn)
+            from . import bot_profile_changes
+            bot_profile_changes.ensure_schema(conn)
 
         self._schema_guard.run(self.engine, "bot-profile-store", bootstrap)
 
@@ -248,14 +250,23 @@ class BotProfileStore:
         from .bot_identities import RESERVED_JOB_BOT_IDS
         if slug in RESERVED_JOB_BOT_IDS:
             raise ValueError(f"Bot slug {slug!r} is reserved for system actions")
-        from .bot_tags.catalog import profile_tag_write
+        from . import bot_profile_changes as profile_changes
+        from .bot_tags.catalog import lock_bot, profile_tag_write
+        from .bot_tags.vocabulary import API_ASSIGNER
 
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
             if guard is not None:
                 guard.lock(session.connection(), slug)
+            # Every profile write reads the row under the bot's tag lock (the one
+            # profile_tag_write takes anyway), guard or not, so the preconditions
+            # below can't pass on a row another upsert is about to change.
+            lock_bot(session.connection(), slug)
             row = session.exec(select(BotProfile).where(BotProfile.slug == slug)).first()
             previous = ProfileRuntime.of(row) if row is not None else None
+            # Under the lock, before any write: a stale read refuses here (TASK-1521).
+            profile_changes.check_preconditions(row, payload)
+            before = profile_changes.snapshot(session.connection(), row)
             payload_agent_backend = payload.get("agent_backend") if "agent_backend" in payload else None
             if isinstance(payload_agent_backend, str):
                 payload_agent_backend = payload_agent_backend.strip().lower() or None
@@ -364,9 +375,12 @@ class BotProfileStore:
                 )
 
             session.add(row)
+            session.flush()
             if guard is not None:
-                session.flush()
                 guard.check(session.connection(), previous, row)
+            profile_changes.record_change(
+                session.connection(), slug, before, profile_changes.snapshot(session.connection(), row),
+                payload, default_by=API_ASSIGNER)
             session.commit()
             session.refresh(row)
             return row

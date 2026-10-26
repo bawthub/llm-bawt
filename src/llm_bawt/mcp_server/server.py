@@ -833,6 +833,9 @@ from . import self_tools as _self_tools  # noqa: F401, E402
 # Self model switch + optional when_idle continuation (TASK-1047)
 from . import self_model_tools as _self_model_tools  # noqa: F401, E402
 
+# Bot-to-bot profile edits with CAS + audit (TASK-1521)
+from . import bot_profile_tools as _bot_profile_tools  # noqa: F401, E402
+
 # ---------------------------------------------------------------------------
 # Ops tools (TASK-639 — DB-configured operations catalog)
 # ---------------------------------------------------------------------------

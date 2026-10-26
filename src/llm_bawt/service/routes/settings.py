@@ -13,6 +13,8 @@ from sqlmodel import Session, select
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from ... import bot_profile_changes as profile_changes
+from ...bot_profile_changes import ProfileFieldsChanged, ProfileRowChanged
 from ...bot_tags import BehaviorTag
 from ...bot_tags.errors import BotTagError, TagSetChanged
 from ...bot_tags.store import BotTagStore
@@ -327,6 +329,11 @@ async def _persist_bot_profile(
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except RouteIneligible as refused:  # a new route with no usable credential; nothing written
         raise HTTPException(status_code=refused.status_code, detail=refused.reason)
+    except ProfileRowChanged:  # a PATCH merged onto a stale row; the PATCH route re-merges
+        raise
+    except ProfileFieldsChanged as stale:  # expected_fields no longer match; nothing written
+        raise HTTPException(status_code=stale.status_code, detail={
+            "code": stale.code, "message": str(stale), "current": stale.current})
     except TagSetChanged as stale:  # expected_tags no longer match; nothing written
         raise HTTPException(status_code=stale.status_code, detail={
             "code": stale.code, "message": str(stale), "current_tags": stale.current})
@@ -684,16 +691,39 @@ async def upsert_bot_profile(slug: str, request: BotProfileUpsertRequest):
 
 @router.patch("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])
 async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
-    """Partially update a bot profile. Only provided fields are changed."""
+    """Partially update a bot profile. Only provided fields are changed.
+
+    The store gets the whole merged row, so the merge is pinned to the row it
+    was read from: if another write lands in between, the store refuses and the
+    merge is redone on the fresh row (TASK-1521), up to ``_PATCH_ATTEMPTS``.
+    """
     service = get_service()
     store = get_bot_profile_store(service.config)
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
 
-    existing = store.get(slug.strip().lower())
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Bot '{slug}' not found")
+    for attempt in range(1, _PATCH_ATTEMPTS + 1):
+        existing = store.get(slug.strip().lower())
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Bot '{slug}' not found")
+        payload = _patch_payload(existing, request)
+        try:
+            return await _persist_bot_profile(payload, create_only=False)
+        except ProfileRowChanged as stale:
+            if attempt == _PATCH_ATTEMPTS:
+                raise HTTPException(status_code=stale.status_code, detail={
+                    "code": stale.code, "message": str(stale)})
+            logger.info("Bot profile %s changed under a PATCH; re-merging (attempt %d)",
+                        existing.slug, attempt)
+    raise AssertionError("unreachable")
 
+
+#: How many times a PATCH re-merges onto a row another write changed underneath it.
+_PATCH_ATTEMPTS = 3
+
+
+def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, object]:
+    """The stored row with the request's explicitly-set fields merged over it."""
     # Build payload from existing + only the fields that were explicitly set
     payload: dict[str, object] = {
         "slug": existing.slug,
@@ -734,8 +764,8 @@ async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
                 "include_in_global_search must equal 'private' not in tags when both are sent; "
                 "send tags alone"))
         payload["tags_assigned_by"] = request.updated_by or API_ASSIGNER
-    elif "expected_tags" in request.model_fields_set:
-        raise HTTPException(status_code=422, detail="expected_tags is only valid with tags")
+    payload[profile_changes.CHANGED_BY] = request.updated_by or API_ASSIGNER
+    payload[profile_changes.ROW_VERSION] = existing.updated_at
 
     # bot_type is DERIVED from agent_backend (the single source of truth), not
     # carried over from the stored row (TASK-516). A PATCH that touches an
@@ -749,10 +779,7 @@ async def patch_bot_profile(slug: str, request: BotProfilePatchRequest):
     # explicit 'agent' has a backend).
     if "bot_type" not in request.model_fields_set:
         payload["bot_type"] = normalize_bot_type(None, payload.get("agent_backend"))
-
-    response = await _persist_bot_profile(payload, create_only=False)
-
-    return response
+    return payload
 
 
 @router.post("/v1/admin/reload-bots", tags=["Admin"])

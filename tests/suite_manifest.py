@@ -8,6 +8,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_bot_access_pg.py::",
     "test_bot_tags_pg.py::",
     "test_bot_tag_api_pg.py::",
+    "test_bot_profile_patch_pg.py::",
     "test_bot_tag_instructions_pg.py::",
     "test_operator_message_search_pg.py::",
     "test_fts_query_pg.py::",

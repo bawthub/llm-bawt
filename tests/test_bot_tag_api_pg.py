@@ -206,7 +206,8 @@ def test_a_matching_expected_set_replaces_regardless_of_order_or_duplicates(api)
 
 
 @pytest.mark.parametrize("body", [
-    {"expected_tags": []},
+    # expected_tags without tags is a valid precondition since TASK-1521
+    # (test_bot_profile_patch_pg.py).
     {"expected_tags": None, "tags": []},
     {"expected_tags": "private", "tags": []},
 ])

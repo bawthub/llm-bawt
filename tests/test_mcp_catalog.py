@@ -144,7 +144,9 @@ async def test_catalog_token_budgets():
     # TASK-1323: messages_context (both anchor forms, offset and cursors
     # in-band; replaces hand-written session SQL and get_by_id windows):
     # 3,974 (+60).
-    assert sum(descriptions) <= 3974, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1521: bots_profile_patch (CAS, private refusal and rollback stated
+    # in-band; replaces hand-written curl PATCHes of other bots): 4,024 (+50).
+    assert sum(descriptions) <= 4024, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -196,7 +198,9 @@ async def test_catalog_token_budgets():
     # TASK-1318: self_system_prompt pinned-vs-unpinned edit timing: 14,502 (+3).
     # TASK-1323: messages_context (anchored neighbour window with offset
     # and owner-bound cursors): 14,756 (+254).
-    assert total <= 14756, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1521: bots_profile_patch (bot_id, changes, reason, expected):
+    # 14,894 (+138). One audited CAS call replaces a GET + curl PATCH pair.
+    assert total <= 14894, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
