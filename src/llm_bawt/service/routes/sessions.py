@@ -49,6 +49,8 @@ class SessionInfo(BaseModel):
     turn_count: int = 0
     first_user_message: str | None = None
     last_user_message: str | None = None
+    last_assistant_message: str | None = None
+    last_assistant_at: str | None = None
     summary: str | None = None
     status: str
     session_metadata: dict | None = None
@@ -265,6 +267,8 @@ def _to_info(row: dict) -> SessionInfo:
         turn_count=int(row.get("turn_count") or 0),
         first_user_message=row.get("first_user_message"),
         last_user_message=row.get("last_user_message"),
+        last_assistant_message=row.get("last_assistant_message"),
+        last_assistant_at=row.get("last_assistant_at"),
         summary=row.get("summary"),
         status=row.get("status", ""),
         session_metadata=_normalize_metadata(row),

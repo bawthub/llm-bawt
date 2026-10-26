@@ -24,6 +24,8 @@ def _session_row(**overrides):
         "last_message_at": 1_775_500_600.5,
         "first_user_message": "please improve this",
         "last_user_message": "add the useful metadata",
+        "last_assistant_message": "Added it; tests pass.",
+        "last_assistant_at": 1_775_500_590.0,
         "summary": "Picker redesign and metadata work.",
     }
     values.update(overrides)
@@ -43,6 +45,30 @@ def test_session_row_exposes_picker_metadata():
     ).isoformat()
     assert row["last_activity_at"] == datetime.fromtimestamp(
         1_775_500_600.5, tz=timezone.utc
+    ).isoformat()
+    assert row["last_assistant_message"] == "Added it; tests pass."
+    assert row["last_assistant_at"] == datetime.fromtimestamp(
+        1_775_500_590.0, tz=timezone.utc
+    ).isoformat()
+
+
+def test_session_row_without_a_reply_reports_none():
+    row = PostgreSQLShortTermManager._row_to_session_dict(
+        _session_row(last_assistant_message=None, last_assistant_at=None)
+    )
+
+    assert row["last_assistant_message"] is None
+    assert row["last_assistant_at"] is None
+
+
+def test_session_info_carries_latest_reply():
+    from llm_bawt.service.routes.sessions import _to_info
+
+    info = _to_info(PostgreSQLShortTermManager._row_to_session_dict(_session_row()))
+
+    assert info.last_assistant_message == "Added it; tests pass."
+    assert info.last_assistant_at == datetime.fromtimestamp(
+        1_775_500_590.0, tz=timezone.utc
     ).isoformat()
 
 
@@ -95,6 +121,8 @@ def test_list_sessions_aggregates_bot_partition_and_sorts_by_activity():
     sql, params = calls[0]
     assert "FROM messages_p_snark" in sql
     assert "COUNT(*) FILTER" in sql
+    assert "FILTER (WHERE role = 'assistant'))[1] AS last_assistant_message" in sql
+    assert "ms.last_assistant_at" in sql
     assert "COALESCE(ms.last_message_at" in sql
     assert "CASE WHEN s.status = 'active' THEN 0 ELSE 1 END" in sql
     assert params == {"limit": 25, "bot_id": "snark", "user_id": "nick"}

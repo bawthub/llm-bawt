@@ -166,6 +166,9 @@ class PostgreSQLShortTermManager:
             "last_activity_at": iso_epoch(getattr(row, "last_message_at", None)),
             "first_user_message": getattr(row, "first_user_message", None),
             "last_user_message": getattr(row, "last_user_message", None),
+            # The thread's latest recorded reply, bounded for list consumers.
+            "last_assistant_message": getattr(row, "last_assistant_message", None),
+            "last_assistant_at": iso_epoch(getattr(row, "last_assistant_at", None)),
             "summary": getattr(row, "summary", None),
         }
 
@@ -308,6 +311,11 @@ class PostgreSQLShortTermManager:
                     (ARRAY_AGG(
                         LEFT(REGEXP_REPLACE(content, '[[:space:]]+', ' ', 'g'), 600)
                         ORDER BY timestamp DESC
+                    ) FILTER (WHERE role = 'assistant'))[1] AS last_assistant_message,
+                    MAX(timestamp) FILTER (WHERE role = 'assistant') AS last_assistant_at,
+                    (ARRAY_AGG(
+                        LEFT(REGEXP_REPLACE(content, '[[:space:]]+', ' ', 'g'), 600)
+                        ORDER BY timestamp DESC
                     ) FILTER (WHERE role = 'summary'))[1] AS summary
                 FROM {messages_table}
                 WHERE session_id IS NOT NULL
@@ -322,6 +330,8 @@ class PostgreSQLShortTermManager:
                 ms.last_message_at,
                 ms.first_user_message,
                 ms.last_user_message,
+                ms.last_assistant_message,
+                ms.last_assistant_at,
                 ms.summary
             FROM sessions AS s
             LEFT JOIN message_stats AS ms ON ms.session_id = s.id
