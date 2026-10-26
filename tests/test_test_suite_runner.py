@@ -4,12 +4,13 @@ from contextlib import nullcontext
 from multiprocessing import get_context
 import os
 from pathlib import Path
-import time
 from types import SimpleNamespace
 
 import pytest
 
 from scripts import test_suite as suite
+
+HANG_GUARD_S = 10.0  # only reached if a forked lock holder hangs
 
 
 def test_offline_partition_requires_every_node_once(monkeypatch):
@@ -60,43 +61,76 @@ def test_global_runner_lock_rejects_concurrent_processes(monkeypatch, tmp_path):
     worker = context.Process(target=_hold_lock, args=(ready_child, release_child))
     worker.start()
     try:
-        assert ready_parent.poll(3) and ready_parent.recv()
+        assert ready_parent.poll(HANG_GUARD_S) and ready_parent.recv()
         with pytest.raises(RuntimeError, match="another llm-bawt test suite"):
             with suite.runner_lock():
                 pass
     finally:
-        release_parent.send(True)
-        worker.join(timeout=3)
-        if worker.is_alive():
-            worker.terminate()
-            worker.join(timeout=3)
+        _release_and_reap(release_parent, worker)
     assert worker.exitcode == 0
     with suite.runner_lock():
         pass
 
 
-def _hold_lock_for(ready, seconds):
-    with suite.runner_lock():
-        ready.send(True)
-        time.sleep(seconds)
+def _release_and_reap(release, worker):
+    release.send(True)
+    worker.join(HANG_GUARD_S)
+    hung = worker.is_alive()
+    if hung:
+        worker.terminate()
+        worker.join()
+    assert not hung, "lock holder did not exit after release"
+
+
+class _PollClock:
+    """Stands in for runner_lock's time module: sleep advances monotonic, no real wait."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.on_sleep = None
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        if self.on_sleep:
+            self.on_sleep()
 
 
 def test_a_bounded_wait_acquires_after_release_and_times_out_while_held(monkeypatch, tmp_path):
     monkeypatch.setattr(suite.tempfile, "gettempdir", lambda: str(tmp_path))
     context = get_context("fork")
     ready_parent, ready_child = context.Pipe()
-    worker = context.Process(target=_hold_lock_for, args=(ready_child, 0.3))
+    release_parent, release_child = context.Pipe()
+    worker = context.Process(target=_hold_lock, args=(ready_child, release_child))
     worker.start()
+    clock = _PollClock()
+    monkeypatch.setattr(suite, "time", SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep))
+    released = False
+
+    def release_holder():
+        nonlocal released
+        released = True
+        _release_and_reap(release_parent, worker)
+
     try:
-        assert ready_parent.poll(3) and ready_parent.recv()
-        with pytest.raises(RuntimeError, match=r"another llm-bawt test suite .*waited \d+\.\ds"):
+        assert ready_parent.poll(HANG_GUARD_S) and ready_parent.recv()
+        with pytest.raises(RuntimeError, match=r"another llm-bawt test suite .*waited 0\.1s"):
             with suite.runner_lock(wait_seconds=0.1, poll_seconds=0.02):
                 pass
-        # The holder releases at ~0.3s; a 3s bounded wait must then acquire.
+        # Held throughout: it polled for exactly its 0.1s budget, then gave up.
+        assert clock.now == pytest.approx(0.1)
+        # The holder exits during the first poll sleep; the next poll must acquire.
+        clock.on_sleep = release_holder
+        started = clock.now
         with suite.runner_lock(wait_seconds=3, poll_seconds=0.02):
             pass
+        assert released
+        assert clock.now - started == pytest.approx(0.02)
     finally:
-        worker.join(timeout=3)
+        if not released:
+            _release_and_reap(release_parent, worker)
     assert worker.exitcode == 0
 
 
@@ -336,6 +370,23 @@ def test_the_timing_report_classifies_by_step_cost_and_honours_markers():
         "D7": [],
         "FOLLOW": ["tests/test_c.py::t: fd x1, 1.25s real", "tests/test_b.py::t: executor x2, 0.50s real"],
     }
+
+
+def test_d3_records_a_test_sleep_but_not_popen_waits_own_poll(monkeypatch):
+    from collections import defaultdict
+
+    from tests import timing_report
+
+    slept = []
+    sleep = timing_report._recording_sleep(slept.append)
+    events = defaultdict(list)
+    monkeypatch.setattr(timing_report, "_current", {"events": events})
+    sleep(0.25)
+    sleep(0)
+    # Popen._wait(timeout) polls from subprocess's own frame: a process wait, not a delay.
+    exec("sleep(0.001)", {"__name__": "subprocess", "sleep": sleep})
+    assert slept == [0.25, 0, 0.001]
+    assert events == {"real_time": ["time.sleep(0.25)"]}
 
 
 def test_a_timing_run_keeps_test_failures_but_not_a_broken_pytest(monkeypatch, tmp_path):

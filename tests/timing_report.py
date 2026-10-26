@@ -33,6 +33,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -71,18 +72,27 @@ def _patch(owner: Any, name: str, replacement: Any) -> None:
     setattr(owner, name, replacement)
 
 
+def _recording_sleep(real_sleep):
+    def sleep(seconds: float) -> None:
+        # sleep(0) only yields the GIL; it waits for nothing. Popen.wait(timeout)
+        # polls with short sleeps until the child exits: that is waiting on the
+        # spawn already recorded as real_process, not a test choosing a delay.
+        caller = sys._getframe(1).f_globals.get("__name__")
+        if (seconds and caller != "subprocess"
+                and threading.current_thread() is threading.main_thread()):
+            _record("real_time", f"time.sleep({seconds!r})")
+        real_sleep(seconds)
+
+    return sleep
+
+
 def _install() -> None:
     asyncio.set_event_loop_policy(virtual_clock.TimingLoopPolicy(
         step_cost=float(os.environ.get(STEP_COST_ENV) or 0), observer=_observe))
     _follow_time.__enter__()
     _follow_futures.__enter__()
     real_sleep, real_popen_init = time.sleep, subprocess.Popen.__init__
-
-    def sleep(seconds: float) -> None:
-        # sleep(0) only yields the GIL; it waits for nothing.
-        if seconds and threading.current_thread() is threading.main_thread():
-            _record("real_time", f"time.sleep({seconds!r})")
-        real_sleep(seconds)
+    sleep = _recording_sleep(real_sleep)
 
     def popen_init(self, args, *rest, **kwargs):
         _record("real_process", str(args[0] if isinstance(args, (list, tuple)) and args else args))
