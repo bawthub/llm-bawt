@@ -7,7 +7,10 @@ import pytest
 from anthropic import APIError
 
 from claude_code_bridge.proxy import chatgpt_transport
-from claude_code_bridge.proxy.chatgpt_transport import ChatGPTEventTimeout
+from claude_code_bridge.proxy.chatgpt_transport import (
+    ChatGPTEventTimeout, DEFAULT_FIRST_OUTPUT_TIMEOUT, DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
+    DEFAULT_STALL_NOTICE_AFTER,
+)
 from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
 from tests.test_proxy_progress_recovery import THINKING, TOOL, Harness, parse_message, success_frames
 from tests import virtual_clock
@@ -33,8 +36,8 @@ def _stream(events, statuses=None, **limits):
     context = None
     if statuses is not None:
         context = NS(attempt=1, provider="openai_chatgpt", report_status=statuses.append)
-    stream = ResponsesSSEStream(opener, context=context, first_event_timeout=10,
-                                productive_idle_timeout=limits.pop("productive", 10))
+    stream = ResponsesSSEStream(opener, context=context,
+                                productive_idle_timeout=limits.pop("productive", DEFAULT_PRODUCTIVE_IDLE_TIMEOUT))
     for name, value in limits.items():
         setattr(stream.owner, name, value)
     return stream
@@ -61,7 +64,7 @@ def test_request_with_no_output_item_times_out_as_first_output():
         with pytest.raises(ChatGPTEventTimeout) as error:
             await _drain(stream)
         assert error.value.phase == "first_output"
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 def test_first_output_telemetry_measures_item_not_headers():
@@ -82,11 +85,14 @@ def test_first_output_telemetry_measures_item_not_headers():
 def test_hidden_reasoning_item_satisfies_first_output():
     async def run():
         reasoning = NS(type="response.output_item.added", item=NS(type="reasoning"))
-        stream = _stream(_chatter(reasoning), first_output_timeout=.02, productive=.1)
+        async def events():
+            yield reasoning
+            await asyncio.Event().wait()
+        stream = _stream(events(), first_output_timeout=DEFAULT_FIRST_OUTPUT_TIMEOUT)
         with pytest.raises(ChatGPTEventTimeout) as error:
             await _drain(stream)
         assert error.value.phase == "productive"
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 def test_whitespace_argument_runaway_times_out_before_productive_idle():
@@ -130,20 +136,20 @@ def test_stall_notice_waits_for_header_timeout_rather_than_failing():
         statuses = []
 
         async def slow_opener():
-            await asyncio.sleep(.08)
+            # Slow headers outlast the production notice but arrive well before
+            # the production first-event deadline on either scheduler speed.
+            await asyncio.sleep(DEFAULT_STALL_NOTICE_AFTER + 10)
             return HTTP(_chatter(NS(type="response.output_text.delta", delta="ok"),
                                  item=NS(type="response.completed",
                                          response=NS(usage=None, status="completed"))))
 
         stream = ResponsesSSEStream(
             slow_opener, context=NS(attempt=1, provider="p", report_status=statuses.append),
-            first_event_timeout=10, productive_idle_timeout=10,
         )
-        stream.owner.stall_notice_after = .02
         events = await _drain(stream)
         assert events[0].delta == "ok"
         assert [s["state"] for s in statuses] == ["stalled", "recovered"]
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 def _frames(raw: list[bytes]) -> list[dict]:
@@ -181,7 +187,7 @@ def test_final_failure_leaves_argumentless_tool_block_open(monkeypatch, mode):
             assert not any(f.get("type") == "message_stop" for f in frames)
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 def test_unflushed_tool_failure_is_rejected_by_the_anthropic_sdk(monkeypatch):
@@ -200,7 +206,7 @@ def test_unflushed_tool_failure_is_rejected_by_the_anthropic_sdk(monkeypatch):
             assert not any(f.get("type") == "message_stop" for f in frames)
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("mode", ["sse", "lite_ws"])
@@ -210,19 +216,21 @@ def test_final_failure_reports_terminal_status_without_sdk_resend(monkeypatch, m
         try:
             await h.collect()
             assert h.attempts == 2
-            assert [s["state"] for s in h.statuses][-2:] == [
-                "reconnecting" if mode == "lite_ws" else "retrying", "failed",
+            assert [s["state"] for s in h.statuses] == [
+                "stalled", "reconnecting" if mode == "lite_ws" else "retrying",
+                "stalled", "failed",
             ]
             tracker, published, _clock = _tracker()
             tracker.on_turn_start()
             for status in h.statuses:
                 tracker.on_proxy_status(status)
-            assert _phases(published)[-2:] == [
-                "reconnecting" if mode == "lite_ws" else "retrying", "waiting_model",
+            assert _phases(published)[-3:] == [
+                "reconnecting" if mode == "lite_ws" else "retrying",
+                "stalled", "waiting_model",
             ]
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("mode", ["sse", "lite_ws"])
@@ -241,7 +249,7 @@ def test_final_failure_still_closes_tool_block_with_flushed_arguments(monkeypatc
             assert any(f.get("type") == "error" for f in frames)
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 # ── turn phase ──────────────────────────────────────────────────────────

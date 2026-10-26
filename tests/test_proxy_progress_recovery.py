@@ -15,9 +15,9 @@ from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapte
 from claude_code_bridge.proxy.chatgpt_transport import ChatGPTResponsesTransport, _event_object
 from claude_code_bridge.proxy.reasoning import ReasoningCodec
 from claude_code_bridge.proxy.request_context import ProxyRequestContext
-from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
 from claude_code_bridge.proxy.retry import FailureBucket, RetryPhase, RetryPolicy, decide
 from claude_code_bridge.proxy.translate import anthropic_to_responses
+from tests import virtual_clock
 
 MODEL = "test-progress-model"
 BASE = "https://provider.test/codex"
@@ -53,7 +53,7 @@ class Feed:
     async def next_frame(self):
         frame = next(self.frames, None)
         if frame is None:
-            await asyncio.sleep(10)  # supervisor/cancellation must interrupt this
+            await asyncio.Event().wait()  # supervisor/cancellation must interrupt this
             raise AssertionError("Unsupervised fixture stream")
         return frame
 
@@ -77,13 +77,10 @@ def success_frames():
 
 
 class Harness:
-    def __init__(self, monkeypatch, mode, first, second, *, idle=.05):
-        from claude_code_bridge.proxy import responses_supervisor, retry, usage_capture
+    def __init__(self, monkeypatch, mode, first, second):
+        from claude_code_bridge.proxy import retry, usage_capture
         monkeypatch.setattr(retry, "compute_backoff", lambda *a, **kw: 0)
         monkeypatch.setattr(usage_capture, "schedule_capture", lambda _: None)
-        monkeypatch.setattr(responses_supervisor, "ResponsesSSEStream", lambda opener, **kw:
-                            ResponsesSSEStream(opener, first_event_timeout=idle,
-                                               productive_idle_timeout=idle, **kw))
         self.feeds = [Feed(first), Feed(second)]
         self.create = AsyncMock(side_effect=self.feeds if mode == "sse" else self.feeds[1:])
         self.options = []
@@ -97,10 +94,7 @@ class Harness:
         )
         self.connector = AsyncMock(return_value=self.feeds[0])
         if mode == "lite_ws":
-            self.adapter._chatgpt_transport = ChatGPTResponsesTransport(
-                connector=self.connector, first_event_timeout=idle,
-                productive_idle_timeout=idle,
-            )
+            self.adapter._chatgpt_transport = ChatGPTResponsesTransport(connector=self.connector)
         # ``waiting`` marks each fresh request (TASK-1079); trouble statuses
         # are what these recovery tests assert on.
         self.statuses = []
@@ -157,10 +151,10 @@ def test_thinking_stall_recovers_with_valid_wire_and_no_replayed_tools(monkeypat
             await h.collect()
             assert h.attempts == 2
             retry_state = "reconnecting" if mode == "lite_ws" else "retrying"
-            assert [s["state"] for s in h.statuses] == [retry_state, "recovered"]
+            assert [s["state"] for s in h.statuses] == ["stalled", retry_state, "recovered"]
             assert h.waiting == 1
-            assert h.statuses[0]["stall_phase"] == "productive"
-            assert h.statuses[0]["max_attempts"] == 2
+            assert h.statuses[1]["stall_phase"] == "productive"
+            assert h.statuses[1]["max_attempts"] == 2
             assert all(o["max_retries"] == 0 for o in h.options)
             h.check_closed()
             message = await parse_message(h.frames)
@@ -198,7 +192,7 @@ def test_thinking_stall_recovers_with_valid_wire_and_no_replayed_tools(monkeypat
                        for i in calls[1]["input"])
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("mode", ["sse", "lite_ws"])
@@ -225,7 +219,7 @@ def test_committed_output_still_prevents_stall_replay(monkeypatch, mode, barrier
             wire = b"".join(h.frames)
             assert h.attempts == (2 if continuation else 1)
             if not continuation:
-                assert [s["state"] for s in h.statuses] == ["failed"]
+                assert [s["state"] for s in h.statuses] == ["stalled", "failed"]
             elif not recovers:
                 assert b'"type":"tool_use"' not in wire
             if recovers:
@@ -237,7 +231,7 @@ def test_committed_output_still_prevents_stall_replay(monkeypatch, mode, barrier
             h.check_closed()
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("mode", ["sse", "lite_ws"])
@@ -247,7 +241,10 @@ def test_thinking_stall_exhaustion_is_bounded_and_terminal(monkeypatch, mode, ca
         try:
             await h.collect()
             assert h.attempts == 2
-            assert h.statuses[0]["state"] == ("reconnecting" if mode == "lite_ws" else "retrying")
+            assert [s["state"] for s in h.statuses] == [
+                "stalled", "reconnecting" if mode == "lite_ws" else "retrying",
+                "recovered", "stalled", "failed",
+            ]
             failures = [r.message for r in caplog.records if "proxy_retry" in r.message]
             assert len(failures) == 2
             assert "boundary=stream" in failures[0]
@@ -264,13 +261,13 @@ def test_thinking_stall_exhaustion_is_bounded_and_terminal(monkeypatch, mode, ca
             h.check_closed()
         finally:
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("mode", ["sse", "lite_ws"])
 def test_cancelled_thinking_is_not_retried(monkeypatch, mode):
     async def run():
-        h = Harness(monkeypatch, mode, [THINKING], success_frames(), idle=10)
+        h = Harness(monkeypatch, mode, [THINKING], success_frames())
         task = asyncio.create_task(h.collect())
         try:
             for _ in range(100):
@@ -288,7 +285,7 @@ def test_cancelled_thinking_is_not_retried(monkeypatch, mode):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await h.adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("attempt", [1, 2, 3])
