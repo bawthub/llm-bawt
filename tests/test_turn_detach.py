@@ -61,7 +61,8 @@ class _Redis:
             return self.batches.pop(0)
         self.entered.set()
         if self.hold is not None:
-            await asyncio.to_thread(self.hold.wait, HANG_GUARD_S)
+            if not await asyncio.to_thread(self.hold.wait, HANG_GUARD_S):
+                raise AssertionError(f"fake XREAD was never released within {HANG_GUARD_S}s")
         else:
             await asyncio.sleep(self.block_s)
         return []
