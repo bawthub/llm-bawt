@@ -6,11 +6,16 @@ and nothing reruns it on a timer; only a re-acquired leadership term does
 (TASK-1311, ``tests/test_dispatcher_leadership.py``). Dispatch waits for it
 only up to a bound; a slow check is never cancelled for being slow, only
 ``stop()`` cancels it, and its end wakes the dispatcher.
+
+Anything timed runs on ``tests/virtual_clock.run_timing`` at the production
+sweep interval and wait bound (TASK-1457): the clock jumps between timers and
+waits are driven by the fakes (``tests/state_changes``), never by polling.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from types import SimpleNamespace
 
@@ -18,11 +23,23 @@ import pytest
 
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 from llm_bawt.service.inter_bot_dispatcher_recovery import StartupRecoveryRunner
+from tests import virtual_clock
+from tests.state_changes import StateChanges
+
+SWEEP_S = inspect.signature(InterBotDeliveryDispatcher.__init__).parameters[
+    "recovery_interval_seconds"].default
+RELEASE_S = InterBotDeliveryDispatcher.RELEASE_TIMEOUT_SECONDS
+WAIT_S = StartupRecoveryRunner.WAIT_SECONDS
+PROMPT_S = 1.0
+"""Virtual seconds for a step that waits out no timer: a few scheduler turns
+(20ms each under the timing report) and worker threads that answer at once.
+Well under every interval it is told apart from (the sweep, the wait bound)."""
 
 
 class _Check:
-    def __init__(self, events: list[str] | None = None):
+    def __init__(self, events: list[str] | None = None, changes: StateChanges | None = None):
         self.events = events if events is not None else []
+        self.changes = changes
         self.calls = 0
         self.raises: Exception | None = None
         self.block: asyncio.Event | None = None
@@ -31,6 +48,8 @@ class _Check:
     async def run_at_startup(self) -> None:
         self.calls += 1
         self.events.append("startup_check")
+        if self.changes is not None:
+            self.changes.poke()
         if self.block is not None:
             try:
                 await self.block.wait()
@@ -42,8 +61,9 @@ class _Check:
 
 
 class _Store:
-    def __init__(self, events: list[str]):
+    def __init__(self, events: list[str], changes: StateChanges | None = None):
         self.events = events
+        self.changes = changes
         self.recover_expired_calls = 0
         self.released_with_check_running: bool | None = None
         self.check: _Check | None = None
@@ -51,6 +71,8 @@ class _Store:
     def recover_expired(self, *, live_owner=None):
         self.recover_expired_calls += 1
         self.events.append("recover_expired")
+        if self.changes is not None:
+            self.changes.poke()
 
     def eligible_targets(self):
         return []
@@ -66,19 +88,25 @@ class _Store:
         )
 
 
-def _dispatcher(check: _Check):
+def _dispatcher(check: _Check, changes: StateChanges | None = None):
+    """A leader on the fakes, at the production sweep interval and wait bound."""
     events = check.events
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
     dispatcher.service = SimpleNamespace(
         config=SimpleNamespace(DEFAULT_USER="nick"),
         _redis_subscriber=SimpleNamespace(connected=True),
     )
-    dispatcher.store = _Store(events)
+    dispatcher.store = _Store(events, changes)
     dispatcher.store.check = check
-    # The loop's wake timeout; tests drive iterations with explicit wakes.
-    dispatcher.recovery_interval_seconds = 5.0
+    dispatcher.recovery_interval_seconds = SWEEP_S
     dispatcher._wake_event = asyncio.Event()
-    dispatcher._recovery = StartupRecoveryRunner(check, on_done=dispatcher._wake_event.set)
+
+    def on_done() -> None:
+        dispatcher._wake_event.set()
+        if changes is not None:
+            changes.poke()
+
+    dispatcher._recovery = StartupRecoveryRunner(check, on_done=on_done)
     dispatcher._stop_event = asyncio.Event()
     dispatcher._task = None
     dispatcher._leader_task = None
@@ -88,37 +116,40 @@ def _dispatcher(check: _Check):
     dispatcher.side_pumps = None
     dispatcher.claim_owner = "test-dispatcher"
     dispatcher._dispatcher_lock = object()
+    dispatcher._lock_probed_at = None  # the session is probed on every sweep
     dispatcher._subscriber_gap_logged = False
     return dispatcher
 
 
-async def _iterate(dispatcher, sweeps_before: int, count: int) -> None:
-    """Drive ``count`` loop iterations by wake, waiting for each sweep."""
-    for index in range(count):
+async def _entered(dispatcher, changes: StateChanges, sweeps_before: int, *,
+                   within: float = PROMPT_S) -> None:
+    """A run() entry settled: its initial recover_expired, then the sweep its
+    own wake starts once the check is done or its wait bound passed."""
+    await changes.until(lambda: dispatcher.store.recover_expired_calls >= sweeps_before + 2,
+                        within=within)
+
+
+async def _iterate(dispatcher, changes: StateChanges, count: int) -> None:
+    """Drive ``count`` loop iterations by wake, each well before the timed sweep."""
+    for _ in range(count):
+        before = dispatcher.store.recover_expired_calls
         dispatcher._wake_event.set()
-        for _ in range(200):
-            if dispatcher.store.recover_expired_calls >= sweeps_before + index + 1:
-                break
-            await asyncio.sleep(0.005)
-        else:  # pragma: no cover - diagnostic
-            raise AssertionError("dispatcher loop did not iterate")
+        await changes.until(lambda: dispatcher.store.recover_expired_calls > before,
+                            within=PROMPT_S)
 
 
 async def _stop(dispatcher, task) -> None:
     dispatcher._stop_event.set()
     dispatcher._wake_event.set()
-    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.wait_for(task, PROMPT_S)
+
+
+async def _stop_dispatcher(dispatcher) -> None:
+    """stop() is bounded by the release timeout, whatever is still running."""
+    await asyncio.wait_for(dispatcher.stop(), RELEASE_S + PROMPT_S)
 
 
 # --- runner unit contract -------------------------------------------------
-
-
-async def _until(predicate, *, polls: int = 200) -> None:
-    for _ in range(polls):
-        if predicate():
-            return
-        await asyncio.sleep(0.005)
-    raise AssertionError("condition not reached")  # pragma: no cover - diagnostic
 
 
 @pytest.mark.asyncio
@@ -133,147 +164,193 @@ async def test_a_failed_check_is_contained_and_still_wakes_dispatch(caplog):
     assert not runner.running and woke == [True]
 
 
-@pytest.mark.asyncio
-async def test_a_slow_check_is_waited_on_boundedly_never_cancelled_and_never_restarted(monkeypatch, caplog):
+def test_a_slow_check_is_waited_on_boundedly_never_cancelled_and_never_restarted(caplog):
     """Cancelling the await would not stop a check's worker-thread write, and
     the sweep would release its lock with that write in flight."""
-    check, woke = _Check(), []
-    check.block = asyncio.Event()
-    monkeypatch.setattr(StartupRecoveryRunner, "WAIT_SECONDS", 0.05)
-    runner = StartupRecoveryRunner(check, on_done=lambda: woke.append(True))
     caplog.set_level(logging.WARNING)
 
-    await asyncio.wait_for(runner.run_once(), timeout=1.0)
-    assert any("still running after" in r.getMessage() and r.levelno == logging.WARNING
-               for r in caplog.records)
-    assert runner.running and not check.cancelled and woke == []
+    async def main():
+        loop = asyncio.get_running_loop()
+        changes = StateChanges()
+        check, woke = _Check(changes=changes), []
+        check.block = asyncio.Event()
 
-    await asyncio.wait_for(runner.run_once(), timeout=1.0)  # crash re-entry
-    assert check.calls == 1
+        def on_done() -> None:
+            woke.append(True)
+            changes.poke()
 
-    check.block.set()
-    await _until(lambda: not runner.running)
-    assert not check.cancelled and woke == [True]
-    await runner.run_once()  # a finished check is not rerun either
-    assert check.calls == 1
+        runner = StartupRecoveryRunner(check, on_done=on_done)
+        started = loop.time()
+        await runner.run_once()
+        elapsed = loop.time() - started
+        # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+        assert WAIT_S <= elapsed < WAIT_S + PROMPT_S
+        assert any("still running after" in r.getMessage() and r.levelno == logging.WARNING
+                   for r in caplog.records)
+        assert runner.running and not check.cancelled and woke == []
+
+        started = loop.time()
+        await runner.run_once()  # crash re-entry: returns at once
+        # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+        assert loop.time() - started < PROMPT_S
+        assert check.calls == 1
+
+        check.block.set()
+        await changes.until(lambda: not runner.running and woke, within=PROMPT_S)  # on_done pokes
+        assert not check.cancelled and woke == [True]
+        await runner.run_once()  # a finished check is not rerun either
+        assert check.calls == 1
+
+    virtual_clock.run_timing(main())
 
 
-@pytest.mark.asyncio
-async def test_stop_cancels_a_running_check_without_waking_dispatch(monkeypatch):
-    check, woke = _Check(), []
-    check.block = asyncio.Event()
-    monkeypatch.setattr(StartupRecoveryRunner, "WAIT_SECONDS", 0.01)
-    runner = StartupRecoveryRunner(check, on_done=lambda: woke.append(True))
-    await runner.run_once()
-    await asyncio.wait_for(runner.stop(), timeout=1.0)
-    assert check.cancelled and not runner.running and woke == []
+def test_stop_cancels_a_running_check_without_waking_dispatch():
+    async def main():
+        check, woke = _Check(), []
+        check.block = asyncio.Event()
+        runner = StartupRecoveryRunner(check, on_done=lambda: woke.append(True))
+        await runner.run_once()  # the bound passes, the check runs on
+        assert runner.running
+        await asyncio.wait_for(runner.stop(), PROMPT_S)
+        assert check.cancelled and not runner.running and woke == []
+
+    virtual_clock.run_timing(main())
 
 
-@pytest.mark.asyncio
-async def test_the_wait_ends_on_stop_without_cancelling_the_check():
-    check = _Check()
-    check.block = asyncio.Event()
-    runner = StartupRecoveryRunner(check)
-    stop = asyncio.Event()
-    waiting = asyncio.create_task(runner.run_once(stop=stop))
-    await _until(lambda: check.calls == 1)
-    stop.set()
-    await asyncio.wait_for(waiting, timeout=1.0)
-    assert runner.running and not check.cancelled  # stop() owns the cancel
-    await asyncio.wait_for(runner.stop(), timeout=1.0)
-    assert check.cancelled
+def test_the_wait_ends_on_stop_without_cancelling_the_check():
+    async def main():
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        check.block = asyncio.Event()
+        runner = StartupRecoveryRunner(check)
+        stop = asyncio.Event()
+        waiting = asyncio.create_task(runner.run_once(stop=stop))
+        await changes.until(lambda: check.calls == 1, within=PROMPT_S)
+        stop.set()
+        await asyncio.wait_for(waiting, PROMPT_S)  # well inside the bound
+        assert runner.running and not check.cancelled  # stop() owns the cancel
+        await asyncio.wait_for(runner.stop(), PROMPT_S)
+        assert check.cancelled
+
+    virtual_clock.run_timing(main())
 
 
 # --- dispatcher wiring ----------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_run_starts_the_check_after_initial_recover_expired():
+def test_run_starts_the_check_after_initial_recover_expired():
     """Recovery steps defer claimed deliveries to recover_expired, so the
     check must see the claims it released."""
-    check = _Check()
-    dispatcher = _dispatcher(check)
-    task = asyncio.create_task(dispatcher.run())
-    await _iterate(dispatcher, 0, 1)
-    await _stop(dispatcher, task)
-    assert check.events[:2] == ["recover_expired", "startup_check"]
+    async def main():
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        dispatcher = _dispatcher(check, changes)
+        task = asyncio.create_task(dispatcher.run())
+        await _entered(dispatcher, changes, 0)
+        await _stop(dispatcher, task)
+        return check.events
+
+    assert virtual_clock.run_timing(main())[:3] == [
+        "recover_expired", "startup_check", "recover_expired"]
 
 
-@pytest.mark.asyncio
-async def test_a_crash_reentry_of_run_never_reruns_the_check():
+def test_a_crash_reentry_of_run_never_reruns_the_check():
     """run() is re-entered after a crash under the same leadership: that is
     not a startup."""
-    check = _Check()
-    dispatcher = _dispatcher(check)
-    for _ in range(2):
-        dispatcher._stop_event.clear()
-        task = asyncio.create_task(dispatcher.run())
-        await _iterate(dispatcher, dispatcher.store.recover_expired_calls, 1)
-        await _stop(dispatcher, task)
-    assert dispatcher.store.recover_expired_calls >= 4 and check.calls == 1
+    async def main():
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        dispatcher = _dispatcher(check, changes)
+        for _ in range(2):
+            dispatcher._stop_event.clear()
+            task = asyncio.create_task(dispatcher.run())
+            await _entered(dispatcher, changes, dispatcher.store.recover_expired_calls)
+            await _stop(dispatcher, task)
+        return dispatcher.store.recover_expired_calls, check.calls
+
+    # Two entries, each its initial recover_expired and one woken sweep.
+    assert virtual_clock.run_timing(main()) == (4, 1)
 
 
-@pytest.mark.asyncio
-async def test_the_check_never_reruns_on_a_timer_or_a_wake(monkeypatch):
+def test_the_check_never_reruns_on_a_timer_or_a_wake():
     """No periodic pass: many loop iterations, each a full delivery sweep, and
     the check ran exactly once."""
-    check = _Check()
-    dispatcher = _dispatcher(check)
-    dispatcher.recovery_interval_seconds = 0.001  # the loop's timed sweep fires constantly
-    task = asyncio.create_task(dispatcher.run())
-    await _iterate(dispatcher, 0, 1)
-    await _until(lambda: dispatcher.store.recover_expired_calls >= 60)
-    await _stop(dispatcher, task)
-    assert check.calls == 1
+    sweeps = 20
+
+    async def main():
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        dispatcher = _dispatcher(check, changes)
+        task = asyncio.create_task(dispatcher.run())
+        await _entered(dispatcher, changes, 0)
+        await _iterate(dispatcher, changes, 3)
+        # The rest are the loop's own timed sweeps, one per interval.
+        await changes.until(lambda: dispatcher.store.recover_expired_calls >= sweeps,
+                            within=sweeps * SWEEP_S)
+        await _stop(dispatcher, task)
+        return check.calls
+
+    assert virtual_clock.run_timing(main()) == 1
 
 
-@pytest.mark.asyncio
-async def test_a_hung_check_is_bounded_dispatch_starts_and_it_stops_before_unlock(monkeypatch):
-    check = _Check()
-    check.block = asyncio.Event()
-    monkeypatch.setattr(StartupRecoveryRunner, "WAIT_SECONDS", 0.05)
-    dispatcher = _dispatcher(check)
-    dispatcher._task = asyncio.create_task(dispatcher.run())
-    await _iterate(dispatcher, 0, 3)
-    assert dispatcher.store.recover_expired_calls >= 3
-    assert not check.cancelled  # still running, not cut off
-    await asyncio.wait_for(dispatcher.stop(), timeout=2.0)
-    assert check.cancelled  # shutdown is the only cancel
-    assert dispatcher.store.released_with_check_running is False
+def test_a_hung_check_is_bounded_dispatch_starts_and_it_stops_before_unlock():
+    async def main():
+        loop = asyncio.get_running_loop()
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        check.block = asyncio.Event()
+        dispatcher = _dispatcher(check, changes)
+        started = loop.time()
+        dispatcher._task = asyncio.create_task(dispatcher.run())
+        # Dispatch starts once the bound passes, with the check still running.
+        await _entered(dispatcher, changes, 0, within=WAIT_S + PROMPT_S)
+        assert loop.time() - started >= WAIT_S
+        await _iterate(dispatcher, changes, 2)
+        assert dispatcher.store.recover_expired_calls == 4
+        assert not check.cancelled  # still running, not cut off
+        await _stop_dispatcher(dispatcher)
+        assert check.cancelled  # shutdown is the only cancel
+        assert dispatcher.store.released_with_check_running is False
+
+    virtual_clock.run_timing(main())
 
 
-@pytest.mark.asyncio
-async def test_a_check_that_outlives_the_wait_wakes_dispatch_when_it_ends(monkeypatch):
-    check = _Check()
-    check.block = asyncio.Event()
-    monkeypatch.setattr(StartupRecoveryRunner, "WAIT_SECONDS", 0.01)
-    dispatcher = _dispatcher(check)
-    dispatcher.recovery_interval_seconds = 60.0  # only a wake can iterate the loop
-    task = asyncio.create_task(dispatcher.run())
-    await _until(lambda: dispatcher.store.recover_expired_calls == 2)  # entry + first iteration
-    await asyncio.sleep(0.02)
-    assert dispatcher.store.recover_expired_calls == 2
-    check.block.set()
-    await _until(lambda: dispatcher.store.recover_expired_calls == 3)
-    await _stop(dispatcher, task)
+def test_a_check_that_outlives_the_wait_wakes_dispatch_when_it_ends():
+    async def main():
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        check.block = asyncio.Event()
+        dispatcher = _dispatcher(check, changes)
+        dispatcher.recovery_interval_seconds = 3600.0  # only a wake can iterate the loop
+        task = asyncio.create_task(dispatcher.run())
+        await _entered(dispatcher, changes, 0, within=WAIT_S + PROMPT_S)
+        await asyncio.sleep(SWEEP_S)  # a production interval: still no sweep without a wake
+        assert dispatcher.store.recover_expired_calls == 2
+        check.block.set()  # its end wakes the loop (on_done)
+        await changes.until(lambda: dispatcher.store.recover_expired_calls == 3, within=PROMPT_S)
+        await _stop(dispatcher, task)
+
+    virtual_clock.run_timing(main())
 
 
-@pytest.mark.asyncio
-async def test_stop_during_the_wait_is_not_held_by_the_bound(caplog):
+def test_stop_during_the_wait_is_not_held_by_the_bound(caplog):
     """Shutdown within the bound (a redeploy right after boot) must not wait
     the bound out: stop() cancels the check right after anyway."""
-    check = _Check()
-    check.block = asyncio.Event()
-    assert StartupRecoveryRunner.WAIT_SECONDS >= 30.0  # the real bound
-    dispatcher = _dispatcher(check)
-    dispatcher._task = asyncio.create_task(dispatcher.run())
-    await _until(lambda: check.calls == 1)
     caplog.set_level(logging.WARNING)
+    assert RELEASE_S + PROMPT_S < WAIT_S  # so a bounded stop() never waited the bound out
 
-    await asyncio.wait_for(asyncio.shield(dispatcher.stop()), timeout=2.0)
+    async def main():
+        changes = StateChanges()
+        check = _Check(changes=changes)
+        check.block = asyncio.Event()
+        dispatcher = _dispatcher(check, changes)
+        dispatcher._task = asyncio.create_task(dispatcher.run())
+        await changes.until(lambda: check.calls == 1, within=PROMPT_S)
+        await _stop_dispatcher(dispatcher)
+        assert check.cancelled
+        assert dispatcher.store.recover_expired_calls == 1  # no sweep after shutdown
 
-    assert check.cancelled
-    assert dispatcher.store.recover_expired_calls == 1  # no sweep after shutdown
+    virtual_clock.run_timing(main())
     assert not any("still running after" in r.getMessage() for r in caplog.records)
 
 
@@ -284,7 +361,7 @@ async def test_stop_during_the_wait_is_not_held_by_the_bound(caplog):
 async def test_is_leader_follows_the_dispatcher_lock():
     dispatcher = _dispatcher(_Check())
     assert dispatcher.is_leader is True
-    await asyncio.wait_for(dispatcher.stop(), timeout=2.0)
+    await _stop_dispatcher(dispatcher)
     assert dispatcher.is_leader is False
 
 
@@ -305,16 +382,25 @@ class _Sweep:
         return {"busy": False, "sweep_run_id": "run-1", "steps": []}
 
 
-@pytest.mark.asyncio
-async def test_the_wired_check_runs_one_full_mutating_sweep_per_process():
+def test_the_wired_check_runs_one_full_mutating_sweep_per_process():
     """What api.py wires: every default step, mutating, once, however long
     the dispatcher keeps sweeping deliveries."""
     from llm_bawt.service.recovery.sweep import StartupRecoveryCheck
 
-    sweep = _Sweep()
-    dispatcher = _dispatcher(_Check())
-    dispatcher._recovery = StartupRecoveryRunner(StartupRecoveryCheck(sweep), on_done=dispatcher._wake_event.set)
-    task = asyncio.create_task(dispatcher.run())
-    await _iterate(dispatcher, 0, 20)
-    await _stop(dispatcher, task)
-    assert sweep.calls == [{"dry_run": False, "actor": "recovery_startup"}]
+    async def main():
+        changes = StateChanges()
+        sweep = _Sweep()
+        dispatcher = _dispatcher(_Check(), changes)
+
+        def on_done() -> None:
+            dispatcher._wake_event.set()
+            changes.poke()
+
+        dispatcher._recovery = StartupRecoveryRunner(StartupRecoveryCheck(sweep), on_done=on_done)
+        task = asyncio.create_task(dispatcher.run())
+        await _entered(dispatcher, changes, 0)
+        await _iterate(dispatcher, changes, 18)
+        await _stop(dispatcher, task)
+        return sweep.calls
+
+    assert virtual_clock.run_timing(main()) == [{"dry_run": False, "actor": "recovery_startup"}]
