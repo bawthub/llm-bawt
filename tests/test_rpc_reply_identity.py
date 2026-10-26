@@ -184,17 +184,17 @@ def test_soul_push_addresses_openclaw(monkeypatch):
 def test_soul_routes_address_openclaw(monkeypatch, route, method):
     from types import SimpleNamespace
 
-    from llm_bawt.service.routes import settings
+    from llm_bawt.service.routes import bot_soul
 
     profile = SimpleNamespace(agent_backend="openclaw", system_prompt="prompt",
                               agent_backend_config={"session_key": "agent:main:main"})
     store = MagicMock(engine=object(), get=MagicMock(return_value=profile))
-    monkeypatch.setattr(settings, "get_service", lambda: SimpleNamespace(config=None))
-    monkeypatch.setattr(settings, "get_bot_profile_store", lambda config: store)
+    monkeypatch.setattr(bot_soul, "get_service", lambda: SimpleNamespace(config=None))
+    monkeypatch.setattr(bot_soul, "get_bot_profile_store", lambda config: store)
     subscriber = MagicMock(send_rpc=AsyncMock(side_effect=RuntimeError("stop here")))
     monkeypatch.setattr("llm_bawt.agent_backends.agent_bridge.get_agent_subscriber",
                         lambda: subscriber)
-    handler = getattr(settings, route)
+    handler = getattr(bot_soul, route)
     with pytest.raises(Exception):
         asyncio.run(handler("bot"))
     call = subscriber.send_rpc.await_args

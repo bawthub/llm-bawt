@@ -1,4 +1,8 @@
-"""Runtime settings routes."""
+"""Runtime settings and bot profile routes.
+
+OpenClaw SOUL.md sync lives in ``bot_soul.py`` (split out under the monolith
+gate, TASK-1521).
+"""
 
 import json
 import logging
@@ -48,6 +52,7 @@ from ..schemas import (
     RuntimeSettingsResponse,
     RuntimeSettingUpsertRequest,
 )
+from .bot_soul import openclaw_agent_id, push_soul_background as _push_soul_background
 from .bot_profile_validation import (
     _humanize_bot_constraint_error,
     _request_to_profile_payload,
@@ -99,34 +104,6 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]])
             policy.validate_setting_write(scope_type, scope_id, key, value)
         except WorkingMemoryError as exc:
             raise HTTPException(status_code=400, detail=exc.message) from exc
-
-
-async def _push_soul_background(slug: str, agent_id: str, system_prompt: str) -> None:
-    """Best-effort push of system_prompt to SOUL.md on the gateway."""
-    import logging
-    import uuid
-
-    logger = logging.getLogger(__name__)
-    try:
-        from ...agent_backends.agent_bridge import get_agent_subscriber
-        subscriber = get_agent_subscriber()
-        if subscriber is None:
-            logger.warning("Auto-push SOUL.md skipped for '%s': no subscriber", slug)
-            return
-
-        result = await subscriber.send_rpc(
-            method="agents.files.set",
-            params={"agentId": agent_id, "name": "SOUL.md", "content": system_prompt},
-            request_id=f"rpc_{uuid.uuid4().hex}",
-            timeout_s=10,
-            backend="openclaw",
-        )
-        if result.get("ok"):
-            logger.info("Auto-pushed SOUL.md for bot '%s' (agent=%s)", slug, agent_id)
-        else:
-            logger.warning("Auto-push SOUL.md failed for '%s': %s", slug, result.get("error"))
-    except Exception as e:
-        logger.warning("Auto-push SOUL.md failed for '%s': %s", slug, e)
 
 
 def _resolve_effective_bot_prompt(config, profile) -> str:
@@ -368,14 +345,7 @@ async def _persist_bot_profile(
 
     effective_prompt = _resolve_effective_bot_prompt(service.config, profile)
     if profile.agent_backend == "openclaw" and effective_prompt.strip():
-        profile_config = profile.agent_backend_config or {}
-        session_key = profile_config.get("session_key", "")
-        agent_id = "main"
-        if session_key.startswith("agent:"):
-            parts = session_key.split(":")
-            if len(parts) >= 2:
-                agent_id = parts[1]
-        await _push_soul_background(profile.slug, agent_id, effective_prompt)
+        await _push_soul_background(profile.slug, openclaw_agent_id(profile), effective_prompt)
 
     response = _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug),
                                     tags=_profile_tags(store.engine, [profile.slug]))
@@ -865,138 +835,3 @@ def cleanup_orphans(
     if "error" in result:
         raise HTTPException(status_code=503, detail=result["error"])
     return result
-
-
-@router.post("/v1/bots/{slug}/sync-soul", tags=["System"])
-async def sync_soul(slug: str):
-    """Sync bot system_prompt from OpenClaw agent's SOUL.md via the bridge."""
-    import uuid
-
-    service = get_service()
-    store = get_bot_profile_store(service.config)
-    if store.engine is None:
-        raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
-
-    profile = store.get(slug)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Bot profile not found")
-    if profile.agent_backend != "openclaw":
-        raise HTTPException(status_code=400, detail="Bot is not an OpenClaw agent backend")
-
-    # Extract agent ID from session_key (e.g. "agent:main:main" -> "main")
-    config = profile.agent_backend_config or {}
-    session_key = config.get("session_key", "")
-    agent_id = "main"
-    if session_key.startswith("agent:"):
-        parts = session_key.split(":")
-        if len(parts) >= 2:
-            agent_id = parts[1]
-
-    # Call agents.files.get via bridge RPC
-    from ...agent_backends.agent_bridge import get_agent_subscriber
-    subscriber = get_agent_subscriber()
-    if subscriber is None:
-        raise HTTPException(status_code=503, detail="OpenClaw bridge not connected")
-
-    request_id = f"rpc_{uuid.uuid4().hex}"
-    try:
-        result = await subscriber.send_rpc(
-            method="agents.files.get",
-            params={"agentId": agent_id, "name": "SOUL.md"},
-            request_id=request_id,
-            timeout_s=15,
-            backend="openclaw",
-        )
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="Bridge RPC timed out")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Bridge RPC failed: {e}")
-
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=502,
-            detail=f"Gateway error: {result.get('error', 'unknown')}",
-        )
-
-    file_info = result.get("payload", {}).get("file", {})
-    if file_info.get("missing"):
-        raise HTTPException(status_code=404, detail=f"SOUL.md not found for agent '{agent_id}'")
-
-    soul_content = file_info.get("content", "")
-    if not soul_content.strip():
-        raise HTTPException(status_code=404, detail=f"SOUL.md is empty for agent '{agent_id}'")
-
-    # Update bot profile system_prompt
-    store.upsert({"slug": slug, "system_prompt": soul_content})
-    _reload_bot_registry()
-    _invalidate_bot_instance_cache(service, slug)
-
-    return {
-        "success": True,
-        "slug": slug,
-        "agent_id": agent_id,
-        "system_prompt_length": len(soul_content),
-    }
-
-
-@router.post("/v1/bots/{slug}/push-soul", tags=["System"])
-async def push_soul(slug: str):
-    """Push bot system_prompt to the OpenClaw agent's SOUL.md via the bridge."""
-    import uuid
-
-    service = get_service()
-    store = get_bot_profile_store(service.config)
-    if store.engine is None:
-        raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
-
-    profile = store.get(slug)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Bot profile not found")
-    if profile.agent_backend != "openclaw":
-        raise HTTPException(status_code=400, detail="Bot is not an OpenClaw agent backend")
-
-    content = profile.system_prompt or ""
-    if not content.strip():
-        raise HTTPException(status_code=400, detail="Bot system_prompt is empty — nothing to push")
-
-    # Extract agent ID from session_key
-    config = profile.agent_backend_config or {}
-    session_key = config.get("session_key", "")
-    agent_id = "main"
-    if session_key.startswith("agent:"):
-        parts = session_key.split(":")
-        if len(parts) >= 2:
-            agent_id = parts[1]
-
-    from ...agent_backends.agent_bridge import get_agent_subscriber
-    subscriber = get_agent_subscriber()
-    if subscriber is None:
-        raise HTTPException(status_code=503, detail="OpenClaw bridge not connected")
-
-    request_id = f"rpc_{uuid.uuid4().hex}"
-    try:
-        result = await subscriber.send_rpc(
-            method="agents.files.set",
-            params={"agentId": agent_id, "name": "SOUL.md", "content": content},
-            request_id=request_id,
-            timeout_s=15,
-            backend="openclaw",
-        )
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="Bridge RPC timed out")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Bridge RPC failed: {e}")
-
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=502,
-            detail=f"Gateway error: {result.get('error', 'unknown')}",
-        )
-
-    file_info = result.get("payload", {}).get("file", {})
-    return {
-        "success": True,
-        "slug": slug,
-        "agent_id": agent_id,
-        "file_size": file_info.get("size", len(content)),
-    }

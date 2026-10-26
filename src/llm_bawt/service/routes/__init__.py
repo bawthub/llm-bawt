@@ -2,6 +2,7 @@
 
 from .admin_gates import router as admin_gates_router
 from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
+from .bot_soul import router as bot_soul_router
 from .bot_tags import router as bot_tags_router
 from .botchat import router as botchat_router
 from .chat import router as chat_router
@@ -73,6 +74,7 @@ all_routers = [
     nextcloud_setup_router,  # Specific setup routes precede generic integration paths.
     integrations_router,
     settings_router,
+    bot_soul_router,
     bot_tags_router,
     setup_router,
     sessions_router,
