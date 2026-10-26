@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -10,6 +9,50 @@ import pytest
 from llm_bawt.service import dependencies
 from llm_bawt.service.instance_manager import InstanceManagerMixin
 from llm_bawt.service.routes import media as media_routes
+
+HANG_GUARD_S = 10.0
+WORKERS = 12
+
+
+class _ContendedLock:
+    """Cache lock that holds the first build until every caller is queued on it.
+
+    Each caller counts itself before it blocks on the real lock. The build
+    (which runs with the lock held) waits until ``expect(n)`` callers have
+    arrived, so the single-flight check runs while every one of them has
+    already missed the lock-free fast path, instead of hoping a sleep is
+    long enough for them to get there.
+    """
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._cond = threading.Condition()
+        self._arrived = 0
+        self._expected = 0
+
+    def expect(self, callers: int) -> None:
+        with self._cond:
+            self._arrived = 0
+            self._expected = callers
+
+    def __enter__(self):
+        with self._cond:
+            self._arrived += 1
+            self._cond.notify_all()
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc):
+        return self._lock.__exit__(*exc)
+
+    def hold_until_contended(self) -> None:
+        with self._cond:
+            if not self._expected:
+                return
+            expected = self._expected
+            self._expected = 0
+            assert self._cond.wait_for(lambda: self._arrived >= expected, HANG_GUARD_S), (
+                f"only {self._arrived} of {expected} callers reached the cache lock"
+            )
 
 
 @pytest.fixture(autouse=True)
@@ -70,17 +113,20 @@ def test_concurrent_media_store_access_constructs_once(monkeypatch) -> None:
 
     constructed = 0
     constructed_lock = threading.Lock()
+    cache_lock = _ContendedLock(dependencies._store_lock)
 
     def factory(config):
         nonlocal constructed
-        time.sleep(0.01)
+        cache_lock.hold_until_contended()
         with constructed_lock:
             constructed += 1
         return SimpleNamespace(config=config)
 
     monkeypatch.setattr(assets, "MediaAssetStore", factory)
+    monkeypatch.setattr(dependencies, "_store_lock", cache_lock)
     config = object()
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    cache_lock.expect(WORKERS)
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         stores = list(
             pool.map(
                 lambda _: dependencies.get_media_asset_store(config),
@@ -131,9 +177,10 @@ def test_memory_client_cache_is_single_flight_and_keeps_user_dimension(
 
     constructed: list[tuple[str, str | None]] = []
     constructed_lock = threading.Lock()
+    cache_lock = _ContendedLock(threading.Lock())
 
     def factory(*, config, bot_id, user_id, server_url):
-        time.sleep(0.01)
+        cache_lock.hold_until_contended()
         with constructed_lock:
             constructed.append((bot_id, user_id))
         return SimpleNamespace(
@@ -147,9 +194,10 @@ def test_memory_client_cache_is_single_flight_and_keeps_user_dimension(
     manager = InstanceManagerMixin()
     manager.config = SimpleNamespace(MCP_SERVER_URL=None)
     manager._memory_clients = {}
-    manager._memory_clients_lock = threading.Lock()
+    manager._memory_clients_lock = cache_lock
 
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    cache_lock.expect(WORKERS)
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         clients = list(
             pool.map(
                 lambda _: manager.get_memory_client("nova", "user-a"),
@@ -171,9 +219,10 @@ def test_memory_storage_caches_are_instance_owned_and_single_flight(
 
     backend_builds: list[str] = []
     manager_builds: list[str] = []
+    cache_lock = _ContendedLock(threading.Lock())
 
     def backend_factory(*, config, bot_id, provision_schema=False):
-        time.sleep(0.01)
+        cache_lock.hold_until_contended()
         backend_builds.append(bot_id)
         return SimpleNamespace(
             config=config,
@@ -183,7 +232,7 @@ def test_memory_storage_caches_are_instance_owned_and_single_flight(
         )
 
     def manager_factory(*, config, bot_id, provision_schema=False):
-        time.sleep(0.01)
+        cache_lock.hold_until_contended()
         manager_builds.append(bot_id)
         return SimpleNamespace(
             config=config,
@@ -195,9 +244,12 @@ def test_memory_storage_caches_are_instance_owned_and_single_flight(
     monkeypatch.setattr(storage_module, "PostgreSQLMemoryBackend", backend_factory)
     monkeypatch.setattr(postgresql, "PostgreSQLShortTermManager", manager_factory)
     first = storage_module.MemoryStorage(config=SimpleNamespace())
+    first._cache_lock = cache_lock
 
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        cache_lock.expect(WORKERS)
         backends = list(pool.map(lambda _: first.get_backend("nova"), range(16)))
+        cache_lock.expect(WORKERS)
         managers = list(
             pool.map(lambda _: first.get_short_term_manager("nova"), range(16))
         )
