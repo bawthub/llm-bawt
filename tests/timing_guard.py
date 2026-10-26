@@ -285,14 +285,27 @@ def _thread_wait(node: ast.AST, awaited: set[int]) -> ast.Call | None:
 
 def _barrier_names(tree: ast.AST) -> set[str]:
     """Names bound to ``Barrier(...)``: its wait raises BrokenBarrierError on
-    timeout, so its result carries nothing to check."""
-    names = set()
+    timeout, so its result carries nothing to check.
+
+    Fails closed: the scan is module-wide, not per scope, so a name counts
+    only when every binding of it in the module (assignment, parameter,
+    loop/with target) is a Barrier. A ``ready`` that is a Barrier in one
+    function and an Event in another stays checked.
+    """
+    barrier_targets = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
             func = node.value.func
             if (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)) == "Barrier":
-                names.update(ast.unparse(target) for target in node.targets)
-    return names
+                barrier_targets.update(id(target) for target in node.targets
+                                       if isinstance(target, (ast.Name, ast.Attribute)))
+    barriers, others = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg):
+            others.add(node.arg)
+        elif isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Store):
+            (barriers if id(node) in barrier_targets else others).add(ast.unparse(node))
+    return barriers - others
 
 
 def _checks_alive(statements: list[ast.stmt], receiver: str) -> bool:

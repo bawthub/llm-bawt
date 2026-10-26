@@ -159,6 +159,24 @@ def test_d4_knows_a_barrier_by_its_constructor():
     """) == [(8, ".wait(timeout) result ignored; a timeout passes silently")]
 
 
+def test_d4_a_name_that_is_a_barrier_only_somewhere_stays_checked():
+    # Codex r1 (slice 7): barrier names were merged across functions.
+    assert _waits("""
+        import threading
+        def first():
+            ready = threading.Barrier(2)
+            ready.wait(10)
+        def second():
+            ready = threading.Event()
+            ready.wait(10)
+        def third(start):
+            start.wait(10)
+        start = threading.Barrier(2)
+    """) == [(5, ".wait(timeout) result ignored; a timeout passes silently"),
+             (8, ".wait(timeout) result ignored; a timeout passes silently"),
+             (10, ".wait(timeout) result ignored; a timeout passes silently")]
+
+
 def test_d4_honours_a_timing_ok_reason():
     assert _waits("""
         def test_x(event):
