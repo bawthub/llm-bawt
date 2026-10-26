@@ -85,7 +85,7 @@ def test_long_bash_outlives_normal_sdk_idle_timeout() -> None:
 
     waited = virtual_clock.run_timing(run())
     # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-    assert waited >= IDLE_TIMEOUT_S + 100
+    assert waited >= IDLE_TIMEOUT_S + 100 - virtual_clock.TICK_S
 
 
 async def _silent_stream():
@@ -117,7 +117,7 @@ def test_silent_sdk_still_hits_idle_watchdog(caplog) -> None:
 
     # One-sided: the full idle timeout was honored (per-step cost only adds).
     # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-    assert virtual_clock.run_timing(run()) >= IDLE_TIMEOUT_S
+    assert virtual_clock.run_timing(run()) >= IDLE_TIMEOUT_S - virtual_clock.TICK_S
 
 
 OVERDUE_BASH_S = 120.0
@@ -152,7 +152,8 @@ def test_active_tool_fails_after_declared_timeout_and_grace() -> None:
 
     # One-sided: the Bash's timeout plus grace was honored.
     # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-    assert virtual_clock.run_timing(run()) >= OVERDUE_BASH_S + DEFAULT_TOOL_GRACE_SECONDS
+    assert (virtual_clock.run_timing(run())
+            >= OVERDUE_BASH_S + DEFAULT_TOOL_GRACE_SECONDS - virtual_clock.TICK_S)
 
 
 def test_health_callback_failure_does_not_kill_turn() -> None:

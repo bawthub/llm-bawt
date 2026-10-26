@@ -149,6 +149,11 @@ _REAL_TIME = real_time.time
 _REAL_PERF_COUNTER = real_time.perf_counter
 _REAL_WRAP_FUTURE = asyncio.wrap_future
 TICKS_PER_SECOND = 1_000_000
+# loop.time() is ticks / TICKS_PER_SECOND from a real-monotonic start, so the
+# difference of two readings carries float rounding (399.99999999999994 for a
+# 400s wait). Lower bounds on elapsed loop time subtract one tick: exact to
+# the clock's resolution, still red if the deadline is cut short.
+TICK_S = 1 / TICKS_PER_SECOND
 IDLE_LIMIT_S = 30.0
 Observer = Callable[[str, float], None]
 

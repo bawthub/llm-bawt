@@ -612,7 +612,8 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
             ]
             # One-sided: the production productive-idle deadline was honored.
             # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-            assert loop.time() - began >= chatgpt_transport.DEFAULT_PRODUCTIVE_IDLE_TIMEOUT
+            assert (loop.time() - began
+                    >= chatgpt_transport.DEFAULT_PRODUCTIVE_IDLE_TIMEOUT - virtual_clock.TICK_S)
             assert socket.close.await_count == 1
             assert not adapter._chatgpt_transport._idle
         finally:

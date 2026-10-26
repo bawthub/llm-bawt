@@ -402,6 +402,23 @@ def test_a_loop_clock_starts_at_real_time_so_a_cached_reading_never_goes_back():
     assert loop_monotonic >= monotonic and loop_wall >= wall
 
 
+def test_an_elapsed_lower_bound_needs_one_tick_of_rounding(monkeypatch):
+    # A real CI start: 400s of loop time read back as 399.99999999999994.
+    monkeypatch.setattr(virtual_clock, "_REAL_MONOTONIC", lambda: 124.770643)
+
+    async def waited():
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await asyncio.sleep(400)
+        return loop.time() - began
+
+    elapsed = virtual_clock.run_timing(waited())
+    # timing-ok: virtual clock (run_timing): loop.time() is exact to one tick
+    assert elapsed < 400
+    # timing-ok: virtual clock (run_timing): loop.time() is exact to one tick
+    assert elapsed >= 400 - virtual_clock.TICK_S
+
+
 def test_timing_loop_fails_a_wait_on_nothing_instead_of_hanging():
     with pytest.raises(RuntimeError, match="deadlock"):
         Run(idle_limit=0.2)(lambda: asyncio.Event().wait())
@@ -428,6 +445,12 @@ def _private_pool_work(wrap) -> tuple[str | None, bool, str | None]:
         while_blocked = loop.real_work()
         gate.set()
         result = await waiter
+        # The worker thread queues the result, then the release, and can be
+        # preempted between the two: the task may resume first. A late
+        # release only keeps FOLLOW a moment longer; join the worker and let
+        # its queued release run before asking what is outstanding.
+        pool.shutdown(wait=True)
+        await asyncio.sleep(0)
         return while_blocked, result, loop.real_work()
 
     try:
