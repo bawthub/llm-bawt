@@ -18,7 +18,7 @@ from .contracts import (
     RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider,
 )
 
-from .excerpts import fts_query, sql_window, terms_for
+from .excerpts import fts_query, query_terms, sql_window, terms_for
 
 # Unknown authors, legacy NULL user sessions, summaries and deleted sessions do
 # not establish provenance. An imported bot message is not caller-owned evidence.
@@ -189,7 +189,34 @@ class MessageSource(PostgresSource):
     # OR is a fallback only when stricter tiers returned nothing. No excluded
     # partition participates even in candidate limiting.
     statement = f"""
-        WITH exact_all AS MATERIALIZED (
+        WITH focused AS MATERIALIZED (
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
+                   TRUE AS exact_match
+            FROM messages m
+            JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                 AS p(source_bot, partition) ON m.bot_id = p.partition
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {PUBLIC_HISTORY_AUTHORITY} AND :focus_enabled
+              AND m.content_tsv @@ plainto_tsquery('english', :focus)
+              AND __FOCUS_EXACT__
+            ORDER BY CASE WHEN m.author_entity_type = 'bot'
+                                AND m.author_entity_id = ANY(CAST(:named_bots AS text[]))
+                          THEN 1 ELSE 0 END DESC,
+                     ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
+                     m.timestamp DESC, m.id LIMIT :candidate_limit
+        ), exact_topic AS MATERIALIZED (
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
+                   TRUE AS exact_match
+            FROM messages m
+            JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                 AS p(source_bot, partition) ON m.bot_id = p.partition
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {PUBLIC_HISTORY_AUTHORITY} AND :topic_enabled AND __EXACT_ALL__
+              AND m.content_tsv @@ plainto_tsquery('english', :topic)
+              AND NOT EXISTS (SELECT 1 FROM focused)
+            ORDER BY ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
+                     m.timestamp DESC, m.id LIMIT :candidate_limit
+        ), exact_all AS MATERIALIZED (
             SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
                    TRUE AS exact_match
             FROM messages m
@@ -197,7 +224,10 @@ class MessageSource(PostgresSource):
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
             WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ALL__
-            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+              AND NOT EXISTS (SELECT 1 FROM focused)
+              AND NOT EXISTS (SELECT 1 FROM exact_topic)
+            ORDER BY ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
+                     m.timestamp DESC, m.id LIMIT :candidate_limit
         ), exact_any AS MATERIALIZED (
             SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
                    TRUE AS exact_match
@@ -206,8 +236,11 @@ class MessageSource(PostgresSource):
                  AS p(source_bot, partition) ON m.bot_id = p.partition
             JOIN sessions s ON s.id = m.session_id
             WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ANY__
+              AND NOT EXISTS (SELECT 1 FROM focused)
+              AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
-            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+            ORDER BY ts_rank(m.content_tsv, to_tsquery('english', :query)) DESC,
+                     m.timestamp DESC, m.id LIMIT :candidate_limit
         ), strong AS MATERIALIZED (
             SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
                    FALSE AS exact_match
@@ -218,6 +251,8 @@ class MessageSource(PostgresSource):
             WHERE {PUBLIC_HISTORY_AUTHORITY}
               AND :allow_lexical
               AND m.content_tsv @@ plainto_tsquery('english', :strong)
+              AND NOT EXISTS (SELECT 1 FROM focused)
+              AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
               AND NOT EXISTS (SELECT 1 FROM exact_any)
             ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
@@ -231,18 +266,24 @@ class MessageSource(PostgresSource):
             WHERE {PUBLIC_HISTORY_AUTHORITY}
               AND :allow_lexical
               AND m.content_tsv @@ to_tsquery('english', :query)
+              AND NOT EXISTS (SELECT 1 FROM focused)
+              AND NOT EXISTS (SELECT 1 FROM exact_topic)
               AND NOT EXISTS (SELECT 1 FROM exact_all)
               AND NOT EXISTS (SELECT 1 FROM exact_any)
               AND NOT EXISTS (SELECT 1 FROM strong)
             ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
         ), candidates AS MATERIALIZED (
-            SELECT * FROM exact_all UNION ALL SELECT * FROM exact_any
-            UNION ALL SELECT * FROM strong UNION ALL SELECT * FROM loose
+            SELECT * FROM focused UNION ALL SELECT * FROM exact_topic
+            UNION ALL SELECT * FROM exact_all UNION ALL SELECT * FROM exact_any
+            UNION ALL SELECT * FROM strong
+            UNION ALL SELECT * FROM loose
         ), query_lexemes AS (
             SELECT ARRAY(SELECT DISTINCT unnest(tsvector_to_array(
                        to_tsvector('english', array_to_string(CAST(:terms AS text[]), ' '))))) AS lexemes
         ), scored AS MATERIALIZED (
             SELECT c.id, c.partition, c.source_bot, c.session_id, c.timestamp, c.exact_match,
+                   (m.author_entity_type = 'bot'
+                    AND m.author_entity_id = ANY(CAST(:named_bots AS text[]))) AS named_author,
                    cardinality(ARRAY(SELECT unnest(q.lexemes)
                                      INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) AS matched,
                    cardinality(q.lexemes) AS possible,
@@ -260,7 +301,7 @@ class MessageSource(PostgresSource):
             -- only an actual exact-tier match establishes identity without a
             -- second lexical token. Having an exact token in the query does not.
             WHERE exact_match OR matched >= LEAST(2, possible)
-            ORDER BY coverage DESC, score DESC, timestamp DESC, id
+            ORDER BY coverage DESC, named_author DESC, score DESC, timestamp DESC, id
             LIMIT :limit
         ), follow_ons AS (
             SELECT f.id, h.partition, h.source_bot, h.coverage, h.score, h.id AS hit_id, f.ord
@@ -297,23 +338,69 @@ class MessageSource(PostgresSource):
         # messages_find treats abbreviations and clock times as literals for
         # browsing; recall must not promote them above topical evidence.
         return tuple(token for token in parse_find_query(query[:512]).exact
-                     if not re.fullmatch(r"(?:[A-Za-z]\.)+[A-Za-z]?|\d{1,2}:\d{2}(?::\d{2})?", token))
+                     if not re.fullmatch(
+                         r"(?:[A-Za-z]\.)+[A-Za-z]?|\d{1,2}:\d{2}(?::\d{2})?|B[1-9]\d*-B[1-9]\d*",
+                         token, re.IGNORECASE))
+
+    @staticmethod
+    def review_terms(query: str) -> tuple[str, ...]:
+        """Index the review number and list endpoints, not the textual range.
+
+        A literal B1-B5 selects unrelated summaries quoting that range, while
+        actual reviews often say B1 through B5 individually. Unlabeled reviews
+        remain searchable via the ordinary lexical fallback.
+        """
+        if not re.search(r"\b(?:review|blockers?)\b", query, re.IGNORECASE):
+            return ()
+        marker = re.search(r"(?<![A-Za-z0-9_])r[1-9]\d{0,3}(?![A-Za-z0-9_])", query, re.IGNORECASE)
+        if marker is None:
+            return ()
+        bounds = re.search(r"\bB([1-9]\d*)\s*[-–]\s*B([1-9]\d*)\b", query, re.IGNORECASE)
+        if bounds:
+            endpoints = (f"b{bounds[1]}", f"b{bounds[2]}")
+        else:
+            # "five blockers" asks for the numbered list even when B1-B5 was
+            # not spelled out. A miss falls back to ordinary lexical retrieval.
+            count = re.search(r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+blockers?\b",
+                              query, re.IGNORECASE)
+            numbers = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+            endpoints = ("b1", f"b{numbers.index(count[1].lower()) + 1}") if count else ()
+        return (marker.group().lower(), *endpoints)
 
     def statement_for(self, query: str) -> str:
         exact = self.exact_literals(query)
         clauses = [f"m.content ILIKE :exact_{i}" for i in range(len(exact))]
-        return (self.statement.replace("__EXACT_ALL__", "(" + " AND ".join(clauses) + ")" if clauses else "FALSE")
+        # A focused review cannot suppress exact search for a different task.
+        # Require every explicit identity in the query before its candidate cap.
+        return (self.statement.replace("__FOCUS_EXACT__", "(" + " AND ".join(clauses) + ")" if clauses else "TRUE")
+                .replace("__EXACT_ALL__", "(" + " AND ".join(clauses) + ")" if clauses else "FALSE")
                 .replace("__EXACT_ANY__", "(" + " OR ".join(clauses) + ")" if clauses else "FALSE"))
 
     def extra_params(self, scope: RecallScope, query: str) -> dict:
         parsed = parse_find_query(query[:512])
         exact = self.exact_literals(query)
         allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
-        # Literal identifiers never degrade to generic prose. Only meaningful
-        # component words of compound identifiers can drive a lexical fallback.
-        strong = list(parsed.parts + parsed.words)[:3] if exact else terms_for(query)[:3]
+        review = self.review_terms(query)
+        # The policy snapshot is the only source of bot identities. Mentioning a
+        # searchable author helps distinguish their actual review from newer
+        # recaps; it never grants a partition or delivery read.
+        named = [bot for bot in allowed if re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(bot)}(?![A-Za-z0-9_])", query, re.IGNORECASE)]
+        terms = list(dict.fromkeys([*terms_for(query), *review]))
+        search = " | ".join(terms)
+        # A numbered review uses an indexed conjunction first; if no labeled
+        # answer exists, the existing bounded exact/lexical tiers still run.
+        strong = list(dict.fromkeys([*review, *terms_for(query)]))[:5]
+        # Recent mentions of a task ID can crowd out its earlier decision.
+        # The question's last three substantive words form an indexed topical
+        # tier; an absent topic falls back to the ranked exact-ID tier.
+        topical = query_terms(query)
+        topic = topical[-3:] if len(exact) == 1 and len(topical) >= 5 else []
         return {"bots": allowed, "parts": [partition_id(bot) for bot in allowed],
-                "delivery_authors": delivery_authors(scope), "strong": " ".join(strong),
+                "delivery_authors": delivery_authors(scope), "named_bots": named,
+                "focus_enabled": len(review) > 1, "focus": " ".join(review),
+                "topic_enabled": bool(topic), "topic": " ".join(topic),
+                "strong": " ".join(strong), "query": search, "terms": terms,
                 "allow_lexical": not exact or bool(parsed.parts),
                 "candidate_limit": 96,
                 **{f"exact_{i}": like_pattern(token) for i, token in enumerate(exact)}}

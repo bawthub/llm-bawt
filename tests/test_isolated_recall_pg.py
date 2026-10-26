@@ -265,6 +265,62 @@ def test_broad_single_word_hit_is_not_presented_as_a_relevant_answer(rig):
     assert not rig.recall("What were the migration findings and owners of the handshake budget?")
 
 
+@pytest.mark.parametrize("query", [
+    "What were the five blockers B1-B5 in peer's r9 review?",
+    "What were the five blockers in peer's r9 review?",
+])
+def test_review_blockers_reach_old_authorized_delivery_past_newer_summaries(rig, query):
+    """A review number and numbered blocker list should find the actual review."""
+    older = rig.now - 3 * DAY
+    answer = rig.add("Message from bot 'peer': TASK-42 DESIGN r9: REQUEST_CHANGES. "
+                     "Five blockers: B1 old deltas replay, B2 compaction loses metadata, "
+                     "B3 archived caches stay warm, B4 scrubbed pins need recovery, "
+                     "B5 session updates invert lock order.", at=older, role="user",
+                     author="peer", author_type="bot")
+    unrelated = rig.add("MDv2 review B1-B5: unrelated rendering findings.", at=rig.now - 30)
+    for n in range(110):
+        rig.add("The peer r9 review had five blockers; investigating TASK-42. "
+                "This is a recap without their text.", at=rig.now - n * 2 - 31)
+    rows = rig.recall(query)
+    assert rows and rows[0].id == answer
+    assert unrelated not in {row.id for row in rows}
+    assert rows[0].source_bot == rig.bot and rows[0].speaker == "bot:peer"
+    assert "B5 session updates invert lock order" in rows[0].text
+
+
+def test_review_focus_keeps_explicit_task_identity_before_candidate_cap(rig):
+    """Another task's same-number reviews cannot suppress the named task."""
+    answer = rig.add("Message from bot 'peer': TASK-42 r9 review. "
+                     "B1 replay, B2 compaction, B3 cache, B4 pins, B5 lock order.",
+                     at=rig.now - 3 * DAY, role="user", author="peer", author_type="bot")
+    for n in range(110):
+        rig.add("Message from bot 'peer': TASK-99 r9 review. "
+                "B1 retry, B2 auth, B3 state, B4 tokens, B5 expiry.",
+                at=rig.now - n * 2, role="user", author="peer", author_type="bot")
+    rows = rig.recall("What were the five blockers B1-B5 in peer's TASK-42 r9 review?")
+    assert rows and rows[0].id == answer
+    assert all("TASK-99" not in row.text for row in rows)
+
+
+def test_task_scope_answer_survives_exact_id_candidate_cap(rig):
+    """A relevant old task choice must not lose to recent generic task mentions."""
+    answer = rig.add("Message from bot 'peer': TASK-42 r10 is ready. "
+                     "Working memory scope is B plus notice; the next turn prompts a re-read.",
+                     at=rig.now - 3 * DAY, role="user", author="peer", author_type="bot")
+    for n in range(120):
+        rig.add("TASK-42 working memory work remains under review.", at=rig.now - n * 3)
+    query = "What scope did the operator choose for TASK-42 working memory: B, B plus notice, or C?"
+    rows = rig.recall(query)
+    assert answer in {row.id for row in rows[:6]}
+    assert "scope is B plus notice" in next(row.text for row in rows if row.id == answer)
+
+
+def test_exact_topic_miss_falls_back_to_authorized_identifier(rig):
+    answer = rig.add("TASK-42 was completed and verified.", at=rig.now - 3 * DAY)
+    rows = rig.recall("What did TASK-42 decide about scope and notice?")
+    assert [row.id for row in rows] == [answer]
+
+
 def test_review_reference_is_omitted_if_one_excerpt_mentions_two_reviews():
     from llm_bawt.recall.postgres import review_ref
     assert review_ref("r8 B5 was revised by r9 B5") is None

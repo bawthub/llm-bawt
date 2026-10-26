@@ -127,17 +127,25 @@ other users and imported other-bot assistant rows are omitted. Memories and
 tool evidence keep the stricter caller-user/own-bot rule.
 
 The messages_find parser supplies literal identity terms (TASK-N, SHA prefixes,
-paths and snake_case); recall discards dotted prose abbreviations and bare
-clock times from that exact set. Indexed exact-all then exact-any candidates
-precede an indexed high-coverage lexical tier; a broad OR runs only if stronger
-tiers are empty. A multi-word question needs at least two lexical matches on
-the lexical tiers, even when the query also contains a missing exact identity;
-only a row admitted by an exact tier waives that floor. A single generic word
-is weak evidence. Each tier caps authorized candidates before ranking, so a
-generic OR cannot force per-row rank work across a whole history partition. A
-missing single-piece identifier does not degrade to old generic fragments. Within the
-candidate set, coverage buckets (`COVERAGE_BUCKETS`) rank the share of query
-lexemes matched, then full-text rank decays by a 14-day recency term.
+paths and snake_case); recall discards dotted prose abbreviations, bare clock
+times and ranges such as B1-B5 from that exact set. Numbered review queries
+first search the indexed review marker and list endpoints (r9, B1 and B5),
+requiring any explicit identity such as a task ID before capping candidates.
+An empty focused search falls back to exact and lexical tiers.
+Questions with one exact identity and enough topical words first intersect it
+with the query's final three substantive terms via the indexed tsvector; a
+miss falls back to relevance-ranked exact-all/exact-any candidates, then an
+indexed high-coverage lexical tier. Broad OR runs only when stronger tiers
+are empty. Within the same coverage bucket an authorized bot named in the
+query can outrank newer recaps by other speakers; naming a bot never changes
+which partitions or deliveries are authorized. A multi-word question needs at
+least two lexical matches on the lexical tiers, even with a missing exact
+identity; only an actual exact-tier match waives that floor. Each tier caps
+authorized candidates before final ranking, so broad OR cannot force per-row
+rank work across a whole history partition. Missing single-piece identifiers
+do not degrade to generic old fragments. Coverage buckets (`COVERAGE_BUCKETS`)
+rank the share of query lexemes matched, then full-text rank decays by a
+14-day recency term.
 This selects at most six **hits**. Each hit carries up to two **follow-ons**
 (`MAX_FOLLOW_ONS_PER_HIT`): the next messages in the same partition and session
 within 30 minutes, under the identical authority filters. Follow-ons reach
