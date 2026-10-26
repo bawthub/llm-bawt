@@ -118,6 +118,8 @@ def test_d4_flags_short_thread_waits_but_not_loop_waits_or_lookups():
             assert queue.get(True, 2) == 1
             assert future.result(3) == 1
             assert mapping.get(1) is None
+            assert session.get(Row, 1) is None
+            assert kwargs.get("delay", 1) == 1
             assert ", ".join(parts)
             assert event.wait(5)
             await asyncio.wait(tasks, timeout=0.1)

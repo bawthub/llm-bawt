@@ -250,11 +250,13 @@ _WAIT_METHODS = frozenset({"wait", "join", "get", "result"})
 
 
 def _timeout_literal(call: ast.Call) -> float | None:
-    """The call's timeout when it is a numeric literal (``get`` only by keyword:
-    ``mapping.get(1)`` is a lookup)."""
+    """The call's timeout when it is a numeric literal (``get`` by keyword, or
+    positionally after a literal ``block`` bool: ``mapping.get(1)``,
+    ``kwargs.get("k", 1)`` and ``session.get(Row, 1)`` are lookups)."""
     name = call.func.attr  # type: ignore[union-attr]
     candidates = [kw.value for kw in call.keywords if kw.arg == "timeout"]
-    if name == "get" and len(call.args) >= 2:  # queue.get(block, timeout)
+    if (name == "get" and len(call.args) >= 2  # queue.get(True, timeout)
+            and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, bool)):
         candidates.append(call.args[1])
     elif name != "get" and call.args:
         candidates.append(call.args[0])
