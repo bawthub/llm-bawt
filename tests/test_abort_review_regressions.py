@@ -25,7 +25,12 @@ from llm_bawt.service.turn_execution import TurnExecution, turn_executions
 from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
 from llm_bawt.service.tool_call_store import ToolCallRecord
 from llm_bawt.service.turn_termination import TurnAbortCoordinator
+from tests import virtual_clock
 from tests.sqlite_support import fast_sqlite_engine
+
+# Hang guard for waits on this test's own threads: a broken path fails here
+# instead of hanging; a healthy one returns in milliseconds.
+HANG_GUARD_S = 10.0
 
 
 @pytest.fixture
@@ -210,9 +215,9 @@ def test_pre_output_abort_and_overlapping_streams_keep_own_identity(store, monke
     threads = [threading.Thread(target=run, args=(name,)) for name in ("A", "B")]
     try:
         threads[0].start()
-        assert sent["A"].wait(3)
+        assert sent["A"].wait(HANG_GUARD_S)
         threads[1].start()
-        assert sent["B"].wait(3)
+        assert sent["B"].wait(HANG_GUARD_S)
         assert not output["A"] and not output["B"]
         # Dispatch marks immediately after send returns; synchronize on that
         # state instead of sleeping or relying on first output.
@@ -230,7 +235,8 @@ def test_pre_output_abort_and_overlapping_streams_keep_own_identity(store, monke
             event.set()
         for thread in threads:
             if thread.ident is not None:
-                thread.join(3)
+                thread.join(HANG_GUARD_S)
+                assert not thread.is_alive()
     assert not errors
     assert output["B"] == ["B"]
 
@@ -337,7 +343,7 @@ def test_real_native_worker_finalizes_within_the_grace_and_stop_confirms_it(stor
             yield "partial"
             waiting.set()
             # A blocked provider: its next chunk arrives only after Stop signals.
-            turn_executions.get("A").cancel_event.wait(5)
+            assert turn_executions.get("A").cancel_event.wait(HANG_GUARD_S)
             yield "not forwarded" * 100
             pytest.fail("continued native model after Stop")
         finally:
@@ -352,7 +358,8 @@ def test_real_native_worker_finalizes_within_the_grace_and_stop_confirms_it(stor
         elapsed = time.monotonic() - started
     finally:
         owner.cancel_event.set()
-        thread.join(5)
+        thread.join(HANG_GUARD_S)
+        assert not thread.is_alive()
     assert result == "aborted:worker_finalized"
     # timing-ok: a real worker thread; the result names worker_finalized, and 1s vs the 5s grace shows it was not waited out
     assert elapsed < turn_abort.WORKER_FINALIZE_GRACE_SECONDS / 5
@@ -671,26 +678,28 @@ def test_user_stop_settles_a_worker_that_never_finalizes(store, monkeypatch):
     _assert_user_stop_settled(store, bridge_state="worker_unfinalized", confirmed=False)
 
 
-def test_user_stop_keeps_the_workers_own_terminal_when_it_finalizes_in_time(store, monkeypatch):
-    from llm_bawt.service import turn_abort
+def test_user_stop_keeps_the_workers_own_terminal_when_it_finalizes_in_time(store):
+    """The production grace on the virtual clock: the worker runs in a tracked
+    thread, so the loop follows real time while it works and can't jump past
+    the grace before it finalizes, however slow the runner."""
+    owner = execution(store, agent=False)
 
-    monkeypatch.setattr(turn_abort, "WORKER_FINALIZE_GRACE_SECONDS", 0.5, raising=False)
-    execution(store, agent=False)
-
-    def finalize_soon():
-        # Finalize only after Stop recorded its request: a fixed sleep let a
-        # loaded run finalize first, and Stop then saw a completed turn.
-        deadline = time.monotonic() + 5
-        while store.get_turn("A").status != "cancelling" and time.monotonic() < deadline:
-            time.sleep(0.005)
+    def finalize_on_stop():
+        # Stop signals the owner after recording its request (the row is
+        # cancelling), exactly when a real native worker starts teardown.
+        assert owner.cancel_event.wait(HANG_GUARD_S)
+        assert store.get_turn("A").status == "cancelling"
         store.update_turn(turn_id="A", status="aborted", end_reason="aborted")
 
-    worker = threading.Thread(target=finalize_soon)
-    worker.start()
-    try:
-        result = asyncio.run(abort_turn(service(store), store.get_turn("A"), source="chat_stop", peer=None))
-    finally:
-        worker.join()
+    async def main():
+        worker = asyncio.create_task(asyncio.to_thread(finalize_on_stop))
+        try:
+            return await abort_turn(service(store), store.get_turn("A"), source="chat_stop", peer=None)
+        finally:
+            owner.cancel_event.set()
+            await worker
+
+    result = virtual_clock.run_timing(main())
     assert result == "aborted:worker_finalized"
     row = store.get_turn("A")
     assert (row.status, row.end_reason) == ("aborted", "aborted")

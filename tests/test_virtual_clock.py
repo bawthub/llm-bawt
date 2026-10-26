@@ -412,10 +412,12 @@ def test_an_elapsed_lower_bound_needs_one_tick_of_rounding(monkeypatch):
         await asyncio.sleep(400)
         return loop.time() - began
 
-    elapsed = virtual_clock.run_timing(waited())
-    # timing-ok: virtual clock (run_timing): loop.time() is exact to one tick
+    # A plain TimingLoop (no report step cost): the test is about the
+    # clock's arithmetic, not about code getting there in time.
+    elapsed = Run()(waited)
+    # timing-ok: virtual clock (TimingLoop): loop.time() is exact to one tick
     assert elapsed < 400
-    # timing-ok: virtual clock (run_timing): loop.time() is exact to one tick
+    # timing-ok: virtual clock (TimingLoop): loop.time() is exact to one tick
     assert elapsed >= 400 - virtual_clock.TICK_S
 
 
