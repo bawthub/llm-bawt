@@ -5,6 +5,7 @@ Imported by server.py to register the task tool group.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
@@ -12,6 +13,9 @@ from typing import Annotated, Any, Literal
 import httpx
 from pydantic import Field
 
+from llm_bawt.bot_access import BotAccessError
+
+from .review_provenance import resolve_review_provenance, signed_review_turn
 from .server import mcp
 from .task_association import associate_current_task
 from .task_step_types import (
@@ -364,6 +368,18 @@ async def list_task_reviews(
         return _http_error(error)
 
 
+async def _review_task_refs(task_id: str) -> list[str]:
+    """The reviewed task's cuid and shortId, so either form matches a delivery."""
+    try:
+        task = await _api_get(f"/tasks/{task_id}")
+    except Exception:
+        logger.warning("review provenance: task %s unavailable", task_id, exc_info=True)
+        return []
+    if not isinstance(task, dict):
+        return []
+    return [ref for ref in (task.get("id"), task.get("shortId")) if isinstance(ref, str) and ref]
+
+
 @mcp.tool(name="tasks_reviews_add")
 async def add_task_review(
     task_id: str,
@@ -396,6 +412,18 @@ async def add_task_review(
         payload["targetRevision"] = target_revision
     if idempotency_key is not None:
         payload["idempotencyKey"] = idempotency_key
+    # TASK-1249: models come from the caller's signed turn, never from
+    # arguments or the body. A bad or foreign credential is refused.
+    try:
+        turn = signed_review_turn(bot_id, {
+            "task_id": task_id, "stage": stage, "verdict": verdict, "body": body,
+            "bot_id": bot_id, "target_revision": target_revision,
+            "idempotency_key": idempotency_key,
+        })
+    except BotAccessError as error:
+        return {"error": error.code}
+    task_refs = await _review_task_refs(task_id) if turn is not None else []
+    payload.update(await asyncio.to_thread(resolve_review_provenance, turn, task_refs))
     try:
         return await _api_post(
             f"/tasks/{task_id}/reviews", json=payload, headers=_headers(bot_id)

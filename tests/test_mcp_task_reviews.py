@@ -55,6 +55,7 @@ def test_reviews_add_forwards_typed_contract_and_bot_actor(monkeypatch, stage, v
         "body": "Review text",
         "targetRevision": "sha256:abc",
         "idempotencyKey": "review:1144:r1",
+        "provenance": "unsigned",
     }, {"X-Agent-Bot-Id": "snark"})]
     assert "author" not in calls[0][1]
     assert "agentBotId" not in calls[0][1]
@@ -76,7 +77,7 @@ def test_reviews_add_requires_actor_and_omits_optional_fields(monkeypatch):
         "id": "review-2"
     }
     assert calls == [("/tasks/TASK-1/reviews", {
-        "stage": "DESIGN", "verdict": "APPROVE", "body": ""
+        "stage": "DESIGN", "verdict": "APPROVE", "body": "", "provenance": "unsigned",
     }, {"X-Agent-Bot-Id": "al"})]
 
 

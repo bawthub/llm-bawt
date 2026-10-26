@@ -97,6 +97,17 @@ def pending_rejection(row: Mapping[str, Any]) -> str | None:
     return str(marker.get("proof") or "rejected")
 
 
+def steer_started(row: Mapping[str, Any]) -> bool:
+    """True when this steer row's current generation reported started.
+
+    The only proof that the target turn actually received a steered message.
+    """
+    if row.get("delivery_mode") != "steer":
+        return False
+    metadata = _metadata(row)
+    return _marker_generation(metadata, STEER_STARTED) == _generation(metadata)
+
+
 def steer_uncertain(record: Any) -> dict[str, Any] | None:
     """The sender-facing uncertain marker for a delivery's current steer, if any.
 
@@ -245,5 +256,5 @@ class SteerLifecycleFence:
 __all__ = [
     "IGNORED", "PENDING", "REOPENED", "STEER_REJECTED_PENDING", "STEER_REJECTION",
     "STEER_STARTED", "STEER_UNCERTAIN", "SteerLifecycleFence", "pending_rejection",
-    "rejection_error", "rejection_merge", "steer_uncertain",
+    "rejection_error", "rejection_merge", "steer_started", "steer_uncertain",
 ]

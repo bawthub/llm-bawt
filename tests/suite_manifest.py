@@ -58,6 +58,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_ops_quiesce_visibility_pg.py::",
     "test_quiesce_control_producer_pg.py::",
     "test_inter_bot_control_lane_pg.py::",
+    "test_review_provenance_pg.py::",
     "test_quiesce_exit_sweep_pg.py::",
     "test_system_gate_admission_pg.py::",
     "test_purge_ops_pg.py::",
