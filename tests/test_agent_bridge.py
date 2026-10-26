@@ -21,7 +21,11 @@ from llm_bawt.integrations.agent_bridge_events import (
     synthesize_event_id,
 )
 from llm_bawt.integrations.openclaw_ingest import EventIngestPipeline
+from tests import virtual_clock
 from tests.test_session_search_pg import repository as pg_repository  # noqa: F401 (pytest fixture registration)
+
+# Virtual-clock hang guard for the steer tests: only a broken run reaches it.
+HANG_GUARD_S = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -66,34 +70,43 @@ class TestClaudeActiveRun:
         assert run.consume_replaced_result(interrupted) is True
         assert run.consume_replaced_result(interrupted) is False
 
-    @pytest.mark.anyio
-    async def test_steer_now_does_not_wait_for_blocked_sdk_message_reader(self):
+    def test_steer_now_does_not_wait_for_blocked_sdk_message_reader(self):
         """Bridge control can advance while its model-message reader is silent.
 
         This does not establish whether the live CLI acknowledges interrupt
         while its *own* upstream HTTP read is blocked; that requires a live probe.
         """
-        entered = asyncio.Event()
-        release = asyncio.Event()
+        async def main():
+            entered = asyncio.Event()
+            release = asyncio.Event()
 
-        async def silent_reader():
-            entered.set()
-            await release.wait()
-            yield MagicMock()
+            async def silent_reader():
+                entered.set()
+                await release.wait()
+                yield MagicMock()
 
-        client = AsyncMock()
-        client.receive_messages = silent_reader
-        run = ClaudeActiveRun(client=client, request_id="req-1", _steer_timeout_s=0.2)
-        reader = asyncio.create_task(anext(run.messages()))
-        try:
-            await asyncio.wait_for(entered.wait(), timeout=0.2)
-            await asyncio.wait_for(run.steer("resume unfinished work"), timeout=0.2)
-            client.interrupt.assert_awaited_once_with()
-            client.query.assert_awaited_once()
-            assert not reader.done()
-        finally:
-            reader.cancel()
-            await asyncio.gather(reader, return_exceptions=True)
+            client = AsyncMock()
+            client.receive_messages = silent_reader
+            # Production steer timeout, on the virtual clock.
+            run = ClaudeActiveRun(client=client, request_id="req-1")
+            reader = asyncio.create_task(anext(run.messages()))
+            loop = asyncio.get_running_loop()
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=HANG_GUARD_S)
+                began = loop.time()
+                await asyncio.wait_for(run.steer("resume unfinished work"), timeout=HANG_GUARD_S)
+                # Steering finished without spending its own timeout, so it
+                # never waited on the blocked reader.
+                # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+                assert loop.time() - began < run._steer_timeout_s
+                client.interrupt.assert_awaited_once_with()
+                client.query.assert_awaited_once()
+                assert not reader.done()
+            finally:
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
+
+        virtual_clock.run_timing(main())
 
     @pytest.mark.anyio
     async def test_steer_failure_does_not_hide_next_error_result(self):
@@ -143,53 +156,63 @@ class TestClaudeActiveRun:
         client.interrupt.assert_not_awaited()
         client.query.assert_not_awaited()
 
-    @pytest.mark.anyio
-    async def test_steer_bounds_unacknowledged_interrupt_before_rpc_deadline(self):
-        interrupt_started = asyncio.Event()
-        release_interrupt = asyncio.Event()
+    def test_steer_bounds_unacknowledged_interrupt_before_rpc_deadline(self):
+        async def main():
+            interrupt_started = asyncio.Event()
+            release_interrupt = asyncio.Event()
 
-        async def hanging_interrupt():
-            interrupt_started.set()
-            await release_interrupt.wait()
+            async def hanging_interrupt():
+                interrupt_started.set()
+                await release_interrupt.wait()
 
-        client = AsyncMock()
-        client.interrupt.side_effect = hanging_interrupt
-        run = ClaudeActiveRun(
-            client=client,
-            request_id="req-1",
-            _steer_timeout_s=0.01,
-        )
+            client = AsyncMock()
+            client.interrupt.side_effect = hanging_interrupt
+            # Production steer timeout: the virtual clock jumps the full wait.
+            run = ClaudeActiveRun(client=client, request_id="req-1")
+            loop = asyncio.get_running_loop()
+            began = loop.time()
 
-        with pytest.raises(RuntimeError, match="steer_interrupt_timeout"):
-            await run.steer("change direction")
+            with pytest.raises(RuntimeError, match="steer_interrupt_timeout"):
+                await run.steer("change direction")
 
-        assert interrupt_started.is_set()
-        client.query.assert_not_awaited()
-        assert run.consume_replaced_result(MagicMock(subtype="success")) is False
+            # One-sided: the full steer timeout was honored (per-step cost only
+            # adds to it).
+            # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+            assert loop.time() - began >= run._steer_timeout_s
+            assert interrupt_started.is_set()
+            client.query.assert_not_awaited()
+            assert run.consume_replaced_result(MagicMock(subtype="success")) is False
 
-    @pytest.mark.anyio
-    async def test_steer_bounds_replacement_query_before_rpc_deadline(self):
-        query_started = asyncio.Event()
-        release_query = asyncio.Event()
+        virtual_clock.run_timing(main())
 
-        async def hanging_query(_message):
-            query_started.set()
-            await release_query.wait()
+    def test_steer_bounds_replacement_query_before_rpc_deadline(self):
+        async def main():
+            query_started = asyncio.Event()
+            release_query = asyncio.Event()
 
-        client = AsyncMock()
-        client.query.side_effect = hanging_query
-        run = ClaudeActiveRun(
-            client=client,
-            request_id="req-1",
-            _steer_timeout_s=0.01,
-        )
+            async def hanging_query(_message):
+                query_started.set()
+                await release_query.wait()
 
-        with pytest.raises(RuntimeError, match="steer_query_timeout"):
-            await run.steer("change direction")
+            client = AsyncMock()
+            client.query.side_effect = hanging_query
+            # Production steer timeout; interrupt and query share one deadline.
+            run = ClaudeActiveRun(client=client, request_id="req-1")
+            loop = asyncio.get_running_loop()
+            began = loop.time()
 
-        assert query_started.is_set()
-        client.disconnect.assert_awaited_once_with()
-        assert run.consume_replaced_result(MagicMock(subtype="success")) is False
+            with pytest.raises(RuntimeError, match="steer_query_timeout"):
+                await run.steer("change direction")
+
+            # One-sided: the full steer timeout was honored (per-step cost only
+            # adds to it).
+            # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+            assert loop.time() - began >= run._steer_timeout_s
+            assert query_started.is_set()
+            client.disconnect.assert_awaited_once_with()
+            assert run.consume_replaced_result(MagicMock(subtype="success")) is False
+
+        virtual_clock.run_timing(main())
 
     def test_success_result_in_interrupt_race_is_still_replaced(self):
         run = ClaudeActiveRun(client=AsyncMock(), request_id="req-1")

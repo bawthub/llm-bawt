@@ -520,6 +520,9 @@ def test_silent_websocket_recovers_over_http_without_outer_cli_retry(monkeypatch
     asyncio.run(run())
 
 
+CHATTER_INTERVAL_S = 1.0
+
+
 @pytest.mark.parametrize("committed_kind", ["reasoning", "text", "tool"])
 def test_productive_stall_after_committed_output_never_replays(monkeypatch, committed_kind):
     from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapter
@@ -567,9 +570,12 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
                 })
 
             async def chatter():
+                # Non-productive keepalive traffic: the socket never goes
+                # idle, but no output arrives, so only the productive-idle
+                # deadline can end the stream.
                 while True:
                     await socket.events.put({"type": "response.in_progress"})
-                    await asyncio.sleep(.002)
+                    await asyncio.sleep(CHATTER_INTERVAL_S)
 
             producer = asyncio.create_task(chatter())
             return socket
@@ -578,11 +584,9 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
         adapter = OpenAIChatGPTAdapter()
         adapter._cached_account_id = "fixture-account"
         adapter.authorize = AsyncMock(return_value=("token", "https://example.test"))
+        # Production deadlines, on the virtual clock.
         adapter._chatgpt_transport = ChatGPTResponsesTransport(
             connector=AsyncMock(side_effect=connect),
-            first_event_timeout=.1,
-            idle_timeout=.2,
-            productive_idle_timeout=.025,
         )
         body = {
             "model": "openai_chatgpt/gpt-6-astra", "max_tokens": 128,
@@ -594,6 +598,8 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
             responses_transport="lite_ws",
             status_callback=lambda request_id, status: statuses.append(status),
         )
+        loop = asyncio.get_running_loop()
+        began = loop.time()
         try:
             chunks = [chunk async for chunk in adapter.call(
                 body, "gpt-6-astra", context,
@@ -601,7 +607,12 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
             joined = b"".join(chunks)
             assert adapter._chatgpt_transport.connector.await_count == 1
             assert b'"type":"api_error"' in joined
-            assert [status["state"] for status in statuses] == ["waiting", "failed"]
+            assert [status["state"] for status in statuses] == [
+                "waiting", "stalled", "failed",
+            ]
+            # One-sided: the production productive-idle deadline was honored.
+            # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+            assert loop.time() - began >= chatgpt_transport.DEFAULT_PRODUCTIVE_IDLE_TIMEOUT
             assert socket.close.await_count == 1
             assert not adapter._chatgpt_transport._idle
         finally:
@@ -610,7 +621,7 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
                 await asyncio.gather(producer, return_exceptions=True)
             await adapter.close()
 
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):

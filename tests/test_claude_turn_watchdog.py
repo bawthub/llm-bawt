@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import pytest
 from claude_agent_sdk.types import (
@@ -9,44 +10,67 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from claude_code_bridge.turn_watchdog import TurnWatchdog, TurnWatchdogTimeout
+from claude_code_bridge.turn_watchdog import (
+    DEFAULT_HEALTH_INTERVAL_SECONDS,
+    DEFAULT_TOOL_GRACE_SECONDS,
+    MAX_TOOL_TIMEOUT_SECONDS,
+    TurnWatchdog,
+    TurnWatchdogTimeout,
+)
+from tests import virtual_clock
+
+# The async tests below run on the virtual clock (virtual_clock.run_timing) at
+# the bridge's production intervals: asyncio timers jump, so a 400s tool takes
+# no wall time, and the outcome cannot depend on how fast the runner is. The
+# watchdog takes the loop's clock explicitly, so its deadlines and the
+# stream's sleeps read the same time.
+IDLE_TIMEOUT_S = 300.0
+BASH_TIMEOUT_S = 500.0
 
 
-async def _stream_with_long_bash():
-    yield AssistantMessage(
+def _watchdog(**kwargs) -> TurnWatchdog:
+    return TurnWatchdog(
+        kwargs.pop("idle_timeout", IDLE_TIMEOUT_S),
+        clock=asyncio.get_running_loop().time,
+        **kwargs,
+    )
+
+
+def _bash(tool_use_id: str, timeout_s: float) -> AssistantMessage:
+    return AssistantMessage(
         content=[
             ToolUseBlock(
-                id="toolu_long",
+                id=tool_use_id,
                 name="Bash",
-                input={"command": "sleep", "timeout": 120},
+                input={"command": "sleep", "timeout": int(timeout_s * 1000)},
             )
         ],
         model="claude-test",
     )
-    await asyncio.sleep(0.07)
+
+
+async def _stream_with_long_bash():
+    yield _bash("toolu_long", BASH_TIMEOUT_S)
+    # Longer than the SDK idle timeout, inside the declared Bash timeout.
+    await asyncio.sleep(IDLE_TIMEOUT_S + 100)
     yield UserMessage(
         content=[ToolResultBlock(tool_use_id="toolu_long", content="done")]
     )
 
 
 def test_long_bash_outlives_normal_sdk_idle_timeout() -> None:
-    async def run() -> None:
+    async def run() -> float:
         stream = _stream_with_long_bash()
         health: list[dict] = []
-        watchdog = TurnWatchdog(
-            idle_timeout=0.03,
-            health_interval=0.005,
-            tool_grace=0.02,
-            max_tool_timeout=1.0,
-            on_health=health.append,
-        )
+        watchdog = _watchdog(on_health=health.append)
 
         start = await watchdog.receive_next(
             stream, request_id="req-long", session_key="snark:nick"
         )
         assert isinstance(start, AssistantMessage)
-        assert watchdog.active_tools[0].timeout_seconds == pytest.approx(0.12)
+        assert watchdog.active_tools[0].timeout_seconds == BASH_TIMEOUT_S
 
+        began = asyncio.get_running_loop().time()
         result = await watchdog.receive_next(
             stream, request_id="req-long", session_key="snark:nick"
         )
@@ -55,23 +79,28 @@ def test_long_bash_outlives_normal_sdk_idle_timeout() -> None:
         assert health
         assert health[-1]["phase"] == "tool_running"
         assert health[-1]["active_tools"][0]["name"] == "Bash"
-        assert health[-1]["active_tools"][0]["timeout_seconds"] == pytest.approx(0.12)
+        assert health[-1]["active_tools"][0]["timeout_seconds"] == BASH_TIMEOUT_S
         assert health[-1]["deadline_in_seconds"] > 0
+        return asyncio.get_running_loop().time() - began
 
-    asyncio.run(run())
+    waited = virtual_clock.run_timing(run())
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert waited >= IDLE_TIMEOUT_S + 100
 
 
 async def _silent_stream():
-    await asyncio.sleep(1)
+    await asyncio.sleep(IDLE_TIMEOUT_S * 2)
     yield UserMessage(content="too late")
 
 
 def test_silent_sdk_still_hits_idle_watchdog(caplog) -> None:
-    async def run() -> None:
-        watchdog = TurnWatchdog(idle_timeout=0.02, health_interval=0.005)
+    async def run() -> float:
+        watchdog = _watchdog()
+        began = asyncio.get_running_loop().time()
 
         with pytest.raises(
-            TurnWatchdogTimeout, match="No SDK messages for 0.02s"
+            TurnWatchdogTimeout,
+            match=re.escape(f"No SDK messages for {IDLE_TIMEOUT_S}s"),
         ) as raised:
             await watchdog.receive_next(
                 _silent_stream(), request_id="req-idle", session_key="loopy:nick"
@@ -84,36 +113,30 @@ def test_silent_sdk_still_hits_idle_watchdog(caplog) -> None:
             and "wait_elapsed_ms=" in record.message
             for record in caplog.records
         )
+        return asyncio.get_running_loop().time() - began
 
-    asyncio.run(run())
+    # One-sided: the full idle timeout was honored (per-step cost only adds).
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert virtual_clock.run_timing(run()) >= IDLE_TIMEOUT_S
+
+
+OVERDUE_BASH_S = 120.0
 
 
 async def _stream_with_overdue_bash():
-    yield AssistantMessage(
-        content=[
-            ToolUseBlock(
-                id="toolu_overdue",
-                name="Bash",
-                input={"command": "sleep", "timeout": 30},
-            )
-        ],
-        model="claude-test",
-    )
-    await asyncio.sleep(1)
+    yield _bash("toolu_overdue", OVERDUE_BASH_S)
+    await asyncio.sleep(IDLE_TIMEOUT_S * 3)
     yield UserMessage(
         content=[ToolResultBlock(tool_use_id="toolu_overdue", content="done")]
     )
 
 
 def test_active_tool_fails_after_declared_timeout_and_grace() -> None:
-    async def run() -> None:
+    async def run() -> float:
         stream = _stream_with_overdue_bash()
-        watchdog = TurnWatchdog(
-            idle_timeout=0.01,
-            health_interval=0.005,
-            tool_grace=0.02,
-            max_tool_timeout=1.0,
-        )
+        watchdog = _watchdog()
+        # Before the tool is observed, so elapsed covers its whole deadline.
+        began = asyncio.get_running_loop().time()
         await watchdog.receive_next(
             stream, request_id="req-overdue", session_key="snark:nick"
         )
@@ -122,32 +145,44 @@ def test_active_tool_fails_after_declared_timeout_and_grace() -> None:
             await watchdog.receive_next(
                 stream, request_id="req-overdue", session_key="snark:nick"
             )
+        # tool_running (not sdk_idle) is the Bash's own deadline firing.
         assert raised.value.phase == "tool_running"
         assert raised.value.retry_fresh_session is False
+        return asyncio.get_running_loop().time() - began
 
-    asyncio.run(run())
+    # One-sided: the Bash's timeout plus grace was honored.
+    # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
+    assert virtual_clock.run_timing(run()) >= OVERDUE_BASH_S + DEFAULT_TOOL_GRACE_SECONDS
 
 
 def test_health_callback_failure_does_not_kill_turn() -> None:
+    calls: list[dict] = []
+
     async def run() -> None:
         async def stream():
-            await asyncio.sleep(0.02)
+            # Several health intervals, inside the idle timeout.
+            await asyncio.sleep(DEFAULT_HEALTH_INTERVAL_SECONDS * 3 + 1)
             yield UserMessage(content="alive")
 
-        def broken_callback(_health: dict) -> None:
+        def broken_callback(health: dict) -> None:
+            calls.append(health)
             raise RuntimeError("telemetry unavailable")
 
-        watchdog = TurnWatchdog(
-            idle_timeout=0.05,
-            health_interval=0.005,
-            on_health=broken_callback,
-        )
+        watchdog = _watchdog(on_health=broken_callback)
         message = await watchdog.receive_next(
             stream(), request_id="req-health", session_key="loopy:nick"
         )
         assert isinstance(message, UserMessage)
 
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
+    assert len(calls) == 3
+
+
+def test_production_intervals_fit_the_rewritten_tests() -> None:
+    """The constants above assume the bridge's defaults; fail loudly if they
+    move so the long-Bash test still outlives the idle timeout."""
+    assert IDLE_TIMEOUT_S + 100 < BASH_TIMEOUT_S <= MAX_TOOL_TIMEOUT_SECONDS
+    assert OVERDUE_BASH_S + DEFAULT_TOOL_GRACE_SECONDS < IDLE_TIMEOUT_S
 
 
 def test_parallel_tools_use_furthest_active_deadline() -> None:

@@ -51,6 +51,10 @@ async def abort(bridge, target, redis, session="bot:user"):
     return bridge._publisher.publish_rpc_result.call_args.args[1]
 
 
+# Thread-wait hang guard: long enough that only a broken handler reaches it.
+HANG_GUARD_S = 10.0
+
+
 async def until(predicate):
     async with asyncio.timeout(3):
         while not predicate():
@@ -159,7 +163,8 @@ def test_local_abort_waits_for_worker_and_does_not_complete_successfully():
             def stream_raw(self, messages):
                 try:
                     started.set()
-                    release.wait(3)
+                    if not release.wait(HANG_GUARD_S):
+                        raise AssertionError("test never released the worker")
                     yield "late token"
                     raise AssertionError("cancelled producer must not generate another token")
                 finally:
@@ -169,7 +174,10 @@ def test_local_abort_waits_for_worker_and_does_not_complete_successfully():
         with ThreadPoolExecutor(max_workers=1) as executor:
             bridge._executor = executor
             task = asyncio.create_task(send(bridge, "active", redis))
-            await until(started.is_set)
+            # A blocking wait in a worker thread, not a poll: real work holds
+            # the virtual clock, so a slow runner can't expire the guard
+            # before the producer thread starts.
+            assert await asyncio.to_thread(started.wait, HANG_GUARD_S)
             await abort(bridge, "active", redis)
             await asyncio.sleep(0)
             await abort(bridge, "active", redis)
