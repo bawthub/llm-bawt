@@ -273,7 +273,7 @@ def test_cancelled_thinking_is_not_retried(monkeypatch, mode):
         h = Harness(monkeypatch, mode, [THINKING], success_frames())
         task = asyncio.create_task(h.collect())
         try:
-            await h.thinking_forwarded.wait()
+            await asyncio.wait_for(h.thinking_forwarded.wait(), timeout=30)  # hang guard
             assert b"thinking_delta" in b"".join(h.frames)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
