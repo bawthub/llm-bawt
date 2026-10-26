@@ -8,7 +8,7 @@ Do not use `pytest -m ""`: that bypasses the external-target boundary.
 
 | Command | Selection | Requirements |
 | --- | --- | --- |
-| `make test` | Hermetic unit tests; **setup + call + teardown <1 s** per case (`LLM_BAWT_UNIT_TIME_BUDGET_SECONDS`, see below) | Python only |
+| `make test` | Hermetic unit tests; **setup + call + teardown <1 s** per case, <1.5 s for `real_process` cases (`LLM_BAWT_UNIT_TIME_BUDGET_SECONDS`, `LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS`, see below) | Python only |
 | `make test-pg-acceptance` | All manifest-listed private SQL tests, zero skips | Docker with pinned pgvector image |
 | `make test-offline-integration` | Real local HTTP/thread lifecycle and real SDK wire integration, zero skips | Loopback/in-memory transport |
 | `make test-sdk-probe` | Optional installed SDK subprocess against fake localhost upstream, zero skips | Installed SDK CLI; never operational bot/provider |
