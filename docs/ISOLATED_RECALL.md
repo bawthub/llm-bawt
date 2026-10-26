@@ -37,20 +37,23 @@ bridge turns propagate that capability; unsupported callers fail closed.
 A single compact JSON text block (no duplicate structured-output copy):
 
 - `status`: `ok`, `no_match`, `insufficient_evidence`, or `error`.
-- `findings`: at most six `{source, id, quote}` entries. Each quote is an exact
-  substring of this call's authorized evidence, at most 400 characters / 100
-  reference tokens. IDs are validated against this call's evidence map. There
-  is no freeform model prose to accidentally reproduce an entire document.
+- `findings`: at most six `{source, id, quote}` entries, with source-owned
+  `provenance` (`source_bot`, `session_id`, `at`, `follows`, and `review_ref` only
+  when present in the authorized excerpt) and offsets for split quotes. Each
+  quote is an exact substring of this call's authorized evidence, at most 400
+  characters / 100 reference tokens. IDs are validated against this call's
+  evidence map. There is no freeform model prose to reproduce a document.
   The model only points at evidence: its quote is located in the excerpt
   (tolerating whitespace reflow, dropped or added `*`/`_`/backtick markers at
   word edges, and `...`/`…` elisions, each elided fragment at
   least three words, in source order) and the packet returns the exact
   contiguous source span, never the model's text. A grounded span longer than
-  `MAX_QUOTE_CHARS`/`MAX_QUOTE_TOKENS` (contracts.py) is shortened to a prefix
-  ending on a sentence or word boundary, not dropped. That finding carries
-  `"truncated": true` (and `uncertainty` says so): it is a prefix and may omit a
-  trailing qualifier or correction. Packet-level `truncated` also covers clipped
-  evidence excerpts, so read the per-finding flag.
+  `MAX_QUOTE_CHARS`/`MAX_QUOTE_TOKENS` (contracts.py) is emitted as multiple
+  ordered, source-offset-backed spans when all of it fits the six-finding and
+  parent-packet budgets. If it cannot fit, the packet is
+  `insufficient_evidence`, not a plausible answer with a hidden missing suffix;
+  the handle permits expanding the original intent. Packet-level `truncated`
+  still reports clipped evidence or insufficient quote space.
 - `rejected_findings`: count of selected excerpts that failed schema or
   grounding and were omitted. Each is dropped individually; if every selection
   is rejected the call is `error`/`ungrounded_synthesis`.
@@ -61,9 +64,14 @@ A single compact JSON text block (no duplicate structured-output copy):
 - `coverage`: per-source success/no-match, counts and prefix-fallback counts;
   task results additionally report semantic/keyword/explicit mode and withheld
   candidates. Incomplete task provenance is `partial`, not a clean no-match.
-  A fatal source failure preserves bounded coverage but returns **no quotes**.
+  An individual source timeout/failure is `unavailable` with a generic code;
+  healthy sources may still yield cited findings, marked incomplete. A mixed
+  unavailable/empty search is `insufficient_evidence`, never `no_match`; all
+  sources unavailable is `error`. Policy, authority and source-contract failures
+  remain fatal and return **no quotes**.
 - `scope`: explicitly notes that tool evidence is metadata-only, tasks exclude
-  responses, and memory/history retrieval is caller scoped.
+  responses, memories are caller scoped, and history spans only live searchable
+  public partitions for the trusted user.
 - `truncated`: indicates excerpt/input/output clipping. A bounded search cannot
   prove absence outside its authorized, matching excerpts.
 - `handle`: opaque, session/bot/user-owned, expires after at most 15 minutes or
@@ -77,9 +85,11 @@ A single compact JSON text block (no duplicate structured-output copy):
   elapsed milliseconds. These are reproducible context measurements, **not
   billing or cache savings**. Provider tokenizers/framing may differ.
 
-A valid search with no authorized matching evidence yields `no_match`. Evidence
-that cannot support findings yields `insufficient_evidence`. Timeouts, bad model
-output, unavailable sources and policy errors are errors, never empty successes.
+A fully searched set of sources with no authorized matching evidence yields
+`no_match`. Evidence that cannot support findings or a search with at least
+one unavailable source yields `insufficient_evidence` unless another healthy
+source supplies grounded findings. An all-source outage, bad model output and
+policy errors are errors, never empty successes.
 All failure codes are server-owned and omit source text/provider exceptions.
 There is **no raw-result fallback**.
 
@@ -100,36 +110,37 @@ column still counts as private). Errors, absent/ambiguous/malformed snapshots,
 sanitation collisions, and unknown callers fail closed. There is no hardcoded bot
 list and no reuse of the existing fail-open aggregate-search helper.
 **Bots outside the searchable set cannot use recall, even for their own history.**
-A tag change is re-read on every request, including follow-ups.
+A tag change is re-read on every request, including follow-ups. Public history
+is selected through a positive map of the current searchable partitions;
+private or excluded partitions cannot enter even the candidate stage.
 
 ### Messages
 
-Read only the live `messages` parent; join canonical sessions for caller bot and
-non-null caller user. Only active/archived sessions and user/assistant messages
-qualify, authored by the caller user, the caller bot, or — **the single
-cross-bot boundary** — a delivery the caller actually received: a `role=user`
-row in the caller's own partition and own session whose bot author is in the
-current searchable set and is not excluded
-(`allowed − excluded − caller`, computed per request). `private` bots are never
-in that set, so their deliveries stay unreachable even inside the caller's own
-history. Deleted sessions, forgotten messages, summaries, unknown
-legacy authors, other users and imported other-bot assistant rows are omitted.
-Those omissions reduce recall coverage deliberately. Memories and tool evidence
-keep the stricter caller-user/own-bot rule.
+Read only the live `messages` parent via the positive public partition map;
+join each partition to its canonical active/archived session for the trusted
+caller user. A row is authorized only when it is a user-authored `role=user`
+message for that user, a canonical assistant authored by its partition bot,
+or a `role=user` delivery authored by a currently searchable bot. Excluded and
+private bots can neither contribute their own partition nor author a delivery.
+Deleted sessions, forgotten messages, summaries, unknown legacy authors,
+other users and imported other-bot assistant rows are omitted. Memories and
+tool evidence keep the stricter caller-user/own-bot rule.
 
-Query terms keep identifier parts (`maintenance_model`, `TASK-1210` →
-maintenance/model, task/1210) rather than dropping them. Hits rank by **query
-coverage** first: the share of the query's distinct lexemes a message contains,
-rounded up into `COVERAGE_BUCKETS` (4) so near-equal coverage ties. A message
-matching one or two generic words of the question ("nick", "error") never
-outranks one matching most of it, however old. Within a bucket, full-text rank
-divided by one recency term (`RECENCY_HALF_WEIGHT_DAYS`: rank halves at 14 days)
-orders hits, so the newer of two equally relevant statements wins. This selects
-up to six **hits**. Each hit carries at most two **follow-ons** (`MAX_FOLLOW_ONS_PER_HIT`, defined beside the recency weight in `recall/contracts.py`): the next
-messages in the same session within 30 minutes, under the identical authority,
-partition and session filters — never another session, bot or user. Follow-ons
-reach term-free corrections ("No summaries. I said message history") that FTS
-cannot. Each message appears once; a message that is also a hit stays a hit.
+The messages_find parser supplies literal identity terms (TASK-N, SHA prefixes,
+paths and snake_case). Indexed exact-all then exact-any candidates precede an
+indexed high-coverage lexical tier; a broad OR runs only if stronger tiers are
+empty. Without an exact identity, a multi-word question needs at least two
+lexical matches; a single generic word is weak evidence. Each tier caps
+authorized candidates before ranking, so a generic OR cannot force per-row
+rank work across a whole history partition. A missing
+single-piece identifier does not degrade to old generic fragments. Within the
+candidate set, coverage buckets (`COVERAGE_BUCKETS`) rank the share of query
+lexemes matched, then full-text rank decays by a 14-day recency term.
+This selects at most six **hits**. Each hit carries up to two **follow-ons**
+(`MAX_FOLLOW_ONS_PER_HIT`): the next messages in the same partition and session
+within 30 minutes, under the identical authority filters. Follow-ons reach
+term-free corrections. Every evidence row carries its real source bot and
+session as server-owned provenance, not a model-inferred review label.
 
 SQL extracts an **original contiguous window** of at most 2,400 characters near
 the whole query phrase, or the longest matching meaningful query term. No full

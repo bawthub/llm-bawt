@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections import Counter
 import time
@@ -49,11 +50,13 @@ ERROR_CODES = frozenset({
 })
 
 
+logger = logging.getLogger(__name__)
 UNCERTAINTY = "Extractive untrusted historical evidence; not exhaustive or proof of current state."
+INCOMPLETE_NOTE = " Source coverage incomplete; an unavailable source may contain a later correction."
 REJECTED_NOTE = (" {} selected excerpt(s) could not be verified against the source and were omitted;"
                  " a later correction may be missing.")
-SHORTENED_NOTE = (" {} quote(s) marked truncated are a prefix of a longer passage and may omit a"
-                  " trailing qualifier or correction.")
+SHORTENED_NOTE = (" {} answer span(s) could not fit without losing a trailing qualifier or correction;"
+                  " expand with the returned handle.")
 
 
 def failure(code: str) -> dict:
@@ -125,9 +128,26 @@ class RecallService:
         for source in request.sources:
             coverage[source] = {"status": "searching", "records": 0}
             provider = self.providers.get(source)
-            if provider is None:
-                raise RecallError("source_unavailable")
-            rows = await provider.search(question, scope, request.task_ids)
+            source_start = time.monotonic()
+            try:
+                if provider is None:
+                    raise RecallError("source_unavailable")
+                rows = await provider.search(question, scope, request.task_ids)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # Only retrieval failures degrade. Policy/authority/contract
+                # violations remain fatal even if another source has evidence.
+                if isinstance(error, RecallError) and error.code not in {
+                    "source_unavailable", "timeout", "busy"}:
+                    raise
+                code = error.code if isinstance(error, RecallError) and error.code in {
+                    "timeout", "busy"} else "source_unavailable"
+                root = error.__cause__ or error
+                logger.warning("recall source failed source=%s class=%s elapsed_ms=%d",
+                               source, type(root).__name__, round((time.monotonic() - source_start) * 1000))
+                coverage[source] = {"status": "unavailable", "records": 0, "error_code": code}
+                continue
             if not isinstance(rows, list):
                 raise RecallError("retrieval_budget")
             hits = {row.id for row in rows if isinstance(row, Evidence) and row.follows is None}
@@ -165,6 +185,10 @@ class RecallService:
                     admit(candidate)
                 else:
                     follow_ons.append(candidate)
+        # A total source outage cannot be interpreted as an empty search.
+        unavailable = any(item["status"] == "unavailable" for item in coverage.values())
+        if unavailable and all(item["status"] == "unavailable" for item in coverage.values()):
+            raise RecallError("source_unavailable")
         # Follow-ons never displace any source's direct hits; they fill whatever
         # remains of the same global record/token caps, behind an admitted hit.
         admitted = {(row.source, row.id) for row in evidence}
@@ -200,31 +224,41 @@ class RecallService:
                 item = index.get((finding.source, finding.id))
                 # Only exact source bytes leave; the model's own text never does.
                 span = ground_quote(finding.quote, item.text) if item is not None else None
-                quote = cap_span(span, MAX_QUOTE_CHARS, MAX_QUOTE_TOKENS) if span else None
-                if quote is None or not quote.strip():
+                if not span:
                     rejected += 1
                     continue
-                entry = {"source": finding.source, "id": finding.id, "quote": quote}
-                if quote != span:
-                    # Prefix of a longer span: a trailing qualifier may be cut.
-                    entry["truncated"] = True
+                offset = item.text.find(span)
+                parts = self._quote_parts(span)
+                if not parts or len(findings) + len(parts) > 6:
+                    # A prefix alone could turn a reversal into a false claim.
                     shortened += 1
                     clipped = True
-                if entry not in findings:
-                    findings.append(entry)
+                    continue
+                provenance = {"source_bot": item.source_bot, "session_id": item.session_id,
+                              "at": item.at, "follows": item.follows, "review_ref": item.review_ref}
+                provenance = {key: value for key, value in provenance.items() if value is not None}
+                for position, quote in parts:
+                    entry = {"source": finding.source, "id": finding.id, "quote": quote}
+                    if provenance:
+                        entry["provenance"] = provenance
+                    if len(parts) > 1 or item.start_char or offset:
+                        entry["start_char"] = item.start_char + offset + position
+                    if entry not in findings:
+                        findings.append(entry)
             if rejected and not findings:
                 raise RecallError("ungrounded_synthesis")
-        incomplete = bool(evidence) or any(item["status"] == "partial" for item in coverage.values())
+        incomplete = bool(evidence) or unavailable or any(item["status"] == "partial" for item in coverage.values())
         packet = {
-            "status": "ok" if findings else ("insufficient_evidence" if incomplete else "no_match"),
-            "findings": findings,
-            "uncertainty": (UNCERTAINTY + (REJECTED_NOTE.format(rejected) if rejected else "")
+            "status": "ok" if findings and not shortened else ("insufficient_evidence" if incomplete else "no_match"),
+            "findings": findings if not shortened else [],
+            "uncertainty": (UNCERTAINTY + (INCOMPLETE_NOTE if unavailable else "")
+                            + (REJECTED_NOTE.format(rejected) if rejected else "")
                             + (SHORTENED_NOTE.format(shortened) if shortened else "")),
             # Selected excerpts that failed schema or grounding and were omitted;
             # caller-visible so a dropped later correction is never silent.
             "rejected_findings": rejected,
             "coverage": coverage,
-            "scope": "Caller history; attributed memories; shared tasks exclude responses; tool metadata only.",
+            "scope": "Public searchable history for trusted user; caller memories; shared tasks exclude responses; tool metadata only.",
             "bounded": True,
             "truncated": clipped,
             "handle": None,
@@ -245,6 +279,19 @@ class RecallService:
         return packet
 
     @staticmethod
+    def _quote_parts(span: str) -> list[tuple[int, str]] | None:
+        """Split one grounded answer into ordered source-exact quoted spans."""
+        parts = []
+        offset = 0
+        while offset < len(span):
+            chunk = cap_span(span[offset:], MAX_QUOTE_CHARS, MAX_QUOTE_TOKENS)
+            if not chunk or not chunk.strip() or len(parts) == 6:
+                return None
+            parts.append((offset, chunk))
+            offset += len(chunk)
+        return parts
+
+    @staticmethod
     def _fit(packet: dict, budget: int):
         # Count exactly the compact JSON returned by the MCP tool, including
         # citations, coverage, handle and measurements. Never return raw fallback.
@@ -257,9 +304,10 @@ class RecallService:
             if tokens(compact_json(packet)) <= budget:
                 return
             if packet["findings"]:
-                packet["findings"].pop()
+                # A partial quoted answer is worse than an explicit insufficiency.
+                # The handle retains search intent so the caller can expand.
+                packet["findings"].clear()
                 packet["truncated"] = True
-                if not packet["findings"]:
-                    packet["status"] = "insufficient_evidence"
+                packet["status"] = "insufficient_evidence"
             else:
                 raise RecallError("retrieval_budget")

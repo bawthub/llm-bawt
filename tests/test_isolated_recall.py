@@ -234,13 +234,83 @@ async def test_worker_keeps_slot_until_cancelled_call_actually_finishes():
 
 
 @pytest.mark.asyncio
-async def test_partial_source_failure_preserves_coverage_not_evidence():
+async def test_partial_source_failure_preserves_healthy_grounded_evidence(caplog):
     failing = Source(error=RecallError("source_unavailable"))
     failing.source = "memories"
     result = await RecallService([Source(), failing], Model()).recall(RecallRequest(query="relay"), SCOPE)
-    assert result["status"] == "error" and result["findings"] == []
+    assert result["status"] == "ok" and result["findings"][0]["id"] == "m1"
     assert result["coverage"]["messages"]["status"] == "ok"
-    assert result["coverage"]["memories"]["status"] == "source_unavailable"
+    assert result["coverage"]["memories"]["status"] == "unavailable"
+    assert "incomplete" in result["uncertainty"]
+    assert "source=memories" in caplog.text and "RecallError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_source_and_empty_healthy_source_never_claim_no_match():
+    failing = Source(error=RuntimeError("PRIVATE DB EXCEPTION"))
+    failing.source = "memories"
+    result = await RecallService([Source([]), failing], Model()).recall(RecallRequest(query="relay"), SCOPE)
+    assert result["status"] == "insufficient_evidence" and not result["findings"]
+    assert result["coverage"]["memories"]["status"] == "unavailable"
+    assert "PRIVATE DB EXCEPTION" not in compact_json(result)
+    all_failed = await RecallService([failing], Model()).recall(
+        RecallRequest(query="relay", sources=("memories",)), SCOPE)
+    assert all_failed["status"] == "error" and all_failed["coverage"]["memories"]["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_answer_exceeding_six_quote_spans_is_not_returned_as_a_prefix():
+    answer = "B5: " + (("A" * 205 + ". ") * 11) + "Approval was revoked at the end."
+    assert len(answer) < 2400
+    raw = compact_json({"findings": [{"source": "messages", "id": "long", "quote": answer}]})
+    item = Evidence("messages", "long", "reviewer", "operator", answer)
+    result = await RecallService([Source([item])], Model(raw)).recall(request(output_tokens=1600), SCOPE)
+    assert result["status"] == "insufficient_evidence" and result["findings"] == []
+    assert result["handle"] and "expand" in result["uncertainty"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["unauthorized", "policy_unavailable", "task_provenance_incomplete"])
+async def test_authority_and_provenance_denials_remain_fatal_with_healthy_source(code):
+    denied = Source(error=RecallError(code))
+    denied.source = "memories"
+    result = await RecallService([Source(), denied], Model()).recall(RecallRequest(query="relay"), SCOPE)
+    assert result["error_code"] == code and result["findings"] == []
+
+
+@pytest.mark.asyncio
+async def test_empty_synthesis_with_exact_receipt_is_explicitly_insufficient():
+    receipt = Evidence("messages", "exact-receipt", "reviewer", "operator",
+                       "TASK-1144 app recreate 8ee7d89 succeeded; health checks passed.")
+    result = await RecallService([Source([receipt])], Model('{"findings":[]}')).recall(
+        RecallRequest(query="TASK-1144 app recreate 8ee7d89", sources=("messages",)), SCOPE)
+    assert result["status"] == "insufficient_evidence" and result["coverage"]["messages"]["records"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_session_reviews_retain_distinct_source_owned_provenance():
+    reviews = [Evidence("messages", "m8", "reviewer", "operator", "r8 B5: old review outcome.",
+                        at="2026-10-21T10:00:00Z", source_bot="peer", session_id="s1", review_ref="r8"),
+               Evidence("messages", "m9", "reviewer", "operator", "r9 B5: corrected review outcome.",
+                        at="2026-10-21T11:00:00Z", source_bot="peer", session_id="s1", review_ref="r9")]
+    raw = compact_json({"findings": [{"source": "messages", "id": "m9", "quote": reviews[1].text}]})
+    result = await RecallService([Source(reviews)], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok" and result["findings"][0]["provenance"] == {
+        "source_bot": "peer", "session_id": "s1", "at": "2026-10-21T11:00:00Z", "review_ref": "r9"}
+
+
+@pytest.mark.asyncio
+async def test_long_grounded_answer_is_split_or_marked_insufficient_not_silently_cut():
+    answer = "B5: " + ("The complete explanation includes this detail. " * 15) + "Final correction: nothing was shipped."
+    item = Evidence("messages", "b5", "reviewer", "operator", answer, start_char=32,
+                    source_bot="peer", session_id="s9")
+    raw = compact_json({"findings": [{"source": "messages", "id": "b5", "quote": answer}]})
+    result = await RecallService([Source([item])], Model(raw)).recall(request(output_tokens=1600), SCOPE)
+    assert result["status"] == "ok", result
+    spans = result["findings"]
+    assert len(spans) >= 2 and "".join(span["quote"] for span in spans) == answer
+    assert spans[0]["start_char"] == 32
+    assert spans[-1]["quote"].endswith("nothing was shipped.")
 
 
 @pytest.mark.asyncio
@@ -493,19 +563,21 @@ LONG_ANSWER = ("Only partly. The first version of recall is live. The latest fix
 
 
 @pytest.mark.asyncio
-async def test_over_long_grounded_quote_is_shortened_not_dropped():
+async def test_over_long_grounded_quote_keeps_complete_answer_or_reports_insufficient():
     assert len(LONG_ANSWER) > 600
     rows = [Evidence("messages", "2a5f048f", "reviewer", "operator", LONG_ANSWER)]
     raw = compact_json({"findings": [{"source": "messages", "id": "2a5f048f",
                                       "quote": LONG_ANSWER.replace("\n\n", "\n")}]})
     result = await RecallService([Source(rows)], Model(raw)).recall(request(), SCOPE)
-    assert result["status"] == "ok" and result["rejected_findings"] == 0
-    quote = result["findings"][0]["quote"]
-    assert LONG_ANSWER.startswith(quote) and quote.startswith("Only partly.")
-    assert len(quote) <= 400 and tokens(quote) <= 100
-    assert quote.endswith(".")  # cut on a sentence boundary, not mid-word
-    assert result["truncated"] is True and result["findings"][0]["truncated"] is True
-    assert "1 quote(s) marked truncated" in result["uncertainty"]
+    assert result["rejected_findings"] == 0
+    if result["status"] == "ok":
+        assert "".join(row["quote"] for row in result["findings"]) == LONG_ANSWER
+        assert len(result["findings"]) >= 2
+        assert all(len(row["quote"]) <= 400 and tokens(row["quote"]) <= 100
+                   for row in result["findings"])
+    else:
+        assert result["status"] == "insufficient_evidence" and not result["findings"]
+        assert result["handle"]
 
 
 @pytest.mark.asyncio

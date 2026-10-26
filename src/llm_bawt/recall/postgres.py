@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from datetime import datetime, timezone
+import re
+
+from llm_bawt.retrieval.find_query import parse as parse_find_query
+from llm_bawt.retrieval.find import like_pattern
 
 from sqlalchemy import text
 
@@ -39,9 +43,29 @@ HISTORY_AUTHORITY = MESSAGE_AUTHORITY.rstrip().removesuffix(")") + """
 """
 
 
+# Message recall searches a positive public partition map, not an exclusion
+# filter. Each message still needs the trusted user/session and canonical author.
+# The caller's own history uses the same rule; memories/tools stay caller-only.
+PUBLIC_HISTORY_AUTHORITY = """
+    m.bot_id = p.partition AND s.bot_id = p.source_bot AND s.user_id = :user
+    AND s.status IN ('active', 'archived')
+    AND ((m.role = 'user' AND m.author_entity_type = 'user'
+          AND m.author_entity_id = :user)
+      OR (m.role = 'assistant' AND m.author_entity_type = 'bot'
+          AND m.author_entity_id = p.source_bot)
+      OR (m.role = 'user' AND m.author_entity_type = 'bot'
+          AND m.author_entity_id = ANY(CAST(:delivery_authors AS text[]))))
+"""
+
 
 def delivery_authors(scope: RecallScope) -> list[str]:
     return sorted(scope.allowed_bot_ids - scope.excluded_bot_ids - {scope.bot_id})
+
+
+def review_ref(text: str) -> str | None:
+    """Only label a review when its id is present in authorized source bytes."""
+    references = {match.group(0).lower() for match in re.finditer(r"\br[1-9][0-9]{0,3}\b", text, re.IGNORECASE)}
+    return next(iter(references)) if len(references) == 1 else None
 
 
 def utc_iso(value) -> str | None:
@@ -122,15 +146,18 @@ class PostgresSource(SourceProvider):
     def evidence_text(self, row: dict) -> str:
         return row["excerpt"]
 
+    def statement_for(self, query: str) -> str:
+        return self.statement
+
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
         tsquery = fts_query(query)
         if not tsquery:
             return []
         params = {"query": tsquery, "bot": scope.bot_id, "partition": partition_id(scope.bot_id),
                   "user": scope.user_id, "limit": MAX_SOURCE_RECORDS, "chars": MAX_RECORD_CHARS,
-                  "phrase": query.lower(), "terms": terms_for(query), **self.extra_params(scope)}
+                  "phrase": query.lower(), "terms": terms_for(query), **self.extra_params(scope, query)}
         try:
-            rows = await DATABASE_WORKER.run(self.database.read, self.statement, params)
+            rows = await DATABASE_WORKER.run(self.database.read, self.statement_for(query), params)
         except RecallError:
             raise
         except Exception as error:
@@ -140,69 +167,140 @@ class PostgresSource(SourceProvider):
                          self.evidence_text(row), row.get("start_char", 0),
                          row.get("truncated", False), row.get("window_kind", "matched"),
                          utc_iso(row.get("at")), row.get("speaker"),
-                         str(row["follows"]) if row.get("follows") else None) for row in rows]
+                         str(row["follows"]) if row.get("follows") else None,
+                         row.get("source_bot"), row.get("session_id"),
+                         review_ref(self.evidence_text(row))) for row in rows]
 
-    def extra_params(self, scope: RecallScope) -> dict:
+    def extra_params(self, scope: RecallScope, query: str) -> dict:
         return {}
 
 
 class MessageSource(PostgresSource):
     source = "messages"
-    # Hits plus their follow-on turns; the service's global record/token caps
-    # still bound what reaches the model (follow-ons sit right after their hit).
     max_records = MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)
+    # Every candidate tier is capped before coverage/rank or full content is
+    # projected. Literal exact tiers use the existing trigram-backed semantics of
+    # messages_find; lexical tiers use the stored indexed content_tsv. The broad
+    # OR is a fallback only when stricter tiers returned nothing. No excluded
+    # partition participates even in candidate limiting.
     statement = f"""
-        WITH query_lexemes AS (
-            -- Same parser and config as the tsquery, so coverage counts exactly
-            -- the lexemes the match can hit (stop words never count).
+        WITH exact_all AS MATERIALIZED (
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            FROM messages m
+            JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                 AS p(source_bot, partition) ON m.bot_id = p.partition
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ALL__
+            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+        ), exact_any AS MATERIALIZED (
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            FROM messages m
+            JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                 AS p(source_bot, partition) ON m.bot_id = p.partition
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ANY__
+              AND NOT EXISTS (SELECT 1 FROM exact_all)
+            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+        ), strong AS MATERIALIZED (
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            FROM messages m
+            JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                 AS p(source_bot, partition) ON m.bot_id = p.partition
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {PUBLIC_HISTORY_AUTHORITY}
+              AND :allow_lexical
+              AND m.content_tsv @@ plainto_tsquery('english', :strong)
+              AND NOT EXISTS (SELECT 1 FROM exact_all)
+              AND NOT EXISTS (SELECT 1 FROM exact_any)
+            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+        ), loose AS MATERIALIZED (
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            FROM messages m
+            JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                 AS p(source_bot, partition) ON m.bot_id = p.partition
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {PUBLIC_HISTORY_AUTHORITY}
+              AND :allow_lexical
+              AND m.content_tsv @@ to_tsquery('english', :query)
+              AND NOT EXISTS (SELECT 1 FROM exact_all)
+              AND NOT EXISTS (SELECT 1 FROM exact_any)
+              AND NOT EXISTS (SELECT 1 FROM strong)
+            ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
+        ), candidates AS MATERIALIZED (
+            SELECT * FROM exact_all UNION ALL SELECT * FROM exact_any
+            UNION ALL SELECT * FROM strong UNION ALL SELECT * FROM loose
+        ), query_lexemes AS (
             SELECT ARRAY(SELECT DISTINCT unnest(tsvector_to_array(
                        to_tsvector('english', array_to_string(CAST(:terms AS text[]), ' '))))) AS lexemes
-        ), hits AS (
-            SELECT m.id, m.session_id, m.timestamp,
-                   CEIL(cardinality(ARRAY(SELECT unnest(q.lexemes)
-                                          INTERSECT SELECT unnest(tsvector_to_array(v.doc))))
-                        * {COVERAGE_BUCKETS}::numeric / GREATEST(cardinality(q.lexemes), 1)) AS coverage,
-                   ts_rank(v.doc, to_tsquery('english', :query))
-                   / (1 + GREATEST(0, extract(epoch FROM now()) - m.timestamp)
+        ), scored AS MATERIALIZED (
+            SELECT c.id, c.partition, c.source_bot, c.session_id, c.timestamp,
+                   cardinality(ARRAY(SELECT unnest(q.lexemes)
+                                     INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) AS matched,
+                   cardinality(q.lexemes) AS possible,
+                   ts_rank(m.content_tsv, to_tsquery('english', :query))
+                   / (1 + GREATEST(0, extract(epoch FROM now()) - c.timestamp)
                           / 86400.0 / {RECENCY_HALF_WEIGHT_DAYS}) AS score
-            FROM messages m JOIN sessions s ON s.id = m.session_id
+            FROM candidates c JOIN messages m ON m.id = c.id AND m.bot_id = c.partition
             CROSS JOIN query_lexemes q
-            CROSS JOIN LATERAL (SELECT m.content_tsv AS doc) v
-            WHERE {HISTORY_AUTHORITY}
-              AND v.doc @@ to_tsquery('english', :query)
-            ORDER BY coverage DESC, score DESC, m.timestamp DESC, m.id
+        ), hits AS MATERIALIZED (
+            SELECT id, partition, source_bot, session_id, timestamp,
+                   CEIL(matched * {COVERAGE_BUCKETS}::numeric / GREATEST(possible, 1)) AS coverage,
+                   score
+            FROM scored
+            -- Broad fallback may return one generic word from a long question;
+            -- that is weak evidence, not a successful match. Exact literals
+            -- already establish identity and need no second lexical token.
+            WHERE :has_exact OR matched >= LEAST(2, possible)
+            ORDER BY coverage DESC, score DESC, timestamp DESC, id
             LIMIT :limit
         ), follow_ons AS (
-            SELECT f.id, h.coverage, h.score, h.id AS hit_id, f.ord
+            SELECT f.id, h.partition, h.source_bot, h.coverage, h.score, h.id AS hit_id, f.ord
             FROM hits h CROSS JOIN LATERAL (
                 SELECT m.id, row_number() OVER (ORDER BY m.timestamp, m.id) AS ord
-                FROM messages m JOIN sessions s ON s.id = m.session_id
-                WHERE {HISTORY_AUTHORITY}
-                  AND m.session_id = h.session_id
+                FROM messages m
+                JOIN sessions s ON s.id = m.session_id
+                JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+                     AS p(source_bot, partition) ON m.bot_id = p.partition
+                WHERE {PUBLIC_HISTORY_AUTHORITY}
+                  AND m.bot_id = h.partition AND m.session_id = h.session_id
                   AND m.timestamp > h.timestamp
                   AND m.timestamp <= h.timestamp + {FOLLOW_ON_WINDOW_SECONDS}
-                ORDER BY m.timestamp, m.id
-                LIMIT {MAX_FOLLOW_ONS_PER_HIT}
+                ORDER BY m.timestamp, m.id LIMIT {MAX_FOLLOW_ONS_PER_HIT}
             ) f
         ), picked AS (
-            -- One record per message; a message that is itself a hit stays a hit.
-            SELECT DISTINCT ON (id) id, coverage, score, hit_id, ord
-            FROM (SELECT id, coverage, score, id AS hit_id, 0 AS ord FROM hits
-                  UNION ALL SELECT id, coverage, score, hit_id, ord FROM follow_ons) candidates
-            ORDER BY id, ord = 0 DESC, coverage DESC, score DESC, hit_id
+            SELECT DISTINCT ON (partition, id) id, partition, source_bot, coverage, score, hit_id, ord
+            FROM (SELECT id, partition, source_bot, coverage, score, id AS hit_id, 0 AS ord FROM hits
+                  UNION ALL SELECT id, partition, source_bot, coverage, score, hit_id, ord FROM follow_ons) choices
+            ORDER BY partition, id, ord = 0 DESC, coverage DESC, score DESC, hit_id
         )
-        SELECT m.id, {_MESSAGE_WINDOW[0]}, m.timestamp AS at,
+        SELECT m.id, p.source_bot, m.session_id, {_MESSAGE_WINDOW[0]}, m.timestamp AS at,
                CASE WHEN p.ord > 0 THEN p.hit_id END AS follows,
-               CASE WHEN m.author_entity_type = 'bot' AND m.author_entity_id <> :bot
+               CASE WHEN m.author_entity_type = 'bot' AND m.author_entity_id <> p.source_bot
                     THEN 'bot:' || m.author_entity_id ELSE m.role END AS speaker
-        FROM picked p JOIN messages m ON m.id = p.id AND m.bot_id = :partition
+        FROM picked p JOIN messages m ON m.id = p.id AND m.bot_id = p.partition
         {_MESSAGE_WINDOW[1]}
         ORDER BY p.coverage DESC, p.score DESC, p.hit_id, p.ord
         LIMIT {MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)}
     """
 
-    def extra_params(self, scope: RecallScope) -> dict:
-        return {"delivery_authors": delivery_authors(scope)}
+    def statement_for(self, query: str) -> str:
+        exact = parse_find_query(query[:512]).exact
+        clauses = [f"m.content ILIKE :exact_{i}" for i in range(len(exact))]
+        return (self.statement.replace("__EXACT_ALL__", "(" + " AND ".join(clauses) + ")" if clauses else "FALSE")
+                .replace("__EXACT_ANY__", "(" + " OR ".join(clauses) + ")" if clauses else "FALSE"))
+
+    def extra_params(self, scope: RecallScope, query: str) -> dict:
+        parsed = parse_find_query(query[:512])
+        exact = parsed.exact
+        allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
+        # Literal identifiers never degrade to generic prose. Only meaningful
+        # component words of compound identifiers can drive a lexical fallback.
+        strong = list(parsed.parts + parsed.words)[:3] if exact else terms_for(query)[:3]
+        return {"bots": allowed, "parts": [partition_id(bot) for bot in allowed],
+                "delivery_authors": delivery_authors(scope), "strong": " ".join(strong),
+                "allow_lexical": not exact or bool(parsed.parts), "has_exact": bool(exact),
+                "candidate_limit": 96,
+                **{f"exact_{i}": like_pattern(token) for i, token in enumerate(exact)}}
 
 
 class MemorySource(PostgresSource):

@@ -113,6 +113,12 @@ class Evidence:
     speaker: str | None = None
     # Id of the direct hit this record continues; None for a direct hit.
     follows: str | None = None
+    # These identify the authorized source row, not the recipient/owner above.
+    # Never derive a review reference from model output: it must occur in the
+    # original, authorized message excerpt.
+    source_bot: str | None = None
+    session_id: str | None = None
+    review_ref: str | None = None
 
 
 class EvidenceBatch(list[Evidence]):

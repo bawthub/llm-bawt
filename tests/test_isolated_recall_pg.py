@@ -203,6 +203,58 @@ def test_coverage_outranks_recency_for_an_old_exact_answer(rig):
     assert [row.id for row in rig.recall(OPENCLAW_QUESTION)][:2] == [newer, march]
 
 
+def test_literal_receipt_beats_new_generic_history_and_keeps_provenance(rig):
+    receipt = rig.add("TASK-1144 app recreate 8ee7d89 succeeded; live health checks passed.",
+                      at=rig.now - 80 * DAY)
+    for i in range(120):
+        rig.add("The app is healthy after a routine check.", at=rig.now - i * 10)
+    rows = rig.recall("What was the exact tip and live health result for TASK-1144 app recreate 8ee7d89?")
+    assert rows and rows[0].id == receipt
+    assert rows[0].source_bot == rig.bot and rows[0].session_id == rig.session
+    assert "health checks passed" in rows[0].text
+
+
+def test_public_cross_bot_recall_is_positive_scoped_with_canonical_authors(rig):
+    public = f"public{uuid.uuid4().hex[:10]}"
+    excluded = f"excluded{uuid.uuid4().hex[:10]}"
+    public_session = rig.add_session(str(uuid.uuid4()), bot=public)
+    excluded_session = rig.add_session(str(uuid.uuid4()), bot=excluded)
+    different_user = rig.add_session(str(uuid.uuid4()), bot=public, user="other-user")
+    body = "TASK-1144 app recreate 8ee7d89; live health checks passed."
+    good = rig.add(body, at=rig.now - 40, partition=public, session=public_session,
+                   author=public, author_type="bot")
+    denied = rig.add(body, at=rig.now - 30, partition=excluded, session=excluded_session,
+                     author=excluded, author_type="bot")
+    other = rig.add(body, at=rig.now - 20, partition=public, session=different_user,
+                    author=public, author_type="bot")
+    imported = rig.add(body, at=rig.now - 10, partition=public, session=public_session,
+                       author="unknown", author_type="bot")
+    rows = rig.recall("TASK-1144 app recreate 8ee7d89", allowed=frozenset({public}),
+                      excluded=frozenset({excluded}))
+    assert [row.id for row in rows] == [good]
+    assert rows[0].source_bot == public and rows[0].session_id == public_session
+    assert {denied, other, imported}.isdisjoint(row.id for row in rows)
+    # A policy change is reflected on the next request, including follow-ups.
+    assert not rig.recall("TASK-1144 app recreate 8ee7d89", allowed=frozenset(),
+                          excluded=frozenset({public, excluded}))
+
+
+def test_nonliteral_identifier_does_not_degrade_to_generic_old_fragment(rig):
+    rig.add("TASK-975 was an old unrelated app health check.", at=rig.now - 10)
+    assert not rig.recall("Who owns HomeBotBand WIP?")
+
+
+def test_broad_single_word_hit_is_not_presented_as_a_relevant_answer(rig):
+    rig.add("The budget was adjusted in an unrelated initiative.", at=rig.now - 10)
+    assert not rig.recall("What were the migration findings and owners of the handshake budget?")
+
+
+def test_review_reference_is_omitted_if_one_excerpt_mentions_two_reviews():
+    from llm_bawt.recall.postgres import review_ref
+    assert review_ref("r8 B5 was revised by r9 B5") is None
+    assert review_ref("r9 B5 was complete") == "r9"
+
+
 def test_received_deliveries_follow_the_current_allowed_policy(rig):
     query = "What did Caid say about the maintenance_model and query_bounded for TASK-1210?"
     body = "TASK-1210: maintenance_model stays unset; query_bounded caps the read."

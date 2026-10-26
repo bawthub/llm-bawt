@@ -168,9 +168,17 @@ async def test_postgres_read_projects_bounded_excerpt_without_legacy_mutating_se
     assert "head_fallback" in statement
     assert params["limit"] == 6 and params["chars"] == 2400
     assert params["partition"] == "reviewer" and params["user"] == "operator"
-    assert "m.role IN ('user', 'assistant')" in statement
+    assert "m.role = 'user'" in statement and "m.role = 'assistant'" in statement
     assert "s.status IN ('active', 'archived')" in statement
-    assert "author_entity_id = :bot" in statement
+    assert "m.bot_id = p.partition" in statement
+    assert "m.author_entity_id = p.source_bot" in statement
+    assert "m.content_tsv @@ plainto_tsquery('english', :strong)" in statement
+    assert "m.content_tsv @@ to_tsquery('english', :query)" in statement
+    assert "LIMIT :candidate_limit" in statement
+    assert params["bots"] == ["peer", "reviewer"]
+    assert "m.content ILIKE :exact_0" not in MessageSource(db).statement_for("evidence")
+    exact = MessageSource(db).statement_for("TASK-1144 app recreate 8ee7d89")
+    assert "m.content ILIKE :exact_0" in exact and "__EXACT_ANY__" not in exact
 
 
 def test_memory_requires_every_source_to_resolve_in_non_deleted_caller_session():
