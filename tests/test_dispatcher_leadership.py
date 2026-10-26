@@ -291,6 +291,18 @@ class _Store:
         return []
 
 
+class _PokingEvent(asyncio.Event):
+    """An asyncio.Event that pokes ``changes`` when set."""
+
+    def __init__(self, changes: StateChanges):
+        super().__init__()
+        self._changes = changes
+
+    def set(self) -> None:
+        super().set()
+        self._changes.poke()
+
+
 def _dispatcher(check=None, changes: StateChanges | None = None) -> InterBotDeliveryDispatcher:
     """A dispatcher on the fakes, at every production interval and timeout."""
     dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
@@ -468,6 +480,7 @@ def test_stop_during_the_probe_never_sweeps_after_the_workers_were_cancelled():
     async def main():
         changes = StateChanges()
         dispatcher = _dispatcher(changes=changes)
+        dispatcher._stop_event = _PokingEvent(changes)
         store = dispatcher.store
         store.probe_block = threading.Event()
         try:
@@ -479,8 +492,8 @@ def test_stop_during_the_probe_never_sweeps_after_the_workers_were_cancelled():
             sweeps_before_stop = store.recover_expired_calls
 
             stop_task = asyncio.create_task(dispatcher.stop())
-            await asyncio.sleep(0)  # stop() sets the stop event before its first await
-            assert dispatcher._stop_event.is_set()
+            # stop() sets the stop event (which pokes) before it awaits anything.
+            await changes.until(dispatcher._stop_event.is_set, within=PROMPT_S)
             store.probe_block.set()  # the session answers "alive" after stop() began
             await asyncio.wait_for(stop_task, RELEASE_S + PROMPT_S)
         finally:
