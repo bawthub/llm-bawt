@@ -122,6 +122,10 @@ def test_list_sessions_aggregates_bot_partition_and_sorts_by_activity():
     assert "FROM messages_p_snark" in sql
     assert "COUNT(*) FILTER" in sql
     assert "FILTER (WHERE role = 'assistant'))[1] AS last_assistant_message" in sql
+    assistant_reply_aggregation = sql.split(
+        ") FILTER (WHERE role = 'assistant'))[1]", 1
+    )[0].rsplit("(ARRAY_AGG(", 1)[-1]
+    assert "ORDER BY timestamp DESC" in assistant_reply_aggregation
     assert "ms.last_assistant_at" in sql
     assert "COALESCE(ms.last_message_at" in sql
     assert "CASE WHEN s.status = 'active' THEN 0 ELSE 1 END" in sql
