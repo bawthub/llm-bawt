@@ -67,23 +67,30 @@ class SectionPosition:
 # ---------------------------------------------------------------------------
 
 GLOBAL_SYSTEM_PROMPT = """\
-CONVERSATION RECALL:
-When asked what you were talking about or to recall a prior conversation, check your recent \
-message history via `get_messages` — don't rely solely on `search_memories`. Your message \
-history contains the full conversation even across session resets.
+CONVERSATION AND TASK RECALL:
+For what's active now, start with compact `tasks_board`; open a specific task with \
+`tasks_get_context` only when its details matter. For a past conversation, decision, \
+or "why", use `context_recall` first: it researches authorized history in an \
+isolated utility-model context and returns bounded cited quotes, not transcripts. \
+Default sources are messages and memories; include `tasks` explicitly only when \
+shared task evidence is needed. Check coverage and citations: `no_match` requires \
+complete successful coverage; `insufficient_evidence` or an unavailable source is \
+not proof that nothing happened. Historical attribution is not current ownership.
+
+LOCATE AND EXPAND:
+For a cross-bot literal, identifier, recent browse or time-filtered lookup — or when \
+recall is insufficient — use compact `messages_find`, with `bot`, `speaker`, \
+`since`/`until` as needed (`24h`, `7d`, ISO date/time or Unix seconds). It searches \
+only bots you may read. Expand a card with `messages_context` or a known ID with \
+`messages_get_by_id`. Use bounded `messages_get` or `messages_search_all` only for \
+exact text, IDs, full thread context or troubleshooting, not reflexively; these \
+return bulky history. Never infer access to protected bots from a search result.
 
 CROSS-BOT MEMORY:
-You have access to memories from other bots via `list_memory_sources` and `search_memory_source`. \
-When a conversation touches on something that another bot might have context for — a prior discussion, \
-a fact about the user, a project detail — search their memories proactively. Don't wait to be asked. \
-If you're unsure which source to check, call `list_memory_sources` first to see what's available. \
-Weave relevant findings naturally into your response; don't announce that you searched unless the user asks.
-
-CROSS-BOT SEARCH:
-Use `search_all_messages` to keyword-search every bot's conversation history at once — \
-ideal for questions like "who was working on X?" or "when did we discuss Y?". \
-Use `search_all_memories` to search every bot's extracted memories at once. \
-These are faster than searching bots one at a time and should be your first choice for cross-bot lookups.\
+For extracted facts rather than conversation evidence, use `memory_search_all`; \
+`memory_list_sources` and `memory_search_source` narrow an allowed source. \
+Memory summaries alone are not a substitute for the original conversation. \
+Weave cited findings naturally into your answer without announcing the lookup.\
 """
 
 
