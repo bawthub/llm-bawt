@@ -1,10 +1,11 @@
-"""``messages_find``: thin trusted-caller adapter over :mod:`llm_bawt.retrieval.find`.
+"""``messages_find`` and ``messages_context``: thin trusted-caller adapters
+over :mod:`llm_bawt.retrieval.find` and :mod:`llm_bawt.retrieval.context`.
 
-Deliberately outside the generic bot-access guard (``SCOPED_RETRIEVAL_TOOLS``):
+Both are deliberately outside the generic bot-access guard (``SCOPED_RETRIEVAL_TOOLS``):
 that guard answers ``access_denied`` for an excluded ``bot`` filter, which
 would tell the caller the bot exists. Here access is resolved per call and an
 excluded or unknown bot narrows the scope to nothing, so it answers with the
-same ``no_match`` as an empty in-scope bot.
+same ``no_match`` as an empty in-scope bot (``not_found`` for a context anchor).
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from functools import lru_cache
 from typing import Literal
 
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
+from llm_bawt.retrieval.context import CHARS_DEFAULT, SIDE_DEFAULT, ContextRequest, MessageContext
 from llm_bawt.retrieval.find import FindRequest, MessageFinder, failure, serialize
 
 from .bot_access_identity import trusted_caller
@@ -107,18 +109,7 @@ async def messages_find(
                  "since": since, "until": until, "handle": handle}
     try:
         async with asyncio.timeout(TOOL_SECONDS):
-            caller = trusted_caller("messages_find", arguments)
-            if caller is None:
-                return failure("caller_unavailable")
-            trigger_id = None
-            if caller.kind == "turn":
-                try:
-                    turn = current_task_turn_context()
-                except Exception:
-                    return failure("caller_unavailable")
-                if (turn.bot_id, turn.user_id) != (caller.bot_id, caller.user_id):
-                    return failure("caller_unavailable")
-                trigger_id = turn.trigger_message_id
+            caller, trigger_id = _caller("messages_find", arguments)
             request = FindRequest(query, bot, speaker, parse_find_time("since", since),
                                   parse_find_time("until", until), handle)
             resolver, finder = _runtime()
@@ -126,6 +117,72 @@ async def messages_find(
             return await asyncio.to_thread(finder.find, access, request, trigger_id=trigger_id)
     except InvalidTime as error:
         return invalid_time(error.field)
+    except BotAccessError as error:
+        return failure(error.code)
+    except TimeoutError:
+        return failure("timeout")
+    except Exception:
+        return failure("source_unavailable")
+
+
+def _caller(tool: str, arguments: dict):
+    """The verified caller and, for a turn, its own trigger message id."""
+    caller = trusted_caller(tool, arguments)
+    if caller is None:
+        raise BotAccessError("caller_unavailable")
+    if caller.kind != "turn":
+        return caller, None
+    try:
+        turn = current_task_turn_context()
+    except Exception:
+        raise BotAccessError("caller_unavailable") from None
+    if (turn.bot_id, turn.user_id) != (caller.bot_id, caller.user_id):
+        raise BotAccessError("caller_unavailable")
+    return caller, turn.trigger_message_id
+
+
+@lru_cache(maxsize=1)
+def _context_runtime() -> MessageContext:
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+    return MessageContext(get_shared_engine(Config()))
+
+
+@mcp.tool(name="messages_context")
+async def messages_context(
+    bot: str | None = None,
+    id: str | None = None,
+    handle: str | None = None,
+    card_ref: str | None = None,
+    before: int = SIDE_DEFAULT,
+    after: int = SIDE_DEFAULT,
+    focus: list[str] | None = None,
+    max_chars: int = CHARS_DEFAULT,
+    offset: int = 0,
+    cursor: str | None = None,
+) -> str:
+    """Read one message and its same-session neighbours.
+
+    Anchor with ``bot`` + ``id``, or ``handle`` + ``card_ref`` from a
+    messages_find card. ``before``/``after`` are 0-10 neighbours; they come
+    back as focused snippets, so open one in full by its ``bot`` + ``id``.
+    ``max_chars`` 1000-8000 bounds the reply; a long anchor continues at
+    ``next_offset``. ``more_before``/``more_after`` cursors page one side.
+    Status is ok, not_found or unavailable(reason).
+    """
+    arguments = {"bot": bot, "id": id, "handle": handle, "card_ref": card_ref,
+                 "before": before, "after": after, "focus": focus,
+                 "max_chars": max_chars, "offset": offset, "cursor": cursor}
+    try:
+        async with asyncio.timeout(TOOL_SECONDS):
+            caller, trigger_id = _caller("messages_context", arguments)
+            request = ContextRequest(bot, id, handle, card_ref, before, after,
+                                     None if focus is None else tuple(focus),
+                                     max_chars, offset, cursor)
+            resolver, _ = _runtime()
+            access = await resolver.resolve(caller)
+            return await asyncio.to_thread(_context_runtime().context, access, request,
+                                           trigger_id=trigger_id)
     except BotAccessError as error:
         return failure(error.code)
     except TimeoutError:

@@ -36,6 +36,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "memory_update_meaning": "Update a memory's intent, stakes, emotional charge, recurrence keywords, or tags.",
     "messages_search_all": "Full-text search across bots; bot_id restricts scope. since/until accept ISO dates or Unix seconds; sort_by: relevance|recent. Respect protected bots.",
     "messages_find": "Locate messages across bots you may read: compact session cards (best + latest), bot/age/speaker facets. Identifiers match exactly. No query browses recent; handle alone pages. ok|no_match|unavailable.",
+    "messages_context": "Expand one message with same-session neighbour snippets. Anchor bot+id, or handle+card_ref from a messages_find card. Long anchors continue at next_offset; cursors page a side. ok|not_found|unavailable.",
     "messages_get": "Read history for bot_id; session_id scopes one thread. summaries_only selects summaries; exclude_summarized avoids duplicate raw context.",
     "messages_get_by_id": "Read a message by UUID or unique prefix (minimum 8 chars), optionally with before/after neighbors.",
     "messages_add": "Write a history message, not a bot turn. Use session_id or user_id to resolve the intended thread; role: user|assistant|system.",

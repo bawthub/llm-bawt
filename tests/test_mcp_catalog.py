@@ -141,7 +141,10 @@ async def test_catalog_token_budgets():
     # 3,911 (+37).
     # TASK-1318: self_system_prompt says pinned sessions (Claude Code, Codex)
     # get edits at the next boundary, unpinned bots next turn: 3,914 (+3).
-    assert sum(descriptions) <= 3914, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1323: messages_context (both anchor forms, offset and cursors
+    # in-band; replaces hand-written session SQL and get_by_id windows):
+    # 3,974 (+60).
+    assert sum(descriptions) <= 3974, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -191,7 +194,9 @@ async def test_catalog_token_budgets():
     # TASK-1249: bots_list_available optional capability filter: 14,499 (+31).
     # Finds a bot by what its role tags can do without naming a custom tag.
     # TASK-1318: self_system_prompt pinned-vs-unpinned edit timing: 14,502 (+3).
-    assert total <= 14502, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1323: messages_context (anchored neighbour window with offset
+    # and owner-bound cursors): 14,756 (+254).
+    assert total <= 14756, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
