@@ -2,6 +2,7 @@
 
 from .admin_gates import router as admin_gates_router
 from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
+from .internal_connections import router as internal_connections_router
 from .bot_soul import router as bot_soul_router
 from .bot_tags import router as bot_tags_router
 from .botchat import router as botchat_router
@@ -88,6 +89,7 @@ all_routers = [
     uploads_router,
     working_memory_router,
     bawthub_auth_secrets_router,
+    internal_connections_router,
     admin_gates_router,
 ]
 
