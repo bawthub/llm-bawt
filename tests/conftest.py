@@ -25,9 +25,11 @@ import pytest
 
 from collections import defaultdict
 from tests import pg_connection_guard
+from tests import time_budget
 from tests.suite_manifest import PG_ACCEPTANCE_SUITES
 
 _DURATIONS = defaultdict(float)
+_REAL_PROCESS: set[str] = set()  # nodeids marked real_process; judged on their own budget
 
 # Root conftest is imported before nested conftests and test modules; a
 # pytest_configure hook would be too late for their import-time side effects.
@@ -42,6 +44,8 @@ def pytest_addoption(parser):
                      help="fail if any private-cluster acceptance suite is absent or skipped")
     parser.addoption("--unit-time-budget", type=float, default=None,
                      help="fail when setup + call + teardown for any selected unit exceeds this many seconds")
+    parser.addoption("--real-process-time-budget", type=float, default=None,
+                     help="the same bound for tests marked real_process (default: the unit budget)")
     parser.addoption("--require-no-skips", action="store_true", default=False,
                      help="fail when any selected test skips or xfails")
 
@@ -59,6 +63,7 @@ def pytest_configure(config):
     config._task780_deselected_by_file = defaultdict(int)
     config._task780_surviving_by_file = defaultdict(int)
     _DURATIONS.clear()
+    _REAL_PROCESS.clear()
     config._task1189_durations = _DURATIONS
 
 
@@ -93,6 +98,9 @@ def pytest_collection_finish(session):
 def pytest_runtest_logreport(report):
     if report.when in {"setup", "call", "teardown"}:
         _DURATIONS[report.nodeid] += report.duration
+        # keywords travel with an xdist report, so the controller sees the marker too.
+        if time_budget.REAL_PROCESS in getattr(report, "keywords", {}):
+            _REAL_PROCESS.add(report.nodeid)
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -114,13 +122,16 @@ def pytest_sessionfinish(session, exitstatus):
             print("Test gate requires zero skips/xfails")
         budget = config.getoption("--unit-time-budget")
         if type(budget) in (int, float):
-            slow = {nodeid: duration for nodeid, duration in config._task1189_durations.items()
-                    if duration >= budget}
-            if slow:
+            process_budget = config.getoption("--real-process-time-budget")
+            slowest = time_budget.slowest_real_process(config._task1189_durations, _REAL_PROCESS)
+            if slowest is not None:
+                print(f"Slowest real_process case: {slowest[1]:.3f}s {slowest[0]} "
+                      f"(budget {budget if process_budget is None else process_budget}s)")
+            found = time_budget.breaches(config._task1189_durations, _REAL_PROCESS, budget, process_budget)
+            if found:
                 session.exitstatus = pytest.ExitCode.TESTS_FAILED
-                print(f"Unit time budget exceeded ({budget}s including fixture setup/teardown):")
-                for nodeid, duration in sorted(slow.items(), key=lambda pair: -pair[1]):
-                    print(f"  {duration:.3f}s {nodeid}")
+                for breach in found:
+                    print("\n".join(breach.lines()))
     pg_connection_guard.uninstall()
 
 

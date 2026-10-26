@@ -118,6 +118,24 @@ def lock_wait_seconds() -> float:
 
 UNIT_TIME_BUDGET_ENV = "LLM_BAWT_UNIT_TIME_BUDGET_SECONDS"
 UNIT_TIME_BUDGET_DEFAULT_S = 1.0
+REAL_PROCESS_TIME_BUDGET_ENV = "LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS"
+# About twice the slowest real_process case on echo (0.66s, 2 pinned CPUs, TASK-1457).
+REAL_PROCESS_TIME_BUDGET_DEFAULT_S = 1.5
+
+
+def _budget_seconds(env: str, default: float, configured: str | None) -> float:
+    if configured is None:
+        configured = os.environ.get(env, "")
+    configured = configured.strip()
+    if not configured:
+        return default
+    try:
+        seconds = float(configured)
+    except ValueError:
+        seconds = 0.0
+    if not 0 < seconds <= 60:
+        raise RuntimeError(f"{env} must be >0 and at most 60 seconds, got {configured!r}")
+    return seconds
 
 
 def unit_time_budget_seconds(configured: str | None = None) -> float:
@@ -131,23 +149,27 @@ def unit_time_budget_seconds(configured: str | None = None) -> float:
     on hangs and new sleeps without failing on runner noise (TASK-1312).
     ``configured`` overrides the environment (the stress step passes CI's value).
     """
-    if configured is None:
-        configured = os.environ.get(UNIT_TIME_BUDGET_ENV, "")
-    configured = configured.strip()
-    if not configured:
-        return UNIT_TIME_BUDGET_DEFAULT_S
-    try:
-        seconds = float(configured)
-    except ValueError:
-        seconds = 0.0
-    if not 0 < seconds <= 60:
-        raise RuntimeError(f"{UNIT_TIME_BUDGET_ENV} must be >0 and at most 60 seconds, got {configured!r}")
-    return seconds
+    return _budget_seconds(UNIT_TIME_BUDGET_ENV, UNIT_TIME_BUDGET_DEFAULT_S, configured)
+
+
+def real_process_time_budget_seconds(configured: str | None = None) -> float:
+    """The same bound for cases marked ``real_process`` (tests/time_budget.py).
+
+    A real binary's cold start on a hosted runner is outside the test's
+    control (a node launcher: 0.1s on echo, 3.3s once on CI), so these cases
+    get their own, wider bound instead of widening the unit budget for all.
+    """
+    return _budget_seconds(REAL_PROCESS_TIME_BUDGET_ENV, REAL_PROCESS_TIME_BUDGET_DEFAULT_S, configured)
+
+
+def budget_flags(unit: float, real_process: float) -> tuple[str, str]:
+    return (f"--unit-time-budget={unit}", f"--real-process-time-budget={real_process}")
 
 
 def unit_gate() -> tuple[str, ...]:
     """Arguments that make the unit suite a gate: per-case budget, zero skips, parallel."""
-    return (f"--unit-time-budget={unit_time_budget_seconds()}", "--require-no-skips", *parallel("load"))
+    return (*budget_flags(unit_time_budget_seconds(), real_process_time_budget_seconds()),
+            "--require-no-skips", *parallel("load"))
 
 
 # ── Stress: changed tests under CI's conditions (TASK-1457) ─────────────────
@@ -162,7 +184,7 @@ def unit_gate() -> tuple[str, ...]:
 
 WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
 CI_GATE_STEP = "make test-all"
-CI_ENV_KEYS = (WORKERS_ENV, UNIT_TIME_BUDGET_ENV)
+CI_ENV_KEYS = (WORKERS_ENV, UNIT_TIME_BUDGET_ENV, REAL_PROCESS_TIME_BUDGET_ENV)
 PG_CPUSET_ENV = "LLM_BAWT_TEST_PG_CPUSET"
 STRESS_CPUS = 2
 STRESS_REPEAT_DEFAULT = 10
@@ -247,7 +269,7 @@ def _files_of(nodes: set[str]) -> tuple[str, ...]:
     return tuple(sorted({node.split("::", 1)[0] for node in nodes}))
 
 
-def stress_plan(files: list[str], budget: float) -> list[StressPart]:
+def stress_plan(files: list[str], budgets: tuple[str, ...]) -> list[StressPart]:
     """The offline gate's partitions, narrowed to ``files``. Each test runs in
     the partition (and with the gate flags) it gets in ``make test-all``."""
     wanted = set(files)
@@ -265,18 +287,18 @@ def stress_plan(files: list[str], budget: float) -> list[StressPart]:
                            f"tests/suite_manifest.py): {sorted(missing)}")
     parts = [
         StressPart("unit", UNIT, _files_of(unit_nodes),
-                   (f"--unit-time-budget={budget}", "--require-no-skips"), "load"),
+                   (*budgets, "--require-no-skips"), "load"),
         StressPart("private-pg", PG, pg_selectors if pg_nodes else (), ("--require-no-skips",), "loadscope"),
         StressPart("local-integration", LOCAL, _files_of(local_nodes), ("--require-no-skips",), "load"),
     ]
     return [part for part in parts if part.selectors]
 
 
-def full_plan(budget: float) -> list[StressPart]:
+def full_plan(budgets: tuple[str, ...]) -> list[StressPart]:
     """Every offline test, partitioned exactly as ``make test-all`` runs it."""
     verify_offline_partition()
     return [
-        StressPart("unit", UNIT, ("tests",), (f"--unit-time-budget={budget}", "--require-no-skips"), "load"),
+        StressPart("unit", UNIT, ("tests",), (*budgets, "--require-no-skips"), "load"),
         StressPart("private-pg", PG, PG_SELECTORS, ("--require-pg-acceptance",), "loadscope"),
         StressPart("local-integration", LOCAL, ("tests",), ("--require-no-skips",), "load"),
     ]
@@ -288,6 +310,8 @@ def stress(base: str, repeat: int, files: list[str] | None = None, everything: b
     ci = ci_env()
     workers = worker_count(ci[WORKERS_ENV])
     budget = unit_time_budget_seconds(ci[UNIT_TIME_BUDGET_ENV])
+    process_budget = real_process_time_budget_seconds(ci[REAL_PROCESS_TIME_BUDGET_ENV])
+    budgets = budget_flags(budget, process_budget)
     if everything:
         scope = "the whole offline suite"
     elif files:
@@ -300,9 +324,9 @@ def stress(base: str, repeat: int, files: list[str] | None = None, everything: b
         print("Stress: PASSED (no changed test files to stress)", flush=True)
         return
     with pinned_cpus() as cpuset:
-        plan = full_plan(budget) if everything else stress_plan(files, budget)
+        plan = full_plan(budgets) if everything else stress_plan(files, budgets)
         print(f"Stress: {repeat} round(s) on CPUs {cpuset} with CI's {workers} worker(s) and "
-              f"{budget}s unit budget; parts: {', '.join(part.name for part in plan)}", flush=True)
+              f"{budget}s unit / {process_budget}s real_process budgets; parts: {', '.join(part.name for part in plan)}", flush=True)
         for number in range(1, repeat + 1):
             for part in plan:
                 try:

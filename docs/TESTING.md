@@ -33,7 +33,16 @@ has fewer, slower cores, cold caches and a virtual disk, so cases that take
 `.github/workflows/tests.yml` sets `LLM_BAWT_UNIT_TIME_BUDGET_SECONDS=3` so CI
 still fails on hangs and new sleeps without failing on runner noise. The value
 must be a number in (0, 60]; anything else fails closed. Keep echo at the
-default. Fixtures that need a file-backed SQLite engine use
+default.
+
+Cases marked `@pytest.mark.real_process(reason=...)` spawn a real binary
+(bash, node, git), whose cold start on the hosted runner is outside the test's
+control: a node launcher that takes 0.1 s on echo once took 3.3 s there. They
+are judged on their own budget, `LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS`:
+1.5 s by default (about twice the slowest such case on echo) and 7 s in CI
+(about twice the slowest seen there). It is enforced like the unit budget, and
+the failure names which budget tripped. Every gated run prints its slowest
+real_process case, so the CI value can be revisited from its own logs. Fixtures that need a file-backed SQLite engine use
 `tests/sqlite_support.py::fast_sqlite_engine`, which turns off per-commit fsync
 (`PRAGMA synchronous = OFF`); that is the dominant cost of such fixtures on a
 virtual disk and no test relies on durability across a power loss.

@@ -361,7 +361,7 @@ test-snapshot: ## Gate BASE + patches in a throwaway worktree: make test-snapsho
 		$(foreach p,$(PATCHES),--patch '$(p)') $(foreach p,$(PATHS),--path '$(p)') \
 		$(foreach n,$(NODES),--node '$(n)')
 
-# Optional diagnostic, not a SHIP gate (TASK-1457): 2 pinned CPUs, CI's workers and unit budget.
+# Optional diagnostic, not a SHIP gate (TASK-1457): 2 pinned CPUs, CI's workers and time budgets.
 test-stress: ## Diagnostic: changed tests REPEAT (10) times as CI runs them: make test-stress [STRESS_BASE=origin/master] [FILES=...]
 	$(TEST_RUNNER) stress $(if $(STRESS_BASE),--stress-base '$(STRESS_BASE)') \
 		$(if $(REPEAT),--repeat '$(REPEAT)') $(FILES)

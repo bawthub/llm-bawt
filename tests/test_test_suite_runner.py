@@ -164,30 +164,41 @@ def test_a_bad_lock_wait_fails_closed(monkeypatch, value):
         suite.lock_wait_seconds()
 
 
-@pytest.mark.parametrize(("value", "expected"), [("", 1.0), ("3", 3.0), ("2.5", 2.5)])
-def test_unit_time_budget_comes_from_the_environment(monkeypatch, value, expected):
-    monkeypatch.setenv(suite.UNIT_TIME_BUDGET_ENV, value)
-    assert suite.unit_time_budget_seconds() == expected
+BUDGETS = [("unit", "UNIT_TIME_BUDGET_ENV", "unit_time_budget_seconds", 1.0),
+           ("real_process", "REAL_PROCESS_TIME_BUDGET_ENV", "real_process_time_budget_seconds", 1.5)]
 
 
+@pytest.mark.parametrize(("name", "env", "read", "default"), BUDGETS, ids=[b[0] for b in BUDGETS])
+@pytest.mark.parametrize(("value", "expected"), [("", None), ("3", 3.0), ("2.5", 2.5)])
+def test_each_time_budget_comes_from_the_environment(monkeypatch, name, env, read, default, value, expected):
+    monkeypatch.setenv(getattr(suite, env), value)
+    assert getattr(suite, read)() == (default if expected is None else expected)
+
+
+@pytest.mark.parametrize(("name", "env", "read", "default"), BUDGETS, ids=[b[0] for b in BUDGETS])
 @pytest.mark.parametrize("value", ["fast", "0", "-1", "61", "nan", "inf"])
-def test_a_bad_unit_time_budget_fails_closed(monkeypatch, value):
-    monkeypatch.setenv(suite.UNIT_TIME_BUDGET_ENV, value)
-    with pytest.raises(RuntimeError, match="at most 60"):
-        suite.unit_time_budget_seconds()
+def test_a_bad_time_budget_fails_closed(monkeypatch, name, env, read, default, value):
+    monkeypatch.setenv(getattr(suite, env), value)
+    with pytest.raises(RuntimeError, match=f"{getattr(suite, env)} must be >0 and at most 60"):
+        getattr(suite, read)()
 
 
-@pytest.mark.parametrize(("configured", "flag"), [(None, "--unit-time-budget=1.0"), ("3", "--unit-time-budget=3.0")])
-def test_the_unit_gate_passes_the_configured_budget_to_pytest(monkeypatch, configured, flag):
+@pytest.mark.parametrize(("configured", "flags"), [
+    ({}, ("--unit-time-budget=1.0", "--real-process-time-budget=1.5")),
+    ({"UNIT_TIME_BUDGET_ENV": "3", "REAL_PROCESS_TIME_BUDGET_ENV": "7"},
+     ("--unit-time-budget=3.0", "--real-process-time-budget=7.0")),
+])
+def test_the_unit_gate_passes_both_configured_budgets_to_pytest(monkeypatch, configured, flags):
     seen = []
-    if configured is None:
-        monkeypatch.delenv(suite.UNIT_TIME_BUDGET_ENV, raising=False)
-    else:
-        monkeypatch.setenv(suite.UNIT_TIME_BUDGET_ENV, configured)
+    for env in ("UNIT_TIME_BUDGET_ENV", "REAL_PROCESS_TIME_BUDGET_ENV"):
+        if env in configured:
+            monkeypatch.setenv(getattr(suite, env), configured[env])
+        else:
+            monkeypatch.delenv(getattr(suite, env), raising=False)
     monkeypatch.setattr(suite, "runner_lock", lambda wait: nullcontext())
     monkeypatch.setattr(suite, "run", lambda marker, *extra: seen.append((marker, extra)))
     assert suite.main(["unit"]) == 0
-    assert seen == [(suite.UNIT, (flag, "--require-no-skips", *suite.parallel("load")))]
+    assert seen == [(suite.UNIT, (*flags, "--require-no-skips", *suite.parallel("load")))]
 
 
 # -- stress step (TASK-1457) -------------------------------------------------
@@ -197,6 +208,7 @@ def test_stress_reads_ci_conditions_from_the_real_workflow():
     env = suite.ci_env()
     assert suite.worker_count(env[suite.WORKERS_ENV]) == 2
     assert suite.unit_time_budget_seconds(env[suite.UNIT_TIME_BUDGET_ENV]) == 3.0
+    assert suite.real_process_time_budget_seconds(env[suite.REAL_PROCESS_TIME_BUDGET_ENV]) == 7.0
 
 
 @pytest.mark.parametrize(("steps", "error"), [
@@ -258,13 +270,15 @@ def test_a_stress_plan_runs_each_changed_test_in_its_gate_partition(monkeypatch)
     }
     monkeypatch.setattr(suite, "PG_SELECTORS", ("tests/test_p.py", "tests/test_other_pg.py"))
     monkeypatch.setattr(suite, "collect", _collect_from(nodes))
-    plan = suite.stress_plan(["tests/test_l.py", "tests/test_p.py", "tests/test_u.py"], 3.0)
+    budgets = suite.budget_flags(3.0, 7.0)
+    plan = suite.stress_plan(["tests/test_l.py", "tests/test_p.py", "tests/test_u.py"], budgets)
     assert [(part.name, part.selectors, part.gate) for part in plan] == [
-        ("unit", ("tests/test_u.py",), ("--unit-time-budget=3.0", "--require-no-skips")),
+        ("unit", ("tests/test_u.py",),
+         ("--unit-time-budget=3.0", "--real-process-time-budget=7.0", "--require-no-skips")),
         ("private-pg", ("tests/test_p.py",), ("--require-no-skips",)),
         ("local-integration", ("tests/test_l.py",), ("--require-no-skips",)),
     ]
-    assert [part.name for part in suite.stress_plan(["tests/test_u.py"], 3.0)] == ["unit"]
+    assert [part.name for part in suite.stress_plan(["tests/test_u.py"], budgets)] == ["unit"]
 
 
 def test_a_changed_integration_test_outside_every_gate_suite_fails_the_plan(monkeypatch):
@@ -272,7 +286,7 @@ def test_a_changed_integration_test_outside_every_gate_suite_fails_the_plan(monk
     monkeypatch.setattr(suite, "PG_SELECTORS", ())
     monkeypatch.setattr(suite, "collect", _collect_from(nodes))
     with pytest.raises(RuntimeError, match=r"register them in tests/suite_manifest.py.*test_p.py::b"):
-        suite.stress_plan(["tests/test_p.py"], 3.0)
+        suite.stress_plan(["tests/test_p.py"], suite.budget_flags(3.0, 7.0))
 
 
 def _stress_harness(monkeypatch, fail_at=None):
@@ -285,9 +299,10 @@ def _stress_harness(monkeypatch, fail_at=None):
         if len(ran) == fail_at:
             raise RuntimeError("test suite failed (exit 1)")
 
-    monkeypatch.setattr(suite, "ci_env", lambda: {suite.WORKERS_ENV: "2", suite.UNIT_TIME_BUDGET_ENV: "3"})
+    monkeypatch.setattr(suite, "ci_env", lambda: {suite.WORKERS_ENV: "2", suite.UNIT_TIME_BUDGET_ENV: "3",
+                                               suite.REAL_PROCESS_TIME_BUDGET_ENV: "7"})
     monkeypatch.setattr(suite, "pinned_cpus", lambda: nullcontext("14,15"))
-    monkeypatch.setattr(suite, "stress_plan", lambda files, budget: plan)
+    monkeypatch.setattr(suite, "stress_plan", lambda files, budgets: plan)
     monkeypatch.setattr(suite, "run", run)
     return ran
 
@@ -298,7 +313,7 @@ def test_stress_repeats_every_part_with_ci_workers(monkeypatch, capsys):
     assert ran == [(suite.UNIT, ("--g", *suite.parallel("load", 2), "tests/test_u.py")),
                    (suite.PG, (*suite.parallel("loadscope", 2), "tests/test_p.py"))] * 2
     out = capsys.readouterr().out
-    assert "2 round(s) on CPUs 14,15 with CI's 2 worker(s) and 3.0s unit budget" in out
+    assert "2 round(s) on CPUs 14,15 with CI's 2 worker(s) and 3.0s unit / 7.0s real_process budgets" in out
     assert "Stress: PASSED (2 round(s))" in out
 
 
@@ -310,7 +325,8 @@ def test_stress_stops_at_the_first_failing_round_and_names_it(monkeypatch):
 
 
 def test_stress_with_no_changed_tests_passes_without_pinning(monkeypatch, capsys):
-    monkeypatch.setattr(suite, "ci_env", lambda: {suite.WORKERS_ENV: "2", suite.UNIT_TIME_BUDGET_ENV: "3"})
+    monkeypatch.setattr(suite, "ci_env", lambda: {suite.WORKERS_ENV: "2", suite.UNIT_TIME_BUDGET_ENV: "3",
+                                               suite.REAL_PROCESS_TIME_BUDGET_ENV: "7"})
     monkeypatch.setattr(suite, "changed_test_files", lambda base: ("abc123def456", []))
     monkeypatch.setattr(suite, "pinned_cpus", lambda: pytest.fail("pinned with nothing to run"))
     suite.stress("origin/master", 10)
