@@ -311,7 +311,7 @@ endif  # not Windows
 # DEV TOOLS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-sweep gate gate-receipt test-service test-paid
+.PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-timing-report test-sweep gate gate-receipt test-service test-paid
 
 # Every scenario enters the same locked runner; CI calls these targets too.
 TEST_RUNNER := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory python -m scripts.test_suite
@@ -365,6 +365,9 @@ test-snapshot: ## Gate BASE + patches in a throwaway worktree: make test-snapsho
 test-stress: ## Diagnostic: changed tests REPEAT (10) times as CI runs them: make test-stress [STRESS_BASE=origin/master] [FILES=...]
 	$(TEST_RUNNER) stress $(if $(STRESS_BASE),--stress-base '$(STRESS_BASE)') \
 		$(if $(REPEAT),--repeat '$(REPEAT)') $(FILES)
+
+test-timing-report: ## Report-only (TASK-1457): unit tests that depend on timing, on a virtual clock; never a gate
+	$(TEST_RUNNER) timing-report
 
 test-sweep: ## One round of every offline test as CI runs it (2 pinned CPUs)
 	$(TEST_RUNNER) stress --all --repeat 1

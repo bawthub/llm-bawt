@@ -3,7 +3,9 @@
 from contextlib import nullcontext
 from multiprocessing import get_context
 import os
+from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -310,3 +312,61 @@ def test_the_offline_suite_never_runs_the_stress_step(monkeypatch):
     assert seen == ["partition", suite.UNIT, suite.PG, suite.LOCAL]
     with pytest.raises(SystemExit, match="2"):
         suite.main(["gate"])
+
+
+def test_the_timing_report_classifies_by_step_cost_and_honours_markers():
+    base = {
+        "tests/test_a.py::t": {"failed": {"when": "call", "message": "TimeoutError"}},
+        "tests/test_b.py::t": {"events": {"real_time": ["time.sleep(0.1)"], "real_process": ["git"]},
+                               "allowed": {"real_process": "needs git"},
+                               "follow": {"executor": [2, 0.5]}},
+        "tests/test_c.py::t": {"follow": {"fd": [1, 1.25]}},
+    }
+    late = {"failed": {"when": "call", "message": "late"}}
+    stepped = {**base, "tests/test_d.py::t": late}
+    # test_e fails in one base round only: D1, intermittently, never D2.
+    rounds = [base, {**base, "tests/test_e.py::t": {"failed": {"when": "call", "message": "raced"}}}]
+    report = suite.summarize_timing(rounds, [stepped, {**stepped, "tests/test_e.py::t": late}],
+                                    {"D4": ["tests/x.py:1: w"], "D7": []})
+    assert report == {
+        "D1": ["tests/test_a.py::t [2/2]: TimeoutError", "tests/test_e.py::t [1/2]: raced"],
+        "D2": ["tests/test_d.py::t [2/2]: late"],
+        "D3": ["tests/test_b.py::t: real_time time.sleep(0.1)"],
+        "D4": ["tests/x.py:1: w"],
+        "D7": [],
+        "FOLLOW": ["tests/test_c.py::t: fd x1, 1.25s real", "tests/test_b.py::t: executor x2, 0.50s real"],
+    }
+
+
+def test_a_timing_run_keeps_test_failures_but_not_a_broken_pytest(monkeypatch, tmp_path):
+    from tests import timing_report
+
+    assert (suite.TIMING_REPORT_ENV, suite.TIMING_STEP_COST_ENV) == (
+        timing_report.REPORT_ENV, timing_report.STEP_COST_ENV)
+    seen = []
+
+    def fake_run(command, cwd, env):
+        seen.append((command, env[suite.TIMING_STEP_COST_ENV]))
+        Path(env[suite.TIMING_REPORT_ENV]).write_text("{}")
+        return SimpleNamespace(returncode=returncode)
+
+    monkeypatch.setattr(suite.subprocess, "run", fake_run)
+    returncode = 1
+    suite.timing_run(0.02, tmp_path / "r.json")
+    command, step_cost = seen[0]
+    assert step_cost == "0.02" and command[command.index("-p") + 1] == "tests.timing_report"
+    returncode = 3
+    with pytest.raises(RuntimeError, match="exit 3"):
+        suite.timing_run(0.0, tmp_path / "s.json")
+
+
+def test_the_timing_report_is_its_own_suite_and_never_part_of_a_gate(monkeypatch):
+    seen = []
+    monkeypatch.setattr(suite, "runner_lock", lambda wait: nullcontext())
+    monkeypatch.setattr(suite, "verify_offline_partition", lambda: None)
+    monkeypatch.setattr(suite, "run", lambda marker, *extra: seen.append(extra))
+    monkeypatch.setattr(suite, "timing_report", lambda: seen.append("timing"))
+    assert suite.main(["offline"]) == 0
+    assert "timing" not in seen and not any("tests.timing_report" in extra for extra in seen)
+    assert suite.main(["timing-report"]) == 0
+    assert seen[-1] == "timing"

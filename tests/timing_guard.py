@@ -235,3 +235,121 @@ def scan_tree(root: Path, skip: frozenset[str] = frozenset()) -> list[Finding]:
             continue
         findings.extend(scan_source(path.read_text(), relative))
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Report-only scanners (TASK-1457 phase a): ``make test-timing-report`` lists
+# what these find; no test enforces them yet.
+#   D4: a thread-side wait that can time out silently, or with a short budget.
+#   D7: src/ binding a clock function by name, which follow_time can't redirect.
+# Awaited calls and asyncio.* are loop-side: the virtual clock (D1) covers them.
+# ---------------------------------------------------------------------------
+
+SHORT_WAIT_S = 5.0
+_WAIT_METHODS = frozenset({"wait", "join", "get", "result"})
+
+
+def _timeout_literal(call: ast.Call) -> float | None:
+    """The call's timeout when it is a numeric literal (``get`` only by keyword:
+    ``mapping.get(1)`` is a lookup)."""
+    name = call.func.attr  # type: ignore[union-attr]
+    candidates = [kw.value for kw in call.keywords if kw.arg == "timeout"]
+    if name == "get" and len(call.args) >= 2:  # queue.get(block, timeout)
+        candidates.append(call.args[1])
+    elif name != "get" and call.args:
+        candidates.append(call.args[0])
+    for node in candidates:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+                and not isinstance(node.value, bool):
+            return float(node.value)
+    return None
+
+
+def _has_timeout(call: ast.Call) -> bool:
+    return bool(call.args) or any(kw.arg == "timeout" for kw in call.keywords)
+
+
+def _thread_wait(node: ast.AST, awaited: set[int]) -> ast.Call | None:
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _WAIT_METHODS and id(node) not in awaited):
+        return None
+    receiver = node.func.value
+    if isinstance(receiver, ast.Name) and receiver.id == "asyncio":
+        return None
+    if isinstance(receiver, ast.Constant):  # ", ".join(parts)
+        return None
+    return node
+
+
+def _checks_alive(statements: list[ast.stmt], receiver: str) -> bool:
+    return any(isinstance(node, ast.Attribute) and node.attr == "is_alive"
+               and ast.unparse(node.value) == receiver
+               for stmt in statements for node in ast.walk(stmt))
+
+
+def scan_thread_waits(source: str, path: str) -> list[Finding]:
+    """D4: ``.wait/.join/.get/.result`` with a literal timeout under 5s; a bare
+    ``x.wait(t)`` whose bool is dropped; ``x.join(t)`` never followed by an
+    ``x.is_alive()`` check."""
+    if not re.search(r"\.(?:wait|join|get|result)\(", source):
+        return []
+    lines = source.splitlines()
+    tree = ast.parse(source)
+    awaited = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)}
+    findings: set[Finding] = set()
+
+    def exempt(line: int) -> bool:
+        return any(0 < number <= len(lines) and EXEMPTION.search(lines[number - 1])
+                   for number in (line, line - 1))
+
+    def add(line: int, kind: str) -> None:
+        if not exempt(line):
+            findings.add(Finding(path, line, kind))
+
+    for node in ast.walk(tree):
+        call = _thread_wait(node, awaited)
+        if call is not None:
+            timeout = _timeout_literal(call)
+            if timeout is not None and 0 < timeout < SHORT_WAIT_S:
+                add(call.lineno, f".{call.func.attr}({timeout:g}) thread wait under {SHORT_WAIT_S:g}s")  # type: ignore[union-attr]
+        for field in _BODIES:
+            body = getattr(node, field, None)
+            if not isinstance(body, list):
+                continue
+            for index, stmt in enumerate(body):
+                if not isinstance(stmt, ast.Expr):
+                    continue
+                call = _thread_wait(stmt.value, awaited)
+                if call is None or not _has_timeout(call):
+                    continue
+                # Barrier.wait raises on timeout; a name is the only static hint.
+                if call.func.attr == "wait" and "barrier" not in ast.unparse(  # type: ignore[union-attr]
+                        call.func.value).lower():  # type: ignore[union-attr]
+                    add(stmt.lineno, ".wait(timeout) result ignored; a timeout passes silently")
+                elif call.func.attr == "join" and not _checks_alive(  # type: ignore[union-attr]
+                        body[index + 1:], ast.unparse(call.func.value)):  # type: ignore[union-attr]
+                    add(stmt.lineno, ".join(timeout) without an is_alive() check after it")
+    return sorted(findings)
+
+
+def scan_clock_imports(source: str, path: str) -> list[Finding]:
+    """D7: ``from time import monotonic`` binds the function at import, so the
+    report's virtual clock (and any test patching ``time.monotonic``) can't
+    reach that module. Use ``import time`` and ``time.monotonic()``."""
+    if "from time import" not in source:
+        return []
+    return sorted({Finding(path, node.lineno, f"from time import {alias.name}; use time.{alias.name}()")
+                   for node in ast.walk(ast.parse(source))
+                   if isinstance(node, ast.ImportFrom) and node.module == "time"
+                   for alias in node.names if alias.name in CLOCK_CALLS})
+
+
+def report_findings(repo: Path, skip: frozenset[str] = frozenset()) -> dict[str, list[Finding]]:
+    """The static half of the timing report: D4 over tests/, D7 over src/."""
+    scans = {"D4": (repo / "tests", scan_thread_waits), "D7": (repo / "src", scan_clock_imports)}
+    report: dict[str, list[Finding]] = {}
+    for key, (root, scan) in scans.items():
+        report[key] = [finding for path in sorted(root.rglob("*.py"))
+                       if (relative := path.relative_to(repo).as_posix()) not in skip
+                       for finding in scan(path.read_text(), relative)]
+    return report

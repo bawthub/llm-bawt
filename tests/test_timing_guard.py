@@ -9,7 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 import textwrap
 
-from tests.timing_guard import scan_source, scan_tree
+from tests.timing_guard import (
+    report_findings,
+    scan_clock_imports,
+    scan_source,
+    scan_thread_waits,
+    scan_tree,
+)
 
 TESTS = Path(__file__).resolve().parent
 # The helper is the one sanctioned poller; the guard and its samples name the patterns.
@@ -97,3 +103,73 @@ def test_an_exemption_needs_a_reason_and_sits_on_or_above_the_statement():
             conn.execute("SELECT state FROM pg_stat_activity WHERE pid = pg_backend_pid()")
             assert time.monotonic() - started < 9  # timing-ok:
     """) == [(8, "asserts wall-clock time under a fixed limit")]
+
+
+def _waits(source: str) -> list[tuple[int, str]]:
+    return [(finding.line, finding.kind)
+            for finding in scan_thread_waits(textwrap.dedent(source), "tests/sample.py")]
+
+
+def test_d4_flags_short_thread_waits_but_not_loop_waits_or_lookups():
+    assert _waits("""
+        async def test_x(event, thread, queue, future, mapping, tasks):
+            assert event.wait(0.5)
+            assert queue.get(timeout=1) == 1
+            assert queue.get(True, 2) == 1
+            assert future.result(3) == 1
+            assert mapping.get(1) is None
+            assert ", ".join(parts)
+            assert event.wait(5)
+            await asyncio.wait(tasks, timeout=0.1)
+            await asyncio.wait_for(event.wait(), 0.1)
+            await loop_event.wait()
+    """) == [(3, ".wait(0.5) thread wait under 5s"), (4, ".get(1) thread wait under 5s"),
+             (5, ".get(2) thread wait under 5s"), (6, ".result(3) thread wait under 5s")]
+
+
+def test_d4_flags_a_silent_wait_or_join_but_not_a_checked_one():
+    assert _waits("""
+        def test_x(event, thread, other, barrier, proc):
+            event.wait(timeout=30)
+            barrier.wait(timeout=30)
+            thread.join(30)
+            other.join(30)
+            assert not other.is_alive()
+            assert event.wait(30)
+            thread.join()
+            if True:
+                proc.join(30)
+            assert done
+    """) == [(3, ".wait(timeout) result ignored; a timeout passes silently"),
+             (5, ".join(timeout) without an is_alive() check after it"),
+             (11, ".join(timeout) without an is_alive() check after it")]
+
+
+def test_d4_honours_a_timing_ok_reason():
+    assert _waits("""
+        def test_x(event):
+            event.wait(0.1)  # timing-ok: proves the event is NOT set in time
+            # timing-ok: short poll inside a bounded loop
+            assert event.wait(0.1) is False
+    """) == []
+
+
+def test_d7_flags_clock_functions_bound_by_name():
+    findings = scan_clock_imports(textwrap.dedent("""
+        from time import monotonic, sleep
+        from time import perf_counter as clock
+        import time
+    """), "src/sample.py")
+    assert [(finding.line, finding.kind) for finding in findings] == [
+        (2, "from time import monotonic; use time.monotonic()"),
+        (3, "from time import perf_counter; use time.perf_counter()")]
+
+
+def test_report_findings_scans_tests_for_d4_and_src_for_d7(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("def test_a(e):\n    e.wait(1)\nfrom time import time\n")
+    (tmp_path / "src" / "a.py").write_text("from time import time\ndef f(e):\n    e.wait(1)\n")
+    report = report_findings(tmp_path)
+    assert [str(finding) for finding in report["D7"]] == ["src/a.py:1: from time import time; use time.time()"]
+    assert {finding.path for finding in report["D4"]} == {"tests/test_a.py"}

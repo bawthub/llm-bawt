@@ -177,4 +177,6 @@ markers = [
     "offline_integration: real local socket/thread integration requiring no external services",
     "sdk_probe: opt-in subprocess SDK proof against a fake localhost provider",
     "external: needs independently provisioned test service or PostgreSQL target; never operational infrastructure",
+    "real_time(reason): deliberately waits real time (time.sleep on the test thread); reported by make test-timing-report (TASK-1457)",
+    "real_process(reason): deliberately spawns a real subprocess; reported by make test-timing-report (TASK-1457)",
 ]

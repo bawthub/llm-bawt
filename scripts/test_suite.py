@@ -10,6 +10,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -312,6 +313,88 @@ def stress(base: str, repeat: int, files: list[str] | None = None, everything: b
     print(f"Stress: PASSED ({repeat} round(s))", flush=True)
 
 
+# Report-only timing check (TASK-1457 phase a). Never part of a gate.
+TIMING_REPORT_ENV = "LLM_BAWT_TIMING_REPORT"
+TIMING_STEP_COST_ENV = "LLM_BAWT_TIMING_STEP_COST"
+TIMING_STEP_COST = 0.02
+TIMING_REPORT_OUT = Path(tempfile.gettempdir()) / "llm-bawt-timing-report.json"
+# The guard and its samples name the patterns on purpose.
+TIMING_STATIC_SKIP = frozenset({"tests/timing_guard.py", "tests/test_timing_guard.py"})
+
+
+def timing_run(step_cost: float, path: Path) -> float:
+    """One unit run with every loop on the virtual clock; test failures are the
+    data, so only a pytest that couldn't run (exit 2+) raises."""
+    command = pytest_args(UNIT, "-q", "-p", "tests.timing_report", *parallel("load"))
+    env = {**os.environ, TIMING_REPORT_ENV: str(path), TIMING_STEP_COST_ENV: str(step_cost)}
+    print(f"Timing report: step cost {step_cost:g}s:", " ".join(command[1:]), flush=True)
+    started = time.monotonic()
+    result = subprocess.run(command, cwd=ROOT, env=env)
+    if result.returncode not in (0, 1) or not path.exists():
+        raise RuntimeError(f"timing report run failed (exit {result.returncode})")
+    return time.monotonic() - started
+
+
+TIMING_ROUNDS = 2
+
+
+def summarize_timing(base: list[dict], stepped: list[dict], static: dict[str, list]) -> dict[str, list]:
+    """``base``/``stepped``: per-test records of each round at step cost 0 and
+    TIMING_STEP_COST. FOLLOW races real work, so a test can fail in one round
+    and pass in the next; ``[k/n]`` says how many rounds it failed in."""
+    def failures(rounds: list[dict]) -> dict[str, list[str]]:
+        seen: dict[str, list[str]] = {}
+        for records in rounds:
+            for node, entry in records.items():
+                if "failed" in entry:
+                    seen.setdefault(node, []).append(entry["failed"]["message"])
+        return seen
+
+    def listed(seen: dict[str, list[str]], rounds: int) -> list[str]:
+        return [f"{node} [{len(messages)}/{rounds}]: {messages[0]}" for node, messages in sorted(seen.items())]
+
+    d1 = failures(base)
+    d2 = {node: messages for node, messages in failures(stepped).items() if node not in d1}
+    first = base[0]
+    d3 = [f"{node}: {kind} {', '.join(sorted(set(details)))}"
+          for node, entry in sorted(first.items())
+          for kind, details in sorted(entry.get("events", {}).items())
+          if kind not in entry.get("allowed", {})]
+    follow = sorted(((spent, node, cause, count) for node, entry in first.items()
+                     for cause, (count, spent) in entry.get("follow", {}).items()), reverse=True)
+    return {
+        "D1": listed(d1, len(base)),
+        "D2": listed(d2, len(stepped)),
+        "D3": d3,
+        "D4": [str(finding) for finding in static["D4"]],
+        "D7": [str(finding) for finding in static["D7"]],
+        "FOLLOW": [f"{node}: {cause} x{count}, {spent:.2f}s real" for spent, node, cause, count in follow],
+    }
+
+
+def timing_report(out: Path = TIMING_REPORT_OUT) -> dict[str, list]:
+    from tests.timing_guard import report_findings
+
+    with tempfile.TemporaryDirectory(prefix="llm-bawt-timing-") as scratch:
+        seconds: list[float] = []
+        records: dict[float, list[dict]] = {0.0: [], TIMING_STEP_COST: []}
+        for number in range(TIMING_ROUNDS):
+            for step_cost in records:
+                path = Path(scratch) / f"round-{number}-step-{step_cost:g}.json"
+                seconds.append(timing_run(step_cost, path))
+                records[step_cost].append(json.loads(path.read_text()))
+    report = summarize_timing(records[0.0], records[TIMING_STEP_COST],
+                              report_findings(ROOT, TIMING_STATIC_SKIP))
+    out.write_text(json.dumps(report, indent=1))
+    for key, lines in report.items():
+        print(f"\n== {key} ({len(lines)})", *lines, sep="\n  ", flush=True)
+    flagged = {key: len(lines) for key, lines in report.items() if key != "FOLLOW"}
+    print(f"\nTiming report: {sum(flagged.values())} finding(s) {flagged}; "
+          f"{len(report['FOLLOW'])} FOLLOW record(s); runs took "
+          f"{' + '.join(f'{value:.1f}s' for value in seconds)}; JSON: {out}", flush=True)
+    return report
+
+
 @contextmanager
 def runner_lock(wait_seconds: float | None = None, poll_seconds: float = 1.0):
     # All heavy suites on one runner serialize, even across separate worktrees.
@@ -350,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("unit", "pg", "offline-integration", "sdk-probe", "integration",
                                            "offline", "target", "profile", "coverage", "stress",
-                                           "service", "paid"))
+                                           "timing-report", "service", "paid"))
     parser.add_argument("node", nargs="*",
                         help="target: explicit tests/... node IDs; stress: test files instead of the changed ones")
     parser.add_argument("--keyword", help="profile only: pytest -k expression")
@@ -410,6 +493,8 @@ def main(argv: list[str] | None = None) -> int:
                 run(SDK, "--require-no-skips")
             elif args.suite == "profile":
                 run(UNIT, "--durations=0", *(["-k", args.keyword] if args.keyword else []))
+            elif args.suite == "timing-report":
+                timing_report()
             elif args.suite == "coverage":
                 run(UNIT, "--cov=src", "--cov-report=term-missing")
             else:
