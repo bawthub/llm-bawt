@@ -64,7 +64,12 @@ def delivery_authors(scope: RecallScope) -> list[str]:
 
 def review_ref(text: str) -> str | None:
     """Only label a review when its id is present in authorized source bytes."""
-    references = {match.group(0).lower() for match in re.finditer(r"\br[1-9][0-9]{0,3}\b", text, re.IGNORECASE)}
+    # Bare rN may name a storage product, revision, or unrelated artifact.
+    # Report a review only when its marker appears with review-specific context.
+    pattern = (r"\breview\s+(r[1-9]\d{0,3})\b|\b(r[1-9]\d{0,3})\s+"
+               r"(?:B[1-9]\d*|APPROVE(?:_WITH_CHANGES)?|REQUEST_CHANGES)\b")
+    references = {next(group for group in match.groups() if group).lower()
+                  for match in re.finditer(pattern, text, re.IGNORECASE)}
     return next(iter(references)) if len(references) == 1 else None
 
 
@@ -185,7 +190,8 @@ class MessageSource(PostgresSource):
     # partition participates even in candidate limiting.
     statement = f"""
         WITH exact_all AS MATERIALIZED (
-            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
+                   TRUE AS exact_match
             FROM messages m
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
@@ -193,7 +199,8 @@ class MessageSource(PostgresSource):
             WHERE {PUBLIC_HISTORY_AUTHORITY} AND __EXACT_ALL__
             ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
         ), exact_any AS MATERIALIZED (
-            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
+                   TRUE AS exact_match
             FROM messages m
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
@@ -202,7 +209,8 @@ class MessageSource(PostgresSource):
               AND NOT EXISTS (SELECT 1 FROM exact_all)
             ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
         ), strong AS MATERIALIZED (
-            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
+                   FALSE AS exact_match
             FROM messages m
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
@@ -214,7 +222,8 @@ class MessageSource(PostgresSource):
               AND NOT EXISTS (SELECT 1 FROM exact_any)
             ORDER BY m.timestamp DESC, m.id LIMIT :candidate_limit
         ), loose AS MATERIALIZED (
-            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp
+            SELECT m.id, m.bot_id AS partition, p.source_bot, m.session_id, m.timestamp,
+                   FALSE AS exact_match
             FROM messages m
             JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
                  AS p(source_bot, partition) ON m.bot_id = p.partition
@@ -233,7 +242,7 @@ class MessageSource(PostgresSource):
             SELECT ARRAY(SELECT DISTINCT unnest(tsvector_to_array(
                        to_tsvector('english', array_to_string(CAST(:terms AS text[]), ' '))))) AS lexemes
         ), scored AS MATERIALIZED (
-            SELECT c.id, c.partition, c.source_bot, c.session_id, c.timestamp,
+            SELECT c.id, c.partition, c.source_bot, c.session_id, c.timestamp, c.exact_match,
                    cardinality(ARRAY(SELECT unnest(q.lexemes)
                                      INTERSECT SELECT unnest(tsvector_to_array(m.content_tsv)))) AS matched,
                    cardinality(q.lexemes) AS possible,
@@ -248,9 +257,9 @@ class MessageSource(PostgresSource):
                    score
             FROM scored
             -- Broad fallback may return one generic word from a long question;
-            -- that is weak evidence, not a successful match. Exact literals
-            -- already establish identity and need no second lexical token.
-            WHERE :has_exact OR matched >= LEAST(2, possible)
+            -- only an actual exact-tier match establishes identity without a
+            -- second lexical token. Having an exact token in the query does not.
+            WHERE exact_match OR matched >= LEAST(2, possible)
             ORDER BY coverage DESC, score DESC, timestamp DESC, id
             LIMIT :limit
         ), follow_ons AS (
@@ -283,22 +292,29 @@ class MessageSource(PostgresSource):
         LIMIT {MAX_SOURCE_RECORDS * (1 + MAX_FOLLOW_ONS_PER_HIT)}
     """
 
+    @staticmethod
+    def exact_literals(query: str) -> tuple[str, ...]:
+        # messages_find treats abbreviations and clock times as literals for
+        # browsing; recall must not promote them above topical evidence.
+        return tuple(token for token in parse_find_query(query[:512]).exact
+                     if not re.fullmatch(r"(?:[A-Za-z]\.)+[A-Za-z]?|\d{1,2}:\d{2}(?::\d{2})?", token))
+
     def statement_for(self, query: str) -> str:
-        exact = parse_find_query(query[:512]).exact
+        exact = self.exact_literals(query)
         clauses = [f"m.content ILIKE :exact_{i}" for i in range(len(exact))]
         return (self.statement.replace("__EXACT_ALL__", "(" + " AND ".join(clauses) + ")" if clauses else "FALSE")
                 .replace("__EXACT_ANY__", "(" + " OR ".join(clauses) + ")" if clauses else "FALSE"))
 
     def extra_params(self, scope: RecallScope, query: str) -> dict:
         parsed = parse_find_query(query[:512])
-        exact = parsed.exact
+        exact = self.exact_literals(query)
         allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
         # Literal identifiers never degrade to generic prose. Only meaningful
         # component words of compound identifiers can drive a lexical fallback.
         strong = list(parsed.parts + parsed.words)[:3] if exact else terms_for(query)[:3]
         return {"bots": allowed, "parts": [partition_id(bot) for bot in allowed],
                 "delivery_authors": delivery_authors(scope), "strong": " ".join(strong),
-                "allow_lexical": not exact or bool(parsed.parts), "has_exact": bool(exact),
+                "allow_lexical": not exact or bool(parsed.parts),
                 "candidate_limit": 96,
                 **{f"exact_{i}": like_pattern(token) for i, token in enumerate(exact)}}
 

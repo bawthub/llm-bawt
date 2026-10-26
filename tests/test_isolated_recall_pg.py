@@ -244,6 +244,22 @@ def test_nonliteral_identifier_does_not_degrade_to_generic_old_fragment(rig):
     assert not rig.recall("Who owns HomeBotBand WIP?")
 
 
+def test_missing_literal_does_not_waive_lexical_floor_for_loose_tier(rig):
+    rig.add("The app was healthy yesterday after a routine check.", at=rig.now - 10)
+    assert not rig.recall("What happened to HomeBotBand yesterday?")
+
+
+@pytest.mark.parametrize("weak_literal", ["e.g.", "i.e.", "3:30"])
+def test_prose_abbreviation_and_clock_do_not_override_lexical_evidence(rig, weak_literal):
+    unrelated = rig.add(f"Use a smaller model, {weak_literal} haiku, for unrelated chores.",
+                        at=rig.now - 5)
+    relevant = rig.add("Deploy order: app first, then workers; that was our decision.",
+                       at=rig.now - DAY)
+    rows = rig.recall(f"What did we decide about the deploy order, {weak_literal} app first?")
+    assert rows and rows[0].id == relevant
+    assert unrelated not in {row.id for row in rows}
+
+
 def test_broad_single_word_hit_is_not_presented_as_a_relevant_answer(rig):
     rig.add("The budget was adjusted in an unrelated initiative.", at=rig.now - 10)
     assert not rig.recall("What were the migration findings and owners of the handshake budget?")
@@ -253,6 +269,9 @@ def test_review_reference_is_omitted_if_one_excerpt_mentions_two_reviews():
     from llm_bawt.recall.postgres import review_ref
     assert review_ref("r8 B5 was revised by r9 B5") is None
     assert review_ref("r9 B5 was complete") == "r9"
+    assert review_ref("Review r9 confirmed the result") == "r9"
+    assert review_ref("Cloudflare R2 bucket") is None
+    assert review_ref("R2 storage") is None
 
 
 def test_received_deliveries_follow_the_current_allowed_policy(rig):

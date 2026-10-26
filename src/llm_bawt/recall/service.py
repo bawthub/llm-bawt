@@ -169,6 +169,8 @@ class RecallService:
             for row in rows:
                 if (not isinstance(row, Evidence) or row.source != source
                         or row.bot_id != scope.bot_id or row.user_id != scope.user_id
+                        or (row.source_bot is not None
+                            and row.source_bot not in scope.allowed_bot_ids - scope.excluded_bot_ids)
                         or not isinstance(row.id, str) or not 0 < len(row.id) <= 80
                         or (row.follows is not None and row.follows not in hits)):
                     raise RecallError("unauthorized")
@@ -245,7 +247,7 @@ class RecallService:
                         entry["start_char"] = item.start_char + offset + position
                     if entry not in findings:
                         findings.append(entry)
-            if rejected and not findings:
+            if rejected and not findings and not shortened:
                 raise RecallError("ungrounded_synthesis")
         incomplete = bool(evidence) or unavailable or any(item["status"] == "partial" for item in coverage.values())
         packet = {

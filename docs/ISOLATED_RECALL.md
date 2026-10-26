@@ -127,13 +127,15 @@ other users and imported other-bot assistant rows are omitted. Memories and
 tool evidence keep the stricter caller-user/own-bot rule.
 
 The messages_find parser supplies literal identity terms (TASK-N, SHA prefixes,
-paths and snake_case). Indexed exact-all then exact-any candidates precede an
-indexed high-coverage lexical tier; a broad OR runs only if stronger tiers are
-empty. Without an exact identity, a multi-word question needs at least two
-lexical matches; a single generic word is weak evidence. Each tier caps
-authorized candidates before ranking, so a generic OR cannot force per-row
-rank work across a whole history partition. A missing
-single-piece identifier does not degrade to old generic fragments. Within the
+paths and snake_case); recall discards dotted prose abbreviations and bare
+clock times from that exact set. Indexed exact-all then exact-any candidates
+precede an indexed high-coverage lexical tier; a broad OR runs only if stronger
+tiers are empty. A multi-word question needs at least two lexical matches on
+the lexical tiers, even when the query also contains a missing exact identity;
+only a row admitted by an exact tier waives that floor. A single generic word
+is weak evidence. Each tier caps authorized candidates before ranking, so a
+generic OR cannot force per-row rank work across a whole history partition. A
+missing single-piece identifier does not degrade to old generic fragments. Within the
 candidate set, coverage buckets (`COVERAGE_BUCKETS`) rank the share of query
 lexemes matched, then full-text rank decays by a 14-day recency term.
 This selects at most six **hits**. Each hit carries up to two **follow-ons**

@@ -100,7 +100,8 @@ async def test_provider_error_codes_are_not_a_data_channel():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed", [{"bot_id": "peer"}, {"user_id": "someone"}, {"source": "tasks"}])
+@pytest.mark.parametrize("changed", [{"bot_id": "peer"}, {"user_id": "someone"},
+                                     {"source": "tasks"}, {"source_bot": "excluded"}])
 async def test_provider_cannot_broaden_scope(changed):
     source = Source()
     source.rows = [replace(source.rows[0], **changed)]
@@ -267,6 +268,19 @@ async def test_answer_exceeding_six_quote_spans_is_not_returned_as_a_prefix():
     result = await RecallService([Source([item])], Model(raw)).recall(request(output_tokens=1600), SCOPE)
     assert result["status"] == "insufficient_evidence" and result["findings"] == []
     assert result["handle"] and "expand" in result["uncertainty"]
+
+
+@pytest.mark.asyncio
+async def test_shortened_answer_with_rejected_selection_is_still_insufficient():
+    answer = "B5: " + (("A" * 205 + ". ") * 11) + "Approval was revoked at the end."
+    raw = compact_json({"findings": [
+        {"source": "messages", "id": "long", "quote": answer},
+        {"source": "messages", "id": "long", "quote": "invented"},
+    ]})
+    item = Evidence("messages", "long", "reviewer", "operator", answer)
+    result = await RecallService([Source([item])], Model(raw)).recall(request(output_tokens=1600), SCOPE)
+    assert result["status"] == "insufficient_evidence" and result["findings"] == []
+    assert result["rejected_findings"] == 1 and result["handle"]
 
 
 @pytest.mark.asyncio
@@ -570,14 +584,11 @@ async def test_over_long_grounded_quote_keeps_complete_answer_or_reports_insuffi
                                       "quote": LONG_ANSWER.replace("\n\n", "\n")}]})
     result = await RecallService([Source(rows)], Model(raw)).recall(request(), SCOPE)
     assert result["rejected_findings"] == 0
-    if result["status"] == "ok":
-        assert "".join(row["quote"] for row in result["findings"]) == LONG_ANSWER
-        assert len(result["findings"]) >= 2
-        assert all(len(row["quote"]) <= 400 and tokens(row["quote"]) <= 100
-                   for row in result["findings"])
-    else:
-        assert result["status"] == "insufficient_evidence" and not result["findings"]
-        assert result["handle"]
+    assert result["status"] == "ok"
+    assert "".join(row["quote"] for row in result["findings"]) == LONG_ANSWER
+    assert len(result["findings"]) >= 2
+    assert all(len(row["quote"]) <= 400 and tokens(row["quote"]) <= 100
+               for row in result["findings"])
 
 
 @pytest.mark.asyncio
