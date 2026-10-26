@@ -73,6 +73,21 @@ def health_block(
 
 _SETTING_PREFIX = "provider_connection:"
 
+# Every runtime_settings key prefix a CredentialStore writes (this class and
+# integrations.connections.IntegrationStore). The generic /v1/settings routes
+# have no service-token auth, so they neither list, write nor delete these rows
+# (TASK-1520); the provider and integration APIs are the only way in.
+CREDENTIAL_SETTING_PREFIXES: tuple[str, ...] = (_SETTING_PREFIX, "integration_connection:")
+
+
+def is_credential_setting_key(key: str) -> bool:
+    """True when ``key`` names (or imitates) a CredentialStore row.
+
+    Case and surrounding whitespace are ignored, so a look-alike key can't be
+    planted through the generic settings routes either.
+    """
+    return key.strip().lower().startswith(CREDENTIAL_SETTING_PREFIXES)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

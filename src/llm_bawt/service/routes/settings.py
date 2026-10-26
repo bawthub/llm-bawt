@@ -16,6 +16,7 @@ from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
 from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
 from ...orphan_partitions import PartitionExecutionHalted
+from ..providers.base import CREDENTIAL_SETTING_PREFIXES, is_credential_setting_key
 from ...working_memory.contracts import WorkingMemoryError
 from ...working_memory.policy import WorkingMemoryPolicy
 from ..profile_route_gate import ProfileRouteGate, ProfileSaveGuard, RouteIneligible
@@ -71,12 +72,24 @@ def _normalize_scope(scope_type: str, scope_id: str | None, default_bot: str) ->
     return "bot", sid
 
 
+def _refuse_credential_key(key: str) -> None:
+    """Credential rows are written only through the provider/integration APIs (TASK-1520)."""
+    if is_credential_setting_key(key):
+        raise HTTPException(
+            status_code=403,
+            detail="Credential settings are managed through the provider and integration APIs",
+        )
+
+
 def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]]) -> None:
     """Refuse a setting write that a feature gate forbids, before anything is stored.
 
     ``working_memory_enabled`` (TASK-1281, docs/WORKING_MEMORY.md 7) is bot-scoped;
-    true needs a non-protected claude-code bot.
+    true needs a non-protected claude-code bot. Credential keys are refused
+    outright (TASK-1520).
     """
+    for _scope_type, _scope_id, key, _value in writes:
+        _refuse_credential_key(key)
     policy = WorkingMemoryPolicy(engine)
     for scope_type, scope_id, key, value in writes:
         if key in RETIRED_BALANCE_SETTINGS:
@@ -421,7 +434,11 @@ def list_runtime_settings(
     if store.engine is None:
         raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
     data = store.get_scope_settings(st, sid)
-    items = [RuntimeSettingItem(key=k, value=v) for k, v in sorted(data.items())]
+    items = [
+        RuntimeSettingItem(key=k, value=v)
+        for k, v in sorted(data.items())
+        if not is_credential_setting_key(k)
+    ]
     return RuntimeSettingsResponse(scope_type=st, scope_id=sid, settings=items)
 
 
@@ -448,7 +465,11 @@ def list_all_runtime_settings(
     normalized_key = key.strip() if key else None
     normalized_key_prefix = key_prefix.strip() if key_prefix else None
 
-    conditions: list = []
+    # Credential rows never appear here, whatever the filters (TASK-1520).
+    conditions: list = [
+        ~func.lower(func.trim(RuntimeSetting.key)).startswith(prefix)
+        for prefix in CREDENTIAL_SETTING_PREFIXES
+    ]
     if normalized_scope_type:
         conditions.append(RuntimeSetting.scope_type == normalized_scope_type)
     if normalized_scope_id:
@@ -458,11 +479,8 @@ def list_all_runtime_settings(
     if normalized_key_prefix:
         conditions.append(RuntimeSetting.key.startswith(normalized_key_prefix))
 
-    statement = select(RuntimeSetting)
-    count_statement = select(func.count()).select_from(RuntimeSetting)
-    if conditions:
-        statement = statement.where(*conditions)
-        count_statement = count_statement.where(*conditions)
+    statement = select(RuntimeSetting).where(*conditions)
+    count_statement = select(func.count()).select_from(RuntimeSetting).where(*conditions)
 
     statement = statement.order_by(RuntimeSetting.scope_type, RuntimeSetting.scope_id, RuntimeSetting.key)
 
@@ -530,6 +548,7 @@ def delete_runtime_setting(
     scope_id: str | None = Query(None, description="bot slug for bot scope"),
 ):
     """Delete one runtime setting."""
+    _refuse_credential_key(key)
     service = get_service()
     st, sid = _normalize_scope(scope_type, scope_id, service._default_bot)
     store = get_runtime_settings_store(service.config)
