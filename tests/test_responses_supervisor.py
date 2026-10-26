@@ -8,6 +8,7 @@ import pytest
 from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
 from claude_code_bridge.proxy.chatgpt_transport import ChatGPTEventTimeout
 from claude_code_bridge.proxy.request_context import ProxyRequestContext
+from tests import virtual_clock
 
 
 class HTTPStream:
@@ -21,8 +22,10 @@ class HTTPStream:
         return self.events
 
 
-async def silent():
-    await asyncio.sleep(10)
+async def silent(started=None):
+    if started is not None:
+        started.set()
+    await asyncio.Event().wait()  # the supervisor must interrupt this pending receive
     yield None
 
 
@@ -34,16 +37,17 @@ async def done():
 def test_http_progress_bounds_close_stream(phase):
     async def run():
         async def chatter():
-            while True:
-                await asyncio.sleep(.001)
-                yield NS(type="response.in_progress")
+            # An output item rules out the earlier first-output deadline;
+            # only productive idle can end this pending receive.
+            yield NS(type="response.output_item.added", item=NS(type="reasoning"))
+            yield NS(type="response.in_progress")
+            await asyncio.Event().wait()
         http = HTTPStream(chatter() if phase == "productive" else silent())
         async def open_http():
             if phase == "headers":
-                await asyncio.sleep(10)
+                await asyncio.Event().wait()
             return http
-        stream = ResponsesSSEStream(open_http, first_event_timeout=.02,
-                                    productive_idle_timeout=.03)
+        stream = ResponsesSSEStream(open_http)
         try:
             with pytest.raises(ChatGPTEventTimeout) as error:
                 async for _ in stream:
@@ -54,17 +58,15 @@ def test_http_progress_bounds_close_stream(phase):
         finally:
             await stream.close()
         assert http.close.await_count == (0 if phase == "headers" else 1)
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.4", "future-model"])
 @pytest.mark.parametrize("committed", [None, "text", "thinking", "reasoning", "tool", "exhausted"])
 def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
     from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapter
-    from claude_code_bridge.proxy import responses_supervisor, retry
+    from claude_code_bridge.proxy import retry
     monkeypatch.setattr(retry, "compute_backoff", lambda *a, **k: 0)
-    monkeypatch.setattr(responses_supervisor, "ResponsesSSEStream", lambda opener, **kw: ResponsesSSEStream(
-        opener, first_event_timeout=.01, productive_idle_timeout=.015, **kw))
 
     async def run():
         async def first_events():
@@ -78,7 +80,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
                     ))
             elif committed == "tool":
                 yield NS(type="response.output_item.added", item=NS(type="function_call", id="fc", call_id="call", name="check"))
-            await asyncio.sleep(10)
+            await asyncio.Event().wait()
         streams = [HTTPStream(first_events()), HTTPStream(silent() if committed == "exhausted" else done())]
         create = AsyncMock(side_effect=streams)
         options = []
@@ -108,11 +110,13 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
             assert adapter._chatgpt_transport is None
             assert streams[0].close.await_count == 1
             if should_retry:
-                assert statuses[0]["state"] == "waiting"
-                assert statuses[1]["state"] == "retrying"
-                assert statuses[1]["transport"] == "sse"
+                states = [status["state"] for status in statuses]
+                # The production 30s notice precedes the 60/90s retry deadline.
+                assert states[:3] == ["waiting", "stalled", "retrying"]
+                retry_status = statuses[2]
+                assert retry_status["transport"] == "sse"
                 # TASK-1079: an HTTPS stall is not "reconnecting over HTTPS".
-                assert "HTTPS" not in statuses[1]["message"]
+                assert "HTTPS" not in retry_status["message"]
                 assert streams[1].close.await_count == 1
             if committed in (None, "thinking", "reasoning"):
                 assert b"message_stop" in output
@@ -122,18 +126,16 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
                 assert b"message_stop" not in output
         finally:
             await adapter.close()
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
 
 
 def test_stall_log_reports_idle_event_types_without_payloads(caplog):
     async def run():
         async def chatter():
             yield NS(type="response.output_text.delta", delta="secret-user-text")
-            while True:
-                yield NS(type="response.in_progress", payload="secret-opaque-content")
-                await asyncio.sleep(.001)
-        stream = ResponsesSSEStream(AsyncMock(return_value=HTTPStream(chatter())),
-                                    first_event_timeout=.02, productive_idle_timeout=.03)
+            yield NS(type="response.in_progress", payload="secret-opaque-content")
+            await asyncio.Event().wait()
+        stream = ResponsesSSEStream(AsyncMock(return_value=HTTPStream(chatter())))
         try:
             with pytest.raises(ChatGPTEventTimeout):
                 async for _ in stream:
@@ -141,7 +143,7 @@ def test_stall_log_reports_idle_event_types_without_payloads(caplog):
         finally:
             await stream.close()
     with caplog.at_level("WARNING"):
-        asyncio.run(run())
+        virtual_clock.run_timing(run())
     assert "last_event='response.in_progress'" in caplog.text
     assert "idle_events={'response.in_progress':" in caplog.text
     assert "secret-user-text" not in caplog.text
@@ -168,14 +170,15 @@ def test_proxy_cancellation_is_not_logged_as_success(caplog):
 
 def test_cancellation_closes_http_without_replay():
     async def run():
-        http = HTTPStream(silent())
+        started = asyncio.Event()
+        http = HTTPStream(silent(started))
         stream = ResponsesSSEStream(AsyncMock(return_value=http))
         task = asyncio.create_task(anext(stream))
-        await asyncio.sleep(.005)
+        await started.wait()  # cancel while the HTTP receive is actually pending
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         await stream.close()
         await stream.close()
         assert http.close.await_count == 1
-    asyncio.run(run())
+    virtual_clock.run_timing(run())
