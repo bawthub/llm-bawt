@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import struct
 import time
 from pathlib import Path
@@ -62,6 +63,23 @@ def parse_deployment(output_tail: str | None) -> dict | None:
     return value if isinstance(value, dict) and value.get("schema") == DEPLOY_SCHEMA else None
 
 
+class StepError(RuntimeError):
+    """A deployer check whose message is built only from non-secret facts."""
+
+
+def safe_error(exc: BaseException) -> str:
+    """Describe a failure for receipts without echoing external text.
+
+    Docker and transport errors can quote the request they rejected, and a
+    create body carries environment values (TASK-1518 r1 B1). Keep only the
+    exception type and the Docker HTTP status; StepError messages are ours.
+    """
+    if isinstance(exc, StepError):
+        return str(exc)
+    match = re.match(r"Docker HTTP (\d{3})\b", str(exc))
+    return f"{type(exc).__name__}: Docker HTTP {match.group(1)}" if match else type(exc).__name__
+
+
 def release_from_labels(labels: dict | None) -> dict | None:
     labels = labels or {}
     if labels.get("com.bawthub.release.schema") != "1":
@@ -91,6 +109,7 @@ class ImageDeployer:
         self.api = api
         self._renderer_override = renderer
         self._config_hash = None
+        self._declared = None
         self.spec = snapshot["spec"]
         self.snapshot = snapshot
         self.job_id = job_id
@@ -111,7 +130,13 @@ class ImageDeployer:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 self._fail("another deploy/rollback holds this target", known=True)
-            self._perform()
+            try:
+                self._perform()
+            except (DeployFailed, TimeoutError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - never let external text reach a receipt
+                self._fail(f"{self.detail['phase']} failed ({safe_error(exc)})",
+                           known=not getattr(self.api, "side_effect_started", False))
         self.detail["phase"] = "done"
         return json.dumps(self.detail, sort_keys=True)
 
@@ -127,6 +152,14 @@ class ImageDeployer:
             # Matches Compose's own hash of the service at this ref, so a later
             # `compose up` sees no drift and does not recreate the target.
             body["Labels"][CONFIG_HASH_LABEL] = self._config_hash
+        if self._declared:
+            # r1 B2: clone_create_body drops values equal to the OLD image's
+            # defaults. A Compose-declared value stays explicit, so a changed
+            # NEW image default can never override it.
+            env = dict(e.partition("=")[::2] for e in body["Env"])
+            env.update(self._declared["env"])
+            body["Env"] = [f"{k}={v}" for k, v in sorted(env.items())]
+            body["Labels"].update(self._declared["labels"])
         return body
 
     def _renderer(self):
@@ -148,6 +181,7 @@ class ImageDeployer:
                        + ", ".join(result["drift"]) + "); run the config reconcile operation first; "
                        "nothing changed", known=True)
         self._config_hash = result["rendered_hash"]
+        self._declared = {"env": result["desired"]["env"], "labels": result["desired"]["labels"]}
 
     def _fail(self, message: str, *, known: bool):
         raise DeployFailed(message, self.detail, outcome_known=known)
@@ -218,7 +252,10 @@ class ImageDeployer:
         temp, prev = f"{self.name}-next-{job8}", f"{self.name}-prev-{job8}"
         self._phase("create")
         body = self._create_body(old, old_image, new_image, ref)
-        new_id = self.api.request("POST", "/containers/create?" + urlencode({"name": temp}), body=body)["Id"]
+        try:
+            new_id = self.api.request("POST", "/containers/create?" + urlencode({"name": temp}), body=body)["Id"]
+        except Exception as exc:  # noqa: BLE001 - production untouched; never echo the body
+            self._fail(f"create failed ({safe_error(exc)}); nothing changed", known=True)
         self.detail["deployed"] = {"container_id": new_id, "image_id": new_image["Id"], "image_ref": ref,
                                    "release": release_from_labels(new_image["Config"].get("Labels"))}
         self._phase("stop-old")
@@ -236,12 +273,12 @@ class ImageDeployer:
             self._phase("verify-release")
             self.detail["health"] = self._verify_release(new_id, expect_release)
         except Exception as exc:  # noqa: BLE001 - every failure must attempt restore
-            self._restore(old["Id"], new_id, prev, f"{type(exc).__name__}: {exc}")
+            self._restore(old["Id"], new_id, prev, safe_error(exc))
         self._phase("cleanup")
         try:
             self.api.request("DELETE", f"/containers/{old['Id']}?v=0")
         except Exception as exc:  # noqa: BLE001 - deployed and verified; report only
-            self.detail["warnings"].append(f"previous container {prev} not removed: {exc}")
+            self.detail["warnings"].append(f"previous container {prev} not removed: {safe_error(exc)}")
 
     def _restore(self, old_id, new_id, prev, reason):
         failed_phase = self.detail["phase"]
@@ -261,7 +298,7 @@ class ImageDeployer:
             self._wait_healthy(old_id)
             self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
         except Exception as exc:  # noqa: BLE001
-            self._fail(f"{failed_phase} failed ({reason}); RESTORE FAILED ({exc}); production state unknown", known=False)
+            self._fail(f"{failed_phase} failed ({reason}); RESTORE FAILED ({safe_error(exc)}); production state unknown", known=False)
         self.detail["restored"] = True
         self._fail(f"{failed_phase} failed ({reason}); previous container restored and healthy", known=True)
 
@@ -283,13 +320,13 @@ class ImageDeployer:
             state = self.api.request("GET", f"/containers/{container_id}/json")["State"]
             health = (state.get("Health") or {}).get("Status")
             if not state.get("Running"):
-                raise RuntimeError(f"container not running (status {state.get('Status')})")
+                raise StepError(f"container not running (status {state.get('Status')})")
             if health == "healthy":
                 return
             if health is None:
-                raise RuntimeError("container has no Docker healthcheck; cannot verify")
+                raise StepError("container has no Docker healthcheck; cannot verify")
             if health == "unhealthy" or self.clock() >= deadline:
-                raise RuntimeError(f"container health {health!r} within {self.spec['health_timeout_seconds']}s")
+                raise StepError(f"container health {health!r} within {self.spec['health_timeout_seconds']}s")
             self.sleep(2)
 
     def _verify_release(self, container_id, expect):
@@ -300,17 +337,17 @@ class ImageDeployer:
         code = self.api.request("GET", f"/exec/{exec_id}/json").get("ExitCode")
         stdout = demux_stdout(raw)
         if code != 0:
-            raise RuntimeError(f"in-container health request exited {code}")
+            raise StepError(f"in-container health request exited {code}")
         payload = json.loads(stdout)
         if payload.get("status") != "healthy":
-            raise RuntimeError(f"health status {payload.get('status')!r}")
+            raise StepError(f"health status {payload.get('status')!r}")
         baked = payload.get("release")
         if expect is not None:
             got = None if not isinstance(baked, dict) else {
                 "version": baked.get("version"), "source_sha": baked.get("sourceSha"),
                 "workflow_run_id": baked.get("workflowRunId")}
             if got != expect:
-                raise RuntimeError(f"running release {got} != expected {expect}")
+                raise StepError(f"running release {got} != expected {expect}")
         return {"status": payload.get("status"), "release": baked}
 
 

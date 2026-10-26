@@ -330,3 +330,38 @@ def test_worker_image_carries_the_modules_and_capability_label():
     for module in ("compose_render.py", "compose_config.py", "config_reconcile.py"):
         assert f"src/llm_bawt/ops/{module}" in dockerfile
     assert f'LABEL {WORKER_CAPABILITY_LABEL}="1"' in dockerfile
+
+
+# ── r1 B1: external error text never reaches a receipt ─────────────────────
+def _leaky(api, *, create=False, new_start=False, restore=False):
+    """Docker errors that quote a rendered value, as a rejected request can."""
+    original = api.request
+
+    def request(method, path, *, body=None, headers=None, raw=False):
+        parts = path.split("/")
+        if create and method == "POST" and path.startswith("/containers/create?") \
+                and any(e.startswith("XAI_API_KEY=") for e in body.get("Env", [])):
+            raise RuntimeError(f"Docker HTTP 400: invalid environment XAI_API_KEY={SECRET}")
+        if method == "POST" and path.endswith("/start") and parts[1] == "containers" \
+                and not api.containers.get(parts[2], {}).get("_render"):
+            if (new_start and parts[2] != api.old_id) or (restore and parts[2] == api.old_id):
+                raise RuntimeError(f"Docker HTTP 500: rejected {SECRET}")
+        return original(method, path, body=body, headers=headers, raw=raw)
+
+    api.request = request
+    return api
+
+
+@pytest.mark.parametrize("leak, state, text", [
+    ({"create": True}, "failed", "create failed (RuntimeError: Docker HTTP 400); nothing changed"),
+    ({"new_start": True}, "failed", "previous container restored and healthy"),
+    ({"new_start": True, "restore": True}, "lost", "RESTORE FAILED (RuntimeError: Docker HTTP 500)"),
+])
+def test_docker_error_quoting_a_rendered_value_never_reaches_the_receipt(tmp_path, leak, state, text):
+    api = ConfigDocker(compose=DRIFTED)
+    path, digest = _worker_request(tmp_path, snapshot(api))
+    _leaky(api, **leak)
+    assert worker_run(path, digest, api_factory=lambda _: api, sleep=lambda _: None) == 1
+    receipt = json.loads((path.parent / "receipt.json").read_text())
+    assert receipt["state"] == state and text in receipt["error"]
+    assert SECRET not in json.dumps(receipt)

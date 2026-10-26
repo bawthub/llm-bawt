@@ -869,3 +869,12 @@ def test_github_verifier_legacy_receipt_still_verifies_when_attempt_known():
 def test_github_verifier_fails_closed_without_token():
     with pytest.raises(ReleaseVerificationError, match="token not connected"):
         GitHubReleaseVerifier("", opener=FakeGitHub()).verify(SPEC, VERIFY_ARGS)
+
+
+def test_compose_declared_value_equal_to_old_image_default_survives_new_default(tmp_path):
+    # TASK-1518 r1 B2: the clone drops values the OLD image supplied; a value
+    # Compose declares must stay explicit when the NEW image's default changes.
+    api = FakeDocker(compose=compose_project(environment={"NODE_ENV": "production", "PATH": "/usr/bin"}))
+    api._new["Config"]["Env"] = ["PATH=/newbin"]
+    assert json.loads(_deployer(api, tmp_path).run())["phase"] == "done"
+    assert "PATH=/usr/bin" in api.create_bodies[0]["Env"]
