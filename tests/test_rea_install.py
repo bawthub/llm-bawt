@@ -120,6 +120,7 @@ def test_non_symlink_current_not_overwritten(fake_install):
     assert (tool.root / "current").read_text() == "unrelated"
 
 
+@pytest.mark.real_process(reason="runs the real bash launcher script")
 def test_launcher_absent_install_is_protocol_clean(tmp_path):
     if not shutil.which("node"):
         pytest.skip("launcher checks need Node")
@@ -131,6 +132,7 @@ def test_launcher_absent_install_is_protocol_clean(tmp_path):
     assert "no installed release" in result.stderr
 
 
+@pytest.mark.real_process(reason="runs the real bash launcher script")
 def test_launcher_preserves_arguments_and_exit_status(fake_install):
     if not shutil.which("node"):
         pytest.skip("launcher checks need Node")
@@ -166,6 +168,7 @@ def test_old_release_can_be_reselected_without_mutation(fake_install):
     ("23.0.0", False), ("24.10.9", False), ("24.11.0", True),
     ("24.21.0", True), ("25.0.0", False), ("26.0.0", True),
 ])
+@pytest.mark.real_process(reason="the installer's engine check runs a real node binary")
 def test_engine_boundaries(version, accepted):
     if not shutil.which("node"):
         pytest.skip("engine checks need Node")

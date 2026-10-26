@@ -16,6 +16,8 @@ import pytest
 from scripts import test_snapshot as snap
 
 SCRIPT = Path(snap.__file__).resolve()
+# The gate's contract is real git plumbing on a scratch repo; a fake would test nothing.
+REAL_GIT = pytest.mark.real_process(reason="drives real git (and the runner) on a scratch repo")
 
 
 def sha(data: bytes) -> str:
@@ -116,6 +118,7 @@ def x2_and_new_file(repo: Path) -> None:
     (repo / "new.py").write_text("new = 1\n")
 
 
+@REAL_GIT
 def test_receipt_diff_sha_equals_git_diff_of_the_committed_change(repo, root, tmp_path):
     patch = make_patch(repo, tmp_path, "approved.patch", x2_and_new_file)
     base = git(repo, "rev-parse", "HEAD").strip()
@@ -137,6 +140,7 @@ def test_receipt_diff_sha_equals_git_diff_of_the_committed_change(repo, root, tm
     assert_no_snapshot_left(repo, root)
 
 
+@REAL_GIT
 def test_an_added_mutant_patch_turns_the_gate_red(repo, root, tmp_path):
     approved = make_patch(repo, tmp_path, "approved.patch", x2)
     git(repo, "apply", "--index", str(approved))
@@ -152,6 +156,7 @@ def test_an_added_mutant_patch_turns_the_gate_red(repo, root, tmp_path):
     assert_no_snapshot_left(repo, root)
 
 
+@REAL_GIT
 def test_a_rejected_hunk_fails_closed_without_running_the_suite(repo, root, tmp_path):
     patch = make_patch(repo, tmp_path, "stale.patch", x2)
     (repo / "app.py").write_text("a = 1\nx = 9\nz = 1\n")
@@ -196,6 +201,7 @@ def rows_provenance(repo: Path, tmp_path: Path, author: str, paths: list[str]) -
     return out
 
 
+@REAL_GIT
 def test_canonical_tree_index_and_refs_are_byte_identical_across_runs(repo, root, tmp_path):
     dirty_canonical(repo)
     before = canonical_state(repo)
@@ -223,6 +229,7 @@ def make_patch_from_copy(repo: Path, tmp_path: Path) -> Path:
     return patch
 
 
+@REAL_GIT
 def test_paths_carries_untracked_and_deleted_files_into_the_snapshot(repo, root, tmp_path):
     x2(repo)
     (repo / "new.py").write_text("new = 1\n")
@@ -242,6 +249,7 @@ def test_paths_carries_untracked_and_deleted_files_into_the_snapshot(repo, root,
     assert set(receipt["ownership"]) == {"app.py", "new.py", "old.py"}
 
 
+@REAL_GIT
 def test_paths_refuses_another_bots_edit_without_creating_a_snapshot(repo, root, tmp_path):
     x2(repo)
     provenance = tmp_path / "provenance.json"
@@ -256,6 +264,7 @@ def test_paths_refuses_another_bots_edit_without_creating_a_snapshot(repo, root,
     assert receipt["patches"] == [] and not (root / "wt").exists()
 
 
+@REAL_GIT
 def test_a_line_attribution_report_is_never_ownership_proof(repo, root, tmp_path):
     """Loopy r3 B1: recon credited AUTHOR with identical text in a different
     function. Only an exact byte chain proves ownership; a report is ignored."""
@@ -280,6 +289,7 @@ def test_a_line_attribution_report_is_never_ownership_proof(repo, root, tmp_path
     assert "current bytes were not produced by any recorded snark edit" in receipt["error"]
 
 
+@REAL_GIT
 def test_a_write_after_the_ownership_check_never_reaches_the_patch(repo, root, tmp_path, monkeypatch):
     """Loopy r3 B2: bytes written between the proof and the patch build stay out."""
     x2(repo)
@@ -299,6 +309,7 @@ def test_a_write_after_the_ownership_check_never_reaches_the_patch(repo, root, t
     assert code == 0 and "+x = 2" in pinned and "foreign" not in pinned, receipt
 
 
+@REAL_GIT
 def test_paths_refuses_a_symlink(repo, root, tmp_path):
     (repo / "link.py").symlink_to("app.py")
     provenance = rows_provenance(repo, tmp_path, "snark", ["link.py"])
@@ -307,6 +318,7 @@ def test_paths_refuses_a_symlink(repo, root, tmp_path):
     assert (code, receipt["status"]) == (2, "refused") and "symlink" in receipt["error"]
 
 
+@REAL_GIT
 def test_paths_without_recorded_edits_is_refused(repo, root, tmp_path):
     x2(repo)
     provenance = tmp_path / "provenance.json"
@@ -320,6 +332,7 @@ def test_paths_without_recorded_edits_is_refused(repo, root, tmp_path):
     (["--base", "HEAD~1"], "BASE must be its HEAD"),
     (["--author", ""], "PATHS requires AUTHOR"),
 ])
+@REAL_GIT
 def test_paths_preconditions(repo, root, extra, message):
     x2(repo)
     git(repo, "commit", "-qam", "second")
@@ -332,6 +345,7 @@ def test_paths_preconditions(repo, root, extra, message):
     ("../escape.py", "repo-relative"), ("/etc/passwd", "repo-relative"),
     ("pkg", "is a directory"), ("old.py", "unchanged vs HEAD"),
 ])
+@REAL_GIT
 def test_paths_must_name_changed_files_inside_the_repo(repo, root, path, message):
     (repo / "pkg").mkdir()
     (repo / "pkg" / "m.py").write_text("m = 1\n")
@@ -339,11 +353,13 @@ def test_paths_must_name_changed_files_inside_the_repo(repo, root, path, message
     assert (code, receipt["status"]) == (2, "refused") and message in receipt["error"]
 
 
+@REAL_GIT
 def test_snapshot_root_inside_the_repo_is_refused_before_writing_anything(repo):
     code = snap.main(["--repo", str(repo), "--root", str(repo / "snapshots"), "--patch", "x"])
     assert code == snap.EXIT_REFUSED and not (repo / "snapshots").exists()
 
 
+@REAL_GIT
 def test_a_stale_snapshot_from_a_dead_process_is_swept(repo, root, tmp_path):
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
@@ -529,6 +545,7 @@ def test_a_finished_suite_leaves_no_descendant_behind(tmp_path):
     assert not live(child), f"descendant {child} outlived the finished suite"
 
 
+@REAL_GIT
 def test_a_patch_that_changes_the_runner_is_flagged(repo, root, tmp_path):
     patch = make_patch(repo, tmp_path, "runner.patch",
                        lambda r: (x2(r), (r / "Makefile").write_text("all:\n")))
@@ -562,6 +579,7 @@ def tip(repo) -> str:
     return git(repo, "rev-parse", "HEAD").strip()
 
 
+@REAL_GIT
 def test_a_ship_reads_the_newest_unpatched_gate_receipt_for_the_exact_tip(repo, root, tmp_path, capsys, tip):
     code, output = gate_receipt(repo, root, "HEAD", capsys)
     assert code == snap.EXIT_REFUSED and f"none for {tip}" in output
@@ -587,6 +605,7 @@ def test_a_ship_reads_the_newest_unpatched_gate_receipt_for_the_exact_tip(repo, 
     assert code == snap.EXIT_FAILED
 
 
+@REAL_GIT
 def test_a_receipt_from_the_stress_era_runner_still_reads(repo, root, capsys, tip):
     # Receipts written before the stress step was dropped carry a stress_base key.
     code, receipt = run_cli(repo, root, "--suite", "gate", suite=check("pass"))
@@ -597,6 +616,7 @@ def test_a_receipt_from_the_stress_era_runner_still_reads(repo, root, capsys, ti
     assert code == snap.EXIT_PASSED and "PASSED" in output
 
 
+@REAL_GIT
 def test_the_gate_no_longer_takes_a_stress_base(repo, root):
     with pytest.raises(SystemExit):
         snap.parse_args(["--repo", str(repo), "--root", str(root), "--suite", "gate", "--stress-base", "HEAD"])

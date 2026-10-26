@@ -344,6 +344,7 @@ def test_real_proc_table_reads_this_process(tmp_path):
     assert not table.is_alive(77, 4242)
 
 
+@pytest.mark.real_process(reason="reads the real /proc table, so it needs a real grandchild process")
 def test_real_proc_table_finds_a_live_grandchild():
     import os
     import subprocess

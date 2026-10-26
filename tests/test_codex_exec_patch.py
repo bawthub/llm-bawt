@@ -57,6 +57,7 @@ async def test_line_over_the_hard_cap_fails_closed():
 
 
 @pytest.mark.asyncio
+@pytest.mark.real_process(reason="runs a fake codex executable to stream a real multi-MiB pipe line")
 async def test_patched_run_streams_a_multi_mib_event_line(tmp_path, monkeypatch):
     """End to end through the patched ``CodexExec.run`` with a real child."""
     big = '{"type":"item.completed","data":"' + "A" * (3 * 1024 * 1024) + '"}'

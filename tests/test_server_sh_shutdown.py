@@ -163,6 +163,7 @@ def stack(tmp_path):
                 pass
 
 
+@pytest.mark.real_process(reason="checks real signal dispositions of a launched child process")
 def test_launcher_resets_signals_the_suite_inherited_as_ignored():
     """A parent that ignores INT/QUIT/HUP (``nohup … &``) still gets a trappable child."""
     probe = (

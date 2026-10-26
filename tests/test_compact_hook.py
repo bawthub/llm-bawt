@@ -78,6 +78,7 @@ def registry_server():
         server.server_close()
 
 
+@pytest.mark.real_process(reason="runs the real command hook script as Claude Code would")
 def test_command_hook_fetches_each_time_and_skips_custom_and_outage(registry_server):
     url, state = registry_server
     command = _ensure_compact_hook({})["hooks"]["PreCompact"][0]["hooks"][0]["command"]
