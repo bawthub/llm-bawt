@@ -147,6 +147,18 @@ def test_d4_flags_a_silent_wait_or_join_but_not_a_checked_one():
              (11, ".join(timeout) without an is_alive() check after it")]
 
 
+def test_d4_knows_a_barrier_by_its_constructor():
+    assert _waits("""
+        import threading
+        start = threading.Barrier(2)
+        def test_x(self, ready):
+            start.wait(timeout=10)
+            self.gate = Barrier(3)
+            self.gate.wait(10)
+            ready.wait(10)
+    """) == [(8, ".wait(timeout) result ignored; a timeout passes silently")]
+
+
 def test_d4_honours_a_timing_ok_reason():
     assert _waits("""
         def test_x(event):

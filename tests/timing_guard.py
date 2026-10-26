@@ -283,6 +283,18 @@ def _thread_wait(node: ast.AST, awaited: set[int]) -> ast.Call | None:
     return node
 
 
+def _barrier_names(tree: ast.AST) -> set[str]:
+    """Names bound to ``Barrier(...)``: its wait raises BrokenBarrierError on
+    timeout, so its result carries nothing to check."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)) == "Barrier":
+                names.update(ast.unparse(target) for target in node.targets)
+    return names
+
+
 def _checks_alive(statements: list[ast.stmt], receiver: str) -> bool:
     return any(isinstance(node, ast.Attribute) and node.attr == "is_alive"
                and ast.unparse(node.value) == receiver
@@ -298,6 +310,7 @@ def scan_thread_waits(source: str, path: str) -> list[Finding]:
     lines = source.splitlines()
     tree = ast.parse(source)
     awaited = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)}
+    barriers = _barrier_names(tree)
     findings: set[Finding] = set()
 
     def exempt(line: int) -> bool:
@@ -324,9 +337,10 @@ def scan_thread_waits(source: str, path: str) -> list[Finding]:
                 call = _thread_wait(stmt.value, awaited)
                 if call is None or not _has_timeout(call):
                     continue
-                # Barrier.wait raises on timeout; a name is the only static hint.
-                if call.func.attr == "wait" and "barrier" not in ast.unparse(  # type: ignore[union-attr]
-                        call.func.value).lower():  # type: ignore[union-attr]
+                # Barrier.wait raises on timeout: known by its constructor or its name.
+                receiver = ast.unparse(call.func.value)  # type: ignore[union-attr]
+                if (call.func.attr == "wait"  # type: ignore[union-attr]
+                        and receiver not in barriers and "barrier" not in receiver.lower()):
                     add(stmt.lineno, ".wait(timeout) result ignored; a timeout passes silently")
                 elif call.func.attr == "join" and not _checks_alive(  # type: ignore[union-attr]
                         body[index + 1:], ast.unparse(call.func.value)):  # type: ignore[union-attr]
