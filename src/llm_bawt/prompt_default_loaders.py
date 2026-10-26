@@ -85,30 +85,6 @@ def load_agents_docs() -> str:
     return AGENTS_DOCS_PROMPT
 
 
-def load_tasks_next_brief_evidence_policy() -> str:
-    from .agent_backends.prompts import NEXT_BRIEF_EVIDENCE_POLICY
-
-    return NEXT_BRIEF_EVIDENCE_POLICY
-
-
-def load_tasks_next_brief_system() -> str:
-    from .agent_backends.prompts import NEXT_BRIEF_SYSTEM
-
-    return NEXT_BRIEF_SYSTEM
-
-
-def load_tasks_next_brief_instructions() -> str:
-    from .agent_backends.prompts import NEXT_BRIEF_INSTRUCTIONS
-
-    return NEXT_BRIEF_INSTRUCTIONS
-
-
-def load_tasks_next_action_create_task() -> str:
-    from .agent_backends.prompts import NEXT_ACTION_CREATE_TASK
-
-    return NEXT_ACTION_CREATE_TASK
-
-
 def load_self_recap_system() -> str:
     from .mcp_server.recap_prompt import RECAP_SYSTEM_PROMPT
 

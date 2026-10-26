@@ -53,10 +53,6 @@ from .prompt_default_loaders import (
     load_recall_synthesis_system,
     load_self_recap_system,
     load_setup_first_agent_prompt,
-    load_tasks_next_action_create_task,
-    load_tasks_next_brief_evidence_policy,
-    load_tasks_next_brief_instructions,
-    load_tasks_next_brief_system,
     load_working_memory_notice,
     load_working_memory_scheduled_note,
     load_working_memory_section,
@@ -372,65 +368,6 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="agent_execution",
         required_vars=("origin", "task_section"),
         loader=load_agents_docs,
-    ),
-    "tasks.next_brief.evidence_policy": PromptDefinition(
-        key="tasks.next_brief.evidence_policy",
-        title="What's Next: evidence policy",
-        category="tasks",
-        required_vars=(),
-        loader=load_tasks_next_brief_evidence_policy,
-        metadata={
-            "notes": (
-                "Sent with the evidence for BawtHub's What's Next brief (TASK-1073). "
-                "BawtHub resolves it at call time and holds no copy: when it can't "
-                "be resolved, the brief fails visibly instead of being generated."
-            ),
-        },
-    ),
-    "tasks.next_brief.system": PromptDefinition(
-        key="tasks.next_brief.system",
-        title="What's Next: brief system prompt",
-        category="tasks",
-        required_vars=(),
-        loader=load_tasks_next_brief_system,
-        metadata={
-            "notes": (
-                "System prompt for BawtHub's What's Next brief (TASK-1073). BawtHub "
-                "reads it at call time and holds no copy: when it can't be resolved, "
-                "no brief is generated."
-            ),
-        },
-    ),
-    "tasks.next_brief.instructions": PromptDefinition(
-        key="tasks.next_brief.instructions",
-        title="What's Next: brief instructions",
-        category="tasks",
-        required_vars=(),
-        loader=load_tasks_next_brief_instructions,
-        metadata={
-            "notes": (
-                "How the What's Next model picks next moves and the JSON it returns "
-                "(TASK-1073). BawtHub reads the body raw and holds no copy: when it "
-                "can't be resolved, no brief is generated. Its literal JSON braces "
-                "are text, not placeholders; llm-bawt never renders it. BawtHub "
-                "validates every pick against its own records."
-            ),
-        },
-    ),
-    "tasks.next_action.create_task": PromptDefinition(
-        key="tasks.next_action.create_task",
-        title="What's Next: create task from a conversation",
-        category="tasks",
-        required_vars=("task_id", "title", "why", "next_step"),
-        loader=load_tasks_next_action_create_task,
-        metadata={
-            "notes": (
-                "Sent into an untracked conversation when the user creates a task "
-                "from it on What's Next (TASK-1073). BawtHub fills the variables and "
-                "refuses a body missing any of them; when it can't be resolved, "
-                "nothing is created."
-            ),
-        },
     ),
     "self_recap.system": PromptDefinition(
         key="self_recap.system",

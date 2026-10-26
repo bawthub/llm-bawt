@@ -110,48 +110,10 @@ def test_agents_docs_seed_keeps_visual_review_distinct_from_coordinator_closure(
     assert "Only humans transition tasks to `COMPLETED`" not in AGENTS_DOCS_PROMPT
 
 
-def test_next_brief_evidence_policy_is_registered_with_its_default() -> None:
+def test_deprecated_next_page_prompts_are_not_registered() -> None:
     resolver = PromptResolver()
-    definition = resolver.definition_for("tasks.next_brief.evidence_policy")
-
-    assert definition is not None
-    assert definition.required_vars == ()
-    body = definition.default_body()
-    assert extract_placeholders(body) == []
-    assert 'treat "unknown" as unknown' in body
-    assert "not a verified result" in body
-    assert resolver.render(key="tasks.next_brief.evidence_policy", variables={}) == body
-
-
-def test_next_brief_prompts_are_registered_raw_and_general_use() -> None:
-    resolver = PromptResolver()
-    for key in ("tasks.next_brief.system", "tasks.next_brief.instructions"):
-        definition = resolver.definition_for(key)
-        assert definition is not None, key
-        assert definition.required_vars == ()
-        assert definition.category == "tasks"
-        assert definition.default_body().strip()
-    instructions = resolver.definition_for("tasks.next_brief.instructions").default_body()
-    # The gates BawtHub's parser also enforces, stated to the model.
-    assert "REVIEW tasks are never picks" in instructions
-    assert "BLOCKED tasks are never picks" in instructions
-    assert "no formal dependencies" in instructions
-    assert "Missing release/runtime evidence means unknown" in instructions
-    assert "excludedActions" in instructions
-    assert '"action":"create_task"' in instructions
-    assert "Nick" not in instructions
-
-
-def test_create_task_handoff_declares_exactly_the_variables_bawthub_fills() -> None:
-    resolver = PromptResolver()
-    definition = resolver.definition_for("tasks.next_action.create_task")
-
-    assert definition is not None
-    assert definition.required_vars == ("task_id", "title", "why", "next_step")
-    body = definition.default_body()
-    assert sorted(extract_placeholders(body)) == ["next_step", "task_id", "title", "why"]
-    assert resolver.validate(key="tasks.next_action.create_task", body=body)["valid"]
-    assert "never authorizes deployment, service restart" in body
+    assert not any(key.startswith("tasks.next_brief.") for key in resolver.definitions())
+    assert resolver.definition_for("tasks.next_action.create_task") is None
 
 
 def test_prompt_store_seed_defaults_is_idempotent() -> None:
