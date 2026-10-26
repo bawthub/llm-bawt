@@ -23,12 +23,14 @@ from urllib.parse import quote, urlencode
 # app/tests import it as a package; the worker image runs this file directly
 # (see __main__). Single source of truth for IMAGE_ACTIONS is image_deploy.
 if __package__:
+    from .config_reconcile import ACTION as CONFIG_ACTION, ConfigReconciler
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
 else:  # pragma: no cover - standalone worker image
     # `python3 -I` drops the script directory from sys.path; re-add ONLY this
     # file's own image-owned, read-only directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from config_reconcile import ACTION as CONFIG_ACTION, ConfigReconciler
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
 
@@ -66,6 +68,23 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(self.timeout)
         self.sock.connect("/var/run/docker.sock")
+
+
+class _AttachStream:
+    def __init__(self, conn, response):
+        self._conn, self._response = conn, response
+
+    def read(self, limit: int) -> bytes:
+        data = bytearray()
+        while len(data) < limit:
+            chunk = self._response.read(min(65536, limit - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        return bytes(data)
+
+    def close(self) -> None:
+        self._conn.close()
 
 
 class DockerAPI:
@@ -116,6 +135,25 @@ class DockerAPI:
             return json.loads(tail) if tail.strip() else None
         finally:
             conn.close()
+
+    def attach_stream(self, container_id: str):
+        """Attach to a created container's stdout/stderr BEFORE it starts.
+
+        Returns an object with ``read(limit)``/``close()`` over Docker's raw
+        multiplexed stream, which ends when the container exits (TASK-1518
+        Compose renderer: its log driver is ``none``, so this is the only copy).
+        """
+        conn = UnixHTTPConnection("localhost", timeout=self.timeout)
+        try:
+            conn.request("POST", f"/containers/{quote(container_id, safe='')}/attach?"
+                         + urlencode({"stream": 1, "stdout": 1, "stderr": 1}))
+            response = conn.getresponse()
+            if response.status >= 300:
+                raise RuntimeError(f"Docker HTTP {response.status} (attach)")
+        except BaseException:
+            conn.close()
+            raise
+        return _AttachStream(conn, response)
 
     def execute(self, spec: dict, args: dict) -> str:
         name, filters = target_selector(spec, args)
@@ -222,7 +260,10 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
         old_handler = signal.signal(signal.SIGALRM, deadline)
         signal.setitimer(signal.ITIMER_REAL, execution["timeout_seconds"])
         try:
-            if snapshot["spec"]["action"] == ROUTING_ACTION:
+            if snapshot["spec"]["action"] == CONFIG_ACTION:
+                output = ConfigReconciler(api, snapshot, job_id,
+                                          lock_root=request_path.parent.parent / ".target-locks").run()
+            elif snapshot["spec"]["action"] == ROUTING_ACTION:
                 output = RoutingReconciler(api, snapshot, job_id,
                                            lock_root=request_path.parent.parent / ".target-locks").run()
             elif snapshot["spec"]["action"] in IMAGE_ACTIONS:

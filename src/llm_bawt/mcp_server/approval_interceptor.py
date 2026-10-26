@@ -357,6 +357,12 @@ class ApprovalAwareFastMCP(FastMCP):
                     "Verifies the hostname-routed health report; restores the previous container "
                     "if verification fails. Changed target/configuration cancels execution."
                 )
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("config"):
+                from ..ops.config_reconcile import approval_text  # TASK-1518
+
+                approval_prompt = approval_text(
+                    operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
+                )
             row, created = store.record_mcp_request(
                 request_id=request_id,
                 tool_use_id=call_context.tool_use_id,

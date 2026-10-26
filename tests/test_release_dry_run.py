@@ -8,7 +8,7 @@ from sqlmodel import Session, create_engine
 
 from llm_bawt.approval_models import REQ_APPROVED, ToolApprovalRequest
 from llm_bawt.approval_policies import ToolApprovalPolicyStore
-from llm_bawt.ops.executor import DispatchResult, Executor, ReconcileResult
+from llm_bawt.ops.executor import ConfigCheckError, DispatchResult, Executor, ReconcileResult
 from llm_bawt.ops.image_deploy import DEPLOY_SCHEMA
 from llm_bawt.ops.release import ReleaseVerifier
 from llm_bawt.ops.release_executor import ReleaseExecutor
@@ -70,6 +70,8 @@ class FakeDocker(Executor):
     def __init__(self):
         self.dispatches = []
         self.current = OLD
+        self.config_checks = []
+        self.config_error = None
 
     def kind(self):
         return "docker"
@@ -85,6 +87,11 @@ class FakeDocker(Executor):
 
     def inspect_target_health(self, spec):
         return "healthy"
+
+    def config_check(self, spec, image_ref=None):
+        self.config_checks.append(image_ref)
+        if self.config_error:
+            raise self.config_error
 
     def dispatch(self, **kwargs):
         self.dispatches.append(kwargs)
@@ -179,6 +186,8 @@ def test_one_approval_reconciles_build_and_exactly_one_deploy_without_external_i
     assert releases.get(row.id).state == "deployed"
     assert len(github.dispatches) == len(docker.dispatches) == 1
     assert docker.current == NEW
+    # TASK-1518: approval checked config at the running ref; the deploy at the built ref.
+    assert docker.config_checks[0] is None and f"{IMAGE_REPO}@{DIGEST}" in docker.config_checks
     child = store.get_job(releases.get(row.id).deploy_job_id)
     assert json.loads(child.args_json) == {"release_run_id": row.id}
     assert child.approval_request_id == child_approval_id
@@ -202,6 +211,7 @@ def test_one_approval_reconciles_build_and_exactly_one_deploy_without_external_i
     ("operation", "deploy_operation_changed"),
     ("missing_approval", "release_authority_invalid"),
     ("tampered_approval", "release_authority_invalid"),
+    ("config_drift", "deploy_unverifiable"),
 ])
 def test_conditional_deploy_refuses_changed_or_unapproved_release(change, expected):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -237,6 +247,9 @@ def test_conditional_deploy_refuses_changed_or_unapproved_release(change, expect
         docker.current = "sha256:" + "c" * 64
     elif change == "operation":
         store.update_operation("bawthub.deploy-prod-image", {"title": "Changed deploy revision"})
+    elif change == "config_drift":
+        # TASK-1518: drift that appears after the release approval refuses the deploy.
+        docker.config_error = ConfigCheckError("config_drift", "config_drift: (env:+BAWTHUB_AUTH_SESSIONS)")
     elif change == "tampered_approval":
         with Session(engine) as session:
             request = session.get(ToolApprovalRequest, approval_id)
@@ -248,7 +261,35 @@ def test_conditional_deploy_refuses_changed_or_unapproved_release(change, expect
         result = ops.get_job_status(parent["id"])
         if result["terminal"]:
             break
+    if change == "config_drift":
+        # Stays build_complete and retries within the prep window (an operator may
+        # reconcile), then declines.
+        row = releases.get(parent["release_id"])
+        assert row.state == "build_complete" and row.error_code == "deploy_unverifiable"
+        assert "env:+BAWTHUB_AUTH_SESSIONS" in row.error_text
+        time[0] += timedelta(minutes=31)
+        ops.get_job_status(parent["id"])
     row = releases.get(parent["release_id"])
     assert row.state == "deploy_declined" and row.error_code == expected
     assert len(github.dispatches) == 1 and docker.dispatches == []
     assert row.deploy_job_id is None and row.deploy_approval_request_id is None
+
+
+def test_release_approval_refuses_when_the_deploy_would_refuse_config_drift():
+    from llm_bawt.ops.service import OpsDispatchError
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    store = OpsStore(None, engine=engine)
+    releases = ReleaseStore(None, engine=engine)
+    for slug in ("bawthub.release-prod", "bawthub.deploy-prod-image"):
+        store.create_operation({**next(row for row in SEEDS if row["slug"] == slug), "enabled": True})
+    docker, github = FakeDocker(), FakeGitHub(releases)
+    docker.config_error = ConfigCheckError("config_drift", "config_drift: (env:+BAWTHUB_AUTH_SESSIONS)")
+    ops = OpsService(store, executor=docker, release_verifier=FakeVerifier(), release_store=releases)
+    coordinator = ReleaseCoordinator(releases=releases, ops=ops, gateway=github,
+                                     approvals=lambda: ToolApprovalPolicyStore(None, engine=engine))
+    ops.register_executor(ReleaseExecutor(coordinator))
+    with pytest.raises(OpsDispatchError) as caught:
+        ops.prepare_invocation("bawthub.release-prod", {"release_task": "TASK-1518"})
+    assert caught.value.code == "config_drift" and "BAWTHUB_AUTH_SESSIONS" in str(caught.value)
+    assert github.dispatches == [] and docker.dispatches == []

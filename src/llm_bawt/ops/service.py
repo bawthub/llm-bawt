@@ -8,7 +8,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .executor import DockerExecutor, Executor, ExecutorError, validate_spec
+from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
+from .executor import ConfigCheckError, DockerExecutor, Executor, ExecutorError, validate_spec
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
 from .routing_reconcile import ACTION as ROUTING_ACTION, valid_routing_binding
@@ -124,6 +125,17 @@ class OpsService:
                 snapshot["routing"] = executor.routing_approval(spec)
             except (ValueError, ExecutorError) as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
+        elif spec["action"] == CONFIG_ACTION:
+            # TASK-1518: the approver sees drift NAMES, mounts and closed-enum
+            # values; the worker re-renders and compares under the target lock.
+            if merged:
+                raise OpsDispatchError("args_invalid", "config reconciliation accepts no arguments")
+            try:
+                snapshot["config"] = executor.config_approval(spec)
+            except ConfigCheckError as exc:
+                raise OpsDispatchError(exc.code, str(exc)) from exc
+            except (ValueError, ExecutorError) as exc:
+                raise OpsDispatchError("target_unavailable", str(exc)) from exc
         elif spec["action"] in IMAGE_ACTIONS:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.
@@ -133,6 +145,15 @@ class OpsService:
                                                       verifier=self._release_verifier))
             except (ReleaseVerificationError, ExecutorError) as exc:
                 raise OpsDispatchError("release_unverified", str(exc)) from exc
+            if spec["action"] == DEPLOY_ACTION:
+                # TASK-1518: never ask a human to approve a deploy that would
+                # clone a stale configuration; the worker re-checks under lock.
+                try:
+                    executor.config_check(spec, snapshot["release"]["image_ref"])
+                except ConfigCheckError as exc:
+                    raise OpsDispatchError(exc.code, str(exc)) from exc
+                except ExecutorError as exc:
+                    raise OpsDispatchError("target_unavailable", str(exc)) from exc
         else:
             # TASK-1002: never ask a human to approve a container this
             # executor's Docker daemon does not have.
@@ -140,6 +161,8 @@ class OpsService:
                 executor.check_target(spec, merged)
                 if is_release_spec(spec):
                     snapshot["release_source"] = executor.approval_source(spec, merged)
+            except ConfigCheckError as exc:  # TASK-1518: the release's deploy would refuse
+                raise OpsDispatchError(exc.code, str(exc)) from exc
             except ExecutorError as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
         try:
@@ -177,6 +200,8 @@ class OpsService:
                 raise ValueError("snapshot quiesce binding mismatch")
             if not valid_routing_binding(detached):
                 raise ValueError("snapshot routing binding mismatch")
+            if not valid_config_binding(detached):
+                raise ValueError("snapshot config binding mismatch")
             if not binding_matches_args(detached):
                 raise ValueError("snapshot release/rollback binding mismatch")
             if is_release_spec(detached["spec"]):

@@ -61,6 +61,19 @@ approval-gated operation. Approved job `389fd3f7eb2742a8944f82158b51154b`
 completed the repair and both hostname-routed health endpoints returned HTTP 200.
 A catalog row alone does not upgrade an immutable worker on other installations.
 
+## Compose configuration drift guard and reconcile (TASK-1518; not activated)
+
+See [OPS_CONFIG_RECONCILE.md](OPS_CONFIG_RECONCILE.md). `deploy_image` specs
+require `compose_config`; a deploy refuses with `config_drift` (names only) when
+the running target differs from its rendered Compose service, at approval and
+again in the worker under the target lock. `bawthub.reconcile-prod-config`
+(disabled seed, no arguments) recreates the target from its Compose service at
+the same pinned image. Both need a worker image labelled
+`llm-bawt.ops.config-reconcile="1"`; without it they refuse with
+`config_reconcile_unavailable`. After the app restarts on this code, production
+deploys are refused until the worker is rebuilt and the live deploy row gains
+`compose_config` (activation order in that doc).
+
 ## Quiesce start fence: worker rollout (TASK-1233)
 
 A quiesce job dispatches with `fence.start_not_after`, and the worker refuses a

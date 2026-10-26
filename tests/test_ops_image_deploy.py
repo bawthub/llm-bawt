@@ -23,8 +23,9 @@ from sqlmodel import Session, create_engine
 from llm_bawt.ops.release_models import RELEASE_AWAITING_DEPLOY_APPROVAL, ReleaseRun
 
 from llm_bawt.ops import OpsDispatchError, OpsService, OpsStore
-from llm_bawt.ops.executor import (DispatchResult, DockerExecutor, Executor, ExecutorError, ReconcileResult,
-                                   validate_spec)
+from llm_bawt.ops.compose_render import RENDER_LABEL
+from llm_bawt.ops.executor import (ConfigCheckError, DispatchResult, DockerExecutor, Executor, ExecutorError,
+                                   ReconcileResult, validate_spec)
 from llm_bawt.ops.image_deploy import (DEPLOY_SCHEMA, DeployFailed, ImageDeployer,
                                        clone_create_body, parse_deployment)
 from llm_bawt.ops.release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
@@ -44,6 +45,44 @@ SPEC = json.loads(SEED["bawthub.deploy-prod-image"]["command_script"])
 VERIFY_ARGS = {"workflow_run_id": "123456", "digest": DIGEST, "source_sha": SOURCE, "version": "1.4.2"}
 RELEASE_ID = "e" * 32
 ARGS = {"release_run_id": RELEASE_ID}
+# TASK-1518: the target's Compose project, as its own labels record it.
+PROJECT_DIR = "/srv/compose/bawthub"
+COMPOSE_FILES = [f"{PROJECT_DIR}/{name}" for name in SPEC["compose_config"]["compose_files"]]
+RENDERER = SPEC["compose_config"]["renderer_image"]
+RENDERER_ID = "sha256:" + "9" * 64
+CONFIG_HASH = "c0" * 32
+TOKEN_TARGET = "/run/bawthub-service-token/token"
+IMAGE_VARIABLE = "${" + SPEC["compose_config"]["image_variable"] + "}"
+
+
+def compose_project(**service):
+    """What ``docker compose config --format json frontend-prod`` prints for the
+    fixture target: no drift by default. Keys mirror real Compose output, and
+    the image is interpolated from the renderer's one injected variable."""
+    body = {"command": None, "entrypoint": None, "environment": {"NODE_ENV": "production"},
+            "image": IMAGE_VARIABLE, "labels": {}, "networks": {"default": None},
+            "pull_policy": "missing", "restart": "unless-stopped",
+            "volumes": [{"type": "bind", "source": f"{PROJECT_DIR}/token", "target": TOKEN_TARGET,
+                         "read_only": True, "bind": {"create_host_path": True}}]}
+    body.update(service)
+    return {"name": "bawthub", "services": {"frontend-prod": body},
+            "networks": {"default": {"name": "bawthub_default"}}}
+
+
+def _frame(stream, text):
+    payload = text.encode()
+    return struct.pack(">BxxxI", stream, len(payload)) + payload
+
+
+class _Stream:
+    def __init__(self, raw):
+        self.raw, self.closed = raw, False
+
+    def read(self, limit):
+        return self.raw[:limit]
+
+    def close(self):
+        self.closed = True
 
 
 def _labels(source=SOURCE, version="1.4.2", run="123456"):
@@ -63,17 +102,21 @@ class FakeDocker:
     """Just enough of the Engine API for ImageDeployer, keyed like dockerd."""
 
     def __init__(self, *, new_health="healthy", new_labels=None, repo_digests=None,
-                 local_new=True, old_restart_fails=False):
+                 local_new=True, old_restart_fails=False, compose=None, render_status=0, render_stderr=""):
         self.side_effect_started = False
         self._seq = 13  # created container ids: "e"*64, "f"*64, ...
         self.calls: list[tuple[str, str]] = []
         self.create_bodies: list[dict] = []
+        self.render_bodies: list[dict] = []
+        self.compose = compose_project() if compose is None else compose
+        self.render_status, self.render_stderr = render_status, render_stderr
         self.old_restart_fails = old_restart_fails
         self.images = {OLD_ID: {"Id": OLD_ID, "RepoDigests": [], "_health": "healthy",
                                 "_release": None,
                                 "Config": {"Labels": {"org.opencontainers.image.title": "old"},
                                            "Env": ["PATH=/usr/bin"], "Cmd": ["node", "server"],
-                                           "Healthcheck": {"Test": ["CMD", "curl"]}}}}
+                                           "Healthcheck": {"Test": ["CMD", "curl"]}}},
+                       RENDERER_ID: {"Id": RENDERER_ID, "RepoDigests": [RENDERER], "Config": {}}}
         self._new = {"Id": NEW_ID, "RepoDigests": [f"{REPO}@{DIGEST}"] if repo_digests is None else repo_digests,
                      "_health": new_health, "_refs": [f"{REPO}@{DIGEST}"],
                      "_release": {"version": "1.4.2", "sourceSha": SOURCE, "workflowRunId": "123456"},
@@ -89,8 +132,11 @@ class FakeDocker:
                        "Cmd": ["node", "server"], "Healthcheck": {"Test": ["CMD", "curl"]},
                        "Labels": {"com.docker.compose.project": "bawthub",
                                   "com.docker.compose.service": "frontend-prod",
+                                  "com.docker.compose.project.working_dir": PROJECT_DIR,
+                                  "com.docker.compose.project.config_files": ",".join(COMPOSE_FILES),
                                   "org.opencontainers.image.title": "old"}},
-            "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+            "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"},
+                           "Binds": [f"{PROJECT_DIR}/token:{TOKEN_TARGET}:ro"]},
             "NetworkSettings": {"Networks": {"bawthub_default": {"Aliases": [NAME, "frontend-prod", old_id[:12]]}}},
             "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}}}}
         self.old_id = old_id
@@ -111,6 +157,30 @@ class FakeDocker:
     def by_name(self, name):
         return self._find_container(name)
 
+    def renderers_left(self):
+        return [c for c in self.containers.values() if c.get("_render")]
+
+    # ── the sealed Compose renderer (TASK-1518) ─────────────────────────
+    def _create_renderer(self, name, body):
+        self.render_bodies.append(body)
+        cid = hashlib.sha256(name.encode()).hexdigest()
+        self.containers[cid] = {"Id": cid, "Name": f"/{name}", "Image": RENDERER_ID, "_render": True,
+                                "Config": {"Image": body["Image"], "Cmd": body["Cmd"], "Env": body["Env"],
+                                           "Labels": body["Labels"]},
+                                "HostConfig": body["HostConfig"], "State": {"Running": False, "Status": "created"}}
+        return {"Id": cid}
+
+    def attach_stream(self, container_id):
+        self.calls.append(("POST", f"/containers/{container_id}/attach"))
+        container = self.containers[container_id]
+        argv = container["Config"]["Cmd"]
+        if "--hash" in argv:
+            out = f"{argv[-1]} {CONFIG_HASH}\n"
+        else:
+            image = container["Config"]["Env"][0].partition("=")[2]
+            out = json.dumps(self.compose).replace(IMAGE_VARIABLE, image)
+        return _Stream(_frame(1, out) + (_frame(2, self.render_stderr) if self.render_stderr else b""))
+
     # ── Engine API ──────────────────────────────────────────────────────
     def request(self, method, path, *, body=None, headers=None, raw=False):
         self.calls.append((method, path))
@@ -121,6 +191,8 @@ class FakeDocker:
             return copy.deepcopy(self._find_image(parts[1]))
         if parts[0] == "images" and parts[1] == "create":
             raise AssertionError("the worker must never pull; the app pulls in preflight")
+        if parts[0] == "containers" and parts[1] == "create" and RENDER_LABEL in (body.get("Labels") or {}):
+            return self._create_renderer(query["name"], body)
         if parts[0] == "containers" and parts[1] == "create":
             self.create_bodies.append(body)
             image = self._find_image(body["Image"])
@@ -146,6 +218,13 @@ class FakeDocker:
         if method == "DELETE":
             self.containers.pop(container["Id"], None)
             return None
+        if container.get("_render"):
+            if action == "start":
+                container["State"] = {"Running": False, "Status": "exited"}
+                return None
+            if action == "wait":
+                return {"StatusCode": self.render_status}
+            raise AssertionError(f"unexpected renderer call {method} {path}")
         if action == "stop":
             container["State"] = {"Running": False, "Status": "exited"}
         elif action == "start":
@@ -184,7 +263,81 @@ def test_deploy_success_swaps_by_digest_and_records_last_known_good(tmp_path):
     assert body["Labels"]["llm-bawt.ops.deployed-by"] == JOB_ID
     assert "org.opencontainers.image.title" not in body["Labels"]  # old image label not carried
     assert body["Env"] == ["NODE_ENV=production"]  # compose env kept, image env dropped
+    # TASK-1518: Compose's own hash at the new ref, so a later `compose up` keeps it.
+    assert body["Labels"]["com.docker.compose.config-hash"] == CONFIG_HASH
     assert parse_deployment(json.dumps(record)) == record
+    assert not api.renderers_left()
+
+
+# ── worker: deploy refuses on configuration drift (TASK-1518) ──────────────
+
+def test_deploy_renders_the_target_compose_service_sealed_at_the_new_ref(tmp_path):
+    api = FakeDocker()
+    _deployer(api, tmp_path).run()
+    assert len(api.render_bodies) == 2  # the JSON config, then Compose's config hash
+    body = api.render_bodies[0]
+    assert body["Image"] == RENDERER and body["Entrypoint"] == ["docker"]
+    assert body["Cmd"] == ["compose", "-p", "bawthub", "-f", COMPOSE_FILES[0], "-f", COMPOSE_FILES[1],
+                           "config", "--format", "json", "frontend-prod"]
+    assert api.render_bodies[1]["Cmd"][-3:] == ["config", "--hash", "frontend-prod"]
+    assert body["Env"] == [f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}"] and body["NetworkDisabled"] is True
+    host = body["HostConfig"]
+    assert host["Binds"] == [f"{PROJECT_DIR}:{PROJECT_DIR}:ro"] and host["NetworkMode"] == "none"
+    assert host["ReadonlyRootfs"] and host["CapDrop"] == ["ALL"] and host["Privileged"] is False
+    assert host["LogConfig"]["Type"] == "none"
+    assert not api.renderers_left()
+
+
+@pytest.mark.parametrize("compose, names", [
+    (compose_project(environment={"NODE_ENV": "production", "BAWTHUB_AUTH_SESSIONS": "on"}),
+     ["env:+BAWTHUB_AUTH_SESSIONS"]),
+    (compose_project(environment={"NODE_ENV": "development"}), ["env:~NODE_ENV"]),
+    (compose_project(volumes=[]), [f"mount:-{TOKEN_TARGET}"]),
+    (compose_project(networks={"default": None, "llm-bawt": None}), ["network:+bawthub_llm-bawt"]),
+    (compose_project(restart="always"), ["restart:~"]),
+    (compose_project(labels={"traefik.enable": "true"}), ["label:+traefik.enable"]),
+])
+def test_deploy_refuses_config_drift_with_names_only_before_touching_production(tmp_path, compose, names):
+    api = FakeDocker(compose=compose)
+    with pytest.raises(DeployFailed, match="config_drift") as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known and not api.side_effect_started and not api.create_bodies
+    assert caught.value.detail["config_drift"] == names
+    assert "development" not in str(caught.value) and "=on" not in str(caught.value)
+    assert api.by_name(NAME)["Id"] == api.old_id and not api.renderers_left()
+
+
+@pytest.mark.parametrize("api_kwargs, message", [
+    ({"render_stderr": 'time="2026-10-26T00:00:00Z" level=warning msg="The \\"XAI_API_KEY\\" variable '
+                       'is not set. Defaulting to a blank string."\n'}, "unset_compose_variable: XAI_API_KEY"),
+    ({"render_stderr": "something else entirely\n"}, "renderer_warning"),
+    ({"render_status": 1}, "renderer_failed"),
+    ({"compose": compose_project(privileged=True)}, "unsupported_compose_key: privileged"),
+    ({"compose": compose_project(image="ghcr.io/bawthub/frontend:latest")}, "compose_image_mismatch"),
+    ({"compose": compose_project(pull_policy="always")}, "unsupported_pull_policy"),
+])
+def test_deploy_refuses_when_the_compose_service_cannot_be_checked(tmp_path, api_kwargs, message):
+    api = FakeDocker(**api_kwargs)
+    with pytest.raises(DeployFailed, match=message) as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known and not api.side_effect_started and not api.create_bodies
+    assert not api.renderers_left()
+
+
+def test_deploy_refuses_a_target_created_from_other_compose_files(tmp_path):
+    api = FakeDocker()
+    api.by_name(NAME)["Config"]["Labels"]["com.docker.compose.project.config_files"] = COMPOSE_FILES[0]
+    with pytest.raises(DeployFailed, match="compose_source_invalid") as caught:
+        _deployer(api, tmp_path).run()
+    assert caught.value.outcome_known and not api.render_bodies and not api.create_bodies
+
+
+def test_deploy_without_compose_config_fails_closed(tmp_path):
+    api = FakeDocker()
+    spec = {k: v for k, v in SPEC.items() if k != "compose_config"}
+    with pytest.raises(DeployFailed, match="no compose_config") as caught:
+        _deployer(api, tmp_path, snapshot={"spec": spec, "release": _release()}).run()
+    assert caught.value.outcome_known and not api.render_bodies and not api.create_bodies
 
 
 def test_deploy_health_failure_restores_previous_container(tmp_path):
@@ -241,6 +394,8 @@ def test_target_lock_excludes_concurrent_image_actions(tmp_path):
 def test_rollback_restores_recorded_image_without_pulling(tmp_path):
     api = FakeDocker(local_new=True)
     _deployer(api, tmp_path).run()
+    # A rollback must stay possible under drift: it never renders or compares.
+    api.compose, renders = compose_project(environment={"NODE_ENV": "x"}), len(api.render_bodies)
     snapshot = {"spec": {**SPEC, "action": "rollback_image"},
                 "rollback": {"deploy_job_id": JOB_ID, "from_image_id": NEW_ID, "from_image_ref": f"{REPO}@{DIGEST}",
                              "to_image_id": OLD_ID, "to_image_ref": "bawthub-frontend-prod:latest",
@@ -249,6 +404,7 @@ def test_rollback_restores_recorded_image_without_pulling(tmp_path):
                                       sleep=lambda _s: None).run())
     assert record["action"] == "rollback" and record["rollback_of"] == JOB_ID
     assert api.by_name(NAME)["Image"] == OLD_ID
+    assert len(api.render_bodies) == renders
 
 
 def test_clone_keeps_compose_overrides_that_differ_from_image():
@@ -310,14 +466,26 @@ def test_image_seeds_ship_disabled_with_fixed_targets():
         assert json.loads(seed["args_schema_json"])["additionalProperties"] is False
 
 
+def test_deploy_seed_requires_compose_config_and_rollback_does_not():
+    assert SPEC["compose_config"] == json.loads(
+        SEED["bawthub.rollback-prod-image"]["command_script"])["compose_config"]
+    bare = {k: v for k, v in SPEC.items() if k != "compose_config"}
+    with pytest.raises(ValueError, match="requires compose_config"):
+        validate_spec(json.dumps(bare))
+    assert validate_spec(json.dumps({**bare, "action": "rollback_image"}))["action"] == "rollback_image"
+
+
 @pytest.mark.parametrize("mutate", [
     lambda s: s.pop("image_repository"),
     lambda s: s.update(image_repository="docker.io/evil/frontend"),
     lambda s: s.update(container_name_from_arg="container"),
     lambda s: s.update(health_timeout_seconds=5),
+    lambda s: s["compose_config"].update(renderer_image="docker:27-cli"),
+    lambda s: s["compose_config"].update(compose_files=["../etc/compose.yml"]),
+    lambda s: s["compose_config"].update(extra="x"),
 ])
 def test_image_spec_rejects_selector_or_registry_drift(mutate):
-    spec = dict(SPEC)
+    spec = copy.deepcopy(SPEC)
     mutate(spec)
     with pytest.raises(ValueError):
         validate_spec(json.dumps(spec))
@@ -375,6 +543,9 @@ def test_preflight_only_pulls_for_deploy(monkeypatch):
     images = _FakeImages()
     executor = _pull_executor(images)
     monkeypatch.setattr(executor, "_check_settings", lambda _s: None)
+    # The deploy's config-check prerequisites have their own tests (test_ops_config_reconcile).
+    monkeypatch.setattr(executor, "_check_config_worker", lambda _s: None)
+    monkeypatch.setattr(executor, "ensure_renderer_image", lambda _s: None)
     executor.client.ping = lambda: True
     executor.preflight({"spec": {**SPEC, "action": "rollback_image"}, "execution": {}})
     executor.preflight({"spec": {"action": "restart"}, "execution": {}})
@@ -388,6 +559,8 @@ def test_preflight_only_pulls_for_deploy(monkeypatch):
 class FakeExecutor(Executor):
     def __init__(self):
         self.current_image = OLD_ID
+        self.config_checks: list[tuple[str, str | None]] = []
+        self.config_error: ConfigCheckError | None = None
 
     def kind(self):
         return "docker"
@@ -397,6 +570,11 @@ class FakeExecutor(Executor):
 
     def inspect_target_image(self, spec):
         return self.current_image
+
+    def config_check(self, spec, image_ref=None):
+        self.config_checks.append((spec["action"], image_ref))
+        if self.config_error:
+            raise self.config_error
 
     def dispatch(self, **kwargs):
         return DispatchResult(host_unit_name="w", status_file_path="s", log_file_path="l")
@@ -469,6 +647,20 @@ def test_deploy_snapshot_binds_verified_release_and_current_image():
     assert snapshot["release"]["digest"] == DIGEST
     assert snapshot["release"]["expected_current_image_id"] == OLD_ID
     assert binding_matches_args(snapshot)
+
+
+def test_deploy_approval_checks_config_at_the_release_ref_and_refuses_drift():
+    service, _store, executor = _service()
+    service.prepare_invocation("bawthub.deploy-prod-image", ARGS)
+    assert executor.config_checks == [("deploy_image", f"{REPO}@{DIGEST}")]
+    executor.config_error = ConfigCheckError("config_drift", "config_drift: (env:+BAWTHUB_AUTH_SESSIONS)")
+    with pytest.raises(OpsDispatchError) as caught:
+        service.prepare_invocation("bawthub.deploy-prod-image", ARGS)
+    assert caught.value.code == "config_drift" and "env:+BAWTHUB_AUTH_SESSIONS" in str(caught.value)
+    executor.config_error = ConfigCheckError("config_reconcile_unavailable", "config_reconcile_unavailable: old")
+    with pytest.raises(OpsDispatchError) as caught:
+        service.prepare_invocation("bawthub.deploy-prod-image", ARGS)
+    assert caught.value.code == "config_reconcile_unavailable"
 
 
 def test_unverified_release_is_refused_before_approval():
@@ -547,8 +739,11 @@ def test_rollback_binds_last_known_good_from_succeeded_deploy():
     deploy_id = _succeeded_deploy(service, store)
     assert store.get_job(deploy_id).to_api()["deployment"]["previous"]["image_id"] == OLD_ID
     executor.current_image = NEW_ID
+    checks = len(executor.config_checks)
+    executor.config_error = ConfigCheckError("config_drift", "config_drift: (env:~X)")
     snapshot = service.prepare_invocation("bawthub.rollback-prod-image", {"deploy_job_id": deploy_id})
     assert snapshot["rollback"]["to_image_id"] == OLD_ID and snapshot["rollback"]["from_image_id"] == NEW_ID
+    assert len(executor.config_checks) == checks  # rollback never checks config
 
 
 def test_rollback_refuses_when_target_moved_on_or_job_not_a_deploy():

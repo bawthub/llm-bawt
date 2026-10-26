@@ -55,6 +55,11 @@ class ReleaseExecutor(Executor):
             current = executor.inspect_target_image(target)
             if not current or not current.startswith("sha256:") or len(current) != 71:
                 raise ExecutorError("production image identity is unavailable")
+            # TASK-1518: never approve a release whose deploy would refuse on
+            # configuration drift. Checked at the running ref, since the new
+            # digest does not exist yet; the deploy re-checks at the built ref
+            # under the target lock.
+            executor.config_check(target)
             return {"expected_sha": head, "deploy_authorization": "after_verified_build",
                     "expected_current_image_id": current, "deploy_operation_id": operation.id,
                     "deploy_operation_version": operation.version,

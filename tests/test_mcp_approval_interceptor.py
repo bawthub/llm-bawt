@@ -215,6 +215,30 @@ def test_routing_approval_displays_exact_target_image_and_delta(capability):
     assert "No build, pull, environment, mount or permission changes" in prompt
 
 
+def test_config_approval_displays_names_mounts_and_enum_values_only(capability):
+    from tests.test_ops_config_reconcile import DRIFTED, SECRET, ConfigDocker, snapshot
+
+    order, executed = [], []
+    store = FakeStore(_policy(PolicyAction.REQUIRE_APPROVAL), order)
+    mcp = _server(store, order, executed)
+    approved = snapshot(ConfigDocker(compose=DRIFTED))
+    mcp._operations_preparer = lambda operation, args: approved
+    clean = {"operation": "bawthub.reconcile-prod-config", "args": {}}
+    stamp = mint_mcp_call_context(
+        capability=capability, tool_name="ops_run", tool_input=clean,
+        tool_use_id="toolu_config", agent_request_id="req_config",
+        session_key="snark:nick", backend="claude-code",
+    )
+    result = _call(mcp, capability, {**clean, MCP_CALL_CONTEXT_KEY: stamp})
+    assert result["status"] == "approval_required" and not executed
+    prompt = store.rows[0][0].prompt
+    config = approved["config"]
+    for text in (config["container_id"], config["image_ref"], *config["drift"], *config["mounts"],
+                 "BAWTHUB_AUTH_SESSIONS=on", config["desired_hash"][:16], "No build or pull"):
+        assert text in prompt
+    assert SECRET not in prompt
+
+
 def test_tampered_args_fail_before_policy_or_execution(capability):
     order, executed = [], []
     store = FakeStore(_policy(PolicyAction.ALLOW), order)

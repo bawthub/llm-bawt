@@ -91,6 +91,18 @@ _OPS_DEFAULT_POLICIES: list[dict[str, Any]] = [
         "order": 10,
     },
     {
+        "id": "seed-ops-run-bawthub-reconcile-prod-config",
+        "backend_scope": "*",
+        "tool_name": "ops_run",
+        "matcher_type": "prefix",
+        "pattern": "operation=bawthub.reconcile-prod-config ",
+        "action": "require_approval",
+        "severity": "high",
+        "category": "configuration",
+        "approval_prompt": "Reconcile production configuration to its Compose service using the same pinned image (brief frontend interruption)?",
+        "order": 11,
+    },
+    {
         "id": "seed-ops-run-require-approval",
         "backend_scope": "*",
         "tool_name": "ops_run",

@@ -1,0 +1,217 @@
+"""Same-image reconcile of a Compose target to its declared config. STANDARD LIBRARY ONLY (TASK-1518).
+
+Recreates the fixed target from its rendered Compose service at the SAME pinned
+image: no build, no pull. Approval binds the live container's configuration
+fingerprint (``current_config_hash``) and the rendered desired configuration
+(``desired_hash``, values included but only hashed), plus drift NAMES, the mount
+list and closed-enum display values (A1). The worker re-renders and recomputes
+both under the per-target lock; any change refuses with nothing applied. The
+swap, health, release-identity check and failure restore are
+:class:`ImageDeployer`'s.
+"""
+from __future__ import annotations
+
+import re
+from urllib.parse import quote
+
+if __package__:
+    from .compose_config import apply_desired, canonical_hash, evaluate
+    from .compose_render import SAFE_PATH
+    from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
+else:  # standalone immutable worker
+    from compose_config import apply_desired, canonical_hash, evaluate
+    from compose_render import SAFE_PATH
+    from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
+
+ACTION = "reconcile_frontend_config"
+SCHEMA = "llm-bawt.ops.config-reconcile/v1"
+# Worker image label proving it carries the Compose renderer, the config
+# reconciler AND the deploy drift guard. Without it both ops refuse.
+WORKER_CAPABILITY_LABEL = "llm-bawt.ops.config-reconcile"
+_PATTERNS = {
+    "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
+    "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
+    "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
+    "image_repository": r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*",
+}
+_RENDERER_IMAGE = r"(?:[a-z0-9.-]+(?::[0-9]{1,5})?/)?[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"
+_BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "source", "current_config_hash",
+                           "desired_hash", "rendered_hash", "drift", "mounts", "display", "release"})
+_STAT = re.compile(r"[0-7]{3,4} [0-9]{1,10} [0-9]{1,10}")
+
+
+def validate_compose_config(value) -> dict:
+    """``compose_config`` shared by deploy_image and this op. Basenames only: the
+    project directory comes from the target's own Compose labels (no host path
+    in a catalog seed)."""
+    if not isinstance(value, dict) or set(value) != {"compose_files", "renderer_image", "image_variable"}:
+        raise ValueError("compose_config requires exactly compose_files, renderer_image, image_variable")
+    files = value["compose_files"]
+    if (not isinstance(files, list) or not 1 <= len(files) <= 4 or len(set(files)) != len(files)
+            or not all(isinstance(f, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.ya?ml", f)
+                       for f in files)):
+        raise ValueError("compose_config.compose_files must be 1..4 distinct Compose file basenames")
+    if not isinstance(value["renderer_image"], str) or not re.fullmatch(_RENDERER_IMAGE, value["renderer_image"]):
+        raise ValueError("compose_config.renderer_image must be pinned by digest")
+    if not isinstance(value["image_variable"], str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value["image_variable"]):
+        raise ValueError("compose_config.image_variable is invalid")
+    return value
+
+
+def validate_config_spec(spec: dict) -> dict:
+    required = {"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
+                "health_timeout_seconds", *_PATTERNS}
+    if not isinstance(spec, dict) or set(spec) != required:
+        raise ValueError("config reconcile spec has missing or unsupported fields")
+    if spec["action"] != ACTION:
+        raise ValueError("not a config reconcile spec")
+    for key, pattern in _PATTERNS.items():
+        if not isinstance(spec[key], str) or not re.fullmatch(pattern, spec[key]):
+            raise ValueError(f"config reconcile spec {key} is invalid")
+    validate_compose_config(spec["compose_config"])
+    shown = spec["display_values"]
+    if (not isinstance(shown, dict) or len(shown) > 8
+            or not all(isinstance(k, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", k)
+                       and isinstance(v, list) and 1 <= len(v) <= 8
+                       and all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,32}", x) for x in v)
+                       for k, v in shown.items())):
+        raise ValueError("display_values must map env names to closed enums of short tokens")
+    paths = spec["stat_paths"]
+    if (not isinstance(paths, list) or len(paths) > 4
+            or not all(isinstance(p, str) and SAFE_PATH.fullmatch(p) and ".." not in p.split("/") for p in paths)):
+        raise ValueError("stat_paths must be up to 4 absolute container paths")
+    for key, low, high in (("stop_grace_seconds", 0, 60), ("health_timeout_seconds", 10, 180)):
+        if type(spec[key]) is not int or not low <= spec[key] <= high:
+            raise ValueError(f"config reconcile spec {key} is out of bounds")
+    return spec
+
+
+def current_config_hash(container: dict, image: dict) -> str:
+    """Fingerprint of everything a clone would carry forward (r2 B2)."""
+    ref = container["Config"].get("Image", "")
+    return canonical_hash(clone_create_body(container, image, image, ref, "binding"))
+
+
+def config_binding(spec: dict, container: dict, image: dict, renderer) -> tuple[dict, dict]:
+    """``(public approval binding, private desired config)``; raises ValueError."""
+    validate_config_spec(spec)
+    config = container["Config"]
+    labels = config.get("Labels") or {}
+    if (container["Name"] != "/" + spec["container_name"]
+            or labels.get("com.docker.compose.project") != spec["compose_project"]
+            or labels.get("com.docker.compose.service") != spec["compose_service"]):
+        raise ValueError("config target Compose identity mismatch")
+    ref = config.get("Image", "")
+    if (not re.fullmatch(re.escape(spec["image_repository"]) + r"@sha256:[0-9a-f]{64}", ref)
+            or image["Id"] != container["Image"] or ref not in (image.get("RepoDigests") or [])):
+        raise ValueError("config target must retain its locally available pinned image")
+    release = release_from_labels(image["Config"].get("Labels"))
+    if not release or not all(release.values()):
+        raise ValueError("config target has no verifiable release identity")
+    result = evaluate(spec, container, image, renderer, ref)
+    binding = {"container_id": container["Id"], "image_id": image["Id"], "image_ref": ref,
+               "source": result["source"], "current_config_hash": current_config_hash(container, image),
+               "desired_hash": result["desired_hash"], "rendered_hash": result["rendered_hash"],
+               "drift": result["drift"], "mounts": result["mounts"], "display": result["display"],
+               "release": release}
+    return binding, result["desired"]
+
+
+def valid_config_binding(snapshot: dict) -> bool:
+    binding = snapshot.get("config")
+    if snapshot["spec"].get("action") != ACTION:
+        return binding is None
+    if snapshot["resolved_args"] != {} or not isinstance(binding, dict) or set(binding) != _BINDING_KEYS:
+        return False
+    try:
+        spec = validate_config_spec(snapshot["spec"])
+        source = binding["source"]
+        return (bool(re.fullmatch(r"[0-9a-f]{64}", binding["container_id"]))
+                and bool(re.fullmatch(r"sha256:[0-9a-f]{64}", binding["image_id"]))
+                and all(re.fullmatch(r"[0-9a-f]{64}", binding[k])
+                        for k in ("current_config_hash", "desired_hash", "rendered_hash"))
+                and bool(re.fullmatch(re.escape(spec["image_repository"]) + r"@sha256:[0-9a-f]{64}", binding["image_ref"]))
+                and set(source) == {"project_dir", "compose_files"}
+                and source["compose_files"] == [f"{source['project_dir']}/{n}"
+                                                for n in spec["compose_config"]["compose_files"]]
+                and all(isinstance(x, str) for x in binding["drift"] + binding["mounts"])
+                and set(binding["display"]) == set(spec["display_values"])
+                and set(binding["release"]) == {"version", "source_sha", "workflow_run_id"}
+                and all(isinstance(v, str) and v for v in binding["release"].values()))
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return False
+
+
+def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
+    """Approval card body: names, mounts and A1 enum values only."""
+    drift = ", ".join(binding["drift"]) or "none (verifies only)"
+    shown = ", ".join(f"{k}={v}" for k, v in sorted(binding["display"].items())) or "none"
+    return (f"{prefix or 'Authorize same-image configuration reconcile?'}\n"
+            f"Target: {spec['container_name']} ({binding['container_id']})\n"
+            f"Unchanged image: {binding['image_ref']}\n"
+            f"Compose source: {', '.join(binding['source']['compose_files'])}\n"
+            f"Drift (names only): {drift}\n"
+            f"Mounts after: {'; '.join(binding['mounts']) or 'none'}\n"
+            f"Shown values: {shown}\n"
+            f"Fingerprints: current {binding['current_config_hash'][:16]}, desired {binding['desired_hash'][:16]}\n"
+            "No build or pull. Environment values other than those shown are never displayed. "
+            "Restores the previous container if health or release verification fails. "
+            "Any change to the container or the rendered configuration cancels execution.")
+
+
+class ConfigReconciler(ImageDeployer):
+    """Use the existing target lock, swap, health and failure-restore machinery."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.detail.update(schema=SCHEMA, action="reconcile-config")
+        self._desired = None
+
+    def _perform(self):
+        if not valid_config_binding(self.snapshot):
+            self._fail("invalid config approval binding", known=True)
+        binding = self.snapshot["config"]
+        old, image = self._target(expected_image_id=binding["image_id"])
+        self._phase("render")
+        try:
+            actual, self._desired = config_binding(self.spec, old, image, self._renderer())
+        except ValueError as exc:  # includes ComposeError: fixed codes and names only
+            self._fail(f"{exc}; nothing changed", known=True)
+        if actual != binding:
+            changed = sorted(k for k in binding if actual.get(k) != binding[k])
+            self._fail(f"config_changed_since_approval ({', '.join(changed)}); nothing changed", known=True)
+        state = old.get("State") or {}
+        if not state.get("Running") or (state.get("Health") or {}).get("Status") != "healthy":
+            self._fail("config reconcile requires a running healthy target", known=True)
+        self.detail["config"] = {k: binding[k] for k in ("drift", "mounts", "display", "rendered_hash",
+                                                          "desired_hash", "current_config_hash")}
+        if not binding["drift"]:
+            self.detail["health"] = self._verify_release(old["Id"], binding["release"])
+            self.detail["unchanged"] = True
+            return
+        self._replace(old, image, image, binding["image_ref"], binding["release"])
+
+    def _create_body(self, old, old_image, new_image, ref):
+        body = super()._create_body(old, old_image, new_image, ref)
+        return apply_desired(body, old, self._desired, container_name=self.name,
+                             service=self.spec["compose_service"],
+                             rendered_hash=self.snapshot["config"]["rendered_hash"])
+
+    def _verify_release(self, container_id, expect):
+        health = super()._verify_release(container_id, expect)
+        health["stat"] = {path: self._stat(container_id, path) for path in self.spec["stat_paths"]}
+        return health
+
+    def _stat(self, container_id, path):
+        """Mode/uid/gid of a file via a fixed argv; never its contents."""
+        exec_id = self.api.request("POST", f"/containers/{quote(container_id, safe='')}/exec", body={
+            "AttachStdout": True, "AttachStderr": True, "Cmd": ["stat", "-c", "%a %u %g", path]})["Id"]
+        raw = self.api.request("POST", f"/exec/{exec_id}/start", body={"Detach": False, "Tty": False}, raw=True)
+        if self.api.request("GET", f"/exec/{exec_id}/json").get("ExitCode") != 0:
+            return "missing"
+        text = demux_stdout(raw).strip()
+        return text if _STAT.fullmatch(text) else "unreadable"
+
+
+__all__ = ["ACTION", "SCHEMA", "WORKER_CAPABILITY_LABEL", "ConfigReconciler", "approval_text", "config_binding", "valid_config_binding",
+           "validate_compose_config", "validate_config_spec"]

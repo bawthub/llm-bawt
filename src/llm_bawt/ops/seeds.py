@@ -292,6 +292,19 @@ _BAWTHUB_SEEDS: list[dict[str, Any]] = [
 # disabled and are covered by dedicated require_approval policies.
 # ---------------------------------------------------------------------------
 
+# TASK-1518: the Compose service the target is declared by. A deploy refuses
+# when the running container differs from it; the reconcile op below repairs
+# that at the same image. The project directory comes from the container's own
+# Compose labels, so only file basenames live here. The renderer is the
+# official Docker CLI image, pinned by digest (it ships the Compose plugin).
+_PROD_COMPOSE_CONFIG = {
+    "compose_files": ["docker-compose.yml", "docker-compose.image.yml"],
+    "renderer_image": (
+        "docker.io/library/docker@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d"
+    ),
+    "image_variable": "BAWTHUB_FRONTEND_IMAGE",
+}
+
 _PROD_TARGET = dict(
     container_name="bawthub-frontend-prod-1",
     compose_project=_BAWTHUB_PROJECT,
@@ -302,6 +315,7 @@ _PROD_TARGET = dict(
     canonical_branch="main",
     stop_grace_seconds=20,
     health_timeout_seconds=180,
+    compose_config=_PROD_COMPOSE_CONFIG,
 )
 
 _IMAGE_SEEDS: list[dict[str, Any]] = [
@@ -391,6 +405,41 @@ _ROUTING_SEEDS: list[dict[str, Any]] = [{
     "risk_level": RISK_HIGH,
     "category": "configuration",
     "approval_prompt_prefix": "Repair production health routing with the same image (brief interruption)",
+}]
+
+
+# TASK-1518: recreate the target from its rendered Compose service at the SAME
+# pinned image. Approval shows drift names, mounts and closed-enum values only.
+_CONFIG_SEEDS: list[dict[str, Any]] = [{
+    "slug": "bawthub.reconcile-prod-config",
+    "title": "Reconcile production frontend configuration",
+    "description": (
+        "Recreate frontend-prod from its declared Compose service using the SAME pinned image. "
+        "No build or pull. Approval binds the running container and the rendered configuration "
+        "and shows changed names only, never values. Verifies health and release identity and "
+        "restores the previous container on failure. Brief frontend interruption."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_frontend_config", container_name="bawthub-frontend-prod-1",
+        compose_project=_BAWTHUB_PROJECT, compose_service="frontend-prod",
+        image_repository="ghcr.io/bawthub/frontend", compose_config=_PROD_COMPOSE_CONFIG,
+        display_values={"BAWTHUB_AUTH_SESSIONS": ["on", "off"]},
+        stat_paths=["/run/bawthub-service-token/token"],
+        stop_grace_seconds=20, health_timeout_seconds=180,
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_HIGH,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile production configuration with the same image (brief interruption)",
 }]
 
 
@@ -493,6 +542,7 @@ SEEDS: list[dict[str, Any]] = [
     *_STANDALONE_CONTAINER_SEEDS,
     *_IMAGE_SEEDS,
     *_ROUTING_SEEDS,
+    *_CONFIG_SEEDS,
     *_RELEASE_SEEDS,
 ]
 

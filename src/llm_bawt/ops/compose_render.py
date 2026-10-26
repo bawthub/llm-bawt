@@ -1,0 +1,187 @@
+"""Render ONE Compose service in a sealed one-shot container. STANDARD LIBRARY ONLY (TASK-1518).
+
+Compose is the declared configuration of a Compose-managed target, but neither
+the app image nor the stdlib-only ops worker ships the Compose CLI or the
+project files. Both therefore ask the Docker daemon to run a digest-pinned
+Docker CLI image with:
+
+* no network, no Docker socket, a read-only root filesystem, every capability
+  dropped and ``no-new-privileges``;
+* the logging driver ``none``, so rendered values never reach daemon logs, and
+  output read once through ``attach``;
+* exactly one read-only bind: the target's own Compose working directory, at
+  the same path, so relative paths and the project ``.env`` resolve as they do
+  for the operator. Both directory and files come from the target's Compose
+  labels and must match the catalog spec's file names;
+* a fixed argv (``compose -p … -f … config``) and a single injected variable,
+  the pinned image reference for the image overlay.
+
+The container is removed (with its anonymous volumes) in every outcome.
+Renderer stderr is never echoed: it can carry interpolated values. Only fixed
+error codes, exit status and the names of unset variables are reported.
+An unset variable fails closed. The operator's shell may have supplied it when
+the target was created, and the renderer cannot reproduce that shell.
+"""
+from __future__ import annotations
+
+import json
+import os
+import posixpath
+import re
+import struct
+from urllib.parse import quote, urlencode
+
+RENDER_LABEL = "llm-bawt.ops.compose-render"
+# Same label the dispatcher puts on workers: Compose-target selection skips it.
+OPS_JOB_LABEL = "llm-bawt.ops.job"
+MAX_RENDER_BYTES = 4 * 1024 * 1024
+_WORKING_DIR = "com.docker.compose.project.working_dir"
+_CONFIG_FILES = "com.docker.compose.project.config_files"
+SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
+_UNSET = re.compile(r'time="[^"]*" level=warning msg="The \\"([A-Za-z_][A-Za-z0-9_]{0,127})\\" '
+                    r'variable is not set\. Defaulting to a blank string\."')
+
+
+class ComposeError(ValueError):
+    """Fixed code plus optional NAMES (variables/keys); never a value."""
+
+    def __init__(self, code: str, names=(), *, detail: str = ""):
+        self.code = code
+        self.names = sorted(set(names))
+        text = code
+        if self.names:
+            text += ": " + ", ".join(self.names)
+        if detail:
+            text += f" ({detail})"
+        super().__init__(text)
+
+
+def compose_source(spec: dict, container: dict) -> dict:
+    """Project directory and files the target was created from, as the spec allows."""
+    labels = container.get("Config", {}).get("Labels") or {}
+    working_dir = labels.get(_WORKING_DIR) or ""
+    files = (labels.get(_CONFIG_FILES) or "").split(",")
+    names = spec["compose_config"]["compose_files"]
+    if (not SAFE_PATH.fullmatch(working_dir) or posixpath.normpath(working_dir) != working_dir
+            or working_dir == "/" or ".." in working_dir.split("/")):
+        raise ComposeError("compose_source_invalid", detail="working directory label")
+    if files != [posixpath.join(working_dir, name) for name in names]:
+        raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
+    return {"project_dir": working_dir, "compose_files": files}
+
+
+def renderer_argv(spec: dict, source: dict, *, hash_only: bool) -> list[str]:
+    argv = ["compose", "-p", spec["compose_project"]]
+    for path in source["compose_files"]:
+        argv += ["-f", path]
+    service = spec["compose_service"]
+    return argv + (["config", "--hash", service] if hash_only else ["config", "--format", "json", service])
+
+
+def renderer_body(spec: dict, source: dict, image_ref: str, argv: list[str], tag: str) -> dict:
+    config = spec["compose_config"]
+    directory = source["project_dir"]
+    return {
+        "Image": config["renderer_image"], "Entrypoint": ["docker"], "Cmd": argv,
+        "Env": [f"{config['image_variable']}={image_ref}"], "WorkingDir": directory,
+        "AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "OpenStdin": False, "Tty": False,
+        "NetworkDisabled": True,
+        "Labels": {RENDER_LABEL: "1", OPS_JOB_LABEL: tag,
+                   # Never a Compose target, even if the image carries such labels.
+                   "com.docker.compose.project": "llm-bawt-ops-render",
+                   "com.docker.compose.service": "compose-render"},
+        "HostConfig": {
+            "NetworkMode": "none", "Binds": [f"{directory}:{directory}:ro"], "ReadonlyRootfs": True,
+            "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"], "LogConfig": {"Type": "none", "Config": {}},
+            "RestartPolicy": {"Name": "no"}, "AutoRemove": False, "Memory": 256 * 1024 * 1024, "PidsLimit": 64,
+            "Privileged": False,
+        },
+    }
+
+
+def demux_streams(raw: bytes) -> tuple[str, str]:
+    """(stdout, stderr) of Docker's multiplexed non-TTY attach stream."""
+    out, err, i = bytearray(), bytearray(), 0
+    while i + 8 <= len(raw):
+        stream, size = raw[i], struct.unpack(">I", raw[i + 4:i + 8])[0]
+        (out if stream == 1 else err).extend(raw[i + 8:i + 8 + size])
+        i += 8 + size
+    return out.decode(errors="replace"), err.decode(errors="replace")
+
+
+class ComposeRenderer:
+    """Render the spec's service. ``api`` is the worker's stdlib DockerAPI shape:
+    ``request(method, path, body=..., raw=...)`` plus ``attach_stream(id)``."""
+
+    def __init__(self, api, spec: dict, *, tag: str):
+        if not re.fullmatch(r"[a-z0-9]{1,32}", tag):
+            raise ValueError("renderer tag must be short lowercase alphanumerics")
+        self.api = api
+        self.spec = spec
+        self.tag = tag
+
+    def render(self, source: dict, image_ref: str) -> dict:
+        """``{"config": <rendered project JSON>, "hash": <compose config hash>}``."""
+        raw = self._run(source, image_ref, renderer_argv(self.spec, source, hash_only=False))
+        try:
+            config = json.loads(raw)
+        except ValueError:
+            raise ComposeError("renderer_output_invalid") from None
+        if not isinstance(config, dict):
+            raise ComposeError("renderer_output_invalid")
+        line = self._run(source, image_ref, renderer_argv(self.spec, source, hash_only=True)).strip()
+        match = re.fullmatch(re.escape(self.spec["compose_service"]) + r" ([0-9a-f]{64})", line)
+        if not match:
+            raise ComposeError("renderer_output_invalid", detail="config hash")
+        return {"config": config, "hash": match.group(1)}
+
+    def _run(self, source: dict, image_ref: str, argv: list[str]) -> str:
+        image = self.spec["compose_config"]["renderer_image"]
+        try:
+            self.api.request("GET", f"/images/{quote(image, safe='')}/json")
+        except RuntimeError as exc:
+            if "HTTP 404" in str(exc):
+                raise ComposeError("renderer_image_missing") from None
+            raise ComposeError("renderer_unavailable") from None
+        name = f"llm-bawt-ops-render-{self.tag}-{os.urandom(4).hex()}"
+        body = renderer_body(self.spec, source, image_ref, argv, self.tag)
+        try:
+            created = self.api.request("POST", "/containers/create?" + urlencode({"name": name}), body=body)
+        except RuntimeError:
+            raise ComposeError("renderer_unavailable") from None
+        container_id = created["Id"]
+        try:
+            try:
+                stream = self.api.attach_stream(container_id)
+                try:
+                    self.api.request("POST", f"/containers/{container_id}/start")
+                    raw = stream.read(MAX_RENDER_BYTES + 1)
+                finally:
+                    stream.close()
+                status = (self.api.request("POST", f"/containers/{container_id}/wait") or {}).get("StatusCode")
+            except (RuntimeError, OSError):
+                raise ComposeError("renderer_unavailable") from None
+        finally:
+            try:
+                self.api.request("DELETE", f"/containers/{container_id}?force=1&v=1")
+            except Exception:  # noqa: BLE001 - render outcome stands; a leftover is labelled
+                pass
+        if len(raw) > MAX_RENDER_BYTES:
+            raise ComposeError("renderer_output_too_large")
+        stdout, stderr = demux_streams(raw)
+        unset, unexpected = set(), False
+        for line in stderr.splitlines():
+            if not line.strip():
+                continue
+            match = _UNSET.fullmatch(line.strip())
+            if match:
+                unset.add(match.group(1))
+            else:
+                unexpected = True
+        if status != 0:
+            raise ComposeError("renderer_failed", detail=f"exit {status}")
+        if unset:
+            raise ComposeError("unset_compose_variable", unset)
+        if unexpected:
+            raise ComposeError("renderer_warning")
+        return stdout

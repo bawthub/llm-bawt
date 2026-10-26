@@ -16,19 +16,35 @@ from pathlib import Path
 
 from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
+from .compose_config import evaluate
+from .compose_render import ComposeError, ComposeRenderer
+from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
+                               config_binding, validate_compose_config, validate_config_spec)
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec, validate_release_spec
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
 from .validation import canonical_json
-from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, atomic_json, is_ops_worker,
+from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
+# Ops whose target configuration is compared with its Compose service (TASK-1518).
+CONFIG_CHECKED_ACTIONS = frozenset({CONFIG_ACTION, DEPLOY_ACTION})
 
 
 class ExecutorError(RuntimeError):
     pass
+
+
+class ConfigCheckError(ExecutorError):
+    """A Compose config check refused. ``code`` is fixed (``config_drift``,
+    ``config_reconcile_unavailable`` or a :class:`ComposeError` code) and the
+    message carries names only, never a value."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
 
 
 @dataclass
@@ -89,6 +105,15 @@ class Executor(ABC):
         """Public routing delta plus a private-config fingerprint; read-only."""
         raise ExecutorError(f"{self.kind()} executor cannot reconcile frontend routing")
 
+    def config_approval(self, spec: dict) -> dict:
+        """Public config-reconcile binding (names, hashes, A1 values); read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot reconcile Compose configuration")
+
+    def config_check(self, spec: dict, image_ref: str | None = None) -> None:
+        """Refuse (ConfigCheckError) when the target's running configuration
+        differs from its Compose service; read-only (TASK-1518)."""
+        raise ExecutorError(f"{self.kind()} executor cannot check Compose configuration")
+
     def check_quiesce_fence(self, settings: dict) -> None:
         """Read-only: the worker this executor would start enforces the quiesce
         start fence (TASK-1233). Fails closed unless an executor proves it."""
@@ -112,10 +137,17 @@ _IMAGE_SPEC_PATTERNS = {
 
 def validate_image_spec(spec: dict) -> dict:
     """Fixed digest deploy/rollback target (TASK-997). No selector arguments:
-    every identity is pinned in the operator-reviewed spec, never in job args."""
-    allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", *_IMAGE_SPEC_PATTERNS}
+    every identity is pinned in the operator-reviewed spec, never in job args.
+    ``compose_config`` (TASK-1518) is required for deploy and optional for
+    rollback, which never checks it: a rollback must stay possible."""
+    allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", "compose_config", *_IMAGE_SPEC_PATTERNS}
     if set(spec) - allowed or set(_IMAGE_SPEC_PATTERNS) - set(spec):
-        raise ValueError(f"image spec requires exactly {sorted(allowed)} (stop_grace_seconds optional)")
+        raise ValueError(f"image spec requires exactly {sorted(allowed)} "
+                         "(stop_grace_seconds optional, compose_config required for deploy)")
+    if spec["action"] == DEPLOY_ACTION and "compose_config" not in spec:
+        raise ValueError("deploy image spec requires compose_config (TASK-1518 drift guard)")
+    if "compose_config" in spec:
+        validate_compose_config(spec["compose_config"])
     for key, pattern in _IMAGE_SPEC_PATTERNS.items():
         if not isinstance(spec[key], str) or not re.fullmatch(pattern, spec[key]):
             raise ValueError(f"image spec {key} is invalid")
@@ -145,6 +177,8 @@ def validate_spec(command_script: str) -> dict:
         raise ValueError("command_script must be a Docker JSON spec") from exc
     if isinstance(spec, dict) and spec.get("action") == ROUTING_ACTION:
         return validate_routing_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == CONFIG_ACTION:
+        return validate_config_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
     if is_release_spec(spec):
@@ -177,9 +211,12 @@ def _stored_pull_auth() -> dict | None:
 class DockerExecutor(Executor):
     def __init__(self, *, client_factory=None, worker_image: str | None = None,
                  receipt_volume: str | None = None, receipt_root: str | None = None,
-                 pull_auth=None):
+                 pull_auth=None, render_api_factory=None):
         self._client_factory = client_factory
         self._client = None
+        # TASK-1518: the sealed Compose renderer speaks the worker's stdlib
+        # Docker API (attach before start); injectable in tests.
+        self._render_api_factory = render_api_factory or (lambda: DockerAPI(60))
         self.worker_image = worker_image or os.getenv("LLM_BAWT_OPS_WORKER_IMAGE", "")
         self.receipt_volume = receipt_volume or os.getenv("LLM_BAWT_OPS_RECEIPT_VOLUME", "")
         self.receipt_root = receipt_root or os.getenv("LLM_BAWT_OPS_RECEIPT_ROOT", "/var/lib/llm-bawt-ops")
@@ -258,6 +295,74 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError("cannot inspect routing target") from exc
 
+    def _check_config_worker(self, settings):
+        """The worker image carries the renderer, the reconciler and the deploy
+        drift guard. An older one would deploy without the guard."""
+        try:
+            self._require_worker_label(
+                settings, CONFIG_WORKER_LABEL,
+                missing=("configured immutable ops worker lacks the Compose config check; "
+                         "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
+                unverifiable="cannot verify the config-reconcile capability of the ops worker")
+        except ExecutorError as exc:
+            raise ConfigCheckError("config_reconcile_unavailable", f"config_reconcile_unavailable: {exc}") from exc
+
+    def ensure_renderer_image(self, spec):
+        """The digest-pinned renderer must be on the daemon: workers never pull
+        and have no network. A public image, so the pull is anonymous."""
+        ref = spec["compose_config"]["renderer_image"]
+        try:
+            self.client.images.get(ref)
+            return
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                raise ExecutorError(f"cannot inspect the Compose renderer image: {exc}") from exc
+        try:
+            self.client.images.pull(ref)
+        except Exception as exc:
+            raise ConfigCheckError("renderer_image_missing",
+                                   f"renderer_image_missing: pinned Compose renderer pull failed: {exc}") from exc
+
+    def _config_inputs(self, spec):
+        """(renderer, container attrs, image attrs) after every prerequisite."""
+        settings = self.execution_settings(spec)
+        self._check_prerequisites(settings)
+        self._check_config_worker(settings)
+        self.ensure_renderer_image(spec)
+        try:
+            target = self.client.containers.get(spec["container_name"])
+            target.reload()
+            image = self.client.images.get(target.attrs["Image"])
+        except Exception as exc:
+            raise ExecutorError(f"cannot inspect config target {spec['container_name']}") from exc
+        renderer = ComposeRenderer(self._render_api_factory(), spec, tag="app" + os.urandom(4).hex())
+        return renderer, target.attrs, image.attrs
+
+    def config_approval(self, spec):
+        renderer, container, image = self._config_inputs(spec)
+        try:
+            return config_binding(spec, container, image, renderer)[0]
+        except ComposeError as exc:  # fixed code and names only
+            raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
+        except (ValueError, KeyError) as exc:
+            raise ExecutorError(f"config target cannot be bound: {exc}") from exc
+
+    def config_check(self, spec, image_ref=None):
+        if not spec.get("compose_config"):
+            raise ConfigCheckError("config_check_unconfigured",
+                                   "deploy spec declares no compose_config; the drift guard cannot run")
+        renderer, container, image = self._config_inputs(spec)
+        try:
+            result = evaluate(spec, container, image, renderer, image_ref or container["Config"].get("Image", ""))
+        except ComposeError as exc:
+            raise ConfigCheckError(exc.code, f"compose config check failed: {exc}") from exc
+        except (ValueError, KeyError) as exc:
+            raise ExecutorError(f"compose config check failed: {exc}") from exc
+        if result["drift"]:
+            raise ConfigCheckError("config_drift", (
+                "config_drift: the running target differs from its Compose service ("
+                + ", ".join(result["drift"]) + "); run the config reconcile operation first"))
+
     def check_target(self, spec, args):
         # TASK-1002: this executor only reaches its own Docker daemon. A target
         # that lives on another host (e.g. Unraid) must fail HERE, before an
@@ -295,6 +400,12 @@ class DockerExecutor(Executor):
         self._check_prerequisites(snapshot["execution"])
         if snapshot["spec"].get("action") == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
+        if snapshot["spec"].get("action") in CONFIG_CHECKED_ACTIONS:
+            # Cheap prerequisites only. The worker re-renders and compares under
+            # the target lock; rendering here would churn renderer containers on
+            # every reconcile tick of a job queued behind a prerequisite.
+            self._check_config_worker(snapshot["execution"])
+            self.ensure_renderer_image(snapshot["spec"])
         if snapshot.get("quiesce"):
             self.check_quiesce_fence(snapshot["execution"])
         if snapshot["spec"].get("action") == DEPLOY_ACTION:

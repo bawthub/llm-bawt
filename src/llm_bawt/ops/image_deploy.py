@@ -10,6 +10,8 @@ Deploy and rollback share ONE replace path:
 
   inspect target → (deploy: ``repo@digest`` must already be on the daemon —
   the app pulls it in preflight) → verify image identity →
+  (deploy: the running config must equal the rendered Compose service apart
+  from the image, TASK-1518, else ``config_drift`` and nothing changes) →
   create clone ``<name>-next-<job8>`` → stop old → rename old ``-prev-<job8>`` →
   rename new to canonical → start → wait for Docker health → verify release
   identity via in-container ``/api/health`` → remove old container.
@@ -27,6 +29,13 @@ import struct
 import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
+
+if __package__:
+    from .compose_config import CONFIG_HASH_LABEL, evaluate
+    from .compose_render import ComposeRenderer
+else:  # standalone immutable worker
+    from compose_config import CONFIG_HASH_LABEL, evaluate
+    from compose_render import ComposeRenderer
 
 DEPLOY_SCHEMA = "llm-bawt.ops.image-deploy/v1"
 DEPLOY_ACTION = "deploy_image"
@@ -78,8 +87,10 @@ class DeployFailed(RuntimeError):
 
 class ImageDeployer:
     def __init__(self, api, snapshot: dict, job_id: str, *, lock_root: Path,
-                 sleep=time.sleep, clock=time.monotonic):
+                 sleep=time.sleep, clock=time.monotonic, renderer=None):
         self.api = api
+        self._renderer_override = renderer
+        self._config_hash = None
         self.spec = snapshot["spec"]
         self.snapshot = snapshot
         self.job_id = job_id
@@ -111,7 +122,32 @@ class ImageDeployer:
             self._rollback()
 
     def _create_body(self, old, old_image, new_image, ref):
-        return clone_create_body(old, old_image, new_image, ref, self.job_id)
+        body = clone_create_body(old, old_image, new_image, ref, self.job_id)
+        if self._config_hash:
+            # Matches Compose's own hash of the service at this ref, so a later
+            # `compose up` sees no drift and does not recreate the target.
+            body["Labels"][CONFIG_HASH_LABEL] = self._config_hash
+        return body
+
+    def _renderer(self):
+        """Sealed one-shot Compose renderer (TASK-1518), injectable in tests."""
+        return self._renderer_override or ComposeRenderer(self.api, self.spec, tag=self.job_id[:12])
+
+    def _check_config(self, old, old_image, ref):
+        """r2 B3, authoritative and under the target lock: refuse to clone a
+        running configuration that differs from the declared Compose service.
+        Compares everything but the image, which the deploy swaps on purpose."""
+        self._phase("config-check")
+        try:
+            result = evaluate(self.spec, old, old_image, self._renderer(), ref)
+        except ValueError as exc:  # ComposeError: fixed codes and names only
+            self._fail(f"compose config check failed: {exc}; nothing changed", known=True)
+        if result["drift"]:
+            self.detail["config_drift"] = result["drift"]
+            self._fail("config_drift: the running target differs from its Compose service ("
+                       + ", ".join(result["drift"]) + "); run the config reconcile operation first; "
+                       "nothing changed", known=True)
+        self._config_hash = result["rendered_hash"]
 
     def _fail(self, message: str, *, known: bool):
         raise DeployFailed(message, self.detail, outcome_known=known)
@@ -139,6 +175,10 @@ class ImageDeployer:
                   "workflow_run_id": str(release["workflow_run_id"])}
         if release_from_labels(new_image["Config"].get("Labels")) != expect:
             self._fail("image release labels do not match the approved run/source/version", known=True)
+        if not self.spec.get("compose_config"):
+            # Fail closed: a silent clone of stale configuration must not be possible.
+            self._fail("deploy spec declares no compose_config; nothing changed", known=True)
+        self._check_config(old, old_image, ref)
         self._replace(old, old_image, new_image, ref, expect)
 
     def _rollback(self):
