@@ -178,7 +178,7 @@ class TestClaudeActiveRun:
             # One-sided: the full steer timeout was honored (per-step cost only
             # adds to it).
             # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-            assert loop.time() - began >= run._steer_timeout_s - virtual_clock.TICK_S
+            assert loop.time() - began >= run._steer_timeout_s
             assert interrupt_started.is_set()
             client.query.assert_not_awaited()
             assert run.consume_replaced_result(MagicMock(subtype="success")) is False
@@ -207,7 +207,7 @@ class TestClaudeActiveRun:
             # One-sided: the full steer timeout was honored (per-step cost only
             # adds to it).
             # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-            assert loop.time() - began >= run._steer_timeout_s - virtual_clock.TICK_S
+            assert loop.time() - began >= run._steer_timeout_s
             assert query_started.is_set()
             client.disconnect.assert_awaited_once_with()
             assert run.consume_replaced_result(MagicMock(subtype="success")) is False

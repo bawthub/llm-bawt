@@ -141,19 +141,19 @@ def run(main: Awaitable[T], *, follow: Iterable[ModuleType] = ()) -> T:
 # test that only passes because the code "got there in time" fails every run.
 # Two ideas come from looptime (github.com/nolar/looptime, evaluated and not
 # adopted: it counts executor Futures, not workers, and jumps over external
-# I/O): integer microsecond ticks, and a sub-tick timeout advancing one tick.
+# I/O): integer ticks, and a sub-tick timeout advancing one tick.
 # ---------------------------------------------------------------------------
 
 _REAL_MONOTONIC = real_time.monotonic
 _REAL_TIME = real_time.time
 _REAL_PERF_COUNTER = real_time.perf_counter
 _REAL_WRAP_FUTURE = asyncio.wrap_future
-TICKS_PER_SECOND = 1_000_000
-# loop.time() is ticks / TICKS_PER_SECOND from a real-monotonic start, so the
-# difference of two readings carries float rounding (399.99999999999994 for a
-# 400s wait). Lower bounds on elapsed loop time subtract one tick: exact to
-# the clock's resolution, still red if the deadline is cut short.
-TICK_S = 1 / TICKS_PER_SECOND
+# A power of two (~0.95us), so every loop.time() reading, ticks / 2**20, is
+# exact in binary and so is the difference of two readings. With decimal
+# microseconds the 400s wait from a CI start of 124.770643s read back as
+# 399.99999999999994 and failed `elapsed >= 400`; now a wait reads back as at
+# least what was asked, and a test bounds elapsed loop time with no tolerance.
+TICKS_PER_SECOND = 1 << 20
 IDLE_LIMIT_S = 30.0
 Observer = Callable[[str, float], None]
 

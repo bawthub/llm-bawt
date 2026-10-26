@@ -106,7 +106,7 @@ def test_steering_without_any_model_output_blocks_original_prompt_replay(monkeyp
             # One-sided: the full steer timeout was honored (per-step cost only
             # adds to it).
             # timing-ok: virtual clock (run_timing): loop.time() is exact and never waits
-            assert loop.time() - began >= active._steer_timeout_s - virtual_clock.TICK_S
+            assert loop.time() - began >= active._steer_timeout_s
         else:
             await active.steer("continue without replay", priority="now")
             sdk.query.assert_awaited_once()

@@ -90,7 +90,7 @@ async def seed1_timer_only():
 
 
 def seed1_ok(run: Run, result) -> bool:
-    return result == pytest.approx(0.1) and not run.follows
+    return result == pytest.approx(0.1, abs=1 / virtual_clock.TICKS_PER_SECOND) and not run.follows
 
 
 async def seed2_thread_released_by_a_timer():
@@ -402,23 +402,27 @@ def test_a_loop_clock_starts_at_real_time_so_a_cached_reading_never_goes_back():
     assert loop_monotonic >= monotonic and loop_wall >= wall
 
 
-def test_an_elapsed_lower_bound_needs_one_tick_of_rounding(monkeypatch):
-    # A real CI start: 400s of loop time read back as 399.99999999999994.
-    monkeypatch.setattr(virtual_clock, "_REAL_MONOTONIC", lambda: 124.770643)
+@pytest.mark.parametrize("start", [124.770643, 231.621586, 0.1, 86_400.3, 3_000_000.000001])
+def test_a_wait_reads_back_as_at_least_what_was_asked_from_any_start(monkeypatch, start):
+    # 124.770643 and 231.621586 are real CI starts where decimal-microsecond
+    # ticks read 400s back as 399.99999999999994 and 30s as 29.999999999999996.
+    monkeypatch.setattr(virtual_clock, "_REAL_MONOTONIC", lambda: start)
+    delays = (400, 30, 5.0, 2.5, 0.3, 0.1, 0.02, 1e-7)
 
     async def waited():
         loop = asyncio.get_running_loop()
-        began = loop.time()
-        await asyncio.sleep(400)
-        return loop.time() - began
+        elapsed = []
+        for delay in delays:
+            began = loop.time()
+            await asyncio.sleep(delay)
+            elapsed.append(loop.time() - began)
+        return elapsed
 
-    # A plain TimingLoop (no report step cost): the test is about the
-    # clock's arithmetic, not about code getting there in time.
+    # A plain TimingLoop (no report step cost): this is the clock's arithmetic.
     elapsed = Run()(waited)
-    # timing-ok: virtual clock (TimingLoop): loop.time() is exact to one tick
-    assert elapsed < 400
-    # timing-ok: virtual clock (TimingLoop): loop.time() is exact to one tick
-    assert elapsed >= 400 - virtual_clock.TICK_S
+    assert all(took >= delay for took, delay in zip(elapsed, delays)), list(zip(elapsed, delays))
+    # A whole-second wait lands exactly on its deadline: nothing rounds.
+    assert elapsed[:3] == [400.0, 30.0, 5.0]
 
 
 def test_timing_loop_fails_a_wait_on_nothing_instead_of_hanging():
@@ -430,7 +434,7 @@ def test_the_policy_makes_every_new_loop_a_timing_loop():
     policy = virtual_clock.TimingLoopPolicy(step_cost=0.5)
     loop = policy.new_event_loop()
     try:
-        assert isinstance(loop, virtual_clock.TimingLoop) and loop._step == 500_000
+        assert isinstance(loop, virtual_clock.TimingLoop) and loop._step == 0.5 * virtual_clock.TICKS_PER_SECOND
     finally:
         loop.close()
 
@@ -535,6 +539,6 @@ def test_run_timing_uses_the_installed_report_loop_or_a_plain_timing_loop():
         asyncio.set_event_loop_policy(None)
         assert virtual_clock.run_timing(step()) == (virtual_clock.TimingLoop, 0, True)
         asyncio.set_event_loop_policy(virtual_clock.TimingLoopPolicy(step_cost=0.5))
-        assert virtual_clock.run_timing(step()) == (virtual_clock.TimingLoop, 500_000, True)
+        assert virtual_clock.run_timing(step()) == (virtual_clock.TimingLoop, 0.5 * virtual_clock.TICKS_PER_SECOND, True)
     finally:
         asyncio.set_event_loop_policy(saved)
