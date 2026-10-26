@@ -7,6 +7,7 @@ its legacy env) from "present but unusable" (409/503, it must not).
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -15,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
+from sqlmodel import Session, SQLModel
 
 from llm_bawt.bawthub_auth import TOKEN_ENV, TOKEN_FILE_ENV
 from llm_bawt.integrations.connections import IntegrationStore
@@ -186,6 +187,55 @@ def test_store_unavailable_is_503(client, stores):
     response = client.get(f"{URL}/provider/xai", headers=AUTH)
     assert response.status_code == 503
     assert response.json() == {"detail": "store_unavailable"}
+
+
+def _raw_row(stores, kind, cid, value_json):
+    with Session(stores[kind]._store.engine) as session:
+        session.add(RuntimeSetting(scope_type="global", scope_id="*",
+                                   key=stores[kind]._key(cid), value_json=value_json))
+        session.commit()
+
+
+@pytest.mark.parametrize("value_json", [
+    "null",                                          # JSON null
+    "[]",                                            # not an object
+    "{not json",                                     # invalid JSON (get_scope_settings skips it)
+    '{"status": "connected", "meta": [], "secret_enc": ""}',  # meta not an object
+])
+def test_present_but_malformed_row_is_never_absent(client, stores, value_json):
+    _raw_row(stores, "provider", "xai", value_json)
+    response = client.get(f"{URL}/provider/xai", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "unreadable"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_decrypted_secret_that_is_not_an_object_is_unreadable(client, stores):
+    _raw_row(stores, "provider", "xai", json.dumps(
+        {"status": "connected", "meta": {}, "secret_enc": crypto.encrypt(json.dumps(["x"]))}))
+    response = client.get(f"{URL}/provider/xai", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "unreadable"}
+
+
+def test_database_read_failure_is_store_unavailable(client, stores, caplog):
+    RuntimeSetting.__table__.drop(stores["provider"]._store.engine)
+    with TestClient(client.app, raise_server_exceptions=False) as unchecked, \
+            caplog.at_level(logging.DEBUG):
+        response = unchecked.get(f"{URL}/provider/xai", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "store_unavailable"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("path,status", [
+    ("integration/google-keep", 404),   # not allowlisted
+    ("provider/xai", 404),              # absent
+])
+def test_error_responses_are_no_store(client, path, status):
+    response = client.get(f"{URL}/{path}", headers=AUTH)
+    assert response.status_code == status
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_route_is_registered_with_the_app_routers():
