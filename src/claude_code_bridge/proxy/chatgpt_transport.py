@@ -425,7 +425,9 @@ class ChatGPTStream:
     def _observe(self, event, now: float) -> bool:
         """Update liveness bookkeeping for one event; return productivity."""
         kind = str(getattr(event, "type", "") or "")
-        if kind == "response.output_item.added":
+        if kind in {"response.output_item.added", "response.output_item.done"}:
+            if self.context is not None and getattr(self.context, "first_output_ms", None) is None:
+                self.context.first_output_ms = (now - self.started_at) * 1000
             self.output_seen = True
         productive = self._is_productive(event)
         if productive:

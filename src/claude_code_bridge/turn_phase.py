@@ -185,9 +185,9 @@ class TurnPhaseTracker:
     def on_proxy_status(self, status: dict) -> None:
         """In-process proxy stall / retry / waiting / recovered signals.
 
-        Trouble states enter their phase. ``waiting`` (a new proxy request,
-        e.g. the CLI's non-streaming fallback) and ``recovered`` leave a
-        trouble phase, so a finished retry can never strand the status.
+        Trouble states enter their phase. A new ``waiting`` request, final
+        ``failed`` outcome, or ``recovered`` output leaves the trouble phase;
+        an exhausted retry cannot strand an amber status.
         """
         state = str(status.get("state") or "")
         phase = _PROXY_STATES.get(state)
@@ -200,8 +200,8 @@ class TurnPhaseTracker:
                 **{k: status.get(k) for k in _PROXY_DETAIL},
             )
             self._proxy_owned = True
-        elif self.phase in _TROUBLE and state in {"waiting", "recovered"}:
-            fallback = TurnPhase.WAITING_MODEL if state == "waiting" else TurnPhase.STREAMING
+        elif self.phase in _TROUBLE and state in {"waiting", "recovered", "failed"}:
+            fallback = TurnPhase.STREAMING if state == "recovered" else TurnPhase.WAITING_MODEL
             self._resume(fallback)
 
     def _resume(self, fallback: TurnPhase) -> None:

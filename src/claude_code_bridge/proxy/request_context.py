@@ -99,6 +99,8 @@ class ProxyRequestContext:
     queue_wait_ms: float = 0.0
     local_setup_ms: float | None = None
     upstream_ttfb_ms: float | None = None
+    first_output_ms: float | None = None
+    retry_lease: Any = field(default=None, repr=False)
     input_tokens: int = 0
     cached_tokens: int = 0
     output_tokens: int = 0

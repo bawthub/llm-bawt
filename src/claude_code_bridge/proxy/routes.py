@@ -21,7 +21,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import lookup
-from .errors import anthropic_error, auth_failed_error
+from .errors import anthropic_error, auth_failed_error, final_error_frame
+from .retry import RetryAdmissionError, RetryBudgetRegistry
 from .heartbeat import DEFAULT_INTERVAL, with_heartbeat
 from .observability import OBSERVABILITY
 from .request_context import (
@@ -48,6 +49,24 @@ except ValueError:
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_SSE_BOUNDARY = re.compile(rb"\r?\n\r?\n")
+_MAX_UNFRAMED_BYTES = 16 * 1024 * 1024
+
+
+def _tool_start(frame: bytes) -> bool:
+    """Recognize a complete tool-use start before any part reaches the SDK."""
+    if b"content_block_start" not in frame:
+        return False
+    data = b"\n".join(line[5:].lstrip() for line in frame.splitlines()
+                      if line.startswith(b"data:"))
+    try:
+        payload = json.loads(data)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid tool start SSE payload")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError("Invalid tool start SSE frame") from exc
+    return (payload.get("type") == "content_block_start"
+            and (payload.get("content_block") or {}).get("type") == "tool_use")
 
 
 def _split_model(model_field: str) -> tuple[str, str]:
@@ -104,6 +123,8 @@ async def _proxy_iter(
     *,
     provider: str,
     context: ProxyRequestContext,
+    budgets: RetryBudgetRegistry | None = None,
+    fingerprint: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Run one proxy request, surfacing adapter failures as Anthropic SSE."""
     started = time.perf_counter()
@@ -113,14 +134,62 @@ async def _proxy_iter(
         provider, account_scope
     )
     status_code: int | None = None
+    lease = None
     try:
+        if budgets is not None and fingerprint is not None:
+            # Acquire before authorization or sampling. The first attempt is
+            # charged here for every adapter, including passthrough adapters;
+            # the Responses adapter charges its own subsequent attempts.
+            lease = budgets.acquire(
+                context.request_id, fingerprint,
+                lambda: adapter.retry_policy(upstream_model, context),
+            )
+            context.retry_lease = lease
+            attempt = lease.policy.claim_attempt()
+            if attempt is None:
+                raise RetryAdmissionError("Proxy retry budget exhausted")
+            context.attempt = attempt
+            context.report_status({"state": "waiting", "provider": provider})
+
         # Heartbeat-wrap every adapter so neither the OpenAI translate path
-        # nor the Z.AI passthrough can go silent long enough to read as a
-        # dead connection (covers the reasoning-window stall).
+        # nor passthrough can go silent enough to read as a dead connection.
+        # Buffer arbitrary transport chunks into complete SSE frames: a
+        # passthrough can split tool_use across chunks, and its tombstone must
+        # be committed BEFORE any bytes of that start reach the SDK.
+        pending = b""
+        saw_error = False
+        saw_message_stop = False
         async for chunk in with_heartbeat(
             adapter.call(body, upstream_model, context), interval=_PING_INTERVAL
         ):
-            yield chunk
+            if lease is None:
+                yield chunk
+                continue
+            pending += chunk
+            while match := _SSE_BOUNDARY.search(pending):
+                frame, pending = pending[:match.end()], pending[match.end():]
+                if _tool_start(frame):
+                    lease.mark_tool_committed()
+                event_lines = frame.splitlines()
+                if b"event: error" in event_lines:
+                    saw_error = True
+                if b"event: message_stop" in event_lines:
+                    saw_message_stop = True
+                yield frame
+            if len(pending) > _MAX_UNFRAMED_BYTES:
+                raise RuntimeError("Proxy SSE frame exceeds safe buffer")
+        if lease is not None and pending.strip():
+            raise RuntimeError("Incomplete proxy SSE frame")
+        if lease is not None and not saw_error and not saw_message_stop:
+            raise RuntimeError("Proxy SSE stream ended before message_stop")
+        if lease is not None and not saw_error:
+            lease.mark_success()
+        if saw_error:
+            status_code = 500
+    except RetryAdmissionError as e:
+        status_code = 500
+        logger.warning("proxy_retry_rejected request_id=%s reason=%s", context.request_id, e)
+        yield final_error_frame("api_error", str(e))
     except (asyncio.CancelledError, GeneratorExit):
         # Cancellation is not a successful model response. No error frame can
         # be sent to a departed consumer, but telemetry must retain the outcome.
@@ -138,37 +207,24 @@ async def _proxy_iter(
         OBSERVABILITY.record_error(provider, status_code)
         etype = _upstream_error_type(msg, status_code)
         logger.warning("Adapter error (type=%s): %s", etype, e)
-        err_payload = {
-            "type": "error",
-            "error": {
-                "type": etype,
-                "message": msg,
-            },
-        }
-        yield (
-            b"event: error\n"
-            b"data: " + json.dumps(err_payload).encode() + b"\n\n"
-        )
+        context.report_status({"state": "failed", "provider": provider})
+        yield final_error_frame(etype, msg)
     except Exception as e:  # noqa: BLE001
         status_code = getattr(e, "status_code", None) or 500
         OBSERVABILITY.record_error(provider, status_code)
         logger.exception("Unexpected adapter failure")
+        context.report_status({"state": "failed", "provider": provider})
         etype = _upstream_error_type(str(e), status_code)
-        err_payload = {
-            "type": "error",
-            "error": {"type": etype, "message": f"Proxy error: {e}"},
-        }
-        yield (
-            b"event: error\n"
-            b"data: " + json.dumps(err_payload).encode() + b"\n\n"
-        )
+        yield final_error_frame(etype, f"Proxy error: {e}")
     finally:
+        if lease is not None:
+            lease.release()
         OBSERVABILITY.end(provider, account_scope)
         errors_429, errors_5xx = OBSERVABILITY.error_totals(provider)
         logger.info(
             "proxy_stream_complete request_id=%s provider=%s account=%s bot=%s "
             "session_hash=%s active_provider=%d active_account=%d queue_ms=%.1f "
-            "setup_ms=%s upstream_ttfb_ms=%s stream_ms=%.1f input=%d cached=%d "
+            "setup_ms=%s upstream_ttfb_ms=%s first_output_ms=%s stream_ms=%.1f input=%d cached=%d "
             "output=%d cache_hit=%.1f%% status=%s errors_429_total=%d "
             "errors_5xx_total=%d upstream_model=%s",
             context.request_id,
@@ -181,6 +237,7 @@ async def _proxy_iter(
             context.queue_wait_ms,
             f"{context.local_setup_ms:.1f}" if context.local_setup_ms is not None else "na",
             f"{context.upstream_ttfb_ms:.1f}" if context.upstream_ttfb_ms is not None else "na",
+            f"{context.first_output_ms:.1f}" if context.first_output_ms is not None else "na",
             (time.perf_counter() - started) * 1000,
             context.input_tokens,
             context.cached_tokens,
@@ -371,8 +428,9 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
     stream_requested = bool(body.get("stream"))
 
     request_headers = getattr(request, "headers", {})
+    bridge_request_id = (request_headers.get(REQUEST_HEADER) or "").strip()
     context = ProxyRequestContext(
-        request_id=(request_headers.get(REQUEST_HEADER) or uuid.uuid4().hex).strip(),
+        request_id=bridge_request_id or uuid.uuid4().hex,
         provider=provider,
         bot_id=(request_headers.get(BOT_HEADER) or "").strip() or None,
         conversation_id=valid_conversation_identity(
@@ -416,18 +474,26 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
     # into one Messages API JSON response.
     body_for_adapter = dict(body)
     body_for_adapter["stream"] = True
+    budgets = getattr(
+        getattr(getattr(request, "app", None), "state", None),
+        "proxy_retry_budgets", None,
+    )
+    fingerprint = (
+        budgets.fingerprint(body_for_adapter, provider, upstream_model)
+        if bridge_request_id and budgets is not None else None
+    )
 
     if not stream_requested:
-        message, error_payload = await _anthropic_sse_to_message(
-            _proxy_iter(
-                adapter,
-                body_for_adapter,
-                upstream_model,
-                provider=provider,
-                context=context,
-            ),
-            fallback_model=body.get("model") or upstream_model,
+        source = _proxy_iter(
+            adapter, body_for_adapter, upstream_model, provider=provider,
+            context=context, budgets=budgets, fingerprint=fingerprint,
         )
+        try:
+            message, error_payload = await _anthropic_sse_to_message(
+                source, fallback_model=body.get("model") or upstream_model,
+            )
+        finally:
+            await source.aclose()  # parser stops early on an error frame
         if error_payload is not None:
             err = error_payload.get("error") if isinstance(error_payload, dict) else {}
             return JSONResponse(error_payload, status_code=_error_status(err.get("type")))
@@ -440,6 +506,8 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
             upstream_model,
             provider=provider,
             context=context,
+            budgets=budgets,
+            fingerprint=fingerprint,
         ),
         media_type="text/event-stream",
         headers={

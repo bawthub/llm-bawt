@@ -4,11 +4,12 @@ import json
 from types import SimpleNamespace as NS
 
 import pytest
+from anthropic import APIError
 
 from claude_code_bridge.proxy import chatgpt_transport
 from claude_code_bridge.proxy.chatgpt_transport import ChatGPTEventTimeout
 from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
-from tests.test_proxy_progress_recovery import THINKING, TOOL, Harness, success_frames
+from tests.test_proxy_progress_recovery import THINKING, TOOL, Harness, parse_message, success_frames
 from tests import virtual_clock
 from tests.test_turn_phase import _phases, _ProxyHarness, _tracker
 
@@ -61,6 +62,21 @@ def test_request_with_no_output_item_times_out_as_first_output():
             await _drain(stream)
         assert error.value.phase == "first_output"
     asyncio.run(run())
+
+
+def test_first_output_telemetry_measures_item_not_headers():
+    async def run():
+        async def events():
+            yield NS(type="response.created")  # headers/created are not model output
+            await asyncio.sleep(.04)
+            yield NS(type="response.output_item.added", item=NS(type="reasoning"))
+            yield NS(type="response.completed", response=NS(usage=None, status="completed"))
+
+        stream = _stream(events(), [], productive=.1)
+        await _drain(stream)
+        assert stream.context.first_output_ms == pytest.approx(40)
+
+    virtual_clock.run(run(), follow=[chatgpt_transport])
 
 
 def test_hidden_reasoning_item_satisfies_first_output():
@@ -163,6 +179,47 @@ def test_final_failure_leaves_argumentless_tool_block_open(monkeypatch, mode):
             assert len(starts) == 1 and starts[0] not in stops
             assert any(f.get("type") == "error" for f in frames)
             assert not any(f.get("type") == "message_stop" for f in frames)
+        finally:
+            await h.adapter.close()
+    asyncio.run(run())
+
+
+def test_unflushed_tool_failure_is_rejected_by_the_anthropic_sdk(monkeypatch):
+    async def run():
+        h = Harness(monkeypatch, "sse", [
+            THINKING, {"type": "response.output_item.added", "item": TOOL},
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_new",
+             "delta": "   "},
+        ], success_frames())
+        try:
+            await h.collect()
+            with pytest.raises(APIError, match="Proxy stream failed"):
+                await parse_message(h.frames)
+            frames, starts, stops = _tool_frames(h)
+            assert len(starts) == 1 and starts[0] not in stops
+            assert not any(f.get("type") == "message_stop" for f in frames)
+        finally:
+            await h.adapter.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["sse", "lite_ws"])
+def test_final_failure_reports_terminal_status_without_sdk_resend(monkeypatch, mode):
+    async def run():
+        h = Harness(monkeypatch, mode, [THINKING], [{"type": "response.created"}])
+        try:
+            await h.collect()
+            assert h.attempts == 2
+            assert [s["state"] for s in h.statuses][-2:] == [
+                "reconnecting" if mode == "lite_ws" else "retrying", "failed",
+            ]
+            tracker, published, _clock = _tracker()
+            tracker.on_turn_start()
+            for status in h.statuses:
+                tracker.on_proxy_status(status)
+            assert _phases(published)[-2:] == [
+                "reconnecting" if mode == "lite_ws" else "retrying", "waiting_model",
+            ]
         finally:
             await h.adapter.close()
     asyncio.run(run())

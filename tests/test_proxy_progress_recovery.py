@@ -225,7 +225,7 @@ def test_committed_output_still_prevents_stall_replay(monkeypatch, mode, barrier
             wire = b"".join(h.frames)
             assert h.attempts == (2 if continuation else 1)
             if not continuation:
-                assert not h.statuses
+                assert [s["state"] for s in h.statuses] == ["failed"]
             elif not recovers:
                 assert b'"type":"tool_use"' not in wire
             if recovers:

@@ -30,6 +30,7 @@ from typing import AsyncIterator, ClassVar
 
 import httpx
 
+from ..errors import final_error_frame as _final_error_frame
 from ..request_context import ProxyRequestContext
 from .. import retry as retry_mod
 from ..stream import TranslatorState
@@ -45,12 +46,6 @@ def _stop_block_frame(index: int) -> bytes:
     """
     payload = {"type": "content_block_stop", "index": index}
     return f"event: content_block_stop\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
-
-
-def _final_error_frame(error_type: str, message: str) -> bytes:
-    """Emit a well-formed Anthropic-shaped SSE error frame."""
-    payload = {"type": "error", "error": {"type": error_type, "message": message}}
-    return f"event: error\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
 
 
 def _is_unflushed_tool(block: dict) -> bool:
@@ -279,7 +274,9 @@ class ProviderAdapter(ABC):
         )
 
         state = TranslatorState()
-        policy = self.retry_policy(upstream_model, context)
+        lease = context.retry_lease if context is not None else None
+        policy = lease.policy if lease is not None else self.retry_policy(upstream_model, context)
+        route_attempt = context.attempt if lease is not None else 0
         # Per Al #4: the on_usage callback wired into context.record_usage
         # fires INSIDE the translator whenever the upstream emits usage. On
         # retry we want the FINAL SUCCESSFUL attempt's usage to win. The
@@ -291,14 +288,20 @@ class ProviderAdapter(ABC):
         tool_schemas = anthropic_body.get("tools")
 
         while True:
-            attempt = policy.start_attempt()
+            # Routes reserve the first attempt before entering any adapter;
+            # direct adapter callers reserve it here. Subsequent attempts all
+            # consume the SAME policy before another upstream sample.
+            attempt = route_attempt or policy.claim_attempt()
+            route_attempt = 0
+            if attempt is None:
+                if context is not None:
+                    context.report_status({"state": "failed", "provider": context.provider})
+                yield _final_error_frame("api_error", "Proxy retry budget exhausted")
+                return
             attempt_started = time.perf_counter()
             if context is not None:
                 context.attempt = attempt
-                if attempt == 1:
-                    # TASK-1079: a fresh model request (including the CLI's
-                    # own non-streaming retry) ends any stale retry/stall
-                    # status left by an earlier request in this turn.
+                if attempt == 1 and lease is None:
                     context.report_status({
                         "state": "waiting", "provider": context.provider,
                     })
@@ -369,6 +372,7 @@ class ProviderAdapter(ABC):
                         initial_exc
                     ),
                 )
+                policy.record_decision(bucket, decision)
                 logger.warning(
                     "proxy_retry request_id=%s bot_id=%s boundary=open "
                     "transport=%s bucket=%s phase=%s stall_phase=%s "
@@ -395,6 +399,8 @@ class ProviderAdapter(ABC):
                             self._cached_expires_at = 0  # type: ignore[attr-defined]
                         bearer, base_url = await self.authorize()
                         if self.reasoning_codec(upstream_model, base_url) != reasoning_codec:
+                            if context is not None:
+                                context.report_status({"state": "failed", "provider": context.provider})
                             yield _final_error_frame(
                                 "authentication_error",
                                 "Reasoning account scope changed during authorization; start a new request",
@@ -411,6 +417,8 @@ class ProviderAdapter(ABC):
                 # Terminal — surface the final error type. On CONNECTING
                 # failure state.message_start_yielded is still False, so the
                 # client sees ONLY an error frame (no orphan message_start).
+                if context is not None:
+                    context.report_status({"state": "failed", "provider": context.provider})
                 yield _final_error_frame(
                     decision.final_error_type or "api_error",
                     f"Proxy exhausted retries: {initial_exc}",
@@ -475,6 +483,7 @@ class ProviderAdapter(ABC):
                 retry_after_s=retry_after,
                 permanent_error_type=permanent_type,
             )
+            policy.record_decision(bucket, decision)
             logger.warning(
                 "proxy_retry request_id=%s bot_id=%s boundary=stream "
                 "transport=%s bucket=%s phase=%s stall_phase=%s "
@@ -539,6 +548,8 @@ class ProviderAdapter(ABC):
             if discard_stream is not None:
                 await discard_stream()
             final_error_type = decision.final_error_type or "api_error"
+            if context is not None:
+                context.report_status({"state": "failed", "provider": context.provider})
             yield _final_error_frame(
                 final_error_type,
                 f"Proxy stream failed: {exc_repr}",

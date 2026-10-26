@@ -35,11 +35,14 @@ Invariants (spec-locked, enforced here + regressed in tests):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import random
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from .stream import TranslatorState
@@ -134,10 +137,10 @@ RATE_LIMIT_MAX_WAIT_S = 10.0
 
 @dataclass
 class RetryPolicy:
-    """Retry configuration + per-call() budget bookkeeping.
+    """Retry configuration and budget for one logical request body.
 
-    One instance per :meth:`ProviderAdapter.call` invocation. Not thread-safe;
-    proxy handles one attempt at a time per call.
+    The registry leases one owner at a time across SDK HTTP resends. Direct
+    adapter calls use a private policy. A policy is used by one owner at once.
     """
 
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
@@ -146,6 +149,7 @@ class RetryPolicy:
     jitter_s: float = DEFAULT_JITTER_S
     rate_limit_max_wait_s: float = RATE_LIMIT_MAX_WAIT_S
     _attempts_used: int = field(default=0, init=False)
+    _terminal: bool = field(default=False, init=False)
 
     @property
     def attempt(self) -> int:
@@ -157,9 +161,140 @@ class RetryPolicy:
         self._attempts_used += 1
         return self._attempts_used
 
+    def claim_attempt(self) -> int | None:
+        """Reserve before sampling upstream, including across SDK resends."""
+        if self._terminal or self.attempts_remaining <= 0:
+            return None
+        return self.start_attempt()
+
+    def record_decision(self, bucket: FailureBucket, decision: RetryDecision) -> None:
+        """A final supervised stall is terminal across SDK HTTP resends."""
+        if bucket is FailureBucket.G_PROGRESS_STALL and not decision.retry:
+            self._terminal = True
+
+    @property
+    def available(self) -> bool:
+        return not self._terminal and self.attempts_remaining > 0
+
     @property
     def attempts_remaining(self) -> int:
         return max(0, self.max_attempts - self._attempts_used)
+
+
+class RetryAdmissionError(RuntimeError):
+    """The proxy must reject a duplicate or exhausted call before sampling."""
+
+
+@dataclass(slots=True)
+class _BudgetEntry:
+    policy: RetryPolicy
+    generation: int = 0
+    active: bool = False
+    tool_committed: bool = False
+    successful: bool = False
+
+
+class RetryLease:
+    """A fenced owner of one logical model call within a bridge send."""
+
+    def __init__(
+        self, registry: "RetryBudgetRegistry", request_id: str, fingerprint: str,
+        entry: _BudgetEntry, generation: int,
+    ) -> None:
+        self._registry = registry
+        self._key = (request_id, fingerprint)
+        self._entry = entry
+        self._generation = generation
+        self.policy = entry.policy
+
+    def mark_tool_committed(self) -> None:
+        self._registry._mark(self, tool=True)
+
+    def mark_success(self) -> None:
+        self._registry._mark(self, success=True)
+
+    def release(self) -> None:
+        self._registry._release(self)
+
+
+class RetryBudgetRegistry:
+    """One attempt counter and one active sampler per request/body fingerprint.
+
+    The bridge's request id is stable across the SDK's HTTP resends and unique
+    to a send. Direct clients lacking that header use a local RetryPolicy and
+    do not fill this registry. Only the bridge's turn-final clear releases tool
+    tombstones; a new body (e.g. containing a tool result) is a different call.
+    """
+
+    def __init__(self, *, max_entries: int = 4096) -> None:
+        self.max_entries = max_entries
+        self._entries: dict[tuple[str, str], _BudgetEntry] = {}
+        self._generation = 0
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def fingerprint(body: dict[str, Any], provider: str, upstream_model: str) -> str:
+        """Hash normalized JSON, never store prompts, tools, or arguments."""
+        normalized = {**body, "stream": True}
+        canonical = json.dumps(
+            [provider, upstream_model, normalized], sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def acquire(
+        self, request_id: str, fingerprint: str,
+        policy_factory: Callable[[], RetryPolicy],
+    ) -> RetryLease:
+        """Reject duplicate sampling or a spent budget atomically."""
+        key = (request_id, fingerprint)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                if len(self._entries) >= self.max_entries:
+                    raise RetryAdmissionError("Proxy retry capacity exhausted")
+                entry = _BudgetEntry(policy=policy_factory())
+                self._entries[key] = entry
+            if entry.active:
+                raise RetryAdmissionError("Identical model call already running")
+            if entry.tool_committed:
+                raise RetryAdmissionError("Completed or partial tool call cannot be replayed")
+            if not entry.policy.available:
+                raise RetryAdmissionError("Proxy retry budget exhausted")
+            self._generation += 1
+            entry.generation = self._generation
+            entry.active = True
+            entry.successful = False
+            return RetryLease(self, request_id, fingerprint, entry, entry.generation)
+
+    def _current(self, lease: RetryLease) -> _BudgetEntry | None:
+        entry = self._entries.get(lease._key)
+        return (
+            entry if entry is lease._entry and entry.active
+            and entry.generation == lease._generation else None
+        )
+
+    def _mark(self, lease: RetryLease, *, tool: bool = False, success: bool = False) -> None:
+        with self._lock:
+            entry = self._current(lease)
+            if entry is not None:
+                entry.tool_committed |= tool
+                entry.successful |= success
+
+    def _release(self, lease: RetryLease) -> None:
+        with self._lock:
+            entry = self._current(lease)
+            if entry is None:
+                return  # stale finalizer cannot clear a subsequent owner
+            entry.active = False
+            if entry.successful and not entry.tool_committed:
+                self._entries.pop(lease._key)
+
+    def clear_request(self, request_id: str) -> None:
+        """Drop this turn's completed-tool tombstones and spent policies."""
+        with self._lock:
+            for key in [key for key in self._entries if key[0] == request_id]:
+                del self._entries[key]
 
 
 def compute_backoff(

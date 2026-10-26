@@ -8,6 +8,7 @@ auth-recovery, and surface-to-user behaviors stay correct.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import HTTPException
@@ -52,6 +53,12 @@ def anthropic_error(
         "error": {"type": atype, "message": message},
     }
     return HTTPException(status_code=status_code, detail=detail)
+
+
+def final_error_frame(error_type: str, message: str) -> bytes:
+    """One Anthropic SSE error shape for adapter and route failures."""
+    payload = {"type": "error", "error": {"type": error_type, "message": message}}
+    return f"event: error\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
 
 
 def auth_failed_error(message: str | None = None) -> HTTPException:

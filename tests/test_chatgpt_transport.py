@@ -601,7 +601,7 @@ def test_productive_stall_after_committed_output_never_replays(monkeypatch, comm
             joined = b"".join(chunks)
             assert adapter._chatgpt_transport.connector.await_count == 1
             assert b'"type":"api_error"' in joined
-            assert [status["state"] for status in statuses] == ["waiting"]
+            assert [status["state"] for status in statuses] == ["waiting", "failed"]
             assert socket.close.await_count == 1
             assert not adapter._chatgpt_transport._idle
         finally:
@@ -691,7 +691,7 @@ def test_fallback_stall_fails_promptly_and_discards_lease(monkeypatch):
             )]
             assert stalls == [("websocket", "productive"), ("sse", "productive")]
             assert b'"type":"api_error"' in b"".join(chunks)
-            assert [status["state"] for status in statuses] == ["waiting", "reconnecting"]
+            assert [status["state"] for status in statuses] == ["waiting", "reconnecting", "failed"]
             assert socket.close.await_count == 1
             assert sse_closed.await_count == 1
             assert not adapter._chatgpt_transport._idle

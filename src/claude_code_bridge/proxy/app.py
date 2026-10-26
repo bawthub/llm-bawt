@@ -20,6 +20,7 @@ from .adapters import close_all, start_all
 from .claude_oauth import ClaudeOAuthGateway, router as claude_oauth_router
 from .routes import router as messages_router
 from .request_context import ProxyCancellationRegistry, ProxyStatusCallback
+from .retry import RetryBudgetRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ def create_app(
     )
     app.state.proxy_status_callback = status_callback
     app.state.proxy_cancellations = cancellation_registry or ProxyCancellationRegistry()
+    app.state.proxy_retry_budgets = RetryBudgetRegistry()
     app.include_router(messages_router)
     app.include_router(claude_oauth_router)
 
@@ -104,6 +106,7 @@ class ProxyServer:
 
     def clear_request(self, request_id: str) -> None:
         self._cancellations.clear(request_id)
+        self._app.state.proxy_retry_budgets.clear_request(request_id)
 
     async def start(self) -> None:
         config = uvicorn.Config(
