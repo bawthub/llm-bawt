@@ -356,8 +356,8 @@ class Config(RuntimeTunables, BaseSettings):
     NO_STREAM: bool = Field(default=False, description="Disable streaming output")
     INTERACTIVE_MODE: bool = Field(default=False, description="Whether the app is in interactive mode (set based on args)")
 
-    # --- Nextcloud Talk Bot Settings (legacy single-bot) --- #
-    NEXTCLOUD_BOT_SECRET: Optional[str] = Field(default=None, description="Nextcloud Talk bot secret from occ talk:bot:install (deprecated: use bot_profiles DB)")
+    # --- Nextcloud Talk --- #
+    # Per-bot Talk secrets live in bot_profiles (DB), never in env.
     NEXTCLOUD_URL: str = Field(default="https://nextcloud.example.com", description="Nextcloud instance URL")
 
     # --- Nextcloud Talk Provisioner --- #
