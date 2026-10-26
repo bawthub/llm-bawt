@@ -10,6 +10,7 @@ detail), plus the ``steer_only`` mode.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -35,6 +36,8 @@ from .inter_bot_steer_only import (
 from .message_authorship import AuthorReference, normalize_author
 from .model_catalog import bot_model_ref
 from .request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
+
+logger = logging.getLogger(__name__)
 
 SendModeName = Literal["steer_or_idle", "when_idle", "steer_only"]
 
@@ -225,6 +228,31 @@ def _gate_disposition(request: Any, body: DeliveryCreate, sender: str, target: s
     return ON_GATE_HOLD if own else ON_GATE_DENY
 
 
+def _signed_sender_turn(request: Any, sender: str) -> str | None:
+    """The sender's turn id from its verified capability, or None (TASK-1249).
+
+    Provenance only: a missing, invalid or expired capability, one signed for
+    another bot, or an unreadable signing key records nothing and never
+    refuses the send.
+    """
+    from .task_turn_context import (
+        SENDER_TURN_CONTEXT_HEADER, TASK_TURN_CONTEXT_HEADER, open_task_turn_context,
+    )
+
+    if request is None:
+        return None
+    capability = (request.headers.get(SENDER_TURN_CONTEXT_HEADER)
+                  or request.headers.get(TASK_TURN_CONTEXT_HEADER))
+    if not capability:
+        return None
+    try:
+        caller = open_task_turn_context(capability)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.debug("Sender turn not recorded: %s", exc)
+        return None
+    return caller.turn_id if caller.bot_id.strip().lower() == sender else None
+
+
 def _steer_only_receipt(
     current: Any, status_code: int, result: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
@@ -354,6 +382,7 @@ class DeliverySender:
             )
         if body.from_selector:
             self._refuse_unselectable(target, sender, bot_caller=author.entity_type == "bot")
+        sender_turn_id = _signed_sender_turn(request, sender) if author.entity_type == "bot" else None
         target_bot = bots.get_bot(target)
         target_exists = target_bot is not None
         durable_capable = bool(target_bot and durable_agent_backend(target_bot))
@@ -506,7 +535,7 @@ class DeliverySender:
                     sender_bot_id=sender, project_id=body.project_id, task_id=body.task_id,
                     message_kind=body.message_kind, max_attempts=body.max_attempts,
                     reset_reason=body.reset_reason or automatic_reason, producer="bot",
-                    on_gate=on_gate,
+                    on_gate=on_gate, sender_turn_id=sender_turn_id,
                 )
             else:
                 record, duplicate = dispatcher.store.enqueue(
@@ -518,7 +547,7 @@ class DeliverySender:
                     message_kind=body.message_kind, metadata=body.metadata,
                     max_attempts=body.max_attempts, session_policy=policy,
                     reset_reason=body.reset_reason or automatic_reason, producer="bot",
-                    on_gate=on_gate,
+                    on_gate=on_gate, sender_turn_id=sender_turn_id,
                 )
         except (IdentityConflict, InvalidIdentity, AdmissionUnavailable) as exc:
             raise DeliveryRefused(status_code=exc.status_code, detail=str(exc)) from exc

@@ -509,8 +509,8 @@ class _Client:
     async def __aexit__(self, *exc):
         return False
 
-    async def post(self, url, json, timeout):
-        self._seen.append((url, json))
+    async def post(self, url, json, timeout, headers=None):
+        self._seen.append((url, json, headers))
         return self._response
 
 
@@ -528,7 +528,7 @@ def test_send_batch_posts_one_body_and_reports_the_receipt(monkeypatch):
     result, seen = _post_batch(monkeypatch, 202, {"batch_id": "b", "dispatched": True})
     assert seen == [("http://app/v1/inter-bot-deliveries/batch", {
         "sender_bot_id": SENDER, "message": "hi", "targets": ["fx-a", "fx-c"],
-        "exclude": ["fx-b"], "mode": STEER_ONLY, "reply_mode": "async"})]
+        "exclude": ["fx-b"], "mode": STEER_ONLY, "reply_mode": "async"}, None)]
     assert result == {"batch_id": "b", "dispatched": True, "success": True, "status_code": 202}
 
 

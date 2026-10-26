@@ -19,6 +19,10 @@ from cryptography.fernet import InvalidToken
 from .service.providers.crypto import _get_fernet
 
 TASK_TURN_CONTEXT_HEADER = "X-LLM-Bawt-Task-Turn-Context"
+# TASK-1249: the same signed capability, forwarded by bots_send_message only to
+# record which turn sent a delivery. A separate header so it never grants what
+# TASK_TURN_CONTEXT_HEADER does on the delivery route (self-model gate hold).
+SENDER_TURN_CONTEXT_HEADER = "X-LLM-Bawt-Sender-Turn-Context"
 TASK_TURN_CONTEXT_TTL_SECONDS = 6 * 60 * 60
 TASK_TURN_CONTEXT_BACKENDS = frozenset({"claude-code", "codex"})
 # Three canonical shapes are minted server-side and must round-trip through the

@@ -13,6 +13,7 @@ from agent_bridge.mcp_call_context import MCP_REQUEST_CONTEXT_HEADER
 
 from ..bawthub_auth import service_auth
 from ..task_turn_context import (
+    SENDER_TURN_CONTEXT_HEADER,
     TASK_TURN_CONTEXT_HEADER,
     TaskTurnContext,
     is_synthetic_turn_id,
@@ -56,6 +57,18 @@ def reset_current_task_turn_capability(token: Token) -> None:
 def current_task_turn_capability() -> str | None:
     """Return the opaque capability bound to this HTTP request, if any."""
     return _current_capability.get()
+
+
+def with_sender_turn(headers: dict[str, str] | None = None) -> dict[str, str] | None:
+    """``headers`` plus this request's capability under the sender header.
+
+    The delivery routes use it only to record which turn sent a delivery
+    (TASK-1249); without a capability the headers are returned unchanged.
+    """
+    capability = current_task_turn_capability()
+    if not capability:
+        return headers
+    return {**(headers or {}), SENDER_TURN_CONTEXT_HEADER: capability}
 
 
 def task_turn_capability_header_present() -> bool:

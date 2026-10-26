@@ -229,14 +229,15 @@ class RequestIdentityResolver:
                 id, sender_bot_id, author_entity_type, author_entity_id,
                 target_bot_id, message, payload_json, metadata_json,
                 user_message_id, turn_id, idempotency_key, project_id, task_id,
-                message_kind, status, max_attempts, session_policy, reset_status, reset_reason
+                message_kind, status, max_attempts, session_policy, reset_status, reset_reason,
+                sender_turn_id
             ) VALUES (
                 :id, :sender, :author_type, :author_id, :target, :message,
                 CAST(:payload AS jsonb), CAST(:metadata AS jsonb), :message_id,
                 :turn_id, :idem, :project, :task, :kind, 'QUEUED', :max_attempts,
                 :session_policy,
                 CASE WHEN :session_policy='continue' THEN NULL ELSE 'PENDING' END,
-                :reset_reason
+                :reset_reason, :sender_turn
             ) ON CONFLICT DO NOTHING RETURNING *
         """), values).mappings().first()
         if row is not None:

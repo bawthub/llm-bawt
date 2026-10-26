@@ -61,6 +61,8 @@ class DeliveryRecord:
     revision: int = 0
     # TASK-1431: 'control' rows steer one pinned run past a held FIFO head.
     lane: str = "normal"
+    # TASK-1249: the sender's signed turn at admission; never caller-supplied.
+    sender_turn_id: str | None = None
 
     @classmethod
     def from_mapping(cls, row: Any) -> "DeliveryRecord":
@@ -106,6 +108,7 @@ class DeliveryRecord:
             claim_token=row.get("claim_token"),
             transport_accepted_at=row.get("transport_accepted_at"),
             target_turn_id=row.get("target_turn_id"),
+            sender_turn_id=row.get("sender_turn_id"),
             delivery_mode=row.get("delivery_mode"),
             reply_mode=reply_mode if reply_mode in {"async", "waited"} else "async",
             session_policy=row.get("session_policy") or SessionPolicy.CONTINUE.value,
@@ -175,6 +178,7 @@ class DeliveryRecord:
             "user_message_id": self.user_message_id,
             "turn_id": self.turn_id,
             "target_turn_id": self.target_turn_id,
+            "sender_turn_id": self.sender_turn_id,
             "delivery_mode": self.delivery_mode,
             "reply_mode": self.reply_mode,
             "session_policy": self.session_policy,

@@ -16,6 +16,7 @@ import httpx
 from llm_bawt.inter_bot_send_targets import SelectorError, TargetSelector
 
 from .inter_bot_send_mode import SendMode
+from .task_association import with_sender_turn
 
 
 def single_explicit_target(targets: Any, sender_bot_id: str) -> str | None:
@@ -59,7 +60,8 @@ async def send_batch(
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{base_url}/v1/inter-bot-deliveries/batch", json=body, timeout=60.0,
+                f"{base_url}/v1/inter-bot-deliveries/batch", json=body,
+                headers=with_sender_turn(), timeout=60.0,
             )
             data = response.json()
     except Exception as exc:

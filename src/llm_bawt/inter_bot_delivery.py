@@ -193,11 +193,16 @@ class InterBotDeliveryStore:
         connection: Connection | None = None,
         producer: str = "bot",
         on_gate: str = "deny",
+        sender_turn_id: str | None = None,
     ) -> tuple[DeliveryRecord, bool]:
         """``on_gate``: under a deny gate (freeze) a new ``deny`` row raises
         ``SystemGateRefused``; ``hold`` rows are admitted and wait at the claim
         (TASK-1233). A caller passing ``connection`` must let that refusal
-        propagate out of its transaction."""
+        propagate out of its transaction.
+
+        ``sender_turn_id`` is the sender's turn from its verified signed turn
+        context, never a request field (TASK-1249). A keyed replay keeps the
+        first admission's value."""
         if self.engine is None:
             raise RuntimeError("Inter-bot delivery database unavailable")
         if connection is not None and connection.engine is not self.engine:
@@ -224,6 +229,7 @@ class InterBotDeliveryStore:
             "max_attempts": max(1, min(int(max_attempts), 20)),
             "session_policy": policy.value,
             "reset_reason": (reset_reason or "").strip() or None,
+            "sender_turn": (sender_turn_id or "").strip() or None,
         }
         with (nullcontext(connection) if connection is not None else self.engine.begin()) as conn:
             from .service.turn_admission import lock_target

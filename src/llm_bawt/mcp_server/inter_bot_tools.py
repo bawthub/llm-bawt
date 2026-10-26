@@ -25,6 +25,7 @@ from .inter_bot_send_mode import (
 from .inter_bot_sender import SenderIdentityError, resolve_message_sender, resolve_sender_bot_id
 from .server import _get_storage, mcp
 from ..task_turn_context import TaskTurnContextError, is_delivery_turn_id
+from .task_association import with_sender_turn
 
 logger = logging.getLogger(__name__)
 _APP_BASE_URL = "http://localhost:8642"
@@ -248,6 +249,8 @@ async def _enqueue_durable(
 ) -> dict:
     """``headers`` is for first-party tool code only (the self-model continue
     forwards its signed turn capability); bots_send_message never sets it.
+    Every send forwards the caller's capability under the separate sender
+    header, which the route uses only to record the sending turn (TASK-1249).
 
     ``steer_only`` and ``from_selector`` are sent only when set, so every other
     body is unchanged.
@@ -281,7 +284,7 @@ async def _enqueue_durable(
             response = await client.post(
                 f"{_APP_BASE_URL}/v1/inter-bot-deliveries",
                 json=body,
-                headers=headers,
+                headers=with_sender_turn(headers),
                 timeout=15.0,
             )
             response.raise_for_status()

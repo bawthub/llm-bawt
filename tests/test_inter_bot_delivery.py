@@ -1686,3 +1686,23 @@ def test_rearm_history_is_bounded_to_the_newest_attempts(delivery_store):
     assert len(history) == ATTEMPT_HISTORY_LIMIT
     assert [entry["n"] for entry in history] == list(range(2, ATTEMPT_HISTORY_LIMIT + 2))
 
+
+def test_sender_turn_is_stored_and_a_keyed_replay_keeps_the_first(delivery_store):
+    """TASK-1249: the admitted sender turn persists; a retry never rewrites it."""
+    store, sender, target = delivery_store
+    payload = {"messages": [{"role": "user", "content": "x"}], "bot_id": target, "stream": False}
+    first, _ = store.enqueue(sender_bot_id=sender, target_bot_id=target, message="review please",
+                             payload=payload, idempotency_key="review-1",
+                             sender_turn_id="turn-" + "a" * 32)
+    again, duplicate = store.enqueue(sender_bot_id=sender, target_bot_id=target,
+                                     message="review please", payload=payload,
+                                     idempotency_key="review-1",
+                                     sender_turn_id="turn-" + "b" * 32)
+    unsigned, _ = store.enqueue(sender_bot_id=sender, target_bot_id=target, message="plain",
+                                payload=payload)
+
+    assert duplicate is True and again.id == first.id
+    assert store.get(first.id).sender_turn_id == "turn-" + "a" * 32
+    assert first.to_api()["sender_turn_id"] == "turn-" + "a" * 32
+    assert store.get(unsigned.id).sender_turn_id is None
+

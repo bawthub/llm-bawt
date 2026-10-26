@@ -46,6 +46,7 @@ def bootstrap_delivery_schema(conn) -> None:
             claim_owner VARCHAR(96),
             transport_accepted_at TIMESTAMPTZ,
             target_turn_id VARCHAR(128),
+            sender_turn_id VARCHAR(128),
             delivery_mode VARCHAR(24),
             session_policy VARCHAR(32) NOT NULL DEFAULT 'continue',
             reset_status VARCHAR(24),
@@ -90,6 +91,10 @@ def bootstrap_delivery_schema(conn) -> None:
     ))
     conn.execute(sa_text(
         "ALTER TABLE inter_bot_deliveries ADD COLUMN IF NOT EXISTS target_turn_id VARCHAR(128)"
+    ))
+    # TASK-1249: the sending bot's signed turn, stamped at admission.
+    conn.execute(sa_text(
+        "ALTER TABLE inter_bot_deliveries ADD COLUMN IF NOT EXISTS sender_turn_id VARCHAR(128)"
     ))
     conn.execute(sa_text(
         "ALTER TABLE inter_bot_deliveries ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(24)"
