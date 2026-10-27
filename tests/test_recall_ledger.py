@@ -24,14 +24,21 @@ USER = "operator"
 
 
 class Sink(LedgerSink):
-    def __init__(self, error=None, gate=None):
+    def __init__(self, error=None, held=False):
         self.writes = []
         self.error = error
-        self.gate = gate
+        # Held sinks park the worker thread until the test releases it.
+        self.held = held
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.released = []
 
     def write(self, handle, scope, coverage, entries, omitted):
-        if self.gate is not None:
-            self.gate.wait(5)
+        self.entered.set()
+        if self.held:
+            # Records whether the write really waited for the release; the
+            # 30 s bound is only a hang guard.
+            self.released.append(self.release.wait(30))
         if self.error:
             raise self.error
         self.writes.append((handle, scope, coverage, entries, omitted))
@@ -102,22 +109,29 @@ def without_elapsed(packet):
 
 
 @pytest.mark.asyncio
-async def test_failing_or_hanging_sink_never_changes_or_delays_the_packet():
+async def test_failing_or_hanging_sink_never_changes_or_delays_the_packet(monkeypatch):
+    # The write's own 2 s budget must not end the hold before the release.
+    monkeypatch.setattr("llm_bawt.recall.service.LEDGER_WRITE_SECONDS", 60)
     request = RecallRequest(query="relay background", sources=("messages",))
     plain = await run(RecallService([named("messages", [message(1)])], Model()), request)
 
     broken = RecallService([named("messages", [message(1)])], Model(), ledger=Sink(error=RuntimeError("db down")))
     assert without_elapsed(await run(broken, request)) == without_elapsed(plain)
 
-    gate = threading.Event()
-    hanging = Sink(gate=gate)
+    hanging = Sink(held=True)
     service = RecallService([named("messages", [message(1)])], Model(), ledger=hanging)
     packet = await service.recall(request, SCOPE)
-    # The packet is final before the write starts or finishes.
+    # The packet is final, and recall has returned, while the write is still
+    # parked in its worker thread.
     assert without_elapsed(packet) == without_elapsed(plain)
-    assert hanging.writes == []
-    gate.set()
+    assert await asyncio.to_thread(hanging.entered.wait, 30), "the write never started"
+    assert hanging.writes == [] and hanging.released == []
+    pending = list(service._ledger_writes)
+    assert len(pending) == 1 and not pending[0].done()
+    hanging.release.set()
     await service.drain_ledger()
+    # The write completed only because it was released, not by timing out.
+    assert hanging.released == [True]
     assert len(hanging.writes) == 1
 
 
@@ -291,6 +305,22 @@ async def test_summary_gives_cited_speakers_and_counts_under_current_policy():
     assert [(item["id"], item["speaker"]) for item in summary["cited"]] == [("m1", "assistant")]
     assert summary["omitted"] == 2
     assert "start_char" not in summary["cited"][0] and "window_kind" not in summary["cited"][0]
+
+
+@pytest.mark.asyncio
+async def test_summary_reauthorizes_cited_tasks_like_a_page():
+    # TASK-2 was cited at recall time; its owner has since become protected.
+    entries = [entry("tasks", "TASK-1", cited=True), entry("tasks", "TASK-2", cited=True),
+               entry("tasks", "TASK-2#review:c" + "b" * 24, cited=True),
+               entry("tasks", "TASK-3#step:1", cited=True), entry("messages", "m1", "peer", cited=True)]
+    owners = {"TASK-1": OWNER, "TASK-2": "protected", "TASK-3": "unreachable"}
+    drilldown = drill(entries, owners=owners)
+    summary = await drilldown.summary("h" * 20, OWNER, USER)
+    assert summary["sources"]["tasks"] == {"recorded": 4, "withheld_now": 3}
+    assert [item["id"] for item in summary["cited"]] == ["TASK-1", "m1"]
+    assert "TASK-2" not in compact_json(summary) and "TASK-3" not in compact_json(summary)
+    page = await drilldown.page("h" * 20, OWNER, USER, "tasks", 0, 20)
+    assert page["withheld_now"] == summary["sources"]["tasks"]["withheld_now"]
 
 
 def test_sources_never_run_an_unbounded_page():

@@ -114,14 +114,22 @@ class EvidenceDrilldown:
             return None
         record, scope = loaded
         sources: dict[str, dict] = {}
-        cited = []
+        shown = []
         for entry in record.entries:
             counts = sources.setdefault(entry["source"], {"recorded": 0, "withheld_now": 0})
             counts["recorded"] += 1
-            if not visible(entry, scope):
+            if visible(entry, scope):
+                shown.append(entry)
+            else:
                 counts["withheld_now"] += 1
-            elif entry.get("cited"):
-                cited.append(public(entry))
+        # Tasks pass the same current task authority as page(), so a task that
+        # became protected is neither cited nor counted as readable here.
+        tasks = [entry for entry in shown if entry["source"] == "tasks"]
+        if tasks:
+            authorized = {id(entry) for entry, _ in await self._task_rows(tasks, scope)}
+            sources["tasks"]["withheld_now"] += len(tasks) - len(authorized)
+            shown = [entry for entry in shown if entry["source"] != "tasks" or id(entry) in authorized]
+        cited = [public(entry) for entry in shown if entry.get("cited")]
         return {"coverage": record.coverage, "sources": sources, "cited": cited,
                 "omitted": record.omitted}
 
@@ -149,6 +157,13 @@ class EvidenceDrilldown:
                 "entries": window, "omitted": record.omitted}
 
     async def _authorized_tasks(self, entries: list[dict], scope: RecallScope) -> list[dict]:
+        return [{**public(entry), "available": True,
+                 "title": row["title"][:300], "status": row["status"][:32],
+                 "snippet": row["title"][:SNIPPET_CHARS], "more": False}
+                for entry, row in await self._task_rows(entries, scope)]
+
+    async def _task_rows(self, entries: list[dict], scope: RecallScope) -> list[tuple[dict, dict]]:
+        """Entries whose task passes the current shared-task authority, with its row."""
         listed = []
         rows: dict[str, dict | None] = {}
         async with self.tasks.reader() as reader:
@@ -162,11 +177,8 @@ class EvidenceDrilldown:
                     except RecallError:
                         rows[ref] = None
                 row = rows[ref]
-                if row is None:
-                    continue
-                listed.append({**public(entry), "available": True,
-                               "title": row["title"][:300], "status": row["status"][:32],
-                               "snippet": row["title"][:SNIPPET_CHARS], "more": False})
+                if row is not None:
+                    listed.append((entry, row))
         return listed
 
     async def _resolve(self, source: str, window: list[dict], scope: RecallScope) -> list[dict]:
