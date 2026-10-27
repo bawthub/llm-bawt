@@ -119,6 +119,17 @@ class CodexSessionMixin:
                 bot_id, thread_session_id, e,
             )
 
+    async def _record_continuity_receipt(
+        self, thread_session_id: str | None, bot_id: str, messages: list[dict], *, restored: bool,
+    ) -> None:
+        """Confirm (or fail) the app's continuity manifest for this exact seed."""
+        from agent_bridge.continuity import post_continuity_receipt
+
+        await post_continuity_receipt(
+            self._app_api_url, thread_session_id, bot_id, messages,
+            restored=restored, logger=logger,
+        )
+
     async def _bot_uses_codex(self, bot_id: str) -> bool:
         """Look up a bot's agent_backend; return True only if it's codex.
 

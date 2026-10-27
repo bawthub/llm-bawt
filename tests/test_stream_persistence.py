@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from agent_bridge.continuity import continuity_digest
+
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.background_service import BackgroundService
 from llm_bawt.service.chat_stream_worker import consume_stream_chunks
@@ -198,6 +200,7 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
         store=SimpleNamespace(
             engine=object(),  # admission claim is constructed; persistence is mocked below
             validate_claim=Mock(return_value=True),
+            bind_new_session_seed=Mock(return_value=True),
             get=Mock(return_value=SimpleNamespace(
                 sender_bot_id="snark",
                 author=AuthorReference.bot("snark"),
@@ -281,6 +284,11 @@ def test_inter_bot_nonstream_turn_start_prefers_request_session_over_archived_se
 
     asyncio.run(service.chat_completion(request))
     service._maybe_rotate_agent_session.assert_not_called()
+    # TASK-1579: the reset binds the exact seed its provider ack must match.
+    applied = [{"role": "user", "content": "prior context"}] if reset_policy == "reset_retain_history" else []
+    service._inter_bot_dispatcher.store.bind_new_session_seed.assert_called_once_with(
+        "delivery-reset", {"payload_digest": continuity_digest(applied), "count": len(applied)},
+    )
     if reset_policy == "reset_retain_history":
         service._maybe_summarize_on_new.assert_called_once()
         assert service._maybe_summarize_on_new.call_args.kwargs["thread_binding"] == {

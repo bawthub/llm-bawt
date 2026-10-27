@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import Mapping
 
+from .continuity import SEED_FRAMING_FIELD, SeedFraming
 from .publisher import COMMANDS_STREAM
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class CommandPublisherMixin:
         subagent_model: str | None = None,
         disallowed_tools: list[str] | None = None,
         inject_messages: list | None = None,
+        inject_seed_framing: SeedFraming | None = None,
         bridge_reset_action: str | None = None,
         context_window: int | None = None,
         compact_threshold: int | None = None,
@@ -138,6 +140,9 @@ class CommandPublisherMixin:
             fields["inject_messages"] = json.dumps(
                 inject_messages, ensure_ascii=False
             )
+            # TASK-1579: registry framing rides only with a non-empty seed.
+            if inject_messages and inject_seed_framing is not None:
+                fields[SEED_FRAMING_FIELD] = inject_seed_framing.to_field()
         if bridge_reset_action:
             supported = (
                 backend in {"claude-code", "codex"}

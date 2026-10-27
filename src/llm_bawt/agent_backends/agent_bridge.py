@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from .base import AgentBackend
+from ..seed_framing import resolve_seed_framing
 from ..service.upstream_status import upstream_status_queue_item
 from ..utils.config import Config
 
@@ -215,6 +216,12 @@ class AgentBridgeBackend(AgentBackend):
             if isinstance(tmid, str) and tmid.strip():
                 trigger_message_id = tmid.strip()
 
+        # TASK-1579: a non-empty seed carries its registry framing, resolved
+        # here at dispatch so bot overrides apply and bridges hold no copy.
+        seed_framing = resolve_seed_framing(
+            config.get("inject_messages"), str(config.get("bot_id") or "").strip() or None,
+        )
+
         request_started = time.time()
         first_delta_at: float | None = None
         run_terminal_seen = False  # the run finished on its own (TASK-1286 detach)
@@ -299,6 +306,7 @@ class AgentBridgeBackend(AgentBackend):
                                 else None
                             ),
                             inject_messages=config.get("inject_messages"),
+                            inject_seed_framing=seed_framing,
                             bridge_reset_action=config.get("bridge_reset_action"),
                             context_window=(
                                 int(config.get("context_window"))

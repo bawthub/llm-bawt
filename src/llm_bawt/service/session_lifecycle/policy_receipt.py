@@ -62,8 +62,6 @@ class BotPolicyReceipt:
         raw = record.metadata.get("new_session_intent")
         if isinstance(raw, dict) and raw.get("origin") in {Origin.CONTEXT_API, Origin.SESSION_API}:
             return BotPolicyReceipt._ensure_standalone(engine, record, ack)
-        if record.session_policy == "reset_retain_history" and ack["provider"] != "claude-code":
-            return None
         provider_id = ack.get("provider_session_id")
         if (not isinstance(provider_id, str) or not provider_id
                 or ack.get("thread_session_id") != record.new_session_id):
@@ -226,7 +224,12 @@ class BotPolicyReceipt:
             if provider_id is not None or ack.get("clean_start") is not True:
                 return None
         elif record.session_policy == "reset_retain_history":
-            if provider != "claude-code" or not isinstance(provider_id, str) or not provider_id:
+            # Retained history resumes a seeded provider session; retaining an
+            # empty history is a clean start the receipt proved seeded nothing.
+            seeded = isinstance(provider_id, str) and bool(provider_id)
+            empty = (provider_id is None and ack.get("clean_start") is True
+                     and ack.get("seeded_count") == 0 and bool(ack.get("seed_digest")))
+            if not (seeded or empty):
                 return None
         else:
             return None

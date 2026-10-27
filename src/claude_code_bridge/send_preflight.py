@@ -94,6 +94,7 @@ async def prepare_parsed_send(
         model=request.model,
         context_window=request.bot_context_window,
         inject_messages=request.inject_messages,
+        inject_seed_framing=request.inject_seed_framing,
         thread_session_id=request.thread_session_id,
         msg_id=msg_id,
         async_redis=async_redis,

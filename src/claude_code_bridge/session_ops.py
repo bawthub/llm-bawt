@@ -31,6 +31,14 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from agent_bridge.continuity import (
+    SeedFraming,
+    format_seed_ack,
+    post_continuity_receipt,
+    render_seed_briefing,
+    seed_receipt,
+    stats_from_messages,
+)
 from agent_bridge.approval import (
     ApprovalDecision,
     PolicyAction,
@@ -54,7 +62,6 @@ from ._bridge_helpers import (
     _XAI_DEFAULT_RATES,
     _REFRESH_BUFFER_MS,
     _bot_slug_from_session_key,
-    _fmt_tokens,
     _usage_input_total,
     _estimate_proxy_cost_usd,
     _pick_iteration_usage,
@@ -118,6 +125,7 @@ class ClaudeSessionMixin:
         msg_id: str,
         async_redis,
         scope=None,
+        inject_seed_framing=None,
     ) -> str | None:
         """Handle bridge-owned ``/new`` setup and return the remaining prompt.
 
@@ -145,7 +153,7 @@ class ClaudeSessionMixin:
         # so seed it here before acknowledging.
         seed_stats = await self._seed_new_session(
             bot_slug, model, injected=inject_messages,
-            thread_session_id=thread_session_id,
+            thread_session_id=thread_session_id, framing=inject_seed_framing,
         )
         if isinstance(seed_stats, dict) and seed_stats.get("reason") and not seed_stats.get("clean_start"):
             raise RuntimeError(f"new-session seed failed: {seed_stats['reason']}")
@@ -161,6 +169,8 @@ class ClaudeSessionMixin:
                 "thread_session_id": thread_session_id,
                 "provider_session_id": (seed_stats or {}).get("session_id"),
                 "clean_start": bool((seed_stats or {}).get("clean_start")),
+                # TASK-1579: binds the app receipt to the seed actually applied.
+                **seed_receipt(inject_messages),
             }},
         )
         if scope is not None:
@@ -249,36 +259,12 @@ class ClaudeSessionMixin:
         """Reproduce the SDK's project-dir sanitization (non-alnum -> '-')."""
         return _SEED_SANITIZE_RE.sub("-", cwd or "")
 
-    def _render_seed_briefing(self, messages: list[dict]) -> str:
-        """Flatten the context messages into a single labeled briefing block.
+    def _render_seed_briefing(self, messages: list[dict], briefing: str) -> str:
+        """The shared text-only briefing (``agent_bridge.continuity``)."""
+        return render_seed_briefing(messages, briefing)
 
-        Summaries keep their ``[Previous conversation X ago]`` headers; recent
-        turns are rendered as a readable transcript. Text-only by construction —
-        no tool_use blocks — so the resumed session never wedges."""
-        lines = [
-            "[Session continuity seed — prior context restored from chat history]",
-            "Below is our earlier conversation for continuity: rolling summaries "
-            "of older sessions, then the most recent messages. Treat it as "
-            "background context; you don't need to repeat it back.",
-            "",
-        ]
-        for m in messages:
-            role = m.get("role")
-            content = (m.get("content") or "").strip()
-            if not content:
-                continue
-            if role == "summary":
-                lines.append(content)
-            elif role == "user":
-                lines.append(f"Nick: {content}")
-            elif role == "assistant":
-                lines.append(f"Assistant (you): {content}")
-            else:
-                lines.append(content)
-            lines.append("")
-        return "\n".join(lines).strip()
-
-    def _write_seed_transcript(self, session_id: str, messages: list[dict]) -> Path:
+    def _write_seed_transcript(self, session_id: str, messages: list[dict],
+                               framing: SeedFraming) -> Path:
         """Write a synthetic two-entry Claude Code transcript (user briefing +
         assistant ack) so the SDK can ``resume`` it into a fresh session.
 
@@ -291,7 +277,7 @@ class ClaudeSessionMixin:
         proj_dir.mkdir(parents=True, exist_ok=True)
         path = proj_dir / f"{session_id}.jsonl"
 
-        briefing = self._render_seed_briefing(messages)
+        briefing = self._render_seed_briefing(messages, framing.briefing)
         ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         user_uuid = str(uuid.uuid4())
         asst_uuid = str(uuid.uuid4())
@@ -322,15 +308,7 @@ class ClaudeSessionMixin:
                 "model": "<synthetic>",
                 "type": "message",
                 "stop_reason": "stop_sequence",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Context restored — I've reviewed our prior "
-                            "summaries and recent messages and I'm caught up."
-                        ),
-                    }
-                ],
+                "content": [{"type": "text", "text": framing.ack}],
                 "usage": {"input_tokens": 0, "output_tokens": 0},
             },
             **common,
@@ -346,40 +324,13 @@ class ClaudeSessionMixin:
 
     @staticmethod
     def _stats_from_messages(messages: list[dict]) -> dict:
-        """Derive /new-ack stats from app-injected seed messages (TASK-501).
-
-        When the app pushes the seed via ``inject_messages`` there is no
-        precomputed stats block (that lived in the context-seed HTTP response),
-        so recompute the same shape from the message roles. approx_tokens is a
-        cheap char/4 estimate — the bridge has no tokenizer."""
-        summary_count = sum(1 for m in messages if m.get("role") == "summary")
-        convo_count = sum(1 for m in messages if m.get("role") in ("user", "assistant"))
-        approx_tokens = sum(len(m.get("content") or "") for m in messages) // 4
-        ts = [float(m.get("timestamp") or 0.0) for m in messages if m.get("timestamp")]
-        return {
-            "summary_count": summary_count,
-            "message_count": convo_count,
-            "total_count": len(messages),
-            "approx_tokens": approx_tokens,
-            "oldest_timestamp": min(ts) if ts else None,
-            "newest_timestamp": max(ts) if ts else None,
-        }
+        """Shared /new-ack stats (``agent_bridge.continuity``)."""
+        return stats_from_messages(messages)
 
     async def _record_continuity_receipt(self, thread_id, bot_id, messages, *, restored):
         """Confirm the app's reference manifest only after the transcript write."""
-        if not thread_id or not self._app_api_url:
-            return
-        from agent_bridge.continuity import continuity_digest
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                response = await client.post(
-                    f"{self._app_api_url}/v1/sessions/{thread_id}/continuity-receipt",
-                    params={"bot_id": bot_id},
-                    json={"payload_digest": continuity_digest(messages), "restored": restored},
-                )
-                response.raise_for_status()
-        except Exception:
-            logger.warning("Continuity receipt unavailable for %s/%s", bot_id, thread_id, exc_info=True)
+        await post_continuity_receipt(self._app_api_url, thread_id, bot_id, messages,
+                                      restored=restored, logger=logger)
 
     async def _seed_new_session(
         self,
@@ -387,6 +338,7 @@ class ClaudeSessionMixin:
         model: str,
         injected: list | None = None,
         thread_session_id: str | None = None,
+        framing: SeedFraming | None = None,
     ) -> dict | None:
         """Seed a brand-new SDK session for ``bot_id`` from app-injected history.
         Writes the synthetic transcript, persists the minted session id, and
@@ -415,9 +367,15 @@ class ClaudeSessionMixin:
         stats = self._stats_from_messages(messages)
         if not messages:
             return {**stats, "seeded": False, "clean_start": True}
+        if framing is None:
+            # TASK-1579: the briefing and reply are registry text the app
+            # resolves; a command without them is refused, never defaulted.
+            logger.warning("Seed refused for %s: no registry framing", bot_id)
+            await self._record_continuity_receipt(thread_session_id, bot_id, messages, restored=False)
+            return {"seeded": False, "reason": "seed framing missing"}
         try:
             session_id = str(uuid.uuid4())
-            self._write_seed_transcript(session_id, messages)
+            self._write_seed_transcript(session_id, messages, framing)
             # Persist the minted SDK session id onto the thread.
             if thread_session_id:
                 await self._set_thread_session(
@@ -436,28 +394,5 @@ class ClaudeSessionMixin:
 
     @staticmethod
     def _format_seed_ack(stats: dict | None) -> str:
-        """Human-facing /new acknowledgement, reporting seed stats when present."""
-        base = "Session reset."
-        if stats is None or stats.get("clean_start"):
-            return f"{base} Ready for a new conversation."
-        if not stats.get("seeded"):
-            reason = stats.get("reason", "nothing to seed")
-            return f"{base} History seeding on, but {reason}. Fresh start."
-        summ = stats.get("summary_count", 0)
-        msgs = stats.get("message_count", 0)
-        toks = stats.get("approx_tokens", 0)
-        span = ""
-        oldest = stats.get("oldest_timestamp")
-        newest = stats.get("newest_timestamp")
-        if oldest and newest:
-            try:
-                o = datetime.fromtimestamp(oldest, timezone.utc).strftime("%Y-%m-%d")
-                n = datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%d")
-                span = f", spanning {o} → {n}" if o != n else f", from {o}"
-            except Exception:
-                span = ""
-        return (
-            f"{base} Seeded {summ} summary record{'s' if summ != 1 else ''} + "
-            f"{msgs} recent message{'s' if msgs != 1 else ''} "
-            f"(~{_fmt_tokens(toks)} tokens){span}. Continuity restored."
-        )
+        """Human-facing /new acknowledgement (``agent_bridge.continuity``)."""
+        return format_seed_ack(stats)

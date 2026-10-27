@@ -164,19 +164,38 @@ def test_native_codex_standalone_clean_reset_keeps_explicit_empty_seed(monkeypat
     service._maybe_rotate_agent_session.assert_not_called()
 
 
-def test_native_codex_configured_history_refuses_before_rotation(monkeypatch):
-    service = SimpleNamespace(_maybe_summarize_on_new=Mock(),
-                              _maybe_rotate_agent_session=Mock())
+def test_native_codex_configured_history_is_seeded_and_bound_before_rotation(monkeypatch):
+    """TASK-1579: Codex /new carries its configured seed; the delivery records
+    that exact seed before any rotation side effect."""
+    order = []
+    seed = [{"role": "summary", "content": "previous"}]
+    service = SimpleNamespace(
+        _maybe_summarize_on_new=Mock(),
+        _maybe_rotate_agent_session=Mock(side_effect=lambda *_a, **_k: order.append("rotate") or "new"),
+    )
     monkeypatch.setattr("llm_bawt.service.routes.history.maybe_build_session_seed",
-                        lambda *_args, **_kwargs: [{"role": "summary", "content": "previous"}])
-    with pytest.raises(ValueError, match="cannot seed configured reset history"):
-        NewSessionExecution.prepare_agent(
-            service, SimpleNamespace(), SimpleNamespace(inter_bot_session_policy=None),
-            bot_id="fixture", model_alias="model", user_prompt="/new",
-            thread_binding={"thread_session_id": "old"},
-            delivery_id="delivery-one", backend_name="codex",
-        )
-    service._maybe_rotate_agent_session.assert_not_called()
+                        lambda *_args, **_kwargs: seed)
+    monkeypatch.setattr("llm_bawt.service.agent_new_rotation.bind_new_successor",
+                        lambda *_args, **_kwargs: {"thread_session_id": "new"})
+    monkeypatch.setattr(NewSessionExecution, "record_seed", staticmethod(
+        lambda _service, delivery, applied: order.append(("seed", delivery, applied))))
+    result = NewSessionExecution.prepare_agent(
+        service, SimpleNamespace(), SimpleNamespace(inter_bot_session_policy=None),
+        bot_id="fixture", model_alias="model", user_prompt="/new",
+        thread_binding={"thread_session_id": "old"},
+        delivery_id="delivery-one", backend_name="codex",
+    )
+    assert result.seed_messages == seed and result.bridge_reset_action == "reset_only"
+    assert order == [("seed", "delivery-one", seed), "rotate"]
+
+
+def test_seed_record_is_skipped_without_a_durable_store():
+    NewSessionExecution.record_seed(SimpleNamespace(), "delivery-one", [])
+    NewSessionExecution.record_seed(
+        SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=SimpleNamespace(engine=None))),
+        "delivery-one", [],
+    )
+    NewSessionExecution.record_seed(SimpleNamespace(_inter_bot_dispatcher=Mock()), None, [])
 
 
 def test_policy_rejects_unknown_mode_before_side_effects():

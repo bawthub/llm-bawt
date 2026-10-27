@@ -195,12 +195,20 @@ class CodexCommandMixin(CodexAppServerMixin):
             thread_resume_id = None
         explicit_thread = (fields.get("explicit_thread") or "").strip() in ("1", "true")
 
-        from .reset_evidence import CodexResetEvidence
+        from agent_bridge.continuity import SEED_FRAMING_FIELD, SeedFraming
+        from .reset_evidence import CodexResetEvidence, parse_seed
 
         try:
             reset_evidence = CodexResetEvidence.from_fields(
                 fields, thread_session_id=thread_session_id,
                 explicit_thread=explicit_thread, thread_resume_id=thread_resume_id,
+            )
+            # App-selected continuity seed (TASK-1579), applied only when this
+            # send opens a fresh provider thread.
+            seed = reset_evidence.seed if reset_evidence is not None else parse_seed(fields)
+            # The app resolves framing for every non-empty seed; never improvise one.
+            seed_framing = SeedFraming.require(
+                SeedFraming.from_field(fields.get(SEED_FRAMING_FIELD)), seed,
             )
         except ValueError as exc:
             self._publish_event(request_id, session_key, 1,
@@ -261,7 +269,7 @@ class CodexCommandMixin(CodexAppServerMixin):
             tmp_image_paths: list[str] = []
 
             try:
-                if reset_evidence is not None and reset_evidence.reset_only:
+                if reset_evidence is not None and reset_evidence.clean_start:
                     # Codex has no process-global conversation: continuity is
                     # solely the app-supplied resume ID. A clean standalone reset
                     # acknowledges explicit no-resume under the session queue;
@@ -303,6 +311,9 @@ class CodexCommandMixin(CodexAppServerMixin):
                     self._session_queue.cancel_event(session_key) if session_key else None
                 )
                 fresh_session_retry = False
+                # A fresh thread opens on the app's seed before its first turn.
+                seed_pending = bool(seed) and not resume_id
+                seeded_id: str | None = None
                 while True:
                     try:
                         from agent_bridge.skill_selection import guard_resumed_bundle
@@ -357,6 +368,28 @@ class CodexCommandMixin(CodexAppServerMixin):
                         )
                         return
 
+                    if seed_pending:
+                        seed_pending = False
+                        seeded_id = await self._seed_fresh_thread(
+                            codex, seed, seed_framing, model=model, bot_slug=bot_slug,
+                            thread_session_id=thread_session_id, reset_evidence=reset_evidence,
+                        )
+                        resume_id = seeded_id
+                        if reset_evidence is not None and reset_evidence.reset_only:
+                            # The seeded thread is the reset; its first real
+                            # turn is the next message, as for a clean reset.
+                            from agent_bridge.continuity import format_seed_ack, stats_from_messages
+
+                            seq += 1
+                            self._publish_event(
+                                request_id, session_key, seq,
+                                kind=AgentEventKind.ASSISTANT_DONE,
+                                text=format_seed_ack({**stats_from_messages(seed), "seeded": True}),
+                                model=model,
+                                extra_raw={"new_session_ack": reset_evidence.acknowledgment()},
+                            )
+                            return
+
                     # Build prompt input fresh each retry attempt — temp files
                     # for images get rebuilt too (the inner loop may clear and
                     # rebuild after a recoverable session error).
@@ -364,9 +397,11 @@ class CodexCommandMixin(CodexAppServerMixin):
                     # TASK-1318: a session-pinned prompt is pasted only when it
                     # takes effect (fresh thread, or the app moved the pin);
                     # the resumed thread's history already carries it. Without
-                    # a delivery mode it is pasted every turn (TASK-288).
+                    # a delivery mode it is pasted every turn (TASK-288). A thread
+                    # this send seeded is fresh: its items carry no prompt.
                     attempt_system_prompt = system_prompt_for_attempt(
-                        system_prompt, system_prompt_delivery, resuming=bool(resume_id),
+                        system_prompt, system_prompt_delivery,
+                        resuming=bool(resume_id) and resume_id != seeded_id,
                     )
                     # TASK-288 observability: log the system_prompt value AS SENT
                     # (prepended to the user message by _build_prompt_input),
@@ -374,7 +409,8 @@ class CodexCommandMixin(CodexAppServerMixin):
                     # decision is visible.
                     logger.info(
                         "Codex prompt: resume=%s delivery=%s system_prompt_sent=%s",
-                        bool(resume_id), system_prompt_delivery or "every_turn",
+                        bool(resume_id) and resume_id != seeded_id,
+                        system_prompt_delivery or "every_turn",
                         f"{len(attempt_system_prompt)} chars" if attempt_system_prompt else "none",
                     )
                     prompt_input, tmp_image_paths = self._build_prompt_input(
@@ -568,8 +604,10 @@ class CodexCommandMixin(CodexAppServerMixin):
                             return
 
                         # Recoverable session error → retry once with fresh thread.
+                        # A seeded thread is never silently replaced by a blank one.
                         if (
                             reset_evidence is None
+                            and seeded_id is None
                             and not fresh_session_retry
                             and not text_parts
                             and _is_codex_session_error(e)
@@ -618,6 +656,42 @@ class CodexCommandMixin(CodexAppServerMixin):
                 self._trigger_message_ids.pop(request_id, None)
                 await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
                 cleanup_complete = True
+
+    async def _seed_fresh_thread(
+        self, codex: Any, seed: list[dict], framing: Any, *, model: str, bot_slug: str,
+        thread_session_id: str | None, reset_evidence: Any,
+    ) -> str:
+        """Open, seed and bind a fresh provider thread; return its id.
+
+        The thread is bound before any turn runs, so a reset is acknowledged
+        only for the exact seeded thread and a later turn resumes it. Any
+        failure fails the send; a blank thread is never substituted.
+        """
+        from .exec_patch import CONFIG_OVERRIDES
+        from .thread_seed import seed_thread
+
+        try:
+            if not (bot_slug and thread_session_id):
+                raise RuntimeError("Codex continuity seed needs a thread binding")
+            seeded_id = await seed_thread(
+                self, codex, CONFIG_OVERRIDES.get(), model=model, cwd=self._cwd,
+                messages=seed, framing=framing, timeout=self._request_timeout,
+            )
+            if reset_evidence is not None:
+                await reset_evidence.bind(self, bot_id=bot_slug, provider_id=seeded_id, model=model)
+            else:
+                await self._set_thread_session(
+                    thread_session_id, bot_slug, seeded_id, model, required=True,
+                )
+        except Exception:
+            await self._record_continuity_receipt(
+                thread_session_id, bot_slug, seed, restored=False,
+            )
+            raise
+        logger.info("Seeded Codex thread %s with %d messages for %s/%s",
+                    seeded_id, len(seed), bot_slug, thread_session_id)
+        await self._record_continuity_receipt(thread_session_id, bot_slug, seed, restored=True)
+        return seeded_id
 
     async def _handle_rpc(
         self, fields: dict, msg_id: str, async_redis,

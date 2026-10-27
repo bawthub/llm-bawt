@@ -14,6 +14,7 @@ from claude_agent_sdk.types import (
 )
 
 from agent_bridge.abort_contract import HOST_SHUTDOWN, aborted_terminal_raw
+from agent_bridge.continuity import seed_receipt
 from agent_bridge.events import AgentEventKind
 from agent_bridge.maintenance import is_compact_command
 from agent_bridge.publisher import COMMANDS_STREAM
@@ -226,6 +227,7 @@ class ClaudeSendMixin(
                     cold_seed = await self._seed_new_session(
                         bot_slug, model, injected=inject_messages,
                         thread_session_id=thread_session_id,
+                        framing=req.inject_seed_framing,
                     )
                     # A reset followed by a task promises the selected
                     # continuity. A failed retained seed must stop before the
@@ -801,7 +803,8 @@ class ClaudeSendMixin(
                                     reset_ack=(
                                         {"thread_session_id": thread_session_id,
                                          "provider_session_id": turn_session_id,
-                                         "clean_start": False}
+                                         "clean_start": False,
+                                         **seed_receipt(inject_messages)}
                                         if req.bridge_reset_action == "reset_follow_up"
                                         and thread_session_id and turn_session_id else None
                                     ),

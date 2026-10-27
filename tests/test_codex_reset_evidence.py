@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from agent_bridge.continuity import seed_receipt
 from agent_bridge.events import AgentEventKind
 from agent_bridge.run_contract import TeardownReport
 from codex_bridge.bridge import CodexBridge
@@ -21,7 +22,7 @@ ANSWER = "The task answer, not a reset confirmation."
 @pytest.fixture
 def harness(monkeypatch):
     state = SimpleNamespace(events=[], writes=[], script=[], provider_id="fresh-provider",
-                            put_status=200, prompts=[], abort=False)
+                            put_status=200, prompts=[], abort=False, receipts=[])
     controller = SimpleNamespace(signal=object(), abort=MagicMock())
     abort_error = type("AbortError", (Exception,), {})
     monkeypatch.setitem(sys.modules, "openai_codex_sdk", SimpleNamespace(
@@ -32,6 +33,11 @@ def harness(monkeypatch):
     state.controller = controller
 
     def handle_http(request):
+        if request.method == "POST":  # continuity receipt (TASK-1579)
+            state.receipts.append((str(request.url), json.loads(request.content)))
+            return httpx.Response(200, json={})
+        if request.method == "GET":  # registry prompt fetch: use the fallback
+            return httpx.Response(404, json={})
         assert request.method == "PUT"
         state.writes.append((str(request.url), json.loads(request.content)))
         return httpx.Response(state.put_status, json={})
@@ -121,7 +127,7 @@ def test_clean_follow_up_proves_exact_binding_and_keeps_task_answer(harness, sta
             done[0].session_key) == ("reset-run", "task-trigger", "codex", "review-bot:nick")
     assert done[0].raw == {"new_session_ack": {
         "thread_session_id": "successor-thread", "provider_session_id": "fresh-provider",
-        "clean_start": False,
+        "clean_start": False, **seed_receipt([]),
     }}
     harness.publisher.publish_unified_event.assert_not_called()
 
@@ -174,6 +180,7 @@ def test_unverified_binding_fails_closed_without_retry(harness, mode):
     ("bridge_reset_action", "unsupported"),
     ("explicit_thread", "true"),
     ("thread_session_id", ""),
+    # A retained seed needs its registry framing; it is never dropped silently.
     ("inject_messages", '[{"role":"user","content":"retained"}]'),
     ("inject_messages", '{"not":"messages"}'),
     ("inject_messages", "not-json"),
@@ -220,7 +227,7 @@ def test_standalone_clean_reset_does_not_invent_a_provider_turn(harness):
     assert len(events) == 1 and events[0].kind == AgentEventKind.ASSISTANT_DONE
     assert events[0].raw == {"new_session_ack": {
         "thread_session_id": "successor-thread", "provider_session_id": None,
-        "clean_start": True,
+        "clean_start": True, **seed_receipt([]),
     }}
     assert events[0].trigger_message_id == "task-trigger" and events[0].provider == "codex"
     harness.publisher.publish_unified_event.assert_not_called()
@@ -228,6 +235,7 @@ def test_standalone_clean_reset_does_not_invent_a_provider_turn(harness):
 
 @pytest.mark.parametrize("field,value", [
     ("inject_messages", None), ("inject_messages", "null"),
+    # Unframed: refused before any provider thread is opened.
     ("inject_messages", '[{"role":"user","content":"retained"}]'),
     ("thread_resume_id", "stale-provider"), ("thread_resume_id", "bot:routing-key"),
     ("explicit_thread", "true"), ("thread_session_id", ""),
@@ -274,8 +282,11 @@ def test_standalone_codex_receipt_requires_empty_successor_binding(harness, rig,
     from llm_bawt.service.session_lifecycle.receipt import NewSessionReceipt, RESET_CONFIRMATION
     from tests.test_new_session_typed_pg import _admit, _dispatcher, _finish_bridge
 
+    from tests.test_new_session_api_review_pg import bind_seed
+
     deliveries, record = _admit(rig)
     claim, payload, new_id, _synthetic_event = _finish_bridge(rig, deliveries, record)
+    bind_seed(deliveries, claim.id, [])
     standalone(harness)
     harness.fields.update(
         request_id=payload["inter_bot_bridge_request_id"], bot_id=rig.bot,
@@ -385,7 +396,10 @@ def test_native_codex_ack_requires_exact_persisted_policy_binding(harness, rig, 
         TASK_REPLY, TASK_TEXT, claim_policy, finish_follow_up, settle,
     )
 
+    from tests.test_new_session_api_review_pg import bind_seed
+
     claim = claim_policy(rig, real_lifecycle, "reset_without_history")
+    bind_seed(real_lifecycle.store, claim.id, [])
     payload, _synthetic_event = finish_follow_up(
         rig, real_lifecycle, claim,
         backend="claude-code" if binding == "wrong-backend" else "codex",

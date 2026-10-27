@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import claude_code_bridge.send_result as send_result_module
+from agent_bridge.continuity import SeedFraming
 from claude_code_bridge._bridge_helpers import _read_session_cost_baseline
 from claude_code_bridge.send_result import ClaudeResultMixin
 from claude_code_bridge.send_usage import (
@@ -103,6 +104,9 @@ def test_fresh_session_turn_cost_is_the_whole_total():
     assert usage["total_cost_usd"] == pytest.approx(0.86)
 
 
+_FRAMING = SeedFraming(briefing="briefing", ack="ack")
+
+
 class _SeedWriter(ClaudeSessionMixin):
     _cwd = "/home/bridge/dev"
 
@@ -111,7 +115,7 @@ def test_seed_transcript_baseline_is_zero_on_a_later_request(transcripts):
     """Snark P2: bare ``/new`` writes the seed in one request; the NEXT ordinary
     request resumes it via ``thread_resume_id`` with no in-memory seed
     provenance. The real seed bytes alone must prove a known-zero baseline."""
-    _SeedWriter()._write_seed_transcript(SID, [{"role": "user", "content": "hi"}])
+    _SeedWriter()._write_seed_transcript(SID, [{"role": "user", "content": "hi"}], _FRAMING)
 
     baseline = turn_cost_baseline_usd(SID)  # fresh call: no request-local state
 
@@ -121,7 +125,7 @@ def test_seed_transcript_baseline_is_zero_on_a_later_request(transcripts):
 
 def test_seed_then_billed_turn_uses_the_recorded_cost_state(transcripts):
     path = transcripts(SID, [])
-    _SeedWriter()._write_seed_transcript(SID, [{"role": "user", "content": "hi"}])
+    _SeedWriter()._write_seed_transcript(SID, [{"role": "user", "content": "hi"}], _FRAMING)
     with open(path, "a") as fh:
         fh.write(json.dumps(_billed_assistant()) + "\n")
         fh.write(json.dumps(_cost_state(SID, 0.42)) + "\n")

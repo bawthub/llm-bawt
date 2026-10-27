@@ -5,6 +5,11 @@ from fastapi import APIRouter, HTTPException, Query
 from ..dependencies import get_service
 from ..logging import get_service_logger
 
+# Agent backends whose bridges can open a fresh session on an app-built seed:
+# Claude Code via a synthetic transcript, Codex via app-server
+# ``thread/inject_items`` (TASK-1579).
+SEEDED_AGENT_BACKENDS = frozenset({"claude-code", "codex"})
+
 router = APIRouter()
 log = get_service_logger(__name__)
 
@@ -218,7 +223,7 @@ def maybe_build_session_seed(
 
     Returns a list of ``{role, content, timestamp}`` seed messages to push to
     the bridge via ``inject_messages``, or None when no seed should attach:
-    non-claude-code backend, continuity off, or a warm session that isn't a
+    unseeded agent backend, continuity off, or a warm session that isn't a
     ``/new``. Never raises — any failure yields None. This is the SOLE seed
     payload authority (TASK-615/501 Phase 2): the app decides what continuity
     context is injected; the bridge only hydrates the fresh SDK transcript.
@@ -229,7 +234,7 @@ def maybe_build_session_seed(
     explicit-thread hydration or policy resets.
     """
     try:
-        if (getattr(llm_bawt.bot, "agent_backend", "") or "") != "claude-code":
+        if (getattr(llm_bawt.bot, "agent_backend", "") or "") not in SEEDED_AGENT_BACKENDS:
             return None
         _binding = thread_binding or {}
         _thread_id = str(_binding.get("thread_session_id") or "").strip()

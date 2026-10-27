@@ -21,6 +21,8 @@ from .chat_prompt_defaults import (
     RESPONSE_STYLE_TLDR,
     RUNTIME_CONTEXT_TEMPLATE,
     SCOPED_COMMIT_PROMPT,
+    SESSION_SEED_ACK,
+    SESSION_SEED_BRIEFING,
     TTS_OUTPUT_INSTRUCTIONS,
 )
 from .prompt_default_loaders import (
@@ -302,6 +304,37 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "toward the BawtHub task system for observability. Supports "
                 "per-bot overrides via scope_type=bot; leave body empty to "
                 "inject nothing even when the flag is on."
+            ),
+        },
+    ),
+    "agents.session_seed_briefing": PromptDefinition(
+        key="agents.session_seed_briefing",
+        title="Agent Session Seed Briefing",
+        category="agent_execution",
+        required_vars=(),
+        loader=lambda: SESSION_SEED_BRIEFING,
+        metadata={
+            "notes": (
+                "Header of the briefing turn that opens a fresh agent session "
+                "(/new, reset, backend switch, cold start) with app-selected "
+                "history. The bridge renders the seed transcript beneath it. "
+                "Claude Code writes it into a synthetic transcript; Codex "
+                "injects it as a thread item. Resolved per bot at dispatch. "
+                "TASK-1579."
+            ),
+        },
+    ),
+    "agents.session_seed_ack": PromptDefinition(
+        key="agents.session_seed_ack",
+        title="Agent Session Seed Acknowledgement",
+        category="agent_execution",
+        required_vars=(),
+        loader=lambda: SESSION_SEED_ACK,
+        metadata={
+            "notes": (
+                "Synthetic assistant reply that follows the session seed "
+                "briefing, so the seeded history ends on an assistant turn. "
+                "Resolved per bot at dispatch. TASK-1579."
             ),
         },
     ),

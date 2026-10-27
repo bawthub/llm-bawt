@@ -805,6 +805,25 @@ class InterBotDeliveryStore:
                 user_message_id=user_message_id, bridge_request_id=bridge_request_id,
             )
 
+    def bind_new_session_seed(self, delivery_id: str, seed: Mapping[str, Any]) -> bool:
+        """Record the seed a reset delivery's provider ack must match (TASK-1579).
+
+        A re-dispatch before any ack replaces the record, so a late ack from a
+        superseded attempt cannot complete the reset; an acknowledged
+        delivery's record is final.
+        """
+        if self.engine is None:
+            return False
+        with self.engine.begin() as conn:
+            return conn.execute(sa_text("""
+                UPDATE inter_bot_deliveries
+                SET metadata_json=jsonb_set(COALESCE(metadata_json, '{}'::jsonb),
+                                           '{new_session_seed}', CAST(:seed AS jsonb)),
+                    updated_at=now()
+                WHERE id=:id AND status='DISPATCHING'
+                  AND metadata_json->'new_session_provider_ack' IS NULL
+            """), {"id": delivery_id, "seed": json.dumps(dict(seed))}).rowcount == 1
+
     def _transition(self, delivery_id: str, assignments: str, params: dict[str, Any], *, only: str | None) -> DeliveryRecord | None:
         if self.engine is None:
             return None

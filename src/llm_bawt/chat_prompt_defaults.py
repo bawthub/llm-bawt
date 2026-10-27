@@ -26,6 +26,20 @@ RESPONSE_STYLE_DEEP_DIVE = (
     "end with a recommendation. Depth over brevity."
 )
 
+# Continuity-seed framing (TASK-1579): the briefing header that opens a fresh
+# agent session's seeded history, and the synthetic assistant reply after it.
+# Bridges render the seed transcript beneath the briefing.
+SESSION_SEED_BRIEFING = (
+    "[Session continuity seed — prior context restored from chat history]\n"
+    "Below is our earlier conversation for continuity: rolling summaries "
+    "of older sessions, then the most recent messages. Treat it as "
+    "background context; you don't need to repeat it back."
+)
+SESSION_SEED_ACK = (
+    "Context restored — I've reviewed our prior "
+    "summaries and recent messages and I'm caught up."
+)
+
 # MCP tool context block (TASK-490) — appended by the claude-code bridge so the
 # agent passes the right bot_id to bawthub MCP tools. {bot_slug} is required.
 MCP_TOOL_CONTEXT_TEMPLATE = (

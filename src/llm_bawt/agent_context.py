@@ -50,9 +50,10 @@ def capabilities_for_backend(backend: str | None) -> AgentContextCapabilities:
     if name == "claude-code":
         return AgentContextCapabilities(name, True, True, True, True)
     if name == "codex":
-        # The Python SDK/CLI surface exposes fresh-thread creation, but no
-        # context-health, compact, or retained-history injection API.
-        return AgentContextCapabilities(name, False, False, False, True)
+        # No context-health or compact API. Retained history is seeded into a
+        # fresh thread through app-server ``thread/inject_items`` (TASK-1579),
+        # whichever transport then runs the turn.
+        return AgentContextCapabilities(name, False, False, True, True)
     if name == "openclaw":
         return AgentContextCapabilities(name, False, False, False, False)
     return AgentContextCapabilities(name or "unknown", False, False, False, False)

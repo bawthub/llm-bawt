@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
-from agent_bridge.continuity import continuity_digest
+from agent_bridge.continuity import SeedFraming, continuity_digest
 from llm_bawt.memory.session_continuity import SessionContinuity
 from llm_bawt.models.message import Message
 from llm_bawt.utils.history import HistoryManager
@@ -133,13 +133,27 @@ def test_bridge_receipt_follows_successful_write_and_failure():
     bridge._write_seed_transcript = Mock()
     bridge._set_thread_session = AsyncMock()
     bridge._record_continuity_receipt = AsyncMock()
-    result = asyncio.run(bridge._seed_new_session("test-bot", "model", payload(), "dest"))
+    framing = SeedFraming(briefing="briefing", ack="ack")
+    result = asyncio.run(bridge._seed_new_session("test-bot", "model", payload(), "dest", framing=framing))
     assert result["seeded"]
     bridge._record_continuity_receipt.assert_awaited_once_with("dest", "test-bot", payload(), restored=True)
     bridge._record_continuity_receipt.reset_mock()
     bridge._write_seed_transcript.side_effect = OSError("disk full")
-    result = asyncio.run(bridge._seed_new_session("test-bot", "model", payload(), "dest"))
+    result = asyncio.run(bridge._seed_new_session("test-bot", "model", payload(), "dest", framing=framing))
     assert not result["seeded"]
+    bridge._record_continuity_receipt.assert_awaited_once_with("dest", "test-bot", payload(), restored=False)
+
+
+def test_bridge_refuses_a_seed_without_registry_framing():
+    """TASK-1579: bridges hold no fallback briefing text."""
+    from claude_code_bridge.session_ops import ClaudeSessionMixin
+    bridge = object.__new__(ClaudeSessionMixin)
+    bridge._write_seed_transcript = Mock()
+    bridge._set_thread_session = AsyncMock()
+    bridge._record_continuity_receipt = AsyncMock()
+    result = asyncio.run(bridge._seed_new_session("test-bot", "model", payload(), "dest"))
+    assert result == {"seeded": False, "reason": "seed framing missing"}
+    bridge._write_seed_transcript.assert_not_called()
     bridge._record_continuity_receipt.assert_awaited_once_with("dest", "test-bot", payload(), restored=False)
 
 

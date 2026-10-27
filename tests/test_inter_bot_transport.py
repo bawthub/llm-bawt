@@ -133,9 +133,9 @@ def test_session_policy_normalization_and_capabilities():
     assert claude.reset_retain_history and claude.reset_without_history
     codex = capabilities_for_backend("codex")
     assert not codex.inspect and not codex.compact
-    assert not codex.reset_retain_history and codex.reset_without_history
-    with pytest.raises(ValueError, match="does not support"):
-        validate_session_policy("codex", SessionPolicy.RESET_RETAIN_HISTORY)
+    # TASK-1579: retained history is seeded into a fresh Codex thread.
+    assert codex.reset_retain_history and codex.reset_without_history
+    validate_session_policy("codex", SessionPolicy.RESET_RETAIN_HISTORY)
     with pytest.raises(ValueError, match="does not support"):
         validate_session_policy("openclaw", SessionPolicy.RESET_WITHOUT_HISTORY)
 
@@ -153,8 +153,9 @@ def test_session_policy_normalization_and_capabilities():
         configured_critical_policy="reset_retain_history",
         backend="codex",
     )
-    assert selected == SessionPolicy.RESET_WITHOUT_HISTORY
-    assert "cannot retain" in reason
+    # Codex seeds retained history into a fresh thread (TASK-1579).
+    assert selected == SessionPolicy.RESET_RETAIN_HISTORY
+    assert "critical" in reason
     selected, reason = preventive_session_policy(
         requested=SessionPolicy.CONTINUE,
         health_state="critical",

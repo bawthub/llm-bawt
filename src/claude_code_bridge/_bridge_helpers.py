@@ -19,6 +19,9 @@ import httpx
 
 from agent_bridge import bridge_token
 
+# Shared with the codex bridge's seed acknowledgement (TASK-1579).
+from agent_bridge.continuity import fmt_tokens as _fmt_tokens  # noqa: F401
+
 logger = logging.getLogger("claude_code_bridge.bridge")
 
 SESSION_PREFIX = "claude-code:"
@@ -58,14 +61,6 @@ def _bot_slug_from_session_key(session_key: str) -> str:
     return sk.split(":", 1)[0]
 
 
-def _fmt_tokens(n: int | None) -> str:
-    """Human-format a token count: 67288 -> '67.3k', 1486 -> '1.5k'."""
-    if n is None:
-        return "?"
-    n = int(n)
-    if n < 1000:
-        return str(n)
-    return f"{n / 1000:.1f}k"
 
 
 def _usage_input_total(usage: dict | None) -> int:

@@ -203,8 +203,6 @@ class NewSessionExecution:
             raise ValueError("typed reset follow-up has invalid admission provenance")
         if typed_task is not None and backend_name not in {"claude-code", "codex"}:
             raise ValueError("typed reset follow-up needs a supported agent bridge")
-        if plan and backend_name == "codex" and plan.continuity is Continuity.RETAIN:
-            raise ValueError("native Codex cannot retain reset history")
         # Resolve one concrete scope per configured /new and hand the same value
         # to the summarize gate, the seed and the continuity receipt, so a
         # concurrent bot-setting edit cannot split them. Only a scheduled reset
@@ -258,12 +256,11 @@ class NewSessionExecution:
                 thread_binding=thread_binding,
                 history_scope=reset_scope,
             )
-        if (is_agent and plan and backend_name == "codex"
-                and plan.rotate_here and (user_prompt.strip() == "/new" or typed_task)
-                and seed):
-            raise ValueError("native Codex cannot seed configured reset history")
-        if typed_task and backend_name == "codex":
-            seed = []
+        if is_agent and plan:
+            # The seed is final here; bind it before any rotation side effect.
+            NewSessionExecution.record_seed(
+                service, getattr(request, "inter_bot_delivery_id", None) or delivery_id, seed,
+            )
         rotated = None
         if is_agent and (plan is None or plan.rotate_here):
             rotated = service._maybe_rotate_agent_session(
@@ -291,11 +288,32 @@ class NewSessionExecution:
             bare_command = plan.rotate_here and user_prompt.strip() == "/new"
             if (standalone_policy or bare_command) and backend_name in {"claude-code", "codex"}:
                 bridge_action = "reset_only"
-                if backend_name == "codex":
-                    # Native Codex can prove an empty fresh binding only; refuse
-                    # configured history above rather than silently dropping it.
+                # A standalone reset always states its seed: [] is a clean start.
+                if seed is None:
                     seed = []
             elif (typed_task is not None or not plan.rotate_here) and backend_name in {"claude-code", "codex"}:
                 bridge_action = "reset_follow_up"
         return PreparedNewSession(seed, thread_binding, rotated, bridge_action, typed_task,
                                   reset_scope)
+
+    @staticmethod
+    def record_seed(service: Any, delivery_id: str | None, seed: list | None) -> None:
+        """Bind a durable reset to the exact seed its bridge must acknowledge.
+
+        The provider ack carries the digest and count of the seed it applied;
+        the receipt accepts it only when they match this record (TASK-1579).
+        A re-dispatch before any ack replaces the record, so a late ack from a
+        superseded attempt cannot complete the reset.
+        """
+        if not delivery_id:
+            return
+        store = getattr(getattr(service, "_inter_bot_dispatcher", None), "store", None)
+        if getattr(store, "engine", None) is None:
+            # Bare harness clients have no durable store and no receipt.
+            return
+        from agent_bridge.continuity import continuity_digest
+
+        applied = list(seed or [])
+        record = {"payload_digest": continuity_digest(applied), "count": len(applied)}
+        if not store.bind_new_session_seed(delivery_id, record):
+            raise RuntimeError("reset seed could not be bound to its delivery")

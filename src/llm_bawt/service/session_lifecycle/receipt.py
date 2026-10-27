@@ -133,6 +133,13 @@ class NewSessionReceipt:
             return False
         if not isinstance(ack.get("thread_session_id"), str) or not ack["thread_session_id"]:
             return False
+        digest = ack.get("seed_digest")
+        count = ack.get("seeded_count")
+        if digest is not None and (
+            not isinstance(digest, str) or not digest
+            or not isinstance(count, int) or isinstance(count, bool) or count < 0
+        ):
+            return False
         with engine.begin() as conn:
             result = conn.execute(text("""
                 UPDATE inter_bot_deliveries
@@ -143,14 +150,35 @@ class NewSessionReceipt:
                   AND target_bot_id=:bot AND user_message_id=:message_id
                   AND metadata_json->'new_session_provider_ack' IS NULL
                   AND (
+                    -- The ack names the exact seed it applied; it must be the
+                    -- one the app bound to this delivery (TASK-1579). A seeded
+                    -- start can never be acknowledged as a clean one.
+                    (:seed_digest <> ''
+                     AND metadata_json->'new_session_seed'->>'payload_digest'=:seed_digest
+                     AND metadata_json->'new_session_seed'->>'count'=CAST(:seeded_count AS text)
+                     AND (:seeded_count=0
+                          OR (:clean_start=false AND :provider_session_id <> '')))
+                    -- Pre-receipt bridges. Claude: a resumable session, or a
+                    -- clean start where the app bound no seed. Codex never
+                    -- seeded, so only where the app bound no seed.
+                    OR (:seed_digest='' AND (
+                        (:provider='claude-code'
+                         AND ((:clean_start=false AND :provider_session_id <> '')
+                              OR (:clean_start=true
+                                  AND COALESCE(metadata_json->'new_session_seed'->>'count', '0')='0')))
+                        OR (:provider='codex'
+                            AND COALESCE(metadata_json->'new_session_seed'->>'count', '0')='0')))
+                  )
+                  AND (
                     (metadata_json->'new_session_intent'->>'origin'
                        IN ('scheduler', 'chat_command')
                        AND (:provider='claude-code'
                             OR (:provider='codex'
                                 AND metadata_json->'new_session_intent'->>'origin'='chat_command'
                                 AND ((:clean_start=true AND :provider_session_id='')
-                                     OR (payload_json->>'inter_bot_typed_follow_up'='true'
-                                         AND :provider_session_id <> '')))))
+                                     OR (:provider_session_id <> ''
+                                         AND (payload_json->>'inter_bot_typed_follow_up'='true'
+                                              OR :seeded_count > 0))))))
                     OR (session_policy IN ('reset_retain_history', 'reset_without_history')
                         AND reset_status='ROTATED' AND :provider IN ('claude-code', 'codex')
                         AND payload_json->>'session_id'=:thread_id
@@ -159,7 +187,11 @@ class NewSessionReceipt:
                           OR (payload_json->>'inter_bot_reset_only'='true'
                               AND metadata_json->'new_session_intent'->>'origin'
                                   IN ('context_api', 'session_api')
-                              AND session_policy='reset_without_history'
+                              AND (session_policy='reset_without_history'
+                                   -- Retaining an empty history is a clean start,
+                                   -- provable only by a digest-bound receipt.
+                                   OR (session_policy='reset_retain_history'
+                                       AND :seed_digest <> '' AND :seeded_count=0))
                               AND :clean_start=true AND :provider_session_id='')
                         ))
                   )
@@ -168,6 +200,8 @@ class NewSessionReceipt:
                     "clean_start": ack.get("clean_start") is True,
                     "thread_id": ack["thread_session_id"],
                     "provider_session_id": str(ack.get("provider_session_id") or ""),
+                    "seed_digest": digest or "",
+                    "seeded_count": count if digest else -1,
                     "bot": bot_id,
                     "message_id": event.trigger_message_id or ""})
             return bool(result.rowcount)

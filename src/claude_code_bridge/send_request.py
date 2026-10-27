@@ -12,6 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from agent_bridge.continuity import SEED_FRAMING_FIELD, SeedFraming
 from agent_bridge.skill_selection import SELECTION_FIELD
 
 from ._bridge_helpers import _bot_slug_from_session_key
@@ -63,6 +64,8 @@ class SendRequest:
     # App-resolved Claude Code auto-compact window (None = CLI default).
     compact_threshold: int | None = None
     bridge_reset_action: str | None = None
+    # TASK-1579: app-resolved registry framing for a non-empty seed.
+    inject_seed_framing: SeedFraming | None = None
     # TASK-1295: the app-resolved catalog endpoint's access-path key. None only
     # when the field is absent (a legacy producer); a present-but-blank value
     # is kept as "" so it is rejected, never mistaken for legacy.
@@ -233,6 +236,7 @@ class SendRequest:
             inject_messages=inject_messages,
             trigger_message_id=trigger_message_id,
             bridge_reset_action=fields.get("bridge_reset_action") or None,
+            inject_seed_framing=SeedFraming.from_field(fields.get(SEED_FRAMING_FIELD)),
             bot_effort=bot_effort,
             bot_max_turns=bot_max_turns,
             subagent_model=subagent_model,

@@ -10,8 +10,10 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import text
 
+from agent_bridge.continuity import seed_receipt
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+from llm_bawt.service.session_lifecycle.execution import NewSessionExecution
 from llm_bawt.service.session_lifecycle.intent import (
     Admission, Continuity, NewSessionIntent, Origin, Outcome,
 )
@@ -28,7 +30,17 @@ def intent_for(rig, origin=Origin.CONTEXT_API, continuity=Continuity.CLEAN):
     )
 
 
-def finish(rig, lifecycle, record, *, backend, continuity):
+RETAINED = [{"source_id": "m1", "role": "user", "content": "earlier", "timestamp": 1.0}]
+
+
+def bind_seed(store, delivery_id, seed):
+    """What ``prepare_agent`` records for the bridge ack to match (TASK-1579)."""
+    NewSessionExecution.record_seed(
+        SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=store)), delivery_id, seed,
+    )
+
+
+def finish(rig, lifecycle, record, *, backend, continuity, seed=None):
     claim = lifecycle.store.claim_next(rig.bot, claim_owner="api-review", steer_capable=False)
     assert claim is not None and claim.id == record.id
     assert claim.old_session_id == rig.session_id and claim.new_session_id != rig.session_id
@@ -36,7 +48,10 @@ def finish(rig, lifecycle, record, *, backend, continuity):
     assert lifecycle.store.mark_transport_accepted(claim.id, claim.claim_token)
     payload = lifecycle.store.payload(claim.id)
     assert payload["inter_bot_reset_only"] is True
-    provider = "retained-provider" if continuity is Continuity.RETAIN else None
+    if seed is None:
+        seed = RETAINED if continuity is Continuity.RETAIN else []
+    bind_seed(lifecycle.store, claim.id, seed)
+    provider = "retained-provider" if seed else None
     with rig.engine.begin() as conn:
         if provider:
             conn.execute(text("""
@@ -63,17 +78,20 @@ def finish(rig, lifecycle, record, *, backend, continuity):
         run_id=payload["inter_bot_bridge_request_id"], provider=backend,
         trigger_message_id=claim.user_message_id,
         raw={"new_session_ack": {"thread_session_id": claim.new_session_id,
-                                 "provider_session_id": provider, "clean_start": not bool(provider)}},
+                                 "provider_session_id": provider, "clean_start": not bool(provider),
+                                 **seed_receipt(seed)}},
     )
     return claim, payload, event
 
 
 @pytest.mark.parametrize("origin", [Origin.CONTEXT_API, Origin.SESSION_API])
-@pytest.mark.parametrize("backend,continuity", [
-    ("claude-code", Continuity.CLEAN), ("claude-code", Continuity.RETAIN),
-    ("codex", Continuity.CLEAN),
+@pytest.mark.parametrize("backend,continuity,seed", [
+    ("claude-code", Continuity.CLEAN, None), ("claude-code", Continuity.RETAIN, None),
+    ("codex", Continuity.CLEAN, None), ("codex", Continuity.RETAIN, None),
+    # Retaining an empty history is a digest-proven clean start (TASK-1579).
+    ("claude-code", Continuity.RETAIN, []), ("codex", Continuity.RETAIN, []),
 ])
-def test_api_admission_claim_receipt_and_retry_are_one_operation(rig, real_lifecycle, monkeypatch, origin, backend, continuity):
+def test_api_admission_claim_receipt_and_retry_are_one_operation(rig, real_lifecycle, monkeypatch, origin, backend, continuity, seed):
     bot = SimpleNamespace(slug=rig.bot, agent_backend=backend, harness=backend)
     monkeypatch.setattr("llm_bawt.service.session_lifecycle.lifecycle.BotManager",
                         lambda _config: SimpleNamespace(get_bot=lambda _slug: bot))
@@ -86,7 +104,8 @@ def test_api_admission_claim_receipt_and_retry_are_one_operation(rig, real_lifec
     with rig.engine.connect() as conn:
         assert conn.execute(text("SELECT last_session_id FROM bot_profiles WHERE slug=:bot"),
                             {"bot": rig.bot}).scalar_one() == rig.session_id
-    claim, payload, event = finish(rig, real_lifecycle, record, backend=backend, continuity=continuity)
+    claim, payload, event = finish(rig, real_lifecycle, record, backend=backend,
+                                   continuity=continuity, seed=seed)
     assert NewSessionReceipt.record_provider_ack(
         rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
     )
@@ -163,3 +182,65 @@ def test_api_admission_skips_without_rotation_or_delayed_work(rig, real_lifecycl
             SELECT count(*) FROM inter_bot_deliveries
             WHERE target_bot_id=:bot AND idempotency_key=:key
         """), {"bot": rig.bot, "key": intent.idempotency_key}).scalar_one() == 0
+
+
+def _seeded_ack(rig, real_lifecycle, monkeypatch, *, backend, bound, ack):
+    bot = SimpleNamespace(slug=rig.bot, agent_backend=backend, harness=backend)
+    monkeypatch.setattr("llm_bawt.service.session_lifecycle.lifecycle.BotManager",
+                        lambda _config: SimpleNamespace(get_bot=lambda _slug: bot))
+    record, _reason = real_lifecycle._admit(intent_for(rig, continuity=Continuity.RETAIN))
+    claim, _payload, event = finish(rig, real_lifecycle, record, backend=backend,
+                                    continuity=Continuity.RETAIN, seed=bound)
+    event.raw["new_session_ack"] = {"thread_session_id": claim.new_session_id, **ack}
+    return NewSessionReceipt.record_provider_ack(
+        rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
+    )
+
+
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+@pytest.mark.parametrize("case", [
+    "other-digest", "wrong-count", "seeded-claims-clean", "empty-retain-without-digest",
+    "seeded-without-digest", "malformed-count",
+])
+def test_provider_ack_must_match_the_bound_seed(rig, real_lifecycle, monkeypatch, backend, case):
+    bound, applied = RETAINED, RETAINED
+    seeded = {"provider_session_id": "retained-provider", "clean_start": False}
+    clean = {"provider_session_id": None, "clean_start": True}
+    if case == "other-digest":
+        applied = [{**RETAINED[0], "content": "something else"}]
+        ack = {**seeded, **seed_receipt(applied)}
+    elif case == "wrong-count":
+        ack = {**seeded, **seed_receipt(applied), "seeded_count": 2}
+    elif case == "seeded-claims-clean":
+        ack = {**clean, **seed_receipt(applied)}
+    elif case == "empty-retain-without-digest":
+        bound, ack = [], clean
+    elif case == "seeded-without-digest":
+        ack = seeded if backend == "codex" else clean
+    else:
+        ack = {**seeded, **seed_receipt(applied), "seeded_count": True}
+    assert not _seeded_ack(rig, real_lifecycle, monkeypatch, backend=backend, bound=bound, ack=ack)
+
+
+def test_seed_record_tracks_redispatch_until_acknowledged(rig, real_lifecycle, monkeypatch):
+    bot = SimpleNamespace(slug=rig.bot, agent_backend="codex", harness="codex")
+    monkeypatch.setattr("llm_bawt.service.session_lifecycle.lifecycle.BotManager",
+                        lambda _config: SimpleNamespace(get_bot=lambda _slug: bot))
+    record, _reason = real_lifecycle._admit(intent_for(rig, continuity=Continuity.RETAIN))
+    claim, _payload, event = finish(rig, real_lifecycle, record, backend="codex",
+                                    continuity=Continuity.RETAIN, seed=[])
+    # A retried dispatch rebuilt its seed before any ack: the record follows it.
+    bind_seed(real_lifecycle.store, claim.id, RETAINED)
+    event.raw["new_session_ack"].update(provider_session_id="retained-provider",
+                                        clean_start=False, **seed_receipt(RETAINED))
+    assert NewSessionReceipt.record_provider_ack(
+        rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
+    )
+    # Once acknowledged, the bound seed is final.
+    with pytest.raises(RuntimeError, match="could not be bound"):
+        bind_seed(real_lifecycle.store, claim.id, [])
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("""
+            SELECT metadata_json->'new_session_seed' FROM inter_bot_deliveries WHERE id=:id
+        """), {"id": claim.id}).scalar_one() == {
+            "payload_digest": seed_receipt(RETAINED)["seed_digest"], "count": 1}

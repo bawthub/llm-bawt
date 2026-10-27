@@ -128,6 +128,7 @@ def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypa
         "asyncio": asyncio, "logger": Mock(), "time": time, "uuid": uuid,
         "Iterator": Iterator, "Any": Any, "AgentResult": lambda **kw: SimpleNamespace(**kw),
         "get_agent_subscriber": lambda: subscriber,
+        "resolve_seed_framing": lambda messages, _bot_id: None if not messages else pytest.fail("seeded"),
     }
     exec(compile(module, str(source), "exec"), scope)
     local = SimpleNamespace(connect=AsyncMock(), close=AsyncMock(), send_command=AsyncMock(),
