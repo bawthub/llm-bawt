@@ -314,3 +314,116 @@ def test_mcp_tool_returns_the_callers_digest(monkeypatch, engine):
     result = json.loads(asyncio.run(tool.context_waste_report(days=30)))
     assert result["status"] == "ok" and result["bots"] == ["alpha", "beta"]
     assert {item["bot"] for item in result["repeats"]["in_session"]} == {"alpha"}
+
+
+# ----- TASK-1590: declared per-tool keys and the HTTP route ---------------
+
+
+def test_declared_keys_replace_the_fallback_per_tool():
+    declared = {"tasks_get": frozenset({"task_id"})}
+    args = json.dumps({"task_id": 1, "limit": 2})
+    assert waste.arg_shape("mcp__bawthub__tasks_get", args, declared) == {
+        "keys": ["task_id"], "unknown_keys": 1}
+    # Absent from the registry: the static allowlist, which knows "limit".
+    assert waste.arg_shape("mcp__bawthub__tasks_list", args, declared)["keys"] == ["limit", "task_id"]
+    # A same-named third-party tool never borrows first-party keys.
+    assert waste.arg_shape("mcp__other__tasks_get", args, declared)["keys"] == []
+    # Schema evolution: a newly declared parameter shows without an allowlist edit.
+    grown = {"tasks_get": frozenset({"task_id", "brand_new"})}
+    assert waste.arg_shape("tasks_get", json.dumps({"brand_new": 1}), grown)["keys"] == ["brand_new"]
+
+
+def test_declared_mcp_keys_follow_each_registered_schema():
+    from mcp.server.fastmcp import FastMCP
+
+    import llm_bawt.mcp_server.server  # noqa: F401  registers every tool
+    from llm_bawt.mcp_server.registry import mcp
+    from llm_bawt.service.context_waste.registry_keys import declared_mcp_keys
+
+    keys = asyncio.run(declared_mcp_keys())
+    tools = asyncio.run(FastMCP.list_tools(mcp))
+    assert keys == {tool.name: frozenset(tool.inputSchema["properties"]) for tool in tools}
+    assert keys["context_waste_report"] == {"bot", "days"}
+    # The fallback holds no names that no registered tool declares any more.
+    assert waste.FIRST_PARTY_MCP_KEYS <= frozenset().union(*keys.values())
+
+
+def test_unreadable_registry_falls_back(monkeypatch):
+    from mcp.server.fastmcp import FastMCP
+
+    from llm_bawt.service.context_waste.registry_keys import declared_mcp_keys
+
+    async def broken(self):
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(FastMCP, "list_tools", broken)
+    assert asyncio.run(declared_mcp_keys()) is None
+
+
+@pytest.fixture
+def waste_client(monkeypatch, engine):
+    from functools import partial
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from llm_bawt.service.routes import context_waste as route
+
+    class Policy:
+        def __init__(self, engine):
+            pass
+
+        def resolve_sync(self, caller):
+            assert caller is None  # the operator view, never a bot caller
+            return access()
+
+    async def no_keys():
+        return None
+
+    monkeypatch.setattr(route, "get_turn_log_store", lambda: SimpleNamespace(engine=engine))
+    monkeypatch.setattr(route, "BotPolicyResolver", Policy)
+    monkeypatch.setattr(route, "load_thresholds", lambda: resolve_thresholds(None))
+    monkeypatch.setattr(route, "declared_mcp_keys", no_keys)
+    monkeypatch.setattr(route, "operator_scope", partial(operator_scope, now=NOW))
+    app = FastAPI()
+    app.include_router(route.router)
+    return TestClient(app)
+
+
+def test_waste_route_scopes_to_the_user_and_excludes_private_bots(engine, waste_client):
+    seed = Seeder(engine)
+    for bot in ("alpha", "secret"):
+        for _ in range(2):
+            seed.call(seed.turn(bot), bot, tokens=20_000)
+    seed.call(seed.turn("alpha", user="stranger"), "alpha", user="stranger",
+              sha="e" * 64, tokens=60_000)
+
+    response = waste_client.get("/v1/turn-logs/waste", params={"user_id": "owner"})
+    assert response.status_code == 200
+    body = response.json()
+    assert "secret" not in body["bots"] and {"alpha", "beta", "hidden"} <= set(body["bots"])
+    assert {item["bot"] for item in body["repeats"]["in_session"]} == {"alpha"}
+    assert {item["max_tokens"] for item in body["totals"]["trusted"]} == {20_000}
+    assert "secret" not in response.text and SECRET_VALUE not in response.text
+
+    stranger = waste_client.get("/v1/turn-logs/waste", params={"user_id": "stranger"}).json()
+    assert {item["max_tokens"] for item in stranger["totals"]["trusted"]} == {60_000}
+
+
+@pytest.mark.parametrize("params,status", [
+    ({"user_id": "owner", "bot": "secret"}, 404),
+    ({"user_id": "owner", "bot": "nobody"}, 404),
+    ({"user_id": "owner", "days": 0}, 422),
+    ({"user_id": "owner", "days": 91}, 422),
+    ({}, 422),
+])
+def test_waste_route_denies_out_of_scope_requests(waste_client, params, status):
+    response = waste_client.get("/v1/turn-logs/waste", params=params)
+    assert response.status_code == status
+
+
+def test_private_and_unknown_bots_are_denied_identically(waste_client):
+    private = waste_client.get("/v1/turn-logs/waste", params={"user_id": "owner", "bot": "secret"})
+    unknown = waste_client.get("/v1/turn-logs/waste", params={"user_id": "owner", "bot": "nobody"})
+    assert private.json() == unknown.json() == {"detail": "access_denied"}

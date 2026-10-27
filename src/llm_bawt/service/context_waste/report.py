@@ -72,10 +72,13 @@ BUILTIN_ARG_KEYS: dict[str, frozenset[str]] = {
     "ToolSearch": frozenset({"query", "max_results"}),
     "Skill": frozenset({"skill", "args"}),
 }
+#: The default and fallback for first-party MCP tools (binding clarification
+#: #3). A tool's own declared schema keys replace it when the in-process
+#: registry can be read (``registry_keys.declared_mcp_keys``, TASK-1590).
 FIRST_PARTY_MCP_KEYS = frozenset({
-    "bot_id", "task_id", "task_ids", "q", "query", "limit", "offset", "status", "focused",
+    "bot_id", "task_id", "q", "query", "limit", "offset", "status", "focused",
     "bot", "speaker", "since", "until", "handle", "id", "card_ref", "before", "after",
-    "max_chars", "focus", "sources", "include", "sort_by", "entity_type", "entity_id",
+    "max_chars", "focus", "sort_by", "entity_type", "entity_id",
     "target_bot_id", "message", "wait_for_reply", "delivery", "idempotency_key",
     "operation", "job_id", "project_id", "memory_id", "min_importance", "n",
 })
@@ -174,8 +177,13 @@ def _command_head(command: Any) -> str:
     return head if head in CMD_HEADS else "other"
 
 
-def arg_shape(tool_name: str, arguments_json: str | None) -> dict[str, Any]:
-    """Allowlisted key names plus value-free derived facts; never values."""
+def arg_shape(tool_name: str, arguments_json: str | None,
+              mcp_keys: Mapping[str, frozenset[str]] | None = None) -> dict[str, Any]:
+    """Allowlisted key names plus value-free derived facts; never values.
+
+    ``mcp_keys`` maps a first-party tool to its declared schema keys. A tool
+    missing from it uses the static :data:`FIRST_PARTY_MCP_KEYS`.
+    """
     try:
         arguments = json.loads(arguments_json) if arguments_json else {}
     except ValueError:
@@ -186,7 +194,7 @@ def arg_shape(tool_name: str, arguments_json: str | None) -> dict[str, Any]:
     if server is None and base in BUILTIN_ARG_KEYS:
         allowed = BUILTIN_ARG_KEYS[base]
     elif _first_party_mcp(server, base):
-        allowed = FIRST_PARTY_MCP_KEYS
+        allowed = (mcp_keys or {}).get(base, FIRST_PARTY_MCP_KEYS)
     else:
         allowed = frozenset()
     keys = sorted(key for key in arguments if key in allowed)
@@ -290,7 +298,8 @@ def find_repeats(rows: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]
     return groups
 
 
-def find_oversized(rows: list[Mapping[str, Any]], thresholds: Mapping[str, Any]) -> list[dict[str, Any]]:
+def find_oversized(rows: list[Mapping[str, Any]], thresholds: Mapping[str, Any],
+                   mcp_keys: Mapping[str, frozenset[str]] | None = None) -> list[dict[str, Any]]:
     per_tool: dict[str, dict[str, Any]] = {}
     for row in rows:
         tool = row["tool_name"]
@@ -308,7 +317,7 @@ def find_oversized(rows: list[Mapping[str, Any]], thresholds: Mapping[str, Any])
             entry["top"].append({
                 "bot": row["bot_id"], "turn_id": row["turn_id"], "tokens": tokens,
                 "created_at": _iso(row["created_at"]),
-                "arg_shape": arg_shape(tool, row.get("arguments_json")),
+                "arg_shape": arg_shape(tool, row.get("arguments_json"), mcp_keys),
             })
     ranked = sorted(per_tool.values(), key=lambda item: (-item["tokens"], item["tool"]))
     return ranked[:TOP_TOOLS]
@@ -414,7 +423,8 @@ def digest(report: Mapping[str, Any]) -> dict[str, Any]:
 # ----- assembly ------------------------------------------------------------
 
 
-def build_report(engine, scope: Scope, thresholds: Mapping[str, Any]) -> dict[str, Any]:
+def build_report(engine, scope: Scope, thresholds: Mapping[str, Any],
+                 mcp_keys: Mapping[str, frozenset[str]] | None = None) -> dict[str, Any]:
     """The whole report for one user, bot set and window."""
     totals = summarize_totals(queries.load_tool_totals(engine, scope))
     repeat_rows = queries.load_repeat_candidates(
@@ -424,7 +434,7 @@ def build_report(engine, scope: Scope, thresholds: Mapping[str, Any]) -> dict[st
     examples = [item for key in ("in_session", "cross_session") for item in repeats[key]]
     shapes = queries.load_arguments(engine, scope, sorted({item["_example_id"] for item in examples}))
     for item in examples:
-        item["arg_shape"] = arg_shape(item["tool"], shapes.get(item.pop("_example_id")))
+        item["arg_shape"] = arg_shape(item["tool"], shapes.get(item.pop("_example_id")), mcp_keys)
 
     smallest = min([thresholds["default"], *thresholds["per_tool"].values()])
     oversized_rows = queries.load_oversized_candidates(engine, scope, min_tokens=smallest)
@@ -440,7 +450,7 @@ def build_report(engine, scope: Scope, thresholds: Mapping[str, Any]) -> dict[st
         "labels": LABELS,
         "totals": totals,
         "repeats": repeats,
-        "oversized": find_oversized(oversized_rows[:queries.MAX_OVERSIZED_ROWS], thresholds),
+        "oversized": find_oversized(oversized_rows[:queries.MAX_OVERSIZED_ROWS], thresholds, mcp_keys),
         "composition": transcript_composition(turn_rows[:queries.MAX_TURN_ROWS]),
         "truncated": {"repeats": repeats_truncated, "oversized": oversized_truncated,
                       "turns": turns_truncated},

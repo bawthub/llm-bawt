@@ -15,6 +15,7 @@ from functools import lru_cache
 from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.retrieval.find import failure, serialize
 from llm_bawt.service.context_waste import build_report, caller_scope
+from llm_bawt.service.context_waste.registry_keys import declared_mcp_keys
 from llm_bawt.service.context_waste.report import digest
 
 from .bot_access_identity import trusted_caller
@@ -41,9 +42,9 @@ def _thresholds(config) -> dict:
     return resolve_thresholds(settings.get(SETTING_KEY))
 
 
-def _report(engine, config, access, bot, days) -> str:
+def _report(engine, config, access, bot, days, mcp_keys=None) -> str:
     scope = caller_scope(access, bot=bot, days=days)
-    return serialize(digest(build_report(engine, scope, _thresholds(config))))
+    return serialize(digest(build_report(engine, scope, _thresholds(config), mcp_keys)))
 
 
 @mcp.tool(name="context_waste_report")
@@ -61,7 +62,8 @@ async def context_waste_report(bot: str | None = None, days: int = 7) -> str:
                 raise BotAccessError("caller_unavailable")
             engine, config = _runtime()
             access = await BotPolicyResolver(engine).resolve(caller)
-            return await asyncio.to_thread(_report, engine, config, access, bot, days)
+            mcp_keys = await declared_mcp_keys()
+            return await asyncio.to_thread(_report, engine, config, access, bot, days, mcp_keys)
     except BotAccessError as error:
         return failure(error.code)
     except TimeoutError:
