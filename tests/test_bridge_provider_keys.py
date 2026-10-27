@@ -257,6 +257,71 @@ def test_zai_usage_authenticates_with_the_stored_key(monkeypatch):
     assert snap.status == "unauthorized"  # what the fake upstream answered
 
 
+# z.ai answers a bad key with HTTP 200 and the failure in the body (TASK-1560).
+_ZAI_REJECTED = {"code": 401, "msg": "token expired or incorrect", "success": False}
+_ZAI_PLAN = {"code": 200, "msg": "Operation successful", "success": True,
+             "data": {"level": "pro", "limits": [
+                 {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 12,
+                  "nextResetTime": 1_900_000_000_000}]}}
+_ZAI_PAYG = {"code": 200, "msg": "Operation successful", "success": True, "data": {"limits": []}}
+
+
+def _zai_response(payload):
+    return SimpleNamespace(status_code=200, is_error=False, json=lambda: payload,
+                           text=str(payload))
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        (_ZAI_REJECTED, "Z.AI rejected the API key"),
+        ({"code": 403, "msg": "forbidden", "success": False}, "Z.AI rejected the API key"),
+        ({"code": 500, "msg": "busy", "success": False}, "Z.AI key check failed with code 500"),
+        ({"code": 1001, "msg": "?"}, "Z.AI key check failed with code 1001"),
+        (_ZAI_PLAN, None),
+        (_ZAI_PAYG, None),
+    ],
+)
+def test_zai_key_check_reads_the_body_of_a_200(monkeypatch, payload, error):
+    from llm_bawt.service.providers import bridge_keys
+
+    monkeypatch.setattr(bridge_keys.httpx, "get", lambda *_a, **_k: _zai_response(payload))
+
+    assert ZaiKeyAdapter._probe("candidate") == ((None, error) if error else ("Z.AI", None))
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        (_ZAI_REJECTED, "unauthorized"),
+        ({"code": 500, "msg": "busy", "success": False}, "error"),
+        (_ZAI_PLAN, "ok"),
+        (_ZAI_PAYG, "ok"),
+    ],
+)
+def test_zai_usage_reads_the_body_of_a_200(monkeypatch, payload, status):
+    class _Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, _url, *, headers):
+            return _zai_response(payload)
+
+    stub_stored_keys(monkeypatch, {"zai": "stored-key"})
+    monkeypatch.setattr(zai_usage.httpx, "AsyncClient", _Client)
+
+    snap = asyncio.run(ZaiUsageAdapter().fetch())
+
+    assert snap.status == status
+    assert snap.available is (payload is _ZAI_PLAN)
+
+
 @pytest.mark.parametrize(
     ("adapter_cls", "provider_id", "env"),
     [

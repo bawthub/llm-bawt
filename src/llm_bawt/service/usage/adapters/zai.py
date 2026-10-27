@@ -27,7 +27,7 @@ import time
 
 import httpx
 
-from ...providers.bridge_keys import ZaiKeyAdapter
+from ...providers.bridge_keys import ZaiEnvelopeError, ZaiKeyAdapter
 from ..base import UsageAdapter
 from .stored_key import stored_api_key
 from ..canonical import (
@@ -172,6 +172,23 @@ class ZaiUsageAdapter(UsageAdapter):
                 status=STATUS_ERROR,
                 error="Non-JSON response from z.ai usage endpoint.",
                 raw={"text": (resp.text or "")[:500]},
+            )
+
+        # z.ai reports a bad or expired key as HTTP 200 with code 401 in the body.
+        failure = ZaiEnvelopeError.from_payload(payload)
+        if failure is not None:
+            if failure.unauthorized:
+                return self._base(
+                    available=False,
+                    status=STATUS_UNAUTHORIZED,
+                    error="z.ai rejected the API key on the usage endpoint.",
+                    raw=payload,
+                )
+            return self._base(
+                available=False,
+                status=STATUS_ERROR,
+                error=f"z.ai usage endpoint failed with code {failure.code}.",
+                raw=payload,
             )
 
         data = payload.get("data") if isinstance(payload, dict) else None
