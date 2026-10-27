@@ -206,13 +206,15 @@ class ClaudeResultMixin:
 
     async def _publish_post_done_context(
         self, sdk_client, *, request_id: str, session_key: str, seq: int,
-        model: str, final_usage: dict | None,
+        model: str, final_usage: dict | None, use_proxy: bool = False,
     ) -> int:
-        """Read /context only after DONE, on the still-owned direct SDK client.
+        """Read /context after DONE on the still-owned SDK client.
 
         USAGE_UPDATE carries a complete final snapshot so the app's ordered run
         consumer can persist it without replacing terminal cost/output values.
-        A failed or slow control request leaves the already-published turn alone.
+        On proxy turns the CLI's category counts are estimates: keep the upstream
+        resident total and window authoritative. A failed or slow control read
+        leaves the already-published turn alone.
         """
         if isinstance(final_usage, dict) and final_usage.get("context_action") == "compact":
             return seq
@@ -224,15 +226,16 @@ class ClaudeResultMixin:
         if breakdown is None:
             return seq
         usage = {**(final_usage or {}), "context_breakdown": breakdown, "usage_status": "final"}
-        native_total = native.get("totalTokens")
-        native_max = native.get("maxTokens")
-        if isinstance(native_total, (int, float)) and native_total > 0:
-            usage.update(resident_tokens=int(native_total), resident_source="claude_sdk_context")
-        if isinstance(native_max, (int, float)) and native_max > 0:
-            usage["context_window"] = int(native_max)
-        usage["context_percentage"] = native.get("percentage")
-        usage["auto_compact_enabled"] = native.get("isAutoCompactEnabled")
-        usage["auto_compact_threshold"] = native.get("autoCompactThreshold")
+        if not use_proxy:
+            native_total = native.get("totalTokens")
+            native_max = native.get("maxTokens")
+            if isinstance(native_total, (int, float)) and native_total > 0:
+                usage.update(resident_tokens=int(native_total), resident_source="claude_sdk_context")
+            if isinstance(native_max, (int, float)) and native_max > 0:
+                usage["context_window"] = int(native_max)
+            usage["context_percentage"] = native.get("percentage")
+            usage["auto_compact_enabled"] = native.get("isAutoCompactEnabled")
+            usage["auto_compact_threshold"] = native.get("autoCompactThreshold")
         seq += 1
         self._publish_event(
             request_id, session_key, seq, kind=AgentEventKind.USAGE_UPDATE,

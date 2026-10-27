@@ -356,6 +356,39 @@ def test_post_done_usage_keeps_cost_and_publishes_full_final_snapshot():
     assert "context_breakdown" not in final
 
 
+def test_proxy_post_done_breakdown_preserves_provider_headline():
+    harness = _Harness()
+    final = {
+        "input_tokens": 20, "cache_read_tokens": 80, "output_tokens": 7,
+        "resident_tokens": 100, "resident_source": "final_iteration_total_input",
+        "context_window": 128000, "total_cost_usd": 0.3,
+    }
+
+    async def read(_client):
+        return {
+            "totalTokens": 55, "maxTokens": 200, "percentage": 27.5,
+            "isAutoCompactEnabled": True, "autoCompactThreshold": 95,
+            "categories": [{"name": "System prompt", "tokens": 50}],
+        }
+
+    harness._read_native_context_usage = read
+    seq = asyncio.run(harness._publish_post_done_context(
+        object(), request_id="req", session_key="session", seq=1,
+        model="openai_chatgpt/gpt", final_usage=final, use_proxy=True,
+    ))
+    assert seq == 2
+    usage = harness.events[-1][3]["token_usage"]
+    assert usage["context_breakdown"]["cli_total_tokens"] == 55
+    assert usage["resident_tokens"] == 100
+    assert usage["resident_source"] == "final_iteration_total_input"
+    assert usage["context_window"] == 128000
+    assert "context_percentage" not in usage
+    assert "auto_compact_threshold" not in usage
+    assert usage["output_tokens"] == 7
+    assert usage["total_cost_usd"] == 0.3
+    assert "context_breakdown" not in final
+
+
 def test_post_done_timeout_and_compact_are_fail_open():
     harness = _Harness()
     calls = []

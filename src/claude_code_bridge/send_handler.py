@@ -27,7 +27,6 @@ from ._bridge_helpers import (
 )
 from .active_run import STEER_INTERRUPTED_TOOL_RESULT, ClaudeActiveRun
 from .native_auth import resolve_native_route
-from .send_boundaries import should_read_native_context_usage
 from .send_errors import (
     AuthRetryPolicy,
     TerminalSDKResultError,
@@ -799,12 +798,12 @@ class ClaudeSendMixin(
                                 # closing it early closes the CLI's control channel.
                                 # The finally block releases it before teardown, even
                                 # on timeout or post-DONE cancellation.
-                                if should_read_native_context_usage(use_proxy=use_proxy):
-                                    seq = await self._publish_post_done_context(
-                                        sdk_client, request_id=request_id,
-                                        session_key=session_key, seq=seq,
-                                        model=actual_model, final_usage=terminal_usage[0],
-                                    )
+                                seq = await self._publish_post_done_context(
+                                    sdk_client, request_id=request_id,
+                                    session_key=session_key, seq=seq,
+                                    model=actual_model, final_usage=terminal_usage[0],
+                                    use_proxy=use_proxy,
+                                )
                                 break
                         aborted = aborted or (cancel_event is not None and cancel_event.is_set())
                         if aborted:

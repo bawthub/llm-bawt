@@ -14,10 +14,7 @@ from claude_code_bridge.send_handler import ClaudeSendMixin
 from claude_code_bridge.send_stream_events import StreamBlockState
 from claude_code_bridge.send_usage import ClaudeUsageMixin
 from tests.virtual_clock import run_timing
-from claude_code_bridge.send_boundaries import (
-    separator_before_new_block,
-    should_read_native_context_usage,
-)
+from claude_code_bridge.send_boundaries import separator_before_new_block
 
 
 def test_stream_blocks_preserve_order_boundaries_and_side_effects() -> None:
@@ -60,12 +57,32 @@ def test_first_or_already_separated_reasoning_block_gets_no_extra_boundary() -> 
     assert separator_before_new_block("**first thought**\n\n") == ""
 
 
-def test_proxy_turn_skips_native_context_control_request() -> None:
-    assert should_read_native_context_usage(use_proxy=True) is False
+def test_proxy_turn_publishes_post_done_context_breakdown(monkeypatch) -> None:
+    async def run():
+        harness = _SendHarness()
+        harness._proxy_base_url = "http://127.0.0.1:1"
+        harness._model_provider_prefix = lambda _model: "test-provider"
+        sdk = _SDKStream(result=True)
 
+        async def read(_client):
+            assert harness.terminal(), "DONE must precede the proxy control read"
+            return {
+                "totalTokens": 55, "maxTokens": 200,
+                "categories": [{"name": "System prompt", "tokens": 50}],
+            }
 
-def test_direct_turn_keeps_native_context_control_request() -> None:
-    assert should_read_native_context_usage(use_proxy=False) is True
+        harness._read_native_context_usage = read
+        monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", lambda **kw: sdk)
+        send = harness.send()
+        await sdk.waiting.wait()
+        sdk.release_stream.set()
+        await send
+        updates = [event for event in harness.events if event.kind is AgentEventKind.USAGE_UPDATE
+                   and event.token_usage and event.token_usage.get("context_breakdown")]
+        assert len(updates) == 1
+        assert updates[0].token_usage["context_breakdown"]["cli_total_tokens"] == 55
+
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
 def test_abort_arms_proxy_gate_before_task_cancel_and_never_disconnects() -> None:
