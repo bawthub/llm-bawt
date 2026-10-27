@@ -368,12 +368,15 @@ def test_no_route_compares_the_bridge_header_outside_bridge_gate():
     (``NAME = "X-Bridge-Token"; request.headers.get(NAME)``) is caught too.
     """
     root = Path(bridge_gate.__file__).resolve().parents[1]  # src/llm_bawt
-    offenders = [
-        f"{path.relative_to(root)}:{line}"
-        for path in root.rglob("*.py")
-        if path != Path(bridge_gate.__file__).resolve()
-        for line in _gate_name_literals(ast.parse(path.read_text(encoding="utf-8")))
-    ]
+    offenders = []
+    for path in root.rglob("*.py"):
+        if path == Path(bridge_gate.__file__).resolve():
+            continue
+        source = path.read_text(encoding="utf-8")
+        # Parse only files that mention a gate name at all (keeps this fast).
+        if not any(name in source.lower() for name in _GATE_NAMES):
+            continue
+        offenders += [f"{path.relative_to(root)}:{line}" for line in _gate_name_literals(ast.parse(source))]
     assert offenders == []
 
 
