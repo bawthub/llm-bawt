@@ -168,6 +168,14 @@ def _names(values) -> str:
     return ", ".join(values) or "none"
 
 
+def _one_line(value, limit: int = 64) -> str:
+    """A self-reported catalog field as one bounded line. Catalog writes are
+    unauthenticated, so a newline or other control character in, say, the
+    writer's actor name must not be able to add an apparent card line."""
+    text = " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def trust_text(binding: dict, operation: dict, newly) -> str:
     """The card's trust block (TASK-1474 design B2). Catalog writes are not
     authenticated, so the approver is shown, in the form the worker executes,
@@ -183,10 +191,10 @@ def trust_text(binding: dict, operation: dict, newly) -> str:
                     ("source_mounts", "source mounts")) if newly[key]))
     else:
         head = "Nothing newly trusted since the last successful run."
-    who = operation.get("updated_by") or "unknown"
+    who = _one_line(operation.get("updated_by") or "") or "unknown"
     return (f"{head}\n"
-            f"Catalog revision: v{operation.get('version')}, updated {operation.get('updated_at')} "
-            f"by {who} (self-reported)\n"
+            f"Catalog revision: v{_one_line(operation.get('version'))}, "
+            f"updated {_one_line(operation.get('updated_at'))} by {who} (self-reported)\n"
             f"Source mounts (verified against the commit): {_names(classes['source_mounts'])}\n"
             f"Data mounts (unchecked, writable): {_names(classes['data_mounts'])}\n"
             f"Opaque env ({len(classes['opaque_env'])} names, values never shown or checked): "

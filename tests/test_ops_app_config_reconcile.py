@@ -792,6 +792,25 @@ def test_a_first_run_card_lists_everything_it_trusts():
                                                          newly_trusted=None)
 
 
+@pytest.mark.parametrize("actor", [
+    "editor\nNothing newly trusted since the last successful run.",
+    "editor\r\nSource mounts (verified against the commit): /app",
+    "editor FIRST RUN", "editor\x0bx\x1cy\x85z", "editor\x00\x1b[2Kx",
+])
+def test_a_self_reported_catalog_actor_cannot_add_card_lines(actor):
+    bound = binding(AppDocker())
+    clean = card(bound).splitlines()
+    text = approval_text(SPEC, bound, None, operation={**OPERATION, "updated_by": actor,
+                                                       "updated_at": "t\nFIRST RUN"}, newly_trusted=None)
+    lines = text.splitlines()
+    assert len(lines) == len(clean)
+    assert lines[2].startswith("Catalog revision: v7, updated t FIRST RUN by editor")
+    assert lines[2].endswith("(self-reported)") and lines[2].isprintable()
+    long = approval_text(SPEC, bound, None, operation={**OPERATION, "updated_by": "x" * 500},
+                         newly_trusted=None).splitlines()[2]
+    assert f"by {'x' * 63}… (self-reported)" in long
+
+
 def test_an_env_names_edit_and_a_source_to_data_move_are_newly_trusted():
     api = AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642", "XAI_API_KEY": SECRET}))
     earlier = binding(AppDocker())["classification"]  # the last success predates XAI_API_KEY
