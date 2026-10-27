@@ -301,6 +301,93 @@ def test_stale_failure_on_a_rotated_source_does_not_reopen_the_newer_import(env,
     assert row_json(engine, "anthropic-api") is None
 
 
+def _vault_write_waits(engine, name: str, value: str) -> bool:
+    """True when a vault write from another session can't take its lock now."""
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            conn.execute(text(
+                "INSERT INTO vault.secrets(name, ciphertext, updated_at) VALUES (:n, pgp_sym_encrypt(:v, :k), now()) "
+                "ON CONFLICT (name) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = now()"),
+                {"n": name, "v": value, "k": KEY})
+    except OperationalError as error:
+        assert getattr(error.orig, "pgcode", None) == "55P03"  # lock_not_available
+        return True
+    return False
+
+
+def test_a_rotation_after_the_source_check_waits_for_the_import(env, monkeypatch):
+    # Codex r1 (cmvq563a400gq0ms3j8u1vrb4) B1: the source check and the
+    # commit must be atomic with respect to vault writers. A rotation that
+    # can't land before the commit lands after it, and is then an ordinary
+    # post-import change the never-overwrite contract skips.
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    importer = VaultImporter(engine, store, KEY)
+    check = importer._source_changed
+    waited = []
+
+    def rotate_after_check(conn, group):
+        changed = check(conn, group)
+        waited.append(_vault_write_waits(engine, "ANTHROPIC_API_KEY", "fixture-rotated-provider-key"))
+        return changed
+
+    monkeypatch.setattr(importer, "_source_changed", rotate_after_check)
+    assert by_name(importer.run())["ANTHROPIC_API_KEY"].outcome == "imported"
+    assert waited == [True]
+    assert store.load("anthropic-api").secret == {"api_key": ANTHROPIC}  # the source that was checked
+    vault_set(engine, "ANTHROPIC_API_KEY", "fixture-rotated-provider-key")
+    assert run(engine, store)["ANTHROPIC_API_KEY"].processed is False
+    assert store.load("anthropic-api").secret == {"api_key": ANTHROPIC}
+
+
+def test_an_alias_added_during_the_import_waits_and_cannot_skip_the_conflict(env, monkeypatch):
+    # Codex r1 B2: an alias inserted after the check must wait for the commit.
+    engine, store = env
+    vault_set(engine, "XAI_API_KEY", XAI_ONE)
+    importer = VaultImporter(engine, store, KEY)
+    check = importer._source_changed
+    waited = []
+
+    def add_alias_after_check(conn, group):
+        changed = check(conn, group)
+        waited.append(_vault_write_waits(engine, "LLM_BAWT_XAI_API_KEY", XAI_TWO))
+        return changed
+
+    monkeypatch.setattr(importer, "_source_changed", add_alias_after_check)
+    importer.run()
+    assert waited == [True]
+    assert "LLM_BAWT_XAI_API_KEY" not in ledger_rows(engine)
+
+
+def test_an_alias_added_after_listing_is_a_source_change_then_a_conflict(env, monkeypatch):
+    # Codex r1 B2, the window before the fence: the alias exists at commit but
+    # wasn't listed. The group is stale, so nothing is written, and the next
+    # run sees both aliases and reports the conflict.
+    engine, store = env
+    vault_set(engine, "XAI_API_KEY", XAI_ONE)
+    importer = VaultImporter(engine, store, KEY)
+    commit = importer._commit
+    added = []
+
+    def add_alias_before_commit(group, outcome, detail, value=None, **kwargs):
+        if not added:
+            added.append(outcome)
+            vault_set(engine, "LLM_BAWT_XAI_API_KEY", XAI_TWO)
+        return commit(group, outcome, detail, value, **kwargs)
+
+    monkeypatch.setattr(importer, "_commit", add_alias_before_commit)
+    first = by_name(importer.run())
+    assert added == [vault_import.IMPORTED]
+    assert (first["XAI_API_KEY"].outcome, first["XAI_API_KEY"].detail_code) == ("failed", "source_changed")
+    assert row_json(engine, "xai") is None
+    second = run(engine, store)
+    assert second["XAI_API_KEY"].outcome == second["LLM_BAWT_XAI_API_KEY"].outcome == "conflict"
+    assert row_json(engine, "xai") is None
+
+
 def test_import_refuses_a_root_key_that_was_not_persisted(env, monkeypatch, tmp_path):
     # Loopy r1 B2: no env root and a key file that can't be written. Load the
     # real crypto module separately from the fixture's in-memory Fernet.

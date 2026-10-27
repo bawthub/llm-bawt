@@ -16,11 +16,13 @@ and one encrypted store, so this command copies what the vault holds into
   recorded. A mismatch rolls the insert back;
 * every write for one destination (ledger rows, the insert and its
   read-back) happens in one transaction under a per-destination advisory
-  lock, after re-reading the ledger, the destination and the vault
-  ciphertext there. A decision made from a stale snapshot of any of them
-  writes nothing (a changed source reports ``failed:source_changed`` without
-  touching the ledger), so a concurrent importer can't bring back a key, old
-  or rotated, that the operator disconnected after another import;
+  lock, after re-reading the ledger, the destination and every mapped vault
+  alias of it there. The transaction holds a SHARE lock on ``vault.secrets``,
+  so vault writes wait for it and the checked source is the one committed. A
+  decision made from a stale snapshot of any of them writes nothing (a
+  changed source reports ``failed:source_changed`` without touching the
+  ledger), so a concurrent importer can't bring back a key, old or rotated,
+  that the operator disconnected after another import;
 * nothing is imported unless the active encryption key is the persisted root
   (env or key file): a record encrypted under a key that exists only in this
   process would be unreadable by the next one (``failed:ephemeral_root``);
@@ -283,11 +285,20 @@ class VaultImporter:
 
     @staticmethod
     def _source_changed(conn, group: _Group) -> bool:
-        """True when any of ``group``'s vault rows changed or vanished since listing."""
-        names = [row.name for row in group.rows]
+        """True when the vault no longer holds exactly ``group``'s rows.
+
+        Takes a SHARE lock on ``vault.secrets`` first, so vault writes (a
+        rotation, a new alias for this destination) wait until this
+        transaction ends: the source checked here is the source committed.
+        Every mapped alias of the destination is compared, not only the
+        names listed earlier, so an alias added since then can't bypass the
+        conflict check.
+        """
+        conn.execute(text("LOCK TABLE vault.secrets IN SHARE MODE"))
+        aliases = [name for name, target in MAPPING.items() if target == group.destination]
         live = {name: _sha256(ciphertext) for name, ciphertext in conn.execute(
-            text("SELECT name, ciphertext FROM vault.secrets WHERE name = ANY(:names)"), {"names": names})}
-        return any(live.get(row.name) != row.source_sha256 for row in group.rows)
+            text("SELECT name, ciphertext FROM vault.secrets WHERE name = ANY(:names)"), {"names": aliases})}
+        return live != {row.name: row.source_sha256 for row in group.rows}
 
     def _commit(self, group: _Group, outcome: str, detail: str | None, value: str | None = None,
                 *, retry: bool = True) -> list[Outcome]:
