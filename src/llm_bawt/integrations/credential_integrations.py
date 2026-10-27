@@ -18,11 +18,13 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlsplit
 
-from llm_bawt.integrations.connections import IntegrationError, IntegrationStore
+from llm_bawt.integrations.connections import IntegrationError, IntegrationStore, RowSnapshot
 from llm_bawt.service.providers.base import STATUS_CONNECTED, ConnectionRecord
 
 AUTH_METHOD = "credentials"
 MAX_VALUE_LENGTH = 4096
+# Compare-and-set retries before a save or removal reports ``conflict``.
+WRITE_ATTEMPTS = 3
 
 FieldKind = Literal["url", "text", "secret"]
 
@@ -143,13 +145,23 @@ class CredentialIntegrations:
             raise IntegrationError("unknown_integration")
         return definition
 
-    def _current(self, integration_id: str) -> ConnectionRecord | None:
-        record = self.store.load(integration_id)
-        return record if record is not None and record.auth_method == AUTH_METHOD else None
+    @staticmethod
+    def _foreign(snapshot: RowSnapshot) -> bool:
+        """A row this form didn't write (another auth method, or unreadable)."""
+        return snapshot.exists and (snapshot.record is None or snapshot.record.auth_method != AUTH_METHOD)
+
+    def _owned(self, integration_id: str) -> RowSnapshot:
+        snapshot = self.store.snapshot(integration_id)
+        if self._foreign(snapshot):
+            # Never overwrite or delete a connection something else manages.
+            raise IntegrationError("managed_elsewhere")
+        return snapshot
 
     def descriptor(self, integration_id: str) -> dict:
         definition = self.definition(integration_id)
-        record = self._current(integration_id)
+        snapshot = self.store.snapshot(integration_id)
+        foreign = self._foreign(snapshot)
+        record = None if foreign else snapshot.record
         meta = record.meta if record else {}
         secret = record.secret if record else {}
         return {
@@ -163,6 +175,7 @@ class CredentialIntegrations:
             "scopes": [],
             "admin_scopes": [],
             "configured": record is not None,
+            "managed_elsewhere": foreign,
             "has_unverified_credentials": False,
             "reauthorization_required": False,
             "client": {"client_id": "", "redirect_uri": "", "has_client_secret": False},
@@ -182,26 +195,26 @@ class CredentialIntegrations:
             "connection": (record or ConnectionRecord(provider=integration_id)).public(),
         }
 
-    def configure(self, integration_id: str, values: dict[str, object]) -> dict:
-        definition = self.definition(integration_id)
-        if not self.store.available:
-            raise IntegrationError("storage_unavailable")
-        unknown = [name for name in values if definition.field(name) is None]
-        if unknown:
+    @staticmethod
+    def _validated(definition: CredentialIntegration, values: dict[str, object]) -> dict[str, str]:
+        if any(definition.field(name) is None for name in values):
             raise IntegrationError("invalid_field")
-        previous = self._current(integration_id)
+        cleaned = {name: _clean(raw) for name, raw in values.items()}
+        for name, value in cleaned.items():
+            if value and definition.field(name).kind == "url" and not _valid_url(value):
+                raise IntegrationError("invalid_url")
+        return cleaned
+
+    @staticmethod
+    def _merged(definition: CredentialIntegration, integration_id: str,
+                previous: ConnectionRecord | None, values: dict[str, str]) -> ConnectionRecord:
         meta = dict(previous.meta) if previous else {}
         secret = dict(previous.secret) if previous else {}
-        for name, raw in values.items():
-            value = _clean(raw)
-            f = definition.field(name)
-            assert f is not None
-            if f.secret:
+        for name, value in values.items():
+            if definition.field(name).secret:
                 if value:  # blank keeps the stored secret
                     secret[name] = value
             elif value:
-                if f.kind == "url" and not _valid_url(value):
-                    raise IntegrationError("invalid_url")
                 meta[name] = value
             else:
                 meta.pop(name, None)
@@ -214,16 +227,38 @@ class CredentialIntegrations:
             raise IntegrationError("missing_required_field")
         if definition.requires_one_of and not any(meta.get(n) for n in definition.requires_one_of):
             raise IntegrationError("missing_required_field")
-        self.store.save(ConnectionRecord(
+        return ConnectionRecord(
             provider=integration_id, status=STATUS_CONNECTED, auth_method=AUTH_METHOD,
             meta=meta, secret=secret,
             connected_at=previous.connected_at if previous else None,
-        ))
-        return self.descriptor(integration_id)
+        )
+
+    def configure(self, integration_id: str, values: dict[str, object]) -> dict:
+        definition = self.definition(integration_id)
+        if not self.store.available:
+            raise IntegrationError("storage_unavailable")
+        cleaned = self._validated(definition, values)
+        # Read, merge and compare-and-set the exact row. A concurrent save makes
+        # the write miss; re-merging onto the newer row keeps its secrets, so a
+        # blank-secret save can never restore a key that was just replaced.
+        for _ in range(WRITE_ATTEMPTS):
+            snapshot = self._owned(integration_id)
+            record = self._merged(definition, integration_id, snapshot.record, cleaned)
+            if self.store.replace(integration_id, snapshot, record):
+                return self.descriptor(integration_id)
+        raise IntegrationError("conflict")
 
     def disconnect(self, integration_id: str) -> bool:
         self.definition(integration_id)
-        return self.store.delete(integration_id)
+        if not self.store.available:
+            raise IntegrationError("storage_unavailable")
+        for _ in range(WRITE_ATTEMPTS):
+            snapshot = self._owned(integration_id)
+            if not snapshot.exists:
+                return False
+            if self.store.remove(integration_id, snapshot):
+                return True
+        raise IntegrationError("conflict")
 
 
 __all__ = [

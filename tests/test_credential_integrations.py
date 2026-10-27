@@ -13,7 +13,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
@@ -47,6 +47,9 @@ def store(monkeypatch):
     monkeypatch.setattr(crypto, "_get_fernet", lambda: fernet)
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(engine, tables=[RuntimeSetting.__table__])
+    with engine.begin() as conn:  # mirrors the production unique index
+        conn.execute(text("CREATE UNIQUE INDEX idx_runtime_settings_scope_key "
+                          "ON runtime_settings (scope_type, scope_id, key)"))
     runtime = object.__new__(RuntimeSettingsStore)
     runtime.config = None
     runtime.engine = engine
@@ -191,12 +194,37 @@ def test_store_unavailable_is_refused(manager, store):
         manager.configure("unraid", VALID["unraid"])
 
 
-def test_record_from_another_auth_method_is_not_merged(manager, store):
-    store.save(ConnectionRecord(provider="unraid", status=STATUS_CONNECTED, auth_method="imported",
-                                meta={"url": "https://old.example", "stale": "x"}, secret={"api_key": "old"}))
-    assert manager.descriptor("unraid")["configured"] is False
-    with pytest.raises(IntegrationError, match="missing_required_field"):
-        manager.configure("unraid", {"url": "https://unraid.example"})
+def _plant_foreign(store, integration_id="unraid", value=None):
+    """Write a row this form didn't create; returns its exact stored bytes."""
+    if value is None:
+        store.save(ConnectionRecord(provider=integration_id, status=STATUS_CONNECTED, auth_method="imported",
+                                    meta={"url": "https://old.example"}, secret={"api_key": "old"}))
+    else:
+        store._store.set_value("global", "*", store._key(integration_id), value)
+    return store.snapshot(integration_id).raw
+
+
+@pytest.mark.parametrize("value", [None, "not-an-object", ["list"]])
+def test_foreign_or_unreadable_row_is_reported_and_never_overwritten(manager, store, value):
+    before = _plant_foreign(store, value=value)
+    descriptor = manager.descriptor("unraid")
+    assert descriptor["configured"] is False and descriptor["managed_elsewhere"] is True
+    with pytest.raises(IntegrationError, match="managed_elsewhere"):
+        manager.configure("unraid", VALID["unraid"])
+    assert store.snapshot("unraid").raw == before
+
+
+@pytest.mark.parametrize("value", [None, "not-an-object"])
+def test_foreign_or_unreadable_row_is_never_disconnected(manager, store, value):
+    before = _plant_foreign(store, value=value)
+    with pytest.raises(IntegrationError, match="managed_elsewhere"):
+        manager.disconnect("unraid")
+    assert store.snapshot("unraid").raw == before
+
+
+def test_own_row_reports_not_managed_elsewhere(manager):
+    assert manager.descriptor("unraid")["managed_elsewhere"] is False
+    assert manager.configure("unraid", VALID["unraid"])["managed_elsewhere"] is False
 
 
 def test_disconnect_removes_the_record(manager, store):
@@ -204,6 +232,68 @@ def test_disconnect_removes_the_record(manager, store):
     assert manager.disconnect("unraid") is True
     assert store.load("unraid") is None
     assert manager.disconnect("unraid") is False
+
+
+# --- concurrent writers -----------------------------------------------------------
+
+def _interleave(monkeypatch, store, write):
+    """Run ``write`` once, right after the next snapshot read (a racing writer)."""
+    real = store.snapshot
+    pending = [write]
+
+    def snapshot(provider):
+        result = real(provider)
+        if pending:
+            pending.pop()()
+        return result
+
+    monkeypatch.setattr(store, "snapshot", snapshot)
+
+
+def test_blank_secret_save_racing_a_rotation_keeps_the_new_key(manager, store, monkeypatch):
+    manager.configure("unraid", {"url": "https://unraid.example", "api_key": "K0"})
+    other = CredentialIntegrations(None, store=store)
+    _interleave(monkeypatch, store, lambda: other.configure("unraid", {"api_key": "K1"}))
+    manager.configure("unraid", {"url": "https://unraid2.example", "api_key": ""})
+    result = store.load("unraid")
+    assert result.secret == {"api_key": "K1"}
+    assert result.meta == {"url": "https://unraid2.example"}
+
+
+def test_first_save_racing_another_first_save_retries_onto_its_row(manager, store, monkeypatch):
+    # Both see no row; the loser's insert hits the unique index and re-merges.
+    other = CredentialIntegrations(None, store=store)
+    _interleave(monkeypatch, store, lambda: other.configure(
+        "object-store", {**VALID["object-store"], "region": "a", "access_key_id": "first-id"}))
+    manager.configure("object-store", {**VALID["object-store"], "access_key_id": "second-id"})
+    result = store.load("object-store")
+    assert result.meta["region"] == "garage" and result.secret["access_key_id"] == "second-id"
+    with store._store.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM runtime_settings")).scalar() == 1
+
+
+def test_save_racing_a_foreign_writer_does_not_overwrite_it(manager, store, monkeypatch):
+    manager.configure("unraid", VALID["unraid"])
+    _interleave(monkeypatch, store, lambda: _plant_foreign(store))
+    with pytest.raises(IntegrationError, match="managed_elsewhere"):
+        manager.configure("unraid", {"url": "https://unraid2.example"})
+    assert store.load("unraid").auth_method == "imported"
+
+
+def test_disconnect_racing_a_foreign_writer_does_not_delete_it(manager, store, monkeypatch):
+    manager.configure("unraid", VALID["unraid"])
+    _interleave(monkeypatch, store, lambda: _plant_foreign(store))
+    with pytest.raises(IntegrationError, match="managed_elsewhere"):
+        manager.disconnect("unraid")
+    assert store.load("unraid").auth_method == "imported"
+
+
+def test_save_that_keeps_losing_the_race_reports_conflict(manager, store, monkeypatch):
+    manager.configure("unraid", VALID["unraid"])
+    monkeypatch.setattr(store, "replace", lambda *_args: False)
+    with pytest.raises(IntegrationError, match="conflict"):
+        manager.configure("unraid", {"url": "https://unraid2.example"})
+    assert store.load("unraid").meta == {"url": "https://unraid.example"}
 
 
 # --- routes -----------------------------------------------------------------------
@@ -231,6 +321,40 @@ def test_put_credentials_validation_error_is_400(client, store):
     assert response.status_code == 400
     assert response.json()["detail"] == "invalid_url"
     assert SECRET not in response.text
+
+
+@pytest.mark.parametrize("body", [
+    {"values": {f"f{i}": SECRET for i in range(17)}},          # too many values
+    {"values": {"url": "https://unraid.example", "api_key": [SECRET]}},  # nested type error
+    {"values": {"api_key": {"nested": SECRET}}},
+    {"values": {"api_key": 7}, "extra": SECRET},
+    {"values": [SECRET]},
+    [SECRET],
+    SECRET,
+])
+def test_put_credentials_malformed_body_never_echoes_input(client, store, body):
+    response = client.put("/v1/integrations/unraid/credentials", json=body)
+    assert response.status_code == 400
+    assert response.json() == {"detail": "invalid_field"}
+    assert SECRET not in response.text
+    assert store.load("unraid") is None
+
+
+def test_put_credentials_invalid_json_never_echoes_input(client):
+    response = client.put("/v1/integrations/unraid/credentials", content=f'{{"values": "{SECRET}',
+                          headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert SECRET not in response.text
+
+
+def test_put_and_delete_refuse_a_foreign_row(client, store):
+    before = _plant_foreign(store)
+    put = client.put("/v1/integrations/unraid/credentials", json={"values": VALID["unraid"]})
+    assert put.status_code == 400 and put.json()["detail"] == "managed_elsewhere"
+    assert SECRET not in put.text
+    delete = client.delete("/v1/integrations/unraid")
+    assert delete.status_code == 400 and delete.json()["detail"] == "managed_elsewhere"
+    assert store.snapshot("unraid").raw == before
 
 
 def test_put_credentials_unknown_integration_is_404():

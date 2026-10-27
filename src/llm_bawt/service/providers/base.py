@@ -190,6 +190,11 @@ class CredentialStore:
         raw = settings.get(self._key(provider))
         if not isinstance(raw, dict):
             return None
+        return self._record(provider, raw)
+
+    @staticmethod
+    def _record(provider: str, raw: dict[str, Any]) -> ConnectionRecord:
+        """Decode a stored row's JSON into a record (secret decrypted)."""
         secret: dict[str, Any] = {}
         enc = raw.get("secret_enc")
         if enc:
@@ -211,6 +216,11 @@ class CredentialStore:
     def save(self, record: ConnectionRecord) -> None:
         if not self.available:
             raise RuntimeError("Runtime settings DB unavailable — cannot persist provider credential")
+        self._store.set_value("global", "*", self._key(record.provider), self._payload(record))
+
+    @staticmethod
+    def _payload(record: ConnectionRecord) -> dict[str, Any]:
+        """Stamp ``record`` and build the stored row JSON (secret encrypted)."""
         record.updated_at = _now()
         if record.status == STATUS_CONNECTED and not record.connected_at:
             record.connected_at = record.updated_at
@@ -224,7 +234,7 @@ class CredentialStore:
         }
         if record.secret:
             payload["secret_enc"] = crypto.encrypt(json.dumps(record.secret))
-        self._store.set_value("global", "*", self._key(record.provider), payload)
+        return payload
 
     def delete(self, provider: str) -> bool:
         if not self.available:

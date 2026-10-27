@@ -12,11 +12,13 @@ import logging
 import re
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlsplit
 
 import httpx
 from sqlalchemy import delete, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from llm_bawt.integrations.keep_workspace import (
@@ -95,9 +97,76 @@ def keep_failure_code(response: httpx.Response) -> str:
     return code
 
 
+@dataclass(frozen=True)
+class RowSnapshot:
+    """One integration row exactly as read, for compare-and-set writes.
+
+    ``record`` is None when there is no row or its JSON isn't an object.
+    """
+
+    row_id: int | None = None
+    raw: str | None = None
+    record: ConnectionRecord | None = None
+
+    @property
+    def exists(self) -> bool:
+        return self.row_id is not None
+
+
 class IntegrationStore(CredentialStore):
     def _key(self, provider: str) -> str:
         return f"integration_connection:{provider}"
+
+    def _where(self, provider: str):
+        return (RuntimeSetting.scope_type == "global", RuntimeSetting.scope_id == "*",
+                RuntimeSetting.key == self._key(provider))
+
+    def snapshot(self, provider: str) -> RowSnapshot:
+        if not self.available:
+            return RowSnapshot()
+        with Session(self._store.engine) as session:
+            row = session.exec(select(RuntimeSetting).where(*self._where(provider))).first()
+            if row is None:
+                return RowSnapshot()
+            row_id, raw = row.id, row.value_json
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        record = self._record(provider, data) if isinstance(data, dict) else None
+        return RowSnapshot(row_id, raw, record)
+
+    def replace(self, provider: str, expected: RowSnapshot, record: ConnectionRecord) -> bool:
+        """Write ``record`` only if the row is still exactly ``expected``.
+
+        Returns False when another writer got there first (changed or deleted
+        the row, or inserted one where none was), so the caller can re-read.
+        """
+        value = json.dumps(self._payload(record), ensure_ascii=False)
+        with Session(self._store.engine) as session:
+            if not expected.exists:
+                session.add(RuntimeSetting(scope_type="global", scope_id="*",
+                                           key=self._key(provider), value_json=value))
+                try:
+                    session.commit()
+                except IntegrityError:  # unique (scope_type, scope_id, key)
+                    session.rollback()
+                    return False
+                return True
+            result = session.execute(update(RuntimeSetting).where(
+                RuntimeSetting.id == expected.row_id, RuntimeSetting.value_json == expected.raw,
+            ).values(value_json=value, updated_at=datetime.now(timezone.utc)))
+            session.commit()
+            return result.rowcount == 1
+
+    def remove(self, provider: str, expected: RowSnapshot) -> bool:
+        """Delete the row only if it is still exactly ``expected``."""
+        with Session(self._store.engine) as session:
+            result = session.execute(delete(RuntimeSetting).where(
+                RuntimeSetting.id == expected.row_id, RuntimeSetting.value_json == expected.raw,
+            ))
+            session.commit()
+            return result.rowcount == 1
 
     def consume_state(self, integration_id: str, state: str, browser: str) -> dict:
         """Atomically consume a matching, unexpired, browser-bound pending flow.

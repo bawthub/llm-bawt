@@ -74,10 +74,7 @@ async def list_integrations():
     return {"integrations": descriptors}
 
 
-class CredentialValues(BaseModel):
-    # Field names and limits are checked against the integration's definition;
-    # a blank secret keeps the stored one.
-    values: dict[str, str] = Field(max_length=16, repr=False)
+MAX_CREDENTIAL_VALUES = 16
 
 
 def credential_manager(integration_id: str) -> CredentialIntegrations:
@@ -86,9 +83,29 @@ def credential_manager(integration_id: str) -> CredentialIntegrations:
     return CredentialIntegrations(get_service().config)
 
 
+async def credential_values(request: Request) -> dict[str, str]:
+    """Parse ``{"values": {name: str}}`` without a pydantic model.
+
+    FastAPI's 422 body echoes the offending input, which here is a secret, so
+    every malformed body gets the same bounded ``invalid_field`` instead. Field
+    names, lengths and URLs are checked against the integration's definition.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    values = body.get("values") if isinstance(body, dict) and body.keys() == {"values"} else None
+    if (not isinstance(values, dict) or len(values) > MAX_CREDENTIAL_VALUES
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items())):
+        raise HTTPException(400, "invalid_field")
+    return values
+
+
 @router.put("/{integration_id}/credentials")
-async def configure_credentials(integration_id: str, body: CredentialValues):
-    result = await call(credential_manager(integration_id).configure, integration_id, body.values)
+async def configure_credentials(integration_id: str, request: Request):
+    service = credential_manager(integration_id)
+    values = await credential_values(request)
+    result = await call(service.configure, integration_id, values)
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
