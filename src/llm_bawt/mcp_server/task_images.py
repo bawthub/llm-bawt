@@ -32,6 +32,9 @@ _UPLOAD_PATH = re.compile(rf"(?:/v1/uploads|{re.escape(PUBLIC_UPLOADS_PREFIX)})/
 _TASK_UPLOAD_PREFIX = "/api/uploads/serve/"
 #: BawtHub's own public domain: absolute links to it are stored origin-relative.
 _PRODUCT_DOMAIN = "bawthub.com"
+#: The product's own hosts without a domain: its compose service name for the
+#: llm-bawt API (``http://app:8642``) and loopback. Any other bare name is refused.
+_SERVICE_HOSTS = frozenset({"app", "localhost", "127.0.0.1"})
 
 
 class ImageRefError(ValueError):
@@ -39,13 +42,13 @@ class ImageRefError(ValueError):
 
 
 def _first_party(host: str) -> bool:
-    """BawtHub's public domain, or a single-label service name (``app``, ``localhost``).
+    """BawtHub's public domain, or one of the product's own service hosts.
 
     A link on any other host is someone else's page, even when its path looks
     like an upload, so it is refused rather than mapped to one of ours.
     """
     host = host.lower()
-    return "." not in host or host == _PRODUCT_DOMAIN or host.endswith(f".{_PRODUCT_DOMAIN}")
+    return host in _SERVICE_HOSTS or host == _PRODUCT_DOMAIN or host.endswith(f".{_PRODUCT_DOMAIN}")
 
 
 def parse_image_ref(ref: Any) -> tuple[str | None, str]:
@@ -107,10 +110,17 @@ async def resolve_image_refs(refs: Iterable[Any]) -> list[str]:
 
 @dataclass(frozen=True)
 class ImageEdit:
-    """What to send BawtHub: stored URLs to append and stored entries to drop."""
+    """What to send BawtHub: stored URLs to append and stored entries to drop.
+
+    ``add`` and ``remove`` carry the whole request, whatever the earlier read
+    showed: BawtHub applies them to the locked list, where adding a present
+    URL or removing an absent one changes nothing. ``fresh`` is the adds that
+    read didn't hold, for reporting only.
+    """
 
     add: list[str]
     remove: list[str]
+    fresh: list[str]
 
     def body(self) -> dict[str, list[str]]:
         return {key: urls for key, urls in (("imageUrlsAdd", self.add), ("imageUrlsRemove", self.remove)) if urls}
@@ -124,19 +134,36 @@ class ImageEdit:
 
 
 def plan_image_edit(current: list[str], add: list[str], remove: Iterable[Any]) -> ImageEdit | None:
-    """The edit that takes ``current`` to ``current + add - remove``; None if it is already there.
+    """The edit for ``add`` and ``remove``; None only when neither names anything.
 
-    ``add`` holds stored URLs (``resolve_image_refs``); one already attached in
-    any form is skipped. ``remove`` may name an upload in any form, or repeat an
-    entry exactly as stored; removing an upload that no longer exists is
-    allowed. Removes are the entries exactly as stored, which is what BawtHub
-    matches on.
+    ``current`` is an earlier read of the list. It never trims the request:
+    another writer can change the list after that read, so an add the read
+    already held, or a remove it didn't, is still sent (TASK-1526 replacement
+    review). The read only supplies the stored spellings BawtHub must match.
+
+    ``add`` holds stored URLs (``resolve_image_refs``). An upload the read held
+    in another spelling (a legacy absolute URL) has that entry removed, so the
+    list ends with one canonical entry, not two. ``remove`` may name an upload
+    in any form, or repeat an entry exactly as stored; removing an upload that
+    no longer exists is allowed. It sends the canonical spelling, the string as
+    given, and every entry the read held for that upload. An upload named in
+    both is removed.
     """
-    dropped = {_key(ref) if isinstance(ref, str) else ref for ref in remove}
-    gone = [url for url in current if url in dropped or _key(url) in dropped]
+    remove_refs = [ref for ref in remove if isinstance(ref, str) and ref.strip()]
+    dropped = {_key(ref) for ref in remove_refs}
+    new = _unique(url for url in add if _key(url) not in dropped)
+    added = {_key(url) for url in new}
+    gone = [
+        *(_key(ref) for ref in remove_refs),
+        *(ref.strip() for ref in remove_refs),
+        *(url for url in current if _key(url) in dropped),
+        # Another spelling of an upload being added: replaced by the canonical one.
+        *(url for url in current if _key(url) in added and url not in new),
+    ]
+    if not new and not gone:
+        return None
     had = {_key(url) for url in current}
-    new = _unique(url for url in add if _key(url) not in had and _key(url) not in dropped)
-    return ImageEdit(add=new, remove=_unique(gone)) if new or gone else None
+    return ImageEdit(add=new, remove=_unique(gone), fresh=[url for url in new if _key(url) not in had])
 
 
 def _trigger_attachments(bot_id: str, message_id: str) -> list[dict[str, Any]]:
@@ -199,12 +226,13 @@ UNSUPPORTED = "BawtHub doesn't support image edits on update yet; the images wer
 
 async def image_edit(read_task, task_id: str, add_refs: list[Any] | None,
                      remove_refs: list[Any] | None, turn_urls: Iterable[str] = ()) -> ImageEdit | None:
-    """The image edit for one update, or None when the task already matches.
+    """The image edit for one update, or None when nothing is added or removed.
 
     ``turn_urls`` are already-checked stored URLs from the linked turn.
-    ``read_task`` is the task GET; the list it returns only decides what is
-    already there. BawtHub applies the edit to the locked row, so a list that
-    moves after this read is never overwritten.
+    ``read_task`` is the task GET; its list only supplies stored spellings and
+    what counts as newly attached. BawtHub applies the edit to the locked row,
+    so a list that moves after this read is neither overwritten nor allowed to
+    cancel part of the edit.
     """
     add = [*await resolve_image_refs(add_refs or []), *turn_urls]
     current = _image_urls(await read_task(task_id))

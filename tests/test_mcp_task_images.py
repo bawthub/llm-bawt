@@ -137,15 +137,74 @@ def test_add_appends_to_the_current_list(monkeypatch: pytest.MonkeyPatch, assets
 
 
 def test_add_and_remove_are_idempotent(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
-    # A legacy absolute entry counts as the same upload.
-    api = FakeTasks(monkeypatch, [f"https://app.bawthub.com/api/chat/uploads/{ID}"])
+    api = FakeTasks(monkeypatch, [STORED])
 
     added = _run(task_tools.update_task("TASK-9", add_image_urls=[ID]))
     removed = _run(task_tools.update_task("TASK-9", remove_image_urls=[OTHER]))
 
-    assert api.patches == []
-    assert added["ok"] is True and added["updated"] == []
-    assert removed["ok"] is True and removed["updated"] == []
+    # The request is sent whatever the read showed; BawtHub's apply is a no-op.
+    assert api.patches == [{"imageUrlsAdd": [STORED]}, {"imageUrlsRemove": [STORED_OTHER, OTHER]}]
+    assert api.urls == [STORED]
+    assert added["ok"] is True and removed["ok"] is True
+
+
+def test_adding_an_upload_held_in_a_legacy_form_leaves_one_canonical_entry(
+        monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
+    legacy = f"https://app.bawthub.com/api/chat/uploads/{ID}"
+    api = FakeTasks(monkeypatch, [legacy, UI_UPLOAD])
+
+    result = _run(task_tools.update_task("TASK-9", add_image_urls=[ID]))
+
+    assert api.patches == [{"imageUrlsAdd": [STORED], "imageUrlsRemove": [legacy]}]
+    assert api.urls == [UI_UPLOAD, STORED]
+    assert result["ok"] is True
+
+
+def _race(monkeypatch: pytest.MonkeyPatch, api: FakeTasks, competing) -> None:
+    """Run ``competing`` on the list after the tool's GET returns and before its PATCH."""
+    real_get = api.get
+
+    async def read_then_compete(path: str, **kwargs: Any) -> dict[str, Any]:
+        task = await real_get(path, **kwargs)
+        competing(api.urls)
+        return task
+
+    monkeypatch.setattr(task_tools, "_api_get", read_then_compete)
+
+
+def test_an_add_the_read_already_held_survives_a_concurrent_remove(
+        monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
+    api = FakeTasks(monkeypatch, [STORED])
+    _race(monkeypatch, api, lambda urls: urls.remove(STORED))
+
+    result = _run(task_tools.update_task("TASK-9", title="new", add_image_urls=[ID]))
+
+    assert api.patches == [{"title": "new", "imageUrlsAdd": [STORED]}]
+    assert api.urls == [STORED]
+    assert result["ok"] is True
+
+
+def test_a_remove_the_read_lacked_survives_a_concurrent_add(
+        monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
+    api = FakeTasks(monkeypatch, [])
+    _race(monkeypatch, api, lambda urls: urls.append(STORED))
+
+    result = _run(task_tools.update_task("TASK-9", title="new", remove_image_urls=[ID]))
+
+    assert api.patches == [{"title": "new", "imageUrlsRemove": [STORED, ID]}]
+    assert api.urls == []
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize(("current", "add", "remove", "expected"), [
+    ([STORED], [STORED], [], task_images.ImageEdit(add=[STORED], remove=[], fresh=[])),
+    ([], [], [ID], task_images.ImageEdit(add=[], remove=[STORED, ID], fresh=[])),
+    ([], [STORED], [ID], task_images.ImageEdit(add=[], remove=[STORED, ID], fresh=[])),
+    ([], [], [], None),
+])
+def test_the_plan_keeps_the_whole_request(current: list[str], add: list[str], remove: list[str],
+                                          expected: task_images.ImageEdit | None) -> None:
+    assert task_images.plan_image_edit(current, add, remove) == expected
 
 
 def test_remove_matches_any_form_even_for_a_deleted_upload(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
@@ -154,8 +213,9 @@ def test_remove_matches_any_form_even_for_a_deleted_upload(monkeypatch: pytest.M
 
     result = _run(task_tools.update_task("TASK-9", remove_image_urls=[f"/v1/uploads/{ID}", "blob:legacy"]))
 
-    # Removes name the entries exactly as stored: that is what BawtHub matches.
-    assert api.patches == [{"imageUrlsRemove": [STORED, "blob:legacy"]}]
+    # Removes name the canonical spelling, the string as given and every stored
+    # entry for that upload: BawtHub matches exact strings.
+    assert api.patches == [{"imageUrlsRemove": [STORED, "blob:legacy", f"/v1/uploads/{ID}"]}]
     assert api.urls == [STORED_OTHER]
     assert result["ok"] is True
 
@@ -205,7 +265,9 @@ def test_an_older_bawthub_is_reported_not_called_ok(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("ref", [f"https://example.com/v1/uploads/{ID}",
-                                 f"https://evil.example/api/chat/uploads/{ID}"])
+                                 f"https://evil.example/api/chat/uploads/{ID}",
+                                 "https://other/api/uploads/serve/example.png",
+                                 f"http://intranet:8642/v1/uploads/{ID}"])
 def test_an_upload_path_on_a_foreign_host_is_refused(ref: str) -> None:
     with pytest.raises(task_images.ImageRefError):
         task_images.parse_image_ref(ref)
@@ -268,7 +330,8 @@ def test_relinking_the_same_turn_adds_no_duplicate(monkeypatch: pytest.MonkeyPat
 
     result = _run(task_tools.update_task("TASK-9", associate_current_turn=True))
 
-    assert api.patches == []
+    # Re-sent and normalized to one canonical entry; nothing is reported as new.
+    assert api.urls == [STORED]
     assert "turnImagesAttached" not in result
     assert turn.associated == ["TASK-9"]
 

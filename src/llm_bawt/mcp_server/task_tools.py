@@ -580,8 +580,6 @@ async def update_task(
             return _http_error(error)
         if edit is not None:
             body.update(edit.body())
-        elif not body and not associate_current_turn:
-            return {"ok": True, "updated": [], "detail": "The task's images already match; nothing was written."}
 
     if not body:
         if associate_current_turn:
@@ -604,7 +602,7 @@ async def update_task(
             if not images_landed:
                 unconfirmed.append(IMAGE_EDIT_UNSUPPORTED)
                 skipped |= {"imageUrlsAdd", "imageUrlsRemove"}
-            turn_attached = [url for url in turn_urls if url in edit.add] if edit and images_landed else []
+            turn_attached = [url for url in turn_urls if url in edit.fresh] if edit and images_landed else []
             if unconfirmed:
                 # An older BawtHub ignores the unknown field but applies the
                 # rest of the PATCH. Say exactly that instead of reporting OK.
