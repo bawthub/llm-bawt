@@ -324,8 +324,10 @@ class BotProfileStore:
                     row.harness = payload.get("harness")
                 if "endpoint_id" in payload:
                     row.endpoint_id = payload.get("endpoint_id")
-                if payload.get("color") is not None:
-                    row.color = payload["color"]
+                # A named color: null clears it, so a rollback can restore "no
+                # color" (TASK-1521); callers that leave color out keep it.
+                if "color" in payload:
+                    row.color = payload.get("color")
                 if "avatar" in payload:
                     row.avatar = payload.get("avatar")
                 if "avatar_render" in payload:

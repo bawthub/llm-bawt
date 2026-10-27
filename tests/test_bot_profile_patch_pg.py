@@ -97,6 +97,21 @@ def test_a_write_without_a_writer_is_audited_as_the_api_and_a_no_op_is_not(api):
     assert len(_changes(api)) == audited
 
 
+def test_a_color_rollback_to_null_clears_it_and_is_audited(api):  # noqa: F811
+    api.patch(BOT, color="#123456")
+
+    response = api.patch(BOT, color=None, updated_by="bot:fixture-caller",
+                         expected_fields={"color": "#123456"})
+
+    assert response.status_code == 200, response.text
+    assert api.store.get(BOT).color is None
+    assert _changes(api)[-1]["changes"] == {"color": {"before": "#123456", "after": None}}
+    # Leaving color out keeps it.
+    api.patch(BOT, color="#654321")
+    api.patch(BOT, description="other")
+    assert api.store.get(BOT).color == "#654321"
+
+
 def test_disjoint_concurrent_edits_both_survive(api):  # noqa: F811
     """The racer merged color onto the row it read; the holder then changed description.
 

@@ -5,7 +5,8 @@ owns the reload, cache invalidation and SOUL push, and its store write takes
 the bot lock. What this tool adds:
 
 - The caller comes only from the signed turn capability; ``updated_by`` is
-  stamped from it, never from an argument.
+  stamped from it, never from an argument. A caller can't change its own tags
+  (``self_tag_edit_refused``): another bot or a person does that.
 - Private bots and unknown bots get the same ``access_denied``. The private
   tag can't be added or removed here.
 - Every write is a compare-and-set. The tool sends ``expected_tags`` (the tag
@@ -16,8 +17,8 @@ the bot lock. What this tool adds:
 - The result holds before/after for each changed field and a ready rollback
   call. The app writes the audit row (``bot_profile_changes``) with the reason.
 
-Capability escalation through tags is out of scope by Nick's 2026-10-26
-decision: llm-bawt is open by design and BawtHub is the auth layer.
+Capability escalation through another bot's tags is out of scope: llm-bawt
+is open by design and BawtHub is the auth layer.
 """
 from __future__ import annotations
 
@@ -135,6 +136,8 @@ async def bots_profile_patch(
         return invalid
     expected = dict(expected or {})
     slug = bot_id.strip().lower() if isinstance(bot_id, str) else ""
+    if TAGS in changes and slug == turn.bot_id.strip().lower():
+        return _error("self_tag_edit_refused", "a bot can't change its own tags")
 
     try:
         access = await _resolve_access()

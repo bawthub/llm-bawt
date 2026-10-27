@@ -202,5 +202,19 @@ def test_a_policy_outage_fails_closed(rig, monkeypatch):
 
 def test_the_catalog_summary_keeps_the_write_contract_inline():
     summary = TOOL_SUMMARIES["bots_profile_patch"]
-    for words in ("compare-and-set", "409 writes nothing", "Private bots refused", "rollback"):
+    for words in ("compare-and-set", "409 writes nothing", "Private bots and own tags refused", "rollback"):
         assert words in summary
+
+
+@pytest.mark.parametrize("target", [CALLER, f" {CALLER.upper()} "])
+def test_a_caller_cannot_change_its_own_tags(rig, target):
+    result = _call(bot_id=target, changes={"tags": ["coder"]})
+
+    assert result["error"] == "self_tag_edit_refused"
+    assert rig.app.calls == []
+
+
+def test_a_caller_may_edit_its_own_other_fields(rig):
+    result = _call(bot_id=CALLER, changes={"description": "new"})
+
+    assert result["changed"] == {"description": {"before": "old", "after": "new"}}
