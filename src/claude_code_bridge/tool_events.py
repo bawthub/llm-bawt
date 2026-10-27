@@ -13,4 +13,4 @@ from agent_bridge.tool_results import ToolResultPayload
 
 def normalize_tool_result(content: Any) -> ToolResultPayload:
     """Serialize an SDK ToolResultBlock without destructively slicing it."""
-    return ToolResultPayload.from_value(content, complete=True)
+    return ToolResultPayload.from_producer(content, complete=True)

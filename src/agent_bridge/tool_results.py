@@ -60,24 +60,43 @@ def count_result_tokens(content: str) -> int:
     return max(1, len(content) // 4)
 
 
-def _without_inline_images(value: Any) -> Any:
+# TASK-1585: provenance for token accounting. A producer that serialized the
+# provider-delivered result itself (so inline media was stripped before
+# counting) stamps this version; payloads without it — old producers, or the
+# app's fallback from a bare result string — are "unverified" in reports.
+TOOL_RESULT_ACCOUNTING_VERSION = 2
+
+
+def _without_inline_images(value: Any, omitted: list[int] | None = None) -> Any:
     """Keep structured result shape without duplicating base64 image bytes.
 
     Screenshot bytes already have their own media-asset lifecycle. Retaining a
     small descriptor here keeps the result truthful and inspectable without
-    storing the same multi-megabyte image twice.
+    storing the same multi-megabyte image twice. ``omitted`` (a one-item
+    counter) receives the number of blocks replaced.
     """
     if isinstance(value, list):
-        return [_without_inline_images(item) for item in value]
+        return [_without_inline_images(item, omitted) for item in value]
     if isinstance(value, dict):
         block_type = str(value.get("type") or "").lower()
         source = value.get("source")
         if block_type in {"image", "image_url"} or (
             isinstance(source, dict) and source.get("type") == "base64"
         ):
-            media_type = source.get("media_type") if isinstance(source, dict) else None
+            if omitted is not None:
+                omitted[0] += 1
+            media_type = (
+                source.get("media_type") if isinstance(source, dict) else value.get("mimeType")
+            )
             return {"type": block_type or "image", "media_type": media_type, "omitted": True}
-        return {str(key): _without_inline_images(item) for key, item in value.items()}
+        return {str(key): _without_inline_images(item, omitted) for key, item in value.items()}
+    return value
+
+
+def _provenance_int(value: Any) -> int | None:
+    """A provenance field is trusted only as a non-negative JSON integer."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
     return value
 
 
@@ -91,9 +110,27 @@ class ToolResultPayload:
     total_tokens: int
     sha256: str
     complete: bool
+    # TASK-1585 provenance (optional dict fields within payload version 1):
+    # ``accounting`` is TOOL_RESULT_ACCOUNTING_VERSION only when the producer
+    # serialized the provider value itself; ``media_blocks`` counts inline media
+    # blocks it removed. None means unverified.
+    media_blocks: int | None = None
+    accounting: int | None = None
 
     @classmethod
-    def from_value(cls, value: Any, *, complete: bool = True) -> "ToolResultPayload":
+    def from_producer(cls, value: Any, *, complete: bool = True) -> "ToolResultPayload":
+        """Serialize a provider-delivered value and stamp accounting provenance.
+
+        Only bridges/clients holding the provider's own value (not an already
+        stringified copy) may call this.
+        """
+        return cls.from_value(value, complete=complete, _accounted=True)
+
+    @classmethod
+    def from_value(
+        cls, value: Any, *, complete: bool = True, _accounted: bool = False,
+    ) -> "ToolResultPayload":
+        omitted = [0]
         if isinstance(value, str):
             content = value
             content_type = "text/plain"
@@ -101,7 +138,7 @@ class ToolResultPayload:
             content = ""
             content_type = "text/plain"
         else:
-            normalized = _without_inline_images(value)
+            normalized = _without_inline_images(value, omitted)
             content = json.dumps(
                 normalized,
                 ensure_ascii=False,
@@ -120,6 +157,8 @@ class ToolResultPayload:
             total_tokens=count_result_tokens(content),
             sha256=hashlib.sha256(raw).hexdigest(),
             complete=bool(complete),
+            media_blocks=omitted[0] if _accounted else None,
+            accounting=TOOL_RESULT_ACCOUNTING_VERSION if _accounted else None,
         )
 
     @classmethod
@@ -131,6 +170,10 @@ class ToolResultPayload:
             raise ValueError("tool-result payload content must be text")
         payload = cls.from_value(content, complete=bool(data.get("complete", False)))
         content_type = str(data.get("content_type") or "text/plain")
+        accounting = _provenance_int(data.get("accounting"))
+        if accounting != TOOL_RESULT_ACCOUNTING_VERSION:
+            accounting = None
+        media_blocks = _provenance_int(data.get("media_blocks")) if accounting else None
         return cls(
             version=TOOL_RESULT_PAYLOAD_VERSION,
             content=content,
@@ -140,6 +183,8 @@ class ToolResultPayload:
             total_tokens=count_result_tokens(content),
             sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
             complete=bool(data.get("complete", False)),
+            media_blocks=media_blocks,
+            accounting=accounting if media_blocks is not None else None,
         )
 
     @property

@@ -104,6 +104,9 @@ class ToolCallRecord(SQLModel, table=True):
     result_total_bytes: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     result_total_tokens: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     skill_context_tokens: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    # TASK-1585: producer accounting provenance; NULL = unverified token count.
+    result_accounting: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    result_media_blocks: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     result_sha256: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     result_content_type: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     result_complete: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
@@ -186,6 +189,8 @@ class ToolCallStore:
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_total_bytes BIGINT",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_total_tokens INTEGER",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS skill_context_tokens INTEGER",
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_accounting INTEGER",
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_media_blocks INTEGER",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_sha256 VARCHAR(64)",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_content_type VARCHAR(128)",
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS result_complete BOOLEAN",
@@ -439,6 +444,8 @@ class ToolCallStore:
                 row.result_total_chars = payload.total_chars
                 row.result_total_bytes = payload.total_bytes
                 row.result_total_tokens = payload.total_tokens
+                row.result_accounting = payload.accounting
+                row.result_media_blocks = payload.media_blocks
                 row.skill_context_tokens = (
                     (skill_context_tokens or row.skill_context_tokens)
                     if row.tool_name == "Skill" and not is_error else None

@@ -16,6 +16,7 @@ import httpx
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
+from agent_bridge.tool_results import ToolResultPayload
 
 from .transport import CodexTransport, validate_auth_json
 from .reset_evidence import CodexResetEvidence
@@ -561,36 +562,24 @@ class CodexEventMixin:
         if item_type in ("webSearch", "web_search"):
             results = self._dig(item, "results") or self._dig(item, "result") or ""
             seq += 1
-            self._publish_event(
-                request_id, session_key, seq,
-                kind=AgentEventKind.TOOL_END,
-                tool_name="web_search",
-                tool_result=str(results),
-            )
+            self._publish_tool_end(request_id, session_key, seq,
+                                   tool_name="web_search", result=results)
             return seq
 
         if item_type in ("mcpToolCall", "mcp_tool_call"):
             tool_name = buf.get("tool_name") or self._dig(item, "tool") or "mcp_tool"
             result = self._dig(item, "result") or self._dig(item, "error") or ""
             seq += 1
-            self._publish_event(
-                request_id, session_key, seq,
-                kind=AgentEventKind.TOOL_END,
-                tool_name=tool_name,
-                tool_result=str(result),
-            )
+            self._publish_tool_end(request_id, session_key, seq,
+                                   tool_name=tool_name, result=result)
             return seq
 
         if item_type in ("dynamicToolCall", "dynamic_tool_call"):
             tool_name = buf.get("tool_name") or self._dig(item, "tool") or "tool"
             result = self._dig(item, "result") or self._dig(item, "error") or ""
             seq += 1
-            self._publish_event(
-                request_id, session_key, seq,
-                kind=AgentEventKind.TOOL_END,
-                tool_name=tool_name,
-                tool_result=str(result),
-            )
+            self._publish_tool_end(request_id, session_key, seq,
+                                   tool_name=tool_name, result=result)
             return seq
 
         if item_type in ("imageView", "image_view"):
@@ -604,6 +593,49 @@ class CodexEventMixin:
             return seq
 
         return seq
+
+    @staticmethod
+    def _shorten_result_paths(value: Any) -> Any:
+        """Recursive path shortening for a JSON-shaped result (strings, dicts, lists)."""
+        if isinstance(value, str):
+            return value.replace("/home/bridge/", "~/").replace("/home/bridge", "~")
+        if isinstance(value, dict):
+            return {k: CodexEventMixin._shorten_result_paths(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [CodexEventMixin._shorten_result_paths(v) for v in value]
+        return value
+
+    @staticmethod
+    def _tool_result_payload(result: Any) -> ToolResultPayload:
+        """TASK-1585: serialize the provider's own result value.
+
+        Structured MCP/web-search results (dicts, lists, SDK models) keep their
+        shape so inline image bytes are stripped before token counting; a
+        ``str()`` repr would tokenize the base64 as text.
+        """
+        dump = getattr(result, "model_dump", None)
+        if callable(dump) and not isinstance(result, (str, dict, list)):
+            result = dump(mode="json")
+        return ToolResultPayload.from_producer(CodexEventMixin._shorten_result_paths(result))
+
+    def _publish_tool_end(
+        self,
+        request_id: str,
+        session_key: str,
+        seq: int,
+        *,
+        tool_name: str,
+        result: Any,
+    ) -> None:
+        """Publish TOOL_END with a string preview plus the versioned payload."""
+        payload = self._tool_result_payload(result)
+        self._publish_event(
+            request_id, session_key, seq,
+            kind=AgentEventKind.TOOL_END,
+            tool_name=tool_name,
+            tool_result=payload.preview,
+            tool_result_payload=payload.to_dict(),
+        )
 
     @staticmethod
     def _note_method(note: Any) -> str:
