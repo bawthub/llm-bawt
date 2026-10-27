@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -167,8 +168,38 @@ def _session_transcript_path(session_id: str | None) -> Path | None:
     return matches[0] if matches else None
 
 
-def _read_session_cost_baseline(session_id: str | None) -> float | None:
-    """Session cost already on the CLI ledger before resuming ``session_id``.
+@dataclass(frozen=True)
+class SessionLedger:
+    """What one pre-turn scan of a session transcript proves.
+
+    ``cost_baseline_usd`` is ``None`` when unknown. ``found`` = the transcript
+    was read. ``billed`` = it holds a model-produced assistant entry.
+    ``synthetic`` = it holds a ``model: "<synthetic>"`` assistant entry (the
+    bridge's seed ack, or a CLI-injected error) before any billed one.
+    """
+
+    cost_baseline_usd: float | None
+    found: bool = False
+    billed: bool = False
+    synthetic: bool = False
+
+    @property
+    def first_turn_start(self) -> str | None:
+        """``session_start`` for a resumed session no model turn has run in yet.
+
+        TASK-1442: bare ``/new`` seeds the session in its own reset request, so
+        its first executed turn arrives as a resume, not a cold start.
+        """
+        if not self.found or self.billed:
+            return None
+        return "seeded" if self.synthetic else "clean"
+
+
+_UNKNOWN_LEDGER = SessionLedger(cost_baseline_usd=None)
+
+
+def _read_session_ledger(session_id: str | None) -> SessionLedger:
+    """Scan ``session_id``'s transcript once before resuming it.
 
     TASK-1054: the CLI appends a ``{"type": "cost-state", "sessionId",
     "totalCostUSD", ...}`` record to the session transcript each turn and
@@ -188,9 +219,9 @@ def _read_session_cost_baseline(session_id: str | None) -> float | None:
     try:
         path = _session_transcript_path(session_id)
         if path is None:
-            return None
+            return _UNKNOWN_LEDGER
         total: float | None = None
-        billed = False
+        billed = synthetic = False
         with open(path, "r") as fh:
             for line in fh:
                 is_cost = '"cost-state"' in line
@@ -212,12 +243,13 @@ def _read_session_cost_baseline(session_id: str | None) -> float | None:
                     message = entry.get("message")
                     model = message.get("model") if isinstance(message, dict) else None
                     billed = model != "<synthetic>"
-        if total is not None:
-            return total
-        return None if billed else 0.0
+                    synthetic = synthetic or not billed
+        if total is None and not billed:
+            total = 0.0
+        return SessionLedger(total, found=True, billed=billed, synthetic=synthetic)
     except Exception:
-        logger.debug("cost baseline read failed for %s", session_id, exc_info=True)
-        return None
+        logger.debug("session ledger read failed for %s", session_id, exc_info=True)
+        return _UNKNOWN_LEDGER
 
 
 def _read_latest_compact_metadata(session_id: str | None) -> dict | None:

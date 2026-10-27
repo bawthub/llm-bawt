@@ -20,7 +20,8 @@ from typing import Any
 from ._bridge_helpers import (
     _estimate_proxy_cost_usd,
     _pick_iteration_usage,
-    _read_session_cost_baseline,
+    SessionLedger,
+    _read_session_ledger,
     _usage_input_total,
 )
 
@@ -29,18 +30,19 @@ from .context_env import effective_context_window
 logger = logging.getLogger("claude_code_bridge.bridge")
 
 
-def turn_cost_baseline_usd(resume_id: str | None) -> float | None:
-    """Session cost already on the CLI ledger before this turn runs (TASK-1054).
+def turn_session_ledger(resume_id: str | None) -> SessionLedger:
+    """What the transcript proves before this turn runs (TASK-1054/1442).
 
-    Fresh sessions start at 0; resumed ones read the transcript
-    (:func:`_read_session_cost_baseline`), which also proves a never-billed
-    seed transcript is 0 however it was created (cold start or bare ``/new``
-    on an earlier request). ``None`` = unknown baseline.
+    Fresh sessions start at 0 cost with no first-turn claim (the cold-start
+    path marks them); resumed ones read the transcript
+    (:func:`_read_session_ledger`), which also proves a never-billed seed
+    transcript is 0 cost and not yet executed however it was created (cold
+    start or bare ``/new`` on an earlier request). ``None`` cost = unknown.
     Blocking file I/O: call via ``asyncio.to_thread``.
     """
     if not resume_id:
-        return 0.0
-    return _read_session_cost_baseline(resume_id)
+        return SessionLedger(cost_baseline_usd=0.0)
+    return _read_session_ledger(resume_id)
 
 
 def native_turn_cost_usd(
@@ -232,7 +234,9 @@ class ClaudeUsageMixin:
                 sdk_client.get_context_usage(), timeout=0.9
             ))
         except Exception as context_error:
-            logger.debug("Native context usage unavailable: %s", context_error)
+            # INFO: a missing breakdown must be attributable (timeout vs error).
+            logger.info("Native context usage unavailable: %s: %s",
+                        type(context_error).__name__, context_error)
             return None
 
     def _compute_result_usage(
@@ -250,7 +254,7 @@ class ClaudeUsageMixin:
         """Return ``(token_usage_payload, ctx_window, max_output)``.
 
         ``cost_baseline_usd`` is the session cost before this turn
-        (:func:`turn_cost_baseline_usd`); ``total_cost_usd`` is this turn's
+        (:func:`turn_session_ledger`); ``total_cost_usd`` is this turn's
         cost, never the CLI's running session total (TASK-1054).
 
         Mirrors the monolith exactly: a failure mid-extraction is swallowed and

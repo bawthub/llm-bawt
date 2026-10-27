@@ -1,10 +1,12 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock
 
+from agent_bridge.continuity import SeedFraming
 from agent_bridge.events import AgentEventKind
 from agent_bridge.run_contract import TeardownReport
 from agent_bridge.session_queue import SessionQueue
@@ -13,6 +15,7 @@ from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.send_handler import ClaudeSendMixin
 from claude_code_bridge.send_stream_events import StreamBlockState
 from claude_code_bridge.send_usage import ClaudeUsageMixin
+from claude_code_bridge.session_ops import ClaudeSessionMixin
 from tests.virtual_clock import run_timing
 from claude_code_bridge.send_boundaries import separator_before_new_block
 
@@ -57,17 +60,40 @@ def test_first_or_already_separated_reasoning_block_gets_no_extra_boundary() -> 
     assert separator_before_new_block("**first thought**\n\n") == ""
 
 
+class _SeedWriter(ClaudeSessionMixin):
+    _cwd = "/home/bridge/dev"
+
+
+def _write_transcript(kind):
+    """Bare ``/new`` writes the seed in its own reset request; the next turn
+    resumes it with no request-local seed provenance (TASK-1442)."""
+    if kind is None:
+        return
+    path = _SeedWriter()._write_seed_transcript(
+        "sdk-session", [{"role": "user", "content": "hi"}], SeedFraming(briefing="b", ack="a"),
+    )
+    if kind == "billed":
+        with open(path, "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"model": MODEL}}) + "\n")
+
+
 @pytest.mark.parametrize(
-    ("resume_id", "seed", "expected_start"),
+    ("resume_id", "seed", "transcript", "expected_start"),
     [
-        ("sdk-session", None, None),
-        (None, None, "clean"),
-        (None, {"seeded": True, "session_id": "sdk-session"}, "seeded"),
+        ("sdk-session", None, None, None),
+        (None, None, None, "clean"),
+        (None, {"seeded": True, "session_id": "sdk-session"}, None, "seeded"),
+        ("sdk-session", None, "seed", "seeded"),
+        ("sdk-session", None, "billed", None),
     ],
+    ids=["resumed-unknown", "clean", "cold-seeded", "resumed-bare-new-seed", "resumed-executed"],
 )
 def test_proxy_turn_publishes_post_done_context_breakdown(
-    monkeypatch, resume_id, seed, expected_start,
+    monkeypatch, tmp_path, resume_id, seed, transcript, expected_start,
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_transcript(transcript)
+
     async def run():
         harness = _SendHarness()
         harness._proxy_base_url = "http://127.0.0.1:1"

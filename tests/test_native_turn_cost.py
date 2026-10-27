@@ -15,12 +15,12 @@ import pytest
 
 import claude_code_bridge.send_result as send_result_module
 from agent_bridge.continuity import SeedFraming
-from claude_code_bridge._bridge_helpers import _read_session_cost_baseline
+from claude_code_bridge._bridge_helpers import _read_session_ledger
 from claude_code_bridge.send_result import ClaudeResultMixin
 from claude_code_bridge.send_usage import (
     ClaudeUsageMixin,
     native_turn_cost_usd,
-    turn_cost_baseline_usd,
+    turn_session_ledger,
 )
 from claude_code_bridge.session_ops import ClaudeSessionMixin
 
@@ -53,6 +53,10 @@ def _result(total):
         text="done",
         content=[],
     )
+
+
+def _baseline(resume_id):
+    return turn_session_ledger(resume_id).cost_baseline_usd
 
 
 def _usage(harness, total, baseline):
@@ -89,7 +93,7 @@ def _cost_state(session_id, total):
 def test_successive_session_totals_report_the_turn_delta(transcripts):
     """Snark's fixture: session totals $3.00 then $3.50 → this turn cost $0.50."""
     transcripts(SID, [{"type": "user"}, _cost_state(SID, 3.00)])
-    baseline = turn_cost_baseline_usd(SID)
+    baseline = _baseline(SID)
     assert baseline == 3.00
 
     usage = _usage(_NativeHarness(), 3.50, baseline)
@@ -99,7 +103,7 @@ def test_successive_session_totals_report_the_turn_delta(transcripts):
 
 
 def test_fresh_session_turn_cost_is_the_whole_total():
-    assert turn_cost_baseline_usd(None) == 0.0
+    assert _baseline(None) == 0.0
     usage = _usage(_NativeHarness(), 0.86, 0.0)
     assert usage["total_cost_usd"] == pytest.approx(0.86)
 
@@ -117,7 +121,7 @@ def test_seed_transcript_baseline_is_zero_on_a_later_request(transcripts):
     provenance. The real seed bytes alone must prove a known-zero baseline."""
     _SeedWriter()._write_seed_transcript(SID, [{"role": "user", "content": "hi"}], _FRAMING)
 
-    baseline = turn_cost_baseline_usd(SID)  # fresh call: no request-local state
+    baseline = _baseline(SID)  # fresh call: no request-local state
 
     assert baseline == 0.0
     assert _usage(_NativeHarness(), 0.42, baseline)["total_cost_usd"] == pytest.approx(0.42)
@@ -129,18 +133,36 @@ def test_seed_then_billed_turn_uses_the_recorded_cost_state(transcripts):
     with open(path, "a") as fh:
         fh.write(json.dumps(_billed_assistant()) + "\n")
         fh.write(json.dumps(_cost_state(SID, 0.42)) + "\n")
-    assert turn_cost_baseline_usd(SID) == 0.42
+    assert _baseline(SID) == 0.42
 
 
 def _billed_assistant():
     return {"type": "assistant", "message": {"model": MODEL, "content": []}}
 
 
+def test_first_turn_start_is_proven_by_the_transcript_alone(transcripts):
+    """TASK-1442: bare /new seeds in its own request, so the first executed
+    turn is a resume. Only a never-billed transcript claims the first turn."""
+    assert turn_session_ledger(None).first_turn_start is None  # cold path marks itself
+    assert turn_session_ledger(SID).first_turn_start is None  # no transcript: unknown
+
+    path = transcripts(SID, [])
+    _SeedWriter()._write_seed_transcript(SID, [{"role": "user", "content": "hi"}], _FRAMING)
+    assert turn_session_ledger(SID).first_turn_start == "seeded"
+
+    with open(path, "a") as fh:
+        fh.write(json.dumps(_billed_assistant()) + "\n")
+    assert turn_session_ledger(SID).first_turn_start is None
+
+    transcripts(SID, [{"type": "user"}, _cost_state(SID, 0.0)])
+    assert turn_session_ledger(SID).first_turn_start == "clean"
+
+
 def test_resume_without_recorded_baseline_is_unknown_not_session_total(transcripts):
     # The CLI billed this session (real-model assistant entry) but left no
     # cost-state, e.g. a pre-cost-state CLI version.
     transcripts(SID, [{"type": "user"}, _billed_assistant()])
-    baseline = turn_cost_baseline_usd(SID)
+    baseline = _baseline(SID)
     assert baseline is None
 
     usage = _usage(_NativeHarness(), 7.84, baseline)
@@ -151,7 +173,7 @@ def test_resume_without_recorded_baseline_is_unknown_not_session_total(transcrip
 
 
 def test_missing_transcript_on_resume_is_unknown(transcripts):
-    assert turn_cost_baseline_usd(SID) is None
+    assert _baseline(SID) is None
 
 
 def test_total_below_baseline_is_unknown():
@@ -168,7 +190,7 @@ def test_cost_state_reader_takes_last_record_for_this_session_only(transcripts):
         _cost_state(SID, 1.06),
         {"type": "user"},
     ])
-    assert _read_session_cost_baseline(SID) == 1.06
+    assert _read_session_ledger(SID).cost_baseline_usd == 1.06
 
 
 def test_double_computation_on_one_result_is_idempotent(transcripts):

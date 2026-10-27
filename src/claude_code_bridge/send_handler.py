@@ -42,7 +42,7 @@ from .send_preflight import SendPreflight
 from .send_result import ClaudeResultMixin
 from .send_stream import ClaudeStreamMixin
 from .send_stream_events import StreamBlockState
-from .send_usage import ClaudeUsageMixin, LiveUsagePublisher, turn_cost_baseline_usd
+from .send_usage import ClaudeUsageMixin, LiveUsagePublisher, turn_session_ledger
 from .subagent_usage import SubagentUsage
 from .worker_liveness import WorkerLiveness
 from .turn_phase import TurnPhaseTracker
@@ -448,13 +448,13 @@ class ClaudeSendMixin(
                     compact_status: str | None = None  # None | "success" | "failed"
                     compact_error_msg: str | None = None
                     turn_session_id: str | None = resume_id
-                    # TASK-1054: ResultMessage.total_cost_usd is the CLI's
-                    # running SESSION total. Snapshot the pre-turn total once
-                    # per attempt (a fresh-session retry resets it to 0) so
-                    # results report this turn's cost.
-                    cost_baseline_usd = await asyncio.to_thread(
-                        turn_cost_baseline_usd, resume_id,
-                    )
+                    # Once per attempt the transcript gives the pre-turn session
+                    # cost (TASK-1054: ResultMessage totals are session-wide) and
+                    # whether a model turn ran yet: bare /new seeds in its own
+                    # request, so its first executed turn arrives as a resume.
+                    ledger = await asyncio.to_thread(turn_session_ledger, resume_id)
+                    cost_baseline_usd = ledger.cost_baseline_usd
+                    session_start = session_start or ledger.first_turn_start
                     # Some providers / SDK paths terminate after an
                     # AssistantMessage snapshot with text/tool_use content and
                     # NEVER emit a trailing ResultMessage. If we only finalize
