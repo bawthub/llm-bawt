@@ -91,6 +91,19 @@ class OpsService:
     def get_operation(self, slug):
         return self.store.get_operation_by_slug(slug)
 
+    def _check_source_published(self, commit: dict) -> None:
+        """TASK-1474: the app's checkout is clean at HEAD (the executor's sealed
+        check); that HEAD must also be the published branch head, so a
+        reconcile never runs code that exists only on this host."""
+        try:
+            published = self._release_verifier.branch_head(commit["repository"], commit["branch"])
+        except ReleaseVerificationError as exc:
+            raise OpsDispatchError("source_unverifiable", f"source_unverifiable: {exc}") from exc
+        if published != commit["head"]:
+            raise OpsDispatchError("source_not_published", (
+                f"source_not_published: the checkout is at {commit['head'][:12]} but "
+                f"{commit['repository']} {commit['branch']} is at {published[:12]}; publish that commit first"))
+
     def prepare_invocation(self, operation_slug: str, args: dict | None) -> dict:
         """Trusted approval integration: persist this JSON BEFORE asking approval.
 
@@ -138,6 +151,8 @@ class OpsService:
                 raise OpsDispatchError(exc.code, str(exc)) from exc
             except (ValueError, ExecutorError) as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
+            if spec["action"] == APP_CONFIG_ACTION:
+                self._check_source_published(snapshot["config"]["source_commit"])
         elif spec["action"] in IMAGE_ACTIONS:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.

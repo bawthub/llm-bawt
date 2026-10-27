@@ -26,15 +26,20 @@ the target was created, and the renderer cannot reproduce that shell.
 from __future__ import annotations
 
 import json
-import os
 import posixpath
 import re
-import struct
-from urllib.parse import quote, urlencode
+
+# The container itself is sealed_container's, shared with the TASK-1474 source
+# check. OPS_JOB_LABEL is re-exported for the target selectors.
+if __package__:
+    from .sealed_container import OPS_JOB_LABEL, SealedContainer, SealedRunError  # noqa: F401
+    from .sealed_container import demux_streams as demux_bytes
+else:  # standalone immutable worker
+    from sealed_container import OPS_JOB_LABEL, SealedContainer, SealedRunError  # noqa: F401
+    from sealed_container import demux_streams as demux_bytes
 
 RENDER_LABEL = "llm-bawt.ops.compose-render"
-# Same label the dispatcher puts on workers: Compose-target selection skips it.
-OPS_JOB_LABEL = "llm-bawt.ops.job"
+RENDER_ROLE = "compose-render"
 MAX_RENDER_BYTES = 4 * 1024 * 1024
 _WORKING_DIR = "com.docker.compose.project.working_dir"
 _CONFIG_FILES = "com.docker.compose.project.config_files"
@@ -94,36 +99,9 @@ def renderer_argv(spec: dict, source: dict, *, hash_only: bool) -> list[str]:
     return argv + (["config", "--hash", service] if hash_only else ["config", "--format", "json", service])
 
 
-def renderer_body(spec: dict, source: dict, image_ref: str, argv: list[str], tag: str) -> dict:
-    config = spec["compose_config"]
-    directory = source["project_dir"]
-    # A Compose-built target (TASK-1474) has no image overlay to inject.
-    variable = config.get("image_variable")
-    return {
-        "Image": config["renderer_image"], "Entrypoint": ["docker"], "Cmd": argv,
-        "Env": [f"{variable}={image_ref}"] if variable else [], "WorkingDir": directory,
-        "AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "OpenStdin": False, "Tty": False,
-        "NetworkDisabled": True,
-        "Labels": {RENDER_LABEL: "1", OPS_JOB_LABEL: tag,
-                   # Never a Compose target, even if the image carries such labels.
-                   "com.docker.compose.project": "llm-bawt-ops-render",
-                   "com.docker.compose.service": "compose-render"},
-        "HostConfig": {
-            "NetworkMode": "none", "Binds": [f"{directory}:{directory}:ro"], "ReadonlyRootfs": True,
-            "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"], "LogConfig": {"Type": "none", "Config": {}},
-            "RestartPolicy": {"Name": "no"}, "AutoRemove": False, "Memory": 256 * 1024 * 1024, "PidsLimit": 64,
-            "Privileged": False,
-        },
-    }
-
-
 def demux_streams(raw: bytes) -> tuple[str, str]:
-    """(stdout, stderr) of Docker's multiplexed non-TTY attach stream."""
-    out, err, i = bytearray(), bytearray(), 0
-    while i + 8 <= len(raw):
-        stream, size = raw[i], struct.unpack(">I", raw[i + 4:i + 8])[0]
-        (out if stream == 1 else err).extend(raw[i + 8:i + 8 + size])
-        i += 8 + size
+    """(stdout, stderr) text of Docker's multiplexed non-TTY attach stream."""
+    out, err = demux_bytes(raw)
     return out.decode(errors="replace"), err.decode(errors="replace")
 
 
@@ -154,38 +132,16 @@ class ComposeRenderer:
         return {"config": config, "hash": match.group(1)}
 
     def _run(self, source: dict, image_ref: str, argv: list[str]) -> str:
-        image = self.spec["compose_config"]["renderer_image"]
+        sealed = SealedContainer(self.api, self.spec["compose_config"]["renderer_image"], role=RENDER_ROLE,
+                                 tag=self.tag, labels={RENDER_LABEL: "1"})
+        # A Compose-built target (TASK-1474) has no image overlay to inject.
+        variable = self.spec["compose_config"].get("image_variable")
         try:
-            self.api.request("GET", f"/images/{quote(image, safe='')}/json")
-        except RuntimeError as exc:
-            if "HTTP 404" in str(exc):
-                raise ComposeError("renderer_image_missing") from None
-            raise ComposeError("renderer_unavailable") from None
-        name = f"llm-bawt-ops-render-{self.tag}-{os.urandom(4).hex()}"
-        body = renderer_body(self.spec, source, image_ref, argv, self.tag)
-        try:
-            created = self.api.request("POST", "/containers/create?" + urlencode({"name": name}), body=body)
-        except RuntimeError:
-            raise ComposeError("renderer_unavailable") from None
-        container_id = created["Id"]
-        try:
-            try:
-                stream = self.api.attach_stream(container_id)
-                try:
-                    self.api.request("POST", f"/containers/{container_id}/start")
-                    raw = stream.read(MAX_RENDER_BYTES + 1)
-                finally:
-                    stream.close()
-                status = (self.api.request("POST", f"/containers/{container_id}/wait") or {}).get("StatusCode")
-            except (RuntimeError, OSError):
-                raise ComposeError("renderer_unavailable") from None
-        finally:
-            try:
-                self.api.request("DELETE", f"/containers/{container_id}?force=1&v=1")
-            except Exception:  # noqa: BLE001 - render outcome stands; a leftover is labelled
-                pass
-        if len(raw) > MAX_RENDER_BYTES:
-            raise ComposeError("renderer_output_too_large")
+            status, raw = sealed.run(entrypoint=["docker"], cmd=argv,
+                                     env=[f"{variable}={image_ref}"] if variable else [],
+                                     directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES)
+        except SealedRunError as exc:
+            raise ComposeError(f"renderer_{exc.kind}") from None
         stdout, stderr = demux_streams(raw)
         unset, unexpected = set(), False
         for line in stderr.splitlines():

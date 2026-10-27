@@ -16,8 +16,9 @@ from pathlib import Path
 
 from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
-from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
-                                   app_config_binding, image_tag, validate_app_spec)
+from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, SOURCE_GUARD_LABEL,
+                                   WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL, app_config_binding,
+                                   image_tag, validate_app_spec)
 from .compose_config import evaluate
 from .compose_render import ComposeError, ComposeRenderer
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
@@ -26,15 +27,17 @@ from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec, validate_release_spec
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
+from .source_state import SourceChecker
 from .validation import canonical_json
 from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 # Ops whose target configuration is compared with its Compose service (TASK-1518),
-# and the worker capability label each needs (TASK-1474: the app reconcile).
-CONFIG_WORKER_LABELS = {CONFIG_ACTION: CONFIG_WORKER_LABEL, DEPLOY_ACTION: CONFIG_WORKER_LABEL,
-                        APP_CONFIG_ACTION: APP_CONFIG_WORKER_LABEL}
+# and the worker capability labels each needs (TASK-1474: the app reconcile and
+# its source guard; an app worker without the guard would swap unpublished source).
+CONFIG_WORKER_LABELS = {CONFIG_ACTION: (CONFIG_WORKER_LABEL,), DEPLOY_ACTION: (CONFIG_WORKER_LABEL,),
+                        APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL)}
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
 
 
@@ -306,11 +309,12 @@ class DockerExecutor(Executor):
         """The worker image carries the renderer, the reconciler and the deploy
         drift guard. An older one would deploy without the guard."""
         try:
-            self._require_worker_label(
-                settings, CONFIG_WORKER_LABELS[action],
-                missing=("configured immutable ops worker lacks the Compose config check; "
-                         "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
-                unverifiable="cannot verify the config-reconcile capability of the ops worker")
+            for label in CONFIG_WORKER_LABELS[action]:
+                self._require_worker_label(
+                    settings, label,
+                    missing=(f"configured immutable ops worker lacks {label}; "
+                             "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
+                    unverifiable="cannot verify the config-reconcile capability of the ops worker")
         except ExecutorError as exc:
             raise ConfigCheckError("config_reconcile_unavailable", f"config_reconcile_unavailable: {exc}") from exc
 
@@ -359,7 +363,9 @@ class DockerExecutor(Executor):
         renderer, container, image = self._config_inputs(spec)
         try:
             if spec["action"] == APP_CONFIG_ACTION:
-                return app_config_binding(spec, container, image, renderer,
+                checker = SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],
+                                        tag="src" + os.urandom(4).hex())
+                return app_config_binding(spec, container, image, renderer, source_checker=checker,
                                           image_tag_moved=self._image_tag_moved(spec, image))[0]
             return config_binding(spec, container, image, renderer)[0]
         except ComposeError as exc:  # fixed code and names only

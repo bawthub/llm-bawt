@@ -450,7 +450,8 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         "Recreate the llm-bawt app from its declared Compose service using the SAME running image. "
         "No build or pull; the image is bound by ID, never by tag. Approval shows changed names, "
         "ports and dependencies only, never values. Dependencies must already be running and are "
-        "never restarted. Verifies health and restores the previous container on failure. "
+        "never restarted. Refuses unless the bind-mounted source is exactly the published branch "
+        "head. Verifies health and restores the previous container on failure. "
         "Cuts in-flight chat turns and MCP calls."
     ),
     "enabled": False,
@@ -463,6 +464,16 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
         display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=180,
         health_url="http://127.0.0.1:8642/health", health_status="ok",
+        # The app runs its source from bind mounts of the checkout, so the
+        # source must be exactly the published branch head. Every container
+        # mount is named here as source or data; anything else refuses.
+        # Destinations are the product's own Compose files' container paths.
+        source_repository="bawthub/llm-bawt", source_branch="master",
+        source_mounts=["/app/src", "/app/server.sh"],
+        data_mounts=["/app/.logs", "/app/models", "/app/storage", "/root/.config/llm-bawt",
+                     "/root/.cache/huggingface", "/root/.cache/llm-bawt/models", "/var/lib/llm-bawt/media",
+                     "/var/lib/llm-bawt-ops", "/var/run/docker.sock", "/home/bridge/dev/agent-skills",
+                     "/run/bawthub-service-token"],
     ),
     "args_schema_json": _schema({}),
     "args_defaults_json": _defaults(),

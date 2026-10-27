@@ -64,6 +64,10 @@ class ReleaseVerifier(ABC):
     def verify(self, spec: dict, args: dict) -> dict:
         """Return the verified release binding or raise ReleaseVerificationError."""
 
+    def branch_head(self, repo: str, branch: str) -> str:
+        """The commit ``refs/heads/<branch>`` of ``repo`` names on the forge (TASK-1474)."""
+        raise ReleaseVerificationError("this release verifier cannot read published branch heads")
+
 
 def _stored_release_token() -> str:
     try:
@@ -163,6 +167,30 @@ class GitHubReleaseVerifier(ReleaseVerifier):
         if obj.get("type") != "commit":
             raise ReleaseVerificationError(f"tag {tag} does not point at a commit")
         return obj["sha"]
+
+    def branch_head(self, repo, branch):
+        """Read-only: the stored token if one is connected, else anonymous (a
+        public repository). Only a 40-hex commit of exactly that ref counts."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", repo or ""):
+            raise ReleaseVerificationError("repository must be owner/repo")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", branch or "") or ".." in branch:
+            raise ReleaseVerificationError("branch name is invalid")
+        self._token = self._fixed_token if self._fixed_token is not None else _stored_release_token()
+        status, _location, body = self._fetch(f"{self.API}/repos/{repo}/git/ref/heads/{branch}",
+                                              auth=bool(self._token), limit=64 * 1024)
+        if status != 200:
+            raise ReleaseVerificationError(f"GitHub branch {branch} lookup returned HTTP {status}")
+        try:
+            ref = json.loads(body)
+            obj = ref["object"]
+            sha = obj["sha"]
+            ok = (ref["ref"] == f"refs/heads/{branch}" and obj["type"] == "commit"
+                  and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha))
+        except (ValueError, KeyError, TypeError):
+            ok = False
+        if not ok:
+            raise ReleaseVerificationError(f"GitHub branch {branch} did not resolve to exactly one commit")
+        return sha
 
     def verify(self, spec, args):
         _require_args(args, _VERIFIER_ARGS)

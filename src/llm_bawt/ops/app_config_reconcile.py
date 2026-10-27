@@ -31,17 +31,24 @@ if __package__:
     from .config_reconcile import (ConfigReconciler, check_compose_identity, current_config_hash,
                                    valid_hashes, validate_renderer_image, validate_target_fields)
     from .image_deploy import StepError
+    from .source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
+                               valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
     from compose_config import BUILT_PROFILE, evaluate, port_list
     from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
     from config_reconcile import (ConfigReconciler, check_compose_identity, current_config_hash,
                                   valid_hashes, validate_renderer_image, validate_target_fields)
     from image_deploy import StepError
+    from source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
+                              valid_source_commit, validate_source_spec)
 
 ACTION = "reconcile_app_config"
 SCHEMA = "llm-bawt.ops.app-config-reconcile/v1"
-# Worker image label proving it carries this module. Without it the op refuses.
+# Worker image labels proving it carries this module and the source guard.
+# Without both the op refuses: an older worker would recreate the app over
+# unpublished source.
 WORKER_CAPABILITY_LABEL = "llm-bawt.ops.app-config-reconcile"
+SOURCE_GUARD_LABEL = "llm-bawt.ops.app-source-guard"
 _PATTERNS = {
     "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
     "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
@@ -50,10 +57,10 @@ _PATTERNS = {
     "health_status": r"[A-Za-z0-9._-]{1,32}",
 }
 _SPEC_KEYS = frozenset({"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
-                        "health_timeout_seconds", *_PATTERNS})
+                        "health_timeout_seconds", *SOURCE_FIELDS, *_PATTERNS})
 _BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "image_tag", "image_tag_moved", "source",
                            "current_config_hash", "desired_hash", "rendered_hash", "drift", "mounts",
-                           "ports", "depends_on", "display"})
+                           "ports", "depends_on", "display", "source_commit"})
 
 
 def validate_app_spec(spec: dict) -> dict:
@@ -68,6 +75,7 @@ def validate_app_spec(spec: dict) -> dict:
     if not isinstance(config, dict) or set(config) != {"renderer_image"}:
         raise ValueError("app compose_config requires exactly renderer_image")
     validate_renderer_image(config)
+    validate_source_spec(spec)
     return spec
 
 
@@ -77,11 +85,14 @@ def image_tag(spec: dict) -> str:
 
 
 def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
-                       image_tag_moved: bool) -> tuple[dict, dict]:
+                       image_tag_moved: bool, source_checker) -> tuple[dict, dict]:
     """``(public approval binding, private desired config)``; raises ValueError.
 
     ``image_tag_moved`` is resolved by the caller: the app at approval; the
-    worker carries the approved value forward and never resolves the tag."""
+    worker carries the approved value forward and never resolves the tag.
+    ``source_checker`` proves the source mounts are exactly one commit
+    (:mod:`source_state`); whether that commit is published is the app's
+    check, made against the binding's ``source_commit``."""
     validate_app_spec(spec)
     check_compose_identity(spec, container)
     ref, tag = container["Config"].get("Image", ""), image_tag(spec)
@@ -89,13 +100,15 @@ def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
         raise ValueError("app config target must run its own Compose-built image")
     result = evaluate(spec, container, image, renderer, ref, BUILT_PROFILE)
     desired = result["desired"]
+    plan = source_plan(spec, result["source"], container, image, desired)
+    head = source_checker.check(result["source"]["project_dir"], plan)
     binding = {"container_id": container["Id"], "image_id": image["Id"], "image_ref": ref,
                "image_tag": tag, "image_tag_moved": bool(image_tag_moved), "source": result["source"],
                "current_config_hash": current_config_hash(container, image),
                "desired_hash": result["desired_hash"], "rendered_hash": result["rendered_hash"],
                "drift": result["drift"], "mounts": result["mounts"], "ports": port_list(desired["ports"]),
                "depends_on": [f"{name}:{cond}" for name, cond in desired["depends_on"].items()],
-               "display": result["display"]}
+               "display": result["display"], "source_commit": source_commit(spec, head)}
     return binding, desired
 
 
@@ -115,7 +128,8 @@ def valid_app_binding(snapshot: dict) -> bool:
                 and bool(SAFE_PATH.fullmatch(source["project_dir"]))
                 and label_files_valid(source["project_dir"], source["compose_files"])
                 and all(isinstance(x, str) for x in lists)
-                and set(binding["display"]) == set(spec["display_values"]))
+                and set(binding["display"]) == set(spec["display_values"])
+                and valid_source_commit(spec, binding["source_commit"]))
     except (TypeError, ValueError, KeyError, AttributeError):
         return False
 
@@ -126,9 +140,12 @@ def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
     shown = ", ".join(f"{k}={v}" for k, v in sorted(binding["display"].items())) or "none"
     moved = (f"Note: tag {binding['image_tag']} now names a different local build. This keeps the RUNNING "
              "image; rebuilding and redeploying is separate.\n") if binding["image_tag_moved"] else ""
+    commit = binding["source_commit"]
     return (f"{prefix or 'Authorize same-image app configuration reconcile?'}\n"
             f"Target: {spec['container_name']} ({binding['container_id']})\n"
             f"Unchanged image: {binding['image_id']} (Compose tag {binding['image_tag']})\n{moved}"
+            f"Source: github.com/{commit['repository']} {commit['branch']} @ {commit['head']} "
+            "(published, clean)\n"
             f"Compose source: {', '.join(binding['source']['compose_files'])}\n"
             f"Drift (names only): {drift}\n"
             f"Ports after: {', '.join(binding['ports']) or 'none'}\n"
@@ -147,14 +164,30 @@ class AppConfigReconciler(ConfigReconciler):
 
     SCHEMA = SCHEMA
     ACTION_NAME = "reconcile-app-config"
-    DETAIL_KEYS = (*ConfigReconciler.DETAIL_KEYS, "ports", "depends_on", "image_tag_moved")
+    DETAIL_KEYS = (*ConfigReconciler.DETAIL_KEYS, "ports", "depends_on", "image_tag_moved", "source_commit")
+
+    def __init__(self, *args, source_checker=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._source_checker_override = source_checker
+        self._source_check = None
+
+    def _source_checker(self):
+        """Sealed git source check (TASK-1474), injectable in tests."""
+        return self._source_checker_override or SourceChecker(
+            self.api, self.spec["compose_config"]["renderer_image"], tag=self.job_id[:12])
 
     def _valid_binding(self) -> bool:
         return valid_app_binding(self.snapshot)
 
     def _bind(self, old, image, binding):
-        return app_config_binding(self.spec, old, image, self._renderer(),
-                                  image_tag_moved=binding["image_tag_moved"])
+        checker = self._source_checker()
+        actual, desired = app_config_binding(self.spec, old, image, self._renderer(),
+                                             image_tag_moved=binding["image_tag_moved"], source_checker=checker)
+        if actual["source_commit"] != binding["source_commit"]:
+            raise SourceStateError("source_moved_since_approval", detail="the checkout is not the approved commit")
+        self._source_check = (checker, actual["source"]["project_dir"],
+                              source_plan(self.spec, actual["source"], old, image, desired))
+        return actual, desired
 
     def _release(self, binding):
         return None  # a local build carries no release identity
@@ -166,6 +199,20 @@ class AppConfigReconciler(ConfigReconciler):
         self._phase("dependencies")
         for service, condition in self._desired["depends_on"].items():
             self._check_dependency(service, condition)
+        # The render and the dependency reads take seconds, so the source is
+        # checked once more as the last read before the old container stops.
+        # What remains is the window from here to the new container importing
+        # its modules (seconds, under the target lock): a writer to the
+        # checkout in that window is not caught. Source edits that land after
+        # the swap are the next reconcile's or deploy's concern, as before.
+        self._phase("source")
+        checker, project_dir, plan = self._source_check
+        try:
+            head = checker.check(project_dir, plan)
+        except SourceStateError as exc:
+            self._fail(f"{exc}; nothing changed", known=True)
+        if head != self.snapshot["config"]["source_commit"]["head"]:
+            self._fail("source_moved_since_approval; nothing changed", known=True)
 
     def _check_dependency(self, service, condition):
         filters = {"label": [f"com.docker.compose.project={self.spec['compose_project']}",
@@ -195,5 +242,6 @@ class AppConfigReconciler(ConfigReconciler):
         return {"status": status, "stat": self._stats(container_id)}
 
 
-__all__ = ["ACTION", "SCHEMA", "WORKER_CAPABILITY_LABEL", "AppConfigReconciler", "app_config_binding",
+__all__ = ["ACTION", "SCHEMA", "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL", "AppConfigReconciler",
+           "app_config_binding",
            "approval_text", "image_tag", "valid_app_binding", "validate_app_spec"]

@@ -33,6 +33,11 @@ services:
       # bytecode here creates root-owned __pycache__ directories that block host
       # tooling. Keep generated caches out of the repository.
       - PYTHONDONTWRITEBYTECODE=1
+      # TASK-1474: never READ bytecode from the checkout either. A __pycache__
+      # .pyc beside the source would run instead of it; with a prefix Python
+      # looks only here (container-local, outside every mount). The config
+      # reconcile refuses a checkout with __pycache__ unless this is set.
+      - PYTHONPYCACHEPREFIX=/tmp/llm-bawt-pycache
       # /v1/usage Claude adapter: a DEDICATED login bundle the app owns and
       # refreshes itself (mode=owned) so it never goes stale and never touches
       # your interactive Claude Code (TUI) login. Lives under the already-RW

@@ -12,19 +12,23 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from llm_bawt.ops.app_config_reconcile import (
-    SCHEMA, WORKER_CAPABILITY_LABEL, AppConfigReconciler, app_config_binding, approval_text,
-    valid_app_binding,
+    SCHEMA, SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL, AppConfigReconciler, app_config_binding,
+    approval_text, valid_app_binding,
 )
 from llm_bawt.ops.compose_config import BUILT_PROFILE, PINNED_PROFILE, translate
 from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer
 from llm_bawt.ops.config_reconcile import valid_config_binding
 from llm_bawt.ops.executor import ConfigCheckError, DockerExecutor, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed
+from llm_bawt.ops.release import ReleaseVerificationError
 from llm_bawt.ops.seeds import SEEDS
+from llm_bawt.ops.source_state import SourceStateError
 from llm_bawt.ops.validation import canonical_json
+from llm_bawt.ops.service import OpsDispatchError
 from llm_bawt.ops.worker import OPS_JOB_LABEL, run as worker_run
 from tests.test_ops_image_deploy import (
-    CONFIG_HASH, JOB_ID, RENDERER, RENDERER_ID, FakeDocker, _frame, _Stream, compose_project,
+    CONFIG_HASH, JOB_ID, RENDERER, RENDERER_ID, FakeDocker, FakeVerifier, _frame, _service, _Stream,
+    compose_project,
 )
 
 SEED = next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-app-config")
@@ -41,6 +45,40 @@ CMD = ["llm-service", "--host", "0.0.0.0"]
 PORT = {"mode": "ingress", "target": 8642, "published": "8642", "protocol": "tcp"}
 WORKER = "sha256:" + "0" * 64
 EXECUTION = {"start_delay_seconds": 0, "timeout_seconds": 60, "max_output_bytes": 65536}
+HEAD = "ab" * 20
+OPS_VOLUME = "/var/lib/llm-bawt-ops"
+SOURCE_PLAN = {"paths": ["server.sh", "src"], "compose_files": ["docker-compose.yml", "docker-compose.dev.yml"],
+               "bytecode_ok": False}
+
+
+class StubChecker:
+    """Stands in for the sealed git check (proven against real git in
+    test_ops_source_state.py). Answers are used in order; the last repeats."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers) or [HEAD]
+        self.calls = []
+
+    def check(self, project_dir, plan):
+        self.calls.append((project_dir, plan))
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+@pytest.fixture(autouse=True)
+def source(monkeypatch):
+    """The executor's and the worker's sealed source check, stubbed."""
+    stub = StubChecker()
+    monkeypatch.setattr("llm_bawt.ops.executor.SourceChecker", lambda *a, **k: stub)
+    monkeypatch.setattr("llm_bawt.ops.app_config_reconcile.SourceChecker", lambda *a, **k: stub)
+    return stub
+
+
+def _bind_mount(name):
+    return {"type": "bind", "source": f"{APP_DIR}/{name}", "target": f"/app/{name}",
+            "bind": {"create_host_path": True}}
 
 
 def app_compose(**service):
@@ -50,9 +88,8 @@ def app_compose(**service):
             "depends_on": {"redis": {"condition": "service_healthy", "required": True}},
             "environment": {"LLM_BAWT_SERVICE_PORT": "8642"}, "networks": {"default": None},
             "ports": [dict(PORT)], "restart": "unless-stopped", "stdin_open": True, "tty": True,
-            "volumes": [{"type": "bind", "source": f"{APP_DIR}/src", "target": "/app/src",
-                         "bind": {"create_host_path": True}},
-                        {"type": "volume", "source": "receipts", "target": "/var/lib/ops", "volume": {}}]}
+            "volumes": [_bind_mount("src"), _bind_mount("server.sh"),
+                        {"type": "volume", "source": "receipts", "target": OPS_VOLUME, "volume": {}}]}
     body.update(service)
     return {"name": "llm-bawt", "services": {"app": body}, "networks": {"default": {"name": "llm-bawt_default"}},
             "volumes": {"receipts": {"name": "llm-bawt_receipts"}}}
@@ -89,8 +126,8 @@ class AppDocker(FakeDocker):
                                   "com.docker.compose.project.config_files": ",".join(APP_FILES),
                                   "org.opencontainers.image.title": "llm-bawt"}},
             "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"},
-                           "Binds": [f"{APP_DIR}/src:/app/src:rw"],
-                           "Mounts": [{"Type": "volume", "Source": "llm-bawt_receipts", "Target": "/var/lib/ops",
+                           "Binds": [f"{APP_DIR}/src:/app/src:rw", f"{APP_DIR}/server.sh:/app/server.sh:rw"],
+                           "Mounts": [{"Type": "volume", "Source": "llm-bawt_receipts", "Target": OPS_VOLUME,
                                        "ReadOnly": False}],
                            "PortBindings": {"8642/tcp": [{"HostIp": "", "HostPort": "8642"}]}},
             "NetworkSettings": {"Networks": {"llm-bawt_default": {"Aliases": [APP_NAME, "app", old_id[:12]]}}},
@@ -135,9 +172,10 @@ class AppDocker(FakeDocker):
         return super().request(method, path, body=body, headers=headers, raw=raw)
 
 
-def binding(api, spec=SPEC, *, moved=False):
+def binding(api, spec=SPEC, *, moved=False, checker=None):
     return app_config_binding(spec, api.by_name(APP_NAME), api.images[APP_ID],
-                              ComposeRenderer(api, spec, tag="app1"), image_tag_moved=moved)[0]
+                              ComposeRenderer(api, spec, tag="app1"), image_tag_moved=moved,
+                              source_checker=checker or StubChecker())[0]
 
 
 def snapshot(api, **kwargs):
@@ -145,6 +183,7 @@ def snapshot(api, **kwargs):
 
 
 def reconciler(api, tmp_path, snap=None):
+    """Its source check is the ``source`` fixture's stub."""
     return AppConfigReconciler(api, snap or snapshot(api), JOB_ID, lock_root=tmp_path / "locks",
                                sleep=lambda _: None, clock=iter(range(0, 10000, 5)).__next__)
 
@@ -203,8 +242,11 @@ def test_binding_shows_names_ports_and_dependencies_only():
     assert bound["source"] == {"project_dir": APP_DIR, "compose_files": APP_FILES}
     assert bound["image_ref"] == TAG and bound["image_id"] == APP_ID and bound["image_tag"] == TAG
     assert valid_app_binding(snapshot(api)) and SECRET not in json.dumps(bound)
+    assert bound["source_commit"] == {"repository": SPEC["source_repository"], "branch": SPEC["source_branch"],
+                                      "head": HEAD}
     text = approval_text(SPEC, bound, None)
     assert "cuts in-flight chat turns" in text and "redis:service_healthy" in text and SECRET not in text
+    assert f"Source: github.com/{SPEC['source_repository']} {SPEC['source_branch']} @ {HEAD}" in text
     assert "now names a different local build" not in text
 
 
@@ -227,6 +269,13 @@ def test_binding_refuses_a_foreign_image_and_bad_label_files():
     lambda s: s["config"]["source"].update(compose_files=["/etc/compose.yml"]),
     lambda s: s["config"].update(ports=[1]),
     lambda s: s.update(resolved_args={"x": 1}),
+    lambda s: s["config"].pop("source_commit"),
+    lambda s: s["config"]["source_commit"].update(head="HEAD"),
+    lambda s: s["config"]["source_commit"].update(repository="evil/llm-bawt"),
+    lambda s: s["config"]["source_commit"].update(branch="feature"),
+    lambda s: s["config"]["source_commit"].update(extra=1),
+    lambda s: s.update(spec={**SPEC, "source_mounts": ["/app/src", "/app/src/llm_bawt"]}),
+    lambda s: s.update(spec={**SPEC, "data_mounts": [*SPEC["data_mounts"], "/app"]}),
 ])
 def test_binding_shape_is_validated(tamper):
     snap = snapshot(AppDocker())
@@ -376,7 +425,8 @@ class _NotFound(Exception):
 def _executor(api, *, worker_labels=None):
     def get_image(ref):
         if ref == WORKER:
-            labels = {WORKER_CAPABILITY_LABEL: "1"} if worker_labels is None else worker_labels
+            labels = ({WORKER_CAPABILITY_LABEL: "1", SOURCE_GUARD_LABEL: "1"} if worker_labels is None
+                      else worker_labels)
             return SimpleNamespace(attrs={"Config": {"Labels": labels}})
         try:
             return SimpleNamespace(attrs=api._find_image(ref))
@@ -413,15 +463,20 @@ def test_unmoved_tag_and_a_target_already_running_by_id():
     assert binding(api)["image_ref"] == APP_ID
 
 
-def test_legacy_worker_without_the_app_capability_refuses():
+@pytest.mark.parametrize("labels, missing", [
+    ({"llm-bawt.ops.config-reconcile": "1"}, WORKER_CAPABILITY_LABEL),
+    # TASK-1474: a worker that reconciles the app but predates the source guard.
+    ({WORKER_CAPABILITY_LABEL: "1"}, SOURCE_GUARD_LABEL),
+])
+def test_legacy_worker_without_the_app_capability_refuses(source, labels, missing):
     api = AppDocker()
-    executor = _executor(api, worker_labels={"llm-bawt.ops.config-reconcile": "1"})
+    executor = _executor(api, worker_labels=labels)
     for call in (lambda: executor.config_approval(SPEC),
                  lambda: executor.preflight({"spec": SPEC, "execution": executor.execution_settings()})):
         with pytest.raises(ConfigCheckError) as caught:
             call()
-        assert caught.value.code == "config_reconcile_unavailable"
-    assert not api.render_bodies
+        assert caught.value.code == "config_reconcile_unavailable" and missing in str(caught.value)
+    assert not api.render_bodies and not source.calls
 
 
 # ── reconcile outcomes ──────────────────────────────────────────────────────
@@ -437,7 +492,8 @@ def test_drift_is_reconciled_and_values_stay_private(tmp_path):
     body = api.create_bodies[0]
     assert f"XAI_API_KEY={SECRET}" in body["Env"] and body["Cmd"] == CMD
     assert body["Labels"]["com.docker.compose.config-hash"] == CONFIG_HASH
-    assert body["HostConfig"]["Binds"] == [f"{APP_DIR}/src:/app/src:rw", "llm-bawt_receipts:/var/lib/ops:rw"]
+    assert body["HostConfig"]["Binds"] == [f"{APP_DIR}/server.sh:/app/server.sh:rw", f"{APP_DIR}/src:/app/src:rw",
+                                           f"llm-bawt_receipts:{OPS_VOLUME}:rw"]
     assert body["NetworkingConfig"]["EndpointsConfig"]["llm-bawt_default"]["Aliases"] == [APP_NAME, "app"]
     assert SECRET not in output and SECRET not in json.dumps(snap)
     assert not any("/images/create" in p for _m, p in api.calls) and not api.renderers_left()
@@ -520,18 +576,19 @@ def test_worker_receipt_is_reconciled_by_a_fresh_app_process(tmp_path, kwargs, s
 
 def test_worker_image_carries_the_module_and_capability_label():
     dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
-    assert "src/llm_bawt/ops/app_config_reconcile.py" in dockerfile
+    for module in ("app_config_reconcile", "source_state", "sealed_container"):
+        assert f"src/llm_bawt/ops/{module}.py" in dockerfile
     assert f'LABEL {WORKER_CAPABILITY_LABEL}="1"' in dockerfile
+    assert f'LABEL {SOURCE_GUARD_LABEL}="1"' in dockerfile
 
 
 # ── app side: snapshot binding ─────────────────────────────────────────────
 
 def test_approval_snapshot_is_bound_and_rejects_smuggling():
-    from llm_bawt.ops.service import OpsDispatchError
-    from tests.test_ops_image_deploy import _rehash, _service
+    from tests.test_ops_image_deploy import _rehash
 
     api = AppDocker(compose=DRIFT)
-    service, store, executor = _service()
+    service, store, executor = _service(PublishedVerifier(HEAD))
     store.create_operation({**SEED, "enabled": True})
     executor.config_approval = lambda spec: binding(api, spec)
     approved = service.prepare_invocation(SEED["slug"], {})
@@ -542,3 +599,158 @@ def test_approval_snapshot_is_bound_and_rejects_smuggling():
         service._verify_snapshot(_rehash(approved), SEED["slug"], {})
     with pytest.raises(OpsDispatchError, match="unknown property 'x'"):
         service.prepare_invocation(SEED["slug"], {"x": 1})
+
+
+# ── TASK-1474: the bind-mounted source is exactly the published commit ──────
+
+class PublishedVerifier(FakeVerifier):
+    """The forge's branch head, or an error reading it."""
+
+    def __init__(self, head=None, *, error=None):
+        super().__init__()
+        self.head, self.branch_error, self.asked = head, error, []
+
+    def branch_head(self, repo, branch):
+        self.asked.append((repo, branch))
+        if self.branch_error:
+            raise ReleaseVerificationError(self.branch_error)
+        return self.head
+
+
+def test_the_checker_verifies_the_planned_source_paths(source):
+    binding(AppDocker(), checker=source)
+    assert source.calls == [(APP_DIR, SOURCE_PLAN)]
+
+
+@pytest.mark.parametrize("prefix, ok", [
+    (None, False), ("/tmp/llm-bawt-pycache", True), ("/app/src/.pycache", False),
+    (f"{OPS_VOLUME}/pycache", False), ("/var/lib", False), ("tmp/pycache", False),
+])
+def test_bytecode_is_tolerated_only_with_a_pycache_prefix_outside_every_mount(source, prefix, ok):
+    env = {"LLM_BAWT_SERVICE_PORT": "8642", **({"PYTHONPYCACHEPREFIX": prefix} if prefix else {})}
+    binding(AppDocker(compose=app_compose(environment=env)), checker=source)
+    assert source.calls[-1][1]["bytecode_ok"] is ok
+
+
+@pytest.mark.parametrize("where", ["compose", "image"])
+@pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP", "LD_PRELOAD"])
+def test_runtime_env_that_loads_code_from_elsewhere_refuses(source, where, name):
+    api = AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642", name: "/srv/x"})
+                    if where == "compose" else None)
+    if where == "image":
+        api.images[APP_ID]["Config"]["Env"].append(f"{name}=/srv/x")
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_env_unsafe" and caught.value.names == [name]
+    assert "/srv/x" not in str(caught.value) and not source.calls
+
+
+def _volumes(*extra, drop=None):
+    compose = app_compose()
+    service = compose["services"]["app"]
+    service["volumes"] = [v for v in service["volumes"] if v["target"] != drop] + list(extra)
+    return compose
+
+
+def _vol(target):
+    return {"type": "volume", "source": "receipts", "target": target, "volume": {}}
+
+
+def _bind(source, target="/app/server.sh"):
+    return {"type": "bind", "source": source, "target": target, "bind": {"create_host_path": True}}
+
+
+@pytest.mark.parametrize("compose, code, name", [
+    (_volumes(_vol("/data")), "source_mount_unclassified", "/data"),
+    (_volumes(_vol("/app/src/llm_bawt/plugins")), "source_mount_shadowed", "/app/src/llm_bawt/plugins"),
+    (_volumes(drop="/app/server.sh"), "source_mount_missing", "/app/server.sh"),
+    (_volumes(_bind("/srv/elsewhere/server.sh"), drop="/app/server.sh"), "source_mount_invalid", "/app/server.sh"),
+    (_volumes(_bind(APP_DIR), drop="/app/server.sh"), "source_mount_invalid", "/app/server.sh"),
+    (_volumes(_bind(f"{APP_DIR}/.git/hooks"), drop="/app/server.sh"), "source_mount_invalid", "/app/server.sh"),
+    (_volumes(_vol("/app/server.sh"), drop="/app/server.sh"), "source_mount_invalid", "/app/server.sh"),
+], ids=["unclassified", "shadowed", "missing", "outside", "project-root", "git-dir", "volume"])
+def test_every_mount_is_classified_and_source_mounts_bind_the_project(source, compose, code, name):
+    with pytest.raises(SourceStateError) as caught:
+        binding(AppDocker(compose=compose), checker=source)
+    assert caught.value.code == code and caught.value.names == [name] and not source.calls
+
+
+@pytest.mark.parametrize("tamper, name", [
+    (lambda api: api.by_name(APP_NAME)["HostConfig"].update(Tmpfs={"/run/scratch": ""}), "/run/scratch"),
+    (lambda api: api.images[APP_ID]["Config"].update(Volumes={"/scratch": {}}), "/scratch"),
+    (lambda api: api.by_name(APP_NAME)["HostConfig"]["Binds"].append("/srv/x:/opt/x:ro"), "/opt/x"),
+], ids=["tmpfs", "image-volume", "current-bind"])
+def test_mounts_compose_does_not_render_are_classified_too(source, tamper, name):
+    api = AppDocker()
+    tamper(api)
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_mount_unclassified" and caught.value.names == [name]
+
+
+def test_an_unclean_checkout_refuses_approval_with_its_code(source):
+    source.answers = [SourceStateError("source_dirty", ["src/llm_bawt/bots.py"])]
+    with pytest.raises(ConfigCheckError) as caught:
+        _executor(AppDocker()).config_approval(SPEC)
+    assert caught.value.code == "source_dirty" and "src/llm_bawt/bots.py" in str(caught.value)
+
+
+def test_checkout_moved_since_approval_refuses_before_create(tmp_path, source):
+    api = AppDocker(compose=DRIFT)
+    snap = snapshot(api)
+    source.answers = ["cd" * 20]
+    with pytest.raises(DeployFailed, match="source_moved_since_approval") as caught:
+        reconciler(api, tmp_path, snap).run()
+    assert caught.value.outcome_known and not api.create_bodies and not api.side_effect_started
+
+
+@pytest.mark.parametrize("answer, code", [
+    ("cd" * 20, "source_moved_since_approval"),
+    (SourceStateError("source_bytecode_unsafe", ["src/llm_bawt/__pycache__/"]), "source_bytecode_unsafe"),
+    (SourceStateError("source_unsupported_entry", ["src/llm_bawt/module.py"]), "source_unsupported_entry"),
+    (SourceStateError("source_unverifiable", detail="sealed git unavailable"), "source_unverifiable"),
+], ids=["moved", "pyc", "symlink", "unverifiable"])
+def test_source_is_rechecked_as_the_last_read_before_the_swap(tmp_path, source, answer, code):
+    api = AppDocker(compose=DRIFT)
+    snap = snapshot(api)
+    source.answers = [HEAD, answer]  # the bind passes; the pre-swap recheck sees the change
+    with pytest.raises(DeployFailed, match=code) as caught:
+        reconciler(api, tmp_path, snap).run()
+    assert caught.value.outcome_known and not api.create_bodies and not api.side_effect_started
+    assert len(source.calls) == 2 and source.calls[0] == source.calls[1] == (APP_DIR, SOURCE_PLAN)
+    assert api.by_name(APP_NAME)["State"]["Running"]
+
+
+def test_a_reconcile_records_the_commit_and_verify_only_checks_once(tmp_path, source):
+    result = json.loads(reconciler(AppDocker(compose=DRIFT), tmp_path).run())
+    assert result["config"]["source_commit"]["head"] == HEAD and len(source.calls) == 2  # bind, pre-swap
+    source.calls.clear()
+    reconciler(AppDocker(), tmp_path).run()
+    assert len(source.calls) == 1  # bind only: nothing is swapped
+
+
+def test_published_source_is_asked_of_the_forge_for_the_spec_repository():
+    verifier = PublishedVerifier(HEAD)
+    service, store, executor = _service(verifier)
+    store.create_operation({**SEED, "enabled": True})
+    api = AppDocker(compose=DRIFT)
+    executor.config_approval = lambda spec: binding(api, spec)
+    assert service.prepare_invocation(SEED["slug"], {})["config"]["source_commit"]["head"] == HEAD
+    assert verifier.asked == [(SPEC["source_repository"], SPEC["source_branch"])]
+
+
+@pytest.mark.parametrize("verifier, code", [
+    (PublishedVerifier("cd" * 20), "source_not_published"),
+    (PublishedVerifier(error="GitHub unreachable: URLError"), "source_unverifiable"),
+    (FakeVerifier(), "source_unverifiable"),  # a verifier that cannot read branch heads
+], ids=["unpublished", "forge-error", "no-branch-reader"])
+def test_unpublished_source_is_refused_before_anyone_is_asked(verifier, code):
+    service, store, executor = _service(verifier)
+    store.create_operation({**SEED, "enabled": True})
+    api = AppDocker(compose=DRIFT)
+    executor.config_approval = lambda spec: binding(api, spec)
+    with pytest.raises(OpsDispatchError) as caught:
+        service.prepare_invocation(SEED["slug"], {})
+    assert caught.value.code == code
+    if code == "source_not_published":
+        assert "publish that commit first" in str(caught.value) and HEAD[:12] in str(caught.value)
