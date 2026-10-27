@@ -38,7 +38,7 @@ def _read_file(path: str) -> str | None:
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip() or None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         if path not in _warned:
             _warned.add(path)
             logger.warning("bridge token file %s unreadable (%s); using fallback",

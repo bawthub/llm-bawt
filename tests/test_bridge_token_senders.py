@@ -53,6 +53,13 @@ def test_empty_or_unreadable_file_falls_back_to_env(sender, tmp_path):
         assert bridge_token.headers(sender, {sender.file_env: path}) == {}
 
 
+def test_undecodable_file_falls_back_to_env(tmp_path):
+    path = tmp_path / "token"
+    path.write_bytes(b"\xff\xfe\x80")
+    env = {BROKER.file_env: str(path), BROKER.legacy_env: LEGACY}
+    assert bridge_token.token(BROKER, env) == LEGACY
+
+
 def test_senders_do_not_cross_gates(tmp_path):
     env = {BROKER.file_env: _file(tmp_path, DERIVED), BROKER.legacy_env: LEGACY}
     assert bridge_token.token(GIT_CREDENTIAL, env) is None
@@ -94,7 +101,13 @@ def test_provider_key_broker_sends_the_file_token(monkeypatch, tmp_path):
 
 
 _SENDER_PACKAGES = ("claude_code_bridge", "codex_bridge", "openclaw_bridge", "agent_bridge")
-_GATE_NAMES = {"x-bridge-token", "bridge_claude_token_secret", "bridge_git_credential_token"}
+_GATE_NAMES = {
+    "x-bridge-token",
+    "bridge_claude_token_secret",
+    "bridge_git_credential_token",
+    "bridge_broker_token_file",
+    "bridge_git_credential_token_file",
+}
 
 
 def test_bridge_code_reads_gate_tokens_only_through_bridge_token():
