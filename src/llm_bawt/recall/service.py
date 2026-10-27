@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import threading
 from collections import Counter
@@ -22,6 +23,7 @@ from .contracts import (
 )
 from .grounding import cap_span, ground_quote
 from .handles import HandleStore
+from .ledger import LEDGER_WORKER, LEDGER_WRITE_SECONDS, MAX_LEDGER_ENTRIES, LedgerSink, ledger_entry
 
 
 class Finding(BaseModel):
@@ -66,24 +68,29 @@ def failure(code: str) -> dict:
 
 class RecallService:
     def __init__(self, providers: list[SourceProvider], synthesizer: Synthesizer,
-                 handles: HandleStore | None = None):
+                 handles: HandleStore | None = None, ledger: LedgerSink | None = None):
         self.providers = {provider.source: provider for provider in providers}
         self.synthesizer = synthesizer
         self.handles = handles if handles is not None else HandleStore()
+        self.ledger = ledger
         self._slots = threading.BoundedSemaphore(4)
+        self._ledger_writes: set[asyncio.Task] = set()
 
     async def recall(self, request: RecallRequest, scope: RecallScope) -> dict:
         start = time.monotonic()
         if not self._slots.acquire(blocking=False):
             return failure("busy")
         coverage = {}
+        read: list[dict] = []
         try:
             if not all(scope.owner) or scope.bot_id in scope.excluded_bot_ids:
                 raise RecallError("unauthorized")
             if tokens(request.query) > MAX_QUERY_TOKENS:
                 raise RecallError("query_budget")
             async with asyncio.timeout(MAX_SECONDS):
-                return await self._research(request, scope, start, coverage)
+                packet = await self._research(request, scope, start, coverage, read)
+            self._record(packet, scope, read)
+            return packet
         except RecallError as error:
             result = failure(error.code)
         except TimeoutError:
@@ -101,8 +108,41 @@ class RecallService:
             result["coverage"] = coverage
         return result
 
+    def _record(self, packet: dict, scope: RecallScope, read: list[dict]) -> None:
+        """Hand the read list to the ledger in the background (TASK-1519).
+
+        The packet is already final: the sink gets copies, runs after this
+        returns, and its failure or slowness is logged, never returned.
+        """
+        if self.ledger is None or not packet.get("handle"):
+            return
+        try:
+            cited = {(item["source"], item["id"]) for item in packet["findings"]}
+            entries = [{**entry, "cited": (entry["source"], entry["id"]) in cited}
+                       for entry in read[:MAX_LEDGER_ENTRIES]]
+            args = (packet["handle"], scope, copy.deepcopy(packet["coverage"]), entries,
+                    max(0, len(read) - MAX_LEDGER_ENTRIES))
+            task = asyncio.create_task(self._write_ledger(args))
+        except Exception as error:
+            logger.warning("recall ledger write skipped class=%s", type(error).__name__)
+            return
+        self._ledger_writes.add(task)
+        task.add_done_callback(self._ledger_writes.discard)
+
+    async def _write_ledger(self, args: tuple) -> None:
+        try:
+            await asyncio.wait_for(LEDGER_WORKER.run(self.ledger.write, *args), LEDGER_WRITE_SECONDS)
+        except Exception as error:
+            logger.warning("recall ledger write skipped class=%s", type(error).__name__)
+
+    async def drain_ledger(self) -> None:
+        """Wait for background ledger writes (tests and orderly shutdown)."""
+        if self._ledger_writes:
+            await asyncio.gather(*self._ledger_writes, return_exceptions=True)
+
     async def _research(self, request: RecallRequest, scope: RecallScope, start: float,
-                        coverage: dict) -> dict:
+                        coverage: dict, read: list[dict] | None = None) -> dict:
+        read = read if read is not None else []
         queries = self.handles.resolve(request, scope)
         # Explicitly retain the initial intent AND subsequent questions. Never
         # concatenate previous answers/source bodies into the new parent turn.
@@ -176,6 +216,8 @@ class RecallService:
                     raise RecallError("unauthorized")
                 if not isinstance(row.text, str) or len(row.text) > MAX_RECORD_CHARS:
                     raise RecallError("retrieval_budget")
+                # Every accepted row, so the ledger count equals coverage.records.
+                read.append(ledger_entry(row))
                 key = (row.source, row.id)
                 if key in seen or not row.text.strip():
                     continue
@@ -275,6 +317,9 @@ class RecallService:
                 "elapsed_ms": round((time.monotonic() - start) * 1000),
             },
         }
+        admitted_keys = {(row.source, row.id) for row in evidence}
+        for entry in read:
+            entry["admitted"] = (entry["source"], entry["id"]) in admitted_keys
         # Reserve the fixed-size handle before packing; no text retained in it.
         packet["handle"] = self.handles.put(request, scope, queries)
         self._fit(packet, request.output_tokens)

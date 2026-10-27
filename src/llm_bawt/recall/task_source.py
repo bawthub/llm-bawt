@@ -1,6 +1,8 @@
 """Explicit shared-task search with bounded provenance checks, never task turns."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import httpx
 
 from llm_bawt.bawthub_auth import service_auth
@@ -15,10 +17,16 @@ from .http import BoundedHTTP
 class TaskSource(SourceProvider):
     source = "tasks"
 
-    async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
+    @staticmethod
+    @asynccontextmanager
+    async def reader():
+        """One bounded reader: 15 calls covers search plus three full authority checks."""
         async with httpx.AsyncClient(timeout=4.0, follow_redirects=False,
                                      auth=service_auth()) as client:
-            reader = BoundedHTTP(client, max_calls=15, max_bytes=262_144)
+            yield BoundedHTTP(client, max_calls=15, max_bytes=262_144)
+
+    async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
+        async with self.reader() as reader:
             return await self.search_with(reader, query, scope, task_ids)
 
     async def search_with(self, reader, query: str, scope: RecallScope,
@@ -42,20 +50,12 @@ class TaskSource(SourceProvider):
         result = EvidenceBatch(search_mode=mode)
         for ref in tuple(dict.fromkeys(refs))[:3]:
             try:
-                # Semantic candidates intentionally lack assignment. Fetch it
-                # before admitting any task content to the utility model.
-                row = await reader.json("GET", f"{BASE_URL}{API_PREFIX}/tasks/{ref}")
-                if not isinstance(row, dict) or not CUID.fullmatch(str(row.get("id", ""))):
-                    raise RecallError("source_unavailable")
-                if not await self._authorized(reader, row, scope):
+                row = await self.authorized_task(reader, ref, scope)
+                if row is None:
                     result.withheld += 1
                     continue
-                short_id = row.get("shortId")
-                if not isinstance(short_id, str) or not TASK_REF.fullmatch(short_id):
-                    raise RecallError("source_unavailable")
-                title, status, description = (row.get(k) for k in ("title", "status", "description"))
-                if not all(isinstance(v, str) for v in (title, status)):
-                    raise RecallError("source_unavailable")
+                short_id, title, status, description = (
+                    row.get(k) for k in ("shortId", "title", "status", "description"))
                 canonical = f"{short_id}: {title[:300]}\nStatus: {status[:32]}\n{str(description or '')}"
                 excerpt, start, truncated, window_kind = excerpt_window(canonical, query)
                 result.append(Evidence("tasks", short_id, scope.bot_id, scope.user_id, excerpt,
@@ -66,6 +66,26 @@ class TaskSource(SourceProvider):
                 # coverage says incomplete, not 'no matching tasks exist'.
                 result.withheld += 1
         return result
+
+    async def authorized_task(self, reader, ref: str, scope: RecallScope) -> dict | None:
+        """The task row if the caller may read it now, else None (TASK-1519 shares this).
+
+        Raises RecallError when authority can't be established; callers treat
+        that as withheld, never as authorized.
+        """
+        # Semantic candidates intentionally lack assignment. Fetch it
+        # before admitting any task content to the utility model.
+        row = await reader.json("GET", f"{BASE_URL}{API_PREFIX}/tasks/{ref}")
+        if not isinstance(row, dict) or not CUID.fullmatch(str(row.get("id", ""))):
+            raise RecallError("source_unavailable")
+        if not await self._authorized(reader, row, scope):
+            return None
+        short_id = row.get("shortId")
+        if not isinstance(short_id, str) or not TASK_REF.fullmatch(short_id):
+            raise RecallError("source_unavailable")
+        if not all(isinstance(row.get(k), str) for k in ("title", "status")):
+            raise RecallError("source_unavailable")
+        return row
 
     async def _authorized(self, reader, row: dict, scope: RecallScope) -> bool:
         # Tasks are shared by the existing API. Assignment is not read authority.

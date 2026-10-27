@@ -112,6 +112,13 @@ class RecallDatabase:
                 return [dict(row) for row in connection.execute(text(statement), params).mappings()]
 
     async def scope(self, context) -> RecallScope:
+        from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_TTL_SECONDS
+        return await self.owner_scope(context.bot_id, context.user_id, context.session_id,
+                                      context.issued_at + TASK_TURN_CONTEXT_TTL_SECONDS)
+
+    async def owner_scope(self, bot_id: str, user_id: str, session_id: str,
+                          expires_at: float | None = None) -> RecallScope:
+        """Scope under the CURRENT tag policy; unauthorized if the bot isn't searchable."""
         try:
             rows = await DATABASE_WORKER.run(self.read, SNAPSHOT_SQL, {})
             if not rows:
@@ -124,15 +131,13 @@ class RecallDatabase:
             # no_global_search, and the legacy column false is private.
             allowed = tags.searchable_bots
             excluded = tags.known_bots - allowed
-            if context.bot_id not in allowed:
+            if bot_id not in allowed:
                 raise RecallError("unauthorized")
             # Sanitation collisions must never broaden partition scope.
             identities = [partition_id(r["slug"]) for r in rows]
             if len(set(identities)) != len(identities):
                 raise RecallError("policy_unavailable")
-            from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_TTL_SECONDS
-            return RecallScope(context.bot_id, context.user_id, context.session_id, excluded, allowed,
-                               context.issued_at + TASK_TURN_CONTEXT_TTL_SECONDS)
+            return RecallScope(bot_id, user_id, session_id, excluded, allowed, expires_at)
         except RecallError:
             raise
         except Exception as error:

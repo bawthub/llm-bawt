@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from llm_bawt.recall.budgets import compact_json
 from llm_bawt.recall.completion import UtilitySynthesizer
 from llm_bawt.recall.contracts import MAX_SECONDS, RecallError, RecallRequest
+from llm_bawt.recall.ledger import PostgresLedger
 from llm_bawt.recall.postgres import MessageSource, MemorySource, RecallDatabase, ToolEvidenceSource
 from llm_bawt.recall.service import RecallService, failure
 from llm_bawt.recall.task_source import TaskSource
@@ -32,6 +33,8 @@ def _runtime() -> tuple[RecallDatabase, RecallService]:
     service = RecallService(
         [MessageSource(database), MemorySource(database), ToolEvidenceSource(database), TaskSource()],
         UtilitySynthesizer(f"http://{host}:{config.SERVICE_PORT}"),
+        # UI drill-down references only (TASK-1519); never read back by bots.
+        ledger=PostgresLedger(database.engine),
     )
     return database, service
 
