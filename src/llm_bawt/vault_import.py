@@ -360,6 +360,17 @@ def read_master_key(path: str | None) -> str | None:
     return key or None
 
 
+def unresolved(outcome: Outcome) -> bool:
+    """True when ``outcome`` still needs the operator: the run is incomplete.
+
+    ``failed`` retries on the next run. A ``conflict`` is unresolved while the
+    destination is still absent, which is exactly when it is re-evaluated
+    (``processed``). Once the destination exists the old conflict is settled
+    and reported unprocessed: there is nothing left to import for it.
+    """
+    return outcome.outcome == FAILED or (outcome.outcome == CONFLICT and outcome.processed)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m llm_bawt.vault_import",
                                      description="Import mapped pgcrypto vault secrets into the credential store.")
@@ -389,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     outcomes = importer.run()
     for outcome in outcomes:
         print(json.dumps(outcome.public()))
-    return 1 if any(outcome.outcome == FAILED for outcome in outcomes) else 0
+    return 1 if any(unresolved(outcome) for outcome in outcomes) else 0
 
 
 if __name__ == "__main__":

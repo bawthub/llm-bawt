@@ -453,6 +453,25 @@ def test_main_reports_names_and_codes_never_values(env, tmp_path, capsys, caplog
         assert value not in ledger_text
 
 
+def test_main_fails_while_a_conflict_is_unresolved_and_passes_once_it_is_settled(env, tmp_path, capsys):
+    engine, store = env
+    key_file = tmp_path / "master-key"
+    key_file.write_text(KEY)
+    vault_set(engine, "XAI_API_KEY", XAI_ONE)
+    vault_set(engine, "LLM_BAWT_XAI_API_KEY", XAI_TWO)
+    # Conflict only: nothing failed, but xai was not imported.
+    assert vault_import.main(["--master-key-file", str(key_file)]) == 1
+    assert vault_import.main(["--master-key-file", str(key_file)]) == 1  # still absent: still unresolved
+    assert row_json(engine, "xai") is None
+    # The operator connects xai in the app: the conflict is settled, the run is complete.
+    store.save(ConnectionRecord(provider="xai", status=STATUS_CONNECTED, auth_method="api_key",
+                                secret={"api_key": XAI_ONE}))
+    capsys.readouterr()
+    assert vault_import.main(["--master-key-file", str(key_file)]) == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert {(line["outcome"], line["processed"]) for line in lines} == {("conflict", False)}
+
+
 def test_main_with_no_vault_is_a_noop(env, capsys):
     engine, _store = env
     with engine.begin() as conn:
