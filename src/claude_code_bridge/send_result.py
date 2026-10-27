@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from typing import Callable
 
 from agent_bridge.events import AgentEventKind
 
 from ._bridge_helpers import _fmt_tokens, _read_latest_compact_metadata
+from .context_breakdown import compact_context_breakdown
 from .send_errors import retry_exhausted_text
 
 
@@ -74,6 +77,7 @@ class ClaudeResultMixin:
         turn_screenshot_assets: list[dict],
         reset_ack: dict | None = None,
         compact_threshold: int | None = None,
+        capture_usage: Callable[[dict | None], None] | None = None,
     ) -> int:
         full_text = "".join(text_parts)
         if not full_text:
@@ -195,5 +199,43 @@ class ClaudeResultMixin:
             token_usage=token_usage_payload,
             attachments=turn_screenshot_assets or None,
             **({"extra_raw": {"new_session_ack": reset_ack}} if reset_ack else {}),
+        )
+        if capture_usage is not None:
+            capture_usage(token_usage_payload)
+        return seq
+
+    async def _publish_post_done_context(
+        self, sdk_client, *, request_id: str, session_key: str, seq: int,
+        model: str, final_usage: dict | None,
+    ) -> int:
+        """Read /context only after DONE, on the still-owned direct SDK client.
+
+        USAGE_UPDATE carries a complete final snapshot so the app's ordered run
+        consumer can persist it without replacing terminal cost/output values.
+        A failed or slow control request leaves the already-published turn alone.
+        """
+        if isinstance(final_usage, dict) and final_usage.get("context_action") == "compact":
+            return seq
+        started = time.monotonic()
+        native = await self._read_native_context_usage(sdk_client)
+        if not native:
+            return seq
+        breakdown = compact_context_breakdown(native, read_ms=(time.monotonic() - started) * 1000)
+        if breakdown is None:
+            return seq
+        usage = {**(final_usage or {}), "context_breakdown": breakdown, "usage_status": "final"}
+        native_total = native.get("totalTokens")
+        native_max = native.get("maxTokens")
+        if isinstance(native_total, (int, float)) and native_total > 0:
+            usage.update(resident_tokens=int(native_total), resident_source="claude_sdk_context")
+        if isinstance(native_max, (int, float)) and native_max > 0:
+            usage["context_window"] = int(native_max)
+        usage["context_percentage"] = native.get("percentage")
+        usage["auto_compact_enabled"] = native.get("isAutoCompactEnabled")
+        usage["auto_compact_threshold"] = native.get("autoCompactThreshold")
+        seq += 1
+        self._publish_event(
+            request_id, session_key, seq, kind=AgentEventKind.USAGE_UPDATE,
+            model=model, token_usage=usage,
         )
         return seq

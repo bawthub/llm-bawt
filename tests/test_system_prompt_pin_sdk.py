@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import socket
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -184,3 +185,63 @@ def test_cli_freezes_the_system_prompt_until_a_manual_compaction(tmp_path):
     assert len(transcripts) == 1, transcripts
     rows = [json.loads(line) for line in transcripts[0].read_text().splitlines()]
     assert sum(row.get("subtype") == "compact_boundary" for row in rows) == 1
+
+
+def test_direct_cli_context_read_latency_probe(tmp_path):
+    """Observe a real CLI control round-trip against a disposable fast upstream.
+
+    The fixture does not measure production-provider latency. It measures the
+    direct SDK/CLI side of the bound before enabling a post-DONE read, and never
+    touches a live bot session or uses credentials.
+    """
+    app = FastAPI()
+    count_requests = []
+
+    @app.post("/v1/messages")
+    async def respond(request: Request):
+        body = await request.json()
+        return StreamingResponse(iter([wire(body.get("model", MODEL), "ok")]),
+                                 media_type="text/event-stream")
+
+    @app.post("/v1/messages/count_tokens")
+    async def count(request: Request):
+        count_requests.append(await request.json())
+        return {"input_tokens": 100}
+
+    async def run():
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
+        server_task = asyncio.create_task(server.serve(sockets=[sock]))
+        try:
+            while not server.started:
+                if server_task.done():
+                    server_task.result()
+                await asyncio.sleep(.01)
+            options, _home = bridge_options(
+                tmp_path, f"http://127.0.0.1:{sock.getsockname()[1]}", prompt("PIN-V1"), None,
+            )
+            content, done = ClaudeStreamMixin._make_prompt_input("One short reply.")
+            client = ClaudeSDKClient(options=options)
+            try:
+                await client.connect(prompt=content)
+                results = [m async for m in client.receive_response() if isinstance(m, ResultMessage)]
+                assert len(results) == 1 and not results[0].is_error
+                started = time.monotonic()
+                usage = await client.get_context_usage()
+                read_ms = (time.monotonic() - started) * 1000
+                assert usage["categories"]
+                assert isinstance(usage["totalTokens"], (float, int))
+                (tmp_path / "context-read-ms.json").write_text(json.dumps({"direct_cli_read_ms": round(read_ms, 1)}))
+                return read_ms
+            finally:
+                done.set()
+                await client.disconnect()
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(server_task, timeout=5)
+            sock.close()
+
+    read_ms = asyncio.run(asyncio.wait_for(run(), timeout=90))
+    assert read_ms >= 0
+    assert count_requests, "the fixture must exercise the CLI token-count path"

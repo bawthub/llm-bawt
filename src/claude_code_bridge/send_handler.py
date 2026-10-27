@@ -759,14 +759,10 @@ class ClaudeSendMixin(
                                 if terminal_error is not None:
                                     raise terminal_error
 
-                                native_context_usage = None
-                                if should_read_native_context_usage(use_proxy=use_proxy):
-                                    native_context_usage = await self._read_native_context_usage(
-                                        sdk_client
-                                    )
                                 if cancel_event is not None and cancel_event.is_set():
                                     aborted = True
                                     break
+                                terminal_usage = [None]
                                 seq = await self._finalize_result_message(
                                     msg,
                                     request_id=request_id,
@@ -783,7 +779,8 @@ class ClaudeSendMixin(
                                     latest_assistant_usage=latest_assistant_usage,
                                     latest_stream_usage=live_usage.stream_usage,
                                     cost_baseline_usd=cost_baseline_usd,
-                                    native_context_usage=native_context_usage,
+                                    native_context_usage=None,
+                                    capture_usage=lambda usage: terminal_usage.__setitem__(0, usage),
                                     compact_status=compact_status,
                                     compact_error_msg=compact_error_msg,
                                     turn_session_id=turn_session_id,
@@ -797,12 +794,15 @@ class ClaudeSendMixin(
                                     ),
                                 )
                                 assistant_done_emitted = True
-                                # The run's ``done`` follows teardown (run_terminal.py);
-                                # the session lock still prevents successor overlap.
                                 terminal_event_published = True
-                                # Release input and stop at ResultMessage: waiting for
-                                # EOF after AskUserQuestion can deadlock (TASK-269).
+                                # Close input before control read; EOF may deadlock after AskUserQuestion.
                                 turn_done.set()
+                                if should_read_native_context_usage(use_proxy=use_proxy):
+                                    seq = await self._publish_post_done_context(
+                                        sdk_client, request_id=request_id,
+                                        session_key=session_key, seq=seq,
+                                        model=actual_model, final_usage=terminal_usage[0],
+                                    )
                                 break
                         aborted = aborted or (cancel_event is not None and cancel_event.is_set())
                         if aborted:

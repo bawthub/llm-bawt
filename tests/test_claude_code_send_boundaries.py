@@ -12,6 +12,8 @@ from claude_code_bridge.command_ops import ClaudeCommandMixin
 from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.send_handler import ClaudeSendMixin
 from claude_code_bridge.send_stream_events import StreamBlockState
+from claude_code_bridge.send_usage import ClaudeUsageMixin
+from tests.virtual_clock import run_timing
 from claude_code_bridge.send_boundaries import (
     separator_before_new_block,
     should_read_native_context_usage,
@@ -453,11 +455,55 @@ def test_abort_during_result_context_read_preserves_result_usage(monkeypatch):
         await sdk.waiting.wait()
         sdk.release_stream.set()
         await reading_context.wait()
+        terminal, = harness.terminal()
+        assert terminal.raw == {}, "DONE precedes the optional control read"
         await harness.abort()
         await asyncio.gather(send, return_exceptions=True)
-        _assert_cancelled(harness)
-        assert harness.terminal()[0].token_usage["output_tokens"] == 11
+        assert harness.terminal() == [terminal], "post-DONE abort cannot duplicate or relabel it"
+        assert terminal.token_usage["output_tokens"] == 11
+        assert not [event for event in harness.events if event.kind == AgentEventKind.USAGE_UPDATE
+                    and event.token_usage and event.token_usage.get("usage_status") == "final"]
     asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
+def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
+    async def run():
+        harness = _SendHarness()
+        first, second = _SDKStream(result=True), _SDKStream(result=True)
+        clients = iter((first, second))
+        monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", lambda **kw: next(clients))
+        reading = asyncio.Event()
+
+        async def slow_context():
+            reading.set()
+            await asyncio.Event().wait()
+
+        first.get_context_usage = slow_context
+        second.get_context_usage = AsyncMock(return_value=None)
+        harness._read_native_context_usage = ClaudeUsageMixin._read_native_context_usage
+        initial = harness.send()
+        await first.waiting.wait()
+        first.release_stream.set()
+        await reading.wait()
+        done, = harness.terminal()
+        assert done.raw == {}
+        loop = asyncio.get_running_loop()
+        successor = harness.send("successor")
+        await harness.queued.wait()
+        assert not second.waiting.is_set()
+        # The SDK read must time out at its virtual deadline, freeing the lock
+        # for the queued turn without waiting for the stuck control request.
+        loop.advance(0.9)
+        await second.waiting.wait()
+        assert first.disconnect_calls == 1
+        second.release_stream.set()
+        await asyncio.gather(initial, successor)
+        assert len(harness.terminal("successor")) == 1
+        assert not [event for event in harness.events if event.run_id == "turn-request"
+                    and event.kind == AgentEventKind.USAGE_UPDATE
+                    and event.token_usage and event.token_usage.get("usage_status") == "final"]
+
+    run_timing(run())
 
 
 def test_abort_after_terminal_during_cleanup_does_not_duplicate_done(monkeypatch):

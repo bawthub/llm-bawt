@@ -147,3 +147,25 @@ def test_usage_update_round_trips_through_agent_event_transport() -> None:
 
     assert restored.kind is AgentEventKind.USAGE_UPDATE
     assert restored.token_usage == event.token_usage
+
+
+def test_post_done_context_update_persists_final_status_and_breakdown() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.updates = []
+
+        def update_turn(self, **kwargs) -> None:
+            self.updates.append(kwargs)
+
+    store = Store()
+    coordinator = TurnUsageCoordinator(store)
+    final = {"input_tokens": 13, "cache_read_tokens": 30,
+             "cache_creation_tokens": 1, "output_tokens": 4,
+             "usage_status": "final", "context_breakdown": {"read_ms": 18.2}}
+    event = coordinator.capture(
+        turn_id="turn-1", trigger_message_id="user-1", bot_id="bot",
+        user_id="user", model="model", token_usage=final,
+    )
+    assert event["token_usage"] == final
+    assert store.updates[-1] == {"turn_id": "turn-1", "token_usage": final}
+    assert coordinator.http_chunk(event)["token_usage"]["context_breakdown"] == {"read_ms": 18.2}

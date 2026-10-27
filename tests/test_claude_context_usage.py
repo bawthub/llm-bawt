@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 from agent_bridge.events import AgentEventKind
+from claude_code_bridge.context_breakdown import compact_context_breakdown
 from claude_code_bridge.send_result import ClaudeResultMixin
 from claude_code_bridge.send_usage import ClaudeUsageMixin
 import claude_code_bridge.send_result as send_result_module
@@ -292,3 +293,85 @@ def test_successful_compact_without_metadata_still_records_the_boundary(monkeypa
     assert usage["context_action_outcome"] == "success"
     assert "context_action_post_tokens" not in usage
     assert usage["resident_source"] == "claude_sdk_context"
+
+
+def test_context_breakdown_keeps_bounded_facts_not_raw_payloads():
+    raw = {
+        "totalTokens": 53000,
+        "categories": [{"name": "Skills", "tokens": 22000, "color": "red"},
+                       {"name": "Deferred", "tokens": 100, "isDeferred": True}],
+        "skills": {"totalSkills": 30, "includedSkills": 12, "tokens": 22000,
+                   "skillFrontmatter": [
+                       {"name": f"skill-{i:02}", "source": "/private/work", "tokens": i}
+                       for i in range(15)
+                   ]},
+        "mcpTools": [{"name": f"tool-{i:02}", "serverName": "api",
+                      "input_schema": {"secret": "never persist"}, "tokens": 100 + i}
+                     for i in range(15)],
+        "memoryFiles": [{"path": "/private/work", "type": "project", "tokens": 100}],
+        "messageBreakdown": {"toolResultTokens": 900, "userMessageTokens": 42,
+                             "toolCallsByType": [{"name": "private", "resultTokens": 900}]},
+        "gridRows": [[{"content": "never persist"}]],
+    }
+    result = compact_context_breakdown(raw, read_ms=45.26)
+    assert result["read_ms"] == 45.3
+    assert result["cli_total_tokens"] == 53000
+    assert result["categories"][1]["isDeferred"] is True
+    assert result["skills"]["top"][0] == {"name": "skill-14", "tokens": 14}
+    assert len(result["skills"]["top"]) == len(result["mcp_tools"]["top"]) == 10
+    assert result["mcp_tools"]["total"] == 15
+    assert result["memory_files"] == {"total": 1, "tokens": 100}
+    assert result["message_breakdown"]["toolResultTokens"] == 900
+    assert "/private/work" not in str(result)
+    assert "never persist" not in str(result)
+    assert compact_context_breakdown({}, read_ms=1) is None
+
+
+def test_post_done_usage_keeps_cost_and_publishes_full_final_snapshot():
+    harness = _Harness()
+    final = {"input_tokens": 20, "output_tokens": 7, "total_cost_usd": 0.3,
+             "resident_tokens": 50, "resident_source": "final_iteration_total_input"}
+
+    async def read(_client):
+        return {"totalTokens": 55, "maxTokens": 200, "percentage": 27.5,
+                "categories": [{"name": "System prompt", "tokens": 50}],
+                "mcpTools": [], "skills": {"totalSkills": 0, "includedSkills": 0,
+                                         "tokens": 0, "skillFrontmatter": []}}
+
+    harness._read_native_context_usage = read
+    seq = asyncio.run(harness._publish_post_done_context(
+        object(), request_id="req", session_key="session", seq=1,
+        model="claude-direct", final_usage=final,
+    ))
+    assert seq == 2
+    event = harness.events[-1][3]
+    assert event["kind"] is AgentEventKind.USAGE_UPDATE
+    usage = event["token_usage"]
+    assert usage["usage_status"] == "final"
+    assert usage["resident_tokens"] == 55
+    assert usage["resident_source"] == "claude_sdk_context"
+    assert usage["output_tokens"] == 7
+    assert usage["total_cost_usd"] == 0.3
+    assert usage["context_breakdown"]["read_ms"] >= 0
+    assert "context_breakdown" not in final
+
+
+def test_post_done_timeout_and_compact_are_fail_open():
+    harness = _Harness()
+    calls = []
+
+    async def read(_client):
+        calls.append(True)
+        return None
+
+    harness._read_native_context_usage = read
+    assert asyncio.run(harness._publish_post_done_context(
+        object(), request_id="req", session_key="session", seq=1,
+        model="claude-direct", final_usage={"output_tokens": 7},
+    )) == 1
+    assert not harness.events
+    assert asyncio.run(harness._publish_post_done_context(
+        object(), request_id="req", session_key="session", seq=1,
+        model="claude-direct", final_usage={"context_action": "compact"},
+    )) == 1
+    assert calls == [True]

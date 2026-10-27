@@ -67,7 +67,10 @@ class TurnUsageCoordinator:
         """Checkpoint a partial snapshot and return its unified event envelope."""
         if not isinstance(token_usage, dict) or not token_usage:
             return None
-        snapshot = {**token_usage, "usage_status": "partial"}
+        # Post-DONE context enrichment carries the complete final usage. Live
+        # iteration checkpoints remain partial; never downgrade a final snapshot.
+        status = "final" if token_usage.get("usage_status") == "final" else "partial"
+        snapshot = {**token_usage, "usage_status": status}
         self._turn_log_store.update_turn(turn_id=turn_id, token_usage=snapshot)
         return {
             "_type": "turn_usage",

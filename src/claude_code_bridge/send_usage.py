@@ -226,8 +226,10 @@ class ClaudeUsageMixin:
         if sdk_client is None:
             return None
         try:
+            # The session lock stays held until teardown: never delay a queued
+            # successor by more than this bounded post-DONE control request.
             return dict(await asyncio.wait_for(
-                sdk_client.get_context_usage(), timeout=5.0
+                sdk_client.get_context_usage(), timeout=0.9
             ))
         except Exception as context_error:
             logger.debug("Native context usage unavailable: %s", context_error)
