@@ -245,6 +245,62 @@ def test_stale_failure_does_not_overwrite_a_concurrent_import(env, monkeypatch):
     assert row_json(engine, "anthropic-api") is None
 
 
+def _rotate_import_and_disconnect(engine, store):
+    """Another process: the vault rotates, it imports the new key, the operator disconnects."""
+    vault_set(engine, "ANTHROPIC_API_KEY", "fixture-rotated-provider-key")
+    assert run(engine, store)["ANTHROPIC_API_KEY"].outcome == "imported"
+    assert store.delete("anthropic-api")
+
+
+def test_stale_import_of_a_rotated_source_cannot_restore_the_old_key(env, monkeypatch):
+    # Loopy r2 (cmvq4flel00gf0ms3xcrtera5): A decrypted h1 and paused; the vault
+    # rotated to h2, B imported h2, the operator disconnected. A must not import h1.
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    stale = VaultImporter(engine, store, KEY)
+    commit = stale._commit
+    raced = []
+
+    def pause_before_commit(group, outcome, detail, value=None, **kwargs):
+        if not raced:
+            raced.append(outcome)
+            _rotate_import_and_disconnect(engine, store)
+        return commit(group, outcome, detail, value, **kwargs)
+
+    monkeypatch.setattr(stale, "_commit", pause_before_commit)
+    result = by_name(stale.run())
+    assert raced == [vault_import.IMPORTED]
+    assert (result["ANTHROPIC_API_KEY"].outcome, result["ANTHROPIC_API_KEY"].detail_code,
+            result["ANTHROPIC_API_KEY"].processed) == ("failed", "source_changed", False)
+    assert row_json(engine, "anthropic-api") is None
+    assert ledger_rows(engine)["ANTHROPIC_API_KEY"]["outcome"] == "imported"
+    assert run(engine, store)["ANTHROPIC_API_KEY"].processed is False
+    assert row_json(engine, "anthropic-api") is None
+
+
+def test_stale_failure_on_a_rotated_source_does_not_reopen_the_newer_import(env, monkeypatch):
+    # Same race ending in a failure: A's "failed" for h1 would overwrite the
+    # ledger's "imported" h2 and make the next run re-import the disconnected key.
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    stale = VaultImporter(engine, store, OTHER_KEY)  # its decrypt fails
+    commit = stale._commit
+    raced = []
+
+    def pause_before_commit(group, outcome, detail, value=None, **kwargs):
+        if not raced:
+            raced.append(outcome)
+            _rotate_import_and_disconnect(engine, store)
+        return commit(group, outcome, detail, value, **kwargs)
+
+    monkeypatch.setattr(stale, "_commit", pause_before_commit)
+    stale.run()
+    assert raced == [vault_import.FAILED]
+    assert ledger_rows(engine)["ANTHROPIC_API_KEY"]["outcome"] == "imported"
+    assert run(engine, store)["ANTHROPIC_API_KEY"].processed is False
+    assert row_json(engine, "anthropic-api") is None
+
+
 def test_import_refuses_a_root_key_that_was_not_persisted(env, monkeypatch, tmp_path):
     # Loopy r1 B2: no env root and a key file that can't be written. Load the
     # real crypto module separately from the fixture's in-memory Fernet.

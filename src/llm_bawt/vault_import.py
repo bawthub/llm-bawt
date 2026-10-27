@@ -16,9 +16,11 @@ and one encrypted store, so this command copies what the vault holds into
   recorded. A mismatch rolls the insert back;
 * every write for one destination (ledger rows, the insert and its
   read-back) happens in one transaction under a per-destination advisory
-  lock, after re-reading the ledger and the destination there. A decision
-  made from a stale snapshot writes nothing, so a concurrent importer can't
-  bring back a key the operator disconnected after another import;
+  lock, after re-reading the ledger, the destination and the vault
+  ciphertext there. A decision made from a stale snapshot of any of them
+  writes nothing (a changed source reports ``failed:source_changed`` without
+  touching the ledger), so a concurrent importer can't bring back a key, old
+  or rotated, that the operator disconnected after another import;
 * nothing is imported unless the active encryption key is the persisted root
   (env or key file): a record encrypted under a key that exists only in this
   process would be unreadable by the next one (``failed:ephemeral_root``);
@@ -279,6 +281,14 @@ class VaultImporter:
             conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
                          {"target": f"llm-bawt/vault-import/{destination}"})
 
+    @staticmethod
+    def _source_changed(conn, group: _Group) -> bool:
+        """True when any of ``group``'s vault rows changed or vanished since listing."""
+        names = [row.name for row in group.rows]
+        live = {name: _sha256(ciphertext) for name, ciphertext in conn.execute(
+            text("SELECT name, ciphertext FROM vault.secrets WHERE name = ANY(:names)"), {"names": names})}
+        return any(live.get(row.name) != row.source_sha256 for row in group.rows)
+
     def _commit(self, group: _Group, outcome: str, detail: str | None, value: str | None = None,
                 *, retry: bool = True) -> list[Outcome]:
         """Re-check eligibility under the destination fence, then write ``outcome``.
@@ -293,6 +303,12 @@ class VaultImporter:
             with self.engine.begin() as conn:
                 self._fence(conn, destination)
                 names = [row.name for row in group.rows]
+                if self._source_changed(conn, group):
+                    # Decided from ciphertext the vault no longer holds. Another
+                    # importer may already own the newer source; write nothing
+                    # and let the next run decide from the current one.
+                    return [Outcome(name, destination, FAILED, "source_changed", processed=False)
+                            for name in names]
                 fresh = {row.name: row for row in conn.execute(select(ledger).where(ledger.c.name.in_(names)))}
                 exists = self.store.exists_in(conn, destination)
                 due, settled = self._split(group, fresh, exists)
