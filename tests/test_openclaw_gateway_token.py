@@ -207,6 +207,42 @@ def test_app_unusable_record_never_falls_back(monkeypatch, code):
     assert LEGACY not in str(raised.value) and str(raised.value) == code
 
 
+def _streamer(**fields):
+    from llm_bawt.service.chat_streaming_bridge import ChatStreamingBridgeMixin
+
+    streamer = ChatStreamingBridgeMixin.__new__(ChatStreamingBridgeMixin)
+    streamer.config = _config(OPENCLAW_GATEWAY_URL="http://gw.test", **fields)
+    return streamer
+
+
+def test_app_stream_rebuilds_the_gateway_client_on_rotation(monkeypatch):
+    # Loopy r1 on eb46516: a saved or rotated token must reach the HTTP client
+    # without a restart, and an unchanged token must keep the client.
+    tokens = iter(["first", "first", "second"])
+    monkeypatch.setattr(openclaw_credentials, "gateway_token", lambda _config: next(tokens))
+    streamer = _streamer()
+
+    async def turns():
+        return [await streamer._openclaw_gateway() for _ in range(3)]
+
+    first, same, rotated = asyncio.run(turns())
+    assert same is first and first.token == "first"
+    assert rotated is not first and rotated.token == "second"
+    assert rotated._client.headers["Authorization"] == "Bearer second"
+    assert streamer._gateway_http is rotated
+
+
+def test_app_stream_unusable_record_fails_the_turn(monkeypatch):
+    def unavailable(_config):
+        raise ConnectionUnavailable("not_connected")
+
+    monkeypatch.setattr(openclaw_credentials, "gateway_token", unavailable)
+    streamer = _streamer(OPENCLAW_GATEWAY_TOKEN=LEGACY)
+    with pytest.raises(ConnectionUnavailable):
+        asyncio.run(streamer._openclaw_gateway())
+    assert getattr(streamer, "_gateway_http", None) is None
+
+
 # --- the bridge's reader -------------------------------------------------
 
 def _http(handler):

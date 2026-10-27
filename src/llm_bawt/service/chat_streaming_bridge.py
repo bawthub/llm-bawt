@@ -44,6 +44,27 @@ class ChatStreamingBridgeMixin(BridgeSessionResetMixin):
             or "agent:main:main"
         )
 
+    async def _openclaw_gateway(self):
+        """The gateway HTTP client for this turn, built with the current token.
+
+        The token is record-first and resolved per turn, so a saved or rotated
+        token applies without a restart. An unusable record raises
+        ``ConnectionUnavailable`` and fails the turn; it never falls back to
+        env. On a token change the client is replaced, not closed: a
+        concurrent turn may still be using it, and its pooled connections are
+        released when it's garbage-collected. Rotation is rare, so this stays
+        simple.
+        """
+        from llm_bawt.integrations.openclaw_credentials import gateway_token
+
+        token = await asyncio.to_thread(gateway_token, self.config)
+        gateway = getattr(self, '_gateway_http', None)
+        if gateway is None or gateway.token != token:
+            from openclaw_bridge.gateway_http import GatewayHttpClient
+            gateway = GatewayHttpClient(self.config.OPENCLAW_GATEWAY_URL, token)
+            self._gateway_http = gateway
+        return gateway
+
     async def _stream_via_bridge(
         self,
         *,
@@ -103,16 +124,7 @@ class ChatStreamingBridgeMixin(BridgeSessionResetMixin):
             redis_sub = getattr(self, '_redis_subscriber', None)
             if redis_sub:
                 # Redis mode: send via Gateway HTTP, subscribe via Redis
-                # Record-first token, resolved per turn so a saved or rotated
-                # token applies without a restart. An unusable record raises
-                # and fails the turn; it never falls back to env.
-                from llm_bawt.integrations.openclaw_credentials import gateway_token
-                token = await asyncio.to_thread(gateway_token, self.config)
-                gateway = getattr(self, '_gateway_http', None)
-                if gateway is None or gateway.token != token:
-                    from openclaw_bridge.gateway_http import GatewayHttpClient
-                    gateway = GatewayHttpClient(self.config.OPENCLAW_GATEWAY_URL, token)
-                    self._gateway_http = gateway
+                gateway = await self._openclaw_gateway()
                 run_id = await gateway.send_user_message(session_key, user_prompt)
                 log.info("OpenClaw gateway HTTP: sent message, run_id=%s", run_id)
                 event_source = redis_sub.subscribe(session_key, run_id=run_id)
