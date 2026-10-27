@@ -622,10 +622,7 @@ def test_the_checker_verifies_the_planned_source_paths(source):
     assert source.calls == [(APP_DIR, SOURCE_PLAN)]
 
 
-@pytest.mark.parametrize("prefix, ok", [
-    (None, False), ("/tmp/llm-bawt-pycache", True), ("/app/src/.pycache", False),
-    (f"{OPS_VOLUME}/pycache", False), ("/var/lib", False), ("tmp/pycache", False),
-])
+@pytest.mark.parametrize("prefix, ok", [(None, False), ("/tmp/llm-bawt-pycache", True)])
 def test_bytecode_is_tolerated_only_with_a_pycache_prefix_outside_every_mount(source, prefix, ok):
     env = {"LLM_BAWT_SERVICE_PORT": "8642", **({"PYTHONPYCACHEPREFIX": prefix} if prefix else {})}
     binding(AppDocker(compose=app_compose(environment=env)), checker=source)
@@ -633,7 +630,54 @@ def test_bytecode_is_tolerated_only_with_a_pycache_prefix_outside_every_mount(so
 
 
 @pytest.mark.parametrize("where", ["compose", "image"])
-@pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP", "LD_PRELOAD"])
+@pytest.mark.parametrize("prefix", ["/app/src/.pycache", f"{OPS_VOLUME}/pycache", OPS_VOLUME, "/var/lib",
+                                    "tmp/pycache", "/tmp/../app/src", ""])
+def test_a_pycache_prefix_on_or_holding_a_mount_refuses_even_with_no_pycache_in_source(source, where, prefix):
+    # Loopy r1 B1: Python reads bytecode AT the prefix, so a forged .pyc on a
+    # data mount loads though the source tree holds no __pycache__ at all.
+    api = AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642",
+                                                     "PYTHONPYCACHEPREFIX": prefix})
+                    if where == "compose" else None)
+    if where == "image":
+        api.images[APP_ID]["Config"]["Env"].append(f"PYTHONPYCACHEPREFIX={prefix}")
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_bytecode_unsafe" and caught.value.names == ["PYTHONPYCACHEPREFIX"]
+    assert not source.calls
+
+
+@pytest.mark.parametrize("where", ["compose", "image"])
+@pytest.mark.parametrize("name, value", [
+    ("PATH", f"{OPS_VOLUME}/bin:/usr/bin"),  # Loopy r1 B2: server.sh runs an unqualified uv
+    ("PATH", "/usr/bin:/app/src"), ("PATH", "/usr/bin::/bin"), ("PATH", "bin:/usr/bin"),
+    ("PATH", "/usr/../var/lib/llm-bawt-ops"), ("LD_LIBRARY_PATH", f"/usr/lib:{OPS_VOLUME}"),
+    ("UV_PROJECT_ENVIRONMENT", f"{OPS_VOLUME}/venv"), ("UV_CONFIG_FILE", "storage/uv.toml"),
+    ("VIRTUAL_ENV", f"{OPS_VOLUME}/venv"), ("XDG_CONFIG_HOME", OPS_VOLUME), ("HOME", f"{OPS_VOLUME}/home"),
+    ("UV_FIND_LINKS", f"file://{OPS_VOLUME}/wheels"),
+])
+def test_a_search_or_config_path_into_a_mount_refuses(source, where, name, value):
+    env = {"LLM_BAWT_SERVICE_PORT": "8642", name: value}
+    api = AppDocker(compose=app_compose(environment=env) if where == "compose" else None)
+    if where == "image":
+        api.images[APP_ID]["Config"]["Env"].append(f"{name}={value}")
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_env_unsafe" and caught.value.names == [name]
+    assert value not in str(caught.value) and not source.calls
+
+
+def test_steering_values_outside_mounts_and_non_path_values_pass(source):
+    env = {"LLM_BAWT_SERVICE_PORT": "8642", "PATH": "/app/.venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin",
+           "UV_HTTP_TIMEOUT": "600", "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
+           "PYTHONWARNINGS": "ignore::DeprecationWarning", "HOME": "/root",
+           "PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache", "CLAUDE_CODE_SKILLS_PATH": f"{OPS_VOLUME}/skills"}
+    binding(AppDocker(compose=app_compose(environment=env)), checker=source)
+    assert source.calls[-1][1]["bytecode_ok"] is True
+
+
+@pytest.mark.parametrize("where", ["compose", "image"])
+@pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP", "LD_PRELOAD",
+                                  "BASH_ENV", "ENV"])
 def test_runtime_env_that_loads_code_from_elsewhere_refuses(source, where, name):
     api = AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642", name: "/srv/x"})
                     if where == "compose" else None)

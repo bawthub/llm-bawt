@@ -54,7 +54,17 @@ MAX_MOUNTS = 32
 # Runtime variables that make Python (or the dynamic loader) take code from a
 # path the source check does not cover. Names are reported, never values.
 UNSAFE_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", "PYTHONSTARTUP",
-              "LD_PRELOAD", "LD_AUDIT")
+              "LD_PRELOAD", "LD_AUDIT", "BASH_ENV", "ENV")
+# Variables that steer where the shell, uv, Python or the dynamic loader find
+# executables, libraries, environments or configuration. Every path in their
+# value must be absolute, normalised and outside every mount: a data mount is
+# writable and unchecked, so ``PATH=/app/storage/bin:…`` would let
+# ``server.sh``'s unqualified ``uv`` run anything (TASK-1474 r1 B2). A value
+# token without ``/`` (``600``, ``1``, ``utf-8``) is not a path; a URL is
+# refused rather than parsed (``file:///…`` is a path). Fails closed.
+STEERING_ENV = ("PATH", "HOME", "VIRTUAL_ENV")
+STEERING_PREFIXES = ("PYTHON", "UV_", "LD_", "XDG_")
+SEARCH_PATHS = ("PATH", "LD_LIBRARY_PATH")  # an empty or relative entry means the cwd
 PYCACHE_PREFIX = "PYTHONPYCACHEPREFIX"
 PYCACHE_DIR = "__pycache__"
 MAX_SHOWN = 5
@@ -167,11 +177,35 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
     unsafe = [name for name in UNSAFE_ENV if name in env]
     if unsafe:
         raise SourceStateError("source_env_unsafe", unsafe)
+    mounts = [d for d in destinations if d]
+    # Python reads bytecode at the prefix INSTEAD of __pycache__, so a prefix
+    # on (or holding) a mount loads a forged .pyc even when no __pycache__
+    # exists under source (TASK-1474 r1 B1): a set prefix must be safe. Unset,
+    # Python uses __pycache__ next to the source, which the checker refuses.
     prefix = env.get(PYCACHE_PREFIX)
-    bytecode_ok = (_clean_path(prefix)
-                   and not any(_within(prefix, d) or _within(d, prefix) for d in destinations if d))
+    if prefix is not None and not (_clean_path(prefix)
+                                   and not any(_within(prefix, d) or _within(d, prefix) for d in mounts)):
+        raise SourceStateError("source_bytecode_unsafe", [PYCACHE_PREFIX],
+                               detail="not an absolute path outside every mount")
+    steering = [name for name, value in env.items()
+                if name != PYCACHE_PREFIX and (name in STEERING_ENV or name.startswith(STEERING_PREFIXES))
+                and not _paths_outside(name, value, mounts)]
+    if steering:
+        raise SourceStateError("source_env_unsafe", steering, detail="search or config path not outside every mount")
     compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
-    return {"paths": sorted(paths), "compose_files": compose_files, "bytecode_ok": bool(bytecode_ok)}
+    return {"paths": sorted(paths), "compose_files": compose_files, "bytecode_ok": prefix is not None}
+
+
+def _paths_outside(name: str, value, mounts: list) -> bool:
+    """Every path in ``value`` is absolute, normalised and outside every mount."""
+    if not isinstance(value, str):
+        return False
+    for token in value.split(":"):
+        if "/" not in token and name not in SEARCH_PATHS:
+            continue
+        if not _clean_path(token) or any(_within(token, d) for d in mounts):
+            return False
+    return True
 
 
 def _records(out: bytes) -> list[str]:
