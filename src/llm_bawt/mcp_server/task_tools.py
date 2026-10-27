@@ -25,6 +25,13 @@ from .task_board_state import (
     _focus_patch,
     _patch_error,
 )
+from .task_images import (
+    ImageRefError,
+    image_urls_patch,
+    linked_turn_images,
+    newly_added,
+    resolve_image_refs,
+)
 from .task_step_types import (
     BLOCKED_DEFINITION,
     CHECK_LINKS_DOC,
@@ -415,6 +422,9 @@ async def update_task(
         bool | None,
         Field(description="True takes a finished task off the board; false restores it."),
     ] = None,
+    add_image_urls: list[str] | None = None,
+    remove_image_urls: list[str] | None = None,
+    attach_turn_images: bool = True,
 ) -> dict:
     """Update a task's fields. Only provided fields are changed.
 
@@ -426,6 +436,11 @@ async def update_task(
       pushed commit and test/live check in response; Snark or Rook closes
       status="COMPLETED" after verifying those receipts.
     - Report failure: status="FAILED", response="What went wrong"
+
+    Images: attach every relevant image from the conversation (screenshots,
+    mockups, error captures). Images reach every bot that works the task;
+    don't make them re-capture with Playwright. Linking the current turn
+    attaches that message's own images automatically.
 
     Moving a task to REVIEW requires it to have an owner. You don't need to set
     one by hand: when status="REVIEW", the task has no owner, and you pass
@@ -496,6 +511,13 @@ async def update_task(
                       be focused itself.
         archived: True archives a finished task; False unarchives it.
                   Combines with status in the same update.
+        add_image_urls: Images to attach: chat upload ids (ma_...) or upload
+                  URLs. Unknown ids are refused. Already attached = no-op.
+        remove_image_urls: Images to detach, same forms. Missing = no-op. If
+                  the task's images change during the update, nothing is saved.
+        attach_turn_images: With associate_current_turn, also attach the
+                  images on the message that started this turn (default True;
+                  listed in turnImagesAttached). False opts out.
 
     Returns:
         Compact updated task summary, or error dict. Use tasks_get for full detail.
@@ -544,9 +566,25 @@ async def update_task(
         if await _task_is_unowned(task_id):
             body["agentBotId"] = bot_id
 
+    turn_urls, turn_error = await linked_turn_images(associate_current_turn, attach_turn_images)
+    turn_attached: list[str] = []
+    if add_image_urls or remove_image_urls or turn_urls:
+        try:
+            image_urls, before = await image_urls_patch(lambda ref: _api_get(f"/tasks/{ref}"), task_id,
+                                                        add_image_urls, remove_image_urls, turn_urls)
+        except ImageRefError as error:
+            return {"error": str(error)}
+        except httpx.HTTPStatusError as error:
+            return _http_error(error)
+        if image_urls is not None:
+            body["imageUrls"] = image_urls
+            turn_attached = newly_added([url for url in turn_urls if url in image_urls], before)
+        elif not body and not associate_current_turn:
+            return {"ok": True, "updated": [], "detail": "The task's images already match; nothing was written."}
+
     if not body:
         if associate_current_turn:
-            return await associate_task_to_current_turn(task_id)
+            return _turn_images(await associate_task_to_current_turn(task_id), turn_attached, turn_error)
         return {"error": "No fields to update"}
 
     try:
@@ -588,10 +626,20 @@ async def update_task(
                         if isinstance(error, httpx.HTTPStatusError)
                         else {"error": str(error)}
                     )
-            return result
+            return _turn_images(result, turn_attached, turn_error)
         return updated
     except httpx.HTTPStatusError as e:
         return _patch_error(e)
+
+
+def _turn_images(result: Any, attached: list[str], error: str | None) -> Any:
+    """Name the linked turn's images this call attached, so a bot can drop an irrelevant one."""
+    if isinstance(result, dict):
+        if attached:
+            result["turnImagesAttached"] = attached
+        if error:
+            result["turnImagesError"] = error
+    return result
 
 
 @mcp.tool(name="tasks_delete")
@@ -788,10 +836,17 @@ async def create_task(
     bot_id: str | None = None,
     associate_current_turn: bool = False,
     blocked_reason: str | None = None,
+    image_urls: list[str] | None = None,
+    attach_turn_images: bool = True,
 ) -> dict:
     """Create a new agent task.
 
     Use this to break work into sub-tasks or queue follow-up work.
+
+    Images: attach every relevant image from the conversation (screenshots,
+    mockups, error captures). Images reach every bot that works the task;
+    don't make them re-capture with Playwright. Linking the current turn
+    attaches that message's own images automatically.
 
     {blocked_definition}
 
@@ -812,6 +867,11 @@ async def create_task(
                 The server supplies all correlation IDs.
         blocked_reason: What Nick must do or decide; required when
                         status="BLOCKED" and rejected otherwise.
+        image_urls: Images to attach: chat upload ids (ma_...) or upload URLs.
+                    Unknown ids are refused.
+        attach_turn_images: With associate_current_turn, also attach the
+                    images on the message that started this turn (default
+                    True; listed in turnImagesAttached). False opts out.
 
     Returns:
         Created task with generated shortId and, when requested, an association result.
@@ -835,6 +895,14 @@ async def create_task(
         if validation_error:
             return {"error": validation_error}
         body["steps"] = steps
+    try:
+        explicit = await resolve_image_refs(image_urls or [])
+    except ImageRefError as error:
+        return {"error": str(error)}
+    turn_urls, turn_error = await linked_turn_images(associate_current_turn, attach_turn_images)
+    turn_attached = newly_added(turn_urls, explicit)
+    if explicit or turn_attached:
+        body["imageUrls"] = [*explicit, *turn_attached]
 
     try:
         created = await _api_post("/tasks", json=body, headers=_headers(bot_id))
@@ -856,6 +924,6 @@ async def create_task(
                 if isinstance(error, httpx.HTTPStatusError)
                 else {"error": str(error)}
             )
-        return {"task": created, "currentTurnAssociation": association}
+        return _turn_images({"task": created, "currentTurnAssociation": association}, turn_attached, turn_error)
     except httpx.HTTPStatusError as e:
         return _http_error(e)

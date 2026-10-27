@@ -200,7 +200,11 @@ async def test_catalog_token_budgets():
     # and owner-bound cursors): 14,756 (+254).
     # TASK-1521: bots_profile_patch (bot_id, changes, reason, expected):
     # 14,894 (+138). One audited CAS call replaces a GET + curl PATCH pair.
-    assert total <= 14894, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1526: image_urls / add_image_urls / remove_image_urls /
+    # attach_turn_images on tasks_create and tasks_update, plus the attach
+    # policy: 15,001 (+107). Task images reach every bot on the task instead of
+    # each one re-capturing them with Playwright.
+    assert total <= 15001, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
