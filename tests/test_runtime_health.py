@@ -99,7 +99,8 @@ def delivery_host():
             lane TEXT DEFAULT 'normal', transport_accepted_at TIMESTAMP)"""))
         conn.execute(text("""CREATE TABLE turn_logs (
             id TEXT, bot_id TEXT, status TEXT, agent_session_key TEXT,
-            agent_request_id TEXT, user_id TEXT, created_at TIMESTAMP, ended_at TIMESTAMP)"""))
+            agent_request_id TEXT, agent_backend TEXT, agent_steer_caps TEXT, user_id TEXT,
+            created_at TIMESTAMP, ended_at TIMESTAMP)"""))
     service = host()
     service._inter_bot_dispatcher = SimpleNamespace(store=SimpleNamespace(engine=engine), _leader_task=task())
     yield service
@@ -130,7 +131,7 @@ def insert(service, status, *, age=0, delay=None, lease=60, target="rook", sende
 
 def open_turn(service, bot, *, age=60, status="streaming", turn_id=None):
     with service._inter_bot_dispatcher.store.engine.begin() as conn:
-        conn.execute(text("INSERT INTO turn_logs VALUES (:id,:bot,:status,NULL,NULL,'u',:created,NULL)"),
+        conn.execute(text("INSERT INTO turn_logs VALUES (:id,:bot,:status,NULL,NULL,NULL,NULL,'u',:created,NULL)"),
                      {"id": turn_id or f"turn-{bot}-{age}", "bot": bot, "status": status,
                       "created": NOW-timedelta(seconds=age)})
 

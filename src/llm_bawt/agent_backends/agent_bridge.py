@@ -201,7 +201,13 @@ class AgentBridgeBackend(AgentBackend):
         self._active_request_id = request_id  # diagnostics only; never abort authority
         execution = config.get("turn_execution")
         if execution is not None:
-            execution.bind_bridge(backend=self.name, session_key=session_key, request_id=request_id)
+            from ..steer_capabilities import encode_caps
+
+            # TASK-1243: the run's steer capabilities are pinned with its binding.
+            execution.bind_bridge(
+                backend=self.name, session_key=session_key, request_id=request_id,
+                steer_caps=encode_caps(self.steer_capabilities(config)),
+            )
         # Fall back to config so callers that thread it through agent_backend_config
         # (rather than as a kwarg) still propagate.
         if not trigger_message_id:

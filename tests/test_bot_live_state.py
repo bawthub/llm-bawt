@@ -29,8 +29,8 @@ def engine():
         conn.execute(sa_text("""
             CREATE TABLE turn_logs (
                 id TEXT PRIMARY KEY, bot_id TEXT, status TEXT, agent_session_key TEXT,
-                agent_request_id TEXT, user_id TEXT, created_at TEXT, ended_at TEXT,
-                end_reason TEXT)
+                agent_request_id TEXT, agent_backend TEXT, agent_steer_caps TEXT, user_id TEXT,
+                created_at TEXT, ended_at TEXT, end_reason TEXT)
         """))
     return engine
 

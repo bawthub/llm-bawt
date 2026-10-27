@@ -31,6 +31,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 
 USER = "nick"  # the rig's fixture user
 MESSAGE = "Please stop at the next safe point."
+LEGACY_CLAUDE_CAPS = "cancel_queued,escalate,next,now"  # a pre-TASK-1243 claude-code row decodes to all
 
 
 @pytest.fixture(autouse=True)
@@ -38,13 +39,15 @@ def _message(monkeypatch):
     monkeypatch.setattr("llm_bawt.ops.quiesce_prompts.resolve", lambda key, bot: MESSAGE)
 
 
-def _turn(rig, *, backend="claude-code", session="sess-held", request="auto", user=USER):
+def _turn(rig, *, backend="claude-code", session="sess-held", request="auto", user=USER, caps=None):
     turn_id = f"turn-{uuid.uuid4().hex}"
     rig.sql("""
         INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
-                               response_text, ended_at, agent_request_id, agent_backend, agent_session_key)
-        VALUES (:id, now(), '/test', true, :bot, :user, 'streaming', '', '', NULL, :req, :backend, :session)
-    """, id=turn_id, bot=rig.bot, user=user, backend=backend, session=session,
+                               response_text, ended_at, agent_request_id, agent_backend, agent_session_key,
+                               agent_steer_caps)
+        VALUES (:id, now(), '/test', true, :bot, :user, 'streaming', '', '', NULL, :req, :backend, :session,
+                :caps)
+    """, id=turn_id, bot=rig.bot, user=user, backend=backend, session=session, caps=caps,
             req=f"req-{turn_id}" if request == "auto" else request)
     return turn_id
 
@@ -138,7 +141,8 @@ def test_a_held_running_turn_gets_one_control_row_and_is_asked_once(rig, monkeyp
     assert control["metadata_json"]["control"] == {
         "run_key": run_key,
         "target_run": {"turn_id": turn_id, "agent_request_id": f"req-{turn_id}",
-                       "backend": "claude-code", "session_key": "sess-held"}}
+                       "backend": "claude-code", "session_key": "sess-held",
+                       "steer_caps": LEGACY_CLAUDE_CAPS}}
     assert control["payload_json"]["user"] == USER and control["message"] == MESSAGE
     member = _member(rig, turn_id)
     assert (member["control_state"], member["control_delivery_id"]) == ("steering", control["id"])
@@ -162,9 +166,11 @@ def test_an_ended_member_is_not_needed_and_gets_no_row(rig):
 
 @pytest.mark.parametrize("turn, expected", [
     ({"backend": "codex"}, ("unsupported", "backend:codex")),
+    # TASK-1243: the run's pinned caps decide; '' is a run bound without steering.
+    ({"caps": ""}, ("unsupported", "backend:claude-code")),
     ({"session": None}, ("unconfirmed", "pinned_run_unaddressable")),
     ({"user": None}, ("unconfirmed", "turn_user_missing")),
-], ids=["other-backend", "no-session", "no-user"])
+], ids=["other-backend", "pinned-no-steer", "no-session", "no-user"])
 def test_a_run_that_cannot_be_asked_is_settled_without_a_row(rig, turn, expected):
     turn_id = _turn(rig, **turn)
     _open(rig)
@@ -234,7 +240,7 @@ def test_only_the_pinned_run_is_addressed_never_the_bots_current_one(rig, monkey
     [control] = _controls(rig)
     assert control["metadata_json"]["control"]["target_run"] == {
         "turn_id": turn_id, "agent_request_id": f"req-{turn_id}", "backend": "claude-code",
-        "session_key": "sess-pinned"}
+        "session_key": "sess-pinned", "steer_caps": LEGACY_CLAUDE_CAPS}
     assert rig.sql("SELECT count(*) FROM gate_members WHERE turn_id=:t", t=other).scalar() == 0
 
 
@@ -246,6 +252,18 @@ def test_a_member_bound_after_capture_pins_the_binding_of_its_request(rig):
     assert _producer(rig).run_pass().enqueued == 1
     pin = _controls(rig)[0]["metadata_json"]["control"]["target_run"]
     assert (pin["backend"], pin["session_key"]) == ("claude-code", "sess-bound")
+
+
+def test_a_run_pinned_with_steering_is_asked_on_any_backend(rig, monkeypatch):
+    """TASK-1243: a codex run bound with ``next`` gets its row, pinned with those caps."""
+    turn_id = _turn(rig, backend="codex", caps="next")
+    _open(rig)
+    assert _producer(rig).run_pass().enqueued == 1
+    [control] = _controls(rig)
+    pin = control["metadata_json"]["control"]["target_run"]
+    assert (pin["backend"], pin["steer_caps"]) == ("codex", "next")
+    claimed, calls = _steer(rig, monkeypatch)
+    assert claimed.id == control["id"] and len(calls) == 1
 
 
 # --- design §3 tests (e)–(j) -------------------------------------------------

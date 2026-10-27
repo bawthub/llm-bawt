@@ -19,9 +19,11 @@ from llm_bawt.service import quiesce_control as qc
 from llm_bawt.service import system_gate_admission as gates
 from llm_bawt.service.leader_side_pumps import CONTROL_RECHECK_CAP_SECONDS, LeaderSidePumps
 from llm_bawt.service.system_gate_admission import ControlGrantRefused, ControlTarget
+from llm_bawt.steer_capabilities import ALL_STEER_CAPS, NEXT
 
 GRANT = DeliveryControlGrant(bot_id="bot", turn_id="turn", delivery_id="d1", claim_token="tok")
-PINNED = ControlTarget(request_id="req-pinned", backend="claude-code", session_key="sess-pinned")
+PINNED = ControlTarget(request_id="req-pinned", backend="claude-code", session_key="sess-pinned",
+                       steer_caps=ALL_STEER_CAPS)
 
 
 def _service():
@@ -89,6 +91,26 @@ def test_a_control_steer_to_a_pinned_run_on_another_backend_is_refused(monkeypat
     with pytest.raises(HTTPException) as raised:
         asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q", control=GRANT))
     assert raised.value.status_code == 409 and bridge.sent == []
+    assert raised.value.detail == "steer_unsupported_transport"
+
+
+def test_a_control_steer_follows_the_pinned_caps_not_the_backend_name(monkeypatch, bridge):
+    """TASK-1243: a run pinned with ``next`` steers on any backend; one pinned
+    without it is refused even on claude-code."""
+    from llm_bawt.service.routes.chat import steer_active_turn
+
+    service, _ = _service()
+    capable = ControlTarget("req", "codex", "sess", steer_caps=frozenset({NEXT}))
+    monkeypatch.setattr(gates, "check_steer", lambda *_a, **_k: capable)
+    asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q", control=GRANT))
+    assert [sent["backend"] for sent in bridge.sent] == ["codex"]
+
+    unable = ControlTarget("req", "claude-code", "sess", steer_caps=frozenset())
+    monkeypatch.setattr(gates, "check_steer", lambda *_a, **_k: unable)
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q2", control=GRANT))
+    assert (raised.value.status_code, raised.value.detail) == (409, "steer_unsupported_transport")
+    assert len(bridge.sent) == 1
 
 
 def test_a_control_steer_needs_its_dedupe_id(monkeypatch, bridge):
@@ -144,15 +166,33 @@ def test_check_steer_refuses_a_grant_for_another_bot_or_turn_or_off_postgresql()
 
 @pytest.mark.parametrize("member,expected", [
     ({"agent_request_id": None}, None),
+    # Legacy rows (no caps recorded) decode from the pinned backend.
     ({"agent_request_id": "r1", "backend": "claude-code", "agent_session_key": "s1",
       "turn_request_id": "r2", "turn_backend": "codex", "turn_session_key": "s2"},
-     ControlTarget("r1", "claude-code", "s1")),
+     ControlTarget("r1", "claude-code", "s1", ALL_STEER_CAPS)),
     ({"agent_request_id": "r1", "backend": None, "agent_session_key": None,
       "turn_request_id": "r1", "turn_backend": "claude-code", "turn_session_key": "s1"},
-     ControlTarget("r1", "claude-code", "s1")),
+     ControlTarget("r1", "claude-code", "s1", ALL_STEER_CAPS)),
     ({"agent_request_id": "r1", "backend": None, "agent_session_key": None,
       "turn_request_id": "r2", "turn_backend": "claude-code", "turn_session_key": "s2"},
      ControlTarget("r1", None, None)),
+    ({"agent_request_id": "r1", "backend": "codex", "agent_session_key": "s1",
+      "turn_request_id": "r1", "turn_backend": "codex", "turn_session_key": "s1"},
+     ControlTarget("r1", "codex", "s1")),
+    # TASK-1243: the pinned request's own caps. The turn row's are used only
+    # when the turn row is that request's binding; '' is "none", not legacy.
+    ({"agent_request_id": "r1", "backend": "codex", "agent_session_key": "s1", "agent_steer_caps": "next",
+      "turn_request_id": "r1", "turn_backend": "codex", "turn_session_key": "s1",
+      "turn_steer_caps": "escalate,next"},
+     ControlTarget("r1", "codex", "s1", frozenset({"next", "escalate"}))),
+    ({"agent_request_id": "r1", "backend": "codex", "agent_session_key": "s1", "agent_steer_caps": "next",
+      "turn_request_id": "r2", "turn_backend": "claude-code", "turn_session_key": "s2",
+      "turn_steer_caps": ""},
+     ControlTarget("r1", "codex", "s1", frozenset({"next"}))),
+    ({"agent_request_id": "r1", "backend": "claude-code", "agent_session_key": "s1", "agent_steer_caps": None,
+      "turn_request_id": "r1", "turn_backend": "claude-code", "turn_session_key": "s1",
+      "turn_steer_caps": ""},
+     ControlTarget("r1", "claude-code", "s1")),
 ])
 def test_the_control_target_is_the_pinned_request_binding(member, expected):
     assert gates.control_target(member) == expected

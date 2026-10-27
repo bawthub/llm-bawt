@@ -77,33 +77,42 @@ class ControlTarget:
 
     Never the bot's current turn or backend (Snark, carried out-of-scope
     member). ``backend``/``session_key`` are None when the pinned run's
-    binding is unknown, and such a run is never steered.
+    binding is unknown, and such a run is never steered. ``steer_caps`` is
+    the pinned run's own capabilities (TASK-1243, ``steer_capabilities``).
     """
 
     request_id: str
     backend: str | None
     session_key: str | None
+    steer_caps: frozenset[str] = frozenset()
 
 
 def control_target(member: Mapping[str, Any]) -> ControlTarget | None:
     """Resolve a member row's pinned run (None until a request is pinned).
 
     ``member`` carries the member's ``agent_request_id``/``backend``/
-    ``agent_session_key`` and its turn row's ``turn_request_id``/
-    ``turn_backend``/``turn_session_key``. The turn row's binding is used only
-    when it is the binding of the pinned request (``bind_agent_bridge`` writes
-    all three together); otherwise the roster's capture is the only record.
-    The request id is only an address, never proof the member is live.
+    ``agent_session_key``/``agent_steer_caps`` and its turn row's
+    ``turn_request_id``/``turn_backend``/``turn_session_key``/
+    ``turn_steer_caps``. The turn row's binding is used only when it is the
+    binding of the pinned request (``bind_agent_bridge`` writes them
+    together); otherwise the roster's capture is the only record. The request
+    id is only an address, never proof the member is live.
     """
+    from ..steer_capabilities import run_steer_caps
+
     request_id = member["agent_request_id"]
     if not request_id:
         return None
     if member["turn_request_id"] == request_id:
         backend = member["turn_backend"] or member["backend"]
         session_key = member["turn_session_key"] or member["agent_session_key"]
+        caps = member.get("turn_steer_caps")
+        caps = member.get("agent_steer_caps") if caps is None else caps
     else:
         backend, session_key = member["backend"], member["agent_session_key"]
-    return ControlTarget(request_id=request_id, backend=backend, session_key=session_key)
+        caps = member.get("agent_steer_caps")
+    return ControlTarget(request_id=request_id, backend=backend, session_key=session_key,
+                         steer_caps=run_steer_caps(backend=backend, caps=caps))
 
 
 # The live-member join (agreed with Byte): a member of its job's current
@@ -113,10 +122,11 @@ def control_target(member: Mapping[str, Any]) -> ControlTarget | None:
 # gate that expired during the wait would still read as live.
 LIVE_MEMBER_SQL = """
     SELECT m.id, m.gate_id, m.bot_id, m.turn_id, m.disposition, m.control_state,
-           m.backend, m.agent_session_key, m.agent_request_id,
+           m.backend, m.agent_session_key, m.agent_request_id, m.agent_steer_caps,
            j.caller_turn_id, t.id AS turn_present, t.ended_at IS NOT NULL AS turn_ended,
            t.user_id AS turn_user_id, t.agent_request_id AS turn_request_id,
-           t.agent_backend AS turn_backend, t.agent_session_key AS turn_session_key
+           t.agent_backend AS turn_backend, t.agent_session_key AS turn_session_key,
+           t.agent_steer_caps AS turn_steer_caps
     FROM gate_members m
     JOIN system_gates g ON g.id = m.gate_id
     JOIN ops_jobs j ON j.id = g.owner_id AND j.quiesce_gate_id = m.gate_id

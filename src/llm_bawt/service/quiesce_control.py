@@ -17,8 +17,8 @@ Per live member (``LIVE_MEMBER_SQL``) that is ``pending`` with no link, or
   df30f61).
 * Member-local decisions: revoked, turn gone or ended -> ``not_needed``; the
   job's caller's own turn -> ``self``; no pinned request yet -> skipped,
-  nothing written; a pinned run on a backend that cannot steer ->
-  ``unsupported``; a binding that is unknown -> ``unconfirmed``; a pinned
+  nothing written; a pinned run whose own steer capabilities (TASK-1243)
+  lack ``next`` -> ``unsupported``; a binding that is unknown -> ``unconfirmed``; a pinned
   turn with no user -> ``unconfirmed`` (``turn_user_missing``: the steer's
   user must be the turn's own, and there is no fallback).
 * The link step (design §3). The run's rows are found by ``run_key``
@@ -42,10 +42,11 @@ from sqlalchemy import text as sa_text
 from ..inter_bot_control_lane import (
     ABSORBING_SQL,
     CONTROL_LANE,
-    STEERABLE_BACKEND,
     control_metadata,
     enqueue_control,
+    pin_matches,
 )
+from ..steer_capabilities import NEXT, encode_caps
 from .system_gate_admission import LIVE_MEMBER_SQL, control_target
 from .turn_admission import lock_target
 from .turn_gates import REVOKED_UNSTARTED, ensure_gate_schema
@@ -162,14 +163,15 @@ class QuiesceControlProducer:
         target = control_target(row)
         if target is None:
             return UNPINNED
-        if target.backend and target.backend != STEERABLE_BACKEND:
+        if target.backend and NEXT not in target.steer_caps:
             return self._set_state(conn, row["id"], "unsupported", f"backend:{target.backend}")
         if not target.backend or not target.session_key:
             return self._set_state(conn, row["id"], "unconfirmed", "pinned_run_unaddressable")
         if not row["turn_user_id"]:
             return self._set_state(conn, row["id"], "unconfirmed", "turn_user_missing")
         pin = {"turn_id": row["turn_id"], "agent_request_id": target.request_id,
-               "backend": target.backend, "session_key": target.session_key}
+               "backend": target.backend, "session_key": target.session_key,
+               "steer_caps": encode_caps(target.steer_caps)}
         return self._link(conn, row, pin, message)
 
     def _link(self, conn, row: Mapping[str, Any], pin: Mapping[str, Any], message: str) -> str:
@@ -203,7 +205,7 @@ class QuiesceControlProducer:
         control = control_metadata(record)
         if getattr(record, "lane", None) != CONTROL_LANE or control.get("run_key") != run_key:
             return False
-        if dict(control.get("target_run") or {}) != dict(pin):
+        if not pin_matches(control.get("target_run") or {}, pin):
             return False
         return bool(conn.execute(sa_text(
             f"SELECT {ABSORBING_SQL} FROM inter_bot_deliveries d WHERE d.id = :id"

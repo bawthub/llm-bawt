@@ -42,6 +42,15 @@ class AgentBackend(ABC):
         """
         return None
 
+    def steer_capabilities(self, config: dict) -> frozenset[str]:
+        """What a run bound now with ``config`` can do with a steer (TASK-1243).
+
+        Names from ``llm_bawt.steer_capabilities``. Pinned on the run at bind
+        and read by every steer decision for that run. The default is none: a
+        backend whose bridge cannot steer only ever starts fresh turns.
+        """
+        return frozenset()
+
     @abstractmethod
     async def chat(
         self,

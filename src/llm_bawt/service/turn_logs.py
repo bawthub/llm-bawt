@@ -355,7 +355,8 @@ class TurnLogStore:
             session_id=session_id, claim=admission_claim,
         )
 
-    def bind_agent_bridge(self, *, turn_id: str, backend: str, session_key: str, request_id: str) -> None:
+    def bind_agent_bridge(self, *, turn_id: str, backend: str, session_key: str, request_id: str,
+                          steer_caps: str | None = None) -> None:
         """Bind before publication, refusing a turn finalized by another owner.
 
         A worker may outlive its HTTP request or lose a race to cancellation.
@@ -376,8 +377,9 @@ class TurnLogStore:
             row.agent_backend = backend
             row.agent_session_key = session_key
             row.agent_request_id = request_id
+            row.agent_steer_caps = steer_caps  # TASK-1243: None = recorded before caps existed
             session.add(row)
-            pin_member_request(session.connection(), turn_id, request_id)  # TASK-1233 test_Z (a)
+            pin_member_request(session.connection(), turn_id, request_id, steer_caps)  # TASK-1233 test_Z (a)
             session.commit()
 
     def update_turn(

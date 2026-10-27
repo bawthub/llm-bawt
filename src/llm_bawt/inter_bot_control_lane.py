@@ -33,12 +33,14 @@ from sqlalchemy.engine import Connection
 from .bot_identities import SYSTEM_BOT_ID
 from .inter_bot_delivery_record import DeliveryRecord
 from .message_authorship import AuthorReference
+from .steer_capabilities import NEXT
 from .utils.schema import ensure_relations
 
 CONTROL_LANE = "control"
 NORMAL_LANE = "normal"
-STEERABLE_BACKEND = "claude-code"
-TARGET_RUN_KEYS = ("turn_id", "agent_request_id", "backend", "session_key")
+# ``steer_caps`` (TASK-1243) is the pinned run's encoded steer capabilities;
+# a row written before it has no such key and decodes from its backend.
+TARGET_RUN_KEYS = ("turn_id", "agent_request_id", "backend", "session_key", "steer_caps")
 
 # One ask per pinned run, retried until its turn ends or this many attempts
 # have been spent (the pump's budget: about a minute of backoff).
@@ -142,6 +144,8 @@ def enqueue_control(
     producer's link step checks it before linking (design §3 step 4).
     """
     pin = {key: target_run.get(key) for key in TARGET_RUN_KEYS}
+    if pin["steer_caps"] is None:
+        del pin["steer_caps"]  # unknown caps are stored as a pre-TASK-1243 pin, never as null
     if not pin["turn_id"] or not pin["agent_request_id"]:
         raise ValueError("a control row needs a pinned turn and request")
     if not run_key or not idempotency_key or not user:
@@ -200,13 +204,33 @@ def linked_member(conn: Connection, *, delivery_id: str, bot_id: str,
 def _pinned_target(member: Mapping[str, Any], pin: Mapping[str, Any]):
     """The member's ``control_target`` when it is exactly the pin, else None."""
     from .service.system_gate_admission import control_target
+    from .steer_capabilities import encode_caps
 
     target = control_target(member)
     if target is None or target.request_id != pin.get("agent_request_id"):
         return None
     if target.backend != pin.get("backend") or target.session_key != pin.get("session_key"):
         return None
+    if pin.get("steer_caps") is not None and encode_caps(target.steer_caps) != pin["steer_caps"]:
+        return None
     return target
+
+
+def pin_matches(stored: Mapping[str, Any], pin: Mapping[str, Any]) -> bool:
+    """A stored ``target_run`` names the run ``pin`` names.
+
+    A row stored before TASK-1243 lacks ``steer_caps``; it still names the
+    same run, so only the keys it has are compared.
+    """
+    stored = dict(stored or {})
+    return set(stored) <= set(pin) and all(pin[key] == value for key, value in stored.items())
+
+
+def pinned_steer_caps(pin: Mapping[str, Any]) -> frozenset[str]:
+    """The pinned run's steer capabilities, decoding a pre-TASK-1243 pin from its backend."""
+    from .steer_capabilities import run_steer_caps
+
+    return run_steer_caps(backend=pin.get("backend"), caps=pin.get("steer_caps"))
 
 
 class ControlClaim:
@@ -250,7 +274,7 @@ class ControlClaim:
             return cls._settle(conn, head, "CANCELLED", f"{NOT_NEEDED}:run_ended")
         if not pin.get("backend") or not pin.get("session_key") or _pinned_target(member, pin) is None:
             return cls._settle(conn, head, "FAILED", f"{UNCONFIRMED}:pinned_run_unaddressable")
-        if pin["backend"] != STEERABLE_BACKEND:
+        if NEXT not in pinned_steer_caps(pin):
             return cls._settle(conn, head, "CANCELLED", f"{NOT_NEEDED}:unsupported_backend")
         if str(_payload(head).get("user") or "") != str(member["turn_user_id"] or ""):
             # steer_active_turn refuses an ownership mismatch on every attempt.
@@ -360,6 +384,8 @@ class ControlSteerFailure:
 
     @classmethod
     def settle(cls, store, record: DeliveryRecord, error: str) -> DeliveryRecord | None:
+        from agent_bridge.steer_contract import STEER_CAPABILITY_REFUSALS
+
         from .service.inter_bot_dispatcher_steer import DEFINITIVE_NOT_ACCEPTED, SteerGeneration
 
         token = record.claim_token or ""
@@ -383,6 +409,10 @@ class ControlSteerFailure:
             ), {"id": _pin(row).get("turn_id")}).mappings().first()
             if turn is None or turn["ended"]:
                 return cls._settle_claimed(conn, row, "CANCELLED", f"{NOT_NEEDED}:run_ended")
+            if error in STEER_CAPABILITY_REFUSALS:
+                # TASK-1243: the pinned run cannot take this ask, and never
+                # will; asking again only burns the budget.
+                return cls._settle_claimed(conn, row, "CANCELLED", f"{NOT_NEEDED}:{error}")
             attempts = int(row["attempt_count"] or 0)
             if attempts >= int(row["max_attempts"] or 0):
                 return cls._settle_claimed(conn, row, "FAILED", f"{UNCONFIRMED}:{error}"[:4000])
@@ -419,4 +449,5 @@ __all__ = [
     "ABSORBING_SQL", "CONTROL_LANE", "CONTROL_MAX_ATTEMPTS", "ControlClaim", "ControlSteerFailure",
     "DeliveryControlGrant", "GRANT_REFUSED", "NORMAL_LANE", "admit_delivery_grant",
     "control_metadata", "enqueue_control", "ensure_control_lane_schema", "linked_member",
+    "pin_matches", "pinned_steer_caps",
 ]

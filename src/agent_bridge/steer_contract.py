@@ -45,6 +45,16 @@ STEER_UNFRAMED = "steer_unframed"
 # turn, the same as a steer to an idle bot.
 STEER_RUN_FINISHING = "run_finishing"
 
+# TASK-1243: the run's transport cannot steer at all (a codex exec run), or
+# can steer but not with the asked priority (``now``, escalate, cancel of a
+# queued message). Refused before anything reaches the model, by the app from
+# the run's pinned capabilities (``llm_bawt.steer_capabilities``) or by the
+# bridge as its backstop, so both are definite non-deliveries: callers send
+# the message as a fresh turn.
+STEER_UNSUPPORTED_TRANSPORT = "steer_unsupported_transport"
+STEER_PRIORITY_UNSUPPORTED = "steer_priority_unsupported"
+STEER_CAPABILITY_REFUSALS = frozenset({STEER_UNSUPPORTED_TRANSPORT, STEER_PRIORITY_UNSUPPORTED})
+
 # ``steer_lifecycle`` event states (the CLI's ``command_lifecycle`` frames,
 # plus the bridge's own ``uncertain``) and the rejection proofs that a
 # command can never run. Published by ``claude_code_bridge.active_run``;

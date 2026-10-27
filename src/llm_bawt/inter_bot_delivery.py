@@ -399,7 +399,7 @@ class InterBotDeliveryStore:
         return DeliveryRecord.from_mapping(cancelled) if cancelled else None
 
     def claim_next(
-        self, target_bot_id: str, *, claim_owner: str, steer_capable: bool,
+        self, target_bot_id: str, *, claim_owner: str, steer_capable: bool | frozenset[str],
         lease_seconds: int = 300,
     ) -> DeliveryRecord | None:
         from .inter_bot_delivery_claim import DeliveryClaim

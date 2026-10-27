@@ -110,11 +110,15 @@ class TurnExecution:
             thread = self._stream_thread
         return self._worker_exited.is_set() and (thread is None or not thread.is_alive())
 
-    def bind_bridge(self, *, backend: str, session_key: str, request_id: str) -> None:
+    def bind_bridge(
+        self, *, backend: str, session_key: str, request_id: str, steer_caps: str | None = None,
+    ) -> None:
         # Persist the actual request-local identity before command publication,
         # never from the bot's shared _active_request_id or first model output.
+        # ``steer_caps`` (TASK-1243) is the run's encoded steer capabilities.
         self.store.bind_agent_bridge(
             turn_id=self.turn_id, backend=backend, request_id=request_id, session_key=session_key,
+            steer_caps=steer_caps,
         )
         with self._lock:
             self.backend, self.session_key, self.request_id = backend, session_key, request_id

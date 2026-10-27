@@ -262,6 +262,9 @@ _MEMBER_ADDED_COLUMNS = {
     # Authority is this link, read at claim and at grant; never a ref stored
     # on the delivery.
     "control_delivery_id": ("VARCHAR(96)", None),
+    # TASK-1243: the pinned run's steer capabilities, copied from the turn row
+    # with ``agent_request_id`` (capture and pin-at-bind). NULL = legacy row.
+    "agent_steer_caps": ("VARCHAR(64)", None),
 }
 
 # The TASK-1233 B3 pump's own claim, lease, retry and generation, retired by
@@ -568,6 +571,11 @@ def _pinned_request(row: Mapping[str, Any]) -> str | None:
     return row["agent_request_id"] or row["turn_request_id"]
 
 
+def _pinned_caps(row: Mapping[str, Any]) -> str | None:
+    """The steer capabilities of ``_pinned_request``'s run (TASK-1243)."""
+    return row["agent_steer_caps"] if row["agent_request_id"] else row["turn_steer_caps"]
+
+
 def _drain_status(row: Mapping[str, Any]) -> DrainStatus:
     from .turn_termination import turn_payload  # keeps this module's import closure DB-only
 
@@ -613,7 +621,7 @@ def member_drained(conn, gate_id: int, turn_id: str) -> DrainStatus | None:
     return _drain_status(row) if row is not None else None
 
 
-def pin_member_request(conn, turn_id: str, request_id: str) -> int:
+def pin_member_request(conn, turn_id: str, request_id: str, steer_caps: str | None = None) -> int:
     """test_Z (a) pin-at-bind: record a newly bound request on every member row of the turn.
 
     The binder calls this in its own transaction, after it has locked the turn
@@ -621,13 +629,15 @@ def pin_member_request(conn, turn_id: str, request_id: str) -> int:
     capture is either read by the capture or pins the committed member. Only an
     unpinned member is filled: the roster's pinned request decides (B1). Every
     gate, live or not (Snark z-r1): ``never_bound`` is sound only if every bind
-    pins, and a member of a lost generation may still be carried.
+    pins, and a member of a lost generation may still be carried. The run's
+    ``steer_caps`` (TASK-1243) are pinned with its request.
     """
     if not _is_postgres(conn):
         return 0
     return conn.execute(sa_text(
-        "UPDATE gate_members SET agent_request_id=:request WHERE turn_id=:turn AND agent_request_id IS NULL"
-    ), {"turn": turn_id, "request": request_id}).rowcount
+        "UPDATE gate_members SET agent_request_id=:request, agent_steer_caps=:caps"
+        " WHERE turn_id=:turn AND agent_request_id IS NULL"
+    ), {"turn": turn_id, "request": request_id, "caps": steer_caps}).rowcount
 
 
 def stamp_member_exit(conn, member_id: int, record: Mapping[str, Any]) -> bool:
@@ -688,6 +698,7 @@ class GateMember:
     backend: str | None = None
     agent_session_key: str | None = None
     agent_request_id: str | None = None
+    agent_steer_caps: str | None = None
     producer_kind: str = "ordinary"
     producer_id: str | None = None
     producer_claim: str | None = None
@@ -740,7 +751,7 @@ def carry_forward(conn, *, predecessor: int, gate: GateBlock) -> list[GateMember
     undrained = [status.member_id for status in gate_drain_status(conn, predecessor) if not status.drained]
     rows = conn.execute(sa_text(
         f"SELECT {', '.join('m.' + name for name in _MEMBER_FIELDS)}, t.status AS current_status,"
-        " t.agent_request_id AS turn_request_id"
+        " t.agent_request_id AS turn_request_id, t.agent_steer_caps AS turn_steer_caps"
         " FROM gate_members m LEFT JOIN turn_logs t ON t.id = m.turn_id"
         " WHERE m.gate_id = :old AND m.id = ANY(:ids) ORDER BY m.id"
     ), {"old": predecessor, "ids": undrained}).mappings().all() if undrained else []
@@ -751,6 +762,7 @@ def carry_forward(conn, *, predecessor: int, gate: GateBlock) -> list[GateMember
         member = GateMember(**{**{name: row[name] for name in _MEMBER_FIELDS}, "gate_id": gate.id,
                                "turn_status": row["current_status"] or row["turn_status"],
                                "agent_request_id": _pinned_request(row),
+                               "agent_steer_caps": _pinned_caps(row),
                                "disposition": RUNNING,
                                "control_state": initial_control_state(gate.owner_kind, RUNNING)})
         if insert_member(conn, member, skip_existing=True):

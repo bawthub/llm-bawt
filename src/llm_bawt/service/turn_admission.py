@@ -207,7 +207,8 @@ def lock_target(conn, bot_id: str) -> None:
 
 
 _OPEN_TARGET_ROWS = sa_text(
-    "SELECT bot_id, id, status, agent_session_key, agent_request_id, user_id, created_at"
+    "SELECT bot_id, id, status, agent_session_key, agent_request_id, agent_backend,"
+    " agent_steer_caps, user_id, created_at"
     " FROM turn_logs WHERE bot_id IN :targets AND ended_at IS NULL"
     " AND id != :turn_id ORDER BY created_at DESC"
 ).bindparams(bindparam("targets", expanding=True))
@@ -652,7 +653,9 @@ class ActivatedGate:
     members: tuple[GateMember, ...]
 
 
-_ROW_COLUMNS = "id, status, agent_session_key, agent_request_id, agent_backend, request_json"
+_ROW_COLUMNS = (
+    "id, status, agent_session_key, agent_request_id, agent_backend, agent_steer_caps, request_json"
+)
 _OPEN_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE bot_id=:bot AND ended_at IS NULL ORDER BY created_at, id"
 _LOCK_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE id = ANY(:ids) ORDER BY id FOR UPDATE"
 
@@ -802,6 +805,7 @@ def _capture_member(conn, gate: GateBlock, spec: GateSpec, bot_id: str, row) -> 
         gate_id=gate.id, bot_id=bot_id, turn_id=row["id"], turn_status=status,
         disposition=disposition, backend=row["agent_backend"],
         agent_session_key=row["agent_session_key"], agent_request_id=row["agent_request_id"],
+        agent_steer_caps=row["agent_steer_caps"],
         producer_kind=producer["kind"], producer_id=producer.get("id"),
         producer_claim=producer.get("claim"),
         control_state=initial_control_state(spec.owner_kind, disposition),

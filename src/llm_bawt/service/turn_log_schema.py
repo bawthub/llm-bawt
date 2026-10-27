@@ -98,6 +98,9 @@ class TurnLog(SQLModel, table=True):
     # with the ids above. Startup recovery's ``run.status`` asks only this
     # bridge; a row without it is never settled as absent.
     agent_backend: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
+    # TASK-1243: the bound run's steer capabilities (``llm_bawt.steer_capabilities``),
+    # written with the ids above. NULL on rows bound before it existed.
+    agent_steer_caps: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     animation: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
     # Per-turn token accounting from the upstream SDK (claude_code, etc.).
     # Stored as JSON text so older rows without this column still load cleanly.
@@ -182,6 +185,9 @@ def bootstrap_turn_log_schema(conn) -> None:
         ))
         conn.execute(sa_text(
             "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS agent_backend VARCHAR(64)"
+        ))
+        conn.execute(sa_text(
+            "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS agent_steer_caps VARCHAR(64)"
         ))
         conn.execute(sa_text(
             "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS animation VARCHAR(255)"

@@ -29,7 +29,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from agent_bridge.steer_contract import STEER_RUN_FINISHING, STEER_UNFRAMED
+from agent_bridge.steer_contract import (
+    STEER_CAPABILITY_REFUSALS,
+    STEER_RUN_FINISHING,
+    STEER_UNFRAMED,
+)
 
 STEER_REQUEST_PREFIX = "steer_delivery_"
 # ``delivery-<uuid hex>`` ids (request_identity); generation 0 has no suffix.
@@ -49,8 +53,10 @@ BRIDGE_RUN_NOT_READY = frozenset({"no_active_run", "active_run_mismatch"})
 # non-system steer) and ``run_finishing`` (TASK-1344: the run already gave its
 # final result, so it never registers as steerable again) are raised by
 # ActiveRun.steer before anything is injected; the last two are app-side and
-# publish no RPC.
-DEFINITIVE_NOT_ACCEPTED = BRIDGE_RUN_NOT_READY | frozenset({
+# publish no RPC. The capability refusals (TASK-1243) come from the steer route
+# (the run's pinned capabilities) or the bridge's backstop, both before the
+# model sees anything.
+DEFINITIVE_NOT_ACCEPTED = BRIDGE_RUN_NOT_READY | STEER_CAPABILITY_REFUSALS | frozenset({
     "maintenance_active",
     "maintenance_command_requires_turn",
     STEER_UNFRAMED,

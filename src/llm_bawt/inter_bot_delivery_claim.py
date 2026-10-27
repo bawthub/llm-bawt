@@ -13,6 +13,7 @@ from .inter_bot_steer_only import (
     NO_ACTIVE_RUN, UNSUPPORTED_BACKEND, is_steer_only, settle_not_needed,
 )
 from .maintenance_delivery import MaintenanceBarrier
+from .steer_capabilities import NEXT, run_steer_caps
 
 QUEUED = "QUEUED"
 STEERING = "STEERING"
@@ -27,10 +28,16 @@ class DeliveryClaim:
         target_bot_id: str,
         *,
         claim_owner: str,
-        steer_capable: bool,
+        steer_capable: bool | frozenset[str],
         lease_seconds: int = 300,
     ) -> DeliveryRecord | None:
-        """Atomically choose STEERING for an active Claude turn or safe dispatch."""
+        """Atomically choose STEERING for an active steerable run or safe dispatch.
+
+        Whether the active run can be steered is its own pinned capability
+        (TASK-1243, ``steer_capabilities``). ``steer_capable`` is only what a
+        run of this bot would bind now: it decides for a run not bound yet.
+        A bool is the legacy form (True = every capability).
+        """
         if store.engine is None:
             return None
         target = target_bot_id.strip().lower()
@@ -94,9 +101,35 @@ class DeliveryClaim:
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
             prefer_steer = bool(payload.get("prefer_steer", True))
             steer_only = is_steer_only(payload)
-            if steer_only and not steer_capable:
-                # TASK-1431: nothing on this backend can be steered, so the row
-                # is not needed; it never waits for or starts a turn.
+            from .service.turn_admission import classify_target, write_reservation
+            # Same classified view save_turn admits against (TASK-1082). Only an
+            # unambiguous executing row is a steer target; a fenced reservation
+            # or several open rows fail closed (wait), never "newest row wins".
+            state = classify_target(conn, target, exclude_turn_id=head["turn_id"])
+            busy = not state.idle
+            active = state.executing
+            if active is None and state.kind == "reserved" and len(state.rows) == 1:
+                # TASK-1067: a fallback reservation whose own delivery the target
+                # already accepted is a committed start, not an idle fence. Later
+                # deliveries steer into it (the bridge answers "not ready" until
+                # the run registers) instead of queueing behind it.
+                committed = conn.execute(sa_text("""
+                    SELECT 1 FROM inter_bot_deliveries
+                    WHERE turn_id=:turn_id AND status='DISPATCHING'
+                      AND transport_accepted_at IS NOT NULL
+                """), {"turn_id": state.rows[0]["id"]}).first()
+                if committed:
+                    active = state.rows[0]
+            # TASK-1243: the active run's own pinned capability decides; the
+            # bot's current answer only stands in for a run not bound yet.
+            provisional = _provisional_caps(steer_capable)
+            can_steer = NEXT in (provisional if active is None else run_steer_caps(
+                backend=active.get("agent_backend"), caps=active.get("agent_steer_caps"),
+                provisional=provisional,
+            ))
+            if steer_only and not can_steer:
+                # TASK-1431: nothing here can be steered, so the row is not
+                # needed; it never waits for or starts a turn.
                 return settle_not_needed(conn, head["id"], UNSUPPORTED_BACKEND)
             try:
                 delivery_user_id = resolve_delivery_user(store.config, payload.get("user"))
@@ -117,25 +150,6 @@ class DeliveryClaim:
                     WHERE id=:id AND status='QUEUED'
                 """), {"id": head["id"], "error": str(exc)})
                 return None
-            from .service.turn_admission import classify_target, write_reservation
-            # Same classified view save_turn admits against (TASK-1082). Only an
-            # unambiguous executing row is a steer target; a fenced reservation
-            # or several open rows fail closed (wait), never "newest row wins".
-            state = classify_target(conn, target, exclude_turn_id=head["turn_id"])
-            busy = not state.idle
-            active = state.executing
-            if active is None and state.kind == "reserved" and len(state.rows) == 1:
-                # TASK-1067: a fallback reservation whose own delivery the target
-                # already accepted is a committed start, not an idle fence. Later
-                # deliveries steer into it (the bridge answers "not ready" until
-                # the run registers) instead of queueing behind it.
-                committed = conn.execute(sa_text("""
-                    SELECT 1 FROM inter_bot_deliveries
-                    WHERE turn_id=:turn_id AND status='DISPATCHING'
-                      AND transport_accepted_at IS NOT NULL
-                """), {"turn_id": state.rows[0]["id"]}).first()
-                if committed:
-                    active = state.rows[0]
             if any(str(row.get("user_id") or "") != delivery_user_id for row in state.rows):
                 return None
             if busy and policy != SessionPolicy.CONTINUE:
@@ -173,7 +187,7 @@ class DeliveryClaim:
                     # starting an overlapping fallback turn. A newer active row
                     # may still be steered on the next claim.
                     return None
-                if not steer_capable or not prefer_steer:
+                if not can_steer or not prefer_steer:
                     return None
                 status = STEERING
                 target_turn_id = active["id"]
@@ -225,3 +239,11 @@ class DeliveryClaim:
                 "delivery_mode": delivery_mode,
             }).mappings().first()
         return DeliveryRecord.from_mapping(row) if row else None
+
+
+def _provisional_caps(steer_capable: bool | frozenset[str]) -> frozenset[str]:
+    from .steer_capabilities import ALL_STEER_CAPS, NO_STEER_CAPS
+
+    if isinstance(steer_capable, bool):
+        return ALL_STEER_CAPS if steer_capable else NO_STEER_CAPS
+    return frozenset(steer_capable)

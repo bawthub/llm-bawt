@@ -5,7 +5,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Literal
 
-from agent_bridge.steer_contract import STEER_RUN_FINISHING
+from agent_bridge.steer_contract import STEER_CAPABILITY_REFUSALS, STEER_RUN_FINISHING
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -95,6 +95,26 @@ class ChatSteerRequest(BaseModel):
     priority: Literal["now", "next"] = Field(
         "next", description="Queue until the next model call without interrupting running tools"
     )
+
+
+# Steer errors that are a definite answer about the run, never a transport fault.
+STEER_DEFINITE_409 = STEER_CAPABILITY_REFUSALS | {"no_active_run", "active_run_mismatch", STEER_RUN_FINISHING}
+
+
+def _run_steer_caps(service, turn) -> tuple[str, frozenset[str]]:
+    """``(backend, steer capabilities)`` of the turn's bound run (TASK-1243).
+
+    The bot's current backend is read only for a row that never recorded one.
+    """
+    from ...steer_capabilities import turn_steer_caps
+
+    bot_backend = ""
+    if not (getattr(turn, "agent_backend", None) or "").strip():
+        from ...bots import BotManager
+
+        bot = BotManager(service.config).get_bot(turn.bot_id)
+        bot_backend = getattr(bot, "agent_backend", None) or ""
+    return turn_steer_caps(turn, bot_backend=bot_backend)
 
 
 class ChatSteerResponse(BaseModel):
@@ -228,9 +248,10 @@ async def steer_active_turn(
     if control is not None:
         target = await asyncio.to_thread(check_steer, engine, bot_id, turn_id=turn.id, grant=control)
         session_key, backend_name = target.session_key, (target.backend or "").strip()
+        caps = target.steer_caps
     else:
         await asyncio.to_thread(check_steer, engine, bot_id, turn_id=turn.id)
-        session_key, backend_name = turn.agent_session_key, None
+        session_key, backend_name, caps = turn.agent_session_key, None, None
     if not session_key:
         # A deterministic delivery retry may inspect the original target after it
         # ended. If the run never registered a bridge session, no steer RPC could
@@ -241,17 +262,14 @@ async def steer_active_turn(
         raise HTTPException(status_code=409, detail="Active bridge run is not ready")
 
     from ...agent_backends.agent_bridge import get_agent_subscriber
+    from ...steer_capabilities import CANCEL_QUEUED, ESCALATE, steer_refusal
 
-    if backend_name is None:
-        from ...bots import BotManager
-
-        bot = BotManager(service.config).get_bot(bot_id)
-        backend_name = (getattr(bot, "agent_backend", None) or "").strip()
-    if backend_name != "claude-code":
-        raise HTTPException(
-            status_code=409,
-            detail="Mid-turn steering is currently supported only by claude-code",
-        )
+    # TASK-1243: the run's own pinned capabilities, never the bot's current backend.
+    if caps is None:
+        backend_name, caps = _run_steer_caps(service, turn)
+    refusal = steer_refusal(caps, request.priority)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
 
     message = request.message.strip()
     wire_message = f"{message}\n\n{wire_suffix}" if wire_suffix else message
@@ -300,7 +318,7 @@ async def steer_active_turn(
         detail = str(result.get("error") or result.get("detail") or "steer failed")
         # TASK-1344: ``run_finishing`` is definite too; the run already gave its
         # final result, so callers send the message as a fresh turn.
-        status = 409 if detail in {"no_active_run", "active_run_mismatch", STEER_RUN_FINISHING} else 502
+        status = 409 if detail in STEER_DEFINITE_409 else 502
         raise HTTPException(status_code=status, detail=detail)
 
     persisted = False
@@ -364,8 +382,8 @@ async def steer_active_turn(
         turn_id=turn.id,
         message_id=request.message_id,
         persisted=persisted,
-        can_escalate=bool(result.get("can_escalate")) and request.priority == "next",
-        can_cancel=bool(result.get("can_cancel")) and request.priority == "next",
+        can_escalate=bool(result.get("can_escalate")) and request.priority == "next" and ESCALATE in caps,
+        can_cancel=bool(result.get("can_cancel")) and request.priority == "next" and CANCEL_QUEUED in caps,
     )
 
 
@@ -410,11 +428,12 @@ async def chat_steer_escalate(request: ChatSteerEscalateRequest) -> dict:
     if not turn.agent_session_key or not turn.agent_request_id:
         raise HTTPException(status_code=409, detail="Active bridge run is not ready")
     from ...agent_backends.agent_bridge import get_agent_subscriber
-    from ...bots import BotManager
+    from ...steer_capabilities import ESCALATE, steer_refusal
 
-    backend = (getattr(BotManager(service.config).get_bot(turn.bot_id), "agent_backend", None) or "").strip()
-    if backend != "claude-code":
-        raise HTTPException(status_code=409, detail="Escalation requires claude-code")
+    backend, caps = _run_steer_caps(service, turn)
+    refusal = steer_refusal(caps, ESCALATE)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
     subscriber = get_agent_subscriber()
     if subscriber is None:
         raise HTTPException(status_code=503, detail="Agent bridge unavailable")
@@ -453,11 +472,12 @@ async def chat_steer_cancel(request: ChatSteerEscalateRequest) -> dict:
     if not turn.agent_session_key or not turn.agent_request_id:
         raise HTTPException(status_code=409, detail="Active bridge run is not ready")
     from ...agent_backends.agent_bridge import get_agent_subscriber
-    from ...bots import BotManager
+    from ...steer_capabilities import CANCEL_QUEUED, steer_refusal
 
-    backend = (getattr(BotManager(service.config).get_bot(turn.bot_id), "agent_backend", None) or "").strip()
-    if backend != "claude-code":
-        raise HTTPException(status_code=409, detail="Cancellation requires claude-code")
+    backend, caps = _run_steer_caps(service, turn)
+    refusal = steer_refusal(caps, CANCEL_QUEUED)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
     subscriber = get_agent_subscriber()
     if subscriber is None:
         raise HTTPException(status_code=503, detail="Agent bridge unavailable")

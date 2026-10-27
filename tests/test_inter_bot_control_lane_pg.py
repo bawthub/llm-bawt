@@ -29,6 +29,7 @@ from llm_bawt.service.system_gate_admission import (
     check_steer,
 )
 from llm_bawt.service.turn_admission import lock_target
+from llm_bawt.steer_capabilities import ALL_STEER_CAPS
 from tests.test_ops_quiesce_pg import rig  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -36,14 +37,17 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")
 USER = "nick"  # the rig's turn rows are owned by this fixture user
 
 
-def _turn(rig, *, backend="claude-code", session="sess-held", status="streaming"):
+def _turn(rig, *, backend="claude-code", session="sess-held", status="streaming", caps=None):
+    """``caps`` None is a row bound before TASK-1243 recorded steer capabilities."""
     turn_id = f"turn-{uuid.uuid4().hex}"
     rig.sql("""
         INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt,
-                               response_text, ended_at, agent_request_id, agent_backend, agent_session_key)
-        VALUES (:id, now(), '/test', true, :bot, :user, :status, '', '', NULL, :req, :backend, :session)
+                               response_text, ended_at, agent_request_id, agent_backend, agent_session_key,
+                               agent_steer_caps)
+        VALUES (:id, now(), '/test', true, :bot, :user, :status, '', '', NULL, :req, :backend, :session,
+                :caps)
     """, id=turn_id, bot=rig.bot, user=USER, status=status, backend=backend, session=session,
-            req=f"req-{turn_id}")
+            req=f"req-{turn_id}", caps=caps)
     return turn_id
 
 
@@ -53,9 +57,10 @@ def _open(rig):
     return job_id
 
 
-def _pin(turn_id, *, backend="claude-code", session="sess-held"):
+def _pin(turn_id, *, backend="claude-code", session="sess-held", **caps):
+    """A pin without ``steer_caps`` is one stored before TASK-1243."""
     return {"turn_id": turn_id, "agent_request_id": f"req-{turn_id}", "backend": backend,
-            "session_key": session}
+            "session_key": session, **caps}
 
 
 def _run_key(turn_id):
@@ -121,7 +126,7 @@ def test_a_held_head_is_passed_by_the_control_row_and_normal_order_survives(rig)
     grant = DeliveryControlGrant.of(claimed)
     assert grant == DeliveryControlGrant(rig.bot, turn_id, control.id, claimed.claim_token)
     assert check_steer(rig.engine, rig.bot, turn_id=turn_id, grant=grant) == ControlTarget(
-        f"req-{turn_id}", "claude-code", "sess-held")
+        f"req-{turn_id}", "claude-code", "sess-held", ALL_STEER_CAPS)  # a legacy row decodes
     # A normal steer is still refused, and the held head never moved.
     with pytest.raises(SteerGateRefused):
         check_steer(rig.engine, rig.bot, turn_id=turn_id)
@@ -224,6 +229,37 @@ def test_a_pin_on_another_backend_is_unsupported(rig):
     _link(rig, job_id, turn_id, control.id)
     settled = _claim(rig)
     assert (settled.status, settled.last_error) == ("CANCELLED", "not_needed:unsupported_backend")
+
+
+@pytest.mark.parametrize("backend", ["codex", "claude-code"])
+def test_a_pin_whose_run_steers_is_claimed_on_any_backend(rig, backend):
+    """TASK-1243: the pinned run's own caps decide, not its backend's name."""
+    turn_id = _turn(rig, backend=backend, caps="next")
+    job_id = _open(rig)
+    control, _ = _control(rig, turn_id, backend=backend, steer_caps="next")
+    _link(rig, job_id, turn_id, control.id)
+    claimed = _claim(rig)
+    assert (claimed.id, claimed.status) == (control.id, "STEERING")
+    assert check_steer(rig.engine, rig.bot, turn_id=turn_id, grant=DeliveryControlGrant.of(claimed)) == (
+        ControlTarget(f"req-{turn_id}", backend, "sess-held", frozenset({"next"})))
+
+
+def test_a_claude_pin_whose_run_cannot_steer_is_unsupported(rig):
+    turn_id = _turn(rig, caps="")
+    job_id = _open(rig)
+    control, _ = _control(rig, turn_id, steer_caps="")
+    _link(rig, job_id, turn_id, control.id)
+    settled = _claim(rig)
+    assert (settled.status, settled.last_error) == ("CANCELLED", "not_needed:unsupported_backend")
+
+
+def test_a_pin_whose_caps_differ_from_the_members_run_is_unconfirmed(rig):
+    turn_id = _turn(rig, caps="next")
+    job_id = _open(rig)
+    control, _ = _control(rig, turn_id, steer_caps="")
+    _link(rig, job_id, turn_id, control.id)
+    settled = _claim(rig)
+    assert (settled.status, settled.last_error) == ("FAILED", "unconfirmed:pinned_run_unaddressable")
 
 
 def test_a_payload_user_that_is_not_the_turns_is_unconfirmed(rig):
@@ -351,6 +387,16 @@ def test_attempts_run_out_to_unconfirmed(rig):
     failed = ControlSteerFailure.settle(rig.deliveries, claimed, "no_active_run")
     assert (failed.status, failed.last_error, failed.claim_token) == (
         "FAILED", "unconfirmed:no_active_run", None)
+
+
+@pytest.mark.parametrize("error", ["steer_unsupported_transport", "steer_priority_unsupported"])
+def test_a_capability_refusal_settles_at_once_without_retries(rig, error):
+    """TASK-1243: the run cannot take this ask and never will; no budget is spent on it."""
+    _, _, claimed = _claimed(rig)
+    settled = ControlSteerFailure.settle(rig.deliveries, claimed, error)
+    assert (settled.status, settled.last_error, settled.claim_token) == (
+        "CANCELLED", f"not_needed:{error}", None)
+    assert _row(rig, claimed.id)["status"] == "CANCELLED"
 
 
 def test_a_failure_after_the_run_ended_is_not_needed(rig):

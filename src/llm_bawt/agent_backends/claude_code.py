@@ -39,6 +39,14 @@ class ClaudeCodeBackend(AgentBridgeBackend):
     # request and reuses it on every resume until compaction (TASK-1318).
     pins_system_prompt = True
 
+    def steer_capabilities(self, config: dict) -> frozenset[str]:
+        # Every claude-code run steers: the CLI queues ``next`` commands,
+        # interrupts for ``now``, and the bridge escalates or withdraws a
+        # queued command (TASK-1243 keeps this as before).
+        from ..steer_capabilities import ALL_STEER_CAPS
+
+        return ALL_STEER_CAPS
+
     @staticmethod
     def _require_model(config: dict) -> str:
         # Hard-require an explicit model. No silent fallback to Sonnet (or

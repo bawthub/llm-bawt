@@ -12,6 +12,7 @@ import httpx
 from ..inter_bot_delivery import DeliveryRecord, InterBotDeliveryStore
 from ..inter_bot_delivery_retry import fail_claim_with_restart_retry
 from ..inter_bot_delivery_user import resolve_delivery_user
+from ..steer_capabilities import bot_steer_caps
 from .dispatcher_leadership import (
     PROBE_TIMEOUT_SECONDS,
     SESSION_GONE_ERRORS,
@@ -452,13 +453,12 @@ class InterBotDeliveryDispatcher:
         from ..bots import BotManager
 
         bot = BotManager(self.service.config).get_bot(target_bot_id)
-        backend = (getattr(bot, "agent_backend", None) or "").strip()
         from .maintenance_queue import MaintenanceQueue
         await MaintenanceQueue(self.service, dispatcher=self).publish_ready(target_bot_id)
-        record = self.store.claim_next(
+        record = self.store.claim_next(  # a bound run's own pinned caps decide (TASK-1243)
             target_bot_id,
             claim_owner=self.claim_owner,
-            steer_capable=(backend == "claude-code"),
+            steer_capable=bot_steer_caps(bot),
         )
         if record is None:
             return False
