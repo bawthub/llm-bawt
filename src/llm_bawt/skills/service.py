@@ -9,6 +9,7 @@ Writes are refused when they would:
 - set ``off`` at tag scope, name an unknown skill or tag, or use a bad mode
   or position (422);
 - add a bot row to an unmanaged or bundle bot (409);
+- adopt a bot while the source offers no skills (503);
 - push any affected bot's injected skills over a cap that were not over it
   before (409, listing each bot, its refs, total and cap).
 """
@@ -232,6 +233,11 @@ class SkillService:
             facts = self._writable_bot(world, slug)
             if facts.bot_type != "agent" or not capabilities_for(facts.harness).supported:
                 raise SkillServiceError(422, f"{slug} runs on a harness that can't apply skills")
+            if not refs:
+                # Adoption seeds from the source; with none visible (e.g. the
+                # skill mount is absent) the bot would be managed with an
+                # empty allow-list and lose every skill at its next session.
+                raise SkillServiceError(503, "no skills are readable; adopting would hide them all")
             return [slug]
 
         refs = [entry.ref for entry in self.source.list()]

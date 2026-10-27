@@ -283,6 +283,20 @@ def test_an_unmounted_source_serves_an_empty_catalog_and_injects_nothing(world, 
     assert resolution.injected == () and resolution.manifest()["entries"] == []
 
 
+def test_adopt_refuses_when_the_source_offers_no_skills(world, tmp_path):
+    unmounted = SkillService(world.rig.engine, list_bots=world.service._list_bots,
+                             caps=world.service._caps,
+                             source=AmbientSource((tmp_path / "not-mounted",)))
+
+    status, detail = _status(unmounted.adopt, "fixture-one", None)
+
+    assert status == 503 and "no skills" in detail
+    assert _status(unmounted.adopt, "fixture-private", None)[0] == 403  # protection checks first
+    with world.rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM skill_managed_bots")).scalar_one() == 0
+    assert unmounted.resolve_bot("fixture-one").manifest() is None
+
+
 def test_routes_serve_the_service_over_http(world, monkeypatch):
     monkeypatch.setattr(skill_routes, "skill_service", lambda: world.service)
     app = FastAPI()
