@@ -998,6 +998,31 @@ def test_soft_then_hard_task_removal_blocks_manual_and_auto_recreation(wm, monke
     assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "removed"
 
 
+def test_purge_key_rotation_uses_one_snapshot_and_fences_recreation(wm, monkeypatch):
+    from llm_bawt.working_memory import store as store_module
+
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    item = wm.service.link_associated(ctx, task.id)["item"]
+    calls = []
+
+    def rotating_key(label):
+        calls.append(label)
+        return b"test-only-stable-key" if len(calls) == 1 else b"rotated-test-key"
+
+    monkeypatch.setattr(store_module, "derive_key", rotating_key)
+    assert wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=True)["state"] == "purged"
+    assert len(calls) == 1  # digest and key sentinel came from this single snapshot
+    with wm.engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM working_memory_task_suppressions"
+            " WHERE bot_id=:bot AND user_id=:user"
+        ), {"bot": wm.bots["on"], "user": wm.user}).scalar_one() == 1
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "task_link_audit_pending"
+    assert len(calls) >= 2
+    assert wm.service.store.list_items(wm.bots["on"], wm.user)["items"] == []
+
+
 def test_rotated_suppression_key_fails_closed_for_links_and_purge(wm, monkeypatch):
     from llm_bawt.working_memory import store as store_module
 
@@ -1012,6 +1037,59 @@ def test_rotated_suppression_key_fails_closed_for_links_and_purge(wm, monkeypatc
     with wm.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM working_memory_items WHERE id=:id"),
                             {"id": item["id"]}).scalar_one() == 1
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_disabled_owner_removes_resolvable_legacy_link(wm, monkeypatch, hard):
+    task, _ = _task_links(wm, monkeypatch)
+    item = wm.service.store.create(wm.bots["on"], wm.user, {
+        "kind": "initiative_link", "initiative_task_id": task.short_id,
+        "objective": "legacy item content",
+    }, idempotency_key=_key(), actor=Actor("bot", wm.bots["on"]))["item"]
+    wm.settings.set_value("bot", wm.bots["on"], KEY, False)
+    assert wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=hard)["state"] == (
+        "purged" if hard else "removed")
+    assert wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=hard)["changed"] is False
+    with wm.engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM working_memory_task_suppressions"
+            " WHERE bot_id=:bot AND user_id=:user"
+        ), {"bot": wm.bots["on"], "user": wm.user}).scalar_one() == 1
+    wm.settings.set_value("bot", wm.bots["on"], KEY, True)
+    assert _code(lambda: wm.service.link_associated(wm.context(), task.id)) == "removed"
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_disabled_owner_cleans_unresolvable_legacy_link(wm, monkeypatch, hard):
+    task, catalog = _task_links(wm, monkeypatch)
+    item = wm.service.store.create(wm.bots["on"], wm.user, {
+        "kind": "initiative_link", "initiative_task_id": task.short_id,
+        "objective": "legacy item content",
+    }, idempotency_key=_key(), actor=Actor("bot", wm.bots["on"]))["item"]
+    resolve = catalog.get
+    catalog.get = lambda _ref: (_ for _ in ()).throw(WorkingMemoryError("task_unavailable", "missing"))
+    wm.settings.set_value("bot", wm.bots["on"], KEY, False)
+    assert wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=hard)["state"] == (
+        "purged" if hard else "removed")
+    wm.settings.set_value("bot", wm.bots["on"], KEY, True)
+    catalog.get = resolve
+    # Soft removal can be resolved and suppressed by the later audit; a hard
+    # purge without identity cannot prove which task to fence, so gate all links.
+    assert _code(lambda: wm.service.link_associated(wm.context(), task.id)) == (
+        "task_link_audit_pending" if hard else "removed")
+    with wm.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM working_memory_items WHERE id=:id"),
+                            {"id": item["id"]}).scalar_one() == (0 if hard else 1)
+
+
+def test_protected_owner_cannot_resolve_legacy_link(wm, monkeypatch):
+    class ForbiddenCatalog:
+        def get(self, _ref):
+            pytest.fail("protected owner must not read task catalog")
+
+    wm.service.catalog = ForbiddenCatalog()
+    assert _code(lambda: wm.service.owner_delete(
+        wm.bots["protected"], wm.user, str(uuid.uuid4()), hard=True)) == "protected_bot"
 
 
 def test_historical_unidentifiable_purge_gates_new_task_links(wm, monkeypatch):

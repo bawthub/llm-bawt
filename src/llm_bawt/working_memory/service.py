@@ -135,7 +135,21 @@ class WorkingMemoryService:
 
     def owner_delete(self, bot_id: str, user_id: str, item_id: Any, *, hard: bool) -> dict[str, Any]:
         self.policy.require_owner_access(bot_id)
-        return self.store.delete(bot_id, user_id, item_id, hard=hard, actor=Actor("user", str(user_id).strip()))
+        # Owner cleanup must work after opt-out. Resolve only this item's
+        # legacy reference off-lock; never require the bot's tools gate or
+        # migrate unrelated items before allowing its removal.
+        ref = self.store.legacy_task_ref(bot_id, user_id, item_id)
+        task = None
+        if ref:
+            try:
+                task = self.catalog.get(ref)
+            except WorkingMemoryError as exc:
+                if exc.code not in ("task_unavailable", "invalid_request"):
+                    raise
+                # An unidentifiable hard purge leaves an unaudited purge row,
+                # fencing future link creation in this namespace.
+        return self.store.delete(bot_id, user_id, item_id, hard=hard,
+                                 actor=Actor("user", str(user_id).strip()), legacy_task=task)
 
 
 __all__ = ["WorkingMemoryService"]

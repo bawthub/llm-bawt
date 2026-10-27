@@ -212,10 +212,10 @@ def _key_check(key: bytes) -> str:
     return hmac.new(key, b"working-memory-task-suppression/key-check/v1", hashlib.sha256).hexdigest()
 
 
-def _task_digest(bot: str, user: str, task_id: str) -> str:
-    """Opaque stable suppression key; never store item text or a task reference."""
+def _task_digest(key: bytes, bot: str, user: str, task_id: str) -> str:
+    """Opaque suppression digest from the same key snapshot as its sentinel."""
     data = json.dumps([bot, user, task_id], separators=(",", ":"), ensure_ascii=False)
-    return hmac.new(_suppression_key(), data.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.new(key, data.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def item_dict(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -250,6 +250,19 @@ class _Write:
         self.bot = bot
         self.user = user
         self.version: int | None = None
+        self._task_key: bytes | None = None
+
+    def task_key(self) -> bytes:
+        """Resolve once per write so digest and sentinel cannot straddle rotation."""
+        if self._task_key is None:
+            try:
+                self._task_key = _suppression_key()
+            except Exception as exc:
+                raise WorkingMemoryError("unavailable", "task suppression key unavailable") from exc
+        return self._task_key
+
+    def task_digest(self, task_id: str) -> str:
+        return _task_digest(self.task_key(), self.bot, self.user, task_id)
 
     def bump(self) -> int:
         """The real-write marker: the returned value is this write's ``ns_version``."""
@@ -287,10 +300,7 @@ class _Write:
         ), {"id": item_id, "bot": self.bot, "user": self.user}).mappings().first()
 
     def _check_suppression_key(self) -> str:
-        try:
-            expected = _key_check(_suppression_key())
-        except Exception as exc:
-            raise WorkingMemoryError("unavailable", "task suppression key unavailable") from exc
+        expected = _key_check(self.task_key())
         checks = self.conn.execute(text(
             "SELECT DISTINCT key_version, key_check FROM working_memory_task_suppressions"
             " WHERE bot_id=:bot AND user_id=:user"
@@ -503,7 +513,6 @@ class WorkingMemoryStore:
             raise WorkingMemoryError("task_link_audit_pending", "historical working-memory links need owner audit")
         legacy = {r["initiative_task_id"] for r in original if not r["canonical_task_id"]}
         resolved = {ref: resolve(ref) for ref in legacy}
-        digests = {info.id: _task_digest(bot, user, info.id) for info in resolved.values()}
         with self._write(bot, user, authorize) as write:
             current = write.conn.execute(text(
                 "SELECT id, initiative_task_id, canonical_task_id, status, removed_at, revision"
@@ -531,7 +540,7 @@ class WorkingMemoryStore:
             actor = Actor("bot", bot)  # migration is external to every pinned session
             for task_id, rows in groups.items():
                 if any(r["removed_at"] is not None for r in rows):
-                    write.suppress(digests.get(task_id) or _task_digest(bot, user, task_id))
+                    write.suppress(write.task_digest(task_id))
                 live = [r for r in rows if r["removed_at"] is None and r["status"] in OPEN_STATUSES]
                 # Prefer an owner-authored item, then the oldest. Migration does
                 # not discard the other item's content or its original create key.
@@ -575,12 +584,6 @@ class WorkingMemoryStore:
         if task is not None:
             if payload["kind"] != "initiative_link" or payload["initiative_task_id"] != task.id:
                 raise WorkingMemoryError("invalid_request", "link task identity must be canonical")
-            try:
-                digest = _task_digest(bot, user, task.id)  # fail before a namespace write
-            except Exception as exc:
-                raise WorkingMemoryError("unavailable", "task suppression key unavailable") from exc
-        else:
-            digest = None
         fingerprint = create_fingerprint(payload)
         with self._write(bot, user, authorize) as write:
             prior = write.conn.execute(text(
@@ -590,8 +593,8 @@ class WorkingMemoryStore:
             ), {"bot": bot, "user": user, "key": key}).mappings().first()
             if prior is not None:
                 return self._replay(write, prior, fingerprint)
-            if digest is not None:
-                if write.suppressed(digest):
+            if task is not None:
+                if write.suppressed(write.task_digest(task.id)):
                     raise WorkingMemoryError("removed", "this task link was removed")
                 existing = write.conn.execute(text(
                     f"SELECT {_ITEM_COLUMNS} FROM working_memory_items"
@@ -705,11 +708,7 @@ class WorkingMemoryStore:
             if reopening and row["kind"] == "initiative_link":
                 if actor.kind != "user" or not row["canonical_task_id"]:
                     raise WorkingMemoryError("already_linked", "archived task links require owner review")
-                try:
-                    digest = _task_digest(bot, user, row["canonical_task_id"])
-                except Exception as exc:
-                    raise WorkingMemoryError("unavailable", "task suppression key unavailable") from exc
-                if write.suppressed(digest):
+                if write.suppressed(write.task_digest(row["canonical_task_id"])):
                     raise WorkingMemoryError("removed", "this task link was removed")
                 other = write.conn.execute(text(
                     "SELECT id FROM working_memory_items WHERE bot_id=:bot AND user_id=:user"
@@ -745,20 +744,39 @@ class WorkingMemoryStore:
             write.change(actor, item, updated["revision"], "archive" if archived else "update")
             return {"item": item_dict(updated), "version": version, "changed": True}
 
+    def legacy_task_ref(self, bot_id: str, user_id: str, item_id: Any) -> str | None:
+        """Read only the owner's scoped legacy reference, before resolving off-lock."""
+        bot, user = normalize_identity(bot_id, user_id)
+        item = normalize_item_id(item_id)
+        with _storage_errors():
+            self.ensure_schema()
+            with self.engine.connect() as conn:
+                return conn.execute(text(
+                    "SELECT initiative_task_id FROM working_memory_items"
+                    " WHERE id=CAST(:id AS uuid) AND bot_id=:bot AND user_id=:user"
+                    " AND kind='initiative_link' AND canonical_task_id IS NULL"
+                ), {"id": item, "bot": bot, "user": user}).scalar()
+
     def delete(self, bot_id: str, user_id: str, item_id: Any, *, hard: bool, actor: Actor,
-               authorize: Authorize | None = None) -> dict[str, Any]:
+               authorize: Authorize | None = None, legacy_task: TaskInfo | None = None) -> dict[str, Any]:
         """Soft delete (final) or hard delete (purge); repeats are idempotent (6.2, 11.3)."""
         bot, user = normalize_identity(bot_id, user_id)
         item = normalize_item_id(item_id)
         with self._write(bot, user, authorize) as write:
             row = write.lock_item(item)
             if row is not None and row["kind"] == "initiative_link":
-                if not row["canonical_task_id"]:
+                task_id = row["canonical_task_id"]
+                if not task_id and legacy_task is not None:
+                    ref = row["initiative_task_id"]
+                    if ref in (legacy_task.id, legacy_task.short_id):
+                        task_id = legacy_task.id
+                # An unresolvable pre-upgrade link can still be owner-deleted.
+                # Soft removal remains identifiable for a later migration;
+                # hard purge leaves no audit row, fencing all future links in
+                # this namespace until the owner completes an identity audit.
+                if not task_id and actor.kind != "user":
                     raise WorkingMemoryError("task_link_audit_pending", "resolve this legacy task link before deletion")
-                try:
-                    digest = _task_digest(bot, user, row["canonical_task_id"])
-                except Exception as exc:
-                    raise WorkingMemoryError("unavailable", "task suppression key unavailable") from exc
+                digest = write.task_digest(task_id) if task_id else None
             else:
                 digest = None
             if row is None:
@@ -783,10 +801,11 @@ class WorkingMemoryStore:
             version = write.bump()
             if digest is not None:
                 write.suppress(digest)
-            write.conn.execute(text(
-                "INSERT INTO working_memory_task_purge_audit (item_id,task_digest)"
-                " VALUES (CAST(:item AS uuid),:digest) ON CONFLICT DO NOTHING"
-            ), {"item": item, "digest": digest})
+            if row["kind"] != "initiative_link" or digest is not None:
+                write.conn.execute(text(
+                    "INSERT INTO working_memory_task_purge_audit (item_id,task_digest)"
+                    " VALUES (CAST(:item AS uuid),:digest) ON CONFLICT DO NOTHING"
+                ), {"item": item, "digest": digest})
             write.conn.execute(text("DELETE FROM working_memory_items WHERE id = :id"), {"id": item})
             write.conn.execute(text(
                 "UPDATE working_memory_changes SET create_fingerprint = NULL"
