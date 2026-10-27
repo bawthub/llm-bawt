@@ -117,6 +117,8 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
                 CredentialField("url", "Home Assistant URL", "url", placeholder="https://homeassistant.example"),
                 CredentialField("token", "Long-lived access token", "secret"),
             ),
+            # llm-bawt and BawtHub both fall back to legacy env without a record.
+            keeps_disconnected_record=True,
         ),
         *(
             CredentialIntegration(

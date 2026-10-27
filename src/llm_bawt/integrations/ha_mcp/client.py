@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...utils.config import Config
+from ..ha_credentials import HACredentials, HomeAssistantUnavailable, resolve_ha_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +38,9 @@ class HomeAssistantNativeClient:
     """
 
     def __init__(self, config: Config):
-        self._url = (getattr(config, "HA_NATIVE_MCP_URL", "") or "").rstrip("/")
-        self._token = (getattr(config, "HA_NATIVE_MCP_TOKEN", "") or "").strip()
+        # URL and token are resolved for every discover/call (TASK-1476), so a
+        # token saved or rotated under Integrations is used without a restart.
+        self._config = config
         self._timeout = float(max(1, int(getattr(config, "HA_MCP_TIMEOUT", 10) or 10)))
 
         # Parse exclude list from config
@@ -52,10 +54,18 @@ class HomeAssistantNativeClient:
         self._tool_names: set[str] = set()
         self._initialized = False
 
+    def _credentials(self) -> HACredentials | None:
+        """Current credentials; ``None`` when none are configured or usable."""
+        try:
+            return resolve_ha_credentials(self._config)
+        except HomeAssistantUnavailable as error:
+            logger.warning("HA native MCP unavailable: %s", error.code)
+            return None
+
     @property
     def available(self) -> bool:
         """True if URL and token are configured."""
-        return bool(self._url) and bool(self._token)
+        return self._credentials() is not None
 
     @property
     def initialized(self) -> bool:
@@ -82,12 +92,13 @@ class HomeAssistantNativeClient:
         Filters out tools in the exclude list. Safe to call multiple times
         (will re-discover each time).
         """
-        if not self.available:
+        credentials = self._credentials()
+        if credentials is None:
             logger.warning("HA native MCP not configured (missing URL or token)")
             return []
 
         try:
-            raw_tools = self._run_async(self._discover_tools_async())
+            raw_tools = self._run_async(self._discover_tools_async(credentials))
             self._tools = []
             self._tool_names = set()
 
@@ -119,7 +130,8 @@ class HomeAssistantNativeClient:
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Call an HA tool by name and return the text result."""
-        if not self.available:
+        credentials = self._credentials()
+        if credentials is None:
             return "Error: HA native MCP not configured"
         if not self._initialized:
             return "Error: HA native MCP tools not discovered yet"
@@ -127,7 +139,7 @@ class HomeAssistantNativeClient:
             return f"Error: Unknown HA tool '{name}'"
 
         try:
-            result = self._run_async(self._call_tool_async(name, arguments))
+            result = self._run_async(self._call_tool_async(credentials, name, arguments))
             return self._extract_text(result)
         except Exception as e:
             logger.error(f"HA tool call failed: {name}({arguments}): {e}")
@@ -135,23 +147,23 @@ class HomeAssistantNativeClient:
 
     # --- Async internals ---
 
-    async def _discover_tools_async(self):
+    async def _discover_tools_async(self, credentials: HACredentials):
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
-        headers = {"Authorization": f"Bearer {self._token}"}
-        async with streamablehttp_client(self._url, headers=headers) as (read, write, _):
+        headers = {"Authorization": f"Bearer {credentials.token}"}
+        async with streamablehttp_client(credentials.mcp_url, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
                 return result.tools
 
-    async def _call_tool_async(self, name: str, arguments: dict[str, Any]):
+    async def _call_tool_async(self, credentials: HACredentials, name: str, arguments: dict[str, Any]):
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
-        headers = {"Authorization": f"Bearer {self._token}"}
-        async with streamablehttp_client(self._url, headers=headers) as (read, write, _):
+        headers = {"Authorization": f"Bearer {credentials.token}"}
+        async with streamablehttp_client(credentials.mcp_url, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await session.call_tool(name, arguments)

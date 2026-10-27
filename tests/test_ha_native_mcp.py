@@ -3,6 +3,7 @@
 import pytest
 from dataclasses import dataclass
 
+from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.ha_mcp.client import (
     HomeAssistantNativeClient,
     HAToolDefinition,
@@ -13,6 +14,12 @@ from llm_bawt.tools.definitions import (
     ha_tools_to_tool_definitions,
     get_tools_list,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_ha_record(monkeypatch):
+    """No Integrations record: these tests cover the legacy settings path."""
+    monkeypatch.setattr(ha_credentials, "read_connection", lambda *args, **kwargs: None)
 
 
 @dataclass

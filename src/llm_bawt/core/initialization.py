@@ -225,22 +225,20 @@ class OrchestratorInitializationMixin:
         if not self.bot.uses_tools or not self.bot.uses_home_assistant:
             return
 
-        # Try native MCP first (direct connection to HA's /api/mcp)
-        native_url = getattr(config, "HA_NATIVE_MCP_URL", "") or ""
-        native_token = getattr(config, "HA_NATIVE_MCP_TOKEN", "") or ""
-        if native_url and native_token:
-            try:
-                client = HomeAssistantNativeClient(config)
-                if client.available:
-                    tools = client.discover_tools()
-                    if tools:
-                        self.ha_native_client = client
-                        logger.info(f"HA native MCP initialized with {len(tools)} tools")
-                        return
-                    else:
-                        logger.warning("HA native MCP connected but no tools discovered")
-            except Exception as e:
-                logger.warning(f"Failed to initialize HA native MCP: {e}")
+        # Try native MCP first (direct connection to HA's /api/mcp). Its
+        # credentials come from the Integrations record first (TASK-1476).
+        try:
+            client = HomeAssistantNativeClient(config)
+            if client.available:
+                tools = client.discover_tools()
+                if tools:
+                    self.ha_native_client = client
+                    logger.info(f"HA native MCP initialized with {len(tools)} tools")
+                    return
+                else:
+                    logger.warning("HA native MCP connected but no tools discovered")
+        except Exception as e:
+            logger.warning(f"Failed to initialize HA native MCP: {e}")
 
         # Fallback to legacy custom MCP server
         if not getattr(config, "HA_MCP_ENABLED", False):

@@ -1,11 +1,13 @@
 """Home Assistant weather proxy route."""
 
+import asyncio
 import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Query
 
+from ...integrations.ha_credentials import HomeAssistantUnavailable, resolve_ha_credentials
 from ..dependencies import get_service
 
 router = APIRouter()
@@ -21,17 +23,17 @@ def _ha_credentials(config: Any) -> tuple[str | None, str | None]:
     Tries HA_NATIVE_MCP_URL first (strips /api/mcp suffix), then falls back
     to HA_MCP_URL (strips /api/mcp if present, otherwise uses as-is).
     """
-    # Try native MCP config first
-    native_url = getattr(config, "HA_NATIVE_MCP_URL", "") or ""
-    native_token = getattr(config, "HA_NATIVE_MCP_TOKEN", "") or ""
-    if native_url:
-        base = native_url.rsplit("/api/mcp", 1)[0] if "/api/mcp" in native_url else native_url.rstrip("/")
-        if native_token:
-            return base, native_token
+    # The Integrations record first, then the deprecated native settings
+    # (TASK-1476). A stored record that can't be used raises
+    # HomeAssistantUnavailable and never falls through to env.
+    credentials = resolve_ha_credentials(config)
+    if credentials is not None:
+        return credentials.base_url, credentials.token
 
     # Fall back to legacy MCP config
     mcp_url = getattr(config, "HA_MCP_URL", "") or ""
     mcp_token = getattr(config, "HA_MCP_AUTH_TOKEN", "") or ""
+    native_token = getattr(config, "HA_NATIVE_MCP_TOKEN", "") or ""
     if mcp_url:
         base = mcp_url.rsplit("/api/mcp", 1)[0] if "/api/mcp" in mcp_url else mcp_url.rstrip("/")
         token = mcp_token or native_token
@@ -52,7 +54,10 @@ async def get_ha_weather(entity_id: str = Query(default="weather.home")):
         return _cache[cache_key]
 
     service = get_service()
-    base_url, token = _ha_credentials(service.config)
+    try:
+        base_url, token = await asyncio.to_thread(_ha_credentials, service.config)
+    except HomeAssistantUnavailable as error:
+        return {"error": f"Home Assistant connection unavailable: {error.code}"}
 
     if not base_url or not token:
         return {"error": "Home Assistant not configured"}

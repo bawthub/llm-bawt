@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from llm_bawt.integrations.ha_credentials import HomeAssistantUnavailable, resolve_ha_credentials
 from llm_bawt.runtime_settings import RuntimeSettingsStore
 
 
@@ -67,14 +68,19 @@ class HomeAudioClient:
     def __init__(self, config, settings: HomeAudioSettings, http: httpx.AsyncClient):
         self.settings = settings
         self.http = http
-        self.ha_url = config.HA_NATIVE_MCP_URL.rstrip("/").removesuffix("/api/mcp")
-        self.token = config.HA_NATIVE_MCP_TOKEN
+        self.config = config
 
     async def _ha(self, method: str, path: str, **kwargs):
-        if not self.ha_url or not self.token:
+        # Resolved per request (TASK-1476): the Integrations record first, so
+        # a saved or rotated token is used without a restart.
+        try:
+            credentials = await asyncio.to_thread(resolve_ha_credentials, self.config)
+        except HomeAssistantUnavailable as error:
+            raise ValueError(f"Home Assistant connection unavailable: {error.code}") from None
+        if credentials is None:
             raise ValueError("Home Assistant URL/token are not configured")
-        response = await self.http.request(method, self.ha_url + "/api/" + path,
-                                           headers={"Authorization": f"Bearer {self.token}"},
+        response = await self.http.request(method, credentials.base_url + "/api/" + path,
+                                           headers={"Authorization": f"Bearer {credentials.token}"},
                                            timeout=15, **kwargs)
         response.raise_for_status()
         return response.json()

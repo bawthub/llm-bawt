@@ -9,10 +9,17 @@ import httpx
 import pytest
 from sqlalchemy import text
 
+from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings, wav_duration
 from llm_bawt.integrations.home_audio_store import HomeAudioStore
 from llm_bawt.integrations.home_audio_worker import HomeAudioWorker
 from tests.sqlite_support import fast_sqlite_engine
+
+
+@pytest.fixture(autouse=True)
+def no_ha_record(monkeypatch):
+    """No Integrations record: these tests cover the legacy settings path."""
+    monkeypatch.setattr(ha_credentials, "read_connection", lambda *args, **kwargs: None)
 
 
 @pytest.fixture

@@ -146,9 +146,9 @@ def test_reconnecting_after_a_disconnect_needs_every_field_again(store):
 
 def test_integrations_without_an_env_fallback_still_delete_on_disconnect(store):
     forms = CredentialIntegrations(None, store=store)
-    forms.configure("home-assistant", {"url": "https://ha.example", "token": STORED_KEY})
-    assert forms.disconnect("home-assistant") is True
-    assert not store.snapshot("home-assistant").exists
+    forms.configure("azure-speech", {"region": "eastus", "key": STORED_KEY})
+    assert forms.disconnect("azure-speech") is True
+    assert not store.snapshot("azure-speech").exists
 
 
 def test_undecryptable_record_never_falls_back_to_env(store, monkeypatch):
