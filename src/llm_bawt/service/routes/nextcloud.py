@@ -1,7 +1,10 @@
 """Nextcloud webhook and admin routes."""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 
+from ..dependencies import get_service
 from ..logging import get_service_logger
 from ..schemas import NextcloudProvisionRequest, NextcloudProvisionResponse
 
@@ -38,7 +41,9 @@ async def provision_nextcloud_talk(request: NextcloudProvisionRequest):
     bot_name = request.bot_name or request.bot_id.title()
 
     try:
-        provisioner = get_provisioner_client()
+        # Resolved per request (a blocking credential-store read), so a saved
+        # or rotated token applies without a restart.
+        provisioner = await asyncio.to_thread(get_provisioner_client, get_service().config)
 
         # Provision via service
         result = await provisioner.provision_talk_room_and_bot(

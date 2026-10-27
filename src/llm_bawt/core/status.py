@@ -432,15 +432,20 @@ def _collect_dependencies(config: Config) -> DependencyInfo:
     search_provider = getattr(config, "SEARCH_PROVIDER", None)
     tavily_key = _key_set("tavily")
     brave_key = _key_set("brave")
-    reddit_client_id = os.getenv("REDDIT_CLIENT_ID") or getattr(config, "REDDIT_CLIENT_ID", "")
-    reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET") or getattr(config, "REDDIT_CLIENT_SECRET", "")
+    try:
+        from ..search.credentials import reddit_credentials  # noqa: PLC0415
+
+        reddit_set = bool(reddit_credentials(config))
+    except Exception as e:  # noqa: BLE001 — status must render without the store
+        logger.debug("Reddit credential check failed: %s", type(e).__name__)
+        reddit_set = False
     if search_provider:
         info.search_provider = search_provider
     elif tavily_key:
         info.search_provider = "tavily"
     elif brave_key:
         info.search_provider = "brave"
-    elif reddit_client_id and reddit_client_secret:
+    elif reddit_set:
         info.search_provider = "reddit"
     else:
         if importlib.util.find_spec("ddgs"):

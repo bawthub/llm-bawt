@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import SearchClient, SearchProvider
-from .credentials import search_key, unusable_reason
+from .credentials import INTEGRATIONS_SETTINGS, reddit_credentials, search_key, unusable_reason
 
 if TYPE_CHECKING:
     from ..utils.config import Config
@@ -122,15 +122,13 @@ def get_search_client(
     
     if provider is None:
         # Auto-select based on availability
-        reddit_client_id = getattr(config, "REDDIT_CLIENT_ID", None)
-        reddit_client_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
         if search_key(config, SearchProvider.TAVILY) and is_search_available(SearchProvider.TAVILY):
             provider = SearchProvider.TAVILY
             logger.debug("Auto-selected Tavily (API key configured)")
         elif search_key(config, SearchProvider.BRAVE) and is_search_available(SearchProvider.BRAVE):
             provider = SearchProvider.BRAVE
             logger.debug("Auto-selected Brave (API key configured)")
-        elif reddit_client_id and reddit_client_secret and is_search_available(SearchProvider.REDDIT):
+        elif reddit_credentials(config) and is_search_available(SearchProvider.REDDIT):
             provider = SearchProvider.REDDIT
             logger.debug("Auto-selected Reddit API (credentials configured)")
         elif is_search_available(SearchProvider.DUCKDUCKGO):
@@ -201,17 +199,16 @@ def get_search_client(
             return _ddg_fallback(config, max_results, fallback,
                                  "Reddit requested but httpx not installed")
 
-        client_id = getattr(config, "REDDIT_CLIENT_ID", None)
-        client_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
-        user_agent = getattr(config, "REDDIT_USER_AGENT", "llm-bawt/0.1")
-        if not client_id or not client_secret:
+        creds = reddit_credentials(config)
+        if not creds:
             return _ddg_fallback(config, max_results, fallback,
-                                 "Reddit requested but credentials are not configured")
+                                 "Reddit requested but no usable Reddit credentials")
 
+        user_agent = getattr(config, "REDDIT_USER_AGENT", "llm-bawt/0.1")
         timeout = getattr(config, "SEARCH_TIMEOUT", 10)
         return RedditSearchClient(
-            client_id=client_id,
-            client_secret=client_secret,
+            client_id=creds.client_id,
+            client_secret=creds.client_secret,
             user_agent=user_agent,
             max_results=max_results,
             timeout=timeout,
@@ -286,18 +283,12 @@ def get_search_unavailable_reason(
                 )
             return "Brave Search is configured but unavailable. Check your API key and network."
 
-        reddit_client_id = getattr(config, "REDDIT_CLIENT_ID", None)
-        reddit_client_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
-        if reddit_client_id or reddit_client_secret:
+        if reddit_credentials(config):
             from .reddit_client import is_reddit_available
             if not is_reddit_available():
                 return (
                     "Reddit search requires httpx. This should be installed by default. "
                     "Try: pip install httpx"
-                )
-            if not reddit_client_id or not reddit_client_secret:
-                return (
-                    "Reddit search requires both REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET."
                 )
             return "Reddit search is configured but unavailable. Check credentials and network."
 
@@ -350,11 +341,10 @@ def get_search_unavailable_reason(
         return "Brave Search is configured but unavailable. Check your API key and network."
 
     if resolved_provider == SearchProvider.REDDIT:
-        client_id = getattr(config, "REDDIT_CLIENT_ID", None)
-        client_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
-        if not client_id or not client_secret:
-            return (
-                "Reddit search requires REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in your config."
+        creds = reddit_credentials(config)
+        if not creds:
+            return unusable_reason("Reddit", creds, INTEGRATIONS_SETTINGS) or (
+                f"Reddit search needs a client ID and secret. Connect Reddit in {INTEGRATIONS_SETTINGS}."
             )
         from .reddit_client import is_reddit_available
         if not is_reddit_available():

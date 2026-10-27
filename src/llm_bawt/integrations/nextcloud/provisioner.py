@@ -1,4 +1,10 @@
-"""Client for Nextcloud Talk provisioner service."""
+"""Client for Nextcloud Talk provisioner service.
+
+The provisioner URL and bearer token come from the encrypted
+``integration_connection:talk-provisioner`` record (the Integrations
+credentials form), resolved on every :func:`get_provisioner_client` call
+(TASK-1476). The legacy env settings apply only while no record exists.
+"""
 
 import logging
 import os
@@ -7,11 +13,27 @@ from typing import Optional
 
 import httpx
 
+from llm_bawt.service.connection_secrets import ConnectionUnavailable, resolve_integration
+
 log = logging.getLogger(__name__)
 
-# Provisioner configuration from environment (prefer LLM_BAWT_ prefix)
-PROVISIONER_URL = os.getenv('LLM_BAWT_TALK_PROVISIONER_URL') or os.getenv('TALK_PROVISIONER_URL', 'http://localhost:8790')
-PROVISIONER_TOKEN = os.getenv('LLM_BAWT_TALK_PROVISIONER_TOKEN') or os.getenv('TALK_PROVISIONER_TOKEN')
+INTEGRATION_ID = "talk-provisioner"
+# Deprecated settings, read in this order while no record exists.
+_LEGACY_URL_VARS = ("LLM_BAWT_TALK_PROVISIONER_URL", "TALK_PROVISIONER_URL")
+_LEGACY_TOKEN_VARS = ("LLM_BAWT_TALK_PROVISIONER_TOKEN", "TALK_PROVISIONER_TOKEN")
+
+
+class TalkProvisionerUnavailable(ValueError):
+    """A stored connection exists (or the store is down) but can't be used.
+
+    ``code`` is ``not_connected``, ``unreadable`` or ``store_unavailable``.
+    A ``ValueError`` so the admin route reports it as a 400; the message
+    never carries a value.
+    """
+
+    def __init__(self, code: str):
+        super().__init__(f"Talk provisioner connection unavailable ({code}); reconnect it under Integrations")
+        self.code = code
 
 
 @dataclass
@@ -42,14 +64,12 @@ class ProvisionerClient:
 
     def __init__(
         self,
-        base_url: str = PROVISIONER_URL,
-        token: Optional[str] = PROVISIONER_TOKEN,
+        base_url: str,
+        token: str,
         timeout: float = 30.0,
     ):
         if not token:
-            raise ValueError(
-                "LLM_BAWT_TALK_PROVISIONER_TOKEN (or TALK_PROVISIONER_TOKEN) environment variable is required"
-            )
+            raise ValueError("A Talk provisioner bearer token is required")
 
         self.base_url = base_url.rstrip('/')
         self.token = token
@@ -208,7 +228,30 @@ class ProvisionerClient:
                 raise
 
 
-# Global accessor
-def get_provisioner_client() -> ProvisionerClient:
-    """Get provisioner client singleton."""
-    return ProvisionerClient()
+def _first_env(names: tuple[str, ...]) -> Optional[str]:
+    return next((value for name in names if (value := os.getenv(name)) and value.strip()), None)
+
+
+def get_provisioner_client(config=None) -> ProvisionerClient:
+    """A client on the credentials stored now (the record first, else legacy settings).
+
+    Raises :class:`TalkProvisionerUnavailable` for a record that exists but
+    can't be used (never falling back to env) and ``ValueError`` when nothing
+    is configured.
+    """
+    if config is None:
+        from llm_bawt.utils.config import Config  # noqa: PLC0415
+
+        config = Config()
+    legacy = {
+        "url": _first_env(_LEGACY_URL_VARS) or getattr(config, "TALK_PROVISIONER_URL", None),
+        "token": _first_env(_LEGACY_TOKEN_VARS) or getattr(config, "TALK_PROVISIONER_TOKEN", None),
+    }
+    try:
+        found = resolve_integration(config, INTEGRATION_ID, legacy,
+                                    legacy_names=(*_LEGACY_URL_VARS, *_LEGACY_TOKEN_VARS))
+    except ConnectionUnavailable as e:
+        raise TalkProvisionerUnavailable(e.code) from None
+    if found is None:
+        raise ValueError("The Talk provisioner is not configured; connect it under Integrations")
+    return ProvisionerClient(base_url=found.meta["url"], token=found.secret["token"])

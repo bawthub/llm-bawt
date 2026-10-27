@@ -1,7 +1,8 @@
 """Stub the stored ``provider_connection:<id>`` records the key readers see (TASK-1476).
 
 ``outcomes`` maps a provider id to a key string, ``None`` (no record) or a
-:class:`ConnectionUnavailable` to raise. Ids not listed read as no record.
+:class:`ConnectionUnavailable` to raise. Ids not listed read as no record,
+and so does every ``integration`` record (Reddit's search credentials).
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ def stub_stored_keys(monkeypatch, outcomes: dict[str, object]) -> list[str]:
     reads: list[str] = []
 
     def fake_read(_config, kind, connection_id, _spec, **_kwargs):
+        if kind == "integration":
+            return None
         assert kind == "provider"
         reads.append(connection_id)
         outcome = outcomes.get(connection_id)

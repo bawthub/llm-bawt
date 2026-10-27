@@ -44,8 +44,9 @@ def test_factory_auto_selects_reddit_when_other_keys_missing():
     assert client.PROVIDER == SearchProvider.REDDIT
 
 
-def test_unavailable_reason_mentions_reddit_credentials():
+def test_unavailable_reason_says_where_to_connect_reddit():
+    # TASK-1476: the credentials live in the Integrations record; the env
+    # settings are a deprecated fallback, so the message points at the form.
     config = _Config()
     message = get_search_unavailable_reason(config, provider=SearchProvider.REDDIT)
-    assert "REDDIT_CLIENT_ID" in message
-    assert "REDDIT_CLIENT_SECRET" in message
+    assert "Settings → Integrations" in message

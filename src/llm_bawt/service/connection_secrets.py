@@ -9,12 +9,16 @@ never the whole record. A record that exists but can't be used (not
 connected, undecryptable or missing a required field) raises
 :class:`ConnectionUnavailable`, so a caller never falls back to a legacy env
 value for it. Only an absent record returns ``None``.
+
+:func:`resolve_integration` is the one record-first, env-fallback rule for
+credential integrations whose readers still accept legacy settings.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -181,12 +185,68 @@ def read_connection(config, kind: str, connection_id: str, spec: FieldSpec,
     )
 
 
+#: Integrations whose legacy-settings warning was already logged, one per process.
+_legacy_warned: set[str] = set()
+
+
+def has_connection_store(config) -> bool:
+    """Whether ``config`` names a database, so a stored record can exist.
+
+    Without database credentials (a CLI-only install) the legacy settings are
+    the only source. A configured but unreachable database is a store outage
+    and stays fail-closed. A duck-typed config without the field counts as no
+    database.
+    """
+    from llm_bawt.utils.config import has_database_credentials  # noqa: PLC0415 — import cycle
+
+    return hasattr(config, "POSTGRES_PASSWORD") and has_database_credentials(config)
+
+
+def resolve_integration(config, integration_id: str, legacy: Mapping[str, str | None], *,
+                        legacy_names: Sequence[str]) -> ConnectionSecret | None:
+    """One credential integration's fields: the stored record, else its legacy settings.
+
+    ``legacy`` maps the integration's field names to the deprecated settings'
+    values. They apply only when no record exists and every required field
+    has one, with one warning per process naming ``legacy_names``, never a
+    value. A record that exists but can't be used raises
+    :class:`ConnectionUnavailable`, so a disconnect never brings env back.
+    Resolve per operation, so a saved or rotated credential applies without a
+    restart.
+    """
+    spec = integration_spec(integration_id)
+    if has_connection_store(config):
+        found = read_connection(config, "integration", integration_id, spec)
+        if found is not None:
+            return found
+    values = {name: value.strip() for name, value in legacy.items() if _present(value)}
+    if not all(name in values for name in (*spec.secret, *spec.meta)):
+        return None
+    if spec.meta_any and not any(name in values for name in spec.meta_any):
+        return None
+    if integration_id not in _legacy_warned:
+        _legacy_warned.add(integration_id)
+        logger.warning(
+            "%s credentials read from deprecated settings %s because no connection is stored; "
+            "save them under Integrations instead",
+            CREDENTIAL_INTEGRATIONS[integration_id].label, "/".join(legacy_names),
+        )
+    return ConnectionSecret(
+        kind="integration",
+        id=integration_id,
+        meta={name: values[name] for name in (*spec.meta, *spec.meta_optional) if name in values},
+        secret={name: values[name] for name in spec.secret},
+    )
+
+
 __all__ = [
     "BAWTHUB_READABLE",
     "ConnectionSecret",
     "ConnectionUnavailable",
     "FieldSpec",
     "KINDS",
+    "has_connection_store",
     "integration_spec",
     "read_connection",
+    "resolve_integration",
 ]

@@ -140,6 +140,30 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
                 ("sabnzbd", "SABnzbd", "Download queue for the media tools.", "https://sabnzbd.example"),
             )
         ),
+        # Read in-process by llm-bawt only, which falls back to the legacy
+        # settings while no record exists.
+        CredentialIntegration(
+            id="reddit",
+            label="Reddit",
+            description="Reddit search for the search tool, through Reddit's OAuth API.",
+            fields=(
+                CredentialField("client_id", "Client ID", "text"),
+                CredentialField("client_secret", "Client secret", "secret"),
+            ),
+            bawthub_readable=False,
+            keeps_disconnected_record=True,
+        ),
+        CredentialIntegration(
+            id="talk-provisioner",
+            label="Nextcloud Talk provisioner",
+            description="Creates Nextcloud Talk rooms and bots for your bots.",
+            fields=(
+                CredentialField("url", "Provisioner URL", "url", placeholder="https://talk-provisioner.example"),
+                CredentialField("token", "Bearer token", "secret"),
+            ),
+            bawthub_readable=False,
+            keeps_disconnected_record=True,
+        ),
     )
 }
 

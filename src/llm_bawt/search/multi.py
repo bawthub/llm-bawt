@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .base import SearchError, SearchProvider, SearchResult
-from .credentials import search_key
+from .credentials import reddit_credentials, search_key
 from .factory import get_search_client, get_search_unavailable_reason, is_search_available
 
 if TYPE_CHECKING:
@@ -47,9 +47,7 @@ def available_providers(config: "Config") -> list[SearchProvider]:
     if search_key(config, SearchProvider.TAVILY) and is_search_available(SearchProvider.TAVILY):
         provs.append(SearchProvider.TAVILY)
 
-    reddit_id = getattr(config, "REDDIT_CLIENT_ID", None)
-    reddit_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
-    if reddit_id and reddit_secret and is_search_available(SearchProvider.REDDIT):
+    if reddit_credentials(config) and is_search_available(SearchProvider.REDDIT):
         provs.append(SearchProvider.REDDIT)
 
     has_keyed_web = any(p in _KEYED_WEB for p in provs)
