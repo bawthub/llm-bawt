@@ -206,8 +206,10 @@ class AmbientSource(SkillSource):
             try:
                 root = configured.resolve()
                 children = sorted(root.iterdir())
-            except OSError:
+            except OSError as exc:
+                _note_unreadable_root(configured, exc)
                 continue
+            _note_unreadable_root(configured, None)
             for child in children:
                 if child.name in found or not _REF.fullmatch(child.name):
                     continue
@@ -229,6 +231,27 @@ class AmbientSource(SkillSource):
                     description=description.strip() if isinstance(description, str) else "",
                     source=self.kind, root=resolved)
         return tuple(found[ref] for ref in sorted(found))
+
+
+_UNREADABLE_ROOTS: set[str] = set()
+_UNREADABLE_LOCK = threading.Lock()
+
+
+def _note_unreadable_root(root: Path, exc: OSError | None) -> None:
+    """Warn once when a configured skill root can't be listed; re-arm when it reads.
+
+    A missing root (e.g. the skill checkout isn't mounted) lists no skills
+    instead of failing, so this warning is the only sign of it.
+    """
+    key = str(root)
+    with _UNREADABLE_LOCK:
+        if exc is None:
+            _UNREADABLE_ROOTS.discard(key)
+            return
+        if key in _UNREADABLE_ROOTS:
+            return
+        _UNREADABLE_ROOTS.add(key)
+    logger.warning("skill root %s is unreadable (%s); it offers no skills", key, exc)
 
 
 class _LruCache:

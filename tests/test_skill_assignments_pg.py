@@ -265,6 +265,24 @@ def test_a_bundle_bot_can_still_be_released(world):
     assert _managed_rows(world) == ([], {})
 
 
+def test_an_unmounted_source_serves_an_empty_catalog_and_injects_nothing(world, monkeypatch, tmp_path):
+    world.service.adopt("fixture-one", None)
+    world.service.put("bot", "fixture-one", "alpha", "injected", 0, None)
+    unmounted = SkillService(world.rig.engine, list_bots=world.service._list_bots,
+                             caps=world.service._caps,
+                             source=AmbientSource((tmp_path / "not-mounted",)))
+    monkeypatch.setattr(skill_routes, "skill_service", lambda: unmounted)
+    app = FastAPI()
+    app.include_router(skill_routes.router)
+    client = TestClient(app)
+
+    assert client.get("/v1/skills").json() == {"data": []}
+    view = client.get("/v1/skills/bots/fixture-one")
+    assert view.status_code == 200 and view.json()["injected_tokens"] == 0
+    resolution = unmounted.resolve_bot("fixture-one")
+    assert resolution.injected == () and resolution.manifest()["entries"] == []
+
+
 def test_routes_serve_the_service_over_http(world, monkeypatch):
     monkeypatch.setattr(skill_routes, "skill_service", lambda: world.service)
     app = FastAPI()

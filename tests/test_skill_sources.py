@@ -38,6 +38,34 @@ def test_listing_reads_frontmatter_and_the_first_root_wins(tmp_path):
     assert (listed["only-second"].name, listed["only-second"].description) == ("only-second", "")
 
 
+def test_a_missing_root_offers_nothing_and_warns_once_until_it_reads_again(tmp_path, caplog):
+    # The app without the skill-checkout mount: SkillService builds a new
+    # source per request, so the warning is once per root, not per instance.
+    root = tmp_path / "not-mounted"
+    caplog.set_level("WARNING", logger="agent_bridge.skill_sources")
+
+    def warnings():
+        return [r for r in caplog.records if str(root) in r.getMessage()]
+
+    for _ in range(2):
+        source = AmbientSource((root,))
+        assert source.list() == () and source.get("real") is None
+        assert source.read_body("real") is None
+        with pytest.raises(SkillSourceError) as missing:
+            source.tree("real")
+        assert missing.value.status == 404
+    assert len(warnings()) == 1 and warnings()[0].levelname == "WARNING"
+
+    _skill(root, "real")
+    assert [e.ref for e in AmbientSource((root,)).list()] == ["real"]
+    assert len(warnings()) == 1
+    (root / "real" / "SKILL.md").unlink()
+    (root / "real").rmdir()
+    root.rmdir()
+    assert AmbientSource((root,)).list() == ()
+    assert len(warnings()) == 2
+
+
 def test_listing_skips_escaping_links_odd_names_and_dirs_without_a_skill_file(tmp_path):
     root, outside = tmp_path / "root", tmp_path / "outside"
     _skill(root, "real")

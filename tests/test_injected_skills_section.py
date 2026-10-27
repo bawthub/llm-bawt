@@ -125,6 +125,24 @@ def test_nothing_to_inject_reads_no_templates_and_adds_nothing(world, resolution
     assert owner._skill_resolution is world["resolution"]
 
 
+def test_an_unmounted_skill_source_injects_nothing(world, tmp_path):
+    # A managed bot with injected rows while the app can't see the skill
+    # checkout: every row is source_missing, nothing is injected or applied.
+    from agent_bridge.skill_sources import AmbientSource
+    from llm_bawt.skills.resolver import SOURCE_MISSING
+
+    facts = BotFacts("fixture-one", "agent", "claude-code", None, frozenset(), False, True)
+    rows = [Assignment("bot", "fixture-one", "a", "injected", 0),
+            Assignment("bot", "fixture-one", "b", "available", 1)]
+    world["resolution"] = resolve(facts, rows, AmbientSource((tmp_path / "not-mounted",)),
+                                  Caps(per_skill=100, total=100))
+    owner = _Owner(_TEMPLATES)
+    assert _section(owner) is None and owner.resolves == []
+    assert {(e.ref, e.applied, e.reason) for e in world["resolution"].entries} == {
+        ("a", False, SOURCE_MISSING), ("b", False, SOURCE_MISSING)}
+    assert world["resolution"].manifest()["entries"] == []
+
+
 def test_a_resolution_failure_skips_the_section(world):
     world["resolution"] = RuntimeError("db down")
     owner = _Owner(_TEMPLATES)
