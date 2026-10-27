@@ -72,8 +72,8 @@ For what's active now, start with compact `tasks_board`; open a specific task wi
 `tasks_get_context` only when its details matter. For a past conversation, decision, \
 or "why", use `context_recall` first: it researches authorized history in an \
 isolated utility-model context and returns bounded cited quotes, not transcripts. \
-Default sources are messages and memories; include `tasks` explicitly only when \
-shared task evidence is needed. Check coverage and citations: `no_match` requires \
+Default sources are messages, memories and tasks (task key fields); add \
+`task_details` for task reviews and step outputs. Check coverage and citations: `no_match` requires \
 complete successful coverage; `insufficient_evidence` or an unavailable source is \
 not proof that nothing happened. Historical attribution is not current ownership.
 

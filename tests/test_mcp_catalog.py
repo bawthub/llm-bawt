@@ -154,7 +154,10 @@ async def test_catalog_token_budgets():
     # messages_search_all, memory_search_all) name the cheaper tool first and
     # tasks_board says it is where active-work lookups start: 4,125 (+67).
     # One avoided default tasks_list call (~13k chars) pays for it.
-    assert sum(descriptions) <= 4125, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1557: context_recall names its new default (tasks) and the two
+    # opt-in depths, task_details and tool_args: 4,136 (+11). Without them a
+    # caller can't know reviews, steps and clone facts are searchable.
+    assert sum(descriptions) <= 4136, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -218,7 +221,9 @@ async def test_catalog_token_budgets():
     # TASK-1555: the description hints above, tasks_list detail flag, and
     # tasks_board's typed view/updated enums and rows scope: 15,170 (+135).
     # An unknown window used to come back as the default board, unannounced.
-    assert total <= 15170, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1557: context_recall's sources enum gains task_details and
+    # tool_args, plus the summary above: 15,189 (+19).
+    assert total <= 15189, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

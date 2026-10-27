@@ -148,11 +148,19 @@ async def test_input_and_output_budgets_apply_to_complete_packets():
 @pytest.mark.parametrize("kwargs", [
     {"query": " "}, {"query": "x" * 1001}, {"output_tokens": 399}, {"output_tokens": 1601},
     {"bot_id": "peer"}, {"sources": []}, {"sources": ["messages", "messages"]},
-    {"task_ids": ["../private"]}, {"task_ids": ["TASK-42"]}, {"output_tokens": True},
+    {"task_ids": ["../private"]}, {"task_ids": ["TASK-42"], "sources": ["messages", "memories"]},
+    {"output_tokens": True}, {"sources": ["tool_bodies"]},
 ])
 def test_request_validation(kwargs):
     with pytest.raises(ValidationError):
         RecallRequest(**{"query": "hello", **kwargs})
+
+
+def test_default_sources_search_task_key_fields_and_details_are_opt_in():
+    assert RecallRequest(query="hello").sources == ("messages", "memories", "tasks")
+    # task_ids narrows either task depth, so a details-only request may name tasks.
+    assert RecallRequest(query="hello", sources=("task_details",), task_ids=("TASK-42",)).task_ids == ("TASK-42",)
+    assert RecallRequest(query="hello", task_ids=("TASK-42",)).sources[-1] == "tasks"
 
 
 @pytest.mark.asyncio
@@ -259,28 +267,199 @@ async def test_failed_source_and_empty_healthy_source_never_claim_no_match():
     assert all_failed["status"] == "error" and all_failed["coverage"]["memories"]["status"] == "unavailable"
 
 
+REVOKED_ANSWER = "Approved. " + (("A" * 205 + ". ") * 11) + "That approval was revoked at the end."
+
+
+def _long_answer_result(*extra, output_tokens=1600, rows=()):
+    raw = compact_json({"findings": [{"source": "messages", "id": "long", "quote": REVOKED_ANSWER}, *extra]})
+    item = Evidence("messages", "long", "reviewer", "operator", REVOKED_ANSWER)
+    return RecallService([Source([item, *rows])], Model(raw)).recall(request(output_tokens=output_tokens), SCOPE)
+
+
 @pytest.mark.asyncio
-async def test_answer_exceeding_six_quote_spans_is_not_returned_as_a_prefix():
-    answer = "B5: " + (("A" * 205 + ". ") * 11) + "Approval was revoked at the end."
-    assert len(answer) < 2400
-    raw = compact_json({"findings": [{"source": "messages", "id": "long", "quote": answer}]})
-    item = Evidence("messages", "long", "reviewer", "operator", answer)
-    result = await RecallService([Source([item])], Model(raw)).recall(request(output_tokens=1600), SCOPE)
-    assert result["status"] == "insufficient_evidence" and result["findings"] == []
+async def test_span_beyond_six_quote_slots_keeps_head_and_trailing_qualifier_marked():
+    # TASK-1557: a found answer is never turned into insufficient_evidence by
+    # its length; it keeps its head AND its last part (the reversal a prefix
+    # would lose), and every cut is marked on the quote and in the packet.
+    result = await _long_answer_result()
+    assert result["status"] == "ok", result
+    spans = result["findings"]
+    assert len(spans) == 6 and len({span["part"] for span in spans}) == 6
+    total = spans[0]["part"].split("/")[1]
+    assert int(total) > 6
+    assert spans[0]["quote"].startswith("Approved.") and spans[0]["part"] == f"1/{total}"
+    assert spans[-1]["quote"].endswith("That approval was revoked at the end.")
+    assert spans[-1]["part"] == f"{total}/{total}" and "truncated" not in spans[-1]
+    assert [bool(span.get("truncated")) for span in spans] == [False] * 4 + [True, False]
+    assert result["truncated"] and "qualifier or correction" in result["uncertainty"]
     assert result["handle"] and "expand" in result["uncertainty"]
+    assert result["metrics"]["parent_tokens"] == tokens(compact_json(result)) <= 1600
 
 
 @pytest.mark.asyncio
-async def test_shortened_answer_with_rejected_selection_is_still_insufficient():
-    answer = "B5: " + (("A" * 205 + ". ") * 11) + "Approval was revoked at the end."
-    raw = compact_json({"findings": [
-        {"source": "messages", "id": "long", "quote": answer},
-        {"source": "messages", "id": "long", "quote": "invented"},
-    ]})
-    item = Evidence("messages", "long", "reviewer", "operator", answer)
-    result = await RecallService([Source([item])], Model(raw)).recall(request(output_tokens=1600), SCOPE)
-    assert result["status"] == "insufficient_evidence" and result["findings"] == []
-    assert result["rejected_findings"] == 1 and result["handle"]
+async def test_shortened_answer_with_rejected_selection_keeps_both_warnings():
+    result = await _long_answer_result({"source": "messages", "id": "long", "quote": "invented"})
+    assert result["status"] == "ok" and result["findings"]
+    assert result["rejected_findings"] == 1
+    assert "a later correction may be missing" in result["uncertainty"]
+    assert "qualifier or correction" in result["uncertainty"]
+
+
+@pytest.mark.asyncio
+async def test_output_budget_shrinks_a_lone_answer_but_keeps_its_trailing_qualifier():
+    result = await _long_answer_result(output_tokens=400)
+    assert result["status"] == "ok", result
+    spans = result["findings"]
+    assert spans[0]["quote"].startswith("Approved.")
+    assert spans[-1]["quote"].endswith("That approval was revoked at the end.")
+    assert any(span.get("truncated") for span in spans)
+    assert result["metrics"]["parent_tokens"] == tokens(compact_json(result)) <= 400
+
+
+@pytest.mark.asyncio
+async def test_findings_past_the_slots_are_omitted_whole_and_reported():
+    later = Evidence("messages", "later", "reviewer", "operator", "Shipped on Thursday after the recheck.")
+    result = await _long_answer_result({"source": "messages", "id": "later", "quote": later.text}, rows=(later,))
+    assert result["status"] == "ok"
+    assert {span["id"] for span in result["findings"]} == {"long"}
+    assert "1 further finding(s) omitted" in result["uncertainty"] and result["truncated"]
+
+
+@pytest.mark.asyncio
+async def test_output_budget_drops_whole_later_findings_never_clears_found_answers():
+    texts = [f"Decision {n}: " + "the rollout plan stays on the documented path. " * 6 for n in range(4)]
+    rows = [Evidence("messages", f"d{n}", "reviewer", "operator", text) for n, text in enumerate(texts)]
+    raw = compact_json({"findings": [{"source": "messages", "id": row.id, "quote": row.text} for row in rows]})
+    result = await RecallService([Source(rows)], Model(raw)).recall(request(output_tokens=400), SCOPE)
+    assert result["status"] == "ok", result
+    kept = result["findings"]
+    assert kept and kept[0]["id"] == "d0" and len({span["id"] for span in kept}) < 4
+    # Whole findings were dropped from the end; what is kept is complete.
+    assert all("truncated" not in span for span in kept if span["id"] != kept[-1]["id"])
+    assert "omitted to fit the output budget" in result["uncertainty"] and result["truncated"]
+    assert result["metrics"]["parent_tokens"] == tokens(compact_json(result)) <= 400
+
+
+@pytest.mark.asyncio
+async def test_same_span_selected_twice_is_one_finding():
+    source = Source()
+    raw = compact_json({"findings": [{"source": "messages", "id": "m1", "quote": source.rows[0].text}] * 2})
+    result = await RecallService([source], Model(raw)).recall(request(), SCOPE)
+    assert result["status"] == "ok" and len(result["findings"]) == 1 and not result["truncated"]
+
+
+def _lone_quote_packet(quote: str):
+    from llm_bawt.recall.service import AnswerSet, GroundedAnswer
+    answers = AnswerSet(False, 0)
+    answers.add(GroundedAnswer([{"source": "messages", "id": "m1", "quote": quote, "start_char": 120,
+                                 "provenance": {"source_bot": "reviewer", "session_id": "s-1"}}]))
+    coverage = {source: {"status": "ok", "records": 4} for source in ("messages", "memories", "tasks")}
+    packet = {"status": "ok", "findings": answers.findings(), "uncertainty": answers.uncertainty(),
+              "coverage": coverage, "truncated": False, "handle": "h", "metrics": {"parent_tokens": 0}}
+    return packet, answers
+
+
+LONE_QUOTE = " ".join(f"step{n}x{n * 7919 % 1000}" for n in range(40))
+
+
+def test_fit_clips_a_lone_quote_to_an_exact_marked_prefix_before_clearing_it():
+    # TASK-1557 replay: a found answer whose one quote no longer fits beside
+    # the coverage report keeps a shorter exact prefix of that quote, marked
+    # truncated and counted as a cut, rather than becoming insufficient_evidence.
+    packet, answers = _lone_quote_packet(LONE_QUOTE)
+    budget = tokens(compact_json(packet)) - 30
+    RecallService._fit(packet, budget, answers)
+    assert packet["status"] == "ok", packet
+    [kept] = packet["findings"]
+    assert LONE_QUOTE.startswith(kept["quote"]) and len(kept["quote"]) < len(LONE_QUOTE)
+    assert not kept["quote"].endswith(" ") and LONE_QUOTE[len(kept["quote"])] == " "
+    assert kept["start_char"] == 120 and kept["truncated"] is True
+    assert packet["truncated"] and "1 answer span(s) cut to fit" in packet["uncertainty"]
+    assert packet["metrics"]["parent_tokens"] == tokens(compact_json(packet)) <= budget
+
+
+def test_fit_drops_provenance_only_at_the_quote_floor_and_keeps_the_citation():
+    probe, probe_answers = _lone_quote_packet(LONE_QUOTE)
+    while probe_answers.reduce():
+        pass
+    bare = probe_answers.findings()
+    assert "provenance" not in bare[0]
+    shaped = {**probe, "findings": bare, "uncertainty": probe_answers.uncertainty(), "truncated": True,
+              "metrics": {"parent_tokens": 999}}
+    budget = tokens(compact_json(shaped))
+    packet, answers = _lone_quote_packet(LONE_QUOTE)
+    RecallService._fit(packet, budget, answers)
+    assert packet["status"] == "ok"
+    [kept] = packet["findings"]
+    assert "provenance" not in kept and kept["source"] == "messages" and kept["id"] == "m1"
+    assert kept["start_char"] == 120 and kept["truncated"] is True and LONE_QUOTE.startswith(kept["quote"])
+    assert len(kept["quote"]) <= 80
+
+
+@pytest.mark.asyncio
+async def test_minimum_output_budget_keeps_a_found_answer_with_every_source_reporting():
+    # TASK-1557 guard: at the smallest accepted output_tokens, a found answer
+    # survives the heaviest coverage report (all five sources; the task
+    # sources, the only ones that return an EvidenceBatch, with withheld rows,
+    # depth and both partial reasons; a head fallback) and the heaviest
+    # provenance (a follow-on row).
+    from llm_bawt.recall.contracts import EvidenceBatch
+
+    class Batch(Source):
+        def __init__(self, source, rows, depth=None):
+            if depth:
+                rows = EvidenceBatch(rows, withheld=9, search_mode="semantic")
+                rows.partial = {"reviews_truncated", "reviews_unavailable"} if depth == "details" else set()
+                self.depth = depth
+            super().__init__(rows)
+            self.source = source
+
+    hit, later = "0b6f3c1e-2d4a-4f8e-9a7b-5c3d2e1f0a9b", "7c1d9e2f-3a4b-4c5d-8e6f-1a2b3c4d5e6f"
+    prose = ("The maintenance model stays on the gguf default for now, so the client is the agent "
+             "backend client and query_bounded keeps its current timeout. ") * 6
+    rows = {
+        "messages": [Evidence("messages", hit, "reviewer", "operator", "Which client runs maintenance?",
+                              window_kind="head_fallback", at="2026-10-20T14:03:11Z", speaker="assistant",
+                              source_bot="peer", session_id="6e3c3af4-a2d5-57a2-b73f-bbcb2d0be7c0"),
+                     Evidence("messages", later, "reviewer", "operator", prose, start_char=2048,
+                              at="2026-10-20T14:09:52Z", speaker="bot:peer", follows=hit, source_bot="peer",
+                              session_id="6e3c3af4-a2d5-57a2-b73f-bbcb2d0be7c0")],
+        "memories": [Evidence("memories", "mem-1", "reviewer", "operator", prose)],
+        "tasks": [Evidence("tasks", "TASK-1210", "reviewer", "operator", prose, source_bot="peer")],
+        "task_details": [Evidence("task_details", "TASK-1210#review:cmvqp5r2x00nh0ms39hkj5aan", "reviewer",
+                                  "operator", prose, source_bot="peer", review_ref="cmvqp5r2x00nh0ms39hkj5aan")],
+        "tool_args": [Evidence("tool_args", "88412", "reviewer", "operator",
+                               "attempted clone repo=https://github.com/example/r dest=/tmp/r " + prose)],
+    }
+    providers = [Batch(source, items, {"tasks": "key_fields", "task_details": "details"}.get(source))
+                 for source, items in rows.items()]
+    # The model's own reply also fits output_tokens: one long span, four short.
+    raw = compact_json({"findings": [{"source": source, "id": items[-1].id,
+                                      "quote": items[-1].text[:600 if source == "messages" else 120]}
+                                     for source, items in rows.items()]})
+    assert tokens(raw) <= 400
+    result = await RecallService(providers, Model(raw)).recall(
+        RecallRequest(query="maintenance model client", sources=tuple(rows), output_tokens=400), SCOPE)
+    assert set(result["coverage"]) == set(rows)
+    assert result["status"] == "ok", result
+    [kept] = result["findings"]
+    assert kept["id"] == later and prose.startswith(kept["quote"]) and kept["truncated"] is True
+    assert "omitted to fit" in result["uncertainty"]
+    assert result["metrics"]["parent_tokens"] == tokens(compact_json(result)) <= 400
+
+
+def test_fit_reports_insufficient_only_when_no_single_quote_fits():
+    # The stated limit of "found stays found": a packet whose fixed parts leave
+    # no room for even the shortest clipped quote returns insufficient_evidence,
+    # with the handle.
+    from llm_bawt.recall.service import OMITTED_NOTE, UNCERTAINTY
+    packet, answers = _lone_quote_packet(LONE_QUOTE)
+    cleared = {**packet, "status": "insufficient_evidence", "findings": [], "truncated": True,
+               "uncertainty": UNCERTAINTY + OMITTED_NOTE.format(1), "metrics": {"parent_tokens": 999}}
+    budget = tokens(compact_json(cleared)) + 3
+    RecallService._fit(packet, budget, answers)
+    assert packet["status"] == "insufficient_evidence" and packet["findings"] == []
+    assert packet["truncated"] and "omitted" in packet["uncertainty"] and packet["handle"] == "h"
 
 
 @pytest.mark.asyncio

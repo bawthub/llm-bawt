@@ -8,7 +8,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-Source = Literal["messages", "memories", "tasks", "tool_evidence"]
+Source = Literal["messages", "memories", "tasks", "task_details", "tool_evidence", "tool_args"]
+# Shared tasks are searched by default (key fields only); their reviews and
+# step outputs (task_details) are opt-in, as are tool metadata and recognized
+# command facts (tool_args) (TASK-1557).
+DEFAULT_SOURCES: tuple[Source, ...] = ("messages", "memories", "tasks")
+TASK_SOURCES = frozenset({"tasks", "task_details"})
+# Fixed reasons a source's coverage is partial beyond withheld records.
+PARTIAL_REASONS = frozenset({"reviews_truncated", "reviews_unavailable"})
 MAX_RECORDS = 24
 MAX_SOURCE_RECORDS = 6
 # Message ranking/expansion policy (TASK-1210), kept together on purpose.
@@ -49,7 +56,7 @@ class RecallError(Exception):
 class RecallRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     query: str = Field(min_length=1, max_length=1000)
-    sources: tuple[Source, ...] = ("messages", "memories")
+    sources: tuple[Source, ...] = DEFAULT_SOURCES
     task_ids: tuple[str, ...] = Field(default=(), max_length=3)
     handle: str | None = Field(default=None, max_length=64)
     output_tokens: int = Field(default=1000, ge=400, le=1600, strict=True)
@@ -64,8 +71,8 @@ class RecallRequest(BaseModel):
     @field_validator("sources")
     @classmethod
     def valid_sources(cls, value: tuple[Source, ...]) -> tuple[Source, ...]:
-        if not value or len(value) > 4 or len(set(value)) != len(value):
-            raise ValueError("select one to four distinct sources")
+        if not value or len(set(value)) != len(value):
+            raise ValueError("select one or more distinct sources")
         return value
 
     @field_validator("task_ids")
@@ -77,8 +84,8 @@ class RecallRequest(BaseModel):
 
     @model_validator(mode="after")
     def task_scope(self):
-        if self.task_ids and "tasks" not in self.sources:
-            raise ValueError("task_ids require tasks source")
+        if self.task_ids and not TASK_SOURCES & set(self.sources):
+            raise ValueError("task_ids require the tasks or task_details source")
         return self
 
 
@@ -128,6 +135,8 @@ class EvidenceBatch(list[Evidence]):
         super().__init__(values)
         self.withheld = withheld
         self.search_mode = search_mode
+        # Codes from PARTIAL_REASONS: searched, but not everything was readable.
+        self.partial: set[str] = set()
 
 
 class SourceProvider(ABC):
@@ -135,6 +144,10 @@ class SourceProvider(ABC):
     # Rows a source may return: direct hits are always capped at
     # MAX_SOURCE_RECORDS; only follow-ons may take a source past it.
     max_records: int = MAX_SOURCE_RECORDS
+    # Own search deadline, inside the recall's MAX_SECONDS: a slow source is
+    # reported unavailable (timeout) and the other sources' evidence is kept.
+    # None: bounded only by the recall deadline.
+    max_seconds: float | None = None
 
     @abstractmethod
     async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:

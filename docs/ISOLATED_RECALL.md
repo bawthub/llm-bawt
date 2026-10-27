@@ -15,11 +15,15 @@ The tool accepts one typed `request` object:
 ```
 
 - `query`: nonblank, at most 1,000 characters and 256 o200k_base tokens.
-- `sources`: one to four distinct values: `messages`, `memories`, `tasks`,
-  `tool_evidence`. Defaults to caller-owned messages and memories.
-- Selecting `tasks` explicitly opts into shared-task discovery. Optional
-  `task_ids` (at most three cuids / TASK-N references) narrows that search.
-  Omit IDs to discover forgotten task references by meaning.
+- `sources`: one or more distinct values: `messages`, `memories`, `tasks`,
+  `task_details`, `tool_evidence`, `tool_args`. Defaults to `messages`,
+  `memories` and `tasks` (TASK-1557: a quarter of real misses were answers
+  that lived only in a task). `task_details` (reviews and step outputs),
+  `tool_evidence` (receipt metadata) and `tool_args` (attempted git clones)
+  are opt-in depth.
+- `tasks`/`task_details` discover shared tasks by meaning. Optional
+  `task_ids` (at most three cuids / TASK-N references) narrows that search
+  and requires one of the two task sources.
 - `output_tokens`: 400–1,600, default 1,000. Bounds the **complete serialized
   packet**, including citations, handle, coverage and metrics.
 - `handle`: optional opaque continuation. Repeat the original `sources` and
@@ -49,11 +53,22 @@ A single compact JSON text block (no duplicate structured-output copy):
   least three words, in source order) and the packet returns the exact
   contiguous source span, never the model's text. A grounded span longer than
   `MAX_QUOTE_CHARS`/`MAX_QUOTE_TOKENS` (contracts.py) is emitted as multiple
-  ordered, source-offset-backed spans when all of it fits the six-finding and
-  parent-packet budgets. If it cannot fit, the packet is
-  `insufficient_evidence`, not a plausible answer with a hidden missing suffix;
-  the handle permits expanding the original intent. Packet-level `truncated`
-  still reports clipped evidence or insufficient quote space.
+  ordered, source-offset-backed spans (`part: "k/n"`). **What was found stays
+  found (TASK-1557):** when the spans exceed the six-finding or parent-packet
+  budget, the packet gives up the least material first, the last finding,
+  then a span's middle parts. A shortened span keeps its head and its last
+  part (where a trailing qualifier or reversal lives), and every kept part
+  followed by omitted text is marked `truncated`. `uncertainty` counts the
+  shortened spans and omitted findings; the handle expands them. When one
+  part of one finding is left and still too long, its quote is clipped to a
+  shorter exact prefix (same `start_char`, word boundary, marked `truncated`,
+  floor `MIN_CLIPPED_QUOTE_CHARS` = 80), and at the floor the finding drops
+  its `provenance` block, which the handle can still expand. The only case
+  that clears findings is when not even that bare floor quote fits beside the
+  coverage report; that packet is `insufficient_evidence`. At the minimum
+  `output_tokens` (400) a bare floor quote fits beside all five sources'
+  coverage, so it doesn't happen at any accepted budget today; a test pins
+  that. Packet-level `truncated` still reports any clipping.
 - `rejected_findings`: count of selected excerpts that failed schema or
   grounding and were omitted. Each is dropped individually; if every selection
   is rejected the call is `error`/`ungrounded_synthesis`.
@@ -69,9 +84,10 @@ A single compact JSON text block (no duplicate structured-output copy):
   unavailable/empty search is `insufficient_evidence`, never `no_match`; all
   sources unavailable is `error`. Policy, authority and source-contract failures
   remain fatal and return **no quotes**.
-- `scope`: explicitly notes that tool evidence is metadata-only, tasks exclude
-  responses, memories are caller scoped, and history spans only live searchable
-  public partitions for the trusted user.
+- `scope`: explicitly notes that memories are caller scoped, history spans only
+  live searchable public partitions for the trusted user, tasks are searched by
+  key fields (reviews and steps only with `task_details`), tool evidence is
+  metadata, and `tool_args` yields attempted-clone facts, never command text.
 - `truncated`: indicates excerpt/input/output clipping. A bounded search cannot
   prove absence outside its authorized, matching excerpts.
 - `handle`: opaque, session/bot/user-owned, expires after at most 15 minutes or
@@ -155,7 +171,8 @@ session as server-owned provenance, not a model-inferred review label.
 SQL extracts an **original contiguous window** of at most 2,400 characters near
 the whole query phrase, or the longest matching meaningful query term. No full
 message body crosses the DB boundary. Stem-only matches without a literal anchor
-use a prefix and explicitly report `head_fallbacks`. Excerpts are then capped at
+use a prefix and report their count as `head_fallbacks` in that source's
+coverage (present only when nonzero). Excerpts are then capped at
 512 reference tokens. Offsets and truncation accompany internal evidence;
 generated/joined search highlights are never treated as original quotation text.
 
@@ -186,9 +203,22 @@ Unknown/private bot provenance or other-user associations deny the candidate.
 System/cron and null human-actor activities are normal neutral shared-task events,
 not authorization grants. Activity headers are attribution, not trusted authority.
 
-Only ID/title/status/description are admitted; never task responses, step output,
-project instructions, related-task content, or other bots' conversation turns.
-Long descriptions use a query-relevant original window. If a candidate's complete
+What is admitted is what `tasks_get` would show the caller (TASK-1557), one
+evidence record ("part") per passage:
+
+- `tasks` (default): `TASK-N` (title, status, description),
+  `TASK-N#response` and `TASK-N#outcome`.
+- `task_details` (opt-in): `TASK-N#step:<n>` (step title and output) and
+  `TASK-N#review:<cuid>` (one page of peer reviews, newest first). A review
+  whose author the caller may not read is dropped and counted as withheld.
+  More reviews than one page reports coverage `partial` (`reviews_truncated`);
+  an unreadable review list keeps the task and its steps and reports
+  `reviews_unavailable`.
+
+Never project instructions, related-task content, or other bots' conversation
+turns. Each part is an original window of at most 1,000 characters, opened where
+the most query terms are, so an answer deep in a long response still reaches the
+model; at most three parts per task. If a candidate's complete
 provenance cannot fit (for example, more than 100 activities or an oversized
 association response), it is withheld and coverage reports incompleteness; other
 sources can still return valid evidence. No hidden pagination/fan-out escapes the
@@ -202,8 +232,36 @@ name, approval status, timestamp, result SHA-256 and recorded byte/character siz
 The tool/turn/message/session chain must match the caller bot and user.
 **Arguments, result bodies, blobs and attachments are neither searched nor sent
 to the utility model.** They can contain cross-bot/secret data even in an owned
-turn. Approval status or a digest does not prove execution success. Payload
-research remains outside this slice.
+turn. Approval status or a digest does not prove execution success.
+
+### Tool args: attempted clones (TASK-1557)
+
+`tool_args` answers "where did a bot clone X?" without letting command text
+cross the boundary. It reads `Bash` calls under the **public-history** rule
+(the call's trigger message must pass the same partition/delivery authority as
+`messages`, for the trusted user), prefiltered in SQL to arguments containing
+`git clone`. `recall/command_facts.py` then parses the command and the only
+admitted text is a server-rendered fact:
+
+    attempted clone repo=<url> dest=<absolute path when known>
+
+The grammar is deliberately narrow. Segments are split only on `&&`, `;` and
+newlines, and parsing **stops at the first unsafe token**: any other operator
+(`|`, `||`, redirects, subshells), `$`, a backtick, a backslash, an unbalanced
+quote, or an unrecognized flag. Facts come only from segments completed before
+that stop, so a later `$(...)` in the same command can't leak and the clone
+before it still counts. Only `cd <path>` and `git clone` with
+`-q`/`--quiet`/`--single-branch`/`--depth N`/`-b|--branch NAME` are understood;
+`pushd`, `popd`, `source`, `eval` and the like make the working directory
+unknown. Repos must be `https://host/path` or `git@host:path` with no
+userinfo, port, query, fragment or `..`; paths must match a plain charset, with
+no `..` and nothing on the credential denylist (`.env`, `.ssh`, keys, …). A
+fact says *attempted*: a recorded call is not proof the clone succeeded.
+
+Ranking and selection use only the rendered facts, never the dropped text.
+Drill-down re-projects the fact under the current authority. Facts about file
+paths (`Read`/`Write`/`Edit`) are deferred: matching them over every tool
+call needs an expression index first.
 
 ## Budgets and isolation
 
@@ -211,7 +269,8 @@ research remains outside this slice.
 |---|---:|
 | Whole MCP request, including policy | 30 seconds |
 | Concurrent research calls per process | 4; excess rejected, no queue |
-| Source-provider calls | 4 |
+| Source-provider calls | one per selected source |
+| Task sources' own deadline | 4 seconds each; a timeout is `unavailable`, other sources' evidence kept |
 | Hits per source / admitted total | 6 / 24 |
 | Message follow-ons | 2 per hit; admitted only after every source's hits, within the same 24 / 6,000 caps |
 | Each source excerpt | 2,400 characters, then 512 reference tokens |
@@ -248,6 +307,13 @@ blank body or a registry error falls back to the seed. The service budgets evide
 against that exact text and sends it, so an edit can't break the 6k input cap. Any
 edit must keep the JSON `findings` contract, because grounding still re-checks
 every quote against the source bytes.
+
+**Known limits.** Grounding proves every quote is real source bytes; it does
+not stop a model from choosing a misleading true excerpt, so selection quality
+is not a security property. And if a packet's fixed parts ever outgrow the
+requested budget so that not even a bare 80-character quote fits beside the
+coverage report, the found evidence is withheld as `insufficient_evidence`
+rather than returned unmarked.
 
 **Data egress:** authorized history excerpts go to whatever utility model the DB
 currently selects, potentially a cloud provider. No model/config change is made

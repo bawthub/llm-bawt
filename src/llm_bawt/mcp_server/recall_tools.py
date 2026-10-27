@@ -10,9 +10,11 @@ from llm_bawt.recall.budgets import compact_json
 from llm_bawt.recall.completion import UtilitySynthesizer
 from llm_bawt.recall.contracts import MAX_SECONDS, RecallError, RecallRequest
 from llm_bawt.recall.ledger import PostgresLedger
-from llm_bawt.recall.postgres import MessageSource, MemorySource, RecallDatabase, ToolEvidenceSource
+from llm_bawt.recall.postgres import (
+    MessageSource, MemorySource, RecallDatabase, ToolArgSource, ToolEvidenceSource,
+)
 from llm_bawt.recall.service import RecallService, failure
-from llm_bawt.recall.task_source import TaskSource
+from llm_bawt.recall.task_source import TaskDetailSource, TaskSource
 from llm_bawt.task_turn_context import TaskTurnContextError
 
 from .registry import mcp
@@ -31,7 +33,8 @@ def _runtime() -> tuple[RecallDatabase, RecallService]:
     if ":" in host:
         host = f"[{host}]"
     service = RecallService(
-        [MessageSource(database), MemorySource(database), ToolEvidenceSource(database), TaskSource()],
+        [MessageSource(database), MemorySource(database), ToolEvidenceSource(database),
+         ToolArgSource(database), TaskSource(), TaskDetailSource()],
         UtilitySynthesizer(f"http://{host}:{config.SERVICE_PORT}"),
         # UI drill-down references only (TASK-1519); never read back by bots.
         ledger=PostgresLedger(database.engine),
@@ -45,9 +48,12 @@ async def context_recall(
 ) -> str:
     """Research caller-owned history in isolated utility context; return bounded cited quotes.
 
-    Selecting tasks explicitly opts into shared task search; task_ids optionally
-    narrows it. Follow-ups must repeat sources/task_ids, retain intent, and refresh
-    evidence. All identity is inherited from the signed current-turn capability.
+    Default sources are messages, memories and tasks (shared task key fields:
+    title, status, description, response, outcome). Add task_details for task
+    reviews and step outputs; tool_evidence for tool metadata; tool_args for
+    attempted repository clones (repo and destination only). task_ids narrows
+    tasks/task_details. Follow-ups must repeat sources/task_ids, retain intent,
+    and refresh evidence. All identity is inherited from the signed current-turn capability.
     No raw results or model errors ever return through this adapter.
     """
     try:

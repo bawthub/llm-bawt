@@ -57,7 +57,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "messages_mark_recalled": "Mark specified messages as recalled from summary expansion; writes metadata.",
     "messages_remove_last_partial": "Delete bot_id's latest message if role matches. Despite the name, it does NOT verify partial status; use only for an explicitly authorized cleanup.",
     "context_get_recent": "Read recent messages plus relevant memories for bot_id; query optionally guides memory retrieval.",
-    "context_recall": "Read-only isolated recall; trusted caller required. Returns bounded cited quotes, not transcripts. tasks opts into shared-task search; tool evidence is metadata only. Expiring handles refresh evidence; repeat sources/task_ids. Uses configured utility model.",
+    "context_recall": "Read-only isolated recall; trusted caller required. Returns bounded cited quotes, not transcripts. tasks is default; task_details adds reviews/steps; tool_evidence is metadata; tool_args adds attempted git clones. Expiring handles refresh evidence; repeat sources/task_ids. Uses configured utility model.",
     "working_memory_list": "Read your own working-memory items for the current user from trusted turn identity; open only unless include_archived.",
     "working_memory_create": "Add an item. idempotency_key: a fresh UUID per create, reused only to retry it. Open-item cap 20. initiative_link points at a task; no next_action/blockers.",
     "working_memory_update": "CAS edit: stale expected_revision returns the current item, writes nothing. Omitted fields stay; clear nulls listed fields. done|cancelled archives.",

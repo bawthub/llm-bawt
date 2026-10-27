@@ -38,12 +38,14 @@ class Reader:
 
 
 @pytest.mark.asyncio
-async def test_task_discovery_shared_unassigned_and_no_responses():
+async def test_task_discovery_shared_unassigned_and_unmatched_response_stays_out():
     reader = Reader(sessions=[{"botId": "peer", "userId": "operator"}])
     evidence = await TaskSource().search_with(reader, "find tool cleanup", SCOPE, ())
-    assert evidence[0].id == "TASK-42"
+    assert [item.id for item in evidence] == ["TASK-42"]
     assert "Bound tool dumps" in evidence[0].text
-    assert "PRIVATE" not in evidence[0].text
+    # The response is a searchable key field (TASK-1557), but only as its own
+    # part and only when it matches the question.
+    assert all("PRIVATE" not in item.text for item in evidence)
     assert len(reader.calls) <= 15
     assert reader.calls[0][0] == "POST" and reader.calls[0][1].endswith("/search/semantic")
     assert reader.calls[0][2]["json"] == {"query": "find tool cleanup", "limit": 3}

@@ -6,6 +6,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_session_search_pg.py::",
     "test_isolated_recall_pg.py::",
     "test_recall_ledger_pg.py::",
+    "test_recall_tool_args_pg.py::",
     "test_bot_access_pg.py::",
     "test_bot_tags_pg.py::",
     "test_bot_tag_api_pg.py::",

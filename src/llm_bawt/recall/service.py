@@ -18,7 +18,7 @@ from .completion import input_tokens
 from .contracts import (
     MAX_FOLLOW_ONS_PER_HIT, MAX_INPUT_TOKENS, MAX_MODEL_BYTES, MAX_QUERY_TOKENS, MAX_QUOTE_CHARS,
     MAX_QUOTE_TOKENS, MAX_RECORD_CHARS,
-    MAX_RECORDS, MAX_SECONDS, MAX_SOURCE_RECORDS, Evidence, EvidenceBatch, RecallError,
+    MAX_RECORDS, MAX_SECONDS, MAX_SOURCE_RECORDS, PARTIAL_REASONS, Evidence, EvidenceBatch, RecallError,
     RecallRequest, RecallScope, Source, SourceProvider, Synthesizer,
 )
 from .grounding import cap_span, ground_quote
@@ -57,8 +57,142 @@ UNCERTAINTY = "Extractive untrusted historical evidence; not exhaustive or proof
 INCOMPLETE_NOTE = " Source coverage incomplete; an unavailable source may contain a later correction."
 REJECTED_NOTE = (" {} selected excerpt(s) could not be verified against the source and were omitted;"
                  " a later correction may be missing.")
-SHORTENED_NOTE = (" {} answer span(s) could not fit without losing a trailing qualifier or correction;"
-                  " expand with the returned handle.")
+SHORTENED_NOTE = (" {} answer span(s) cut to fit; text omitted after a truncated quote may hold a"
+                  " qualifier or correction; expand with the handle.")
+OMITTED_NOTE = " {} further finding(s) omitted to fit the output budget; expand with the returned handle."
+MAX_FINDINGS = 6
+# The shortest prefix a lone quote is clipped to before a found answer may be
+# reported as insufficient_evidence: enough to name what was found.
+MIN_CLIPPED_QUOTE_CHARS = 80
+
+
+class GroundedAnswer:
+    """One grounded span as ordered quote parts, shrinkable without lying (TASK-1557).
+
+    A span too long for the remaining slots keeps its head and its LAST part:
+    a trailing qualifier or reversal ("... that approval was revoked") is the
+    part a prefix would lose. Every kept part followed by omitted text is
+    marked ``truncated``, so a cut is never silent.
+    """
+
+    def __init__(self, parts: list[dict]):
+        self.parts = parts
+        self.kept = list(range(len(parts)))
+        self.clipped: int | None = None  # chars kept of a lone part's quote
+        self.bare = False  # provenance left to the handle; the citation stays
+
+    @property
+    def cut(self) -> bool:
+        return len(self.kept) < len(self.parts) or self.clipped is not None
+
+    def shrink_to(self, slots: int) -> None:
+        if slots >= len(self.parts):
+            self.kept = list(range(len(self.parts)))
+        elif slots == 1:
+            self.kept = [0]
+        else:
+            self.kept = list(range(slots - 1)) + [len(self.parts) - 1]
+
+    def clip(self) -> bool:
+        """Last resort for a lone kept part: a shorter prefix of the same quote,
+        then, at the floor, the citation without its provenance block.
+
+        The prefix starts where the quote does, so it stays an exact source
+        substring at the same ``start_char``. It ends on a word boundary when
+        one is near and is marked ``truncated``. Provenance (speaker, session,
+        time) is metadata of the cited record, so the handle still expands it.
+        Returns False when neither is left to give up.
+        """
+        if len(self.kept) != 1:
+            return False
+        part = self.parts[self.kept[0]]
+        quote = part["quote"]
+        current = len(quote) if self.clipped is None else self.clipped
+        if current <= MIN_CLIPPED_QUOTE_CHARS:
+            if self.bare or "provenance" not in part:
+                return False
+            self.bare = True
+            return True
+        target = max(MIN_CLIPPED_QUOTE_CHARS, current * 2 // 3)
+        head = quote[:target]
+        space = head.rfind(" ")
+        if space >= target // 2:
+            head = head[:space]
+        head = head.rstrip()
+        if not head:
+            return False
+        self.clipped = len(head)
+        return True
+
+    def entries(self) -> list[dict]:
+        entries = []
+        for position, index in enumerate(self.kept):
+            entry = dict(self.parts[index])
+            if len(self.parts) > 1:
+                # Parts of one selection read together; "k/n" shows the group.
+                entry["part"] = f"{index + 1}/{len(self.parts)}"
+            following = self.kept[position + 1] if position + 1 < len(self.kept) else len(self.parts)
+            if following != index + 1:
+                entry["truncated"] = True
+            if self.clipped is not None:
+                entry["quote"] = entry["quote"][:self.clipped]
+                entry["truncated"] = True
+            if self.bare:
+                entry.pop("provenance", None)
+            entries.append(entry)
+        return entries
+
+    def keys(self) -> set[tuple]:
+        return {(part["source"], part["id"], part.get("start_char"), part["quote"]) for part in self.parts}
+
+
+class AnswerSet:
+    """The packet's findings, plus the honest notes for anything cut or omitted."""
+
+    def __init__(self, unavailable: bool, rejected: int):
+        self.answers: list[GroundedAnswer] = []
+        self.unavailable = unavailable
+        self.rejected = rejected
+        self.omitted = 0
+
+    def add(self, answer: GroundedAnswer) -> None:
+        if any(answer.keys() <= item.keys() for item in self.answers):
+            return  # the same source span selected twice
+        slots = MAX_FINDINGS - sum(len(item.kept) for item in self.answers)
+        if slots <= 0:
+            self.omitted += 1
+            return
+        answer.shrink_to(slots)
+        self.answers.append(answer)
+
+    @property
+    def shortened(self) -> int:
+        return sum(answer.cut for answer in self.answers)
+
+    def findings(self) -> list[dict]:
+        return [entry for answer in self.answers for entry in answer.entries()]
+
+    def drop_all(self) -> None:
+        self.omitted += len(self.answers)
+        self.answers.clear()
+
+    def uncertainty(self) -> str:
+        return (UNCERTAINTY + (INCOMPLETE_NOTE if self.unavailable else "")
+                + (REJECTED_NOTE.format(self.rejected) if self.rejected else "")
+                + (SHORTENED_NOTE.format(self.shortened) if self.shortened else "")
+                + (OMITTED_NOTE.format(self.omitted) if self.omitted else ""))
+
+    def reduce(self) -> bool:
+        """Give up the least material: the last finding, then the tail-most kept
+        part, then the end of the one quote left (down to a floor)."""
+        if len(self.answers) > 1:
+            self.answers.pop()
+            self.omitted += 1
+            return True
+        if self.answers and len(self.answers[0].kept) > 1:
+            self.answers[0].shrink_to(len(self.answers[0].kept) - 1)
+            return True
+        return bool(self.answers) and self.answers[0].clip()
 
 
 def failure(code: str) -> dict:
@@ -172,7 +306,10 @@ class RecallService:
             try:
                 if provider is None:
                     raise RecallError("source_unavailable")
-                rows = await provider.search(question, scope, request.task_ids)
+                # The recall's own deadline still cancels; only the provider's
+                # expiring here becomes TimeoutError.
+                async with asyncio.timeout(getattr(provider, "max_seconds", None)):
+                    rows = await provider.search(question, scope, request.task_ids)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -181,8 +318,11 @@ class RecallService:
                 if isinstance(error, RecallError) and error.code not in {
                     "source_unavailable", "timeout", "busy"}:
                     raise
-                code = error.code if isinstance(error, RecallError) and error.code in {
-                    "timeout", "busy"} else "source_unavailable"
+                if isinstance(error, TimeoutError):
+                    code = "timeout"
+                else:
+                    code = error.code if isinstance(error, RecallError) and error.code in {
+                        "timeout", "busy"} else "source_unavailable"
                 root = error.__cause__ or error
                 logger.warning("recall source failed source=%s class=%s elapsed_ms=%d",
                                source, type(root).__name__, round((time.monotonic() - source_start) * 1000))
@@ -197,12 +337,23 @@ class RecallService:
             if (len(hits) > MAX_SOURCE_RECORDS or len(rows) > row_limit
                     or any(count > MAX_FOLLOW_ONS_PER_HIT for count in per_hit.values())):
                 raise RecallError("retrieval_budget")
-            coverage[source] = {"status": "ok" if rows else "no_match", "records": len(rows),
-                                "head_fallbacks": sum(row.window_kind == "head_fallback" for row in rows
-                                                      if isinstance(row, Evidence) and row.follows is None)}
+            coverage[source] = {"status": "ok" if rows else "no_match", "records": len(rows)}
+            head_fallbacks = sum(row.window_kind == "head_fallback" for row in rows
+                                 if isinstance(row, Evidence) and row.follows is None)
+            if head_fallbacks:
+                # Reported only when nonzero: coverage is paid per source in
+                # every packet's output budget.
+                coverage[source]["head_fallbacks"] = head_fallbacks
+            depth = getattr(provider, "depth", None)
+            if depth in {"key_fields", "details"}:
+                coverage[source]["depth"] = depth
             if isinstance(rows, EvidenceBatch):
+                # Withheld counts saturate so coverage never enumerates protected rows.
                 coverage[source]["withheld"] = min(3, max(0, rows.withheld))
-                if rows.withheld:
+                reasons = sorted(set(getattr(rows, "partial", ())) & PARTIAL_REASONS)
+                if reasons:
+                    coverage[source]["partial_reasons"] = reasons
+                if rows.withheld or reasons:
                     coverage[source]["status"] = "partial"
                 coverage[source]["search_mode"] = rows.search_mode if rows.search_mode in {
                     "explicit", "semantic", "keyword", "lexical"} else "unknown"
@@ -241,11 +392,9 @@ class RecallService:
                 admit(candidate)
         # Oldest-first so later corrections read as later; undated rows last.
         evidence.sort(key=lambda row: (row.at is None, row.at or ""))
-        findings = []
+        answers = AnswerSet(bool(unavailable), 0)
         model_calls = 0
         model_output_tokens = 0
-        rejected = 0
-        shortened = 0
         if evidence:
             model_calls = 1
             raw = await self.synthesizer.synthesize(system, question, evidence, request.output_tokens)
@@ -263,48 +412,49 @@ class RecallService:
                 try:
                     finding = Finding.model_validate(proposed)
                 except ValidationError:
-                    rejected += 1
+                    answers.rejected += 1
                     continue
                 item = index.get((finding.source, finding.id))
                 # Only exact source bytes leave; the model's own text never does.
                 span = ground_quote(finding.quote, item.text) if item is not None else None
                 if not span:
-                    rejected += 1
+                    answers.rejected += 1
                     continue
                 offset = item.text.find(span)
                 parts = self._quote_parts(span)
-                if not parts or len(findings) + len(parts) > 6:
-                    # A prefix alone could turn a reversal into a false claim.
-                    shortened += 1
-                    clipped = True
+                if not parts:
+                    answers.omitted += 1
                     continue
                 provenance = {"source_bot": item.source_bot, "session_id": item.session_id,
                               "at": item.at, "follows": item.follows, "review_ref": item.review_ref}
                 provenance = {key: value for key, value in provenance.items() if value is not None}
+                entries = []
                 for position, quote in parts:
                     entry = {"source": finding.source, "id": finding.id, "quote": quote}
                     if provenance:
                         entry["provenance"] = provenance
                     if len(parts) > 1 or item.start_char or offset:
                         entry["start_char"] = item.start_char + offset + position
-                    if entry not in findings:
-                        findings.append(entry)
-            if rejected and not findings and not shortened:
+                    entries.append(entry)
+                answers.add(GroundedAnswer(entries))
+            if answers.rejected and not answers.answers and not answers.omitted:
                 raise RecallError("ungrounded_synthesis")
+        findings = answers.findings()
         incomplete = bool(evidence) or unavailable or any(item["status"] == "partial" for item in coverage.values())
         packet = {
-            "status": "ok" if findings and not shortened else ("insufficient_evidence" if incomplete else "no_match"),
-            "findings": findings if not shortened else [],
-            "uncertainty": (UNCERTAINTY + (INCOMPLETE_NOTE if unavailable else "")
-                            + (REJECTED_NOTE.format(rejected) if rejected else "")
-                            + (SHORTENED_NOTE.format(shortened) if shortened else "")),
+            # A found answer stays ok when cut to fit; the cut is marked, never hidden.
+            "status": "ok" if findings else ("insufficient_evidence" if incomplete else "no_match"),
+            "findings": findings,
+            "uncertainty": answers.uncertainty(),
             # Selected excerpts that failed schema or grounding and were omitted;
             # caller-visible so a dropped later correction is never silent.
-            "rejected_findings": rejected,
+            "rejected_findings": answers.rejected,
             "coverage": coverage,
-            "scope": "Public searchable history for trusted user; caller memories; shared tasks exclude responses; tool metadata only.",
+            # Static and short: it is paid in every packet's output budget.
+            "scope": ("Public searchable history for trusted user; caller memories; shared tasks; "
+                      "tool metadata and clone facts, never commands."),
             "bounded": True,
-            "truncated": clipped,
+            "truncated": clipped or answers.shortened > 0 or answers.omitted > 0,
             "handle": None,
             "metrics": {
                 "tokenizer": "o200k_base",
@@ -322,7 +472,7 @@ class RecallService:
             entry["admitted"] = (entry["source"], entry["id"]) in admitted_keys
         # Reserve the fixed-size handle before packing; no text retained in it.
         packet["handle"] = self.handles.put(request, scope, queries)
-        self._fit(packet, request.output_tokens)
+        self._fit(packet, request.output_tokens, answers)
         return packet
 
     @staticmethod
@@ -332,14 +482,14 @@ class RecallService:
         offset = 0
         while offset < len(span):
             chunk = cap_span(span[offset:], MAX_QUOTE_CHARS, MAX_QUOTE_TOKENS)
-            if not chunk or not chunk.strip() or len(parts) == 6:
+            if not chunk or not chunk.strip():
                 return None
             parts.append((offset, chunk))
             offset += len(chunk)
         return parts
 
     @staticmethod
-    def _fit(packet: dict, budget: int):
+    def _fit(packet: dict, budget: int, answers: AnswerSet):
         # Count exactly the compact JSON returned by the MCP tool, including
         # citations, coverage, handle and measurements. Never return raw fallback.
         while True:
@@ -350,10 +500,18 @@ class RecallService:
                 packet["metrics"]["parent_tokens"] = count
             if tokens(compact_json(packet)) <= budget:
                 return
-            if packet["findings"]:
-                # A partial quoted answer is worse than an explicit insufficiency.
-                # The handle retains search intent so the caller can expand.
-                packet["findings"].clear()
+            if answers.reduce():
+                # Fewer findings or a marked cut, never a cleared answer: what
+                # was found stays found (TASK-1557).
+                packet["findings"] = answers.findings()
+                packet["uncertainty"] = answers.uncertainty()
+                packet["truncated"] = True
+            elif packet["findings"]:
+                # The one limit on "found stays found": not even one quote fits
+                # beside the coverage report. The handle keeps the search intent.
+                answers.drop_all()
+                packet["findings"] = []
+                packet["uncertainty"] = answers.uncertainty()
                 packet["truncated"] = True
                 packet["status"] = "insufficient_evidence"
             else:

@@ -64,6 +64,45 @@ def excerpt_window(content: str, query: str) -> tuple[str, int, bool, str]:
     return excerpt, start, len(content) > len(excerpt), "head_fallback" if fallback else "matched"
 
 
+def term_coverage(content: str, query: str) -> int:
+    """Distinct meaningful query terms present in ``content`` (case-insensitive)."""
+    folded = content.lower()
+    return sum(term in folded for term in query_terms(query))
+
+
+def focused_window(content: str, query: str, width: int) -> tuple[str, int, bool, str]:
+    """The ``width``-char original window covering the most distinct query terms.
+
+    ``excerpt_window`` opens at the first hit, which in a long task part is often
+    a passing mention in its first line. Recall hands each record to the model
+    as a short prefix, so the window has to open where the answer is: at the
+    candidate start (one per term occurrence, bounded) whose span holds the most
+    distinct terms, earliest on ties. Same word snap and fallback as
+    ``excerpt_window``.
+    """
+    folded = content.lower()
+    terms = terms_for(query)
+    phrase = folded.find(query.lower())
+    starts = {phrase} if phrase >= 0 else set()
+    for term in terms:
+        position = folded.find(term)
+        while position >= 0 and len(starts) < 64:
+            starts.add(position)
+            position = folded.find(term, position + 1)
+    if not starts:
+        excerpt = content[:width]
+        return excerpt, 0, len(content) > len(excerpt), "head_fallback"
+    best_start, best_score = 0, -1
+    for position in sorted(starts):
+        start = _word_start(content, max(0, position - WINDOW_LEAD_CHARS))
+        span = folded[start:start + width]
+        score = sum(term in span for term in terms) + (phrase >= 0 and query.lower() in span)
+        if score > best_score:
+            best_start, best_score = start, score
+    excerpt = content[best_start:best_start + width]
+    return excerpt, best_start, len(content) > len(excerpt), "matched"
+
+
 def sql_window(column: str, alias: str = "win") -> tuple[str, str]:
     """Trusted column literals only. Return excerpt + offsets without full bytes.
 

@@ -323,6 +323,21 @@ async def test_summary_reauthorizes_cited_tasks_like_a_page():
     assert page["withheld_now"] == summary["sources"]["tasks"]["withheld_now"]
 
 
+@pytest.mark.asyncio
+async def test_task_details_reauthorize_as_their_task_in_summary_and_page():
+    review = "#review:c" + "b" * 24
+    entries = [entry("task_details", "TASK-1" + review, speaker="bot:peer", cited=True),
+               entry("task_details", "TASK-2#step:3", cited=True),
+               entry("task_details", "TASK-1#step:1", speaker="bot:protected", cited=True)]
+    drilldown = drill(entries, owners={"TASK-1": OWNER, "TASK-2": "protected"})
+    summary = await drilldown.summary("h" * 20, OWNER, USER)
+    assert summary["sources"]["task_details"] == {"recorded": 3, "withheld_now": 2}
+    assert [item["id"] for item in summary["cited"]] == ["TASK-1" + review]
+    page = await drilldown.page("h" * 20, OWNER, USER, "task_details", 0, 20)
+    assert [item["id"] for item in page["entries"]] == ["TASK-1" + review]
+    assert page["withheld_now"] == 2 and "PRIVATE" not in compact_json(page)
+
+
 def test_sources_never_run_an_unbounded_page():
     from llm_bawt.recall.drilldown import MAX_PAGE
     page = asyncio.run(drill([entry("memories", f"x{i}") for i in range(80)]).page(

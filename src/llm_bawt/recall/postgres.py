@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from datetime import datetime, timezone
+import json
 import re
 
 from llm_bawt.retrieval.find_query import parse as parse_find_query
@@ -18,7 +19,8 @@ from .contracts import (
     RECENCY_HALF_WEIGHT_DAYS, Evidence, RecallError, RecallScope, SourceProvider,
 )
 
-from .excerpts import fts_query, query_terms, sql_window, terms_for
+from .command_facts import MAX_COMMAND_CHARS, command_facts
+from .excerpts import fts_query, query_terms, sql_window, term_coverage, terms_for
 
 # Unknown authors, legacy NULL user sessions, summaries and deleted sessions do
 # not establish provenance. An imported bot message is not caller-owned evidence.
@@ -461,3 +463,91 @@ class ToolEvidenceSource(PostgresSource):
 
     def evidence_text(self, row: dict) -> str:
         return compact_json({key: value for key, value in row.items() if key not in {"id", "at"}})
+
+
+# A recorded Bash call's arguments, read only to project command facts; never
+# returned. Longer arguments cannot hold a command command_facts accepts.
+TOOL_ARG_CHARS = MAX_COMMAND_CHARS * 2
+# Every recorded clone the caller may read is a candidate; the ranking that
+# picks MAX_SOURCE_RECORDS runs on the projected facts, not the raw command.
+TOOL_ARG_CANDIDATES = 200
+
+
+def tool_arg_facts(arguments: object) -> str | None:
+    """The admitted bytes of one Bash call: rendered command facts, else None."""
+    try:
+        parsed = json.loads(arguments) if isinstance(arguments, str) else None
+    except ValueError:
+        return None
+    facts = command_facts(parsed.get("command")) if isinstance(parsed, dict) else []
+    return "\n".join(fact.render() for fact in facts) or None
+
+
+class ToolArgSource(PostgresSource):
+    """Opt-in structured facts from recorded commands (TASK-1557; command_facts).
+
+    Origin is the same positive public partition map and trigger-message
+    authority as message recall: a call is readable only when the message that
+    started its turn is. That gate is necessary, not sufficient; only the
+    projected facts are admitted. Candidates are prefiltered by the one
+    recognized operation so the scan stays bounded.
+    """
+    source = "tool_args"
+    statement = f"""
+        WITH candidates AS MATERIALIZED (
+            SELECT t.id, t.bot_id, t.user_id, t.turn_id, t.created_at,
+                   left(t.arguments_json, :argument_chars) AS arguments
+            FROM tool_call_records t
+            WHERE t.bot_id = ANY(CAST(:bots AS text[])) AND t.user_id = :user
+              AND t.tool_name = 'Bash'
+              AND strpos(left(t.arguments_json, :argument_chars), 'git clone') > 0
+        )
+        SELECT c.id::text AS id, c.arguments, c.created_at AS at,
+               p.source_bot, m.session_id
+        FROM candidates c
+        JOIN unnest(CAST(:bots AS text[]), CAST(:parts AS text[]))
+             AS p(source_bot, partition) ON c.bot_id = p.source_bot
+        JOIN turn_logs turns ON turns.id = c.turn_id
+          AND turns.bot_id = c.bot_id AND turns.user_id = c.user_id
+        JOIN messages m ON m.id = turns.trigger_message_id AND m.bot_id = p.partition
+        JOIN sessions s ON s.id = m.session_id
+        WHERE {PUBLIC_HISTORY_AUTHORITY}
+        ORDER BY c.created_at DESC, c.id
+        LIMIT :candidate_limit
+    """
+
+    def extra_params(self, scope: RecallScope, query: str) -> dict:
+        allowed = sorted(scope.allowed_bot_ids - scope.excluded_bot_ids)
+        return {"bots": allowed, "parts": [partition_id(bot) for bot in allowed],
+                "delivery_authors": delivery_authors(scope),
+                "argument_chars": TOOL_ARG_CHARS, "candidate_limit": TOOL_ARG_CANDIDATES}
+
+    async def search(self, query: str, scope: RecallScope, task_ids: tuple[str, ...]) -> list[Evidence]:
+        if not fts_query(query):
+            return []
+        try:
+            rows = await DATABASE_WORKER.run(self.database.read, self.statement,
+                                             {"user": scope.user_id, **self.extra_params(scope, query)})
+        except RecallError:
+            raise
+        except Exception as error:
+            raise RecallError("source_unavailable") from error
+        ranked = []
+        for row in rows:
+            facts = tool_arg_facts(row["arguments"])
+            if not facts:
+                continue
+            # Selection uses only admitted bytes (facts and the server-owned
+            # source bot): a term that matched only in the raw command never
+            # selects the call. Operand matches rank above label matches
+            # ("clone", "repo"), which every candidate shares.
+            operands = re.sub(r"\b(?:attempted|clone|repo|dest)\b=?", " ", facts)
+            labelled = f"{facts}\n{row.get('source_bot') or ''}"
+            score = (term_coverage(operands, query), term_coverage(labelled, query))
+            if score[1]:
+                ranked.append((score, row, facts))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [Evidence(self.source, row["id"], scope.bot_id, scope.user_id, facts,
+                         at=utc_iso(row.get("at")), source_bot=row.get("source_bot"),
+                         session_id=row.get("session_id"))
+                for _, row, facts in ranked[:MAX_SOURCE_RECORDS]]
