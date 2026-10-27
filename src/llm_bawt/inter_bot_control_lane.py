@@ -369,6 +369,8 @@ class ControlSteerFailure:
     * the grant refused → back to QUEUED, no attempt spent; the next claim
       re-admits it or settles it ``control_revoked``;
     * the pinned turn ended or gone → ``not_needed:run_ended``;
+    * a capability refusal before transport acceptance → ``not_needed:<code>``
+      (TASK-1243); after acceptance it is retried like any failure;
     * attempts spent → ``unconfirmed:<error>``;
     * otherwise → QUEUED with backoff, spending the attempt. The steer
       generation advances only on a definitive rejection before transport
@@ -409,14 +411,16 @@ class ControlSteerFailure:
             ), {"id": _pin(row).get("turn_id")}).mappings().first()
             if turn is None or turn["ended"]:
                 return cls._settle_claimed(conn, row, "CANCELLED", f"{NOT_NEEDED}:run_ended")
-            if error in STEER_CAPABILITY_REFUSALS:
+            accepted = row["transport_accepted_at"] is not None
+            if error in STEER_CAPABILITY_REFUSALS and not accepted:
                 # TASK-1243: the pinned run cannot take this ask, and never
-                # will; asking again only burns the budget.
+                # will; asking again only burns the budget. After transport
+                # acceptance the ask may have landed, so it is retried under
+                # the same generation like any other failure.
                 return cls._settle_claimed(conn, row, "CANCELLED", f"{NOT_NEEDED}:{error}")
             attempts = int(row["attempt_count"] or 0)
             if attempts >= int(row["max_attempts"] or 0):
                 return cls._settle_claimed(conn, row, "FAILED", f"{UNCONFIRMED}:{error}"[:4000])
-            accepted = row["transport_accepted_at"] is not None
             advance = not accepted and error in DEFINITIVE_NOT_ACCEPTED
             return store.requeue_claim(
                 conn, record.id, token, error,

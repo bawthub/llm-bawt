@@ -399,6 +399,16 @@ def test_a_capability_refusal_settles_at_once_without_retries(rig, error):
     assert _row(rig, claimed.id)["status"] == "CANCELLED"
 
 
+@pytest.mark.parametrize("error", ["steer_unsupported_transport", "steer_priority_unsupported"])
+def test_a_capability_refusal_after_acceptance_retries_the_same_generation(rig, error):
+    """TASK-1243: an accepted ask may have landed; only an unaccepted refusal settles."""
+    _, _, claimed = _claimed(rig)
+    assert rig.deliveries.mark_transport_accepted(claimed.id, claimed.claim_token)
+    queued = ControlSteerFailure.settle(rig.deliveries, claimed, error)
+    assert (queued.status, queued.attempt_count, queued.last_error) == ("QUEUED", 1, error)
+    assert SteerGeneration.of(queued).generation == 0
+
+
 def test_a_failure_after_the_run_ended_is_not_needed(rig):
     turn_id, _, claimed = _claimed(rig)
     rig.end(turn_id, exited=True)
