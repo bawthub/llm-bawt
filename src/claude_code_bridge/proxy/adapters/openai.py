@@ -18,6 +18,8 @@ from typing import ClassVar
 
 import httpx
 
+from agent_bridge import bridge_token
+
 from .base import ProviderAdapter
 
 logger = logging.getLogger(__name__)
@@ -38,10 +40,7 @@ class OpenAIAdapter(ProviderAdapter):
             raise RuntimeError(
                 "LLM_BAWT_API_URL not set — cannot reach the OpenAI API-key broker"
             )
-        headers = {}
-        secret = os.environ.get("BRIDGE_CLAUDE_TOKEN_SECRET")
-        if secret:
-            headers["X-Bridge-Token"] = secret
+        headers = bridge_token.headers()
         try:
             response = httpx.get(
                 f"{api_url}/v1/providers/openai-api/token",

@@ -19,6 +19,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
+from agent_bridge import bridge_token
+
 from .._bridge_helpers import _fetch_broker_token
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,7 @@ class ClaudeOAuthGateway:
     async def forward(self, request: Request, path: str) -> StreamingResponse | JSONResponse:
         body = await request.body()
         headers = _headers(request.headers)
-        for key in ("authorization", "x-api-key", "content-length", "x-bridge-token"):
+        for key in ("authorization", "x-api-key", "content-length", bridge_token.HEADER.lower()):
             headers.pop(key, None)
         # Deliberately fixed origin. A model/request cannot select an upstream
         # host or forward subscription credentials to a third-party adapter.

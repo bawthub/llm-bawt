@@ -32,6 +32,8 @@ from typing import ClassVar
 
 import httpx
 
+from agent_bridge import bridge_token
+
 from .anthropic_passthrough import AnthropicPassthroughAdapter
 
 logger = logging.getLogger(__name__)
@@ -78,10 +80,7 @@ class OpenRouterAdapter(AnthropicPassthroughAdapter):
             raise RuntimeError(
                 "LLM_BAWT_API_URL not set — cannot reach the OpenRouter key broker"
             )
-        headers = {}
-        secret = os.environ.get("BRIDGE_CLAUDE_TOKEN_SECRET")
-        if secret:
-            headers["X-Bridge-Token"] = secret
+        headers = bridge_token.headers()
         try:
             resp = httpx.get(
                 f"{api_url}/v1/providers/openrouter/token",

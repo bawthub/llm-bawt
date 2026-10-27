@@ -17,6 +17,8 @@ from typing import Callable
 
 import httpx
 
+from agent_bridge import bridge_token
+
 logger = logging.getLogger("claude_code_bridge.bridge")
 
 SESSION_PREFIX = "claude-code:"
@@ -386,10 +388,7 @@ def _fetch_broker_token(
     api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
     if not api_url:
         return None, None
-    headers = {}
-    secret = os.environ.get("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if secret:
-        headers["X-Bridge-Token"] = secret
+    headers = bridge_token.headers()
     params = {"force": "true"} if force else {}
     if force and rejected_token_sha256:
         params["rejected_token_sha256"] = rejected_token_sha256

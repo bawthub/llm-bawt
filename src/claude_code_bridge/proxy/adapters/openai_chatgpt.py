@@ -22,6 +22,8 @@ from typing import ClassVar
 
 import httpx
 
+from agent_bridge import bridge_token
+
 from .base import ProviderAdapter
 from .. import retry as retry_mod
 from ..request_context import ProxyRequestContext
@@ -172,10 +174,7 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
             raise RuntimeError(
                 "LLM_BAWT_API_URL not set — cannot reach the token broker"
             )
-        headers = {}
-        secret = os.environ.get("BRIDGE_CLAUDE_TOKEN_SECRET")
-        if secret:
-            headers["X-Bridge-Token"] = secret
+        headers = bridge_token.headers()
         try:
             resp = httpx.get(
                 f"{api_url}/v1/providers/openai_chatgpt/token",

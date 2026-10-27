@@ -11,6 +11,8 @@ from pathlib import Path
 
 import httpx
 
+from agent_bridge import bridge_token
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,10 +27,7 @@ def materialize_auth_from_broker(auth_file: Path) -> bool:
     if not api_url:
         logger.warning("LLM_BAWT_API_URL not set — cannot materialize auth.json from broker")
         return False
-    headers = {}
-    secret = os.environ.get("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if secret:
-        headers["X-Bridge-Token"] = secret
+    headers = bridge_token.headers()
     attempts = max(1, int(os.getenv("CODEX_AUTH_BROKER_ATTEMPTS", "8")))
     delay = max(0.0, float(os.getenv("CODEX_AUTH_BROKER_RETRY_SECONDS", "1")))
     for attempt in range(1, attempts + 1):
