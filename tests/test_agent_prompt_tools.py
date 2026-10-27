@@ -61,6 +61,9 @@ class _PromptProbe:
     def _sec_tag_context(self, builder: PromptBuilder, prompt: str) -> None:
         return None
 
+    def _sec_injected_skills(self, builder: PromptBuilder, prompt: str) -> None:
+        return None
+
 
 @pytest.mark.parametrize(
     ("model_type", "harness"),

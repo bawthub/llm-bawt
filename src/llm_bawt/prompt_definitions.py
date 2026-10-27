@@ -39,6 +39,8 @@ from .prompt_default_loaders import (
     load_inter_bot_reply_channel_waited_no_return,
     load_history_summarization_batch,
     load_history_summarization_single,
+    load_injected_skills_entry,
+    load_injected_skills_preamble,
     load_media_prompt_expansion_video,
     load_memory_extraction_fact,
     load_memory_extraction_summary,
@@ -610,6 +612,31 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "Added to the outbound message of a scheduler turn for an opted-in bot "
             "(TASK-1281, OI-R5): scheduled automation should not act on working memory. "
             "An instruction, not an execution ban. Bot overrides supported."
+        )},
+    ),
+    "agents.injected_skills.preamble": PromptDefinition(
+        key="agents.injected_skills.preamble",
+        title="Injected Skills: Preamble",
+        category="agent_execution",
+        loader=load_injected_skills_preamble,
+        metadata={"notes": (
+            "Heading of the injected-skills section (TASK-1309), shown above the "
+            "skill bodies assigned to an agent bot in 'injected' mode. The section "
+            "is omitted when the bot has no injected skills. Bot overrides supported."
+        )},
+    ),
+    "agents.injected_skills.entry": PromptDefinition(
+        key="agents.injected_skills.entry",
+        title="Injected Skills: Entry",
+        category="agent_execution",
+        required_vars=("body",),
+        loader=load_injected_skills_entry,
+        metadata={"notes": (
+            "One injected skill (TASK-1309). Variables: {ref} (skill name), "
+            "{base_dir} (directory its relative paths resolve against) and {body} "
+            "(SKILL.md without frontmatter; required, or the section is dropped). "
+            "Filled by plain substitution, so other braces are literal. Bot "
+            "overrides supported."
         )},
     ),
     "setup.first_agent_prompt": PromptDefinition(

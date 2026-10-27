@@ -224,6 +224,34 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "See docs/WORKING_MEMORY.md."
         ),
     ),
+    # TASK-1309: global only. llm_bawt.skills reads them with
+    # resolve_global_runtime_setting, which ignores bot rows.
+    "skills_skill_token_cap": SettingDefinition(
+        key="skills_skill_token_cap",
+        type="int",
+        default=12000,
+        applies_to=("agent",),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Injected skill token cap (per skill)",
+        help=(
+            "Global only: the largest SKILL.md body (estimated tokens) that may be "
+            "injected into an agent bot's system prompt. A larger skill stays "
+            "assigned but is skipped as over_cap."
+        ),
+    ),
+    "skills_total_token_cap": SettingDefinition(
+        key="skills_total_token_cap",
+        type="int",
+        default=25000,
+        applies_to=("agent",),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Injected skills token cap (per bot)",
+        help=(
+            "Global only: the most estimated tokens of injected skill bodies one "
+            "agent bot carries. Skills are admitted in assignment order; a write "
+            "that would push a skill over this cap is refused."
+        ),
+    ),
     "claude_code_disallowed_tools": SettingDefinition(
         key="claude_code_disallowed_tools",
         type="string_list",

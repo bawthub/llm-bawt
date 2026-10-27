@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import re
-
-from agent_bridge.skill_selection import claude_skill_names, legacy_claude_skill_roots
-from agent_bridge.tool_results import count_result_tokens
-
-_MAX_SKILL_BYTES = 1_000_000
-_FRONTMATTER = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n", re.DOTALL)
+from agent_bridge.skill_sources import AmbientSource
 
 
 def skill_context_tokens(arguments: dict | None, *, skill_bundle: str | None = None) -> int | None:
@@ -20,18 +14,7 @@ def skill_context_tokens(arguments: dict | None, *, skill_bundle: str | None = N
     if skill_bundle is not None:
         return None  # Bundle selectors map to immutable plugin packages, not ambient roots.
     name = (arguments or {}).get("skill")
-    if not isinstance(name, str) or name not in claude_skill_names(None):
+    if not isinstance(name, str):
         return None
-    for configured_root in legacy_claude_skill_roots():
-        root = configured_root.resolve()
-        skill_file = (root / name / "SKILL.md").resolve()
-        if not skill_file.is_relative_to(root) or not skill_file.is_file():
-            continue
-        try:
-            if skill_file.stat().st_size > _MAX_SKILL_BYTES:
-                return None
-            text = skill_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
-        return count_result_tokens(_FRONTMATTER.sub("", text, count=1)) or None
-    return None
+    body = AmbientSource().read_body(name)
+    return (body.tokens or None) if body is not None else None

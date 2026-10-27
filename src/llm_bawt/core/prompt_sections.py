@@ -244,6 +244,46 @@ class PromptSectionsMixin:
             metadata=metadata,
         )
 
+    def _sec_injected_skills(self, builder: PromptBuilder, prompt: str) -> None:
+        """TASK-1309 injected skills (agent backends only): the SKILL.md bodies
+        assigned to this bot in 'injected' mode, admitted under the token caps.
+        Fails closed: any error omits the section; it never fails the build."""
+        from ..skills.prompts import ENTRY_KEY, PREAMBLE_KEY, render_section
+        from ..skills.service import SkillService
+        from ..utils.db import get_shared_engine
+
+        try:
+            engine = get_shared_engine(self.config)
+            resolution = SkillService.from_config(engine, self.config).resolve_bot(self.bot_id)
+            injected = resolution.injected if resolution is not None else ()
+            if not injected:
+                return
+            preamble = self.config_resolver.resolve_body(
+                PREAMBLE_KEY, scope_type="bot", scope_id=self.bot_id)
+            entry = self.config_resolver.resolve_body(
+                ENTRY_KEY, scope_type="bot", scope_id=self.bot_id)
+            body = render_section(
+                preamble.body if preamble else "", entry.body if entry else "",
+                [(e.ref, e.base_dir, e.body_text) for e in injected])
+            manifest = resolution.manifest()
+        except Exception:
+            logger.warning("injected skills unavailable; section skipped", exc_info=True)
+            return
+        if not body.strip():
+            return
+        builder.add_section(
+            "injected_skills",
+            body,
+            position=SectionPosition.GLOBAL_INSTRUCTIONS,
+            metadata={
+                "source": "skills.resolve",
+                "gate": "agent_backend & managed skills with injected assignments",
+                "refs": [e.ref for e in injected],
+                "tokens": resolution.injected_tokens,
+                "manifest_sha": manifest["manifest_sha"] if manifest else None,
+            },
+        )
+
     def _sec_working_memory(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-1281 working-memory section, rendered per turn by the dispatch path."""
         if self._working_memory_section:

@@ -199,6 +199,18 @@ def load_working_memory_scheduled_note() -> str:
     return DEFAULT_SCHEDULED_NOTE
 
 
+def load_injected_skills_preamble() -> str:
+    from .skills.prompts import DEFAULT_PREAMBLE
+
+    return DEFAULT_PREAMBLE
+
+
+def load_injected_skills_entry() -> str:
+    from .skills.prompts import DEFAULT_ENTRY
+
+    return DEFAULT_ENTRY
+
+
 def load_setup_first_agent_prompt() -> str:
     from .seeding.data import FIRST_AGENT_PROMPT_SEED
 

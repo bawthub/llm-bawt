@@ -65,5 +65,7 @@ PROMPT_MANIFEST: tuple[SectionSpec, ...] = (
     SectionSpec("agent_global_prompt", PER_TURN, "_sec_agent_global_prompt", applies_to=("agent",)),
     # TASK-1249: same position as agent_global_prompt; walk order puts it after.
     SectionSpec("tag_context", PER_TURN, "_sec_tag_context", applies_to=("agent",)),
+    # TASK-1309: same position again; walk order puts it after tag_context.
+    SectionSpec("injected_skills", PER_TURN, "_sec_injected_skills", applies_to=("agent",)),
     SectionSpec("working_memory", PER_TURN, "_sec_working_memory", applies_to=("agent",)),
 )
