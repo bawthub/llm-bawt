@@ -17,6 +17,7 @@ from codex_bridge.app_server import (
     APP_SERVER_VERSION,
     INTERRUPT_NO_TURN,
     METHOD_NOT_FOUND,
+    STEERED_UNCONFIRMED,
     TURN_ENDED,
     TURN_INTERRUPTED,
     AppServerClosed,
@@ -209,18 +210,28 @@ def test_steer_without_a_live_turn_is_refused_before_any_rpc(state):
     assert sent == [] and run_.pending_steers == {}
 
 
-def test_a_closed_pipe_before_delivery_is_run_finishing_but_a_lost_reply_is_not():
-    for sent, expected in ((False, RuntimeError), (True, AppServerClosed)):
-        async def request(self, *args, _sent=sent, **kwargs):
-            raise AppServerClosed("gone", sent=_sent)
+def _closing_run(sent):
+    async def request(self, *args, **kwargs):
+        raise AppServerClosed("gone", sent=sent)
 
-        run_ = _bare_run(request=request)
-        run_.set_turn("turn-1")
-        with pytest.raises(expected) as raised:
-            asyncio.run(run_.steer("x", message_id="m", origin="user", steer_rpc_id=None))
-        # Only a definite non-delivery maps to run_finishing.
-        assert (str(raised.value) == STEER_RUN_FINISHING) is (not sent)
-        assert run_.pending_steers == {}
+    run_ = _bare_run(request=request)
+    run_.set_turn("turn-1")
+    return run_
+
+
+def test_a_closed_pipe_before_delivery_is_run_finishing():
+    run_ = _closing_run(sent=False)
+    with pytest.raises(RuntimeError, match=STEER_RUN_FINISHING):
+        asyncio.run(run_.steer("x", message_id="m", origin="user", steer_rpc_id=None))
+    assert run_.pending_steers == {}
+
+
+def test_a_reply_lost_after_the_write_is_unconfirmed_and_kept_pending():
+    run_ = _closing_run(sent=True)
+    detail = asyncio.run(run_.steer("x", message_id="m", origin="user", steer_rpc_id=None))
+    assert detail == STEERED_UNCONFIRMED
+    pending = run_.pending_steers["m"]
+    assert pending.accepted and pending.resolved.is_set() and not pending.started
 
 
 def test_interrupt_without_a_turn_or_after_the_end_sends_nothing():

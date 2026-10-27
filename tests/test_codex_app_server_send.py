@@ -26,7 +26,14 @@ from agent_bridge.steer_contract import (
     STEER_UNSUPPORTED_TRANSPORT,
 )
 from codex_bridge import app_server_send
-from codex_bridge.app_server import CLOSE_STEP_GRACE_S, CodexAppServerRun, JsonRpcStdioClient
+from codex_bridge.app_server import (
+    CLOSE_STEP_GRACE_S,
+    INVALID_REQUEST,
+    AppServerClosed,
+    AppServerError,
+    CodexAppServerRun,
+    JsonRpcStdioClient,
+)
 from codex_bridge.app_server_send import ABORT_INTERRUPT_BOUND_S
 from codex_bridge.command_ops import CodexCommandMixin
 from codex_bridge.event_ops import CodexEventMixin
@@ -138,35 +145,32 @@ def test_a_failed_turn_publishes_its_error_once(tmp_path):
 
 
 @REAL
-def test_another_app_server_version_falls_back_to_exec_and_is_remembered(tmp_path):
+def test_another_app_server_version_fails_the_send_and_is_remembered(tmp_path):
+    """Never exec instead: the run's pinned caps say it steers (review p2-r1 B2)."""
     codex = _fake_codex(tmp_path, version="0.158.0")
     exec_threads = []
-
-    async def run_streamed(prompt, options):
-        return "streamed"
-
-    def start_thread(options):
-        exec_threads.append(options)
-        return SimpleNamespace(id="exec-thread", run_streamed=run_streamed)
-
-    codex.start_thread = start_thread
+    codex.start_thread = codex.resume_thread = lambda *args: exec_threads.append(args)
     bridge = _bridge(tmp_path, codex)
-
-    async def events(streamed):
-        yield SimpleNamespace(type="turn.completed", usage=None)
-
-    bridge._iter_events = events
     redis = SimpleNamespace(xack=AsyncMock())
+    steers = []
 
     async def run():
         await _send(bridge, redis, request_id="one")
         await _send(bridge, redis, request_id="two")
+        # Nothing is left behind for a steer to reach.
+        await bridge._handle_steer(_steer_fields(target_request_id="two"), "steer-msg", redis)
+        steers.append(_rpc_result(bridge, "steer-rpc"))
 
     asyncio.run(run())
-    assert len(exec_threads) == 2
-    assert len(_published(bridge, AgentEventKind.ASSISTANT_DONE)) == 2
-    assert "0.158.0" in bridge._app_server_unsupported
-    # Spawned once: the second send went straight to exec.
+    assert exec_threads == []
+    assert not _published(bridge, AgentEventKind.ASSISTANT_DONE)
+    errors = [e["text"] for e in _published(bridge, AgentEventKind.ERROR)]
+    assert len(errors) == 2
+    for text in errors:
+        assert "codex app-server 0.158.0 is not the supported 0.157.1" in text
+        assert "codex_transport=exec" in text
+    assert steers == [{"ok": False, "error": "no_active_run"}]
+    # Spawned once: the second send failed from the remembered verdict.
     assert [m.get("method") for m in fake.read_log(tmp_path / "received.jsonl")] == ["initialize"]
 
 
@@ -261,6 +265,97 @@ def test_steer_refusals(active, fields, error):
     assert redis.xack.call_args.args[-1] == "steer-msg"
     if run is not None:
         run.client.request.assert_not_awaited()
+
+
+def _steered_bridge(run):
+    bridge = make_bridge("codex")
+    bridge._session_queue.set_active_client(SESSION, run)
+    return bridge
+
+
+@pytest.mark.parametrize("lost", [
+    TimeoutError(),
+    AppServerClosed("codex app-server exited before answering turn/steer", sent=True),
+], ids=["reply_timeout", "closed_after_write"])
+def test_a_steer_whose_reply_is_lost_stays_ok_and_settles_uncertain(lost):
+    """Review p2-r1 B1: written, reply lost, never shown → ok once, uncertain once."""
+    run = _stub_run()
+    run.client.request.side_effect = lost
+    bridge = _steered_bridge(run)
+    redis = SimpleNamespace(xack=AsyncMock())
+
+    async def scenario():
+        await bridge._handle_steer(_steer_fields(), "steer-msg", redis)
+        seq = await bridge._settle_steers(run, SESSION, 0, wait=True)
+        return await bridge._settle_steers(run, SESSION, seq, wait=True)
+
+    seq = asyncio.run(scenario())
+    # ok: the caller must not send it again; the lifecycle settles it.
+    assert _rpc_result(bridge, "steer-rpc") == {
+        "ok": True, "detail": "steered_unconfirmed", "active_request_id": "active",
+        "can_escalate": False, "can_cancel": False}
+    assert _lifecycle(bridge) == [("m-2", LIFECYCLE_UNCERTAIN)] and seq == 1
+    (event,) = _published(bridge, AgentEventKind.STEER_LIFECYCLE)
+    assert event["extra_raw"]["steer_rpc_id"] == "steer-rpc" and event["extra_raw"]["origin"] == "user"
+
+
+def test_a_lost_steer_later_shown_by_the_turn_is_started_not_uncertain():
+    run = _stub_run()
+    run.client.request.side_effect = TimeoutError()
+    bridge = _steered_bridge(run)
+
+    async def scenario():
+        await bridge._handle_steer(_steer_fields(), "steer-msg", SimpleNamespace(xack=AsyncMock()))
+        seq = bridge._note_steer_started(run, {"type": "userMessage", "clientId": "m-2"}, SESSION, 0)
+        return await bridge._settle_steers(run, SESSION, seq, wait=True)
+
+    asyncio.run(scenario())
+    assert _lifecycle(bridge) == [("m-2", "started")]
+
+
+@pytest.mark.parametrize(("refusal", "error"), [
+    (AppServerError("turn/steer", INVALID_REQUEST, "no active turn to steer"), STEER_RUN_FINISHING),
+    (AppServerClosed("codex app-server exited before answering turn/steer", sent=False), STEER_RUN_FINISHING),
+    (AppServerError("turn/steer", -32603, "internal error"), "internal error"),
+], ids=["no_live_turn", "never_written", "server_error"])
+def test_a_definite_steer_refusal_is_not_settled(refusal, error):
+    run = _stub_run()
+    run.client.request.side_effect = refusal
+    bridge = _steered_bridge(run)
+
+    async def scenario():
+        await bridge._handle_steer(_steer_fields(), "steer-msg", SimpleNamespace(xack=AsyncMock()))
+        await bridge._settle_steers(run, SESSION, 0, wait=True)
+
+    asyncio.run(scenario())
+    reply = _rpc_result(bridge, "steer-rpc")
+    assert reply["ok"] is False and error in reply["error"]
+    assert _lifecycle(bridge) == [] and run.pending_steers == {}
+
+
+def test_a_steer_still_in_flight_when_a_stopped_turn_settles_is_uncertain_and_stays_ok():
+    """The turn settled it first, so a late refusal can't turn it into a resend."""
+    run = _stub_run()
+    bridge = _steered_bridge(run)
+    answered = asyncio.Event()
+
+    async def request(method, params, timeout=None):
+        await answered.wait()
+        raise AppServerError("turn/steer", INVALID_REQUEST, "no active turn to steer")
+
+    run.client.request.side_effect = request
+
+    async def scenario():
+        steer = asyncio.create_task(bridge._handle_steer(_steer_fields(), "steer-msg",
+                                                         SimpleNamespace(xack=AsyncMock())))
+        await until(lambda: "m-2" in run.pending_steers)
+        await bridge._settle_steers(run, SESSION, 0, wait=False)
+        answered.set()
+        await asyncio.wait_for(steer, HANG_GUARD_S)
+
+    asyncio.run(scenario())
+    assert _lifecycle(bridge) == [("m-2", LIFECYCLE_UNCERTAIN)]
+    assert _rpc_result(bridge, "steer-rpc")["ok"] is True
 
 
 def test_a_system_steer_may_be_unframed():

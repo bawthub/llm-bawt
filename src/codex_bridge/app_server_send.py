@@ -65,15 +65,17 @@ class CodexAppServerMixin:
 
     _app_server_unsupported: str | None = None
 
-    async def _open_app_server(self, codex: Any, overrides: tuple[str, ...]) -> JsonRpcStdioClient | None:
-        """A ready app-server for this attempt, or ``None`` to run it on exec.
+    async def _open_app_server(self, codex: Any, overrides: tuple[str, ...]) -> JsonRpcStdioClient:
+        """A ready app-server for this attempt; failures raise into the send.
 
-        ``None`` only when the binary is not the pinned app-server version,
-        remembered for this process (the binary doesn't change under it).
-        Any other failure raises, into the send's normal error handling.
+        A binary that is not the pinned app-server version fails the send,
+        and is remembered for this process (the binary doesn't change under
+        it). It is never run on exec instead: the app pinned this run's steer
+        capabilities from the bot's ``app_server`` opt-in, and an exec run
+        would be offered steers it can't take.
         """
         if self._app_server_unsupported:
-            return None
+            raise AppServerVersionMismatch(self._app_server_unsupported)
         from openai_codex_sdk.exec import CodexExecArgs
 
         executor = codex._exec
@@ -86,9 +88,12 @@ class CodexAppServerMixin:
                 timeout=self._request_timeout,
             )
         except AppServerVersionMismatch as exc:
-            self._app_server_unsupported = str(exc)
-            logger.warning("%s; codex sends run on exec, which cannot steer", exc)
-            return None
+            self._app_server_unsupported = (
+                f"{exc}; codex_transport=app_server sends fail until the supported codex "
+                "is installed or the bot is set to codex_transport=exec"
+            )
+            logger.error("%s", self._app_server_unsupported)
+            raise AppServerVersionMismatch(self._app_server_unsupported) from exc
 
     async def _run_app_server_turn(
         self,
@@ -264,17 +269,19 @@ class CodexAppServerMixin:
         return self._publish_steer_lifecycle(run, str(item["clientId"]), "started", session_key, seq)
 
     async def _settle_steers(self, run: CodexAppServerRun, session_key: str, seq: int, *, wait: bool) -> int:
-        """Publish ``uncertain`` for every accepted steer the turn never showed.
+        """Publish ``uncertain`` for every possibly delivered steer the turn never showed.
 
-        On a normal end the in-flight steer RPCs are given their bounded
-        answer first; a stopped or cancelled send doesn't wait.
+        That is one app-server accepted, one whose reply was lost, and one
+        still in flight: a definite non-delivery has already left
+        ``pending_steers``. On a normal end the in-flight steer RPCs are given
+        their bounded answer first; a stopped or cancelled send doesn't wait.
         """
         unresolved = [p.resolved.wait() for p in run.pending_steers.values() if not p.resolved.is_set()]
         if wait and unresolved:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.gather(*unresolved), CONTROL_RPC_TIMEOUT_S)
         for message_id, pending in list(run.pending_steers.items()):
-            if pending.accepted and not pending.started:
+            if (pending.accepted or not pending.resolved.is_set()) and not pending.started:
                 pending.started = True  # settled; publish once
                 seq = self._publish_steer_lifecycle(run, message_id, LIFECYCLE_UNCERTAIN, session_key, seq)
         return seq
@@ -326,15 +333,17 @@ class CodexAppServerMixin:
                 text = (fields.get("message") or "").strip()
             if not text:
                 raise ValueError("chat.steer requires message")
-            await run.steer(
+            # An unconfirmed steer is still ``ok``: it may be in the turn, so
+            # the caller must not send it again. Its lifecycle settles it.
+            detail = await run.steer(
                 text, message_id=(fields.get("message_id") or "").strip() or None,
                 origin=origin, steer_rpc_id=rpc_id or None,
             )
-            logger.info("chat.steer accepted: session=%s active_request=%s chars=%d",
-                        session_key, active_request_id or "?", len(text))
+            logger.info("chat.steer %s: session=%s active_request=%s chars=%d",
+                        detail, session_key, active_request_id or "?", len(text))
             if rpc_id:
                 self._publisher.publish_rpc_result(rpc_id, {
-                    "ok": True, "detail": "steered", "active_request_id": active_request_id or None,
+                    "ok": True, "detail": detail, "active_request_id": active_request_id or None,
                     "can_escalate": False, "can_cancel": False,
                 })
         except Exception as exc:

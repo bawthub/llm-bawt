@@ -16,8 +16,9 @@ one of them with a JSON-RPC error: fail closed, never an implied approval.
 
 The pinned :data:`APP_SERVER_VERSION` is the version whose schema
 (``tests/fixtures/codex_app_server/``) this client was written against. A
-different binary is not trusted to speak it: the send falls back to exec for
-that attempt, which cannot steer, so the bridge refuses steers to it.
+different binary is not trusted to speak it, and the send fails. It never
+runs on exec instead: the app pinned the run's steer capabilities from the
+bot's opt-in, so an exec run would be offered steers it cannot take.
 """
 
 from __future__ import annotations
@@ -62,6 +63,12 @@ INTERRUPT_TIMEOUT = "interrupt_timeout"
 INTERRUPT_NO_TURN = "interrupt_no_turn"
 # Stop reasons after which the turn is known to be over without a kill.
 GRACEFUL_STOPS = frozenset({TURN_INTERRUPTED, TURN_ENDED})
+
+# CodexAppServerRun.steer outcomes. ``steered``: app-server accepted it.
+# ``steered_unconfirmed``: it was written but its reply never came, so it may
+# be in the turn; the turn settles it ``started`` or ``uncertain``.
+STEERED = "steered"
+STEERED_UNCONFIRMED = "steered_unconfirmed"
 
 _CLOSED = object()
 
@@ -410,11 +417,16 @@ class CodexAppServerRun:
         self.turn_done.set()
 
     async def steer(self, text: str, *, message_id: str | None, origin: str,
-                    steer_rpc_id: str | None) -> None:
+                    steer_rpc_id: str | None) -> str:
         """Add ``text`` to the running turn (``turn/steer``).
 
-        Raises ``RuntimeError(run_finishing)`` when nothing was delivered
-        because the turn is stopping or over: a definite non-delivery.
+        Returns :data:`STEERED`, or :data:`STEERED_UNCONFIRMED` when the
+        outcome is unknown (a timeout, or app-server gone after the write).
+        An unknown steer stays pending, so the turn settles it ``started`` or
+        ``uncertain`` and the caller never sends it again.
+
+        Raises only on a definite non-delivery: ``RuntimeError(run_finishing)``
+        when the turn is stopping or over, or app-server's own error reply.
         """
         if self.stopping or self.turn_done.is_set() or self.turn_id is None:
             raise RuntimeError(STEER_RUN_FINISHING)
@@ -430,19 +442,35 @@ class CodexAppServerRun:
         try:
             await self.client.request("turn/steer", params, timeout=CONTROL_RPC_TIMEOUT_S)
         except BaseException as exc:
-            if message_id:
-                self.pending_steers.pop(message_id, None)
-            # Definite non-delivery: app-server refused it (no live turn, or
-            # not this one), or never received it. A lost reply or a timeout
-            # is not: the steer may be in the turn, so it surfaces as is.
-            if (isinstance(exc, AppServerError) and exc.code == INVALID_REQUEST) or (
-                isinstance(exc, AppServerClosed) and not exc.sent
-            ):
-                raise RuntimeError(STEER_RUN_FINISHING) from exc
-            raise
+            if pending is not None and pending.started:
+                # The turn already settled it (started, or uncertain because
+                # the turn ended first). That outcome stands.
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return STEERED_UNCONFIRMED
+            # Definite non-delivery: app-server answered with an error, or
+            # never received it.
+            refused = isinstance(exc, AppServerError)
+            unsent = isinstance(exc, AppServerClosed) and not exc.sent
+            if refused or unsent:
+                if message_id:
+                    self.pending_steers.pop(message_id, None)
+                if unsent or exc.code == INVALID_REQUEST:  # no live turn, or not this one
+                    raise RuntimeError(STEER_RUN_FINISHING) from exc
+                raise
+            # Unknown: it was written and may be in the turn. Kept pending as
+            # possibly accepted, so the turn settles it.
+            if pending is not None:
+                pending.accepted = True
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            logger.warning("turn/steer outcome unknown (%s: %s); settling it with the turn",
+                           type(exc).__name__, exc)
+            return STEERED_UNCONFIRMED
         else:
             if pending is not None:
                 pending.accepted = True
+            return STEERED
         finally:
             if pending is not None:
                 pending.resolved.set()
@@ -521,5 +549,5 @@ class CodexAppServerRun:
 __all__ = [
     "APP_SERVER_VERSION", "AppServerClosed", "AppServerError", "AppServerVersionMismatch",
     "CodexAppServerRun", "GRACEFUL_STOPS", "INVALID_REQUEST", "JsonRpcStdioClient",
-    "PendingSteer", "server_version", "spawn_app_server",
+    "PendingSteer", "STEERED", "STEERED_UNCONFIRMED", "server_version", "spawn_app_server",
 ]

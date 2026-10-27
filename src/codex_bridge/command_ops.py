@@ -390,7 +390,7 @@ class CodexCommandMixin(CodexAppServerMixin):
                     session_persisted = bool(resume_id)
 
                     # TASK-1243: an app-server turn when the bot asks for one
-                    # and the binary speaks it; otherwise exec, whose per-turn
+                    # (an unsupported binary fails it); otherwise exec, whose per-turn
                     # AbortController lets chat.abort interrupt the codex
                     # subprocess through the SDK's signal plumbing.
                     from openai_codex_sdk import AbortController, AbortError
