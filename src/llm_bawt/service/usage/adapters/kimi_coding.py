@@ -9,12 +9,13 @@ native response in ``raw`` for future refinement.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 
 import httpx
 
+from ...providers.bridge_keys import KimiCodingKeyAdapter
 from ..base import UsageAdapter
+from .stored_key import stored_api_key
 from ..canonical import (
     STATUS_ERROR,
     STATUS_OK,
@@ -27,7 +28,6 @@ from ..canonical import (
 logger = logging.getLogger(__name__)
 
 USAGE_URL = "https://api.kimi.com/coding/v1/usages"
-_KEY_ENVS = ("KIMI_CODING_API_KEY", "KIMI_API_KEY")
 
 
 def _number(value: object) -> float | None:
@@ -157,19 +157,11 @@ class KimiCodingUsageAdapter(UsageAdapter):
     backend = "claude-code"
     access_path_keys = ("kimi-coding-chat",)
 
-    @staticmethod
-    def _key() -> str | None:
-        return next((os.getenv(env) for env in _KEY_ENVS if os.getenv(env)), None)
-
     async def fetch(self) -> ProviderUsage:
-        key = self._key()
-        if not key:
-            return self._base(
-                available=False,
-                status=STATUS_UNAUTHORIZED,
-                error="No Kimi For Coding API key configured (set KIMI_CODING_API_KEY).",
-                limits=[],
-            )
+        stored = await stored_api_key("kimi-coding", "Kimi For Coding", KimiCodingKeyAdapter.env_vars)
+        if stored.key is None:
+            return self._base(available=False, status=stored.status, error=stored.error, limits=[])
+        key = stored.key
 
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:

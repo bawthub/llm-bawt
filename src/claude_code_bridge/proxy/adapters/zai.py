@@ -32,3 +32,4 @@ class ZaiAdapter(AnthropicPassthroughAdapter):
     DEFAULT_BASE_URL: ClassVar[str] = "https://api.z.ai/api/anthropic"
     BASE_URL_ENV: ClassVar[str] = "ZAI_BASE_URL"
     API_KEY_ENVS: ClassVar[tuple[str, ...]] = ("ZAI_API_KEY", "Z_AI_API_KEY")
+    BROKER_PROVIDER_ID: ClassVar[str] = "zai"

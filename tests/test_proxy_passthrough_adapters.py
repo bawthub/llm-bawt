@@ -25,6 +25,21 @@ import pytest
 from claude_code_bridge.proxy.adapters import lookup
 from claude_code_bridge.proxy.adapters.moonshot import MoonshotAdapter
 from claude_code_bridge.proxy.adapters.zai import ZaiAdapter
+from claude_code_bridge.proxy.adapters import anthropic_passthrough
+from claude_code_bridge.provider_key_broker import BrokerKeyNotInstalled
+
+
+@pytest.fixture(autouse=True)
+def _no_broker_key(monkeypatch):
+    """The app broker has no stored key, so the legacy env keys apply (TASK-1476).
+
+    Broker-first behaviour itself is covered in test_bridge_provider_keys.py.
+    """
+
+    def fake_fetch(provider_id):
+        raise BrokerKeyNotInstalled(f"no {provider_id} key")
+
+    monkeypatch.setattr(anthropic_passthrough, "fetch_provider_api_key", fake_fetch)
 
 # One message_start (carrying a usage block the tap parses) + a stop event.
 def _sse(model: str) -> bytes:
@@ -122,15 +137,13 @@ def test_moonshot_sends_bearer():
     assert headers["x-api-key"] == "K"  # harmless compatibility mirror
 
 
-def test_missing_key_error_names_the_env_vars(monkeypatch):
+def test_missing_key_error_points_at_the_providers_page(monkeypatch):
     for env in ("ZAI_API_KEY", "Z_AI_API_KEY"):
         monkeypatch.delenv(env, raising=False)
     with pytest.raises(RuntimeError) as exc:
         ZaiAdapter()._api_key()
-    # Byte-identical to the pre-refactor message.
     assert str(exc.value) == (
-        "Z.AI API key required: set ZAI_API_KEY (or Z_AI_API_KEY) "
-        "on the claude-code-bridge container."
+        "Z.AI API key required: connect it in Settings → Providers."
     )
 
 

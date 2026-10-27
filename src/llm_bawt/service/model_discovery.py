@@ -427,15 +427,36 @@ class KimiCodingDiscoveryProvider(ModelDiscoveryProvider):
 
     aliases = ("kimi", "kimi_coding", "kimi-code")
     _url = "https://api.kimi.com/coding/v1/models"
-    _key_envs = ("KIMI_CODING_API_KEY", "KIMI_API_KEY")
 
-    def fetch(self) -> list[dict[str, Any]]:
-        key = next((os.getenv(name) for name in self._key_envs if os.getenv(name)), None)
+    def __init__(self, config: Config | None = None):
+        self._config = config
+
+    def _key(self) -> str:
+        """The stored Kimi For Coding key; legacy env only while none is stored (TASK-1476)."""
+        from .connection_secrets import ConnectionUnavailable
+        from .providers.api_key import resolve_stored_api_key
+        from .providers.bridge_keys import KimiCodingKeyAdapter
+
+        try:
+            key = resolve_stored_api_key(
+                self._config, KimiCodingKeyAdapter.id, KimiCodingKeyAdapter.env_vars,
+            )
+        except ConnectionUnavailable as exc:
+            raise ModelDiscoveryError(
+                f"The stored Kimi For Coding key is unusable ({exc.code}); "
+                "reconnect it in Settings → Providers",
+                status_code=503,
+            ) from None
         if not key:
             raise ModelDiscoveryError(
-                "Kimi discovery requires KIMI_CODING_API_KEY in env",
+                "Kimi discovery requires a Kimi For Coding key; connect it in "
+                "Settings → Providers",
                 status_code=503,
             )
+        return key
+
+    def fetch(self) -> list[dict[str, Any]]:
+        key = self._key()
         headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
         try:
             response = httpx.get(self._url, headers=headers, timeout=20.0)
@@ -444,7 +465,7 @@ class KimiCodingDiscoveryProvider(ModelDiscoveryProvider):
             status = exc.response.status_code
             if status == 401:
                 raise ModelDiscoveryError(
-                    "Kimi rejected KIMI_CODING_API_KEY while listing models",
+                    "Kimi rejected the Kimi For Coding key while listing models",
                     status_code=503,
                 ) from exc
             raise ModelDiscoveryError(
@@ -585,7 +606,7 @@ def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ..
             ),
             pass_key=True,
         ),
-        KimiCodingDiscoveryProvider(),
+        KimiCodingDiscoveryProvider(config),
         OpenRouterDiscoveryProvider(),
     )
 

@@ -23,12 +23,13 @@ the moment to tighten this mapper.
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 import httpx
 
+from ...providers.bridge_keys import ZaiKeyAdapter
 from ..base import UsageAdapter
+from .stored_key import stored_api_key
 from ..canonical import (
     ProviderUsage,
     UsageLimit,
@@ -128,13 +129,10 @@ class ZaiUsageAdapter(UsageAdapter):
     access_path_keys = ("zai-anthropic",)
 
     async def fetch(self) -> ProviderUsage:
-        key = os.getenv("ZAI_API_KEY") or os.getenv("Z_AI_API_KEY")
-        if not key:
-            return self._base(
-                available=False,
-                status=STATUS_UNAUTHORIZED,
-                error="ZAI_API_KEY not set; cannot query GLM Coding Plan usage.",
-            )
+        stored = await stored_api_key("zai", "Z.AI", ZaiKeyAdapter.env_vars)
+        if stored.key is None:
+            return self._base(available=False, status=stored.status, error=stored.error)
+        key = stored.key
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
 
         try:

@@ -9,6 +9,7 @@ separate ``/usages`` endpoint used by the app's usage adapter.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -20,12 +21,19 @@ from ..stream_cc import chat_completions_to_anthropic_sse
 from ..translate_cc import anthropic_to_chat_completions
 from ..request_context import ProxyRequestContext
 from .base import ProviderAdapter
+from ...provider_key_broker import (
+    BrokerKeyError,
+    BrokerKeyNotInstalled,
+    fetch_provider_api_key,
+)
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1"
 _TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
 _KEY_ENVS = ("KIMI_CODING_API_KEY", "KIMI_API_KEY")
+#: App provider id whose stored key the broker serves.
+_BROKER_PROVIDER_ID = "kimi-coding"
 
 
 class KimiCodingAdapter(ProviderAdapter):
@@ -35,13 +43,27 @@ class KimiCodingAdapter(ProviderAdapter):
 
     @staticmethod
     def _api_key() -> str:
+        """The stored key from the app broker; legacy env only when none is stored.
+
+        Blocking I/O, so :meth:`authorize` runs it off the event loop. Any
+        broker failure other than "nothing stored" (503) is raised (TASK-1476).
+        """
+        try:
+            return fetch_provider_api_key(_BROKER_PROVIDER_ID)
+        except BrokerKeyNotInstalled:
+            pass
+        except BrokerKeyError as exc:
+            raise RuntimeError(f"Kimi For Coding API key unavailable: {exc}") from exc
         for env in _KEY_ENVS:
             key = os.getenv(env)
             if key:
+                logger.warning(
+                    "Using %s from the bridge environment because no Kimi For "
+                    "Coding key is stored in the app (legacy)", env,
+                )
                 return key
         raise RuntimeError(
-            "Kimi For Coding API key required: set KIMI_CODING_API_KEY "
-            "(KIMI_API_KEY also accepted) on the claude-code-bridge container."
+            "Kimi For Coding API key required: connect it in Settings → Providers."
         )
 
     @staticmethod
@@ -49,7 +71,7 @@ class KimiCodingAdapter(ProviderAdapter):
         return (os.getenv("KIMI_CODING_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
 
     async def authorize(self) -> tuple[str, str]:
-        return self._api_key(), self._base_url()
+        return await asyncio.to_thread(self._api_key), self._base_url()
 
     async def call(
         self,

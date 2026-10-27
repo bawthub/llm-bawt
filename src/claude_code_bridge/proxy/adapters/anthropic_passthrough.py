@@ -24,6 +24,7 @@ that instead (e.g. xAI).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -33,6 +34,11 @@ import httpx
 
 from .base import ProviderAdapter
 from ..request_context import ProxyRequestContext
+from ...provider_key_broker import (
+    BrokerKeyError,
+    BrokerKeyNotInstalled,
+    fetch_provider_api_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,10 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
     BASE_URL_ENV: ClassVar[str] = ""
     #: Env vars searched in order for the API key.
     API_KEY_ENVS: ClassVar[tuple[str, ...]] = ()
+    #: App provider id whose stored key the broker serves (TASK-1476). When
+    #: set, the broker is asked first on every call and :attr:`API_KEY_ENVS`
+    #: apply only when it answers that no key is stored (503).
+    BROKER_PROVIDER_ID: ClassVar[str] = ""
     #: Human label used in log lines and the missing-key error.
     LABEL: ClassVar[str] = ""
     #: Path appended to the base URL for the messages endpoint.
@@ -70,10 +80,33 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
     # -- credentials -----------------------------------------------------
 
     def _api_key(self) -> str:
+        """The provider key: the app broker first, then the legacy env.
+
+        Blocking I/O; async callers run it off the event loop. Only the
+        broker's "nothing stored" answer lets the env key apply. Any other
+        broker failure (a disconnected or unreadable connection, the store
+        down, the app unreachable) is raised, so a stale env key can't mask it.
+        """
+        if self.BROKER_PROVIDER_ID:
+            try:
+                return fetch_provider_api_key(self.BROKER_PROVIDER_ID)
+            except BrokerKeyNotInstalled:
+                pass
+            except BrokerKeyError as exc:
+                raise RuntimeError(f"{self.LABEL} API key unavailable: {exc}") from exc
         for env in self.API_KEY_ENVS:
             key = os.getenv(env)
             if key:
+                if self.BROKER_PROVIDER_ID:
+                    logger.warning(
+                        "Using %s from the bridge environment because no %s key "
+                        "is stored in the app (legacy)", env, self.LABEL,
+                    )
                 return key
+        if self.BROKER_PROVIDER_ID:
+            raise RuntimeError(
+                f"{self.LABEL} API key required: connect it in Settings → Providers."
+            )
         primary, *aliases = self.API_KEY_ENVS
         names = primary
         if aliases:
@@ -100,7 +133,7 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
         # Not used by ``call`` below (it builds its own headers), but the ABC
         # requires it and it keeps the adapter usable by the default
         # Responses-API path should the provider ever expose one.
-        return self._api_key(), self._base_url()
+        return await asyncio.to_thread(self._api_key), self._base_url()
 
     # -- the shared passthrough -----------------------------------------
 
@@ -111,7 +144,7 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
         context: ProxyRequestContext | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream the Anthropic request straight upstream, relay SSE back."""
-        api_key = self._api_key()
+        api_key = await asyncio.to_thread(self._api_key)
         url = f"{self._base_url()}{self.MESSAGES_PATH}"
 
         # The SDK sent model="<provider>/<upstream>"; the upstream wants the

@@ -24,6 +24,7 @@ from ...utils.config import Config
 from .base import (
     AUTH_API_KEY,
     STATUS_CONNECTED,
+    STATUS_DISCONNECTED,
     ConnectionRecord,
     ProviderAdapter,
     ValidateResult,
@@ -42,6 +43,22 @@ class ApiKeyAdapter(ProviderAdapter):
     """
 
     auth_methods = (AUTH_API_KEY,)
+    #: Disconnect leaves a key-free ``disconnected`` record instead of deleting
+    #: the row. Set when a reader falls back to legacy env while no record
+    #: exists (:func:`resolve_stored_api_key`, the bridge broker's 503), so a
+    #: disconnect can't bring the env key back.
+    keeps_disconnected_record: bool = False
+
+    def disconnect(self) -> bool:
+        if not self.keeps_disconnected_record:
+            return super().disconnect()
+        record = self.store.load(self.id)
+        if record is None or record.status == STATUS_DISCONNECTED:
+            return False
+        self.store.save(ConnectionRecord(
+            provider=self.id, status=STATUS_DISCONNECTED, auth_method=AUTH_API_KEY,
+        ))
+        return True
 
     # --- api key -------------------------------------------------------------
     def set_api_key(self, api_key: str) -> ValidateResult:
@@ -137,4 +154,38 @@ def resolve_api_key(
             )
             return val
 
+    return None
+
+
+# Providers whose env fallback has already logged its deprecation warning.
+_env_fallback_warned: set[str] = set()
+
+
+def resolve_stored_api_key(config: Config, provider_id: str, env_vars: Sequence[str] = ()) -> str | None:
+    """A provider's API key, record-first and fail-closed (TASK-1476).
+
+    The ``provider_connection:<id>`` record wins. ``env_vars`` are read only
+    when no record exists, with one warning per provider that names the vars
+    and never a value. A record that exists but can't be used (disconnected,
+    undecryptable, store down) raises
+    :class:`~llm_bawt.service.connection_secrets.ConnectionUnavailable`; it
+    never falls back to env. Returns None when there is no record and no env.
+    """
+    from ..connection_secrets import FieldSpec, read_connection  # noqa: PLC0415 — import cycle
+
+    found = read_connection(config, "provider", provider_id, FieldSpec(secret=(_SECRET_FIELD,)))
+    if found is not None:
+        return found.secret[_SECRET_FIELD]
+    for var in env_vars:
+        value = os.getenv(var)
+        if value:
+            if provider_id not in _env_fallback_warned:
+                _env_fallback_warned.add(provider_id)
+                logger.warning(
+                    "Using %s from the environment for provider '%s' because no "
+                    "connection is stored (deprecated; connect the key in "
+                    "Settings → Providers). Checked: %s.",
+                    var, provider_id, ", ".join(env_vars),
+                )
+            return value
     return None

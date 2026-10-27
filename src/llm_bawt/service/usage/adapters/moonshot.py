@@ -36,7 +36,9 @@ import time
 import httpx
 
 from ..balance import BALANCE_PROVIDER
+from ...providers.bridge_keys import MoonshotKeyAdapter
 from ..base import UsageAdapter
+from .stored_key import stored_api_key
 from ..canonical import (
     STATUS_ERROR,
     STATUS_OK,
@@ -48,7 +50,6 @@ from ..canonical import (
 
 logger = logging.getLogger(__name__)
 
-API_KEY_ENVS = ("MOONSHOT_API_KEY", "LLM_BAWT_MOONSHOT_API_KEY", "KIMI_API_KEY")
 DEFAULT_BASE_URL = "https://api.moonshot.ai/v1"
 BASE_URL_ENV = "MOONSHOT_USAGE_BASE_URL"
 
@@ -73,14 +74,6 @@ class MoonshotUsageAdapter(UsageAdapter):
     report_ttl = 10.0
 
     # -- helpers ---------------------------------------------------------
-
-    @staticmethod
-    def _api_key() -> str | None:
-        for env in API_KEY_ENVS:
-            key = os.getenv(env)
-            if key:
-                return key
-        return None
 
     @staticmethod
     def _base_url() -> str:
@@ -112,17 +105,10 @@ class MoonshotUsageAdapter(UsageAdapter):
     # -- fetch -----------------------------------------------------------
 
     async def fetch(self):
-        key = self._api_key()
-        if not key:
-            return self._base(
-                available=False,
-                status=STATUS_UNAUTHORIZED,
-                error=(
-                    "No Moonshot API key configured "
-                    "(set MOONSHOT_API_KEY / LLM_BAWT_MOONSHOT_API_KEY)."
-                ),
-                limits=[],
-            )
+        stored = await stored_api_key("moonshot", "Moonshot", MoonshotKeyAdapter.env_vars)
+        if stored.key is None:
+            return self._base(available=False, status=stored.status, error=stored.error, limits=[])
+        key = stored.key
 
         url = f"{self._base_url()}/users/me/balance"
         headers = {

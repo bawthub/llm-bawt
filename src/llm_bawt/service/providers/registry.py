@@ -31,6 +31,7 @@ from .github_deploy import (
 from .openai_key import OpenAIKeyAdapter
 from .openrouter import OpenRouterAdapter
 from .xai import XaiAdapter
+from .bridge_keys import KimiCodingKeyAdapter, MoonshotKeyAdapter, ZaiKeyAdapter
 from .x import XAdapter
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     AnthropicKeyAdapter.id: AnthropicKeyAdapter,
     AnthropicAdminAdapter.id: AnthropicAdminAdapter,
     XAdapter.id: XAdapter,
+    # TASK-1476: bridge-proxy API keys, retired from env.
+    ZaiKeyAdapter.id: ZaiKeyAdapter,
+    KimiCodingKeyAdapter.id: KimiCodingKeyAdapter,
+    MoonshotKeyAdapter.id: MoonshotKeyAdapter,
     # TASK-997: release-deploy credentials (DB-stored, never env).
     GitHubReleaseAdapter.id: GitHubReleaseAdapter,
     GitHubReleaseDispatchAdapter.id: GitHubReleaseDispatchAdapter,

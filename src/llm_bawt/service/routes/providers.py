@@ -376,6 +376,23 @@ async def api_key_token(provider_id: str, request: Request):
     adapter = _adapter_or_404(provider_id)
     if not isinstance(adapter, ApiKeyAdapter):
         raise HTTPException(status_code=404, detail=f"{provider_id} has no api-key broker")
+    if adapter.keeps_disconnected_record:
+        # TASK-1476: 503 is the one answer that lets a bridge use its legacy
+        # env key, so it means "no record" only. A record that can't be used
+        # (disconnected, undecryptable) is 409 and a store outage is 500.
+        from ..connection_secrets import ConnectionUnavailable, FieldSpec, read_connection  # noqa: PLC0415
+
+        try:
+            found = await run_in_threadpool(
+                read_connection, adapter.config, "provider", adapter.id,
+                FieldSpec(secret=("api_key",)), store=adapter.store,
+            )
+        except ConnectionUnavailable as exc:
+            status = 500 if exc.code == "store_unavailable" else 409
+            raise HTTPException(status_code=status, detail=f"{provider_id} credential {exc.code}") from None
+        if found is None:
+            raise HTTPException(status_code=503, detail=f"no {provider_id} credential installed")
+        return {"access_token": found.secret["api_key"], "expires_at": None, "state": "ok"}
     key = await run_in_threadpool(adapter.api_key)
     if not key:
         raise HTTPException(status_code=503, detail=f"no {provider_id} credential installed")

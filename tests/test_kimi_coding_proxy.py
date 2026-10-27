@@ -15,6 +15,19 @@ from claude_code_bridge.proxy.stream_cc import chat_completions_to_anthropic_sse
 from claude_code_bridge.proxy.translate_cc import anthropic_to_chat_completions
 from llm_bawt.service.usage.adapters import kimi_coding as kimi_usage
 from llm_bawt.service.usage.adapters.kimi_coding import KimiCodingUsageAdapter
+from tests.stored_provider_keys import stub_stored_keys
+from claude_code_bridge.proxy.adapters import kimi_coding as kimi_proxy
+from claude_code_bridge.provider_key_broker import BrokerKeyNotInstalled
+
+
+def _no_broker_key(monkeypatch):
+    """The app broker reports no stored Kimi key, so the legacy env applies."""
+
+    def fake_fetch(provider_id):
+        assert provider_id == "kimi-coding"
+        raise BrokerKeyNotInstalled("503")
+
+    monkeypatch.setattr(kimi_proxy, "fetch_provider_api_key", fake_fetch)
 
 
 def _payloads(frames: list[bytes]) -> list[dict]:
@@ -241,6 +254,7 @@ def test_adapter_posts_chat_completions_with_bearer(fake_kimi_upstream, monkeypa
     base_url, captured = fake_kimi_upstream
     monkeypatch.setenv("KIMI_CODING_BASE_URL", base_url)
     monkeypatch.setenv("KIMI_CODING_API_KEY", "coding-key")
+    _no_broker_key(monkeypatch)
     body = {
         "model": "kimi_coding/k3",
         "messages": [{"role": "user", "content": "hi"}],
@@ -315,6 +329,7 @@ def test_kimi_coding_usage_parses_live_subscription_shape(monkeypatch):
             return _Response()
 
     monkeypatch.setenv("KIMI_CODING_API_KEY", "coding-key")
+    stub_stored_keys(monkeypatch, {})
     monkeypatch.setattr(kimi_usage.httpx, "AsyncClient", _Client)
 
     snap = asyncio.run(KimiCodingUsageAdapter().fetch())

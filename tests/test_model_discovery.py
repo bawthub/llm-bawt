@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from llm_bawt.service.connection_secrets import ConnectionUnavailable
 from llm_bawt.service.model_discovery import (
     CodexBridgeDiscoveryProvider,
     KimiCodingDiscoveryProvider,
@@ -12,8 +13,14 @@ from llm_bawt.service.model_discovery import (
     discover_models,
 )
 from llm_bawt.service.routes import models as model_routes
+from tests.stored_provider_keys import stub_stored_keys
 
 _BRIDGE_URL = "http://codex-bridge:8682/models"
+
+
+def _stored_kimi(monkeypatch, outcome):
+    """Stub the stored Kimi For Coding record: a key, None (no record) or an error."""
+    stub_stored_keys(monkeypatch, {"kimi-coding": outcome})
 
 
 def test_kimi_discovery_preserves_display_name_and_context(monkeypatch):
@@ -63,6 +70,7 @@ def test_kimi_discovery_preserves_display_name_and_context(monkeypatch):
         return _Response({"user": {"membership": {"level": "LEVEL_BASIC"}}})
 
     monkeypatch.setenv("KIMI_CODING_API_KEY", "coding-key")
+    _stored_kimi(monkeypatch, None)
     monkeypatch.setattr("llm_bawt.service.model_discovery.httpx.get", fake_get)
 
     assert KimiCodingDiscoveryProvider().fetch() == [
@@ -103,6 +111,7 @@ def test_kimi_discovery_keeps_highspeed_for_upgraded_members(monkeypatch):
         return _Response({"user": {"membership": {"level": "LEVEL_ALLEGRETTO"}}})
 
     monkeypatch.setenv("KIMI_CODING_API_KEY", "coding-key")
+    _stored_kimi(monkeypatch, None)
     monkeypatch.setattr("llm_bawt.service.model_discovery.httpx.get", fake_get)
 
     assert KimiCodingDiscoveryProvider().fetch() == [
@@ -117,12 +126,43 @@ def test_kimi_discovery_keeps_highspeed_for_upgraded_members(monkeypatch):
 def test_kimi_discovery_requires_its_subscription_key(monkeypatch):
     monkeypatch.delenv("KIMI_CODING_API_KEY", raising=False)
     monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    _stored_kimi(monkeypatch, None)
 
     with pytest.raises(ModelDiscoveryError) as exc_info:
         KimiCodingDiscoveryProvider().fetch()
 
     assert exc_info.value.status_code == 503
-    assert "KIMI_CODING_API_KEY" in str(exc_info.value)
+    assert "connect it in Settings" in str(exc_info.value)
+
+
+def test_kimi_discovery_uses_the_stored_key_over_env(monkeypatch):
+    seen: list[str] = []
+
+    def fake_get(url, *, headers, timeout):
+        seen.append(headers["Authorization"])
+        raise httpx.ConnectError("stop here")
+
+    monkeypatch.setenv("KIMI_CODING_API_KEY", "env-key")
+    _stored_kimi(monkeypatch, "stored-key")
+    monkeypatch.setattr("llm_bawt.service.model_discovery.httpx.get", fake_get)
+
+    with pytest.raises(ModelDiscoveryError):
+        KimiCodingDiscoveryProvider().fetch()
+    assert seen == ["Bearer stored-key"]
+
+
+def test_kimi_discovery_never_falls_back_to_env_past_a_disconnect(monkeypatch):
+    def fake_get(*_args, **_kwargs):
+        raise AssertionError("no request may be sent")
+
+    monkeypatch.setenv("KIMI_CODING_API_KEY", "env-key")
+    _stored_kimi(monkeypatch, ConnectionUnavailable("not_connected"))
+    monkeypatch.setattr("llm_bawt.service.model_discovery.httpx.get", fake_get)
+
+    with pytest.raises(ModelDiscoveryError) as exc_info:
+        KimiCodingDiscoveryProvider().fetch()
+    assert exc_info.value.status_code == 503
+    assert "not_connected" in str(exc_info.value)
 
 
 def test_kimi_provider_aliases_resolve(monkeypatch):

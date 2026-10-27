@@ -16,6 +16,7 @@ from llm_bawt.service.usage.adapters.anthropic_api import AnthropicApiUsageAdapt
 from llm_bawt.service.usage.adapters.moonshot import MoonshotUsageAdapter
 from llm_bawt.service.usage.balance import BalanceRow, anchored_balance, balance_update_for_turn
 from llm_bawt.service.usage.canonical import UsageSpend
+from tests.stored_provider_keys import stub_stored_keys
 
 NOW = datetime(2026, 10, 25, 16, tzinfo=timezone.utc)
 
@@ -100,6 +101,7 @@ def test_provider_reported_balance_invents_no_deposit_debit_or_anchor(monkeypatc
         return Response()
 
     monkeypatch.setenv("MOONSHOT_API_KEY", "sk-test")
+    stub_stored_keys(monkeypatch, {})
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     import asyncio
 
@@ -454,8 +456,9 @@ def test_reports_say_whether_a_manual_balance_is_accepted():
 async def test_error_and_no_balance_reports_keep_the_capability_flags(monkeypatch):
     from llm_bawt.service.usage.adapters import OpenRouterUsageAdapter
 
-    for env in ("MOONSHOT_API_KEY", "LLM_BAWT_MOONSHOT_API_KEY"):
+    for env in ("MOONSHOT_API_KEY", "LLM_BAWT_MOONSHOT_API_KEY", "KIMI_API_KEY"):
         monkeypatch.delenv(env, raising=False)
+    stub_stored_keys(monkeypatch, {})
     native = await MoonshotUsageAdapter().fetch()
     assert native.balance is None and native.balance_supported and not native.manual_balance_supported
 

@@ -63,6 +63,7 @@ class MoonshotAdapter(AnthropicPassthroughAdapter):
         "LLM_BAWT_MOONSHOT_API_KEY",
         "KIMI_API_KEY",
     )
+    BROKER_PROVIDER_ID: ClassVar[str] = "moonshot"
 
     def _auth_headers(self, api_key: str) -> dict[str, str]:
         """Bearer (Moonshot's documented ``ANTHROPIC_AUTH_TOKEN`` style),
