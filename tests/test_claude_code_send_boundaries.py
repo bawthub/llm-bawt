@@ -439,6 +439,54 @@ def test_normal_completion_still_emits_one_success(monkeypatch, result):
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
+def test_post_done_control_read_keeps_sdk_input_open(monkeypatch):
+    async def run():
+        harness = _SendHarness()
+
+        class InputAwareSDK(_SDKStream):
+            def __init__(self):
+                super().__init__(result=True)
+                self.input_closed = asyncio.Event()
+                self.input_reader = None
+
+            async def connect(self, prompt):
+                async def read_input():
+                    async for _ in prompt:
+                        pass
+                    self.input_closed.set()
+
+                self.input_reader = asyncio.create_task(read_input())
+                await asyncio.sleep(0)
+
+            async def get_context_usage(self):
+                await asyncio.sleep(0)  # Let a prematurely released input close.
+                if self.input_closed.is_set():
+                    raise RuntimeError("SDK control channel closed with input")
+                assert harness.terminal(), "DONE must precede the control read"
+                return {"totalTokens": 55, "maxTokens": 200,
+                        "categories": [{"name": "System prompt", "tokens": 50}]}
+
+            async def disconnect(self):
+                await super().disconnect()
+                await self.input_reader
+
+        sdk = InputAwareSDK()
+        harness._read_native_context_usage = ClaudeUsageMixin._read_native_context_usage
+        monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", lambda **kw: sdk)
+        send = harness.send()
+        await sdk.waiting.wait()
+        sdk.release_stream.set()
+        await send
+        assert sdk.input_closed.is_set()
+        assert harness.terminal()[0].kind is AgentEventKind.ASSISTANT_DONE
+        updates = [event for event in harness.events if event.kind is AgentEventKind.USAGE_UPDATE
+                   and event.token_usage and event.token_usage.get("context_breakdown")]
+        assert len(updates) == 1
+        assert updates[0].token_usage["resident_tokens"] == 55
+
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
 def test_abort_during_result_context_read_preserves_result_usage(monkeypatch):
     async def run():
         harness = _SendHarness()

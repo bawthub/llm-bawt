@@ -795,8 +795,10 @@ class ClaudeSendMixin(
                                 )
                                 assistant_done_emitted = True
                                 terminal_event_published = True
-                                # Close input before control read; EOF may deadlock after AskUserQuestion.
-                                turn_done.set()
+                                # Keep the SDK input alive for the bounded control read;
+                                # closing it early closes the CLI's control channel.
+                                # The finally block releases it before teardown, even
+                                # on timeout or post-DONE cancellation.
                                 if should_read_native_context_usage(use_proxy=use_proxy):
                                     seq = await self._publish_post_done_context(
                                         sdk_client, request_id=request_id,

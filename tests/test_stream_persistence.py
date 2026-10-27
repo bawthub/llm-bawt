@@ -382,6 +382,58 @@ def test_finalize_turn_persists_non_streaming_agent_usage(monkeypatch) -> None:
     }
 
 
+def test_post_done_usage_survives_nonstream_backend_and_turn_finalization(monkeypatch) -> None:
+    from agent_bridge.events import AgentEvent, AgentEventKind
+    from llm_bawt.agent_backends import agent_bridge as bridge_module
+    from llm_bawt.clients.agent_backend_client import AgentBackendClient
+
+    done_usage = {"input_tokens": 11, "output_tokens": 3, "usage_status": "final"}
+    enriched = {**done_usage, "resident_tokens": 55, "resident_source": "claude_sdk_context",
+                "context_breakdown": {"read_ms": 23.1}}
+
+    class FakeRedisSubscriber:
+        def __init__(self, _url):
+            self._redis = SimpleNamespace(connection_pool=SimpleNamespace(
+                connection_kwargs={"url": "redis://localhost:6379/0"}))
+
+        async def connect(self):
+            pass
+
+        async def send_command(self, **_kwargs):
+            pass
+
+        async def subscribe_run(self, *_args, **_kwargs):
+            yield AgentEvent(event_id="done", session_key="s", run_id="r",
+                             kind=AgentEventKind.ASSISTANT_DONE, origin="assistant",
+                             text="done", token_usage=done_usage)
+            yield AgentEvent(event_id="enriched", session_key="s", run_id="r",
+                             kind=AgentEventKind.USAGE_UPDATE, origin="system",
+                             token_usage=enriched)
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(bridge_module, "get_agent_subscriber", lambda: SimpleNamespace(
+        _redis=SimpleNamespace(connection_pool=SimpleNamespace(
+            connection_kwargs={"url": "redis://localhost:6379/0"}))))
+    monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", FakeRedisSubscriber)
+    backend = bridge_module.AgentBridgeBackend()
+    result = asyncio.run(backend.chat_full("hello", {"bot_id": "test"}))
+    assert result.text == "done"
+
+    client = AgentBackendClient.__new__(AgentBackendClient)
+    client.last_result = result
+    service = _build_service_for_finalize()
+    service._finalize_turn(
+        llm_bawt=SimpleNamespace(finalize_response=Mock(), adapter=None, client=client),
+        turn_id="turn-post-done", response_text=result.text, tool_context="",
+        tool_call_details=[], prepared_messages=[], user_prompt="hello",
+        model="test-model", bot_id="test", user_id="test-user", elapsed_ms=20,
+        stream=False,
+    )
+    assert service._update_turn_log.call_args.kwargs["token_usage"] == enriched
+
+
 def test_resolve_turn_usage_recovers_partial_backend_result(monkeypatch) -> None:
     service = _build_service_for_finalize()
 

@@ -381,6 +381,12 @@ class AgentBridgeBackend(AgentBackend):
 
                             elif event.kind == AgentEventKind.USAGE_UPDATE:
                                 if event.token_usage:
+                                    # The same final snapshot must reach chat_full()
+                                    # on nonstream turns, not just the live queue.
+                                    # ASSISTANT_DONE was already published, so this
+                                    # overwrites its earlier unenriched usage.
+                                    token_usage.clear()
+                                    token_usage.update(event.token_usage)
                                     result_queue.put({
                                         "event": "live_usage",
                                         "token_usage": event.token_usage,
