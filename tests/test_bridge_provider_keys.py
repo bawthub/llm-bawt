@@ -38,7 +38,7 @@ from llm_bawt.service.usage.adapters import zai as zai_usage
 from llm_bawt.service.usage.adapters.kimi_coding import KimiCodingUsageAdapter
 from llm_bawt.service.usage.adapters.moonshot import MoonshotUsageAdapter
 from llm_bawt.service.usage.adapters.zai import ZaiUsageAdapter
-from tests.stored_provider_keys import stub_stored_keys
+from tests.stored_provider_keys import real_credential_store, stub_stored_keys
 
 ADAPTERS = (ZaiKeyAdapter, KimiCodingKeyAdapter, MoonshotKeyAdapter)
 
@@ -130,33 +130,8 @@ def test_resolver_never_falls_back_to_env_past_an_unusable_record(monkeypatch, c
 @pytest.fixture
 def real_store(monkeypatch):
     """A real CredentialStore over SQLite with a swappable Fernet key."""
-    from cryptography.fernet import Fernet
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.pool import StaticPool
-    from sqlmodel import SQLModel
-
-    from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
-    from llm_bawt.service.providers import base, crypto
-
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(engine, tables=[RuntimeSetting.__table__])
-    with engine.begin() as conn:
-        conn.execute(text(
-            "CREATE UNIQUE INDEX idx_runtime_settings_scope_key ON runtime_settings (scope_type, scope_id, key)"
-        ))
-    runtime = object.__new__(RuntimeSettingsStore)
-    runtime.engine = engine
-    runtime.config = None
-    monkeypatch.setattr(base, "RuntimeSettingsStore", lambda config: runtime)
-    fernet = Fernet(Fernet.generate_key())
-    monkeypatch.setattr(crypto, "_get_fernet", lambda: fernet)
-
-    def rotate_root():
-        other = Fernet(Fernet.generate_key())
-        monkeypatch.setattr(crypto, "_get_fernet", lambda: other)
-
-    yield base.CredentialStore(SimpleNamespace()), rotate_root
-    engine.dispose()
+    with real_credential_store(monkeypatch) as handles:
+        yield handles
 
 
 def _route(cls):

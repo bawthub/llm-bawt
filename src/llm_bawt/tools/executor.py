@@ -1360,13 +1360,12 @@ class ToolExecutor:
 
     def _execute_news(self, tool_call: ToolCall) -> str:
         """Execute NewsAPI tool - article search or headlines."""
-        if not self.news_client:
-            self._ensure_news_client()
+        self._ensure_news_client()
         if not self.news_client:
             return format_tool_result(
                 tool_call.name,
                 None,
-                error="NewsAPI not available. Set NEWSAPI_API_KEY in your environment.",
+                error="NewsAPI not available. Connect a NewsAPI key in Settings → Providers.",
             )
 
         action = tool_call.arguments.get("action", "search").lower()
@@ -1406,22 +1405,28 @@ class ToolExecutor:
             return format_tool_result(tool_call.name, None, error=str(e))
 
     def _ensure_news_client(self) -> None:
-        """Lazy-init NewsAPI client if API key is available."""
-        if self.news_client:
+        """Match the NewsAPI client to the key resolved for this call.
+
+        Resolved on every call, so a key connected, rotated or disconnected
+        in Settings takes effect without a restart. Without a config the
+        client handed in (if any) is used as is.
+        """
+        if not self.config:
             return
         try:
-            import os
-            api_key = (
-                (getattr(self.config, "NEWSAPI_API_KEY", "") if self.config else "")
-                or os.environ.get("NEWSAPI_API_KEY", "")
-                or os.environ.get("LLM_BAWT_NEWSAPI_API_KEY", "")
-            )
-            if api_key:
-                from ..integrations.newsapi.client import NewsAPIClient
-                self.news_client = NewsAPIClient(api_key=api_key)
-                logger.debug("NewsAPI client initialized")
-        except Exception as e:
-            logger.warning(f"Failed to initialize NewsAPI client: {e}")
+            from ..search.credentials import resolve_key
+            api_key = resolve_key(self.config, "newsapi").value
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to resolve the NewsAPI key: {e}")
+            self.news_client = None
+            return
+        if not api_key:
+            self.news_client = None
+            return
+        if self.news_client is None or getattr(self.news_client, "_api_key", None) != api_key:
+            from ..integrations.newsapi.client import NewsAPIClient
+            self.news_client = NewsAPIClient(api_key=api_key)
+            logger.debug("NewsAPI client initialized")
 
     def _execute_web_fetch(self, tool_call: ToolCall) -> str:
         """Execute web fetch tool - retrieve web page content."""

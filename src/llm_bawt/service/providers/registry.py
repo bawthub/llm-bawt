@@ -32,6 +32,7 @@ from .openai_key import OpenAIKeyAdapter
 from .openrouter import OpenRouterAdapter
 from .xai import XaiAdapter
 from .bridge_keys import KimiCodingKeyAdapter, MoonshotKeyAdapter, ZaiKeyAdapter
+from .search_keys import SEARCH_KEY_ADAPTERS
 from .x import XAdapter
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,8 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     ZaiKeyAdapter.id: ZaiKeyAdapter,
     KimiCodingKeyAdapter.id: KimiCodingKeyAdapter,
     MoonshotKeyAdapter.id: MoonshotKeyAdapter,
+    # TASK-1476: search-tool keys (Brave, Tavily, NewsAPI), retired from env.
+    **{cls.id: cls for cls in SEARCH_KEY_ADAPTERS},
     # TASK-997: release-deploy credentials (DB-stored, never env).
     GitHubReleaseAdapter.id: GitHubReleaseAdapter,
     GitHubReleaseDispatchAdapter.id: GitHubReleaseDispatchAdapter,

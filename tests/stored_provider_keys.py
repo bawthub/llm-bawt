@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from llm_bawt.service.connection_secrets import ConnectionSecret
@@ -31,3 +33,41 @@ def stub_stored_keys(monkeypatch, outcomes: dict[str, object]) -> list[str]:
         lambda: SimpleNamespace(config=SimpleNamespace()),
     )
     return reads
+
+
+@contextmanager
+def real_credential_store(monkeypatch) -> Iterator[tuple[object, Callable[[], None]]]:
+    """A real CredentialStore over SQLite with a swappable Fernet key.
+
+    Yields ``(store, rotate_root)``; ``rotate_root()`` swaps the Fernet key so
+    every stored secret becomes undecryptable.
+    """
+    from cryptography.fernet import Fernet
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel
+
+    from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
+    from llm_bawt.service.providers import base, crypto
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=[RuntimeSetting.__table__])
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE UNIQUE INDEX idx_runtime_settings_scope_key ON runtime_settings (scope_type, scope_id, key)"
+        ))
+    runtime = object.__new__(RuntimeSettingsStore)
+    runtime.engine = engine
+    runtime.config = None
+    monkeypatch.setattr(base, "RuntimeSettingsStore", lambda config: runtime)
+    fernet = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(crypto, "_get_fernet", lambda: fernet)
+
+    def rotate_root():
+        other = Fernet(Fernet.generate_key())
+        monkeypatch.setattr(crypto, "_get_fernet", lambda: other)
+
+    try:
+        yield base.CredentialStore(SimpleNamespace()), rotate_root
+    finally:
+        engine.dispose()

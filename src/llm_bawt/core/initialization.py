@@ -256,8 +256,9 @@ class OrchestratorInitializationMixin:
         if not self.bot.uses_tools:
             return
         try:
-            api_key = getattr(self.config, "NEWSAPI_API_KEY", "")
-            client = NewsAPIClient(api_key=api_key or None)
+            from ..search.credentials import resolve_key  # noqa: PLC0415
+
+            client = NewsAPIClient(api_key=resolve_key(self.config, "newsapi").value)
             if client.is_available():
                 self.news_client = client
                 logger.debug("NewsAPI client initialized")

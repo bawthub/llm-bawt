@@ -19,6 +19,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import SearchProvider, SearchResult
+from .credentials import search_key
 from .factory import get_search_client, is_search_available
 
 if TYPE_CHECKING:
@@ -40,9 +41,9 @@ def available_providers(config: "Config") -> list[SearchProvider]:
     """
     provs: list[SearchProvider] = []
 
-    if getattr(config, "BRAVE_API_KEY", None) and is_search_available(SearchProvider.BRAVE):
+    if search_key(config, SearchProvider.BRAVE) and is_search_available(SearchProvider.BRAVE):
         provs.append(SearchProvider.BRAVE)
-    if getattr(config, "TAVILY_API_KEY", None) and is_search_available(SearchProvider.TAVILY):
+    if search_key(config, SearchProvider.TAVILY) and is_search_available(SearchProvider.TAVILY):
         provs.append(SearchProvider.TAVILY)
 
     reddit_id = getattr(config, "REDDIT_CLIENT_ID", None)

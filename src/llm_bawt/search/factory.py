@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import SearchClient, SearchProvider
+from .credentials import search_key, unusable_reason
 
 if TYPE_CHECKING:
     from ..utils.config import Config
@@ -96,14 +97,12 @@ def get_search_client(
     
     if provider is None:
         # Auto-select based on availability
-        tavily_key = getattr(config, "TAVILY_API_KEY", None)
-        brave_key = getattr(config, "BRAVE_API_KEY", None)
         reddit_client_id = getattr(config, "REDDIT_CLIENT_ID", None)
         reddit_client_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
-        if tavily_key and is_search_available(SearchProvider.TAVILY):
+        if search_key(config, SearchProvider.TAVILY) and is_search_available(SearchProvider.TAVILY):
             provider = SearchProvider.TAVILY
             logger.debug("Auto-selected Tavily (API key configured)")
-        elif brave_key and is_search_available(SearchProvider.BRAVE):
+        elif search_key(config, SearchProvider.BRAVE) and is_search_available(SearchProvider.BRAVE):
             provider = SearchProvider.BRAVE
             logger.debug("Auto-selected Brave (API key configured)")
         elif reddit_client_id and reddit_client_secret and is_search_available(SearchProvider.REDDIT):
@@ -137,9 +136,9 @@ def get_search_client(
             logger.error("DuckDuckGo fallback also unavailable")
             return None
         
-        api_key = getattr(config, "TAVILY_API_KEY", None)
+        api_key = search_key(config, SearchProvider.TAVILY).value
         if not api_key:
-            logger.warning("Tavily requested but TAVILY_API_KEY not configured, falling back to DuckDuckGo")
+            logger.warning("Tavily requested but no usable Tavily key, falling back to DuckDuckGo")
             from .ddgs_client import DuckDuckGoClient, is_ddgs_available
             if is_ddgs_available():
                 timeout = getattr(config, "SEARCH_TIMEOUT", 10)
@@ -169,9 +168,9 @@ def get_search_client(
             logger.error("DuckDuckGo fallback also unavailable")
             return None
 
-        api_key = getattr(config, "BRAVE_API_KEY", None)
+        api_key = search_key(config, SearchProvider.BRAVE).value
         if not api_key:
-            logger.warning("Brave requested but BRAVE_API_KEY not configured, falling back to DuckDuckGo")
+            logger.warning("Brave requested but no usable Brave key, falling back to DuckDuckGo")
             from .ddgs_client import DuckDuckGoClient, is_ddgs_available
             if is_ddgs_available():
                 timeout = getattr(config, "SEARCH_TIMEOUT", 10)
@@ -273,7 +272,7 @@ def get_search_unavailable_reason(
                 resolved_provider = None
 
     if resolved_provider is None:
-        tavily_key = getattr(config, "TAVILY_API_KEY", None)
+        tavily_key = search_key(config, SearchProvider.TAVILY)
         if tavily_key:
             from .tavily_client import is_tavily_available
             if not is_tavily_available():
@@ -283,7 +282,7 @@ def get_search_unavailable_reason(
                 )
             return "Tavily is configured but unavailable. Check your API key and network."
 
-        brave_key = getattr(config, "BRAVE_API_KEY", None)
+        brave_key = search_key(config, SearchProvider.BRAVE)
         if brave_key:
             from .brave_client import is_brave_available
             if not is_brave_available():
@@ -319,9 +318,11 @@ def get_search_unavailable_reason(
 
     if resolved_provider == SearchProvider.TAVILY:
         from .tavily_client import is_tavily_available
-        api_key = getattr(config, "TAVILY_API_KEY", None)
+        api_key = search_key(config, SearchProvider.TAVILY)
         if not api_key:
-            return "Tavily requires TAVILY_API_KEY to be set in your config."
+            return unusable_reason("Tavily", api_key) or (
+                "Tavily needs an API key. Connect it in Settings → Providers."
+            )
         if not is_tavily_available():
             return (
                 "Tavily search requires tavily-python. "
@@ -340,11 +341,11 @@ def get_search_unavailable_reason(
         return "DuckDuckGo search is configured but unavailable."
 
     if resolved_provider == SearchProvider.BRAVE:
-        api_key = getattr(config, "BRAVE_API_KEY", None)
+        api_key = search_key(config, SearchProvider.BRAVE)
         if not api_key:
-            return (
-                "Brave Search requires BRAVE_API_KEY to be set in your config. "
-                "Get a free API key at: https://api.search.brave.com/"
+            return unusable_reason("Brave Search", api_key) or (
+                "Brave Search needs an API key. Connect it in Settings → Providers "
+                "(get one at https://api.search.brave.com/)."
             )
         from .brave_client import is_brave_available
         if not is_brave_available():

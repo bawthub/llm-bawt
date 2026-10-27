@@ -6,7 +6,6 @@ Uses newsapi.org REST API:
 """
 
 import logging
-import os
 from typing import Any
 
 import httpx
@@ -25,11 +24,9 @@ class NewsAPIClient:
         timeout: int = 10,
         language: str = "en",
     ):
-        self._api_key = (
-            api_key
-            or os.environ.get("NEWSAPI_API_KEY", "")
-            or os.environ.get("LLM_BAWT_NEWSAPI_API_KEY", "")
-        )
+        # Callers resolve the key (llm_bawt.search.credentials.resolve_key);
+        # no env read here, so a disconnected key stays off.
+        self._api_key = api_key or ""
         self._timeout = timeout
         self._language = language
         self._client: httpx.Client | None = None
@@ -98,7 +95,7 @@ class NewsAPIClient:
             Formatted string of articles
         """
         if not self._api_key:
-            return "Error: NewsAPI key not configured. Set NEWSAPI_API_KEY."
+            return "Error: NewsAPI key not configured. Connect it in Settings → Providers."
 
         try:
             client = self._get_client()
@@ -179,7 +176,7 @@ class NewsAPIClient:
             Formatted string of headlines
         """
         if not self._api_key:
-            return "Error: NewsAPI key not configured. Set NEWSAPI_API_KEY."
+            return "Error: NewsAPI key not configured. Connect it in Settings → Providers."
 
         try:
             client = self._get_client()

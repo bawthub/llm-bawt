@@ -417,13 +417,21 @@ def _collect_dependencies(config: Config) -> DependencyInfo:
     info.openai_key_set = bool(os.getenv("OPENAI_API_KEY"))
 
     # NewsAPI
-    newsapi_key = os.getenv("NEWSAPI_API_KEY") or getattr(config, "NEWSAPI_API_KEY", "")
-    info.newsapi_key_set = bool(newsapi_key)
+    from ..search.credentials import resolve_key  # noqa: PLC0415
+
+    def _key_set(provider_id: str) -> bool:
+        try:
+            return bool(resolve_key(config, provider_id))
+        except Exception as e:  # noqa: BLE001 — status must render without the store
+            logger.debug("search key check failed for %s: %s", provider_id, e)
+            return False
+
+    info.newsapi_key_set = _key_set("newsapi")
 
     # Search provider
     search_provider = getattr(config, "SEARCH_PROVIDER", None)
-    tavily_key = os.getenv("TAVILY_API_KEY") or getattr(config, "TAVILY_API_KEY", "")
-    brave_key = os.getenv("BRAVE_API_KEY") or getattr(config, "BRAVE_API_KEY", "")
+    tavily_key = _key_set("tavily")
+    brave_key = _key_set("brave")
     reddit_client_id = os.getenv("REDDIT_CLIENT_ID") or getattr(config, "REDDIT_CLIENT_ID", "")
     reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET") or getattr(config, "REDDIT_CLIENT_SECRET", "")
     if search_provider:
