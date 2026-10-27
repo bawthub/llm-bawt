@@ -92,11 +92,16 @@ async def openclaw_ws_bridge(
 
 
 async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str, consumer_id: str):
-    """Durable event stream using Redis consumer groups for one or more bots.
+    """Resumable event stream for one UI window, over one or more bots.
+
+    Reads by the window's server-held cursor (``agent_bridge.ui_stream``): the
+    newest connection for a consumer_id owns it, and an older connection that
+    is still open upstream stops at its next read instead of competing for
+    events (TASK-1582).
 
     Uses a DEDICATED RedisSubscriber per SSE connection, closed in finally.
 
-    Why per-connection: ``subscribe_group`` issues a blocking XREADGROUP that
+    Why per-connection: the reader issues a blocking XREAD that
     holds a pool connection. When the client disconnects (mobile lock screen,
     tab close, network drop), Starlette cancels this task mid-read and redis-py
     strands that connection in whatever pool it was using. If that were the
@@ -108,13 +113,14 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
     """
     sub = RedisSubscriber(redis_url)
     await sub.connect()
-    # Create the consumer group(s) BEFORE announcing "hello". The group is
-    # anchored at "$" (latest), so it captures every event published from this
-    # point on. A downstream consumer (e.g. the bawthub chat TTS driver) can
-    # therefore treat "hello" as a real "you are subscribed, safe to fire a
-    # turn" signal — closing the race where a turn published between connect and
-    # group-create produced no audio.
-    await sub.ensure_groups(bot_ids, user_id, consumer_id, include_global=True)
+    # Claim the cursor BEFORE announcing "hello". A stream without a stored
+    # cursor is pinned to its current tail, so every event published from this
+    # point on is delivered. A downstream consumer (e.g. the bawthub chat TTS
+    # driver) can therefore treat "hello" as a real "you are subscribed, safe to
+    # fire a turn" signal — closing the race where a turn published between
+    # connect and subscribe produced no audio.
+    reader = sub.ui_stream(bot_ids, user_id, consumer_id, include_global=True)
+    await reader.claim()
     yield _sse(
         "hello",
         {
@@ -133,9 +139,7 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
     # keeps the client socket open after the upstream died).
     last_ping = asyncio.get_running_loop().time()
     try:
-        async for event_data in sub.subscribe_group(
-            bot_ids, user_id, consumer_id, timeout_s=86400, include_global=True,
-        ):
+        async for event_data in reader.events(timeout_s=86400):
             if event_data is not None:
                 replayed = event_data.pop("_replayed", False)
                 yield _sse("event", {**event_data, "replayed": replayed})

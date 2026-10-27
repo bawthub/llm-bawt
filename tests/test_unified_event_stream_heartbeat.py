@@ -30,19 +30,26 @@ class _FakeSubscriber:
     async def connect(self) -> None:
         return None
 
-    async def ensure_groups(self, *args, **kwargs) -> None:
-        type(self).groups_scope = args[:2]
-        type(self).groups_include_global = kwargs.get("include_global", False)
+    def ui_stream(self, *args, **kwargs):
+        cls = type(self)
+        cls.groups_scope = args[:2]
+        cls.groups_include_global = kwargs.get("include_global", False)
+        bot_ids = args[0]
 
-    async def subscribe_group(self, *args, **kwargs):
-        type(self).subscription_scope = args[:2]
-        type(self).subscription_include_global = kwargs.get("include_global", False)
-        yield None  # idle keepalive tick
-        if not args[0]:
-            yield {"_type": "bot_profile_changed", "bot_id": "al"}
-        else:
-            yield {"_type": "turn_start", "turn_id": "t1", "_replayed": True}
-        yield None
+        class _Reader:
+            async def claim(self) -> None:
+                cls.subscription_scope = cls.groups_scope
+                cls.subscription_include_global = cls.groups_include_global
+
+            async def events(self, **_kwargs):
+                yield None  # idle keepalive tick
+                if not bot_ids:
+                    yield {"_type": "bot_profile_changed", "bot_id": "al"}
+                else:
+                    yield {"_type": "turn_start", "turn_id": "t1", "_replayed": True}
+                yield None
+
+        return _Reader()
 
     async def close(self) -> None:
         self.closed = True

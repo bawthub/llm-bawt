@@ -19,10 +19,15 @@ from .command_publisher import CommandPublisherMixin
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
 from .steer_contract import FRAMED_MESSAGE_FIELD, INTERRUPT_FRAME_FIELD, INTERRUPT_ITEM_FIELD
+from .ui_stream import (
+    LEGACY_UI_GROUP_PREFIX,
+    UI_CURSOR_TTL_S,
+    UiStreamReader,
+    unified_stream_keys,
+)
 from .publisher import (
     COMMANDS_STREAM,
     EVENTS_STREAM_PREFIX,
-    GLOBAL_CONFIG_STREAM,
     HISTORY_STREAM,
     RUN_STREAM_PREFIX,
     UNIFIED_EVENTS_PREFIX,
@@ -507,150 +512,18 @@ class RedisSubscriber(CommandPublisherMixin):
 
     # ---- Unified event stream (consumer groups) ----
 
-    async def ensure_consumer_group(
-        self,
-        stream_key: str,
-        group_name: str,
-    ) -> None:
-        """Idempotent XGROUP CREATE — creates the group starting from latest."""
-        try:
-            await self._redis.xgroup_create(
-                stream_key, group_name, id="$", mkstream=True,
-            )
-        except Exception:
-            pass  # group already exists
-
-    async def ensure_groups(
+    def ui_stream(
         self,
         bot_id: str | list[str],
         user_id: str,
         consumer_id: str,
         *,
         include_global: bool = False,
-    ) -> dict[str, str]:
-        """Pre-create the unified-stream consumer group(s) for these bots.
-
-        Returns the ``{stream_key: bot_id}`` mapping. Because the group is
-        created at ``$`` (latest), any event published AFTER this call is
-        captured and delivered on the next ``subscribe_group`` read — even if
-        the caller hasn't started reading yet. This lets a caller create the
-        group up-front and only then signal "subscribed" downstream, closing
-        the race where events published between connect and group-create are
-        lost. Idempotent, so ``subscribe_group`` re-invokes it harmlessly.
-        """
+    ) -> UiStreamReader:
+        """Cursor reader for one SSE connection of a UI window (TASK-1582)."""
         bot_ids = [bot_id] if isinstance(bot_id, str) else list(bot_id)
-        group_name = f"ui:{consumer_id}"
-        stream_keys: dict[str, str] = {}
-        for bid in bot_ids:
-            sk = f"{UNIFIED_EVENTS_PREFIX}{bid}:{user_id}"
-            stream_keys[sk] = bid
-        if include_global:
-            stream_keys[GLOBAL_CONFIG_STREAM] = "system"
-        for sk in stream_keys:
-            await self.ensure_consumer_group(sk, group_name)
-        return stream_keys
-
-    async def subscribe_group(
-        self,
-        bot_id: str | list[str],
-        user_id: str,
-        consumer_id: str,
-        *,
-        timeout_s: float = 86400,
-        include_global: bool = False,
-    ) -> AsyncIterator[dict | None]:
-        """Subscribe to unified event stream(s) via consumer groups.
-
-        ``bot_id`` may be a single bot or a list of bots.  When multiple bots
-        are given, events from ALL of them are interleaved and yielded.
-
-        Two-phase read per stream:
-        1. Replay pending (unacked) messages from previous connection
-        2. Read new messages as they arrive
-
-        Yields raw event dicts (not AgentEvent — unified stream carries
-        tool events, OpenClaw events, and application events).
-        """
-        group_name = f"ui:{consumer_id}"
-        consumer_name = "reader"
-
-        # Ensure consumer groups exist for all streams (idempotent — the SSE
-        # route may have pre-created them via ensure_groups before signaling
-        # "hello"). Returns the {stream_key: bot_id} mapping used below.
-        stream_keys = await self.ensure_groups(
-            bot_id, user_id, consumer_id, include_global=include_global,
-        )
-
-        # Phase 1: replay pending (unacked) messages from all streams
-        try:
-            results = await self._redis.xreadgroup(
-                group_name, consumer_name,
-                {sk: "0" for sk in stream_keys},
-                count=500,
-            )
-            if results:
-                # Interleave messages from all streams by Redis message ID
-                # (timestamp-based) so events aren't serialized per-stream.
-                all_msgs: list[tuple[str, str, dict]] = []
-                for stream_name, messages in results:
-                    for msg_id, fields in messages:
-                        all_msgs.append((msg_id, stream_name, fields))
-                all_msgs.sort(key=lambda x: x[0])
-
-                for msg_id, stream_name, fields in all_msgs:
-                    payload_str = fields.get("payload", "{}")
-                    try:
-                        data = json.loads(payload_str)
-                    except Exception:
-                        data = {"raw": payload_str}
-                    data["_replayed"] = True
-                    yield data
-                    await self._redis.xack(stream_name, group_name, msg_id)
-        except Exception:
-            logger.exception("Error replaying pending messages for %s", list(stream_keys))
-
-        # Phase 2: live events from all streams
-        deadline = asyncio.get_event_loop().time() + timeout_s
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                return
-
-            block_ms = min(int(remaining * 1000), 2000)
-            try:
-                results = await self._redis.xreadgroup(
-                    group_name, consumer_name,
-                    {sk: ">" for sk in stream_keys},
-                    count=100,
-                    block=block_ms,
-                )
-            except Exception:
-                logger.exception("Redis XREADGROUP error on %s", list(stream_keys))
-                await asyncio.sleep(1)
-                continue
-
-            if not results:
-                yield None  # keepalive tick — lets caller send SSE ping
-                continue
-
-            # Interleave messages from all streams by Redis message ID
-            # so concurrent bot events are delivered in chronological order
-            # instead of all-of-stream-A then all-of-stream-B.
-            all_msgs: list[tuple[str, str, dict]] = []
-            for stream_name, messages in results:
-                for msg_id, fields in messages:
-                    all_msgs.append((msg_id, stream_name, fields))
-            all_msgs.sort(key=lambda x: x[0])
-
-            for msg_id, stream_name, fields in all_msgs:
-                deadline = asyncio.get_event_loop().time() + timeout_s
-                payload_str = fields.get("payload", "{}")
-                try:
-                    data = json.loads(payload_str)
-                except Exception:
-                    data = {"raw": payload_str}
-                yield data
-                await self._redis.xack(stream_name, group_name, msg_id)
+        keys = unified_stream_keys(bot_ids, user_id, include_global=include_global)
+        return UiStreamReader(self._redis, consumer_id, keys)
 
     async def publish_tool_event(
         self,
@@ -867,12 +740,15 @@ class RedisSubscriber(CommandPublisherMixin):
         self,
         stream_key: str,
         *,
-        max_idle_ms: int = 1_800_000,
+        max_idle_ms: int = UI_CURSOR_TTL_S * 1000,
     ) -> int:
-        """Destroy consumer groups that have been idle too long.
+        """Destroy retired per-window ``ui:*`` consumer groups (TASK-1582).
 
-        Only targets ui:* groups (not system groups like llm-bawt).
-        Returns the number of groups destroyed.
+        UI fan-out no longer reads groups (see ``ui_stream``). A window that
+        reconnects migrates its own group into its cursor and destroys it; this
+        sweep removes the rest once idle past the cursor's resume window,
+        pending entries or not. Groups of other consumers (``persist:tools``,
+        bridges) are never touched. Returns the number of groups destroyed.
         """
         destroyed = 0
         try:
@@ -882,14 +758,9 @@ class RedisSubscriber(CommandPublisherMixin):
 
         for group in groups:
             name = group.get("name", "")
-            if not name.startswith("ui:"):
+            if not name.startswith(LEGACY_UI_GROUP_PREFIX):
                 continue
-            # Check last delivered ID and pending count
-            # If no pending and idle > threshold, destroy
             consumers = group.get("consumers", 0)
-            pending = group.get("pending", 0)
-            if pending > 0:
-                continue  # has unacked messages, keep alive
             # Check consumer idle time
             try:
                 consumer_info = await self._redis.xinfo_consumers(stream_key, name)

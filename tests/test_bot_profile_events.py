@@ -8,23 +8,20 @@ import pytest
 
 from agent_bridge.publisher import GLOBAL_CONFIG_STREAM
 from agent_bridge.subscriber import RedisSubscriber
+from agent_bridge.ui_stream import unified_stream_keys
 from llm_bawt.service.routes import settings
 
 
 def test_global_config_stream_is_subscribed_by_each_window_without_cross_user_turns():
     async def exercise():
         sub = object.__new__(RedisSubscriber)
-        sub._redis = SimpleNamespace(xgroup_create=AsyncMock())
-        nick = await sub.ensure_groups(["al"], "nick", "window-nick", include_global=True)
-        guest = await sub.ensure_groups(["al"], "guest", "window-guest", include_global=True)
-        regular = await sub.ensure_groups(["al"], "nick", "worker")
+        nick = unified_stream_keys(["al"], "nick", include_global=True)
+        guest = unified_stream_keys(["al"], "guest", include_global=True)
+        regular = unified_stream_keys(["al"], "nick")
         assert GLOBAL_CONFIG_STREAM in nick and GLOBAL_CONFIG_STREAM in guest
         assert "events:al:guest" not in nick
         assert "events:al:nick" not in guest
         assert GLOBAL_CONFIG_STREAM not in regular
-        created = sub._redis.xgroup_create.await_args_list
-        assert any(c.args[:2] == (GLOBAL_CONFIG_STREAM, "ui:window-nick") for c in created)
-        assert any(c.args[:2] == (GLOBAL_CONFIG_STREAM, "ui:window-guest") for c in created)
 
         sub._pub_redis = SimpleNamespace(xadd=AsyncMock(return_value="123-0"))
         assert await sub.publish_global_config_event({"_type": "bot_profile_changed", "bot_id": "al"}) == "123-0"
