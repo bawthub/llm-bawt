@@ -34,7 +34,6 @@ from .object_store import (
     BlobRange,
     FsBlobBackend,
     get_blob_backend,
-    s3_config_from_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,11 +87,9 @@ class MediaStorage:
             base_path or os.environ.get("MEDIA_STORAGE_PATH", DEFAULT_STORAGE_PATH)
         )
         if backend is None:
-            backend = get_blob_backend(
-                "media_storage",
-                fs_root=self.base_path,
-                s3_cfg=s3_config_from_env(),
-            )
+            # S3 credentials: the stored object-store connection, per
+            # operation (TASK-1476).
+            backend = get_blob_backend("media_storage", fs_root=self.base_path)
         self.backend = backend
         logger.info(
             "MediaStorage initialized: base_path=%s backend=%s",

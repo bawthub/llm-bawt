@@ -468,12 +468,18 @@ class TestGetBlobBackend:
         with pytest.raises(ValueError, match="fs_root not provided"):
             get_blob_backend("media_store")
 
-    def test_s3_requires_cfg(
+    def test_s3_without_cfg_uses_the_stored_connection_source(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # TASK-1476: no fixed config means the shared stored-connection
+        # source; nothing is resolved until the first operation.
+        from llm_bawt.media import object_store_credentials as creds
+
         monkeypatch.setenv("LLM_BAWT_STORAGE_BACKEND", "s3")
-        with pytest.raises(ValueError, match="s3_cfg not provided"):
-            get_blob_backend("media_store", fs_root=tmp_path)
+        monkeypatch.setattr(creds, "_default_source", None)
+        be = get_blob_backend("media_store", fs_root=tmp_path)
+        assert isinstance(be, S3BlobBackend)
+        assert be._source is creds.default_s3_config_source()
 
 
 # ---------------------------------------------------------------------------

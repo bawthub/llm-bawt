@@ -97,6 +97,8 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
                 CredentialField("access_key_id", "Access key ID", "secret"),
                 CredentialField("secret_access_key", "Secret access key", "secret"),
             ),
+            # llm-bawt and BawtHub both fall back to legacy env without a record.
+            keeps_disconnected_record=True,
         ),
         CredentialIntegration(
             id="azure-speech",

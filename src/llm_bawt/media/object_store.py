@@ -62,7 +62,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional, Protocol
 
@@ -492,8 +492,8 @@ class S3Config:
     endpoint: str
     region: str
     bucket: str
-    access_key: str
-    secret_key: str
+    access_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
     #: TCP connect timeout. Short on purpose — a wedged Garage shouldn't
     #: tie up app workers.
     connect_timeout: float = 5.0
@@ -503,6 +503,12 @@ class S3Config:
     #: boto3 retry budget. Standard mode adds exponential backoff between
     #: attempts; we keep the count low so a real outage surfaces quickly.
     max_attempts: int = 3
+
+
+class S3ConfigSource(Protocol):
+    """Supplies the :class:`S3Config` to use now; raises when none is usable."""
+
+    def current(self) -> S3Config: ...
 
 
 class S3BlobBackend:
@@ -517,16 +523,31 @@ class S3BlobBackend:
     The boto3 client is built on first property access, behind a lock.
     Until then, instantiating this class does no network I/O and never
     fails because Garage is down.
+
+    ``cfg`` is either a fixed :class:`S3Config` or a source with a
+    ``current()`` method (TASK-1476: the stored ``object-store`` connection,
+    see :mod:`llm_bawt.media.object_store_credentials`). A source is asked
+    before every operation; when its answer changes (rotated keys, a new
+    endpoint or bucket) the client is rebuilt, so no restart is needed.
     """
 
-    def __init__(self, cfg: S3Config, key_prefix: str = ""):
-        self.cfg = cfg
+    def __init__(self, cfg: S3Config | S3ConfigSource, key_prefix: str = ""):
+        self._source = None if isinstance(cfg, S3Config) else cfg
+        self._static_cfg = cfg if isinstance(cfg, S3Config) else None
         # Always end with "/" so concat is safe; empty stays empty.
         if key_prefix and not key_prefix.endswith("/"):
             key_prefix = key_prefix + "/"
         self.key_prefix = key_prefix
         self._client_lock = threading.Lock()
         self._client = None
+        self._client_cfg: S3Config | None = None
+
+    @property
+    def cfg(self) -> S3Config:
+        """The config to use now. A source raises when none is usable."""
+        if self._source is not None:
+            return self._source.current()
+        return self._static_cfg
 
     # ------------------------------------------------------------------
     # Lazy client construction
@@ -534,42 +555,54 @@ class S3BlobBackend:
 
     @property
     def client(self):
-        """Return the boto3 S3 client, building on first access.
+        """Return the boto3 S3 client, building on first access."""
+        return self._connection()[0]
 
-        Double-checked locking: cheap fast path once the client exists,
-        single-build under the lock when it doesn't.
+    def _connection(self):
+        """The client and the config it was built from, as one consistent pair.
+
+        A fixed config builds once (double-checked locking). A source's
+        config is re-read each call and the client is rebuilt when it differs
+        from the one the current client was built with.
         """
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    # Local import — keeps boto3 off the hot path for
-                    # processes that never touch S3 and lets the app
-                    # boot even if the package is missing on a dev box.
-                    import boto3
-                    from botocore.config import Config as BotoConfig
+        cfg = self.cfg
+        if self._client is not None and (self._source is None or cfg == self._client_cfg):
+            return self._client, cfg
+        with self._client_lock:
+            if self._client is None or (self._source is not None and cfg != self._client_cfg):
+                self._client = self._build_client(cfg)
+                self._client_cfg = cfg
+            return self._client, cfg
 
-                    self._client = boto3.client(
-                        "s3",
-                        endpoint_url=self.cfg.endpoint,
-                        region_name=self.cfg.region,
-                        aws_access_key_id=self.cfg.access_key,
-                        aws_secret_access_key=self.cfg.secret_key,
-                        config=BotoConfig(
-                            signature_version="s3v4",
-                            s3={"addressing_style": "path"},
-                            connect_timeout=self.cfg.connect_timeout,
-                            read_timeout=self.cfg.read_timeout,
-                            retries={
-                                "max_attempts": self.cfg.max_attempts,
-                                "mode": "standard",
-                            },
-                        ),
-                    )
-                    logger.info(
-                        "S3BlobBackend client built: endpoint=%s region=%s bucket=%s prefix=%r",
-                        self.cfg.endpoint, self.cfg.region, self.cfg.bucket, self.key_prefix,
-                    )
-        return self._client
+    def _build_client(self, cfg: S3Config):
+        # Local import — keeps boto3 off the hot path for processes that
+        # never touch S3 and lets the app boot even if the package is
+        # missing on a dev box.
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=cfg.endpoint,
+            region_name=cfg.region,
+            aws_access_key_id=cfg.access_key,
+            aws_secret_access_key=cfg.secret_key,
+            config=BotoConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                connect_timeout=cfg.connect_timeout,
+                read_timeout=cfg.read_timeout,
+                retries={
+                    "max_attempts": cfg.max_attempts,
+                    "mode": "standard",
+                },
+            ),
+        )
+        logger.info(
+            "S3BlobBackend client built: endpoint=%s region=%s bucket=%s prefix=%r",
+            cfg.endpoint, cfg.region, cfg.bucket, self.key_prefix,
+        )
+        return client
 
     def _full_key(self, key: str) -> str:
         if not key:
@@ -617,8 +650,9 @@ class S3BlobBackend:
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
-            self.client.put_object(
-                Bucket=self.cfg.bucket,
+            client, cfg = self._connection()
+            client.put_object(
+                Bucket=cfg.bucket,
                 Key=self._full_key(key),
                 Body=data,
                 ContentType=content_type,
@@ -636,8 +670,9 @@ class S3BlobBackend:
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
-            resp = self.client.get_object(
-                Bucket=self.cfg.bucket,
+            client, cfg = self._connection()
+            resp = client.get_object(
+                Bucket=cfg.bucket,
                 Key=self._full_key(key),
             )
         except ClientError as e:
@@ -652,14 +687,15 @@ class S3BlobBackend:
     def get_range(self, key: str, range_header: str | None) -> BlobRange:
         from botocore.exceptions import BotoCoreError, ClientError
 
-        kwargs: dict = {"Bucket": self.cfg.bucket, "Key": self._full_key(key)}
+        kwargs: dict = {"Key": self._full_key(key)}
         if range_header:
             # Forward the client's Range header verbatim. boto3 / S3 will
             # surface InvalidRange / 416 if it's unsatisfiable.
             kwargs["Range"] = range_header
 
         try:
-            resp = self.client.get_object(**kwargs)
+            client, cfg = self._connection()
+            resp = client.get_object(Bucket=cfg.bucket, **kwargs)
         except ClientError as e:
             if self._is_not_found(e):
                 raise BlobNotFound(key) from e
@@ -704,8 +740,9 @@ class S3BlobBackend:
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
-            self.client.delete_object(
-                Bucket=self.cfg.bucket,
+            client, cfg = self._connection()
+            client.delete_object(
+                Bucket=cfg.bucket,
                 Key=self._full_key(key),
             )
         except ClientError as e:
@@ -719,8 +756,9 @@ class S3BlobBackend:
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
-            self.client.head_object(
-                Bucket=self.cfg.bucket,
+            client, cfg = self._connection()
+            client.head_object(
+                Bucket=cfg.bucket,
                 Key=self._full_key(key),
             )
             return True
@@ -817,6 +855,11 @@ def s3_config_from_env() -> S3Config | None:
 
     Callers should treat ``None`` as "S3 not configured" — combined with
     ``LLM_BAWT_STORAGE_BACKEND=fs`` (the default) this is a no-op.
+
+    Deprecated (TASK-1476): only the legacy fallback of
+    :func:`~llm_bawt.media.object_store_credentials.resolve_s3_config`,
+    used while no ``object-store`` connection is stored. Don't pass its
+    result to :func:`get_blob_backend`; that would bypass the record.
     """
     endpoint = os.environ.get("LLM_BAWT_S3_ENDPOINT")
     region = os.environ.get("LLM_BAWT_S3_REGION")
@@ -854,9 +897,10 @@ def get_blob_backend(
         ``LLM_BAWT_STORAGE_BACKEND=fs`` (the default). Required as the
         fallback source if ``fallback_fs=True``.
     s3_cfg
-        :class:`S3Config` for the S3 backend. Required when
-        ``LLM_BAWT_STORAGE_BACKEND=s3``. Use :func:`s3_config_from_env`
-        in most cases.
+        A fixed :class:`S3Config` for the S3 backend (tests, tools). Leave
+        it unset in the app: the backend then uses the stored
+        ``object-store`` connection, re-read per operation, and the
+        ``LLM_BAWT_S3_*`` env vars only while no record exists.
     fallback_fs
         Wraps the S3 primary so 404 GETs retry from ``fs_root``. Defaults
         to the value of ``LLM_BAWT_S3_FALLBACK_FS`` (boolean env var),
@@ -883,12 +927,16 @@ def get_blob_backend(
         return FsBlobBackend(fs_root)
 
     if backend_kind == "s3":
-        if s3_cfg is None:
-            raise ValueError(
-                "S3 backend selected but s3_cfg not provided "
-                "(set LLM_BAWT_S3_{ENDPOINT,REGION,BUCKET,ACCESS_KEY,SECRET_KEY})"
-            )
-        primary = S3BlobBackend(s3_cfg, key_prefix=_S3_KEY_PREFIXES[kind])
+        source: S3Config | S3ConfigSource
+        if s3_cfg is not None:
+            source = s3_cfg
+        else:
+            # TASK-1476: the stored object-store connection, re-read per
+            # operation (env vars only while no record exists).
+            from .object_store_credentials import default_s3_config_source
+
+            source = default_s3_config_source()
+        primary = S3BlobBackend(source, key_prefix=_S3_KEY_PREFIXES[kind])
         if fallback_fs:
             if fs_root is None:
                 raise ValueError("fallback_fs=True requires fs_root for the fallback")

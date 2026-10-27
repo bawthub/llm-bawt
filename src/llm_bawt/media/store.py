@@ -198,11 +198,9 @@ class MediaStore:
         if backend is None:
             # Default backend: env-driven (``fs`` unless STORAGE_BACKEND=s3).
             # Construction performs no network I/O — boto3 client is lazy.
-            backend = get_blob_backend(
-                "media_store",
-                fs_root=self.root,
-                s3_cfg=s3_config_from_env(),
-            )
+            # S3 credentials: the stored object-store connection, per
+            # operation (TASK-1476).
+            backend = get_blob_backend("media_store", fs_root=self.root)
         self.backend = backend
         self.db = db
 

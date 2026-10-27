@@ -72,14 +72,14 @@ def _get_diff_blob_backend() -> "BlobBackend | None":
         return _DIFF_BLOB_BACKEND
     _DIFF_BLOB_RESOLVED = True
     try:
-        from ..media.object_store import get_blob_backend, s3_config_from_env
+        from ..media.object_store import get_blob_backend
 
         fs_root = Path(
             os.environ.get("LLM_BAWT_DIFFBLOBS_FS_ROOT", DEFAULT_DIFFBLOBS_FS_ROOT)
         )
-        _DIFF_BLOB_BACKEND = get_blob_backend(
-            "turn_diffs", fs_root=fs_root, s3_cfg=s3_config_from_env()
-        )
+        # S3 credentials come from the stored object-store connection,
+        # resolved per operation (TASK-1476).
+        _DIFF_BLOB_BACKEND = get_blob_backend("turn_diffs", fs_root=fs_root)
     except Exception:
         logger.exception(
             "diff blob backend unavailable; diff bytes will use Postgres fallback"
