@@ -181,8 +181,12 @@ class BridgeGates:
 
     # --- checking -------------------------------------------------------
     def classify(self, gate: Gate, header: str | None) -> Outcome:
-        if not header:
+        # Only an absent header is MISSING. A present-but-empty one matches
+        # nothing, so it is BAD and refused even while the gate is open.
+        if header is None:
             return Outcome.MISSING
+        if not header:
+            return Outcome.BAD
         presented = header.encode("utf-8")
         # Compare against both before deciding, so timing doesn't say which
         # value a near miss resembled.

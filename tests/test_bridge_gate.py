@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -79,7 +80,7 @@ def test_classifies_all_four_outcomes_per_gate(gate):
     assert gates.classify(gate, DERIVED[gate.label]) is Outcome.DERIVED
     assert gates.classify(gate, LEGACY[gate]) is Outcome.LEGACY
     assert gates.classify(gate, None) is Outcome.MISSING
-    assert gates.classify(gate, "") is Outcome.MISSING
+    assert gates.classify(gate, "") is Outcome.BAD
     assert gates.classify(gate, "not-the-token") is Outcome.BAD
 
 
@@ -324,15 +325,58 @@ def test_routes_go_through_the_gate(monkeypatch):
     assert client.get("/v1/providers/openrouter/token", headers={"X-Bridge-Token": "wrong"}).status_code == 401
 
 
+def test_present_empty_header_is_refused_on_an_open_gate(monkeypatch):
+    """(N) default: an absent header passes, an empty one is BAD (401)."""
+    from llm_bawt.service.routes import providers
+
+    gates = make({})
+    monkeypatch.setattr(bridge_gate, "_GATES", gates)
+    monkeypatch.setattr(providers, "get_service", lambda: type("S", (), {"config": None})())
+    monkeypatch.setattr(providers, "get_adapter", lambda _config, _id: None)
+    app = FastAPI()
+    app.include_router(providers.router)
+    client = TestClient(app)
+    url = "/v1/providers/github/git-credential"
+    assert client.get(url).status_code == 404  # missing, gate open: passes to the route
+    assert client.get(url, headers={"X-Bridge-Token": ""}).status_code == 401
+    assert gates.counts(GIT_CREDENTIAL)["bad"] == 1
+
+
+_GATE_NAMES = {"x-bridge-token", "bridge_claude_token_secret", "bridge_git_credential_token"}
+
+
+def _gate_name_literals(tree: ast.AST) -> list[int]:
+    """Line numbers of non-docstring string constants naming a gate header/env."""
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    return [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and id(node) not in docstrings and node.value.strip().lower() in _GATE_NAMES
+    ]
+
+
 def test_no_route_compares_the_bridge_header_outside_bridge_gate():
-    """Guard: every X-Bridge-Token check goes through bridge_gate."""
+    """Guard: only bridge_gate names the gate header or its env vars.
+
+    Matches string constants rather than lines, so an alias
+    (``NAME = "X-Bridge-Token"; request.headers.get(NAME)``) is caught too.
+    """
     root = Path(bridge_gate.__file__).resolve().parents[1]  # src/llm_bawt
-    pattern = re.compile(r"X-Bridge-Token|BRIDGE_CLAUDE_TOKEN_SECRET|BRIDGE_GIT_CREDENTIAL_TOKEN\b")
-    offenders = []
-    for path in root.rglob("*.py"):
-        if path == Path(bridge_gate.__file__).resolve():
-            continue
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if pattern.search(line) and re.search(r"headers|getenv|environ", line):
-                offenders.append(f"{path.relative_to(root)}:{number}")
+    offenders = [
+        f"{path.relative_to(root)}:{line}"
+        for path in root.rglob("*.py")
+        if path != Path(bridge_gate.__file__).resolve()
+        for line in _gate_name_literals(ast.parse(path.read_text(encoding="utf-8")))
+    ]
     assert offenders == []
+
+
+def test_guard_catches_an_aliased_header_read():
+    src = 'NAME = "X-Bridge-Token"\ndef f(request):\n    """X-Bridge-Token"""\n    return request.headers.get(NAME)\n'
+    assert _gate_name_literals(ast.parse(src)) == [1]
