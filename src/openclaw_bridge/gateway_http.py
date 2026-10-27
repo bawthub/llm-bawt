@@ -27,6 +27,11 @@ class GatewayHttpClient:
             timeout=60.0,
         )
 
+    @property
+    def token(self) -> str:
+        """The bearer this client was built with (callers rebuild on rotation)."""
+        return self._token
+
     async def send_user_message(self, session_key: str, text: str) -> str:
         """Send a user message via the Gateway HTTP API. Returns run_id."""
         idempotency_key = f"idem_{uuid.uuid4().hex}"

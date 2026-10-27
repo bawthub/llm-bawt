@@ -13,6 +13,7 @@ from agent_bridge.publisher import RedisPublisher
 from agent_bridge.store import EventStore, create_agent_event_tables
 from .bridge import SessionBridge
 from .config import BridgeConfig
+from .gateway_token import gateway_token
 from .ingest import EventIngestPipeline, IngestFilterConfig
 from .ws_client import OpenClawWsClient, OpenClawWsConfig
 
@@ -98,7 +99,7 @@ def main() -> None:
     # WS client — session keys come from the bot mapping
     ws_config = OpenClawWsConfig(
         url=config.ws_url,
-        token=config.ws_token,
+        token_provider=gateway_token,
         session_keys=list(session_to_bot.keys()),
         reconnect_max_delay=config.reconnect_max_delay,
     )

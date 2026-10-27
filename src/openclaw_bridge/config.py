@@ -11,7 +11,7 @@ class BridgeConfig:
     # OpenClaw Gateway
     gateway_url: str = ""  # HTTP base URL (e.g. http://gateway-host:18789)
     ws_url: str = ""       # WS URL (e.g. ws://gateway-host:18789/v1/ws)
-    ws_token: str = ""     # Bearer token for both HTTP and WS auth
+    # The gateway token is not config: openclaw_bridge.gateway_token resolves it per connect.
     reconnect_max_delay: int = 60
 
     # PostgreSQL (for event store)
@@ -42,7 +42,6 @@ class BridgeConfig:
     def from_env(cls) -> BridgeConfig:
         return cls(
             ws_url=os.environ.get("OPENCLAW_WS_URL", ""),
-            ws_token=os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""),
             reconnect_max_delay=int(os.environ.get("OPENCLAW_WS_RECONNECT_MAX_DELAY", "60")),
             postgres_user=os.environ.get("POSTGRES_USER", "llm_bawt"),
             postgres_password=os.environ.get("POSTGRES_PASSWORD", ""),

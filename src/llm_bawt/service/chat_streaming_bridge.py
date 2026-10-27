@@ -10,6 +10,7 @@ finalize/persist/update turn) resolves across the mixin set unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -102,13 +103,15 @@ class ChatStreamingBridgeMixin(BridgeSessionResetMixin):
             redis_sub = getattr(self, '_redis_subscriber', None)
             if redis_sub:
                 # Redis mode: send via Gateway HTTP, subscribe via Redis
+                # Record-first token, resolved per turn so a saved or rotated
+                # token applies without a restart. An unusable record raises
+                # and fails the turn; it never falls back to env.
+                from llm_bawt.integrations.openclaw_credentials import gateway_token
+                token = await asyncio.to_thread(gateway_token, self.config)
                 gateway = getattr(self, '_gateway_http', None)
-                if not gateway:
+                if gateway is None or gateway.token != token:
                     from openclaw_bridge.gateway_http import GatewayHttpClient
-                    gateway = GatewayHttpClient(
-                        self.config.OPENCLAW_GATEWAY_URL,
-                        self.config.OPENCLAW_GATEWAY_TOKEN,
-                    )
+                    gateway = GatewayHttpClient(self.config.OPENCLAW_GATEWAY_URL, token)
                     self._gateway_http = gateway
                 run_id = await gateway.send_user_message(session_key, user_prompt)
                 log.info("OpenClaw gateway HTTP: sent message, run_id=%s", run_id)

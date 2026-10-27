@@ -206,6 +206,9 @@ class OpenClawWsConfig:
     session_keys: list[str] = field(default_factory=list)
     reconnect_max_delay: int = 60
     device_identity_path: str = ""
+    # When set, called (in a worker thread) on every connect and wins over
+    # ``token``; it may block on I/O and raise to refuse the connect.
+    token_provider: Callable[[], str] | None = None
 
 
 class OpenClawWsClient:
@@ -248,12 +251,21 @@ class OpenClawWsClient:
             # Pairing required — start reconnect loop that polls for approval
             self._schedule_reconnect()
 
+    async def _resolve_token(self) -> str:
+        provider = self._config.token_provider
+        if provider is None:
+            return self._config.token
+        return await asyncio.to_thread(provider)
+
     async def _do_connect(self) -> None:
         if websockets is None:
             logger.error("websockets package not installed. Install with: pip install websockets>=13.0")
             return
 
         try:
+            # Resolved per connect so a saved or rotated token applies at the
+            # next reconnect. A provider failure takes the reconnect path below.
+            token = await self._resolve_token()
             self._ws = await websockets.connect(
                 self._config.url,
                 ping_interval=20,
@@ -286,8 +298,8 @@ class OpenClawWsClient:
 
             # Build auth block
             auth: dict = {}
-            if self._config.token:
-                auth["token"] = self._config.token
+            if token:
+                auth["token"] = token
             if identity and identity.get("deviceToken"):
                 auth["deviceToken"] = identity["deviceToken"]
 
@@ -302,7 +314,7 @@ class OpenClawWsClient:
                     role=role,
                     scopes=scopes,
                     signed_at_ms=signed_at_ms,
-                    token=self._config.token or None,
+                    token=token or None,
                     nonce=nonce,
                     platform=client_platform,
                     device_family="",
