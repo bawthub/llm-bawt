@@ -95,14 +95,20 @@ def compact_context_breakdown(raw: dict, *, read_ms: float) -> dict | None:
             key: _tokens(messages.get(key)) for key in MESSAGE_TOTALS
         }
         by_type = messages.get("attachmentsByType")
-        if isinstance(by_type, list) and all(
-            isinstance(item, dict)
-            and isinstance(item.get("name"), str)
-            and isinstance(item.get("tokens"), (int, float))
-            and not isinstance(item["tokens"], bool)
-            and math.isfinite(item["tokens"])
-            and item["tokens"] >= 0
-            for item in by_type
+        raw_attachment_total = messages.get("attachmentTokens")
+        if (
+            isinstance(raw_attachment_total, int)
+            and not isinstance(raw_attachment_total, bool)
+            and 0 <= raw_attachment_total <= 2**53 - 1
+            and isinstance(by_type, list)
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and isinstance(item.get("tokens"), int)
+                and not isinstance(item["tokens"], bool)
+                and 0 <= item["tokens"] <= 2**53 - 1
+                for item in by_type
+            )
         ):
             type_total = sum(_tokens(item["tokens"]) for item in by_type)
             non_wire = sum(

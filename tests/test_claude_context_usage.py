@@ -363,6 +363,20 @@ def test_context_breakdown_excludes_non_wire_attachment_bookkeeping_from_mix():
         }}
         assert "wireAttachmentTokens" not in compact_context_breakdown(
             incomplete, read_ms=1)["message_breakdown"]
+    fractional = {**raw, "messageBreakdown": {
+        **raw["messageBreakdown"], "attachmentTokens": 2,
+        "attachmentsByType": [
+            {"name": "prompt_snapshot", "tokens": 1.9},
+            {"name": "skill_listing", "tokens": 1.9},
+        ],
+    }}
+    assert "wireAttachmentTokens" not in compact_context_breakdown(
+        fractional, read_ms=1)["message_breakdown"]
+    fractional_total = {**raw, "messageBreakdown": {
+        **raw["messageBreakdown"], "attachmentTokens": 40000.5,
+    }}
+    assert "wireAttachmentTokens" not in compact_context_breakdown(
+        fractional_total, read_ms=1)["message_breakdown"]
 
 
 def test_post_done_usage_keeps_cost_and_publishes_full_final_snapshot():
