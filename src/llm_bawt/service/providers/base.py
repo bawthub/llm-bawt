@@ -236,6 +236,65 @@ class CredentialStore:
             payload["secret_enc"] = crypto.encrypt(json.dumps(record.secret))
         return payload
 
+    def create_if_absent(self, record: ConnectionRecord, *, conn: Any = None) -> bool:
+        """Store ``record`` only if no row exists for it; True when this call inserted it.
+
+        A single ``INSERT … ON CONFLICT DO NOTHING`` on the scope/key unique
+        index, so a row in ANY status (including an operator's disconnected
+        one) is never overwritten, even by a concurrent writer. Pass ``conn``
+        to insert inside the caller's transaction.
+        """
+        if not self.available:
+            raise RuntimeError("Runtime settings DB unavailable — cannot persist provider credential")
+        if conn is not None:
+            return self._insert_absent(conn, record)
+        with self._store.engine.begin() as own:
+            return self._insert_absent(own, record)
+
+    def _insert_absent(self, conn: Any, record: ConnectionRecord) -> bool:
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        from ...runtime_settings import RuntimeSetting
+
+        dialect = {"postgresql": postgresql, "sqlite": sqlite}[conn.dialect.name]
+        statement = dialect.insert(RuntimeSetting.__table__).values(
+            scope_type="global", scope_id="*", key=self._key(record.provider),
+            value_json=json.dumps(self._payload(record), ensure_ascii=False),
+            updated_at=datetime.now(timezone.utc),
+        ).on_conflict_do_nothing(index_elements=["scope_type", "scope_id", "key"])
+        return conn.execute(statement).rowcount == 1
+
+    def load_in(self, conn: Any, provider: str) -> ConnectionRecord | None:
+        """:meth:`load` through ``conn``, so it sees that transaction's own writes."""
+        from sqlalchemy import select
+
+        from ...runtime_settings import RuntimeSetting
+
+        table = RuntimeSetting.__table__
+        raw = conn.execute(select(table.c.value_json).where(
+            table.c.scope_type == "global", table.c.scope_id == "*",
+            table.c.key == self._key(provider),
+        )).scalar_one_or_none()
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None
+        return self._record(provider, value) if isinstance(value, dict) else None
+
+    def exists_in(self, conn: Any, provider: str) -> bool:
+        """True when ANY row (any status, even undecodable) exists for ``provider``."""
+        from sqlalchemy import select
+
+        from ...runtime_settings import RuntimeSetting
+
+        table = RuntimeSetting.__table__
+        return conn.execute(select(table.c.id).where(
+            table.c.scope_type == "global", table.c.scope_id == "*",
+            table.c.key == self._key(provider),
+        )).first() is not None
+
     def delete(self, provider: str) -> bool:
         if not self.available:
             return False
