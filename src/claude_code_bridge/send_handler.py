@@ -207,6 +207,7 @@ class ClaudeSendMixin(
                 # Session resolution: the app resolved the thread's stored
                 # SDK session id (model-checked). None → cold-start.
                 resume_id = None if reset_requested else req.thread_resume_id
+                session_start: str | None = None
                 if resume_id:
                     logger.info(
                         "Resuming thread: thread=%s resume=%s",
@@ -241,6 +242,10 @@ class ClaudeSendMixin(
                             bot_slug, resume_id,
                             cold_seed.get("summary_count"), cold_seed.get("message_count"),
                         )
+                    # Mark the actual first turn of this SDK session. The
+                    # thread's stored session key is overwritten on reset, so
+                    # historical turn timestamps cannot recover this boundary.
+                    session_start = "seeded" if cold_seed and cold_seed.get("seeded") else "clean"
 
                 # Resolve settings file path
                 settings_path = str(Path.home() / ".claude" / "settings.json")
@@ -597,6 +602,10 @@ class ClaudeSendMixin(
                                 # back from the transcript below.
                                 if data.get("session_id"):
                                     turn_session_id = data["session_id"]
+                                    if resume_id and turn_session_id != resume_id:
+                                        # The SDK started a replacement session
+                                        # despite the requested resume key.
+                                        session_start = "clean"
                                 # Compaction lifecycle. A /compact turn emits
                                 # SystemMessage(subtype="status"): first
                                 # status="compacting", then a payload carrying
@@ -761,6 +770,11 @@ class ClaudeSendMixin(
                                 if cancel_event is not None and cancel_event.is_set():
                                     aborted = True
                                     break
+                                result_session_id = getattr(msg, "session_id", None)
+                                if result_session_id:
+                                    turn_session_id = result_session_id
+                                    if resume_id and turn_session_id != resume_id:
+                                        session_start = "clean"
                                 terminal_usage = [None]
                                 seq = await self._finalize_result_message(
                                     msg,
@@ -803,6 +817,7 @@ class ClaudeSendMixin(
                                     session_key=session_key, seq=seq,
                                     model=actual_model, final_usage=terminal_usage[0],
                                     use_proxy=use_proxy,
+                                    session_start=session_start if turn_session_id else None,
                                 )
                                 break
                         aborted = aborted or (cancel_event is not None and cancel_event.is_set())
@@ -929,6 +944,7 @@ class ClaudeSendMixin(
                             # Retry without the wedged SDK session. The next init
                             # persists its replacement to the same durable thread.
                             resume_id = None
+                            session_start = "clean"
                             continue
 
                         raise

@@ -57,7 +57,17 @@ def test_first_or_already_separated_reasoning_block_gets_no_extra_boundary() -> 
     assert separator_before_new_block("**first thought**\n\n") == ""
 
 
-def test_proxy_turn_publishes_post_done_context_breakdown(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("resume_id", "seed", "expected_start"),
+    [
+        ("sdk-session", None, None),
+        (None, None, "clean"),
+        (None, {"seeded": True, "session_id": "sdk-session"}, "seeded"),
+    ],
+)
+def test_proxy_turn_publishes_post_done_context_breakdown(
+    monkeypatch, resume_id, seed, expected_start,
+) -> None:
     async def run():
         harness = _SendHarness()
         harness._proxy_base_url = "http://127.0.0.1:1"
@@ -72,8 +82,9 @@ def test_proxy_turn_publishes_post_done_context_breakdown(monkeypatch) -> None:
             }
 
         harness._read_native_context_usage = read
+        harness._seed_new_session = AsyncMock(return_value=seed)
         monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", lambda **kw: sdk)
-        send = harness.send()
+        send = harness.send(resume_id=resume_id)
         await sdk.waiting.wait()
         sdk.release_stream.set()
         await send
@@ -81,6 +92,7 @@ def test_proxy_turn_publishes_post_done_context_breakdown(monkeypatch) -> None:
                    and event.token_usage and event.token_usage.get("context_breakdown")]
         assert len(updates) == 1
         assert updates[0].token_usage["context_breakdown"]["cli_total_tokens"] == 55
+        assert updates[0].token_usage["context_breakdown"].get("session_start") == expected_start
 
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
@@ -158,13 +170,13 @@ class _SendHarness(ClaudeSendMixin, ClaudeCommandMixin, ClaudeEventMixin):
         if event.raw.get("turn_health", {}).get("phase") == "queued":
             self.queued.set()
 
-    def send(self, request_id="turn-request"):
+    def send(self, request_id="turn-request", resume_id="sdk-session"):
         return asyncio.create_task(self._handle_send({
             "request_id": request_id,
             "session_key": SESSION,
             "model": MODEL,
             "message": "hello",
-            "thread_resume_id": "sdk-session",
+            "thread_resume_id": resume_id,
             "trigger_message_id": f"message-{request_id}",
         }, f"send-{request_id}", self.redis))
 

@@ -207,6 +207,7 @@ class ClaudeResultMixin:
     async def _publish_post_done_context(
         self, sdk_client, *, request_id: str, session_key: str, seq: int,
         model: str, final_usage: dict | None, use_proxy: bool = False,
+        session_start: str | None = None,
     ) -> int:
         """Read /context after DONE on the still-owned SDK client.
 
@@ -225,6 +226,8 @@ class ClaudeResultMixin:
         breakdown = compact_context_breakdown(native, read_ms=(time.monotonic() - started) * 1000)
         if breakdown is None:
             return seq
+        if session_start in {"clean", "seeded"}:
+            breakdown["session_start"] = session_start
         usage = {**(final_usage or {}), "context_breakdown": breakdown, "usage_status": "final"}
         if not use_proxy:
             native_total = native.get("totalTokens")

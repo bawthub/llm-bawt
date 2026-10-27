@@ -10,6 +10,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from ..dependencies import get_service, get_turn_log_store
+from ..context_trend import load_context_trend
 from ..schemas import (
     RecentBotTurn,
     RecentByBotsResponse,
@@ -270,6 +271,19 @@ def _response_tail(response_text: str) -> str | None:
     if 0 < pp < len(tail) - _TAIL_MIN:
         tail = tail[pp + 2:]
     return tail
+
+
+@router.get("/v1/turn-logs/context-trend", tags=["Debug"])
+def context_trend(
+    user_id: str = Query(..., min_length=1),
+    bot_id: str = Query(..., min_length=1),
+    days: int = Query(90, ge=1, le=365),
+    limit: int = Query(60, ge=1, le=120),
+):
+    store = get_turn_log_store()
+    if store.engine is None:
+        raise HTTPException(status_code=503, detail="Turn logs DB unavailable")
+    return load_context_trend(store.engine, user_id=user_id, bot_id=bot_id, days=days, limit=limit)
 
 
 @router.get("/v1/turn-logs", response_model=TurnLogListResponse, tags=["Debug"])
