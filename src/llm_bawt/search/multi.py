@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .base import SearchProvider, SearchResult
+from .base import SearchError, SearchProvider, SearchResult
 from .credentials import search_key
-from .factory import get_search_client, is_search_available
+from .factory import get_search_client, get_search_unavailable_reason, is_search_available
 
 if TYPE_CHECKING:
     from ..utils.config import Config
@@ -65,6 +66,20 @@ def _dedupe_key(url: str) -> str:
     return u.rstrip("/").lower()
 
 
+@dataclass
+class SearchOutcome:
+    """What a fan-out returned, and what each provider did (TASK-1562).
+
+    ``providers`` lists only the providers that answered; a provider that
+    couldn't be used or failed upstream is in ``errors`` with a user-facing
+    reason instead, so a broken provider never looks like "no results".
+    """
+
+    results: list[SearchResult] = field(default_factory=list)
+    providers: list[str] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)
+
+
 async def search_all(
     config: "Config",
     query: str,
@@ -72,6 +87,18 @@ async def search_all(
     max_results: int = 5,
     providers: list[SearchProvider | str] | None = None,
 ) -> tuple[list[SearchResult], list[str]]:
+    """``(results, providers_answered)`` from :func:`search_all_detailed`."""
+    outcome = await search_all_detailed(config, query, max_results=max_results, providers=providers)
+    return outcome.results, outcome.providers
+
+
+async def search_all_detailed(
+    config: "Config",
+    query: str,
+    *,
+    max_results: int = 5,
+    providers: list[SearchProvider | str] | None = None,
+) -> SearchOutcome:
     """Fan ``query`` out to every configured provider in parallel and merge.
 
     Args:
@@ -79,14 +106,16 @@ async def search_all(
         query: The search query.
         max_results: Max results requested **per provider**.
         providers: Optional explicit provider list; defaults to
-            ``available_providers(config)``.
+            ``available_providers(config)``. A named provider is never
+            replaced by another: one that can't be used is reported in
+            ``errors`` rather than answered by DuckDuckGo under its name.
 
     Returns:
-        ``(results, providers_queried)`` — results interleaved round-robin
-        across providers (so every provider is represented), deduped by URL,
-        each tagged with its ``source``. ``providers_queried`` is the list of
-        provider values actually hit.
+        A :class:`SearchOutcome`. Results are interleaved round-robin across
+        providers (so every provider is represented), deduped by URL, each
+        tagged with its ``source``.
     """
+    outcome = SearchOutcome()
     if providers is None:
         provider_list = available_providers(config)
     else:
@@ -96,36 +125,43 @@ async def search_all(
                 provider_list.append(p if isinstance(p, SearchProvider) else SearchProvider(str(p).lower()))
             except ValueError:
                 logger.warning("Ignoring unknown search provider: %r", p)
-
-    if not provider_list:
-        return [], []
+                outcome.errors[str(p)] = (
+                    f"Unknown search provider {str(p)[:32]!r}. "
+                    f"Use one of: {', '.join(s.value for s in SearchProvider)}."
+                )
 
     clients = []
     for prov in provider_list:
-        client = get_search_client(config, provider=prov, max_results=max_results)
-        # get_search_client can fall back to DDG if a provider is misconfigured;
-        # keep whatever it hands back but remember which slot it filled.
-        if client is not None:
+        client = get_search_client(config, provider=prov, max_results=max_results, fallback=False)
+        if client is None:
+            outcome.errors[prov.value] = get_search_unavailable_reason(config, prov)
+        else:
             clients.append((prov, client))
 
     if not clients:
-        return [], []
+        return outcome
 
-    async def _run(prov: SearchProvider, client) -> list[SearchResult]:
+    async def _run(prov: SearchProvider, client) -> list[SearchResult] | None:
         try:
             # search() is blocking (httpx sync / ddgs) — offload to a thread so
             # all providers run concurrently.
             results = await asyncio.to_thread(client.search, query, max_results)
-            # Backfill source in case a client left it unset.
-            for r in results:
-                if r.source is None:
-                    r.source = prov
-            return results
+        except SearchError as e:
+            outcome.errors[prov.value] = str(e)
+            return None
         except Exception as e:  # noqa: BLE001 — one provider failing must not sink the rest
             logger.warning("Search provider %s failed: %s", prov.value, e)
-            return []
+            outcome.errors[prov.value] = f"{prov.value} search failed ({type(e).__name__})."
+            return None
+        # Backfill source in case a client left it unset.
+        for r in results:
+            if r.source is None:
+                r.source = prov
+        return results
 
-    grouped = await asyncio.gather(*[_run(prov, client) for prov, client in clients])
+    answers = await asyncio.gather(*[_run(prov, client) for prov, client in clients])
+    outcome.providers = [prov.value for (prov, _), got in zip(clients, answers) if got is not None]
+    grouped = [got for got in answers if got]
 
     # Round-robin interleave (rank 0 of every provider, then rank 1, …) so every
     # provider is represented even after dedup; drop cross-provider URL
@@ -143,4 +179,5 @@ async def search_all(
                 seen.add(key)
                 merged.append(r)
 
-    return merged, [prov.value for prov, _ in clients]
+    outcome.results = merged
+    return outcome

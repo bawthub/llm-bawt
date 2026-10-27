@@ -54,13 +54,34 @@ def is_search_available(provider: SearchProvider | str | None = None) -> bool:
     return False
 
 
+def _ddg_fallback(config: "Config", max_results: int, fallback: bool, why: str) -> SearchClient | None:
+    """The chosen provider can't be used: DuckDuckGo stands in, or None.
+
+    With ``fallback=False`` (a caller that asked for one provider by name) the
+    answer is None, so the caller reports the provider's problem instead of
+    serving another provider's results under its name (TASK-1562).
+    """
+    if not fallback:
+        logger.warning("%s; not falling back", why)
+        return None
+    logger.warning("%s, falling back to DuckDuckGo", why)
+    from .ddgs_client import DuckDuckGoClient, is_ddgs_available
+    if is_ddgs_available():
+        timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+        return DuckDuckGoClient(max_results=max_results, timeout=timeout)
+    logger.error("DuckDuckGo fallback also unavailable")
+    return None
+
+
 def get_search_client(
     config: "Config",
     provider: SearchProvider | str | None = None,
     max_results: int | None = None,
+    *,
+    fallback: bool = True,
 ) -> SearchClient | None:
     """Create a search client based on configuration.
-    
+
     Provider selection priority:
     1. Explicit provider argument
     2. Config SEARCH_PROVIDER setting
@@ -68,12 +89,16 @@ def get_search_client(
     4. Brave (if API key configured)
     5. Reddit API (if OAuth credentials configured)
     6. DuckDuckGo (free fallback)
-    
+
     Args:
         config: Application config
         provider: Override provider selection
         max_results: Override default max results
-        
+        fallback: When the selected provider can't be used (no usable key,
+            library missing), return DuckDuckGo instead. False returns None,
+            so the caller can name the problem (``get_search_unavailable_reason``)
+            rather than label DuckDuckGo results as that provider's.
+
     Returns:
         Configured SearchClient or None if search unavailable
     """
@@ -127,24 +152,13 @@ def get_search_client(
         from .tavily_client import TavilyClient, is_tavily_available
         
         if not is_tavily_available():
-            logger.warning("Tavily requested but tavily-python not installed, falling back to DuckDuckGo")
-            # Fall back to DuckDuckGo
-            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-            if is_ddgs_available():
-                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-            logger.error("DuckDuckGo fallback also unavailable")
-            return None
-        
+            return _ddg_fallback(config, max_results, fallback,
+                                 "Tavily requested but tavily-python not installed")
+
         api_key = search_key(config, SearchProvider.TAVILY).value
         if not api_key:
-            logger.warning("Tavily requested but no usable Tavily key, falling back to DuckDuckGo")
-            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-            if is_ddgs_available():
-                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-            logger.error("DuckDuckGo fallback also unavailable")
-            return None
+            return _ddg_fallback(config, max_results, fallback,
+                                 "Tavily requested but no usable Tavily key")
         
         include_answer = getattr(config, "SEARCH_INCLUDE_ANSWER", False)
         search_depth = getattr(config, "SEARCH_DEPTH", "basic")
@@ -160,23 +174,13 @@ def get_search_client(
         from .brave_client import BraveSearchClient, is_brave_available
 
         if not is_brave_available():
-            logger.warning("Brave requested but httpx not installed, falling back to DuckDuckGo")
-            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-            if is_ddgs_available():
-                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-            logger.error("DuckDuckGo fallback also unavailable")
-            return None
+            return _ddg_fallback(config, max_results, fallback,
+                                 "Brave requested but httpx not installed")
 
         api_key = search_key(config, SearchProvider.BRAVE).value
         if not api_key:
-            logger.warning("Brave requested but no usable Brave key, falling back to DuckDuckGo")
-            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-            if is_ddgs_available():
-                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-            logger.error("DuckDuckGo fallback also unavailable")
-            return None
+            return _ddg_fallback(config, max_results, fallback,
+                                 "Brave requested but no usable Brave key")
 
         include_summary = getattr(config, "SEARCH_INCLUDE_ANSWER", False)
         safesearch = getattr(config, "BRAVE_SAFESEARCH", "moderate")
@@ -194,25 +198,15 @@ def get_search_client(
         from .reddit_client import RedditSearchClient, is_reddit_available
 
         if not is_reddit_available():
-            logger.warning("Reddit requested but httpx not installed, falling back to DuckDuckGo")
-            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-            if is_ddgs_available():
-                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-            logger.error("DuckDuckGo fallback also unavailable")
-            return None
+            return _ddg_fallback(config, max_results, fallback,
+                                 "Reddit requested but httpx not installed")
 
         client_id = getattr(config, "REDDIT_CLIENT_ID", None)
         client_secret = getattr(config, "REDDIT_CLIENT_SECRET", None)
         user_agent = getattr(config, "REDDIT_USER_AGENT", "llm-bawt/0.1")
         if not client_id or not client_secret:
-            logger.warning("Reddit requested but credentials are not configured, falling back to DuckDuckGo")
-            from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-            if is_ddgs_available():
-                timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-                return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-            logger.error("DuckDuckGo fallback also unavailable")
-            return None
+            return _ddg_fallback(config, max_results, fallback,
+                                 "Reddit requested but credentials are not configured")
 
         timeout = getattr(config, "SEARCH_TIMEOUT", 10)
         return RedditSearchClient(

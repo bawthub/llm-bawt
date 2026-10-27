@@ -112,12 +112,14 @@ async def web_search(
             to all configured providers.
 
     Returns:
-        Dict with ``query``, ``providers`` (list actually queried),
+        Dict with ``query``, ``providers`` (the providers that answered),
         ``count``, and ``results`` (list of ``{title, url, snippet, score,
-        source}``). If no provider is configured, ``results`` is empty and
-        ``error`` explains how to enable search.
+        source}``). A named provider is never stood in for by another.
+        ``errors`` maps each provider that couldn't be used or failed
+        upstream (rejected key, rate limit, outage) to the reason; when
+        nothing came back, ``error`` says why.
     """
-    from llm_bawt.search.multi import search_all
+    from llm_bawt.search.multi import search_all_detailed
     from llm_bawt.utils.config import config
 
     q = (query or "").strip()
@@ -127,7 +129,7 @@ async def web_search(
 
     providers = [provider] if provider else None
     try:
-        results, queried = await search_all(
+        outcome = await search_all_detailed(
             config, q, max_results=max_results, providers=providers
         )
     except Exception as e:  # noqa: BLE001
@@ -135,15 +137,20 @@ async def web_search(
         return {"query": q, "providers": [], "count": 0, "results": [],
                 "error": f"Search failed: {e}"}
 
-    if not queried:
-        from llm_bawt.search import get_search_unavailable_reason
-        return {"query": q, "providers": [], "count": 0, "results": [],
-                "error": get_search_unavailable_reason(config)}
-
-    logger.info("web_search %r → %d results across %s", q, len(results), queried)
-    return {
+    response: dict = {
         "query": q,
-        "providers": queried,
-        "count": len(results),
-        "results": [r.to_dict() for r in results],
+        "providers": outcome.providers,
+        "count": len(outcome.results),
+        "results": [r.to_dict() for r in outcome.results],
     }
+    if outcome.errors:
+        response["errors"] = outcome.errors
+        if not outcome.results:
+            response["error"] = " ".join(outcome.errors.values())
+    elif not outcome.providers:
+        from llm_bawt.search import get_search_unavailable_reason
+        response["error"] = get_search_unavailable_reason(config)
+
+    logger.info("web_search %r → %d results from %s; failed: %s",
+                q, len(outcome.results), outcome.providers, sorted(outcome.errors))
+    return response

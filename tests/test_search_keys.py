@@ -282,3 +282,161 @@ def test_an_existing_executor_follows_a_disconnect_or_rotation(monkeypatch):
     search()
 
     assert calls == ["stored-key", "rotated-key", "ddg"]
+
+
+# --- a named provider never hides its failure (TASK-1562) -----------------------
+
+
+def _web_search(monkeypatch, config, **kwargs) -> dict:
+    import asyncio
+
+    from llm_bawt.mcp_server.search_tools import web_search
+
+    monkeypatch.setattr("llm_bawt.utils.config.config", config)
+    return asyncio.run(web_search("q", **kwargs))
+
+
+def _every_search_available(monkeypatch):
+    from llm_bawt.search import factory, multi
+
+    monkeypatch.setattr(multi, "is_search_available", lambda provider=None: True)
+    monkeypatch.setattr(factory, "is_search_available", lambda provider=None: True)
+
+
+def _result(url: str, source: SearchProvider):
+    from llm_bawt.search.base import SearchResult
+
+    return SearchResult(title="t", url=url, snippet="s", source=source)
+
+
+@pytest.mark.parametrize("code", ["not_connected", "unreadable", "store_unavailable"])
+def test_web_search_for_an_unusable_brave_says_why_and_never_serves_ddg(monkeypatch, code):
+    from llm_bawt.search.ddgs_client import DuckDuckGoClient
+
+    _every_search_available(monkeypatch)
+    stub_stored_keys(monkeypatch, {"brave": ConnectionUnavailable(code)})
+    ddg = []
+    monkeypatch.setattr(DuckDuckGoClient, "search", lambda self, q, *a, **kw: ddg.append(q) or [])
+
+    result = _web_search(monkeypatch, _config(BRAVE_API_KEY="config-key"), provider="brave")
+
+    assert ddg == []
+    assert result["providers"] == [] and result["count"] == 0
+    assert set(result["errors"]) == {"brave"}
+    assert result["error"] == result["errors"]["brave"]
+    assert "Settings → Providers" in result["error"] or "credential store" in result["error"]
+    assert "config-key" not in str(result)
+
+
+def test_web_search_reports_brave_rejecting_the_key(monkeypatch):
+    def handler(request):
+        assert request.headers["X-Subscription-Token"] == "stored-key"
+        return httpx.Response(422, json={"error": {"code": "SUBSCRIPTION_TOKEN_INVALID"}})
+
+    real_client = httpx.Client
+    monkeypatch.setattr("llm_bawt.search.brave_client.httpx.Client",
+                        lambda **kw: real_client(**kw, transport=httpx.MockTransport(handler)))
+    _every_search_available(monkeypatch)
+    stub_stored_keys(monkeypatch, {"brave": "stored-key"})
+
+    result = _web_search(monkeypatch, _config(), provider="brave")
+
+    assert result["providers"] == [] and result["results"] == []
+    assert "rejected the API key (HTTP 422, SUBSCRIPTION_TOKEN_INVALID)" in result["error"]
+    assert "stored-key" not in str(result)
+
+
+def test_a_fan_out_lists_only_the_providers_that_answered(monkeypatch):
+    from llm_bawt.search.base import SearchError
+    from llm_bawt.search.brave_client import BraveSearchClient
+    from llm_bawt.search.tavily_client import TavilyClient
+
+    _every_search_available(monkeypatch)
+    stub_stored_keys(monkeypatch, {"brave": "b-key", "tavily": "t-key"})
+
+    def brave_fails(self, q, *a, **kw):
+        raise SearchError(SearchProvider.BRAVE, "Brave Search rate limit exceeded (HTTP 429).", 429)
+
+    monkeypatch.setattr(BraveSearchClient, "search", brave_fails)
+    monkeypatch.setattr(TavilyClient, "search",
+                        lambda self, q, *a, **kw: [_result("https://a.example", SearchProvider.TAVILY)])
+
+    result = _web_search(monkeypatch, _config())
+
+    assert result["providers"] == ["tavily"]
+    assert result["count"] == 1
+    assert result["errors"] == {"brave": "Brave Search rate limit exceeded (HTTP 429)."}
+    assert "error" not in result, "results came back, so there is no top-level error"
+
+
+def test_a_provider_that_answers_empty_is_not_an_error(monkeypatch):
+    from llm_bawt.search.brave_client import BraveSearchClient
+
+    _every_search_available(monkeypatch)
+    stub_stored_keys(monkeypatch, {"brave": "b-key"})
+    monkeypatch.setattr(BraveSearchClient, "search", lambda self, q, *a, **kw: [])
+
+    result = _web_search(monkeypatch, _config(), provider="brave")
+
+    assert result["providers"] == ["brave"] and result["count"] == 0
+    assert "errors" not in result and "error" not in result
+
+
+def test_an_unexpected_client_crash_is_named_without_its_text(monkeypatch):
+    from llm_bawt.search.brave_client import BraveSearchClient
+
+    _every_search_available(monkeypatch)
+    stub_stored_keys(monkeypatch, {"brave": "b-key"})
+
+    def crash(self, q, *a, **kw):
+        raise RuntimeError("internal detail b-key")
+
+    monkeypatch.setattr(BraveSearchClient, "search", crash)
+    result = _web_search(monkeypatch, _config(), provider="brave")
+
+    assert result["errors"] == {"brave": "brave search failed (RuntimeError)."}
+    assert "b-key" not in str(result)
+
+
+def test_an_unknown_provider_is_an_error(monkeypatch):
+    result = _web_search(monkeypatch, _config(), provider="bing")
+
+    assert result["providers"] == []
+    assert "Unknown search provider 'bing'" in result["error"]
+
+
+def test_get_search_client_without_fallback_returns_none(monkeypatch):
+    from llm_bawt.search import factory
+    from llm_bawt.search.ddgs_client import DuckDuckGoClient
+
+    _every_search_available(monkeypatch)
+    stub_stored_keys(monkeypatch, {"brave": ConnectionUnavailable("not_connected")})
+    config = _config()
+
+    assert factory.get_search_client(config, provider="brave", fallback=False) is None
+    assert isinstance(factory.get_search_client(config, provider="brave"), DuckDuckGoClient)
+
+
+def test_the_search_tool_says_when_ddg_stood_in_for_the_configured_provider(monkeypatch):
+    from llm_bawt.search.brave_client import BraveSearchClient
+    from llm_bawt.search.ddgs_client import DuckDuckGoClient
+    from llm_bawt.tools.executor import ToolExecutor
+    from llm_bawt.tools.parser import ToolCall
+
+    outcomes = {"brave": "stored-key"}
+    stub_stored_keys(monkeypatch, outcomes)
+    monkeypatch.setattr(BraveSearchClient, "search",
+                        lambda self, q, **kw: [_result("https://b.example", SearchProvider.BRAVE)])
+    monkeypatch.setattr(DuckDuckGoClient, "search",
+                        lambda self, q, **kw: [_result("https://d.example", SearchProvider.DUCKDUCKGO)])
+    executor = ToolExecutor(user_id="synthetic", config=_config(SEARCH_PROVIDER="brave"))
+
+    def search() -> str:
+        return executor.execute(ToolCall(name="search", arguments={"query": "q"}, raw_text=""))
+
+    assert "Note:" not in search()
+    outcomes["brave"] = ConnectionUnavailable("not_connected")
+    stood_in = search()
+    assert "https://d.example" in stood_in
+    assert "These results are from duckduckgo instead." in stood_in
+    assert "Settings → Providers" in stood_in

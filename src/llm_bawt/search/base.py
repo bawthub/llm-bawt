@@ -20,6 +20,20 @@ class SearchProvider(str, Enum):
     REDDIT = "reddit"
 
 
+class SearchError(Exception):
+    """A provider answered with a failure instead of results.
+
+    Raised rather than returning ``[]`` so a caller can tell "the provider
+    failed" from "the provider found nothing". The message is user-facing and
+    never contains the API key.
+    """
+
+    def __init__(self, provider: SearchProvider, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.provider = provider
+        self.status_code = status_code
+
+
 @dataclass
 class SearchResult:
     """A single search result.

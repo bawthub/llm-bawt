@@ -1,18 +1,25 @@
 """Brave Search client implementation."""
 
 import logging
+from typing import Any
 
 import httpx
 
-from .base import SearchClient, SearchProvider, SearchResult
+from .base import SearchClient, SearchError, SearchProvider, SearchResult
 
 logger = logging.getLogger(__name__)
 
 BRAVE_API_BASE = "https://api.search.brave.com/res/v1"
 
+_FRESHNESS = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}
+
 
 class BraveSearchClient(SearchClient):
-    """Brave Search API client."""
+    """Brave Search API client.
+
+    An upstream failure (rejected key, rate limit, outage) raises
+    :class:`SearchError`; an empty list means Brave answered and found nothing.
+    """
 
     PROVIDER = SearchProvider.BRAVE
     REQUIRES_API_KEY = True
@@ -55,6 +62,44 @@ class BraveSearchClient(SearchClient):
             )
         return self._client
 
+    def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """GET ``path`` and return the JSON body, or raise :class:`SearchError`."""
+        try:
+            response = self._get_client().get(path, params=params)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e.response) from None
+        except httpx.RequestError as e:
+            logger.error("Brave search request failed: %s", type(e).__name__)
+            raise SearchError(self.PROVIDER, f"Brave Search is unreachable ({type(e).__name__}).") from None
+        except ValueError:
+            logger.error("Brave search returned a non-JSON body")
+            raise SearchError(self.PROVIDER, "Brave Search returned an unreadable response.") from None
+
+    def _params(self, query: str, max_results: int, time_range: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"q": query, "count": max_results, "safesearch": self._safesearch}
+        if time_range in _FRESHNESS:
+            params["freshness"] = _FRESHNESS[time_range]
+        return params
+
+    def _web_results(self, data: dict[str, Any], *, extra_snippets: bool = True) -> list[SearchResult]:
+        results = []
+        for raw in data.get("web", {}).get("results", []):
+            snippet = raw.get("description", "")
+            extra = raw.get("extra_snippets", []) if extra_snippets else []
+            if extra:
+                snippet = f"{snippet}\n{' '.join(extra[:2])}"
+            results.append(SearchResult(
+                title=raw.get("title", ""),
+                url=raw.get("url", ""),
+                snippet=snippet,
+                score=self._normalize_score(raw),
+                source=self.PROVIDER,
+                raw=raw,
+            ))
+        return results
+
     def search(
         self,
         query: str,
@@ -67,60 +112,13 @@ class BraveSearchClient(SearchClient):
             return []
 
         max_results = max_results or self.max_results
+        params = self._params(query, max_results)
+        if region:
+            params["country"] = region
+        if self._include_summary:
+            params["summary"] = "1"
 
-        try:
-            client = self._get_client()
-
-            params = {
-                "q": query,
-                "count": max_results,
-                "safesearch": self._safesearch,
-            }
-
-            if region:
-                params["country"] = region
-
-            if self._include_summary:
-                params["summary"] = "1"
-
-            response = client.get("/web/search", params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-
-            web_results = data.get("web", {}).get("results", [])
-            for raw in web_results:
-                snippet = raw.get("description", "")
-                extra = raw.get("extra_snippets", [])
-                if extra:
-                    snippet = f"{snippet}\n{' '.join(extra[:2])}"
-
-                results.append(SearchResult(
-                    title=raw.get("title", ""),
-                    url=raw.get("url", ""),
-                    snippet=snippet,
-                    score=self._normalize_score(raw),
-                    source=self.PROVIDER,
-                    raw=raw,
-                ))
-
-            return results[:max_results]
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                logger.error("Brave API key is invalid")
-            elif e.response.status_code == 429:
-                logger.warning("Brave rate limit exceeded")
-            else:
-                logger.error(f"Brave search HTTP error: {e}")
-            return []
-        except httpx.RequestError as e:
-            logger.error(f"Brave search request failed: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Brave search failed: {e}")
-            return []
+        return self._web_results(self._get_json("/web/search", params))[:max_results]
 
     def search_news(
         self,
@@ -134,64 +132,23 @@ class BraveSearchClient(SearchClient):
             return []
 
         max_results = max_results or self.max_results
+        data = self._get_json("/news/search", self._params(query, max_results, time_range))
 
-        try:
-            client = self._get_client()
-
-            params = {
-                "q": query,
-                "count": max_results,
-                "safesearch": self._safesearch,
-            }
-
-            if time_range:
-                freshness_map = {
-                    "d": "pd",
-                    "w": "pw",
-                    "m": "pm",
-                    "y": "py",
-                }
-                if time_range in freshness_map:
-                    params["freshness"] = freshness_map[time_range]
-
-            response = client.get("/news/search", params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-
-            news_results = data.get("results", [])
-            for raw in news_results:
-                snippet = raw.get("description", "")
-                age = raw.get("age", "")
-                if age:
-                    snippet = f"[{age}] {snippet}"
-
-                results.append(SearchResult(
-                    title=raw.get("title", ""),
-                    url=raw.get("url", ""),
-                    snippet=snippet,
-                    score=None,
-                    source=self.PROVIDER,
-                    raw=raw,
-                ))
-
-            return results[:max_results]
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                logger.error("Brave API key is invalid")
-            elif e.response.status_code == 429:
-                logger.warning("Brave rate limit exceeded")
-            else:
-                logger.error(f"Brave news search HTTP error: {e}")
-            return []
-        except httpx.RequestError as e:
-            logger.error(f"Brave news search request failed: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Brave news search failed: {e}")
-            return []
+        results = []
+        for raw in data.get("results", []):
+            snippet = raw.get("description", "")
+            age = raw.get("age", "")
+            if age:
+                snippet = f"[{age}] {snippet}"
+            results.append(SearchResult(
+                title=raw.get("title", ""),
+                url=raw.get("url", ""),
+                snippet=snippet,
+                score=None,
+                source=self.PROVIDER,
+                raw=raw,
+            ))
+        return results[:max_results]
 
     def search_reddit(
         self,
@@ -205,63 +162,8 @@ class BraveSearchClient(SearchClient):
             return []
 
         max_results = max_results or self.max_results
-
-        try:
-            client = self._get_client()
-
-            params = {
-                "q": f"site:reddit.com {query}".strip(),
-                "count": max_results,
-                "safesearch": self._safesearch,
-            }
-
-            if time_range:
-                freshness_map = {
-                    "d": "pd",
-                    "w": "pw",
-                    "m": "pm",
-                    "y": "py",
-                }
-                if time_range in freshness_map:
-                    params["freshness"] = freshness_map[time_range]
-
-            response = client.get("/web/search", params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-            web_results = data.get("web", {}).get("results", [])
-            for raw in web_results:
-                snippet = raw.get("description", "")
-                extra = raw.get("extra_snippets", [])
-                if extra:
-                    snippet = f"{snippet}\n{' '.join(extra[:2])}"
-
-                results.append(SearchResult(
-                    title=raw.get("title", ""),
-                    url=raw.get("url", ""),
-                    snippet=snippet,
-                    score=self._normalize_score(raw),
-                    source=self.PROVIDER,
-                    raw=raw,
-                ))
-
-            return results[:max_results]
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                logger.error("Brave API key is invalid")
-            elif e.response.status_code == 429:
-                logger.warning("Brave rate limit exceeded")
-            else:
-                logger.error(f"Brave reddit search HTTP error: {e}")
-            return []
-        except httpx.RequestError as e:
-            logger.error(f"Brave reddit search request failed: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Brave reddit search failed: {e}")
-            return []
+        params = self._params(f"site:reddit.com {query}".strip(), max_results, time_range)
+        return self._web_results(self._get_json("/web/search", params))[:max_results]
 
     def search_with_summary(
         self,
@@ -273,43 +175,11 @@ class BraveSearchClient(SearchClient):
             return [], None
 
         max_results = max_results or self.max_results
+        params = {**self._params(query, max_results), "summary": "1"}
+        data = self._get_json("/web/search", params)
 
-        try:
-            client = self._get_client()
-
-            params = {
-                "q": query,
-                "count": max_results,
-                "safesearch": self._safesearch,
-                "summary": "1",
-            }
-
-            response = client.get("/web/search", params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-            web_results = data.get("web", {}).get("results", [])
-            for raw in web_results:
-                results.append(SearchResult(
-                    title=raw.get("title", ""),
-                    url=raw.get("url", ""),
-                    snippet=raw.get("description", ""),
-                    score=self._normalize_score(raw),
-                    source=self.PROVIDER,
-                    raw=raw,
-                ))
-
-            summary = None
-            summarizer = data.get("summarizer", {})
-            if summarizer:
-                summary = summarizer.get("summary")
-
-            return results[:max_results], summary
-
-        except Exception as e:
-            logger.error(f"Brave search with summary failed: {e}")
-            return [], None
+        summary = (data.get("summarizer") or {}).get("summary")
+        return self._web_results(data, extra_snippets=False)[:max_results], summary
 
     def _normalize_score(self, raw: dict) -> float | None:
         """Normalize Brave ranking to a 0.0-1.0 score."""
@@ -323,6 +193,34 @@ class BraveSearchClient(SearchClient):
         """Clean up HTTP client on deletion."""
         if self._client:
             self._client.close()
+
+
+def _status_error(response: httpx.Response) -> SearchError:
+    """Map a Brave error response to a user-facing :class:`SearchError`.
+
+    Brave's error body carries a machine code (``SUBSCRIPTION_TOKEN_INVALID``,
+    ``RATE_LIMITED``, …); only that code is echoed, never the request headers.
+    """
+    status = response.status_code
+    code = None
+    try:
+        error = response.json().get("error")
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            code = error["code"][:64]
+    except Exception:  # noqa: BLE001 — a non-JSON error body still maps by status
+        pass
+    detail = f"HTTP {status}" + (f", {code}" if code else "")
+
+    if status in (401, 403) or code == "SUBSCRIPTION_TOKEN_INVALID":
+        logger.error("Brave rejected the API key (%s)", detail)
+        message = f"Brave Search rejected the API key ({detail}). Reconnect it in Settings → Providers."
+    elif status == 429:
+        logger.warning("Brave rate limit exceeded (%s)", detail)
+        message = f"Brave Search rate limit exceeded ({detail})."
+    else:
+        logger.error("Brave search HTTP error (%s)", detail)
+        message = f"Brave Search failed ({detail})."
+    return SearchError(SearchProvider.BRAVE, message, status_code=status)
 
 
 def is_brave_available() -> bool:

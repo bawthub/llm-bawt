@@ -1342,11 +1342,32 @@ class ToolExecutor:
                 )
 
             formatted = self.search_client.format_results_for_llm(results)
+            note = self._search_fallback_note()
+            if note:
+                formatted = f"{note}\n\n{formatted}"
             return format_tool_result(tool_call.name, formatted)
 
         except Exception as e:
             logger.error(f"Search failed: {e}")
             return format_tool_result(tool_call.name, None, error=str(e))
+
+    def _search_fallback_note(self) -> str | None:
+        """Say so when a stand-in served the configured provider's search.
+
+        With SEARCH_PROVIDER set to a provider that can't be used (e.g. Brave
+        disconnected), ``get_search_client`` falls back to DuckDuckGo; the
+        results must not read as that provider's (TASK-1562).
+        """
+        preferred = str(getattr(self.config, "SEARCH_PROVIDER", None) or "").lower()
+        served = getattr(getattr(self.search_client, "PROVIDER", None), "value", None)
+        if not preferred or not served or served == preferred:
+            return None
+        try:
+            from ..search import get_search_unavailable_reason
+            reason = get_search_unavailable_reason(self.config, preferred)
+        except Exception:  # noqa: BLE001 — the note is advisory
+            reason = f"{preferred} is unavailable."
+        return f"Note: {reason} These results are from {served} instead."
 
     def _ensure_search_client(self) -> None:
         """Lazy-init the search client, and keep a keyed one on the current key.
