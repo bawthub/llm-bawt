@@ -13,6 +13,12 @@ BRAVE_API_BASE = "https://api.search.brave.com/res/v1"
 
 _FRESHNESS = {"d": "pd", "w": "pw", "m": "pm", "y": "py"}
 
+# Brave error-body codes safe to show; anything else is reported by status only.
+_KNOWN_CODES = frozenset({
+    "SUBSCRIPTION_TOKEN_INVALID", "RATE_LIMITED", "OPTION_NOT_IN_PLAN",
+    "VALIDATION", "RESOURCE_NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN",
+})
+
 
 class BraveSearchClient(SearchClient):
     """Brave Search API client.
@@ -64,6 +70,9 @@ class BraveSearchClient(SearchClient):
 
     def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         """GET ``path`` and return the JSON body, or raise :class:`SearchError`."""
+        if not self._api_key:
+            logger.error("Brave API key not configured")
+            raise SearchError(self.PROVIDER, "Brave Search has no API key. Connect it in Settings → Providers.")
         try:
             response = self._get_client().get(path, params=params)
             response.raise_for_status()
@@ -107,10 +116,6 @@ class BraveSearchClient(SearchClient):
         region: str | None = None,
     ) -> list[SearchResult]:
         """Perform a Brave web search."""
-        if not self._api_key:
-            logger.error("Brave API key not configured")
-            return []
-
         max_results = max_results or self.max_results
         params = self._params(query, max_results)
         if region:
@@ -127,10 +132,6 @@ class BraveSearchClient(SearchClient):
         time_range: str | None = None,
     ) -> list[SearchResult]:
         """Search Brave news."""
-        if not self._api_key:
-            logger.error("Brave API key not configured")
-            return []
-
         max_results = max_results or self.max_results
         data = self._get_json("/news/search", self._params(query, max_results, time_range))
 
@@ -157,10 +158,6 @@ class BraveSearchClient(SearchClient):
         time_range: str | None = None,
     ) -> list[SearchResult]:
         """Search Reddit content via Brave web search."""
-        if not self._api_key:
-            logger.error("Brave API key not configured")
-            return []
-
         max_results = max_results or self.max_results
         params = self._params(f"site:reddit.com {query}".strip(), max_results, time_range)
         return self._web_results(self._get_json("/web/search", params))[:max_results]
@@ -171,9 +168,6 @@ class BraveSearchClient(SearchClient):
         max_results: int | None = None,
     ) -> tuple[list[SearchResult], str | None]:
         """Search with AI-generated summary (requires Pro plan)."""
-        if not self._api_key:
-            return [], None
-
         max_results = max_results or self.max_results
         params = {**self._params(query, max_results), "summary": "1"}
         data = self._get_json("/web/search", params)
@@ -198,15 +192,16 @@ class BraveSearchClient(SearchClient):
 def _status_error(response: httpx.Response) -> SearchError:
     """Map a Brave error response to a user-facing :class:`SearchError`.
 
-    Brave's error body carries a machine code (``SUBSCRIPTION_TOKEN_INVALID``,
-    ``RATE_LIMITED``, …); only that code is echoed, never the request headers.
+    Brave's error body carries a machine code. Only a code from
+    :data:`_KNOWN_CODES` is echoed: any other body text is upstream-controlled
+    and could carry anything, including the key, so it maps by status alone.
     """
     status = response.status_code
     code = None
     try:
         error = response.json().get("error")
-        if isinstance(error, dict) and isinstance(error.get("code"), str):
-            code = error["code"][:64]
+        if isinstance(error, dict) and error.get("code") in _KNOWN_CODES:
+            code = error["code"]
     except Exception:  # noqa: BLE001 — a non-JSON error body still maps by status
         pass
     detail = f"HTTP {status}" + (f", {code}" if code else "")

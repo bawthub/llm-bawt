@@ -29,11 +29,13 @@ class TestBraveSearchClient:
         client = BraveSearchClient(api_key="", max_results=5)
         assert client.is_available() is False
 
-    def test_search_no_api_key(self):
-        """Search should return empty list without API key."""
-        client = BraveSearchClient(api_key="")
-        results = client.search("test query")
-        assert results == []
+    @pytest.mark.parametrize("call", [
+        lambda c: c.search("q"), lambda c: c.search_news("q"),
+        lambda c: c.search_reddit("q"), lambda c: c.search_with_summary("q"),
+    ])
+    def test_no_api_key_is_an_error_not_an_empty_answer(self, call):
+        with pytest.raises(SearchError, match="has no API key"):
+            call(BraveSearchClient(api_key=""))
 
     @patch("llm_bawt.search.brave_client.httpx.Client")
     def test_search_success(self, mock_client_class):
@@ -161,10 +163,19 @@ class TestBraveFailuresAreErrors:
         with pytest.raises(SearchError, match=r"rate limit exceeded \(HTTP 429, RATE_LIMITED\)"):
             _brave_answering(429, {"error": {"code": "RATE_LIMITED"}}).search("q")
 
-    def test_other_status_names_status_and_capped_code(self):
+    def test_other_status_names_status_and_known_code(self):
         with pytest.raises(SearchError) as caught:
-            _brave_answering(500, {"error": {"code": "X" * 200}}).search("q")
-        assert str(caught.value) == f"Brave Search failed (HTTP 500, {'X' * 64})."
+            _brave_answering(400, {"error": {"code": "OPTION_NOT_IN_PLAN"}}).search("q")
+        assert str(caught.value) == "Brave Search failed (HTTP 400, OPTION_NOT_IN_PLAN)."
+
+    @pytest.mark.parametrize("status", [401, 429, 500])
+    def test_an_unknown_body_code_is_never_echoed(self, status, caplog):
+        """Upstream-controlled text (here, the key itself) maps by status only."""
+        with pytest.raises(SearchError) as caught:
+            _brave_answering(status, {"error": {"code": "test-key"}}).search("q")
+        assert "test-key" not in str(caught.value)
+        assert f"(HTTP {status})" in str(caught.value)
+        assert "test-key" not in caplog.text
 
     def test_a_non_json_error_body_still_maps_by_status(self):
         with pytest.raises(SearchError, match=r"failed \(HTTP 502\)"):
