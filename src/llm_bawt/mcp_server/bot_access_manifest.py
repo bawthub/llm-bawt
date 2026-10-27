@@ -32,6 +32,7 @@ NON_HISTORY_TOOLS = frozenset({
     "ops_job_status", "ops_quiesce_ack", "media_lookup", "media_add", "media_queue", "media_history",
     "media_pipeline_status", "media_library_stats", "generate_image", "speech_generate",
     "home_audio_devices", "home_audio_enqueue", "home_audio_status", "home_audio_cancel",
+    "notify_user",
     "x_search", "x_counts", "web_search", "bots_list_available",
 })
 PARTICIPANT_TOOLS = frozenset({"bots_delivery_get", "bots_deliveries_list"})
