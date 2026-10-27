@@ -3,9 +3,10 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
-from llm_bawt.service.context_trend import load_context_trend
+from llm_bawt.service.context_trend import _snapshot, load_context_trend
 from llm_bawt.service.turn_log_schema import TurnLog
 
 
@@ -62,3 +63,59 @@ def test_trend_only_uses_marked_first_turns_and_never_crosses_users():
     assert [row["turn_id"] for row in load_context_trend(
         engine, user_id="owner", bot_id="alpha", days=90, limit=1,
     )["series"]] == ["second-session"]
+
+
+@pytest.mark.parametrize("bad_start", [[], {}])
+def test_malformed_session_start_is_rejected(bad_start):
+    row = {
+        "id": "bad", "bot_id": "alpha", "created_at": datetime.now(timezone.utc),
+        "token_usage_json": _usage(bad_start),
+    }
+    assert _snapshot(row) is None
+
+
+@pytest.mark.parametrize("bad_usage", [
+    '{"session_start": "clean"',
+    _usage("unknown"),
+    json.dumps({"unrelated": "session_start"}),
+    _usage([]),
+    _usage({}),
+])
+def test_latest_and_limit_are_applied_after_validating_snapshots(bad_usage):
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        for turn_id, when, usage in [
+            ("valid", now - timedelta(days=1), _usage("clean")),
+            ("invalid", now, bad_usage),
+        ]:
+            session.add(TurnLog(
+                id=turn_id, bot_id="alpha", user_id="owner", created_at=when,
+                ended_at=when, token_usage_json=usage,
+            ))
+        session.commit()
+    result = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=1)
+    assert [row["turn_id"] for row in result["latest"]] == ["valid"]
+    assert [row["turn_id"] for row in result["series"]] == ["valid"]
+    assert result["truncated"] is False
+
+
+def test_candidate_cap_reports_truncation_without_claiming_all_bots(monkeypatch):
+    from llm_bawt.service import context_trend
+
+    monkeypatch.setattr(context_trend, "MAX_CANDIDATES", 2)
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine, tables=[TurnLog.__table__])
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        for i in range(3):
+            when = now - timedelta(minutes=i)
+            session.add(TurnLog(
+                id=f"turn-{i}", bot_id="alpha", user_id="owner", created_at=when,
+                ended_at=when, token_usage_json=_usage("clean"),
+            ))
+        session.commit()
+    result = load_context_trend(engine, user_id="owner", bot_id="alpha", days=90, limit=1)
+    assert result["truncated"] is True
+    assert [row["turn_id"] for row in result["series"]] == ["turn-0"]

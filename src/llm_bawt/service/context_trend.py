@@ -9,6 +9,9 @@ from typing import Any, Mapping
 from sqlalchemy import text
 from sqlmodel import Session
 
+MAX_CANDIDATES = 5000
+MAX_LATEST_BOTS = 200
+
 
 def _count(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
@@ -25,7 +28,7 @@ def _snapshot(row: Mapping[str, Any]) -> dict | None:
     if not isinstance(breakdown, dict):
         return None
     start = breakdown.get("session_start")
-    if start not in {"clean", "seeded"}:
+    if not isinstance(start, str) or start not in {"clean", "seeded"}:
         return None
     categories = []
     raw_categories = breakdown.get("categories")
@@ -62,35 +65,40 @@ def load_context_trend(engine, *, user_id: str, bot_id: str, days: int, limit: i
 
     The session table stores only the *current* SDK resume key. Earlier SDK
     boundaries cannot be reconstructed from thread timestamps, so only rows
-    explicitly marked by the bridge are eligible. Both queries are bounded by
-    user, date, marker and result count; prompts never leave the database.
+    explicitly marked by the bridge are eligible. Candidates are bounded by
+    user, date, marker and a hard cap, then validated before latest/series
+    selection. Prompts never leave the database.
     """
     params = {
         "user_id": user_id,
         "bot_id": bot_id,
         "since": datetime.now(timezone.utc) - timedelta(days=days),
         "marker": '%"session_start"%',
-        "limit": limit,
+        "candidate_limit": MAX_CANDIDATES + 1,
     }
     eligible = """
         user_id = :user_id AND created_at >= :since AND ended_at IS NOT NULL
         AND bot_id IS NOT NULL AND token_usage_json LIKE :marker
     """
     with Session(engine) as session:
-        latest_rows = session.execute(text(f"""
-            WITH ranked AS (
-                SELECT id, bot_id, created_at, token_usage_json,
-                    ROW_NUMBER() OVER (PARTITION BY bot_id ORDER BY created_at DESC, id DESC) AS rn
-                FROM turn_logs WHERE {eligible}
-            )
-            SELECT id, bot_id, created_at, token_usage_json
-            FROM ranked WHERE rn = 1 ORDER BY bot_id LIMIT 200
-        """), params).mappings().all()
-        series_rows = session.execute(text(f"""
+        rows = session.execute(text(f"""
             SELECT id, bot_id, created_at, token_usage_json FROM turn_logs
-            WHERE {eligible} AND bot_id = :bot_id
-            ORDER BY created_at DESC, id DESC LIMIT :limit
+            WHERE {eligible}
+            ORDER BY created_at DESC, id DESC LIMIT :candidate_limit
         """), params).mappings().all()
-    latest = [item for row in latest_rows if (item := _snapshot(row)) is not None]
-    series = [item for row in reversed(series_rows) if (item := _snapshot(row)) is not None]
-    return {"latest": latest, "series": series, "days": days, "bot_id": bot_id}
+    truncated = len(rows) > MAX_CANDIDATES
+    latest_by_bot: dict[str, dict] = {}
+    newest_series: list[dict] = []
+    for row in rows[:MAX_CANDIDATES]:
+        item = _snapshot(row)
+        if item is None:
+            continue
+        latest_by_bot.setdefault(item["bot_id"], item)
+        if item["bot_id"] == bot_id and len(newest_series) < limit:
+            newest_series.append(item)
+    latest = [latest_by_bot[bot] for bot in sorted(latest_by_bot)[:MAX_LATEST_BOTS]]
+    return {
+        "latest": latest, "series": list(reversed(newest_series)),
+        "days": days, "bot_id": bot_id,
+        "truncated": truncated or len(latest_by_bot) > MAX_LATEST_BOTS,
+    }
