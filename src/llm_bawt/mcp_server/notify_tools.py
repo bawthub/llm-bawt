@@ -1,8 +1,8 @@
 """``notify_user``: push to the user's phone through Home Assistant (TASK-1531).
 
-The caller is the signed turn (or approved/service) identity when one is
-present; a supplied credential that doesn't open, or one for another bot,
-is refused rather than trusted as the ``bot_id`` argument. Private and
+The caller must be a signed turn (or approved/service) identity for
+``bot_id``: no credential, one that doesn't open, or one for another bot is
+refused rather than trusting the ``bot_id`` argument. Private and
 unknown bots are refused, and an unreadable tag snapshot refuses everyone.
 Every call, refused or not, writes one ``notify_log`` audit row.
 """
@@ -40,7 +40,11 @@ def _refusal(bot_id: str, arguments: dict) -> str | None:
         caller = trusted_caller("notify_user", arguments)
     except BotAccessError:
         return "refused:caller_unverified"
-    if caller is not None and caller.bot_id != bot_id:
+    if caller is None:
+        # A push reaches a person's phone: an unsigned client never gets to
+        # speak as a bot by naming it.
+        return "refused:caller_unverified"
+    if caller.bot_id != bot_id:
         return "refused:caller_mismatch"
     tags = BotTags().snapshot()
     if not tags.available:

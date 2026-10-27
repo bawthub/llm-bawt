@@ -273,13 +273,19 @@ def tool(monkeypatch, rig, store):
     return state
 
 
+def signed(bot):
+    return SimpleNamespace(bot_id=bot)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("bot,caller,tags,expected", [
-    ("private-bot", None, Tags(), "refused:private_bot"),
-    ("ghost-bot", None, Tags(), "refused:unknown_bot"),
-    ("fixture-bot", None, Tags(available=False), "refused:policy_unavailable"),
+    ("private-bot", signed("private-bot"), Tags(), "refused:private_bot"),
+    ("ghost-bot", signed("ghost-bot"), Tags(), "refused:unknown_bot"),
+    ("fixture-bot", signed("fixture-bot"), Tags(available=False), "refused:policy_unavailable"),
     ("fixture-bot", BotAccessError("caller_unavailable"), Tags(), "refused:caller_unverified"),
-    ("fixture-bot", SimpleNamespace(bot_id="private-bot"), Tags(), "refused:caller_mismatch"),
+    # An unsigned MCP client can't push by naming a known public bot.
+    ("fixture-bot", None, Tags(), "refused:caller_unverified"),
+    ("fixture-bot", signed("private-bot"), Tags(), "refused:caller_mismatch"),
 ])
 async def test_tool_refusals_are_audited_and_send_nothing(tool, rig, store, bot, caller, tags,
                                                           expected):
@@ -296,3 +302,12 @@ async def test_tool_sends_for_the_signed_caller(tool, rig, store):
                                              urgency="high", link="/tasks")
     assert receipt["result"] == "sent" and len(rig.requests) == 1
     assert store.get(receipt["id"])["bot_id"] == "fixture-bot"
+
+
+@pytest.mark.anyio
+async def test_off_origin_link_is_an_audited_refusal(tool, rig, store):
+    tool.caller = signed("fixture-bot")
+    receipt = await notify_tools.notify_user(bot_id="fixture-bot", message="hi",
+                                             link="https://evil.example/x")
+    assert receipt["result"] == "refused:invalid_link" and rig.requests == []
+    assert store.get(receipt["id"])["result"] == "refused:invalid_link"

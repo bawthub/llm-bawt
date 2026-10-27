@@ -171,12 +171,16 @@ class Notifier:
                      dedupe_key: str | None = None) -> dict:
         if urgency not in URGENCIES:
             raise ValueError("urgency must be normal or high")
-        url = resolve_link(link, self.config.PUBLIC_ORIGIN)
         audit = (bot_id, urgency, message, dedupe_key)
 
         async def done(result: str, **extra) -> dict:
             row = await asyncio.to_thread(self.store.record, *audit, result)
             return {"result": result, "id": row, **extra}
+
+        try:
+            url = resolve_link(link, self.config.PUBLIC_ORIGIN)
+        except ValueError as error:
+            return await done("refused:invalid_link", detail=str(error))
 
         try:
             settings = await asyncio.to_thread(NotifySettings.load, self.config)
