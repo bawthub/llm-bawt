@@ -4,7 +4,8 @@ Pulls common concerns into one place:
 
 - credentials from the encrypted ``integration_connection:<service>`` record,
   with the legacy env vars only as a deprecated fallback when no record exists
-- one ``httpx.AsyncClient`` per service (lazy, rebuilt when credentials change)
+- one ``httpx.AsyncClient`` per service (lazy, rebuilt when credentials change,
+  held per operation so a rotation never closes one in use)
 - consistent error wrapping (``ArrAPIError``) so MCP tools can return
   a structured failure instead of leaking httpx tracebacks
 - a small ``api_key`` header injection helper for Sonarr/Radarr
@@ -16,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -167,38 +169,70 @@ def resolve_credentials(service: str, url_var: str, key_var: str, *, config=None
     return url, key
 
 
+class _Held:
+    """One built client, how many operations hold it, and whether it was replaced."""
+
+    __slots__ = ("client", "pair", "users", "retired")
+
+    def __init__(self, client, pair: tuple[str, str]):
+        self.client, self.pair, self.users, self.retired = client, pair, 0, False
+
+
 class ClientSlot:
     """One process-wide client per service, rebuilt when its credentials change.
 
-    Credentials are resolved on every call, so a key saved or rotated in the
-    Integrations form takes effect without a restart.
+    Credentials are resolved for every operation, so a key saved or rotated in
+    the Integrations form takes effect without a restart. A tool holds its
+    client for the whole operation (``async with slot.lease(resolve)``); a
+    client replaced by a rotation is closed only once the last operation
+    holding it has finished, never under one still using it.
     """
 
     def __init__(self, build):
         self._build = build
-        self._client = None
-        self._pair: tuple[str, str] | None = None
+        self._current: _Held | None = None
 
-    def get(self, pair: tuple[str, str]):
-        if self._client is None or self._pair != pair:
-            old = self._client
-            self._client, self._pair = self._build(*pair), pair
-            if old is not None:
-                _close_later(old)
-        return self._client
+    @asynccontextmanager
+    async def lease(self, resolve):
+        """Hold the client for ``resolve()``'s credentials for one operation.
+
+        ``resolve`` is the blocking credential lookup; it runs off the event
+        loop and raises ``ArrNotConfigured``/``ArrUnavailable`` before anything
+        is built.
+        """
+        pair = await asyncio.to_thread(resolve)
+        held = self._current
+        retired = None
+        if held is None or held.pair != pair:
+            retired, held = held, _Held(self._build(*pair), pair)
+            self._current = held
+        held.users += 1  # before any await, so a rotation can't close it first
+        try:
+            if retired is not None:
+                retired.retired = True
+                if retired.users == 0:
+                    await _close(retired.client)
+            yield held.client
+        finally:
+            held.users -= 1
+            if held.retired and held.users == 0:
+                await _close(held.client)
 
     def reset(self) -> None:
-        self._client, self._pair = None, None
+        self._current = None
 
 
-def _close_later(client) -> None:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return  # no loop: nothing in flight, let it be collected
-    task = loop.create_task(client.aclose())
+async def _close(client) -> None:
+    """Close ``client`` to completion, even if the awaiting caller is cancelled."""
+    task = asyncio.get_running_loop().create_task(client.aclose())
     _CLOSING.add(task)
     task.add_done_callback(_CLOSING.discard)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:  # noqa: BLE001 - a failed close must not fail the tool
+        logger.warning("closing a replaced arr client failed: %s", type(error).__name__)
 
 
 _CLOSING: set = set()

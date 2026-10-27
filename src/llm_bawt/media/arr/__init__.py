@@ -13,14 +13,16 @@ Only when no record exists are the deprecated env vars read:
     LLM_BAWT_RADARR_URL / LLM_BAWT_RADARR_API_KEY
     LLM_BAWT_SABNZBD_URL / LLM_BAWT_SABNZBD_API_KEY
 
-``await get_*_client()`` resolves credentials on every call and reuses one
-``httpx.AsyncClient`` per service until they change.
+``async with sonarr_client() as sonarr:`` (and ``radarr_client`` /
+``sabnzbd_client``) resolves credentials for each operation and holds one
+``httpx.AsyncClient`` per service until they change. A replaced client is
+closed after the last operation holding it ends.
 """
 
 from .base import ArrAPIError, ArrNotConfigured, ArrUnavailable
-from .radarr import RadarrClient, get_radarr_client
-from .sabnzbd import SabnzbdClient, get_sabnzbd_client
-from .sonarr import SonarrClient, get_sonarr_client
+from .radarr import RadarrClient, radarr_client
+from .sabnzbd import SabnzbdClient, sabnzbd_client
+from .sonarr import SonarrClient, sonarr_client
 
 __all__ = [
     "ArrAPIError",
@@ -29,7 +31,7 @@ __all__ = [
     "RadarrClient",
     "SabnzbdClient",
     "SonarrClient",
-    "get_radarr_client",
-    "get_sabnzbd_client",
-    "get_sonarr_client",
+    "radarr_client",
+    "sabnzbd_client",
+    "sonarr_client",
 ]

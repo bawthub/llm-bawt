@@ -6,7 +6,6 @@ adapted for movies.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -132,9 +131,10 @@ class RadarrClient(_BaseArrClient):
 _slot = ClientSlot(lambda url, key: RadarrClient(url, key, timeout=arr_timeout()))
 
 
-async def get_radarr_client() -> RadarrClient:
-    """The process-wide Radarr client for the current credentials (see Sonarr)."""
-    pair = await asyncio.to_thread(
-        resolve_credentials, "radarr", "LLM_BAWT_RADARR_URL", "LLM_BAWT_RADARR_API_KEY",
-    )
-    return _slot.get(pair)
+def _credentials() -> tuple[str, str]:
+    return resolve_credentials("radarr", "LLM_BAWT_RADARR_URL", "LLM_BAWT_RADARR_API_KEY")
+
+
+def radarr_client():
+    """Hold the process-wide Radarr client for one operation (see ``sonarr_client``)."""
+    return _slot.lease(_credentials)

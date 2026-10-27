@@ -19,7 +19,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from llm_bawt.integrations.connections import IntegrationError, IntegrationStore, RowSnapshot
-from llm_bawt.service.providers.base import STATUS_CONNECTED, ConnectionRecord
+from llm_bawt.service.providers.base import STATUS_CONNECTED, STATUS_DISCONNECTED, ConnectionRecord
 
 AUTH_METHOD = "credentials"
 MAX_VALUE_LENGTH = 4096
@@ -53,6 +53,10 @@ class CredentialIntegration:
     # Whether BawtHub's server may read it through the internal connection
     # route. Integrations only llm-bawt itself uses stay off that allowlist.
     bawthub_readable: bool = True
+    # Disconnect leaves a credential-free ``disconnected`` record instead of
+    # deleting the row. Set when a reader falls back to legacy env while no
+    # record exists, so a disconnect can't bring the env credentials back.
+    keeps_disconnected_record: bool = False
 
     def field(self, name: str) -> CredentialField | None:
         return next((f for f in self.fields if f.name == name), None)
@@ -124,6 +128,7 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
                     CredentialField("api_key", "API key", "secret"),
                 ),
                 bawthub_readable=False,
+                keeps_disconnected_record=True,
             )
             for service_id, label, description, placeholder in (
                 ("sonarr", "Sonarr", "TV library and downloads for the media tools.", "https://sonarr.example"),
@@ -182,6 +187,8 @@ class CredentialIntegrations:
         snapshot = self.store.snapshot(integration_id)
         foreign = self._foreign(snapshot)
         record = None if foreign else snapshot.record
+        if record is not None and record.status == STATUS_DISCONNECTED:
+            record = None  # a disconnect marker: nothing is configured
         meta = record.meta if record else {}
         secret = record.secret if record else {}
         return {
@@ -269,14 +276,19 @@ class CredentialIntegrations:
         raise IntegrationError("conflict")
 
     def disconnect(self, integration_id: str) -> bool:
-        self.definition(integration_id)
+        definition = self.definition(integration_id)
         if not self.store.available:
             raise IntegrationError("storage_unavailable")
         for _ in range(WRITE_ATTEMPTS):
             snapshot = self._owned(integration_id)
-            if not snapshot.exists:
+            if not snapshot.exists or snapshot.record.status == STATUS_DISCONNECTED:
                 return False
-            if self.store.remove(integration_id, snapshot):
+            if definition.keeps_disconnected_record:
+                marker = ConnectionRecord(provider=integration_id, status=STATUS_DISCONNECTED, auth_method=AUTH_METHOD)
+                written = self.store.replace(integration_id, snapshot, marker)
+            else:
+                written = self.store.remove(integration_id, snapshot)
+            if written:
                 return True
         raise IntegrationError("conflict")
 

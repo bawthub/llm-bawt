@@ -15,7 +15,6 @@ appear.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -168,14 +167,16 @@ class SonarrClient(_BaseArrClient):
 _slot = ClientSlot(lambda url, key: SonarrClient(url, key, timeout=arr_timeout()))
 
 
-async def get_sonarr_client() -> SonarrClient:
-    """The process-wide Sonarr client for the current credentials.
+def _credentials() -> tuple[str, str]:
+    return resolve_credentials("sonarr", "LLM_BAWT_SONARR_URL", "LLM_BAWT_SONARR_API_KEY")
 
-    Raises ``ArrNotConfigured`` when there is no stored connection and no
-    legacy env, ``ArrUnavailable`` when the stored connection can't be used.
-    Callers in the MCP tool layer surface both as a structured error.
+
+def sonarr_client():
+    """Hold the process-wide Sonarr client for one operation.
+
+    ``async with sonarr_client() as sonarr:``. Credentials are resolved on
+    entry; it raises ``ArrNotConfigured`` when there is no stored connection
+    and no legacy env, ``ArrUnavailable`` when the stored connection can't be
+    used. Callers in the MCP tool layer surface both as a structured error.
     """
-    pair = await asyncio.to_thread(
-        resolve_credentials, "sonarr", "LLM_BAWT_SONARR_URL", "LLM_BAWT_SONARR_API_KEY",
-    )
-    return _slot.get(pair)
+    return _slot.lease(_credentials)

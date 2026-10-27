@@ -7,7 +7,6 @@ tools actually need: version check, queue, history, pause/resume.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -97,9 +96,10 @@ class SabnzbdClient:
 _slot = ClientSlot(lambda url, key: SabnzbdClient(url, key, timeout=arr_timeout()))
 
 
-async def get_sabnzbd_client() -> SabnzbdClient:
-    """The process-wide SABnzbd client for the current credentials (see Sonarr)."""
-    pair = await asyncio.to_thread(
-        resolve_credentials, "sabnzbd", "LLM_BAWT_SABNZBD_URL", "LLM_BAWT_SABNZBD_API_KEY",
-    )
-    return _slot.get(pair)
+def _credentials() -> tuple[str, str]:
+    return resolve_credentials("sabnzbd", "LLM_BAWT_SABNZBD_URL", "LLM_BAWT_SABNZBD_API_KEY")
+
+
+def sabnzbd_client():
+    """Hold the process-wide SABnzbd client for one operation (see ``sonarr_client``)."""
+    return _slot.lease(_credentials)

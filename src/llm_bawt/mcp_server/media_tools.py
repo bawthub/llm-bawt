@@ -25,9 +25,9 @@ from llm_bawt.media.arr import (
     ArrAPIError,
     ArrNotConfigured,
     ArrUnavailable,
-    get_radarr_client,
-    get_sabnzbd_client,
-    get_sonarr_client,
+    radarr_client,
+    sabnzbd_client,
+    sonarr_client,
 )
 
 from .server import mcp
@@ -223,17 +223,17 @@ async def media_lookup(query: str, kind: str = "auto", limit: int = 5) -> dict:
 
     if "series" in kinds:
         try:
-            sonarr = await get_sonarr_client()
-            raw = await sonarr.lookup(query)
-            results.extend(_condense_lookup_series(s) for s in raw[:limit])
+            async with sonarr_client() as sonarr:
+                raw = await sonarr.lookup(query)
+                results.extend(_condense_lookup_series(s) for s in raw[:limit])
         except Exception as e:
             errors["sonarr"] = str(e)
 
     if "movie" in kinds:
         try:
-            radarr = await get_radarr_client()
-            raw = await radarr.lookup(query)
-            results.extend(_condense_lookup_movie(m) for m in raw[:limit])
+            async with radarr_client() as radarr:
+                raw = await radarr.lookup(query)
+                results.extend(_condense_lookup_movie(m) for m in raw[:limit])
         except Exception as e:
             errors["radarr"] = str(e)
 
@@ -288,98 +288,98 @@ async def media_add(
 
     try:
         if kind == "movie":
-            client = await get_radarr_client()
-            matches = await client.lookup(term)
-            if not matches:
-                return {"error": f"no Radarr match for {term!r}"}
-            chosen = matches[0]
-            if (chosen.get("id") or 0) > 0:
+            async with radarr_client() as client:
+                matches = await client.lookup(term)
+                if not matches:
+                    return {"error": f"no Radarr match for {term!r}"}
+                chosen = matches[0]
+                if (chosen.get("id") or 0) > 0:
+                    return {
+                        "success": True,
+                        "already_in_library": True,
+                        "kind": "movie",
+                        "library_id": chosen["id"],
+                        "title": chosen.get("title"),
+                        "year": chosen.get("year"),
+                        "message": "Movie already in Radarr library",
+                    }
+                profile_id, profile_name = await _resolve_quality_profile(
+                    client.list_quality_profiles, quality_profile
+                )
+                root = await _pick_root_folder(client.list_root_folders)
+                if not profile_id or not root:
+                    return {
+                        "error": "missing quality profile or root folder in Radarr",
+                        "profile_id": profile_id,
+                        "root": root,
+                    }
+                added = await client.add_movie(
+                    chosen,
+                    quality_profile_id=profile_id,
+                    root_folder_path=root,
+                    monitored=monitored,
+                    minimum_availability=minimum_availability,
+                    search_now=search_now,
+                )
                 return {
                     "success": True,
-                    "already_in_library": True,
                     "kind": "movie",
-                    "library_id": chosen["id"],
-                    "title": chosen.get("title"),
-                    "year": chosen.get("year"),
-                    "message": "Movie already in Radarr library",
+                    "library_id": added.get("id"),
+                    "title": added.get("title"),
+                    "year": added.get("year"),
+                    "profile": profile_name,
+                    "root_folder": root,
+                    "monitored": added.get("monitored"),
+                    "search_triggered": search_now,
+                    "message": f"Added {added.get('title')} ({added.get('year')}) to Radarr",
                 }
-            profile_id, profile_name = await _resolve_quality_profile(
-                client.list_quality_profiles, quality_profile
-            )
-            root = await _pick_root_folder(client.list_root_folders)
-            if not profile_id or not root:
-                return {
-                    "error": "missing quality profile or root folder in Radarr",
-                    "profile_id": profile_id,
-                    "root": root,
-                }
-            added = await client.add_movie(
-                chosen,
-                quality_profile_id=profile_id,
-                root_folder_path=root,
-                monitored=monitored,
-                minimum_availability=minimum_availability,
-                search_now=search_now,
-            )
-            return {
-                "success": True,
-                "kind": "movie",
-                "library_id": added.get("id"),
-                "title": added.get("title"),
-                "year": added.get("year"),
-                "profile": profile_name,
-                "root_folder": root,
-                "monitored": added.get("monitored"),
-                "search_triggered": search_now,
-                "message": f"Added {added.get('title')} ({added.get('year')}) to Radarr",
-            }
         else:  # series
-            client = await get_sonarr_client()
-            matches = await client.lookup(term)
-            if not matches:
-                return {"error": f"no Sonarr match for {term!r}"}
-            chosen = matches[0]
-            if (chosen.get("id") or 0) > 0:
+            async with sonarr_client() as client:
+                matches = await client.lookup(term)
+                if not matches:
+                    return {"error": f"no Sonarr match for {term!r}"}
+                chosen = matches[0]
+                if (chosen.get("id") or 0) > 0:
+                    return {
+                        "success": True,
+                        "already_in_library": True,
+                        "kind": "series",
+                        "library_id": chosen["id"],
+                        "title": chosen.get("title"),
+                        "year": chosen.get("year"),
+                        "message": "Series already in Sonarr library",
+                    }
+                profile_id, profile_name = await _resolve_quality_profile(
+                    client.list_quality_profiles, quality_profile
+                )
+                root = await _pick_root_folder(client.list_root_folders)
+                if not profile_id or not root:
+                    return {
+                        "error": "missing quality profile or root folder in Sonarr",
+                        "profile_id": profile_id,
+                        "root": root,
+                    }
+                added = await client.add_series(
+                    chosen,
+                    quality_profile_id=profile_id,
+                    root_folder_path=root,
+                    monitored=monitored,
+                    search_now=search_now,
+                    monitor=monitor,
+                )
                 return {
                     "success": True,
-                    "already_in_library": True,
                     "kind": "series",
-                    "library_id": chosen["id"],
-                    "title": chosen.get("title"),
-                    "year": chosen.get("year"),
-                    "message": "Series already in Sonarr library",
+                    "library_id": added.get("id"),
+                    "title": added.get("title"),
+                    "year": added.get("year"),
+                    "profile": profile_name,
+                    "root_folder": root,
+                    "monitor_mode": monitor,
+                    "monitored": added.get("monitored"),
+                    "search_triggered": search_now,
+                    "message": f"Added {added.get('title')} ({added.get('year')}) to Sonarr",
                 }
-            profile_id, profile_name = await _resolve_quality_profile(
-                client.list_quality_profiles, quality_profile
-            )
-            root = await _pick_root_folder(client.list_root_folders)
-            if not profile_id or not root:
-                return {
-                    "error": "missing quality profile or root folder in Sonarr",
-                    "profile_id": profile_id,
-                    "root": root,
-                }
-            added = await client.add_series(
-                chosen,
-                quality_profile_id=profile_id,
-                root_folder_path=root,
-                monitored=monitored,
-                search_now=search_now,
-                monitor=monitor,
-            )
-            return {
-                "success": True,
-                "kind": "series",
-                "library_id": added.get("id"),
-                "title": added.get("title"),
-                "year": added.get("year"),
-                "profile": profile_name,
-                "root_folder": root,
-                "monitor_mode": monitor,
-                "monitored": added.get("monitored"),
-                "search_triggered": search_now,
-                "message": f"Added {added.get('title')} ({added.get('year')}) to Sonarr",
-            }
     except Exception as e:
         return _err(e)
 
@@ -400,39 +400,39 @@ async def media_queue(limit_per_service: int = 25) -> dict:
     out: dict[str, Any] = {"sonarr": None, "radarr": None, "sabnzbd": None, "errors": {}}
 
     try:
-        sonarr = await get_sonarr_client()
-        s_queue = await sonarr.queue(page_size=limit_per_service)
-        out["sonarr"] = {
-            "total": s_queue.get("totalRecords", 0),
-            "items": [_condense_sonarr_queue_item(r) for r in s_queue.get("records", [])],
-        }
+        async with sonarr_client() as sonarr:
+            s_queue = await sonarr.queue(page_size=limit_per_service)
+            out["sonarr"] = {
+                "total": s_queue.get("totalRecords", 0),
+                "items": [_condense_sonarr_queue_item(r) for r in s_queue.get("records", [])],
+            }
     except Exception as e:
         out["errors"]["sonarr"] = str(e)
 
     try:
-        radarr = await get_radarr_client()
-        r_queue = await radarr.queue(page_size=limit_per_service)
-        out["radarr"] = {
-            "total": r_queue.get("totalRecords", 0),
-            "items": [_condense_radarr_queue_item(r) for r in r_queue.get("records", [])],
-        }
+        async with radarr_client() as radarr:
+            r_queue = await radarr.queue(page_size=limit_per_service)
+            out["radarr"] = {
+                "total": r_queue.get("totalRecords", 0),
+                "items": [_condense_radarr_queue_item(r) for r in r_queue.get("records", [])],
+            }
     except Exception as e:
         out["errors"]["radarr"] = str(e)
 
     try:
-        sab = await get_sabnzbd_client()
-        q = await sab.queue(limit=limit_per_service)
-        slots = q.get("slots", []) or []
-        out["sabnzbd"] = {
-            "paused": q.get("paused"),
-            "speed": q.get("speed"),
-            "size_left": q.get("sizeleft"),
-            "time_left": q.get("timeleft"),
-            "free_gb": _safe_float(q.get("diskspace1")),
-            "total_free_gb": _safe_float(q.get("diskspacetotal1")),
-            "active_slots": len(slots),
-            "items": [_condense_sab_slot(s) for s in slots],
-        }
+        async with sabnzbd_client() as sab:
+            q = await sab.queue(limit=limit_per_service)
+            slots = q.get("slots", []) or []
+            out["sabnzbd"] = {
+                "paused": q.get("paused"),
+                "speed": q.get("speed"),
+                "size_left": q.get("sizeleft"),
+                "time_left": q.get("timeleft"),
+                "free_gb": _safe_float(q.get("diskspace1")),
+                "total_free_gb": _safe_float(q.get("diskspacetotal1")),
+                "active_slots": len(slots),
+                "items": [_condense_sab_slot(s) for s in slots],
+            }
     except Exception as e:
         out["errors"]["sabnzbd"] = str(e)
 
@@ -462,40 +462,40 @@ async def media_history(
 
     if kind in ("series", "all"):
         try:
-            sonarr = await get_sonarr_client()
-            evt = sonarr_event_map.get(event) if event else None
-            h = await sonarr.history(page_size=limit, event_type=evt)
-            out["sonarr"] = [
-                {
-                    "title": r.get("sourceTitle"),
-                    "event": r.get("eventType"),
-                    "date": r.get("date"),
-                    "series_id": r.get("seriesId"),
-                    "episode_id": r.get("episodeId"),
-                    "quality": (r.get("quality") or {}).get("quality", {}).get("name"),
-                    "download_id": r.get("downloadId"),
-                }
-                for r in (h.get("records") or [])
-            ]
+            async with sonarr_client() as sonarr:
+                evt = sonarr_event_map.get(event) if event else None
+                h = await sonarr.history(page_size=limit, event_type=evt)
+                out["sonarr"] = [
+                    {
+                        "title": r.get("sourceTitle"),
+                        "event": r.get("eventType"),
+                        "date": r.get("date"),
+                        "series_id": r.get("seriesId"),
+                        "episode_id": r.get("episodeId"),
+                        "quality": (r.get("quality") or {}).get("quality", {}).get("name"),
+                        "download_id": r.get("downloadId"),
+                    }
+                    for r in (h.get("records") or [])
+                ]
         except Exception as e:
             out["errors"]["sonarr"] = str(e)
 
     if kind in ("movie", "all"):
         try:
-            radarr = await get_radarr_client()
-            evt = radarr_event_map.get(event) if event else None
-            h = await radarr.history(page_size=limit, event_type=evt)
-            out["radarr"] = [
-                {
-                    "title": r.get("sourceTitle"),
-                    "event": r.get("eventType"),
-                    "date": r.get("date"),
-                    "movie_id": r.get("movieId"),
-                    "quality": (r.get("quality") or {}).get("quality", {}).get("name"),
-                    "download_id": r.get("downloadId"),
-                }
-                for r in (h.get("records") or [])
-            ]
+            async with radarr_client() as radarr:
+                evt = radarr_event_map.get(event) if event else None
+                h = await radarr.history(page_size=limit, event_type=evt)
+                out["radarr"] = [
+                    {
+                        "title": r.get("sourceTitle"),
+                        "event": r.get("eventType"),
+                        "date": r.get("date"),
+                        "movie_id": r.get("movieId"),
+                        "quality": (r.get("quality") or {}).get("quality", {}).get("name"),
+                        "download_id": r.get("downloadId"),
+                    }
+                    for r in (h.get("records") or [])
+                ]
         except Exception as e:
             out["errors"]["radarr"] = str(e)
 
@@ -537,33 +537,33 @@ async def media_pipeline_status(query: str, kind: str = "auto") -> dict:
 
     if check_series:
         try:
-            sonarr = await get_sonarr_client()
-            q = await sonarr.queue(page_size=100)
-            for r in q.get("records", []):
-                title = (r.get("title") or "") + " " + ((r.get("series") or {}).get("title") or "")
-                if needle in title.lower():
-                    out["queue"]["sonarr"].append(_condense_sonarr_queue_item(r))
+            async with sonarr_client() as sonarr:
+                q = await sonarr.queue(page_size=100)
+                for r in q.get("records", []):
+                    title = (r.get("title") or "") + " " + ((r.get("series") or {}).get("title") or "")
+                    if needle in title.lower():
+                        out["queue"]["sonarr"].append(_condense_sonarr_queue_item(r))
         except Exception as e:
             out["errors"]["sonarr"] = str(e)
 
     if check_movie:
         try:
-            radarr = await get_radarr_client()
-            q = await radarr.queue(page_size=100)
-            for r in q.get("records", []):
-                title = (r.get("title") or "") + " " + ((r.get("movie") or {}).get("title") or "")
-                if needle in title.lower():
-                    out["queue"]["radarr"].append(_condense_radarr_queue_item(r))
+            async with radarr_client() as radarr:
+                q = await radarr.queue(page_size=100)
+                for r in q.get("records", []):
+                    title = (r.get("title") or "") + " " + ((r.get("movie") or {}).get("title") or "")
+                    if needle in title.lower():
+                        out["queue"]["radarr"].append(_condense_radarr_queue_item(r))
         except Exception as e:
             out["errors"]["radarr"] = str(e)
 
     # 3) SAB slot scan
     try:
-        sab = await get_sabnzbd_client()
-        sq = await sab.queue(limit=100)
-        for s in sq.get("slots", []) or []:
-            if needle in (s.get("filename") or "").lower():
-                out["queue"]["sabnzbd"].append(_condense_sab_slot(s))
+        async with sabnzbd_client() as sab:
+            sq = await sab.queue(limit=100)
+            for s in sq.get("slots", []) or []:
+                if needle in (s.get("filename") or "").lower():
+                    out["queue"]["sabnzbd"].append(_condense_sab_slot(s))
     except Exception as e:
         out["errors"]["sabnzbd"] = str(e)
 
@@ -608,43 +608,43 @@ async def media_library_stats() -> dict:
     out: dict[str, Any] = {"series": None, "movies": None, "sabnzbd": None, "errors": {}}
 
     try:
-        sonarr = await get_sonarr_client()
-        all_series = await sonarr.list_series()
-        s_queue = await sonarr.queue(page_size=1)
-        s_missing = await sonarr.missing(page_size=1)
-        out["series"] = {
-            "total": len(all_series),
-            "monitored": sum(1 for s in all_series if s.get("monitored")),
-            "queue": s_queue.get("totalRecords", 0),
-            "missing": s_missing.get("totalRecords", 0),
-        }
+        async with sonarr_client() as sonarr:
+            all_series = await sonarr.list_series()
+            s_queue = await sonarr.queue(page_size=1)
+            s_missing = await sonarr.missing(page_size=1)
+            out["series"] = {
+                "total": len(all_series),
+                "monitored": sum(1 for s in all_series if s.get("monitored")),
+                "queue": s_queue.get("totalRecords", 0),
+                "missing": s_missing.get("totalRecords", 0),
+            }
     except Exception as e:
         out["errors"]["sonarr"] = str(e)
 
     try:
-        radarr = await get_radarr_client()
-        all_movies = await radarr.list_movies()
-        r_queue = await radarr.queue(page_size=1)
-        r_missing = await radarr.missing(page_size=1)
-        out["movies"] = {
-            "total": len(all_movies),
-            "monitored": sum(1 for m in all_movies if m.get("monitored")),
-            "have_file": sum(1 for m in all_movies if m.get("hasFile")),
-            "queue": r_queue.get("totalRecords", 0),
-            "missing": r_missing.get("totalRecords", 0),
-        }
+        async with radarr_client() as radarr:
+            all_movies = await radarr.list_movies()
+            r_queue = await radarr.queue(page_size=1)
+            r_missing = await radarr.missing(page_size=1)
+            out["movies"] = {
+                "total": len(all_movies),
+                "monitored": sum(1 for m in all_movies if m.get("monitored")),
+                "have_file": sum(1 for m in all_movies if m.get("hasFile")),
+                "queue": r_queue.get("totalRecords", 0),
+                "missing": r_missing.get("totalRecords", 0),
+            }
     except Exception as e:
         out["errors"]["radarr"] = str(e)
 
     try:
-        sab = await get_sabnzbd_client()
-        q = await sab.queue(limit=1)
-        out["sabnzbd"] = {
-            "paused": q.get("paused"),
-            "speed": q.get("speed"),
-            "free_gb": _safe_float(q.get("diskspace1")),
-            "active_slots": q.get("noofslots", 0),
-        }
+        async with sabnzbd_client() as sab:
+            q = await sab.queue(limit=1)
+            out["sabnzbd"] = {
+                "paused": q.get("paused"),
+                "speed": q.get("speed"),
+                "free_gb": _safe_float(q.get("diskspace1")),
+                "active_slots": q.get("noofslots", 0),
+            }
     except Exception as e:
         out["errors"]["sabnzbd"] = str(e)
 
