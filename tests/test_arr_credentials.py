@@ -221,10 +221,11 @@ def test_rotation_never_closes_a_client_another_operation_still_holds():
     # on one client while another tool resolves a rotated key.
     async def scenario():
         slot = arr_base.ClientSlot(_FakeClient)
-        rotated, done = asyncio.Event(), asyncio.Event()
+        holding, rotated, done = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
         async def long_tool():
             async with slot.lease(_const(OLD)) as client:
+                holding.set()  # OLD is acquired before the rotation starts
                 await rotated.wait()
                 assert not client.closed  # still usable mid-operation
                 return client
@@ -236,7 +237,7 @@ def test_rotation_never_closes_a_client_another_operation_still_holds():
                 return client
 
         holder = asyncio.create_task(long_tool())
-        await asyncio.sleep(0)
+        await holding.wait()
         rotator = asyncio.create_task(rotating_tool())
         old = await holder
         assert old.closed  # closed by the holder's own exit, awaited to completion
