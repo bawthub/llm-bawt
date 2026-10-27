@@ -147,7 +147,10 @@ async def test_catalog_token_budgets():
     # TASK-1521: bots_profile_patch (CAS, private refusal and rollback stated
     # in-band; replaces hand-written curl PATCHes of other bots): 4,024 (+50).
     # TASK-1521: bots_profile_patch names the own-tags refusal: 4,027 (+3).
-    assert sum(descriptions) <= 4027, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1526: the image attach policy and opt-out on tasks_create, the
+    # linked turn's images on tasks_update: 4,058 (+31). Bots attach what
+    # they were shown instead of each task bot re-capturing it.
+    assert sum(descriptions) <= 4058, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -206,7 +209,9 @@ async def test_catalog_token_budgets():
     # policy: 15,001 (+107). Task images reach every bot on the task instead of
     # each one re-capturing them with Playwright.
     # TASK-1521: bots_profile_patch summary names the own-tags refusal: 15,004 (+3).
-    assert total <= 15004, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1526: the attach policy moved into the tasks_create/tasks_update
+    # summaries the model actually sees: 15,035 (+31).
+    assert total <= 15035, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

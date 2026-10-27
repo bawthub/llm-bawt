@@ -26,8 +26,9 @@ from .task_board_state import (
     _patch_error,
 )
 from .task_images import (
+    UNSUPPORTED as IMAGE_EDIT_UNSUPPORTED,
     ImageRefError,
-    image_urls_patch,
+    image_edit,
     linked_turn_images,
     newly_added,
     resolve_image_refs,
@@ -513,8 +514,9 @@ async def update_task(
                   Combines with status in the same update.
         add_image_urls: Images to attach: chat upload ids (ma_...) or upload
                   URLs. Unknown ids are refused. Already attached = no-op.
-        remove_image_urls: Images to detach, same forms. Missing = no-op. If
-                  the task's images change during the update, nothing is saved.
+        remove_image_urls: Images to detach, same forms. Missing = no-op.
+                  Only the change is sent, so images someone else attaches
+                  meanwhile are kept.
         attach_turn_images: With associate_current_turn, also attach the
                   images on the message that started this turn (default True;
                   listed in turnImagesAttached). False opts out.
@@ -567,24 +569,23 @@ async def update_task(
             body["agentBotId"] = bot_id
 
     turn_urls, turn_error = await linked_turn_images(associate_current_turn, attach_turn_images)
-    turn_attached: list[str] = []
+    edit = None
     if add_image_urls or remove_image_urls or turn_urls:
         try:
-            image_urls, before = await image_urls_patch(lambda ref: _api_get(f"/tasks/{ref}"), task_id,
-                                                        add_image_urls, remove_image_urls, turn_urls)
+            edit = await image_edit(lambda ref: _api_get(f"/tasks/{ref}"), task_id,
+                                    add_image_urls, remove_image_urls, turn_urls)
         except ImageRefError as error:
             return {"error": str(error)}
         except httpx.HTTPStatusError as error:
             return _http_error(error)
-        if image_urls is not None:
-            body["imageUrls"] = image_urls
-            turn_attached = newly_added([url for url in turn_urls if url in image_urls], before)
+        if edit is not None:
+            body.update(edit.body())
         elif not body and not associate_current_turn:
             return {"ok": True, "updated": [], "detail": "The task's images already match; nothing was written."}
 
     if not body:
         if associate_current_turn:
-            return _turn_images(await associate_task_to_current_turn(task_id), turn_attached, turn_error)
+            return _turn_images(await associate_task_to_current_turn(task_id), [], turn_error)
         return {"error": "No fields to update"}
 
     try:
@@ -595,18 +596,23 @@ async def update_task(
         )
         if isinstance(updated, dict):
             unconfirmed = [
-                state for state in (_FOCUS, _ARCHIVE)
+                f"{state.unsupported}; {state.name} was not changed" for state in (_FOCUS, _ARCHIVE)
                 if state.patch_key in body and state.row_key not in updated
             ]
+            skipped = {state.patch_key for state in (_FOCUS, _ARCHIVE) if state.row_key not in updated}
+            images_landed = edit is None or edit.landed(updated)
+            if not images_landed:
+                unconfirmed.append(IMAGE_EDIT_UNSUPPORTED)
+                skipped |= {"imageUrlsAdd", "imageUrlsRemove"}
+            turn_attached = [url for url in turn_urls if url in edit.add] if edit and images_landed else []
             if unconfirmed:
                 # An older BawtHub ignores the unknown field but applies the
                 # rest of the PATCH. Say exactly that instead of reporting OK.
-                skipped = {state.patch_key for state in unconfirmed}
+                applied = sorted(key for key in body if key not in skipped)
                 result = {
-                    "error": "; ".join(
-                        f"{state.unsupported}; {state.name} was not changed" for state in unconfirmed
-                    ) + ", the other fields were applied.",
-                    "updated": sorted(key for key in body if key not in skipped),
+                    "error": "; ".join(unconfirmed)
+                    + (", the other fields were applied." if applied else "."),
+                    "updated": applied,
                     "task": _compact_task(updated),
                 }
             else:

@@ -1,7 +1,8 @@
 """TASK-1526: tasks_create/tasks_update attach chat images to a task.
 
-BawtHub stores ``imageUrls`` and its PATCH replaces the whole array, so the
-tool reads, edits, re-reads and refuses a list that moved in between.
+An update sends ``imageUrlsAdd``/``imageUrlsRemove``, never the whole array:
+BawtHub applies them under the row lock (its taskImageEdits.pg.test.ts holds
+the race). An older BawtHub ignores them, and the tool says so.
 """
 
 from __future__ import annotations
@@ -37,23 +38,36 @@ def assets(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
 
 
 class FakeTasks:
-    """Task API double: GETs return successive image lists, PATCH/POST are recorded."""
+    """Task API double over one stored image list, applying edits as BawtHub does.
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, *lists: list[str]) -> None:
-        self.lists = list(lists)
+    ``old_server`` answers like a BawtHub release without image edits: the
+    edit fields are ignored and the rest of the PATCH applies.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, urls: list[str], *, old_server: bool = False) -> None:
+        self.urls = list(urls)
+        self.old_server = old_server
         self.patches: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
         monkeypatch.setattr(task_tools, "_api_get", self.get)
         monkeypatch.setattr(task_tools, "_api_patch", self.patch)
         monkeypatch.setattr(task_tools, "_api_post", self.post)
 
+    def _task(self, **fields: Any) -> dict[str, Any]:
+        return {"id": "task-id", "shortId": "TASK-9", "title": "t", "status": "QUEUED", **fields,
+                "imageUrls": list(self.urls)}
+
     async def get(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        urls = self.lists.pop(0) if len(self.lists) > 1 else self.lists[0]
-        return {"id": "task-id", "shortId": "TASK-9", "title": "t", "status": "QUEUED", "imageUrls": urls}
+        return self._task()
 
     async def patch(self, path: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
         self.patches.append(json)
-        return {"id": "task-id", "shortId": "TASK-9", "title": "t", "status": "QUEUED", **json}
+        if not self.old_server:
+            removed = set(json.get("imageUrlsRemove", []))
+            self.urls = [url for url in self.urls if url not in removed]
+            self.urls += [url for url in json.get("imageUrlsAdd", []) if url not in self.urls]
+        rest = {key: value for key, value in json.items() if not key.startswith("imageUrls")}
+        return self._task(**rest)
 
     async def post(self, path: str, json: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
         self.posts.append(json)
@@ -117,8 +131,9 @@ def test_add_appends_to_the_current_list(monkeypatch: pytest.MonkeyPatch, assets
 
     result = _run(task_tools.update_task("TASK-9", add_image_urls=[ID], bot_id="vex"))
 
-    assert api.patches == [{"imageUrls": [UI_UPLOAD, STORED]}]
-    assert result["ok"] is True and result["updated"] == ["imageUrls"]
+    assert api.patches == [{"imageUrlsAdd": [STORED]}]
+    assert api.urls == [UI_UPLOAD, STORED]
+    assert result["ok"] is True and result["updated"] == ["imageUrlsAdd"]
 
 
 def test_add_and_remove_are_idempotent(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
@@ -139,18 +154,29 @@ def test_remove_matches_any_form_even_for_a_deleted_upload(monkeypatch: pytest.M
 
     result = _run(task_tools.update_task("TASK-9", remove_image_urls=[f"/v1/uploads/{ID}", "blob:legacy"]))
 
-    assert api.patches == [{"imageUrls": [STORED_OTHER]}]
+    # Removes name the entries exactly as stored: that is what BawtHub matches.
+    assert api.patches == [{"imageUrlsRemove": [STORED, "blob:legacy"]}]
+    assert api.urls == [STORED_OTHER]
     assert result["ok"] is True
 
 
-def test_list_changed_before_write_refuses_lost_update(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
-    # First read [], then a concurrent UI upload lands before the write.
-    api = FakeTasks(monkeypatch, [], [UI_UPLOAD])
+def test_a_concurrent_upload_is_kept_because_only_the_edit_is_sent(
+        monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
+    api = FakeTasks(monkeypatch, [])
+    real_get = api.get
+
+    async def read_then_ui_upload(path: str, **kwargs: Any) -> dict[str, Any]:
+        task = await real_get(path, **kwargs)
+        api.urls.append(UI_UPLOAD)  # lands after the tool read the list
+        return task
+
+    monkeypatch.setattr(task_tools, "_api_get", read_then_ui_upload)
 
     result = _run(task_tools.update_task("TASK-9", add_image_urls=[ID], title="new"))
 
-    assert "nothing was saved" in result["error"]
-    assert api.patches == []
+    assert "imageUrls" not in api.patches[0]
+    assert api.urls == [UI_UPLOAD, STORED]
+    assert result["ok"] is True
 
 
 def test_images_travel_with_other_fields(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
@@ -158,7 +184,31 @@ def test_images_travel_with_other_fields(monkeypatch: pytest.MonkeyPatch, assets
 
     _run(task_tools.update_task("TASK-9", title="new", add_image_urls=[ID]))
 
-    assert api.patches == [{"title": "new", "imageUrls": [STORED]}]
+    assert api.patches == [{"title": "new", "imageUrlsAdd": [STORED]}]
+
+
+def test_an_older_bawthub_is_reported_not_called_ok(monkeypatch: pytest.MonkeyPatch, assets: dict) -> None:
+    api = FakeTasks(monkeypatch, [STORED_OTHER], old_server=True)
+    turn = Turn(monkeypatch, [_image(ID)])
+
+    mixed = _run(task_tools.update_task("TASK-9", title="new", remove_image_urls=[OTHER],
+                                        associate_current_turn=True))
+    alone = _run(task_tools.update_task("TASK-9", add_image_urls=[ID], attach_turn_images=False))
+
+    assert "images were not changed" in mixed["error"] and "other fields were applied" in mixed["error"]
+    assert mixed["updated"] == ["title"]
+    assert "turnImagesAttached" not in mixed
+    assert turn.associated == ["TASK-9"]
+    assert "images were not changed" in alone["error"] and "other fields" not in alone["error"]
+    assert alone["updated"] == []
+    assert api.urls == [STORED_OTHER]
+
+
+@pytest.mark.parametrize("ref", [f"https://example.com/v1/uploads/{ID}",
+                                 f"https://evil.example/api/chat/uploads/{ID}"])
+def test_an_upload_path_on_a_foreign_host_is_refused(ref: str) -> None:
+    with pytest.raises(task_images.ImageRefError):
+        task_images.parse_image_ref(ref)
 
 
 class Turn:
@@ -194,7 +244,8 @@ def test_linking_attaches_the_trigger_images(monkeypatch: pytest.MonkeyPatch, as
     result = _run(task_tools.update_task("TASK-9", associate_current_turn=True))
 
     assert turn.reads == [("vex", "m-1")]
-    assert api.patches == [{"imageUrls": [UI_UPLOAD, STORED, STORED_OTHER]}]
+    assert api.patches == [{"imageUrlsAdd": [STORED, STORED_OTHER]}]
+    assert api.urls == [UI_UPLOAD, STORED, STORED_OTHER]
     assert result["turnImagesAttached"] == [STORED, STORED_OTHER]
     assert turn.associated == ["TASK-9"]
 

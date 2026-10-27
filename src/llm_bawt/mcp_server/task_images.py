@@ -7,10 +7,10 @@ chat upload is stored as ``/api/chat/uploads/<id>``, the form BawtHub's own
 upload proxy and ``proxifyUploadUrl`` produce. Images already uploaded through
 BawtHub's task UI (``/api/uploads/serve/…``) are kept as they are.
 
-BawtHub's PATCH replaces the whole array, so an update reads the list, edits
-it and re-reads it just before writing. A list that changed in between is a
-conflict and nothing is written. The window between that re-read and the
-PATCH is not closed: BawtHub has no compare-and-set for ``imageUrls``.
+An update never sends the whole array: it sends ``imageUrlsAdd`` and
+``imageUrlsRemove``, which BawtHub applies to the list it holds under the task
+row lock, so an image another writer adds meanwhile is kept. An older BawtHub
+ignores those fields; the tool sees that in the returned list and says so.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
@@ -38,8 +39,13 @@ class ImageRefError(ValueError):
 
 
 def _first_party(host: str) -> bool:
+    """BawtHub's public domain, or a single-label service name (``app``, ``localhost``).
+
+    A link on any other host is someone else's page, even when its path looks
+    like an upload, so it is refused rather than mapped to one of ours.
+    """
     host = host.lower()
-    return host == _PRODUCT_DOMAIN or host.endswith(f".{_PRODUCT_DOMAIN}")
+    return "." not in host or host == _PRODUCT_DOMAIN or host.endswith(f".{_PRODUCT_DOMAIN}")
 
 
 def parse_image_ref(ref: Any) -> tuple[str | None, str]:
@@ -55,14 +61,13 @@ def parse_image_ref(ref: Any) -> tuple[str | None, str]:
     parts = urlsplit(value)
     if parts.scheme not in ("", "http", "https") or (parts.scheme and not parts.netloc):
         raise ImageRefError(f"not an upload id or upload URL: {ref!r}")
+    if parts.netloc and not _first_party(parts.hostname or ""):
+        raise ImageRefError(f"not a BawtHub upload URL: {ref!r}")
     match = _UPLOAD_PATH.fullmatch(parts.path)
     if match:
-        # The id is checked against the upload store, so the host doesn't matter.
         asset_id = match.group(1)
         return asset_id, f"{PUBLIC_UPLOADS_PREFIX}/{asset_id}"
     if parts.path.startswith(_TASK_UPLOAD_PREFIX) and ".." not in parts.path:
-        if parts.netloc and not _first_party(parts.hostname or ""):
-            raise ImageRefError(f"not a BawtHub upload URL: {ref!r}")
         return None, parts.path
     raise ImageRefError(f"not an upload id or upload URL: {ref!r}")
 
@@ -100,18 +105,38 @@ async def resolve_image_refs(refs: Iterable[Any]) -> list[str]:
     return _unique(url for _, url in parsed)
 
 
-def edit_image_urls(current: list[str], add: list[str], remove: Iterable[Any]) -> list[str]:
-    """``current`` plus ``add`` minus ``remove``, order kept; repeating an edit changes nothing.
+@dataclass(frozen=True)
+class ImageEdit:
+    """What to send BawtHub: stored URLs to append and stored entries to drop."""
 
-    ``add`` holds stored URLs (``resolve_image_refs``). ``remove`` may name an
-    upload in any form, or repeat an entry exactly as stored; removing an
-    upload that no longer exists is allowed.
+    add: list[str]
+    remove: list[str]
+
+    def body(self) -> dict[str, list[str]]:
+        return {key: urls for key, urls in (("imageUrlsAdd", self.add), ("imageUrlsRemove", self.remove)) if urls}
+
+    def landed(self, task: Any) -> bool:
+        """True when the returned task holds every add and none of the removes."""
+        urls = task.get("imageUrls") if isinstance(task, dict) else None
+        if not isinstance(urls, list):
+            return False
+        return all(url in urls for url in self.add) and not any(url in urls for url in self.remove)
+
+
+def plan_image_edit(current: list[str], add: list[str], remove: Iterable[Any]) -> ImageEdit | None:
+    """The edit that takes ``current`` to ``current + add - remove``; None if it is already there.
+
+    ``add`` holds stored URLs (``resolve_image_refs``); one already attached in
+    any form is skipped. ``remove`` may name an upload in any form, or repeat an
+    entry exactly as stored; removing an upload that no longer exists is
+    allowed. Removes are the entries exactly as stored, which is what BawtHub
+    matches on.
     """
     dropped = {_key(ref) if isinstance(ref, str) else ref for ref in remove}
-    seen: dict[str, str] = {}
-    for url in [*current, *add]:
-        seen.setdefault(_key(url), url)
-    return [url for key, url in seen.items() if key not in dropped and url not in dropped]
+    gone = [url for url in current if url in dropped or _key(url) in dropped]
+    had = {_key(url) for url in current}
+    new = _unique(url for url in add if _key(url) not in had and _key(url) not in dropped)
+    return ImageEdit(add=new, remove=_unique(gone)) if new or gone else None
 
 
 def _trigger_attachments(bot_id: str, message_id: str) -> list[dict[str, Any]]:
@@ -162,35 +187,28 @@ async def linked_turn_images(associate: bool, attach: bool) -> tuple[list[str], 
         return [], f"could not read this turn's images: {error}"
 
 
-class ImageListChanged(ImageRefError):
-    """The task's image list changed between the read and the write."""
-
-
 def newly_added(urls: Iterable[str], before: Iterable[str]) -> list[str]:
     """The ``urls`` that weren't already in ``before`` (compared by upload)."""
     had = {_key(url) for url in before}
     return [url for url in urls if _key(url) not in had]
 
 
-async def image_urls_patch(read_task, task_id: str, add_refs: list[Any] | None,
-                           remove_refs: list[Any] | None,
-                           turn_urls: Iterable[str] = ()) -> tuple[list[str] | None, list[str]]:
-    """``(imageUrls for the PATCH or None when unchanged, the list as read)``.
+#: Said when the PATCH came back without the edit: a BawtHub release older than TASK-1526.
+UNSUPPORTED = "BawtHub doesn't support image edits on update yet; the images were not changed"
+
+
+async def image_edit(read_task, task_id: str, add_refs: list[Any] | None,
+                     remove_refs: list[Any] | None, turn_urls: Iterable[str] = ()) -> ImageEdit | None:
+    """The image edit for one update, or None when the task already matches.
 
     ``turn_urls`` are already-checked stored URLs from the linked turn.
-    ``read_task`` is the task GET. The list is re-read just before returning;
-    if it changed since the first read, ImageListChanged is raised and the
-    caller writes nothing.
+    ``read_task`` is the task GET; the list it returns only decides what is
+    already there. BawtHub applies the edit to the locked row, so a list that
+    moves after this read is never overwritten.
     """
     add = [*await resolve_image_refs(add_refs or []), *turn_urls]
     current = _image_urls(await read_task(task_id))
-    wanted = edit_image_urls(current, add, remove_refs or [])
-    if wanted == current:
-        return None, current
-    if _image_urls(await read_task(task_id)) != current:
-        raise ImageListChanged("the task's images changed while this update was prepared; "
-                               "nothing was saved, re-read and retry")
-    return wanted, current
+    return plan_image_edit(current, add, remove_refs or [])
 
 
 def _image_urls(task: Any) -> list[str]:
