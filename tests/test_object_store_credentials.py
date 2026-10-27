@@ -246,6 +246,101 @@ def test_backend_refuses_every_operation_after_a_disconnect(forms, env, built):
     assert len(built) == 1  # no client was ever built from the env keys
 
 
+def test_a_reader_never_pairs_a_rebuilt_client_with_its_stale_config():
+    """A reader holding config A, overlapping a rebuild for B, uses A's client.
+
+    The writer pauses right after it publishes anything holding client B. The
+    reader (which read config A) then runs until it finishes or waits on the
+    lock, and only then is the writer released. Every call must send its
+    request with the bucket its own client was built for.
+    """
+    import threading
+
+    old_cfg = S3Config("https://old.example", "region", "bucket-A", "access", "old-secret")
+    new_cfg = S3Config("https://new.example", "region", "bucket-B", "access", "new-secret")
+    reader_has_old_cfg = threading.Event()
+    release_reader = threading.Event()
+    published_new = threading.Event()
+    release_writer = threading.Event()
+    reader_done_or_waiting = threading.Event()
+    seen: list[tuple[str, str]] = []
+    errors: list[BaseException] = []
+
+    class Source:
+        cfg = old_cfg
+
+        def current(self):
+            if threading.current_thread().name == "reader":
+                reader_has_old_cfg.set()
+                assert release_reader.wait(5)  # timing-ok: thread hang guard
+                return old_cfg
+            return self.cfg
+
+    class FakeClient:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def head_object(self, *, Bucket, Key):
+            seen.append((self.cfg.bucket, Bucket))
+
+    def holds_new_client(value):
+        values = value if isinstance(value, tuple) else (value,)
+        return any(isinstance(v, FakeClient) and v.cfg == new_cfg for v in values)
+
+    class PausingBackend(S3BlobBackend):
+        def __setattr__(self, key, value):
+            object.__setattr__(self, key, value)
+            if threading.current_thread().name == "writer" and holds_new_client(value):
+                published_new.set()
+                assert release_writer.wait(5)  # timing-ok: thread hang guard
+
+    class WatchedLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "reader":
+                reader_done_or_waiting.set()
+            self._lock.acquire()
+
+        def __exit__(self, *exc):
+            self._lock.release()
+
+    source = Source()
+    backend = PausingBackend(source)
+    backend._build_client = lambda cfg: FakeClient(cfg)
+    backend.exists("initial")
+    backend._client_lock = WatchedLock()
+
+    def read():
+        try:
+            backend.exists("read")
+        except BaseException as exc:  # noqa: BLE001 — surfaced by the assert below
+            errors.append(exc)
+        finally:
+            reader_done_or_waiting.set()
+
+    reader = threading.Thread(target=read, name="reader")
+    writer = threading.Thread(target=lambda: backend.exists("write"), name="writer")
+    reader.start()
+    try:
+        assert reader_has_old_cfg.wait(5)  # timing-ok: thread hang guard
+        source.cfg = new_cfg
+        writer.start()
+        assert published_new.wait(5)  # timing-ok: thread hang guard
+        release_reader.set()
+        assert reader_done_or_waiting.wait(5)  # timing-ok: thread hang guard
+    finally:
+        release_reader.set()
+        release_writer.set()
+        reader.join(5)  # timing-ok: thread hang guard
+        if writer.ident is not None:
+            writer.join(5)  # timing-ok: thread hang guard
+    assert not reader.is_alive() and not writer.is_alive()
+    assert not errors
+    assert len(seen) == 3 and all(client == requested for client, requested in seen), seen
+
+
 def test_backend_with_a_fixed_config_builds_once(built):
     backend = S3BlobBackend(STORED)
     backend.get("a")

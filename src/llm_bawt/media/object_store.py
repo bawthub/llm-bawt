@@ -64,7 +64,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional, Protocol
+from typing import Any, Literal, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -539,8 +539,9 @@ class S3BlobBackend:
             key_prefix = key_prefix + "/"
         self.key_prefix = key_prefix
         self._client_lock = threading.Lock()
-        self._client = None
-        self._client_cfg: S3Config | None = None
+        # (client, the config it was built from), published as one tuple so
+        # a reader can never see a client paired with another config.
+        self._pair: tuple[Any, S3Config] | None = None
 
     @property
     def cfg(self) -> S3Config:
@@ -563,16 +564,20 @@ class S3BlobBackend:
 
         A fixed config builds once (double-checked locking). A source's
         config is re-read each call and the client is rebuilt when it differs
-        from the one the current client was built with.
+        from the one the current client was built with. The pair is read once
+        and published as one tuple, so a concurrent rebuild can't hand this
+        caller a new client with its old config.
         """
         cfg = self.cfg
-        if self._client is not None and (self._source is None or cfg == self._client_cfg):
-            return self._client, cfg
+        pair = self._pair
+        if pair is not None and (self._source is None or pair[1] == cfg):
+            return pair
         with self._client_lock:
-            if self._client is None or (self._source is not None and cfg != self._client_cfg):
-                self._client = self._build_client(cfg)
-                self._client_cfg = cfg
-            return self._client, cfg
+            pair = self._pair
+            if pair is None or (self._source is not None and pair[1] != cfg):
+                pair = (self._build_client(cfg), cfg)
+                self._pair = pair
+            return pair
 
     def _build_client(self, cfg: S3Config):
         # Local import — keeps boto3 off the hot path for processes that

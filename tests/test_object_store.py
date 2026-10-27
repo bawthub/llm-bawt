@@ -91,7 +91,7 @@ def s3(s3_cfg: S3Config):
 
     with mock_aws():
         backend = S3BlobBackend(s3_cfg, key_prefix="blobs/")
-        backend._client = boto3.client("s3", region_name="us-east-1")
+        backend._pair = (boto3.client("s3", region_name="us-east-1"), s3_cfg)
         backend.client.create_bucket(Bucket=s3_cfg.bucket)
         yield backend
 
@@ -253,10 +253,10 @@ class TestS3BlobBackend:
         that should trigger construction.
         """
         backend = S3BlobBackend(s3_cfg, key_prefix="blobs/")
-        assert backend._client is None
+        assert backend._pair is None
         with mock_aws():
             _ = backend.client  # first access builds the client
-        assert backend._client is not None
+        assert backend._pair is not None
 
 
 class TestS3BlobBackendErrorMapping:
@@ -270,10 +270,10 @@ class TestS3BlobBackendErrorMapping:
         backend = S3BlobBackend(s3_cfg, key_prefix="blobs/")
         import boto3
         with mock_aws():
-            backend._client = boto3.client("s3", region_name="us-east-1")
+            backend._pair = (boto3.client("s3", region_name="us-east-1"), s3_cfg)
             backend.client.create_bucket(Bucket=s3_cfg.bucket)
             with patch.object(
-                backend._client,
+                backend.client,
                 "get_object",
                 side_effect=EndpointConnectionError(endpoint_url="http://nope"),
             ):
@@ -292,9 +292,9 @@ class TestS3BlobBackendErrorMapping:
         )
         import boto3
         with mock_aws():
-            backend._client = boto3.client("s3", region_name="us-east-1")
+            backend._pair = (boto3.client("s3", region_name="us-east-1"), s3_cfg)
             backend.client.create_bucket(Bucket=s3_cfg.bucket)
-            with patch.object(backend._client, "get_object", side_effect=boom):
+            with patch.object(backend.client, "get_object", side_effect=boom):
                 with pytest.raises(BlobBackendUnavailable):
                     backend.get("any/key")
 
@@ -311,9 +311,9 @@ class TestS3BlobBackendErrorMapping:
         )
         import boto3
         with mock_aws():
-            backend._client = boto3.client("s3", region_name="us-east-1")
+            backend._pair = (boto3.client("s3", region_name="us-east-1"), s3_cfg)
             backend.client.create_bucket(Bucket=s3_cfg.bucket)
-            with patch.object(backend._client, "get_object", side_effect=not_found):
+            with patch.object(backend.client, "get_object", side_effect=not_found):
                 with pytest.raises(BlobNotFound):
                     backend.get("any/key")
 
