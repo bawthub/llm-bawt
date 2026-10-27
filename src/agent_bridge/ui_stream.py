@@ -26,6 +26,8 @@ import logging
 import secrets
 from typing import Any, AsyncIterator, Iterable
 
+from redis.exceptions import ResponseError
+
 from .publisher import GLOBAL_CONFIG_STREAM, UNIFIED_EVENTS_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,8 @@ UI_CURSOR_TTL_S = 1800
 # How often an idle connection confirms it still owns the cursor (and refreshes
 # the TTL). A superseded idle connection exits within this interval.
 OWNER_CHECK_INTERVAL_S = 5.0
-# Consumer-group prefix of the retired per-window groups, swept by the app.
+# Consumer-group prefix of the retired per-window groups. Each is destroyed by
+# its own window once migrated into the cursor; nothing sweeps them.
 LEGACY_UI_GROUP_PREFIX = "ui:"
 
 READ_COUNT = 100
@@ -171,19 +174,35 @@ class UiStreamReader:
                 logger.debug("Failed to retire group %s on %s", self._legacy_group, sk)
 
     async def _legacy_resume_point(self, stream_key: str) -> str | None:
-        """Where the retired ``ui:{consumer_id}`` group would have resumed."""
+        """Where the retired ``ui:{consumer_id}`` group would have resumed.
+
+        ``None`` only when the stream or the group is proven absent. Any other
+        failure raises, so ``claim`` fails closed: nothing is seeded and the
+        group is kept, and the next connect retries the migration.
+        """
         try:
             groups = await self._redis.xinfo_groups(stream_key)
-        except Exception:
-            return None  # no such stream yet
+        except ResponseError as exc:
+            if _is_absent(exc):
+                return None
+            raise
         for group in groups:
             if group.get("name") != self._legacy_group:
                 continue
             if int(group.get("pending") or 0):
-                summary = await self._redis.xpending(stream_key, self._legacy_group)
+                try:
+                    summary = await self._redis.xpending(stream_key, self._legacy_group)
+                except ResponseError as exc:
+                    if _is_absent(exc):
+                        return None
+                    raise
                 oldest = (summary or {}).get("min")
-                if oldest:
-                    return stream_id_before(oldest)
+                if not oldest:
+                    raise RuntimeError(
+                        f"legacy group {self._legacy_group} on {stream_key} reports pending "
+                        "entries without an oldest id"
+                    )
+                return stream_id_before(oldest)
             return group.get("last-delivered-id") or _EMPTY_STREAM_ID
         return None
 
@@ -263,6 +282,12 @@ class UiStreamReader:
         if not self.superseded:
             logger.info("UI stream %s superseded by a newer connection", self.cursor_key)
         self.superseded = True
+
+
+def _is_absent(exc: ResponseError) -> bool:
+    """Redis proved the stream (``no such key``) or group (``NOGROUP``) absent."""
+    msg = str(exc)
+    return "no such key" in msg.lower() or msg.startswith("NOGROUP")
 
 
 def _pairs(cursors: dict[str, str]) -> list[str]:

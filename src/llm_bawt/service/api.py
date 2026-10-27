@@ -178,22 +178,9 @@ async def lifespan(app):
             # finalize_response().  The active chat.send path persists via
             # finalize_response() and does not need this consumer.
 
-            # Start background task to clean up stale consumer groups
-            async def _cleanup_stale_groups():
-                """Periodically destroy idle ui:* consumer groups."""
-                while True:
-                    await asyncio.sleep(300)
-                    try:
-                        streams = await redis_subscriber.list_unified_streams()
-                        total = 0
-                        for stream_key in streams:
-                            total += await redis_subscriber.cleanup_stale_groups(stream_key)
-                        if total:
-                            log.info("Cleaned up %d stale consumer groups", total)
-                    except Exception:
-                        log.debug("Stale group cleanup error", exc_info=True)
-
-            service._group_cleanup_task = asyncio.create_task(_cleanup_stale_groups())
+            # No ui:* consumer-group sweep (TASK-1582): UI windows read by
+            # cursor, and a retired ui:* group is destroyed only by its own
+            # window once its state is migrated (agent_bridge.ui_stream).
 
             # Start persistence consumer for tool events → Postgres.
             # TASK-286: also accumulates assistant text deltas per turn so a
@@ -415,7 +402,6 @@ async def lifespan(app):
 
 
 BACKGROUND_TASK_ATTRIBUTES = (
-    "_group_cleanup_task",
     "_tool_persist_task",
     "_mcp_continuation_task",
     "_ops_receipt_task",

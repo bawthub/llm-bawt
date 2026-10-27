@@ -19,12 +19,7 @@ from .command_publisher import CommandPublisherMixin
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
 from .steer_contract import FRAMED_MESSAGE_FIELD, INTERRUPT_FRAME_FIELD, INTERRUPT_ITEM_FIELD
-from .ui_stream import (
-    LEGACY_UI_GROUP_PREFIX,
-    UI_CURSOR_TTL_S,
-    UiStreamReader,
-    unified_stream_keys,
-)
+from .ui_stream import LEGACY_UI_GROUP_PREFIX, UiStreamReader, unified_stream_keys
 from .publisher import (
     COMMANDS_STREAM,
     EVENTS_STREAM_PREFIX,
@@ -520,7 +515,11 @@ class RedisSubscriber(CommandPublisherMixin):
         *,
         include_global: bool = False,
     ) -> UiStreamReader:
-        """Cursor reader for one SSE connection of a UI window (TASK-1582)."""
+        """Cursor reader for one SSE connection of a UI window (TASK-1582).
+
+        Replaces the per-window ``ui:*`` consumer groups. Nothing sweeps those:
+        a window retires its own group once its state is migrated.
+        """
         bot_ids = [bot_id] if isinstance(bot_id, str) else list(bot_id)
         keys = unified_stream_keys(bot_ids, user_id, include_global=include_global)
         return UiStreamReader(self._redis, consumer_id, keys)
@@ -736,49 +735,24 @@ class RedisSubscriber(CommandPublisherMixin):
             logger.exception("turn_text_offset read failed for %s", stream_key)
         return None
 
-    async def cleanup_stale_groups(
+    async def ensure_consumer_group(
         self,
         stream_key: str,
-        *,
-        max_idle_ms: int = UI_CURSOR_TTL_S * 1000,
-    ) -> int:
-        """Destroy retired per-window ``ui:*`` consumer groups (TASK-1582).
+        group_name: str,
+    ) -> None:
+        """Idempotent XGROUP CREATE — creates the group starting from latest.
 
-        UI fan-out no longer reads groups (see ``ui_stream``). A window that
-        reconnects migrates its own group into its cursor and destroys it; this
-        sweep removes the rest once idle past the cursor's resume window,
-        pending entries or not. Groups of other consumers (``persist:tools``,
-        bridges) are never touched. Returns the number of groups destroyed.
+        Refuses ``ui:*`` names: the per-window groups are retired, and that set
+        must not grow again (TASK-1582).
         """
-        destroyed = 0
+        if group_name.startswith(LEGACY_UI_GROUP_PREFIX):
+            raise ValueError(f"refusing to create retired UI consumer group {group_name!r}")
         try:
-            groups = await self._redis.xinfo_groups(stream_key)
+            await self._redis.xgroup_create(
+                stream_key, group_name, id="$", mkstream=True,
+            )
         except Exception:
-            return 0
-
-        for group in groups:
-            name = group.get("name", "")
-            if not name.startswith(LEGACY_UI_GROUP_PREFIX):
-                continue
-            consumers = group.get("consumers", 0)
-            # Check consumer idle time
-            try:
-                consumer_info = await self._redis.xinfo_consumers(stream_key, name)
-                all_idle = all(
-                    (c.get("idle", 0) > max_idle_ms) for c in consumer_info
-                ) if consumer_info else (consumers == 0)
-            except Exception:
-                all_idle = consumers == 0
-
-            if all_idle:
-                try:
-                    await self._redis.xgroup_destroy(stream_key, name)
-                    destroyed += 1
-                    logger.debug("Destroyed stale consumer group %s on %s", name, stream_key)
-                except Exception:
-                    logger.debug("Failed to destroy group %s on %s", name, stream_key)
-
-        return destroyed
+            pass  # group already exists
 
     async def drain_tool_events(
         self,

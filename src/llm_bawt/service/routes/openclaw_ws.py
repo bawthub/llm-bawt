@@ -112,33 +112,36 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
     reclaims it. Reconnects clean up instead of building up.
     """
     sub = RedisSubscriber(redis_url)
-    await sub.connect()
-    # Claim the cursor BEFORE announcing "hello". A stream without a stored
-    # cursor is pinned to its current tail, so every event published from this
-    # point on is delivered. A downstream consumer (e.g. the bawthub chat TTS
-    # driver) can therefore treat "hello" as a real "you are subscribed, safe to
-    # fire a turn" signal — closing the race where a turn published between
-    # connect and subscribe produced no audio.
-    reader = sub.ui_stream(bot_ids, user_id, consumer_id, include_global=True)
-    await reader.claim()
-    yield _sse(
-        "hello",
-        {
-            "bot_ids": bot_ids,
-            "user_id": user_id,
-            "consumer_id": consumer_id,
-            "mode": "unified" if bot_ids else "config-only",
-            "connected": True,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-
-    # Named heartbeat event (not an SSE ``: comment``): EventSource never
-    # surfaces comments, so only a named event lets the browser's watchdog
-    # tell a live-but-quiet stream from a silently dead one (a proxy hop that
-    # keeps the client socket open after the upstream died).
-    last_ping = asyncio.get_running_loop().time()
     try:
+        await sub.connect()
+        # Claim the cursor BEFORE announcing "hello". A stream without a stored
+        # cursor resumes from its legacy group or is pinned to its current tail,
+        # so every event published from this point on is delivered. A
+        # downstream consumer (e.g. the bawthub chat TTS driver) can therefore
+        # treat "hello" as a real "you are subscribed, safe to fire a turn"
+        # signal — closing the race where a turn published between connect and
+        # subscribe produced no audio. A failed claim fails closed: no hello,
+        # an error frame and the subscriber closed; the client reconnects and
+        # the next claim retries the migration.
+        reader = sub.ui_stream(bot_ids, user_id, consumer_id, include_global=True)
+        await reader.claim()
+        yield _sse(
+            "hello",
+            {
+                "bot_ids": bot_ids,
+                "user_id": user_id,
+                "consumer_id": consumer_id,
+                "mode": "unified" if bot_ids else "config-only",
+                "connected": True,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+        # Named heartbeat event (not an SSE ``: comment``): EventSource never
+        # surfaces comments, so only a named event lets the browser's watchdog
+        # tell a live-but-quiet stream from a silently dead one (a proxy hop
+        # that keeps the client socket open after the upstream died).
+        last_ping = asyncio.get_running_loop().time()
         async for event_data in reader.events(timeout_s=86400):
             if event_data is not None:
                 replayed = event_data.pop("_replayed", False)
