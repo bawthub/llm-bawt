@@ -75,8 +75,10 @@ async def providers_health():
             try:
                 h = a.health()
             except Exception as e:  # noqa: BLE001 — one bad adapter must not hide the rest
+                # Log the text; the response gets the type only, since a DB
+                # error names the DB host and user (TASK-1561).
                 logger.warning("health probe failed for %s: %s", a.id, e)
-                h = {"state": "unknown", "detail": str(e)[:200]}
+                h = {"state": "unknown", "detail": f"health probe failed ({type(e).__name__})"}
             out.append({"id": a.id, "label": a.label, **h})
         return out
 

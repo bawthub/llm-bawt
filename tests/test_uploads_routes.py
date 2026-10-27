@@ -619,3 +619,21 @@ def test_delete_file_asset(client: TestClient) -> None:
     aid = resp.json()["asset_id"]
     assert client.delete(f"/v1/uploads/{aid}", headers={"X-Entity-Id": "nick"}).status_code == 204
     assert client.get(f"/v1/uploads/{aid}").status_code == 404
+
+
+def test_post_unexpected_error_does_not_echo_its_text(
+    client: TestClient, media_store: MediaStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DB error names its host and user; the 500 body must not (TASK-1561)."""
+    leak = 'connection to server at "postgres" (192.0.2.7) failed for user "tenant_user"'
+
+    def _fail(**_kwargs: Any) -> None:
+        raise RuntimeError(leak)
+
+    monkeypatch.setattr(media_store, "upload", _fail)
+    resp = client.post(
+        "/v1/uploads", headers={"X-Entity-Id": "user-1"}, files={"file": ("a.txt", b"hi", "text/plain")}
+    )
+
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": "upload failed (RuntimeError); see the app log"}

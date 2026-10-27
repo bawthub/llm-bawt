@@ -377,8 +377,12 @@ async def upload_asset(
             detail="Media storage backend unavailable; try again shortly",
         )
     except Exception as e:
+        # The text of an unexpected error can name the DB host and user
+        # (psycopg2 connect errors do), so it goes to the log only (TASK-1561).
         logger.exception("MediaStore.upload failed")
-        raise HTTPException(status_code=500, detail=f"upload failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"upload failed ({type(e).__name__}); see the app log"
+        )
 
     return JSONResponse(asset_to_upload_response_dict(asset))
 

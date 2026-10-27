@@ -197,3 +197,28 @@ def test_model_discovery_uses_credential_store_key(monkeypatch) -> None:
 
     assert provider.fetch() == [{"id": "model-1", "description": "Model One"}]
     assert seen == ["stored-key"]
+
+
+def test_providers_health_does_not_echo_a_probe_error(monkeypatch) -> None:
+    """A failing probe reports its type only; its text can name the DB (TASK-1561)."""
+    leak = 'connection to server at "postgres" (192.0.2.7) failed for user "tenant_user"'
+
+    class _Broken:
+        id = "broken"
+        label = "Broken"
+
+        def health(self):
+            raise RuntimeError(leak)
+
+    monkeypatch.setattr(provider_routes, "get_service", lambda: SimpleNamespace(config=None))
+    monkeypatch.setattr(provider_routes, "all_adapters", lambda _config: [_Broken()])
+    app = FastAPI()
+    app.include_router(provider_routes.router)
+
+    response = TestClient(app).get("/v1/providers/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"providers": [{
+        "id": "broken", "label": "Broken", "state": "unknown",
+        "detail": "health probe failed (RuntimeError)",
+    }]}
