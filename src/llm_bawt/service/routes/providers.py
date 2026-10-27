@@ -11,12 +11,12 @@ event loop isn't blocked.
 from __future__ import annotations
 
 import logging
-import os
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from .. import bridge_gate
 from ..dependencies import get_service
 from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
 from ..providers.github import GitHubAdapter, GitHubConfigError
@@ -201,12 +201,10 @@ async def openrouter_api_key(request: Request):
     The claude-code bridge proxy adapter calls this instead of reading env
     vars — the DB-backed CredentialStore is the sole source of truth. Static
     key, so no refresh chain; ``expires_at`` is always null. Same trust model
-    as the Claude/ChatGPT brokers above: internal network only, optional
-    ``X-Bridge-Token`` defense in depth.
+    as the Claude/ChatGPT brokers above: internal network plus the
+    ``X-Bridge-Token`` broker gate.
     """
-    expected = os.getenv("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if expected and request.headers.get("X-Bridge-Token") != expected:
-        raise HTTPException(status_code=401, detail="bad bridge token")
+    bridge_gate.check(request, bridge_gate.BROKER)
 
     adapter = _adapter_or_404("openrouter")
     key = await run_in_threadpool(adapter.api_key)
@@ -235,14 +233,11 @@ async def claude_access_token(
     401 it supplies ``force=true`` and ``rejected_token_sha256`` so an already
     rotated token is reused. The app is the SOLE refresher of the rotate-on-use
     chain — readers never refresh. Same trust model as git credentials: internal
-    network only; if ``BRIDGE_CLAUDE_TOKEN_SECRET`` is set we additionally
-    require it via the ``X-Bridge-Token`` header for defense in depth.
+    network plus the ``X-Bridge-Token`` broker gate (``bridge_gate``).
     """
     from ..usage.claude_oauth import get_access_token  # noqa: PLC0415
 
-    expected = os.getenv("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if expected and request.headers.get("X-Bridge-Token") != expected:
-        raise HTTPException(status_code=401, detail="bad bridge token")
+    bridge_gate.check(request, bridge_gate.BROKER)
 
     result = await run_in_threadpool(
         get_access_token, force_refresh=force, rejected_token_sha256=rejected_token_sha256,
@@ -272,9 +267,7 @@ async def chatgpt_access_token(request: Request, force: bool = False):
     """
     from ..usage.codex_oauth import get_access_token  # noqa: PLC0415
 
-    expected = os.getenv("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if expected and request.headers.get("X-Bridge-Token") != expected:
-        raise HTTPException(status_code=401, detail="bad bridge token")
+    bridge_gate.check(request, bridge_gate.BROKER)
 
     result = await run_in_threadpool(get_access_token, force_refresh=force)
     if result.token is None:
@@ -301,9 +294,7 @@ async def chatgpt_auth_bundle(request: Request):
     """
     from ..usage.codex_oauth import _load  # noqa: PLC0415
 
-    expected = os.getenv("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if expected and request.headers.get("X-Bridge-Token") != expected:
-        raise HTTPException(status_code=401, detail="bad bridge token")
+    bridge_gate.check(request, bridge_gate.BROKER)
 
     _, bundle = await run_in_threadpool(_load)
     if not bundle:
@@ -343,13 +334,10 @@ async def github_git_credential(request: Request):
     The tenant bridge configures ``credential.helper`` to curl this endpoint.
     Reachable only within the deployment's internal network: the app talks to
     other services by compose service name, and only the frontend (:3000) is
-    forwarded to the LAN — the app port is not routed to the internet. If
-    ``BRIDGE_GIT_CREDENTIAL_TOKEN`` is set, we additionally require it via the
-    ``X-Bridge-Token`` header for defense in depth.
+    forwarded to the LAN — the app port is not routed to the internet. The
+    ``X-Bridge-Token`` git-credential gate (``bridge_gate``) adds a token check.
     """
-    expected = os.getenv("BRIDGE_GIT_CREDENTIAL_TOKEN")
-    if expected and request.headers.get("X-Bridge-Token") != expected:
-        raise HTTPException(status_code=401, detail="bad bridge token")
+    bridge_gate.check(request, bridge_gate.GIT_CREDENTIAL)
 
     service = get_service()
     adapter = get_adapter(service.config, "github")
@@ -378,14 +366,12 @@ async def api_key_token(provider_id: str, request: Request):
     Serves xai / openai-api / anthropic-api (and any future ApiKeyAdapter)
     from the DB-backed CredentialStore — bridges and internal consumers call
     this instead of reading env vars. Static keys, so ``expires_at`` is null.
-    Same trust model as the brokers above: internal network only, optional
-    ``X-Bridge-Token`` defense in depth.
+    Same trust model as the brokers above: internal network plus the
+    ``X-Bridge-Token`` broker gate.
     """
     from ..providers.api_key import ApiKeyAdapter  # noqa: PLC0415
 
-    expected = os.getenv("BRIDGE_CLAUDE_TOKEN_SECRET")
-    if expected and request.headers.get("X-Bridge-Token") != expected:
-        raise HTTPException(status_code=401, detail="bad bridge token")
+    bridge_gate.check(request, bridge_gate.BROKER)
 
     adapter = _adapter_or_404(provider_id)
     if not isinstance(adapter, ApiKeyAdapter):

@@ -48,6 +48,21 @@ async def lifespan(app):
 
     export_service_token()
 
+    # TASK-1477: export the derived bridge-gate tokens for the bridges, and
+    # record enforcement for a tenant bootstrap marked fresh. Before any route
+    # serves, so an enforced gate has no open window.
+    from ..runtime_settings import RuntimeSettingsStore
+    from .bridge_gate import bridge_gates, seed_enforced_defaults, use_store
+
+    bridge_gates().export_tokens()
+    # The store bootstraps runtime_settings, which a fresh tenant lacks.
+    gate_settings = RuntimeSettingsStore(config)
+    use_store(gate_settings)
+    try:
+        seed_enforced_defaults(gate_settings.engine)
+    except Exception as exc:  # noqa: BLE001 - the env default still enforces
+        log.warning("Could not seed bridge gate enforcement (%s)", type(exc).__name__)
+
     # Prefer MCP tool-based memory retrieval for llm-service.
     # This ensures memory retrieval happens via MCP tools and can be logged clearly.
     _ensure_mcp_server(config)

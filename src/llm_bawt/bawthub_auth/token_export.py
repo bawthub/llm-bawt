@@ -37,13 +37,15 @@ def export_service_token(source: ServiceTokenSource | None = None) -> ExportResu
     return (source or service_token_source()).sync(force=True)
 
 
-def publish(path: Path, token: str | None, environ: Mapping[str, str]) -> ExportResult:
+def publish(path: Path, token: str | None, environ: Mapping[str, str], *,
+            uid_env: str = EXPORT_UID_ENV) -> ExportResult:
     """Write ``token`` to ``path``, or remove ``path`` when there is none.
 
-    Raises ``ValueError`` (bad uid, nothing written) or ``OSError``; the token
-    source reports those. Never logs.
+    ``uid_env`` names the env var holding the reader's uid (the bridge-token
+    exports use their own, TASK-1477). Raises ``ValueError`` (bad uid, nothing
+    written) or ``OSError``; the caller reports those. Never logs.
     """
-    uid = _reader_uid(environ)
+    uid = _reader_uid(environ, uid_env)
     if token is None:
         path.unlink(missing_ok=True)
         return ExportResult.REMOVED
@@ -51,12 +53,12 @@ def publish(path: Path, token: str | None, environ: Mapping[str, str]) -> Export
     return ExportResult.WRITTEN
 
 
-def _reader_uid(environ: Mapping[str, str]) -> int | None:
-    raw = (environ.get(EXPORT_UID_ENV) or "").strip()
+def _reader_uid(environ: Mapping[str, str], uid_env: str) -> int | None:
+    raw = (environ.get(uid_env) or "").strip()
     if not raw:
         return None
     if not raw.isdigit():
-        raise ValueError(f"{EXPORT_UID_ENV} must be a numeric uid")
+        raise ValueError(f"{uid_env} must be a numeric uid")
     return int(raw)
 
 

@@ -148,9 +148,12 @@ def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
         check_database(ops_store.engine),
         check_redis(getattr(config, "REDIS_URL", "") or ""),
     ]
+    from .bridge_gate import bridge_gates
+
     probes = [
         ("ops.executors", lambda: check_ops_executors(ops_service)),
         ("ops.queue", lambda: [check_ops_queue(ops_store)]),
+        ("bridge_gate", lambda: bridge_gates().health_checks()),
     ]
     if service is not None:
         runtime = RuntimeHealthChecks(service)
