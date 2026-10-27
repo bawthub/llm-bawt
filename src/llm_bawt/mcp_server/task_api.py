@@ -45,6 +45,45 @@ def compact_project(project: dict | None) -> dict | None:
     }
 
 
+def _state_fields(task: dict) -> dict:
+    """The fields a row carries only in the state that makes them the point."""
+    fields: dict[str, Any] = {}
+    # TASK-1368: a BLOCKED row is Nick's action item; its reason is the point.
+    if task.get("status") == "BLOCKED":
+        fields["blockedReason"] = task.get("blockedReason")
+    # TASK-1422: a REVIEW row's "Where to look" pages are what the reviewer opens.
+    if task.get("status") == "REVIEW" and task.get("checkLinks"):
+        fields["checkLinks"] = task.get("checkLinks")
+    # TASK-1380: a focused task carries its place in the user's ordered focus list.
+    if task.get("focusRank") is not None:
+        fields["focusRank"] = task.get("focusRank")
+        fields["focusedAt"] = task.get("focusedAt")
+    # TASK-1380: an archived task is finished and off the board.
+    if task.get("archivedAt") is not None:
+        fields["archivedAt"] = task.get("archivedAt")
+    return fields
+
+
+def lean_task(task: dict) -> dict:
+    """TASK-1555: the default list row: what a bot needs to pick the one task to open.
+
+    compact_task is the opt-in detail row (ids, counts, timestamps, url).
+    """
+    lean = {
+        "shortId": task.get("shortId"),
+        "title": task.get("title"),
+        "status": task.get("status"),
+        "priority": task.get("priority"),
+        "agentBotId": task.get("agentBotId"),
+        "updatedAt": task.get("updatedAt"),
+    }
+    project = task.get("project")
+    if isinstance(project, dict) and project.get("name"):
+        lean["project"] = project.get("name")
+    lean.update(_state_fields(task))
+    return lean
+
+
 def compact_task(task: dict) -> dict:
     steps = task.get("steps") if isinstance(task.get("steps"), list) else []
     dependencies = task.get("dependencies") if isinstance(task.get("dependencies"), list) else []
@@ -70,28 +109,18 @@ def compact_task(task: dict) -> dict:
         "dependencyCount": len(dependencies),
         "dependentCount": len(dependents),
     }
-    # TASK-1368: a BLOCKED row is Nick's action item; its reason is the point.
-    if task.get("status") == "BLOCKED":
-        compact["blockedReason"] = task.get("blockedReason")
-    # TASK-1422: a REVIEW row's "Where to look" pages are what the reviewer opens.
-    if task.get("status") == "REVIEW" and task.get("checkLinks"):
-        compact["checkLinks"] = task.get("checkLinks")
-    # TASK-1380: a focused task carries its place in the user's ordered focus list.
-    if task.get("focusRank") is not None:
-        compact["focusRank"] = task.get("focusRank")
-        compact["focusedAt"] = task.get("focusedAt")
-    # TASK-1380: an archived task is finished and off the board.
-    if task.get("archivedAt") is not None:
-        compact["archivedAt"] = task.get("archivedAt")
+    compact.update(_state_fields(task))
     return compact
 
 
-def compact_task_list_payload(payload: Any) -> Any:
+def compact_task_list_payload(payload: Any, *, detail: bool = True) -> Any:
+    """The task list with each row compacted: detail rows, or lean_task rows."""
     if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
         return payload
+    row = compact_task if detail else lean_task
     compact = dict(payload)
     compact["tasks"] = [
-        compact_task(task) if isinstance(task, dict) else task
+        row(task) if isinstance(task, dict) else task
         for task in payload["tasks"]
     ]
     return compact

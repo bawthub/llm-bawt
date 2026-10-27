@@ -59,6 +59,12 @@ from .task_api import (
 
 logger = logging.getLogger(__name__)
 
+# TASK-1555: lookup defaults sized for "find the one task to open", not a dump.
+TASKS_LIST_DEFAULT_LIMIT = 10
+TASKS_LIST_MAX_LIMIT = 25
+SEMANTIC_DEFAULT_LIMIT = 10
+SEMANTIC_MAX_LIMIT = 25
+
 async def list_projects() -> list[dict] | dict:
     """Compatibility wrapper; the registered tool lives in project_tools."""
     try:
@@ -84,9 +90,10 @@ async def list_tasks(
     status: str | None = None,
     project_id: str | None = None,
     q: str | None = None,
-    limit: int = 20,
+    limit: int = TASKS_LIST_DEFAULT_LIMIT,
     focused: bool | None = None,
     archived: bool | None = None,
+    detail: bool = False,
 ) -> dict:
     """List agent tasks with optional filters.
 
@@ -101,19 +108,22 @@ async def list_tasks(
         project_id: Filter to tasks in a specific project (cuid).
                     Use "none" for unassigned tasks.
         q: Search query - matches title, description, and shortId.
-        limit: Maximum tasks to return (default 20, max 50).
+        limit: Maximum tasks to return (default 10, max 25).
         focused: True for focused tasks only, in focus order; False for
                  unfocused tasks only (the backlog). Combines with the other
                  filters. Change focus with tasks_update(focus=...).
         archived: True for archived (finished, off the board) tasks only;
                   False to leave them out. Change it with
                   tasks_update(archived=...).
+        detail: True for detail rows (ids, project, timestamps, url and
+                description/step/dependency counts) instead of lean rows.
 
     Returns:
-        Dict with "tasks" list and "total" count.
-        Each task is a compact row with title/status metadata and counts;
-        focused tasks also carry focusRank and focusedAt, archived tasks
-        archivedAt.
+        Dict with "tasks", "total" (every match) and "more" (true when total
+        exceeds the rows returned: narrow the filters).
+        Each task is a lean row: shortId, title, status, priority,
+        agentBotId, updatedAt and project name. Focused tasks also carry
+        focusRank and focusedAt, archived tasks archivedAt.
         Use tasks_get or tasks_get_context for full descriptions and steps.
     """
     logger.debug(
@@ -121,7 +131,7 @@ async def list_tasks(
         status, project_id, q, focused, archived,
     )
     params: dict[str, str] = {
-        "limit": str(min(limit, 50)),
+        "limit": str(max(1, min(limit, TASKS_LIST_MAX_LIMIT))),
         "sort": "focus" if focused else "updated",
     }
     if status:
@@ -146,18 +156,40 @@ async def list_tasks(
             # A BawtHub without the state ignores the filter and returns every
             # task; never present that as the filtered list.
             return {"error": f"{state.unsupported}; the {param}={str(value).lower()} list was not read."}
-    return _compact_task_list_payload(payload)
+    compact = _compact_task_list_payload(payload, detail=detail)
+    if isinstance(compact, dict) and isinstance(compact.get("tasks"), list):
+        total = compact.get("total")
+        compact["more"] = isinstance(total, int) and total > len(compact["tasks"])
+    return compact
+
+
+BoardView = Literal["kanban", "status"]
+#: BawtHub's UPDATED_WINDOWS ids (frontend/src/lib/taskBoard.ts). The board
+#: falls back to its default for an unknown value, as the page does; the
+#: schema rejects one up front and the reply-echo check below catches drift.
+BoardUpdated = Literal["1h", "6h", "24h", "48h", "7d", "30d", "all"]
+BoardRows = Literal["active", "all"]
+
+
+def _board_mismatch(reply: dict, asked: dict[str, str | None]) -> str | None:
+    """An error when the board did not apply an arg it was given, else None."""
+    for key, value in asked.items():
+        if value and reply.get(key) != value:
+            return (f"the board did not apply {key}={value!r} (it used {reply.get(key)!r}); "
+                    "that board is not returned.")
+    return None
 
 
 @mcp.tool(name="tasks_board")
 async def tasks_board(
-    view: str | None = None,
-    updated: str | None = None,
+    view: BoardView | None = None,
+    updated: BoardUpdated | None = None,
     bot: str | None = None,
     q: str | None = None,
     project: str | None = None,
     priority: str | None = None,
     limit: int = 20,
+    rows: BoardRows | None = None,
 ) -> dict:
     """The task board as data: the lanes BawtHub's /tasks/board lays out.
 
@@ -166,28 +198,34 @@ async def tasks_board(
     the same lanes, cards and counts as the page with every column shown.
     Hiding a column is a browser preference the endpoint never sees, so a
     column the page hides by default (the status view's Cancelled) is
-    included. The args are the board URL's params; unknown view/updated
-    values fall back to the board's defaults, and the reply echoes the ones
-    applied.
+    included. The args are the board URL's params; a view or updated value
+    the board did not apply is an error, never a silently different board.
 
     Args:
         view: "kanban" (default) or "status".
-        updated: The Updated time filter: 1h, 6h, 24h, 48h, 7d (default),
-                 30d or all. Applies to windowed lanes only.
+        updated: The Updated time filter (default 7d). Applies to windowed
+                 lanes only.
         bot: Assigned bot slug.
         q: Search over TASK-ID, title, project name and bot.
         project: Project id (cuid), or "none" for unassigned tasks.
         priority: One priority, e.g. HIGH.
         limit: Rows per lane (default 20, max 50); counts stay whole.
+        rows: "active" sends cards only for open columns (kanban: Blocked,
+              To do, Doing, Review); drawers and closed lanes (Backlog,
+              Done, Archived) keep their counts with rowsOmitted. "all"
+              sends every lane's cards. Default: "active" without q, "all"
+              with q.
 
     Returns:
-        Dict with view, updated, q, filters, now and lanes: every column in
-        order, each followed by the drawers it shows (`in` names the
-        column). Each lane has id, label, windowed, shown, older (left out by
-        the time filter) and compact rows (shortId, title, status, priority,
-        agentBotId, focusRank, archivedAt, updatedAt, blockedReason).
-        Use tasks_get for a task's description and steps.
+        Dict with view, updated, q, filters, rows, now and lanes: every
+        column in order, each followed by the drawers it shows (`in` names
+        the column). Each lane has id, label, windowed, active, shown, older
+        (left out by the time filter) and compact rows (shortId, title,
+        status, priority, agentBotId, focusRank, archivedAt, updatedAt,
+        blockedReason).
+        Use tasks_get_context for one task's description and steps.
     """
+    rows_scope = rows or ("all" if q else "active")
     params = {
         key: value
         for key, value in (
@@ -197,18 +235,28 @@ async def tasks_board(
         if value
     }
     params["limit"] = str(max(1, min(limit, 50)))
+    params["rows"] = rows_scope
     try:
-        return await _api_get("/board", params=params)
+        reply = await _api_get("/board", params=params)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
     except NotJsonResponse as e:
         return {"error": str(e)}
+    if not isinstance(reply, dict):
+        return reply
+    mismatch = _board_mismatch(reply, {"view": view, "updated": updated})
+    if mismatch:
+        return {"error": mismatch}
+    if rows_scope == "active" and reply.get("rows") != rows_scope:
+        # A BawtHub build before TASK-1555 ignores rows and sends every card.
+        reply["note"] = f"this BawtHub build ignores rows={rows_scope}; every lane's cards are included."
+    return reply
 
 
 @mcp.tool(name="tasks_search_semantic")
 async def search_tasks_semantic(
     query: str,
-    limit: int = 20,
+    limit: int = SEMANTIC_DEFAULT_LIMIT,
 ) -> dict:
     """Find tasks by meaning, not just keywords (semantic / vector search).
 
@@ -225,25 +273,39 @@ async def search_tasks_semantic(
 
     Args:
         query: Natural-language description of what you're looking for.
-        limit: Maximum tasks to return (default 20, max 100).
+        limit: Maximum tasks to return (default 10, max 25).
 
     Returns:
         Dict with:
           - ``mode``: "semantic" (vector search) or "keyword" (fallback).
           - ``results``: ranked list of compact task rows, each with id,
-            shortId, title, description, status, priority, projectId, and
-            ``score`` (cosine similarity in [0,1], higher = closer; 0 for
+            shortId, title, descriptionChars, status, priority, projectId,
+            and ``score`` (cosine similarity in [0,1], higher = closer; 0 for
             keyword-fallback rows).
-        Use tasks_get for full description, response, and steps.
+        Use tasks_get_context for one task's description, response and steps.
     """
     logger.debug("MCP tool invoked: tools/search_tasks_semantic q=%s limit=%s", query, limit)
     if not query or not query.strip():
         return {"error": "query is required"}
-    body = {"query": query, "limit": min(limit, 100)}
+    body = {"query": query, "limit": max(1, min(limit, SEMANTIC_MAX_LIMIT))}
     try:
-        return await _api_post("/tasks/search/semantic", json=body)
+        payload = await _api_post("/tasks/search/semantic", json=body)
     except httpx.HTTPStatusError as e:
         return _http_error(e)
+    return _without_descriptions(payload)
+
+
+def _without_descriptions(payload: Any) -> Any:
+    """TASK-1555: semantic rows carry the full description; send its length."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return payload
+    results = []
+    for row in payload["results"]:
+        if isinstance(row, dict) and "description" in row:
+            row = dict(row)
+            row["descriptionChars"] = len(str(row.pop("description") or ""))
+        results.append(row)
+    return {**payload, "results": results}
 
 
 @mcp.tool(name="tasks_get")

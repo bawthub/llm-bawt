@@ -3,12 +3,17 @@
 FastMCP still owns callable signatures and validation. The public list_tools seam
 only replaces model-facing descriptions and removes generated schema titles.
 Titles are annotations, not field names; never recursively strip arbitrary keys.
+
+TASK-1555: call_tool also re-emits JSON result text without whitespace.
+FastMCP renders a tool's dict/list result with ``indent=2``, and every
+newline and indent is a model token: the same payload costs ~45% more.
 """
 
+import json
 from copy import deepcopy
 from typing import Any
 
-from mcp.types import Tool
+from mcp.types import TextContent, Tool
 
 from .approval_interceptor import ApprovalAwareFastMCP
 from .catalog_contracts import TOOL_SUMMARIES, tool_description
@@ -54,6 +59,37 @@ def compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def compact_json_text(block: Any) -> Any:
+    """``block`` with JSON text re-serialized without whitespace; else as-is.
+
+    Only text that parses as a JSON object or array changes, and it decodes to
+    the same value: nothing is dropped or reordered. Non-ASCII stays literal,
+    as FastMCP wrote it.
+    """
+    if not isinstance(block, TextContent) or block.text[:1] not in ("{", "["):
+        return block
+    try:
+        value = json.loads(block.text)
+    except ValueError:
+        return block
+    compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return block if compact == block.text else block.model_copy(update={"text": compact})
+
+
+def compact_call_result(result: Any) -> Any:
+    """A FastMCP call_tool result with every JSON text block compacted.
+
+    The result is content blocks, or (content blocks, structured content) for a
+    tool with an output schema. Structured content and any other shape (an
+    approval error dict) pass through unchanged.
+    """
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], list):
+        return ([compact_json_text(block) for block in result[0]], result[1])
+    if isinstance(result, list):
+        return [compact_json_text(block) for block in result]
+    return result
+
+
 class CatalogFastMCP(ApprovalAwareFastMCP):
     """Approval-aware server with a compact, skill-linked discovery catalog."""
 
@@ -72,7 +108,7 @@ class CatalogFastMCP(ApprovalAwareFastMCP):
             # Avoid doomed ASK cards. The registered callable checks again at
             # execution, including approved execution's bypass of call_tool.
             await self.bot_access.preflight(name, public)
-            return await super().call_tool(name, arguments)
+            return compact_call_result(await super().call_tool(name, arguments))
 
     async def call_approved_tool(self, name, arguments, **kwargs):
         with invocation_context(name, arguments):

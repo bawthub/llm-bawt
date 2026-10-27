@@ -48,14 +48,16 @@ def test_semantic_search_posts_query_and_returns_payload(
     result = _run(task_tools.search_tasks_semantic("auth is broken"))
 
     assert calls == [
-        {"path": "/tasks/search/semantic", "json": {"query": "auth is broken", "limit": 20}, "headers": None}
+        {"path": "/tasks/search/semantic", "json": {"query": "auth is broken", "limit": 10}, "headers": None}
     ]
-    assert result == payload
+    # TASK-1555: the row's description becomes its length; tasks_get_context reads it.
+    row = {key: value for key, value in payload["results"][0].items() if key != "description"}
+    assert result == {"mode": "semantic", "results": [{**row, "descriptionChars": 16}]}
     assert result["mode"] == "semantic"
     assert result["results"][0]["shortId"] == "TASK-266"
 
 
-def test_semantic_search_clamps_limit_to_100(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_semantic_search_clamps_limit_to_25(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
     async def fake_post(path: str, json: dict[str, Any], headers: dict | None = None) -> dict:
@@ -66,7 +68,7 @@ def test_semantic_search_clamps_limit_to_100(monkeypatch: pytest.MonkeyPatch) ->
 
     _run(task_tools.search_tasks_semantic("anything", limit=5000))
 
-    assert seen["limit"] == 100
+    assert seen["limit"] == 25
 
 
 def test_semantic_search_empty_query_short_circuits(

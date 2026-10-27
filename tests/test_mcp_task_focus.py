@@ -193,7 +193,7 @@ def test_focused_list_asks_for_rank_order_and_keeps_it(monkeypatch: pytest.Monke
 
     result = _run(task_tools.list_tasks(focused=True))
 
-    assert seen == [{"limit": "20", "sort": "focus", "focused": "true"}]
+    assert seen == [{"limit": "10", "sort": "focus", "focused": "true"}]
     assert [(t["shortId"], t["focusRank"]) for t in result["tasks"]] == [("TASK-2", 1), ("TASK-1", 2)]
 
 
@@ -202,7 +202,7 @@ def test_unfocused_list_is_the_backlog_by_recency(monkeypatch: pytest.MonkeyPatc
 
     result = _run(task_tools.list_tasks(focused=False, status="QUEUED"))
 
-    assert seen == [{"limit": "20", "sort": "updated", "status": "QUEUED", "focused": "false"}]
+    assert seen == [{"limit": "10", "sort": "updated", "status": "QUEUED", "focused": "false"}]
     assert "focusRank" not in result["tasks"][0]
 
 
@@ -214,6 +214,7 @@ def test_an_empty_list_from_a_focus_server_is_truly_empty(monkeypatch: pytest.Mo
         "tasks": [],
         "total": 0,
         "focusFilter": focused,
+        "more": False,
     }
 
 
@@ -252,5 +253,5 @@ def test_unfiltered_list_needs_no_focus_support(monkeypatch: pytest.MonkeyPatch)
 
     result = _run(task_tools.list_tasks())
 
-    assert seen == [{"limit": "20", "sort": "updated"}]
+    assert seen == [{"limit": "10", "sort": "updated"}]
     assert result["tasks"][0]["shortId"] == "TASK-7"

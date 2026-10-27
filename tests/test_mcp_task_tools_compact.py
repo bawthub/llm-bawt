@@ -45,15 +45,91 @@ def _full_task() -> dict[str, Any]:
     }
 
 
-def test_tasks_list_returns_compact_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tasks_list_returns_lean_rows_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # TASK-1555: the default row is what a bot needs to pick the one task to open.
     async def fake_get(path: str, params: dict | None = None) -> dict[str, Any]:
-        assert path == "/tasks"
-        assert params == {"limit": "20", "sort": "updated", "q": "garage"}
+        assert params == {"limit": "10", "sort": "updated", "q": "garage"}
         return {"tasks": [_full_task()], "total": 1}
 
     monkeypatch.setattr(task_tools, "_api_get", fake_get)
 
     result = _run(task_tools.list_tasks(q="garage"))
+
+    assert result == {
+        "tasks": [{
+            "shortId": "TASK-266",
+            "title": "Fix garage task context blowup",
+            "status": "REVIEW",
+            "priority": "HIGH",
+            "agentBotId": "snark",
+            "updatedAt": "2026-06-13T21:00:00Z",
+            "project": "Garage",
+        }],
+        "total": 1,
+        "more": False,
+    }
+
+
+@pytest.mark.parametrize("limit,sent", [(500, "25"), (25, "25"), (0, "1"), (-3, "1")])
+def test_tasks_list_limit_is_clamped_to_1_25(monkeypatch: pytest.MonkeyPatch, limit: int, sent: str) -> None:
+    seen: list[str] = []
+
+    async def fake_get(path: str, params: dict | None = None) -> dict[str, Any]:
+        seen.append(params["limit"])
+        return {"tasks": [], "total": 0}
+
+    monkeypatch.setattr(task_tools, "_api_get", fake_get)
+
+    _run(task_tools.list_tasks(limit=limit))
+
+    assert seen == [sent]
+
+
+def test_tasks_list_says_when_there_is_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get(path: str, params: dict | None = None) -> dict[str, Any]:
+        return {"tasks": [_full_task()] * 10, "total": 182}
+
+    monkeypatch.setattr(task_tools, "_api_get", fake_get)
+
+    result = _run(task_tools.list_tasks())
+
+    assert (len(result["tasks"]), result["total"], result["more"]) == (10, 182, True)
+
+
+def _realistic_task(n: int) -> dict[str, Any]:
+    """A GET /tasks row at the size BawtHub sends: long text, steps, links."""
+    task = _full_task()
+    task.update({
+        "id": f"cmvq{n:021d}",
+        "shortId": f"TASK-{1000 + n}",
+        "title": "Bots burn 5-16k tokens per lookup: cheap-lookup rules exist only in one profile",
+        "steps": [{"id": f"s{i}", "title": "Step", "status": "COMPLETED"} for i in range(8)],
+    })
+    return task
+
+
+def test_the_default_list_fits_a_lookup_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ~2k tokens at ~4 chars a token, as compact JSON (catalog.compact_json_text).
+    async def fake_get(path: str, params: dict | None = None) -> dict[str, Any]:
+        return {"tasks": [_realistic_task(n) for n in range(int(params["limit"]))], "total": 400}
+
+    monkeypatch.setattr(task_tools, "_api_get", fake_get)
+
+    result = _run(task_tools.list_tasks())
+
+    assert len(result["tasks"]) == 10
+    assert len(json.dumps(result, separators=(",", ":"))) < 8_000
+
+
+def test_tasks_list_detail_returns_compact_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get(path: str, params: dict | None = None) -> dict[str, Any]:
+        assert path == "/tasks"
+        assert params == {"limit": "10", "sort": "updated", "q": "garage"}
+        return {"tasks": [_full_task()], "total": 1}
+
+    monkeypatch.setattr(task_tools, "_api_get", fake_get)
+
+    result = _run(task_tools.list_tasks(q="garage", detail=True))
 
     assert result["total"] == 1
     task = result["tasks"][0]

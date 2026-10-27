@@ -186,7 +186,7 @@ def test_archived_filter_is_sent_and_confirmed(monkeypatch: pytest.MonkeyPatch, 
     result = _run(task_tools.list_tasks(archived=archived, status="COMPLETED"))
 
     assert seen == [
-        {"limit": "20", "sort": "updated", "status": "COMPLETED", "archived": str(archived).lower()}
+        {"limit": "10", "sort": "updated", "status": "COMPLETED", "archived": str(archived).lower()}
     ]
     assert result["tasks"][0]["shortId"] == "TASK-7"
     assert ("archivedAt" in result["tasks"][0]) is archived
@@ -198,7 +198,9 @@ def test_an_empty_list_from_an_archive_server_is_truly_empty(
 ) -> None:
     _capture_list(monkeypatch, [], archive_filter=archived)
 
-    assert _run(task_tools.list_tasks(archived=archived)) == {"tasks": [], "total": 0, "archiveFilter": archived}
+    assert _run(task_tools.list_tasks(archived=archived)) == {
+        "tasks": [], "total": 0, "archiveFilter": archived, "more": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -237,7 +239,7 @@ def test_both_filters_must_be_confirmed(monkeypatch: pytest.MonkeyPatch) -> None
 
     result = _run(task_tools.list_tasks(focused=True, archived=False))
 
-    assert seen == [{"limit": "20", "sort": "focus", "focused": "true", "archived": "false"}]
+    assert seen == [{"limit": "10", "sort": "focus", "focused": "true", "archived": "false"}]
     assert result["tasks"][0]["focusRank"] == 1
 
     # Focus shipped, archive not yet: the archive half is unconfirmed.
@@ -252,5 +254,5 @@ def test_default_list_needs_no_archive_support(monkeypatch: pytest.MonkeyPatch) 
 
     result = _run(task_tools.list_tasks())
 
-    assert seen == [{"limit": "20", "sort": "updated"}]
+    assert seen == [{"limit": "10", "sort": "updated"}]
     assert result["tasks"][0]["shortId"] == "TASK-7"

@@ -150,7 +150,11 @@ async def test_catalog_token_budgets():
     # TASK-1526: the image attach policy and opt-out on tasks_create, the
     # linked turn's images on tasks_update: 4,058 (+31). Bots attach what
     # they were shown instead of each task bot re-capturing it.
-    assert sum(descriptions) <= 4058, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1555: the bulky lookups (tasks_list, tasks_search_semantic,
+    # messages_search_all, memory_search_all) name the cheaper tool first and
+    # tasks_board says it is where active-work lookups start: 4,125 (+67).
+    # One avoided default tasks_list call (~13k chars) pays for it.
+    assert sum(descriptions) <= 4125, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -211,13 +215,16 @@ async def test_catalog_token_budgets():
     # TASK-1521: bots_profile_patch summary names the own-tags refusal: 15,004 (+3).
     # TASK-1526: the attach policy moved into the tasks_create/tasks_update
     # summaries the model actually sees: 15,035 (+31).
-    assert total <= 15035, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1555: the description hints above, tasks_list detail flag, and
+    # tasks_board's typed view/updated enums and rows scope: 15,170 (+135).
+    # An unknown window used to come back as the default board, unannounced.
+    assert total <= 15170, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
 @pytest.mark.parametrize("name,words", [
     ("tasks_update", ("REVIEW", "COMPLETED", "BUG")),
-    ("tasks_list", ("focused=true", "archived=false", "tasks_update focus/archived")),
+    ("tasks_list", ("focused=true", "archived=false", "tasks_update edits both")),
     ("tasks_associate_current", ("actually", "mention", "fails closed")),
     ("steps_set", ("ENTIRE", "deleting", "[]")),
     ("tasks_delete", ("Permanently", "CANCELLED")),
@@ -238,6 +245,60 @@ async def test_catalog_token_budgets():
 def test_call_critical_warnings_stay_inline(name, words):
     for word in words:
         assert word in TOOL_SUMMARIES[name]
+
+
+# TASK-1555: a bulky lookup tool names the cheaper one to try first; one
+# question once cost a bot ~48k tokens through these.
+@pytest.mark.parametrize("name,cheaper", [
+    ("tasks_list", ("tasks_board(q=)",)),
+    ("tasks_search_semantic", ("tasks_board(q=)",)),
+    ("messages_search_all", ("context_recall", "messages_find")),
+    ("memory_search_all", ("memory_search_source",)),
+    ("tasks_board", ("Start here for active work",)),
+])
+def test_bulky_lookups_name_the_cheaper_tool(name, cheaper):
+    for hint in cheaper:
+        assert hint in TOOL_SUMMARIES[name]
+
+
+def test_tool_results_are_compact_json():
+    from mcp.types import ImageContent, TextContent
+
+    from llm_bawt.mcp_server.catalog import compact_call_result
+
+    pretty = TextContent(type="text", text=json.dumps({"a": [1, {"b": "é"}]}, indent=2, ensure_ascii=False))
+    image = ImageContent(type="image", data="AA==", mimeType="image/png")
+    plain = TextContent(type="text", text="{not json")
+
+    [compact, untouched_image, untouched_text] = compact_call_result([pretty, image, plain])
+    assert compact.text == '{"a":[1,{"b":"é"}]}'
+    assert json.loads(compact.text) == json.loads(pretty.text)
+    assert (untouched_image, untouched_text) == (image, plain)
+
+    blocks, structured = compact_call_result(([pretty], {"result": 1}))
+    assert blocks[0].text == compact.text and structured == {"result": 1}
+    assert compact_call_result({"error": "denied"}) == {"error": "denied"}
+
+
+@pytest.mark.anyio
+async def test_call_tool_returns_compact_json(monkeypatch):
+    # FastMCP renders a dict result with indent=2; the catalog server re-emits it.
+    from mcp.types import TextContent
+
+    async def fastmcp_result(self, name, arguments):
+        value = {"rows": [{"id": 1}, {"id": 2}]}
+        return [TextContent(type="text", text=json.dumps(value, indent=2))], value
+
+    async def allow(self, name, arguments):
+        return None
+
+    monkeypatch.setattr(ApprovalAwareFastMCP, "call_tool", fastmcp_result)
+    server = CatalogFastMCP("compact-test")
+    monkeypatch.setattr(type(server.bot_access), "preflight", allow)
+
+    result = await server.call_tool("rows", {})
+    blocks = result[0] if isinstance(result, tuple) else result
+    assert blocks[0].text == '{"rows":[{"id":1},{"id":2}]}'
 
 
 def test_task_update_closure_guidance_matches_visual_review_policy():
