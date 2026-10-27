@@ -23,6 +23,7 @@ from codex_bridge.app_server import (
     AppServerClosed,
     AppServerVersionMismatch,
     CodexAppServerRun,
+    JsonRpcStdioClient,
     server_version,
     spawn_app_server,
 )
@@ -118,6 +119,40 @@ def test_another_version_is_refused_and_reaped(tmp_path, version):
     (proc,) = ledger.procs
     assert proc.returncode is not None
     assert [m.get("method") for m in fake.read_log(tmp_path / "received.jsonl")] == ["initialize"]
+
+
+@REAL
+def test_a_cancel_during_the_refused_handshake_teardown_waits_for_the_reap(tmp_path, monkeypatch):
+    """A cancel landing while spawn_app_server tears a refused child down is
+    held until the child is reaped, then re-raised."""
+    ledger = ProcessLedger()
+    entered, release = None, None
+    teardown = JsonRpcStdioClient._teardown
+
+    async def gated_teardown(self):
+        entered.set()
+        await release.wait()
+        return await teardown(self)
+
+    monkeypatch.setattr(JsonRpcStdioClient, "_teardown", gated_teardown)
+
+    async def run():
+        nonlocal entered, release
+        entered, release = asyncio.Event(), asyncio.Event()
+        bind_ledger(ledger)
+        task = asyncio.create_task(_spawn(tmp_path, version="0.158.0"))
+        await asyncio.wait_for(entered.wait(), HANG_GUARD_S)
+        task.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not task.done(), "spawn_app_server returned while its child was still being torn down"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    (proc,) = ledger.procs
+    assert proc.returncode is not None
 
 
 def test_server_version_reads_the_user_agent():

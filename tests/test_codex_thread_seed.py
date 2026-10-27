@@ -28,12 +28,16 @@ PINNED = "PINNED-SYSTEM-PROMPT"
 class FakeAppServer:
     """The app-server calls a seed makes, with an optional scripted failure."""
 
-    def __init__(self, thread_id="seeded-provider", inject_error=None, block_inject=None):
+    def __init__(self, thread_id="seeded-provider", inject_error=None, block_inject=None,
+                 block_close=None):
         self.thread_id = thread_id
         self.inject_error = inject_error
         self.block_inject = block_inject
+        self.block_close = block_close
         self.calls: list[tuple[str, dict]] = []
         self.closed = 0
+        self.reaped = False
+        self._close_task = None
 
     async def request(self, method, params, *, timeout=None):
         self.calls.append((method, params))
@@ -46,11 +50,16 @@ class FakeAppServer:
         return {}
 
     def close(self):
+        """Like the real client: one teardown task, however often it is asked for."""
         self.closed += 1
-
-        async def done():
-            return "closed"
-        return asyncio.ensure_future(done())
+        if self._close_task is None:
+            async def teardown():
+                if self.block_close is not None:
+                    await self.block_close.wait()
+                self.reaped = True
+                return "closed"
+            self._close_task = asyncio.ensure_future(teardown())
+        return self._close_task
 
 
 def seeded(harness, app_server=None, *, framing=FRAMING):
@@ -204,10 +213,13 @@ def test_session_error_on_a_seeded_thread_is_not_retried_blank(harness):
     harness.sdk.start_thread.assert_not_called()
 
 
-def test_cancel_during_inject_still_reaps_the_app_server():
+@pytest.mark.parametrize("second_cancel", [False, True], ids=["cancel-in-inject", "cancel-again-in-close"])
+def test_a_cancelled_seed_returns_only_after_the_app_server_is_reaped(second_cancel):
+    """The send's session is released when seed_thread returns, so a cancel,
+    even one landing mid-teardown, must not return before the child is reaped."""
     async def run():
-        gate = asyncio.Event()
-        app_server = FakeAppServer(block_inject=gate)
+        inject, close = asyncio.Event(), asyncio.Event()
+        app_server = FakeAppServer(block_inject=inject, block_close=close)
         bridge = MagicMock()
         bridge._open_app_server = AsyncMock(return_value=app_server)
         task = asyncio.create_task(seed_thread(
@@ -216,11 +228,21 @@ def test_cancel_during_inject_still_reaps_the_app_server():
         while len(app_server.calls) < 2:
             await asyncio.sleep(0)
         task.cancel()
+        while app_server._close_task is None:
+            await asyncio.sleep(0)
+        if second_cancel:
+            task.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not task.done(), "seed_thread returned while the app-server was still being torn down"
+        assert not app_server.reaped
+        close.set()
         with pytest.raises(asyncio.CancelledError):
             await task
         return app_server
 
-    assert asyncio.run(run()).closed == 1
+    app_server = asyncio.run(run())
+    assert app_server.reaped and app_server.closed == 1
 
 
 def test_method_not_found_names_the_pinned_app_server():

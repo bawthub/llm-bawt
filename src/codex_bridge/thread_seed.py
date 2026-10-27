@@ -13,12 +13,11 @@ silently starting a blank thread.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from agent_bridge.continuity import SeedFraming, render_seed_briefing
 
-from .app_server import APP_SERVER_VERSION, METHOD_NOT_FOUND, AppServerError
+from .app_server import APP_SERVER_VERSION, METHOD_NOT_FOUND, AppServerError, close_and_reap
 
 
 class CodexSeedUnsupported(RuntimeError):
@@ -67,4 +66,4 @@ async def seed_thread(
             raise
         return thread_id
     finally:
-        await asyncio.shield(client.close())
+        await close_and_reap(client)

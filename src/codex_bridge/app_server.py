@@ -351,9 +351,33 @@ async def spawn_app_server(
             )
         await client.notify("initialized")
     except BaseException:
-        await asyncio.shield(client.close())
+        await close_and_reap(client)
         raise
     return client
+
+
+async def close_and_reap(client: Any) -> str:
+    """Tear ``client`` down and wait until its child is reaped, even if cancelled.
+
+    A bare ``await asyncio.shield(client.close())`` keeps the teardown running
+    but lets a cancel that lands meanwhile return at once, so the caller could
+    release its session while the child still lives. Here a cancel during the
+    teardown is held until it finishes, then re-raised. The wait is bounded by
+    the teardown's own grace steps.
+    """
+    task = client.close()
+    interrupted = False
+    while True:
+        try:
+            detail = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+            interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+    return detail
 
 
 @dataclass
@@ -549,5 +573,6 @@ class CodexAppServerRun:
 __all__ = [
     "APP_SERVER_VERSION", "AppServerClosed", "AppServerError", "AppServerVersionMismatch",
     "CodexAppServerRun", "GRACEFUL_STOPS", "INVALID_REQUEST", "JsonRpcStdioClient",
-    "PendingSteer", "STEERED", "STEERED_UNCONFIRMED", "server_version", "spawn_app_server",
+    "PendingSteer", "STEERED", "STEERED_UNCONFIRMED", "close_and_reap", "server_version",
+    "spawn_app_server",
 ]
