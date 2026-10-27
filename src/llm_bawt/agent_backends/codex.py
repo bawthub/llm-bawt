@@ -27,6 +27,8 @@ class CodexBackend(AgentBridgeBackend):
                      set manually; cleared by ``/new`` or model change)
         model:       Codex model id (default ``gpt-5.4``)
         timeout_seconds: Max wait for response (default: 600)
+        codex_transport: ``exec`` (default) or ``app_server``. Only an
+                     app-server run can be steered mid-turn (TASK-1243).
     """
 
     name = "codex"
@@ -35,6 +37,16 @@ class CodexBackend(AgentBridgeBackend):
     # history carries it. Pin it per session and paste it only when it takes
     # effect, instead of appending a copy to every turn.
     pins_system_prompt = True
+
+    def steer_capabilities(self, config: dict) -> frozenset[str]:
+        # TASK-1243: app-server accepts ``turn/steer`` into the running turn,
+        # which is a ``next`` steer. It has no queued-command handle, so no
+        # ``now``, escalate or cancel. ``codex exec`` cannot steer at all.
+        from ..steer_capabilities import NEXT, NO_STEER_CAPS
+
+        if str(config.get("codex_transport") or "").strip() == "app_server":
+            return frozenset({NEXT})
+        return NO_STEER_CAPS
 
     def system_prompt_delivery(self, is_boundary: bool) -> str | None:
         # "now": the pin moved this turn, paste it even on a resumed thread.

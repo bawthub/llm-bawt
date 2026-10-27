@@ -57,6 +57,11 @@ def _request_to_profile_payload(
     return payload
 
 
+#: ``agent_backend_config.codex_transport`` values (TASK-1243): ``exec`` is the
+#: one-shot ``codex exec`` stream, ``app_server`` the steerable JSON-RPC server.
+CODEX_TRANSPORTS = ("exec", "app_server")
+
+
 def _validate_profile_payload(payload: dict[str, object]) -> None:
     resolved_type = normalize_bot_type(
         str(payload.get("bot_type")) if payload.get("bot_type") is not None else None,
@@ -74,6 +79,12 @@ def _validate_profile_payload(payload: dict[str, object]) -> None:
             raise HTTPException(status_code=400, detail="skill_bundle must be a lowercase kebab-case registry name") from exc
         if agent_backend not in {"claude-code", "codex"}:
             raise HTTPException(status_code=400, detail="skill_bundle requires Claude Code or Codex")
+    if isinstance(config, dict) and config.get("codex_transport") is not None:
+        # TASK-1243: which codex runtime serves the bot's turns.
+        if agent_backend != "codex":
+            raise HTTPException(status_code=400, detail="codex_transport requires the Codex backend")
+        if config["codex_transport"] not in CODEX_TRANSPORTS:
+            raise HTTPException(status_code=400, detail="codex_transport must be one of: " + ", ".join(CODEX_TRANSPORTS))
     _normalize_agent_backend_config_model(agent_backend, payload)
     _validate_model_endpoint(payload)
 

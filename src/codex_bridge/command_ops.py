@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from agent_bridge.abort_rpc import answer_abort, cancel_request_handler
+from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.send_admission import admit_send
 from agent_bridge.events import AgentEvent, AgentEventKind, synthesize_event_id
@@ -22,6 +22,7 @@ from agent_bridge.maintenance import is_new_command
 from agent_bridge.publisher import COMMANDS_STREAM, RedisPublisher
 from agent_bridge.session_queue import SessionQueue
 
+from .app_server_send import CodexAppServerMixin, wants_app_server
 from .auth_broker import materialize_auth_from_broker
 from .process_ledger import ProcessLedger, bind_ledger
 from .transport import CodexTransport, auth_path, validate_auth_json
@@ -42,7 +43,7 @@ from ._bridge_helpers import (
 logger = logging.getLogger("codex_bridge.bridge")
 
 
-class CodexCommandMixin:
+class CodexCommandMixin(CodexAppServerMixin):
     """Codex Redis command listener + send/RPC handlers (TASK-555).
 
     Split out of ``CodexBridge`` (TASK-555). Composed back on via
@@ -121,6 +122,12 @@ class CodexCommandMixin:
                         elif action == "rpc.call":
                             asyncio.create_task(
                                 self._handle_rpc(fields, msg_id, async_redis)
+                            )
+                        elif action == "chat.steer" and backend == self._backend_name:
+                            # TASK-1243: into the live app-server turn. Never
+                            # takes the send lock, which the send holds.
+                            asyncio.create_task(
+                                self._handle_steer(fields, msg_id, async_redis)
                             )
                         else:
                             await async_redis.xack(COMMANDS_STREAM, CONSUMER_GROUP, msg_id)
@@ -382,71 +389,98 @@ class CodexCommandMixin:
                     final_usage: Any = None
                     session_persisted = bool(resume_id)
 
-                    # Per-turn AbortController so chat.abort can interrupt the
-                    # codex subprocess server-side via the SDK's signal plumbing.
+                    # TASK-1243: an app-server turn when the bot asks for one
+                    # and the binary speaks it; otherwise exec, whose per-turn
+                    # AbortController lets chat.abort interrupt the codex
+                    # subprocess through the SDK's signal plumbing.
                     from openai_codex_sdk import AbortController, AbortError
 
-                    controller = AbortController()
-                    if session_key:
-                        self._session_queue.set_active_client(session_key, controller)
-
+                    controller = None
                     try:
-                        # Open or resume thread (sync API)
-                        thread_options = {
-                            "model": model,
-                            "working_directory": self._cwd,
-                            "approval_policy": "never",
-                            "sandbox_mode": "danger-full-access",
-                            "skip_git_repo_check": True,
-                        }
-                        if resume_id:
-                            thread = codex.resume_thread(resume_id, thread_options)
-                        else:
-                            thread = codex.start_thread(thread_options)
-
-                        streamed = await thread.run_streamed(
-                            prompt_input,
-                            {"signal": controller.signal},
+                        app_server = (
+                            await self._open_app_server(codex, CONFIG_OVERRIDES.get())
+                            if wants_app_server(fields) else None
                         )
-
-                        async for event in self._iter_events(streamed):
-                            if cancel_event is not None and cancel_event.is_set():
-                                logger.info(
-                                    "chat.abort signalled, aborting Codex turn: session=%s request=%s",
-                                    session_key, request_id,
-                                )
-                                aborted = True
-                                try:
-                                    controller.abort("chat.abort")
-                                except Exception:
-                                    logger.debug("controller.abort raised", exc_info=True)
-                                break
-
+                        if app_server is not None:
                             (
-                                seq,
-                                persisted_now,
-                                usage_now,
-                            ) = await self._handle_event(
-                                event,
-                                bot_slug=bot_slug,
-                                session_key=session_key,
+                                seq, aborted, session_persisted, final_usage, thread,
+                            ) = await self._run_app_server_turn(
+                                app_server,
+                                prompt_input=prompt_input,
+                                resume_id=resume_id,
+                                model=model,
+                                cancel_event=cancel_event,
                                 request_id=request_id,
+                                session_key=session_key,
+                                bot_slug=bot_slug,
                                 seq=seq,
                                 text_parts=text_parts,
                                 item_text=item_text,
-                                model=model,
-                                actual_model_ref=[actual_model],
-                                resume_id=resume_id,
-                                session_persisted=session_persisted,
                                 item_buffers=item_buffers,
-                                thread=thread,
+                                session_persisted=session_persisted,
                                 thread_session_id=thread_session_id,
                                 reset_evidence=reset_evidence,
                             )
-                            if persisted_now:
-                                session_persisted = True
-                            if usage_now is not None:
-                                final_usage = usage_now
+                        else:
+                            controller = AbortController()
+                            if session_key:
+                                self._session_queue.set_active_client(session_key, controller)
+                            # Open or resume thread (sync API)
+                            thread_options = {
+                                "model": model,
+                                "working_directory": self._cwd,
+                                "approval_policy": "never",
+                                "sandbox_mode": "danger-full-access",
+                                "skip_git_repo_check": True,
+                            }
+                            if resume_id:
+                                thread = codex.resume_thread(resume_id, thread_options)
+                            else:
+                                thread = codex.start_thread(thread_options)
+
+                            streamed = await thread.run_streamed(
+                                prompt_input,
+                                {"signal": controller.signal},
+                            )
+
+                            async for event in self._iter_events(streamed):
+                                if cancel_event is not None and cancel_event.is_set():
+                                    logger.info(
+                                        "chat.abort signalled, aborting Codex turn: session=%s request=%s",
+                                        session_key, request_id,
+                                    )
+                                    aborted = True
+                                    try:
+                                        controller.abort("chat.abort")
+                                    except Exception:
+                                        logger.debug("controller.abort raised", exc_info=True)
+                                    break
+
+                                (
+                                    seq,
+                                    persisted_now,
+                                    usage_now,
+                                ) = await self._handle_event(
+                                    event,
+                                    bot_slug=bot_slug,
+                                    session_key=session_key,
+                                    request_id=request_id,
+                                    seq=seq,
+                                    text_parts=text_parts,
+                                    item_text=item_text,
+                                    model=model,
+                                    actual_model_ref=[actual_model],
+                                    resume_id=resume_id,
+                                    session_persisted=session_persisted,
+                                    item_buffers=item_buffers,
+                                    thread=thread,
+                                    thread_session_id=thread_session_id,
+                                    reset_evidence=reset_evidence,
+                                )
+                                if persisted_now:
+                                    session_persisted = True
+                                if usage_now is not None:
+                                    final_usage = usage_now
 
                         # On a fresh thread, capture the id once the stream is
                         # done in case we never saw a typed thread.started event.
@@ -487,10 +521,11 @@ class CodexCommandMixin:
                         )
                         # The app persists partial text and aborted status.
                         # Do not emit a successful assistant completion.
-                        try:
-                            controller.abort("task_cancelled")
-                        except Exception:
-                            pass
+                        if controller is not None:
+                            try:
+                                controller.abort("task_cancelled")
+                            except Exception:
+                                pass
                         raise
 
                     except AbortError:
@@ -549,7 +584,7 @@ class CodexCommandMixin:
 
                         raise
                     finally:
-                        if session_key:
+                        if session_key and controller is not None:
                             current = self._session_queue.get_active_client(session_key)
                             if current is controller:
                                 self._session_queue.pop_active_client(session_key)
@@ -635,12 +670,12 @@ class CodexCommandMixin:
                         request_id, {"ok": False, "error": "missing sessionKey"},
                     )
             elif method == "chat.abort":
-                # The targeted send owns its AbortController and interrupts it
-                # in its cancellation handler; never take a sibling's handle.
+                # An app-server turn is interrupted first (TASK-1243); any other
+                # send is cancelled, and owns its own teardown. Never take a
+                # sibling's handle.
                 self._publisher.publish_rpc_result(
                     request_id,
-                    await answer_abort(self._backend_name, params,
-                                       cancel_request_handler(self._session_queue)),
+                    await answer_abort(self._backend_name, params, self._abort_request),
                 )
             elif method == RUN_STATUS_METHOD and message_backend == self._backend_name:
                 # Answered only when addressed to us: see agent_bridge.run_status.

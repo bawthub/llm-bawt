@@ -58,6 +58,7 @@ class CommandPublisherMixin:
         context_window: int | None = None,
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
+        codex_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
         question_answer_wait_seconds: int | None = None,
         thread_session_id: str | None = None,
@@ -123,6 +124,8 @@ class CommandPublisherMixin:
             fields["compact_threshold"] = str(compact_threshold)
         if responses_transport:
             fields["responses_transport"] = responses_transport
+        if codex_transport:  # TASK-1243: codex exec or app-server
+            fields["codex_transport"] = codex_transport
         if mcp_tool_timeout_ms is not None and mcp_tool_timeout_ms > 0:
             fields["mcp_tool_timeout_ms"] = str(mcp_tool_timeout_ms)
         if question_answer_wait_seconds is not None:
