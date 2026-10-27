@@ -29,6 +29,10 @@ from .context_env import effective_context_window
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
+# Post-DONE /context read cap. Reads ran up to ~870 ms and ~9% missed at 0.9 s;
+# 2 s keeps the extra session-lock hold after DONE negligible (TASK-1442).
+NATIVE_CONTEXT_READ_TIMEOUT_S = 2.0
+
 
 def turn_session_ledger(resume_id: str | None) -> SessionLedger:
     """What the transcript proves before this turn runs (TASK-1054/1442).
@@ -231,7 +235,7 @@ class ClaudeUsageMixin:
             # The session lock stays held until teardown: never delay a queued
             # successor by more than this bounded post-DONE control request.
             return dict(await asyncio.wait_for(
-                sdk_client.get_context_usage(), timeout=0.9
+                sdk_client.get_context_usage(), timeout=NATIVE_CONTEXT_READ_TIMEOUT_S
             ))
         except Exception as context_error:
             # INFO: a missing breakdown must be attributable (timeout vs error).

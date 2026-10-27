@@ -14,8 +14,9 @@ from claude_code_bridge.command_ops import ClaudeCommandMixin
 from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.send_handler import ClaudeSendMixin
 from claude_code_bridge.send_stream_events import StreamBlockState
-from claude_code_bridge.send_usage import ClaudeUsageMixin
+from claude_code_bridge.send_usage import NATIVE_CONTEXT_READ_TIMEOUT_S, ClaudeUsageMixin
 from claude_code_bridge.session_ops import ClaudeSessionMixin
+from tests.virtual_clock import run as run_virtual
 from tests.virtual_clock import run_timing
 from claude_code_bridge.send_boundaries import separator_before_new_block
 
@@ -569,6 +570,27 @@ def test_abort_during_result_context_read_preserves_result_usage(monkeypatch):
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
+@pytest.mark.parametrize(("reply_after", "breakdown"), [
+    (1.5, True),  # beyond the old 0.9 s cap that dropped ~9% of breakdowns
+    (NATIVE_CONTEXT_READ_TIMEOUT_S + 0.1, False),
+])
+def test_native_context_read_waits_up_to_its_cap(reply_after, breakdown):
+    class Client:
+        async def get_context_usage(self):
+            await asyncio.sleep(reply_after)
+            return {"totalTokens": 55}
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        usage = await ClaudeUsageMixin._read_native_context_usage(Client())
+        return usage, loop.time() - started
+
+    usage, elapsed = run_virtual(run())
+    assert (usage == {"totalTokens": 55}) is breakdown
+    assert elapsed == pytest.approx(min(reply_after, NATIVE_CONTEXT_READ_TIMEOUT_S))
+
+
 def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
     async def run():
         harness = _SendHarness()
@@ -596,7 +618,7 @@ def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
         assert not second.waiting.is_set()
         # The SDK read must time out at its virtual deadline, freeing the lock
         # for the queued turn without waiting for the stuck control request.
-        loop.advance(0.9)
+        loop.advance(NATIVE_CONTEXT_READ_TIMEOUT_S)
         await second.waiting.wait()
         assert first.disconnect_calls == 1
         second.release_stream.set()
