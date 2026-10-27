@@ -56,13 +56,28 @@ def _base_url(url: str) -> str:
     return url.strip().rstrip("/").removesuffix(_MCP_PATH).rstrip("/")
 
 
+def _stored(config):
+    """The usable record, ``None`` when none exists; raises when unusable."""
+    try:
+        return read_connection(config, "integration", INTEGRATION_ID, integration_spec(INTEGRATION_ID))
+    except ConnectionUnavailable as error:
+        raise HomeAssistantUnavailable(error.code) from None
+
+
+def check_stored_connection(config) -> bool:
+    """Whether a usable record exists (``False`` when none does).
+
+    Raises :class:`HomeAssistantUnavailable` for a record that exists but
+    can't be used, so env-only clients (the legacy MCP server) stay off after
+    a disconnect, the same as the native readers.
+    """
+    return _stored(config) is not None
+
+
 def resolve_ha_credentials(config) -> HACredentials | None:
     """The Home Assistant credentials to use now, or ``None`` when none are set."""
     global _env_fallback_warned
-    try:
-        found = read_connection(config, "integration", INTEGRATION_ID, integration_spec(INTEGRATION_ID))
-    except ConnectionUnavailable as error:
-        raise HomeAssistantUnavailable(error.code) from None
+    found = _stored(config)
     if found is not None:
         return HACredentials(_base_url(found.meta["url"]), found.secret["token"].strip())
     url = _base_url(getattr(config, "HA_NATIVE_MCP_URL", "") or "")
@@ -78,4 +93,10 @@ def resolve_ha_credentials(config) -> HACredentials | None:
     return HACredentials(url, token)
 
 
-__all__ = ["HACredentials", "HomeAssistantUnavailable", "INTEGRATION_ID", "resolve_ha_credentials"]
+__all__ = [
+    "HACredentials",
+    "HomeAssistantUnavailable",
+    "INTEGRATION_ID",
+    "check_stored_connection",
+    "resolve_ha_credentials",
+]

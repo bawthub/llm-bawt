@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...utils.config import Config
-from ..ha_credentials import HACredentials, HomeAssistantUnavailable, resolve_ha_credentials
+from ..ha_credentials import (
+    HACredentials,
+    HomeAssistantUnavailable,
+    check_stored_connection,
+    resolve_ha_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,13 +237,27 @@ class HomeAssistantMCPClient:
     """Typed client for Home Assistant MCP tool calls."""
 
     def __init__(self, config: Config):
+        self._config = config
         self._base_url = (getattr(config, "HA_MCP_URL", "") or "").rstrip("/")
         self._timeout = float(max(1, int(getattr(config, "HA_MCP_TIMEOUT", 10) or 10)))
         self._auth_token = (getattr(config, "HA_MCP_AUTH_TOKEN", "") or "").strip()  # Reserved for future authenticated transports.
 
     @property
     def available(self) -> bool:
-        return bool(self._base_url)
+        if not self._base_url:
+            return False
+        try:
+            self._require_usable_connection()
+        except HomeAssistantUnavailable as error:
+            logger.warning("Legacy HA MCP disabled: Home Assistant connection unavailable: %s", error.code)
+            return False
+        return True
+
+    def _require_usable_connection(self) -> None:
+        # TASK-1476: env-configured, but a Home Assistant record that exists
+        # and can't be used (e.g. disconnected) turns it off too. Checked on
+        # every call, so a disconnect after startup takes effect at once.
+        check_stored_connection(self._config)
 
     def status(self) -> str:
         return self._call_text_tool("status", {})
@@ -278,6 +297,10 @@ class HomeAssistantMCPClient:
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         if not self._base_url:
             raise RuntimeError("HA MCP URL is not configured")
+        try:
+            self._require_usable_connection()
+        except HomeAssistantUnavailable as error:
+            raise RuntimeError(str(error)) from None
         sse_url = f"{self._base_url}/sse"
         try:
             return self._run_async(self._call_tool_async(sse_url, name, arguments))

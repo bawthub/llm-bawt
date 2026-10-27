@@ -19,17 +19,19 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
+from llm_bawt.core.initialization import OrchestratorInitializationMixin
 from llm_bawt.integrations import ha_credentials
 from llm_bawt.integrations.connections import IntegrationStore
 from llm_bawt.integrations.credential_integrations import CredentialIntegrations
 from llm_bawt.integrations.ha_credentials import HACredentials, HomeAssistantUnavailable, resolve_ha_credentials
-from llm_bawt.integrations.ha_mcp.client import HomeAssistantNativeClient
+from llm_bawt.integrations.ha_mcp.client import HomeAssistantMCPClient, HomeAssistantNativeClient
 from llm_bawt.integrations.home_audio import HomeAudioClient, HomeAudioSettings
 from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
 from llm_bawt.service import connection_secrets
 from llm_bawt.service.providers import crypto
 from llm_bawt.service.providers.base import STATUS_DISCONNECTED
 from llm_bawt.service.routes import ha_weather
+from llm_bawt.tools.executor import ToolExecutor
 
 STORED_TOKEN = "stored-ha-token-do-not-echo"
 ROTATED_TOKEN = "rotated-ha-token-do-not-echo"
@@ -224,3 +226,75 @@ def test_weather_route_surfaces_an_unusable_record_without_legacy_fallback(forms
     result = _weather(monkeypatch, config, requests)
     assert result == {"error": "Home Assistant connection unavailable: not_connected"}
     assert requests == []
+
+
+# --- the legacy env-only MCP client (Loopy r1 B1) ---------------------------
+
+def _make_unusable(forms, monkeypatch, state):
+    _save(forms)
+    if state == "disconnected":
+        forms.disconnect("home-assistant")
+    elif state == "unreadable":
+        monkeypatch.setattr(crypto, "_get_fernet", lambda: Fernet(Fernet.generate_key()))  # rotated root
+    else:
+        def down(config, kind):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(connection_secrets, "_store", down)
+
+
+def _legacy_config():
+    # No native settings, so only the legacy server could serve Home Assistant.
+    return _config(url="", token="", HA_MCP_ENABLED=True, HA_MCP_URL="http://ha-legacy.example",
+                   HA_MCP_AUTH_TOKEN=ENV_TOKEN)
+
+
+def _initialized(config):
+    owner = SimpleNamespace(bot=SimpleNamespace(uses_tools=True, uses_home_assistant=True),
+                            home_client=None, ha_native_client=None)
+    OrchestratorInitializationMixin._init_home_assistant(owner, config)
+    return owner
+
+
+UNUSABLE = ["disconnected", "unreadable", "store_down"]
+
+
+@pytest.mark.parametrize("state", UNUSABLE)
+def test_initialization_never_enables_legacy_on_an_unusable_record(forms, monkeypatch, state):
+    _make_unusable(forms, monkeypatch, state)
+    owner = _initialized(_legacy_config())
+    assert owner.home_client is None and owner.ha_native_client is None
+
+
+@pytest.mark.parametrize("state", UNUSABLE)
+def test_executor_lazy_init_never_enables_legacy_on_an_unusable_record(forms, monkeypatch, state):
+    _make_unusable(forms, monkeypatch, state)
+    executor = ToolExecutor(user_id="test-user", config=_legacy_config())
+    executor._ensure_home_client()
+    assert executor.home_client is None
+
+
+def test_without_a_record_legacy_still_initializes(store):
+    owner = _initialized(_legacy_config())
+    assert isinstance(owner.home_client, HomeAssistantMCPClient)
+    executor = ToolExecutor(user_id="test-user", config=_legacy_config())
+    executor._ensure_home_client()
+    assert isinstance(executor.home_client, HomeAssistantMCPClient)
+
+
+def test_legacy_client_stops_on_the_next_call_after_a_disconnect(forms, monkeypatch):
+    client = HomeAssistantMCPClient(_legacy_config())
+    assert client.available is True
+    calls = []
+
+    async def fake_call(sse_url, name, arguments):
+        calls.append(name)
+        return SimpleNamespace(content=[SimpleNamespace(text="ok")])
+
+    monkeypatch.setattr(client, "_call_tool_async", fake_call)
+    assert client.status() == "ok"
+    _save(forms)
+    forms.disconnect("home-assistant")
+    with pytest.raises(RuntimeError, match="unavailable: not_connected"):
+        client.status()
+    assert calls == ["status"] and client.available is False
