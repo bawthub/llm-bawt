@@ -44,6 +44,14 @@ class BotInfo(BaseModel):
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] = Field(default_factory=dict)
     settings: dict[str, Any] = Field(default_factory=dict)
+    steer_capabilities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "TASK-1243: what a run started now would accept as a steer "
+            "(llm_bawt.steer_capabilities names). A hint only: a running turn's "
+            "own pinned value is on its turn-log row (steer_caps)."
+        ),
+    )
 
 
 class BotsResponse(BaseModel):

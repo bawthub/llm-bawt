@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from ...bots import BotManager
+from ...steer_capabilities import bot_steer_caps
 from ..dependencies import get_service
 from ..providers.registry import access_path_connections, route_eligibility
 from ..schemas import (
@@ -214,6 +215,7 @@ def list_bots():
             agent_backend=bot.agent_backend,
             agent_backend_config=bot.agent_backend_config or {},
             settings=bot.settings,
+            steer_capabilities=sorted(bot_steer_caps(bot)),
         )
         for bot in bot_manager.list_bots()
     ]

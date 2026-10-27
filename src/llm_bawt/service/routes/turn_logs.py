@@ -167,6 +167,40 @@ def _live_tool_calls(store: TurnLogStore, turn_id: str) -> list[dict]:
     return calls
 
 
+def _in_flight_steer_caps(service, rows) -> dict[str, list[str]]:
+    """Sorted steer capabilities of each in-flight row's run (TASK-1243).
+
+    The run's pinned value decides. A row not bound yet stands in with what
+    its bot would bind now, read once per bot. Ended rows are left out.
+    """
+    from ...steer_capabilities import NO_STEER_CAPS, bot_steer_caps, run_steer_caps
+
+    provisional_by_bot: dict[str, frozenset[str]] = {}
+
+    def provisional(bot_id: str) -> frozenset[str]:
+        if bot_id not in provisional_by_bot:
+            caps = NO_STEER_CAPS
+            try:
+                from ...bots import BotManager
+
+                bot = BotManager(service.config).get_bot(bot_id) if bot_id else None
+                caps = bot_steer_caps(bot) if bot is not None else NO_STEER_CAPS
+            except Exception:
+                log.warning("steer caps unavailable for bot %s", bot_id, exc_info=True)
+            provisional_by_bot[bot_id] = caps
+        return provisional_by_bot[bot_id]
+
+    result: dict[str, list[str]] = {}
+    for row in rows:
+        if getattr(row, "ended_at", None) is not None:
+            continue
+        backend = (getattr(row, "agent_backend", None) or "").strip()
+        stored = getattr(row, "agent_steer_caps", None)
+        bot_caps = None if backend or stored is not None else provisional(row.bot_id or "")
+        result[row.id] = sorted(run_steer_caps(backend=backend, caps=stored, provisional=bot_caps))
+    return result
+
+
 def _live_tool_call_counts(store: TurnLogStore, turn_ids: list[str]) -> dict[str, int]:
     """Count realtime tool-call rows for multiple turns in one query."""
     if store.engine is None or not turn_ids:
@@ -305,6 +339,7 @@ def list_turn_logs(
 
     # TASK-1074: mid-turn joiners get the current transient phase (never stored).
     live_phases = getattr(service, "_live_turn_phases", None)
+    steer_caps_by_turn = _in_flight_steer_caps(service, rows)
     items = []
     for row in rows:
         tool_call_count = live_tool_counts.get(row.id, 0)
@@ -346,6 +381,7 @@ def list_turn_logs(
                     if live_phases is not None and getattr(row, "ended_at", None) is None
                     else None
                 ),
+                steer_caps=steer_caps_by_turn.get(row.id),
             )
         )
 

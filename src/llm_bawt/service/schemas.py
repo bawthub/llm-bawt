@@ -303,6 +303,8 @@ class TurnLogListItem(BaseModel):
     # existing turn-log backfill graft.
     changed_files: dict[str, Any] | None = None
     live_phase: dict[str, Any] | None = None  # TASK-1074: transient, in-flight rows only (upstream_status.LiveTurnPhases)
+    # TASK-1243: sorted steer capabilities of an in-flight row's run; None once ended.
+    steer_caps: list[str] | None = None
 
 
 class TurnLogListResponse(BaseModel):
