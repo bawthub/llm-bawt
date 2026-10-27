@@ -247,14 +247,19 @@ class PromptSectionsMixin:
     def _sec_injected_skills(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-1309 injected skills (agent backends only): the SKILL.md bodies
         assigned to this bot in 'injected' mode, admitted under the token caps.
-        Fails closed: any error omits the section; it never fails the build."""
+        Fails closed: any error omits the section; it never fails the build.
+        The resolution is kept as ``_skill_resolution`` so the turn pins the
+        same manifest this section rendered (None when it failed)."""
         from ..skills.prompts import ENTRY_KEY, PREAMBLE_KEY, render_section
+        from ..skills.resolver import INJECTED
         from ..skills.service import SkillService
         from ..utils.db import get_shared_engine
 
+        self._skill_resolution = None
         try:
             engine = get_shared_engine(self.config)
             resolution = SkillService.from_config(engine, self.config).resolve_bot(self.bot_id)
+            self._skill_resolution = resolution
             injected = resolution.injected if resolution is not None else ()
             if not injected:
                 return
@@ -281,6 +286,9 @@ class PromptSectionsMixin:
                 "refs": [e.ref for e in injected],
                 "tokens": resolution.injected_tokens,
                 "manifest_sha": manifest["manifest_sha"] if manifest else None,
+                # Injected assignments left out of this render, and why.
+                "skipped": [{"ref": e.ref, "reason": e.reason} for e in resolution.entries
+                            if e.mode == INJECTED and not e.applied],
             },
         )
 

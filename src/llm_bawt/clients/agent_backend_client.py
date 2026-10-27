@@ -239,6 +239,8 @@ class AgentBackendClient(LLMClient):
         # TASK-1318: the session-pinned prompt decision. Its bytes are already
         # the system message; the backend must send them verbatim.
         system_prompt_pin = kwargs.pop("system_prompt_pin", None)
+        # TASK-1309: the skill manifest pinned with that prompt (request-local).
+        skill_selection = kwargs.pop("skill_selection", None)
 
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
@@ -265,6 +267,8 @@ class AgentBackendClient(LLMClient):
             delivery = self._backend.system_prompt_delivery(system_prompt_pin.is_boundary)
             if delivery:
                 config["system_prompt_delivery"] = delivery
+        if skill_selection is not None:
+            config["skill_selection"] = skill_selection
 
         execution = kwargs.pop("turn_execution", None)
         if execution is not None:

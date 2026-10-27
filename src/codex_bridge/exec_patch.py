@@ -2,11 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextvars import ContextVar
 from typing import AsyncIterator
 
 from .process_ledger import register_process
 
 logger = logging.getLogger(__name__)
+
+#: This turn's ``codex -c`` overrides (bare ``key=value``; TASK-1309 skill
+#: selection). The SDK's thread options have no config passthrough, so the
+#: send sets this before running and the patched ``run`` adds them.
+CONFIG_OVERRIDES: ContextVar[tuple[str, ...]] = ContextVar("codex_config_overrides", default=())
+
+
+def with_config_overrides(command_args: list[str], overrides: tuple[str, ...]) -> list[str]:
+    """Insert ``--config`` pairs after ``exec --experimental-json``, before any ``resume``."""
+    if not overrides:
+        return command_args
+    if command_args[:2] != ["exec", "--experimental-json"]:
+        raise RuntimeError("unexpected codex command shape; refusing to place skill overrides")
+    extra = [part for item in overrides for part in ("--config", item)]
+    return [*command_args[:2], *extra, *command_args[2:]]
 
 #: Hard ceiling for one JSONL event line from ``codex exec``. Lines are no
 #: longer bounded by the StreamReader buffer limit (see ``read_event_line``);
@@ -77,7 +93,7 @@ def install(*, stream_limit: int = 1024 * 1024) -> None:
         if args.signal is not None and args.signal.aborted:
             raise AbortError(_format_abort_reason(args.signal.reason))
 
-        command_args = self._build_command_args(args)
+        command_args = with_config_overrides(self._build_command_args(args), CONFIG_OVERRIDES.get())
         env = self._build_env(args)
 
         proc = await asyncio.create_subprocess_exec(

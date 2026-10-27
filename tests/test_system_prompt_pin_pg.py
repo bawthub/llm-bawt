@@ -69,11 +69,13 @@ class Rig:
             })
         return turn_id
 
-    def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True, resume=None):
+    def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True, resume=None,
+                skill_manifest=None):
         """Resolve a turn; ``dispatched`` models the bridge's first output confirming it."""
         decision = self.store.resolve(
             session_id=self.session_id, turn_id=turn_id, storage_bot=self.bot,
             rendered=rendered, cold_start=cold, sections=sections, resume_id=resume,
+            skill_manifest=skill_manifest,
         )
         if dispatched and decision is not None and decision.is_boundary:
             assert self.store.confirm(session_id=self.session_id, turn_id=turn_id)
@@ -464,3 +466,59 @@ def test_bare_reset_marker_beats_a_proven_compaction(rig):
 def test_bare_reset_marker_needs_a_session(rig):
     turn = rig.add_turn("/new")
     assert rig.store.mark_reset_boundary(session_id=str(uuid.uuid4()), turn_id=turn, resume_id=None) is False
+
+
+# ── TASK-1309: the skill selection is pinned with the bytes ─────────────────
+
+def _manifest(*refs):
+    return {"harness": "claude-code", "injected": [],
+            "entries": [{"ref": ref, "mode": "available", "source": "ambient"} for ref in refs],
+            "manifest_sha": uuid.uuid4().hex}
+
+
+def test_pinned_skills_move_only_at_a_boundary(rig):
+    first_skills, edited, after_new = _manifest("alpha"), _manifest("alpha", "beta"), _manifest("gamma")
+    first = rig.add_turn()
+    pinned = rig.resolve(first, "V1", cold=True, skill_manifest=first_skills)
+    assert pinned.skill_manifest == first_skills
+    assert rig.turn_request(first)[PIN_KEY]["skill_manifest"] == first_skills
+
+    # Assignments edited mid-session: the kept turn replays the pinned skills.
+    second = rig.add_turn()
+    kept = rig.resolve(second, "V1", skill_manifest=edited)
+    assert (kept.action, kept.skill_manifest) == ("kept", first_skills)
+    assert "skill_manifest" not in rig.turn_request(second)[PIN_KEY]
+
+    moved = rig.resolve(rig.add_turn("/new hi"), "V2", cold=True, skill_manifest=after_new)
+    assert (moved.action, moved.skill_manifest) == ("pinned", after_new)
+    assert rig.resolve(rig.add_turn(), "V2", skill_manifest=edited).skill_manifest == after_new
+
+
+def test_a_session_pinned_unmanaged_stays_unmanaged_until_its_boundary(rig):
+    # Also a pin taken before skills were pinned: its record has no manifest.
+    first = rig.add_turn()
+    rig.resolve(first, "V1", cold=True)
+    assert "skill_manifest" not in rig.turn_request(first)[PIN_KEY]
+    kept = rig.resolve(rig.add_turn(), "V1", skill_manifest=_manifest("alpha"))
+    assert (kept.action, kept.skill_manifest) == ("kept", None)
+
+
+def test_a_corrupt_pinned_selection_fails_the_turn(rig):
+    from agent_bridge.skill_selection import SkillSelectionError
+
+    first = rig.add_turn()
+    rig.resolve(first, "V1", cold=True, skill_manifest=_manifest("alpha"))
+    payload = rig.turn_request(first)
+    payload[PIN_KEY]["skill_manifest"] = {"entries": [{"ref": "../escape"}], "manifest_sha": "x"}
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE turn_logs SET request_json=:rj WHERE id=:id"),
+                     {"rj": json.dumps(payload), "id": first})
+    second = rig.add_turn()
+    with pytest.raises(SkillSelectionError):
+        rig.resolve(second, "V1", skill_manifest=_manifest("alpha"))
+    # Nothing was recorded for the failed turn, and the pin did not move.
+    with rig.engine.connect() as conn:
+        raw = conn.execute(text("SELECT request_json FROM turn_logs WHERE id=:id"),
+                           {"id": second}).scalar_one()
+    assert raw is None or PIN_KEY not in json.loads(raw)
+    assert rig.store.get(rig.session_id)["turn_id"] == first

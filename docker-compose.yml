@@ -59,6 +59,12 @@ services:
       # BAWTHUB_SERVICE_TOKEN[_FILE] in .env; the override is what gets exported.
       - BAWTHUB_SERVICE_TOKEN_EXPORT_FILE=/run/bawthub-service-token/token
       - BAWTHUB_SERVICE_TOKEN_EXPORT_UID=${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
+      # TASK-1309: the skill catalog, the injected-skills prompt section and
+      # the codex skill selection read the same skill tree the agent bridges
+      # load, at the same path, so a rendered base_dir is the path the bridge
+      # sees. Mounted read-only below; tests/test_skill_compose_parity.py
+      # keeps this equal to claude-code-bridge's value.
+      - CLAUDE_CODE_SKILLS_PATH=/home/bridge/dev/agent-skills
       # TASK-636: CODEX_AUTH_PATH removed — the app reads the codex bundle
       # from the encrypted DB store (provider_connection:openai_chatgpt).
     ports:
@@ -114,6 +120,8 @@ services:
       # No SSH, no keys, no host runner — the container talks to the same daemon
       # that spawned it. Host and container both trusted (LAN-only deployment).
       - /var/run/docker.sock:/var/run/docker.sock
+      # TASK-1309: skill content, read-only (see CLAUDE_CODE_SKILLS_PATH).
+      - ${HOME}/dev/agent-skills:/home/bridge/dev/agent-skills:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"

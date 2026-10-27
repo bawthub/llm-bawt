@@ -17,7 +17,7 @@ from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
 from .logging import get_service_logger
 from .pending_tool_calls import PendingToolCallCorrelator
-from .system_prompt_pin import SessionPinConfirmer, apply_session_pin
+from .system_prompt_pin import SessionPinConfirmer, apply_session_pin, pin_backend_kwargs
 from .tool_execution_stamps import ToolExecutionStamps
 from .turn_stream_context import TurnStreamContext, _TEXT_DELTA_FLUSH_CHARS
 from .turn_stream_finalize import TurnStreamFinalizer
@@ -351,8 +351,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     extra_kwargs["thread_binding"] = ctx.thread_binding
                 if is_agent_backend and ctx.bridge_reset_action:
                     extra_kwargs["bridge_reset_action"] = ctx.bridge_reset_action
-                if system_prompt_pin is not None:
-                    extra_kwargs["system_prompt_pin"] = system_prompt_pin
+                extra_kwargs.update(pin_backend_kwargs(ctx, system_prompt_pin, agent=is_agent_backend))
                 if is_agent_backend and task_turn_capability:
                     # TASK-701: opaque current-turn authority. The client/backend
                     # forwards this request-locally; it is never model-visible.

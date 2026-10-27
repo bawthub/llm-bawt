@@ -127,8 +127,8 @@ class SkillSource(ABC):
         entry = self.get(ref)
         if entry is None:
             return None
-        path = entry.root / SKILL_FILE
         try:
+            path = _confined(entry.root, SKILL_FILE)
             stat = path.stat()
             key = (ref, str(path), stat.st_mtime_ns, stat.st_size)
             cached = _BODY_CACHE.get(key)
@@ -213,13 +213,15 @@ class AmbientSource(SkillSource):
                     continue
                 try:
                     resolved = child.resolve()
-                    skill_file = resolved / SKILL_FILE
-                    # A link out of the checkout is not a skill of this source.
-                    if (not resolved.is_relative_to(root) or not resolved.is_dir()
-                            or not skill_file.is_file()):
+                    # A link out of the checkout, or a SKILL.md linked out of
+                    # its own skill directory, is not a skill of this source.
+                    if not resolved.is_relative_to(root) or not resolved.is_dir():
+                        continue
+                    skill_file = _confined(resolved, SKILL_FILE)
+                    if not skill_file.is_file():
                         continue
                     meta = _frontmatter_of(skill_file)
-                except OSError:
+                except (OSError, SkillSourceError):
                     continue
                 description = meta.get("description")
                 found[child.name] = SkillEntry(

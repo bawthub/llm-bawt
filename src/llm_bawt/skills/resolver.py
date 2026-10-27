@@ -92,6 +92,8 @@ class SkillResolution:
     harness: str | None
     entries: tuple[ResolvedSkill, ...]
     caps: Caps
+    #: Why a managed bot's rows apply nothing (private, harness, bundle).
+    skip_reason: str | None = None
 
     @property
     def applied(self) -> tuple[ResolvedSkill, ...]:
@@ -114,9 +116,10 @@ class SkillResolution:
         """What the bridge applies for this bot; None when nothing is managed.
 
         ``manifest_sha`` covers every other field, so a pinned session can
-        tell whether its skills changed.
+        tell whether its skills changed. A bot whose rows a blanket reason
+        skips also gets None: it keeps its own (ambient or bundle) skills.
         """
-        if not self.managed:
+        if not self.managed or self.skip_reason is not None:
             return None
         body = {
             "harness": self.harness,
@@ -188,7 +191,7 @@ def resolve(facts: BotFacts, rows: Iterable[Assignment], source: SkillSource,
             **base, applied=fits, reason=None if fits else OVER_CAP,
             tokens=body.tokens, content_sha=body.content_sha,
             body_text=body.text if fits else None, base_dir=str(skill.root) if fits else None))
-    return SkillResolution(facts.slug, True, facts.harness, tuple(entries), caps)
+    return SkillResolution(facts.slug, True, facts.harness, tuple(entries), caps, blanket)
 
 
 def newly_over_cap(before: SkillResolution, after: SkillResolution) -> frozenset[str]:

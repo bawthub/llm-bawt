@@ -8,6 +8,8 @@ import pytest
 from agent_bridge.skill_sources import (
     MAX_VIEW_BYTES,
     AmbientSource,
+    SkillEntry,
+    SkillSource,
     SkillSourceError,
     split_frontmatter,
 )
@@ -47,6 +49,32 @@ def test_listing_skips_escaping_links_odd_names_and_dirs_without_a_skill_file(tm
     (root / "empty").mkdir()
     refs = [e.ref for e in AmbientSource((root,)).list()]
     assert refs == ["inner-link", "real"]
+
+
+def test_a_skill_file_linked_out_of_its_skill_is_neither_listed_nor_read(tmp_path):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("---\nname: leak\n---\nSECRET BODY\n")
+    (root / "escaper").mkdir(parents=True)
+    (root / "escaper" / "SKILL.md").symlink_to(outside / "secret.md")
+    (root / "sibling-link").mkdir()
+    _skill(root, "real")
+    (root / "sibling-link" / "SKILL.md").symlink_to(root / "real" / "SKILL.md")
+    source = AmbientSource((root,))
+
+    assert [e.ref for e in source.list()] == ["real"]
+    assert source.read_body("escaper") is None
+
+    class _Trusting(SkillSource):
+        """A source that lists the escaping skill anyway; reading must still refuse."""
+
+        kind = "fixture"
+
+        def list(self):
+            return (SkillEntry("escaper", "escaper", "", self.kind,
+                               (root / "escaper").resolve()),)
+
+    assert _Trusting().read_body("escaper") is None
 
 
 def test_body_strips_frontmatter_counts_tokens_and_tracks_edits(tmp_path):

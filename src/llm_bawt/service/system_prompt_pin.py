@@ -66,6 +66,10 @@ PENDING_KEY = "system_prompt_pin_pending"
 #: turn that resumes a new SDK session is a cold start.
 BOUNDARY_KEY = "system_prompt_pin_boundary"
 PIN_VERSION = 1
+#: Key on the pin turn's audit record holding the skill manifest pinned with
+#: its bytes (TASK-1309), and the backend kwarg that carries it.
+SKILL_MANIFEST_KEY = "skill_manifest"
+SKILL_SELECTION_KWARG = "skill_selection"
 
 #: Pin-move reasons. Boundaries the harness itself observes are verified;
 #: fallbacks can disagree with the harness until its next boundary.
@@ -106,6 +110,8 @@ class PinDecision:
     snapshot_unverified: bool = False
     pinned_sections: dict[str, dict] | None = field(default=None, compare=False)
     candidate_sections: dict[str, dict] | None = field(default=None, compare=False)
+    #: TASK-1309: the skill manifest pinned with these bytes (None = unmanaged).
+    skill_manifest: dict | None = field(default=None, compare=False)
 
     @property
     def drift(self) -> bool:
@@ -190,6 +196,49 @@ def _sections_value(value: Any) -> dict[str, dict] | None:
                                   if isinstance(item, Mapping)}))
 
 
+def _manifest_value(value: Any) -> dict | None:
+    """A JSON-safe copy of a skill manifest, or None when absent or malformed."""
+    return json.loads(json.dumps(dict(value))) if isinstance(value, Mapping) else None
+
+
+def _pinned_manifest(record: Mapping) -> dict | None:
+    """The manifest pinned on a pin turn's record; a corrupt one fails the turn.
+
+    Absent means the session was pinned unmanaged (or before skills were
+    pinned) and stays so until its next boundary, never the current render's.
+    """
+    from agent_bridge.skill_selection import ManagedSelection
+
+    value = record.get(SKILL_MANIFEST_KEY)
+    if value is None:
+        return None
+    ManagedSelection.from_manifest(value)  # raises SkillSelectionError
+    return _manifest_value(value)
+
+
+def fresh_skill_manifest(ctx) -> dict | None:
+    """This turn's resolved skill manifest (rendered with its injected section)."""
+    resolution = getattr(getattr(ctx, "llm_bawt", None), "_skill_resolution", None)
+    return resolution.manifest() if resolution is not None else None
+
+
+def pin_backend_kwargs(ctx, decision: PinDecision | None, *, agent: bool) -> dict[str, Any]:
+    """Backend kwargs for this turn's pinned prompt and its skill selection.
+
+    A pinned turn sends the selection pinned with its bytes, so skills move
+    only at the session's boundaries; an unpinned turn sends this render's.
+    """
+    if not agent:
+        return {}
+    kwargs: dict[str, Any] = {}
+    if decision is not None:
+        kwargs[PIN_KEY] = decision
+    manifest = decision.skill_manifest if decision is not None else fresh_skill_manifest(ctx)
+    if manifest is not None:
+        kwargs[SKILL_SELECTION_KWARG] = manifest
+    return kwargs
+
+
 def _held_sections(reason: str, sections: Mapping[str, dict] | None, pin: dict | None) -> dict | None:
     """Section metadata of the prompt the harness holds after this pin move."""
     if reason in (COLD_START, COMPACTION):
@@ -252,6 +301,8 @@ def apply_session_pin(
     client as ``system_prompt_pin`` so the backend sends the bytes verbatim.
     ``sections`` is this render's section metadata, passed to ``resolve``.
     """
+    from agent_bridge.skill_selection import SkillSelectionError
+
     from ..models.message import Message
 
     backend = getattr(client, "_backend", None)
@@ -292,7 +343,10 @@ def apply_session_pin(
             ),
             sections=sections,
             resume_id=resume_id,
+            skill_manifest=fresh_skill_manifest(ctx),
         )
+    except SkillSelectionError:
+        raise  # a corrupt pinned skill selection is never swapped for the current one
     except Exception:
         logger.warning(
             "system prompt pin failed for session %s turn %s; sending the fresh render",
@@ -409,6 +463,7 @@ class SystemPromptPinStore:
         cold_start: bool,
         sections: Mapping[str, dict] | None = None,
         resume_id: str | None = None,
+        skill_manifest: Mapping | None = None,
     ) -> PinDecision | None:
         """Decide this turn's prompt, stage a pin move if needed, record the audit.
 
@@ -433,6 +488,11 @@ class SystemPromptPinStore:
         resume id differs from the reset turn's; it stays until
         :meth:`confirm`, so an unconfirmed boundary is decided again. A
         marker whose reset never installed a new session is dropped.
+
+        ``skill_manifest`` (TASK-1309) is this render's resolved skills. It is
+        pinned with the bytes on the pin turn's audit record, so a kept turn
+        replays the pinned one; a pin from before skills were pinned replays
+        None (unmanaged) until its next boundary.
         """
         if self.engine is None or not session_id or not turn_id:
             return None
@@ -462,6 +522,7 @@ class SystemPromptPinStore:
 
             pin_row_found = False
             pinned_text: str | None = None
+            record: Any = None
             compacted = False
             if pin is not None and not cold_start:
                 if pin["turn_id"] == turn_id:
@@ -496,6 +557,7 @@ class SystemPromptPinStore:
                     snapshot_unverified=reason in UNVERIFIED_REASONS,
                     pinned_sections=held_sections,
                     candidate_sections=candidate_sections,
+                    skill_manifest=_manifest_value(skill_manifest),
                 )
                 new_pin = {
                     "v": PIN_VERSION,
@@ -536,6 +598,7 @@ class SystemPromptPinStore:
                         _sections_value(pin.get("candidate_sections"))
                         if pin.get("snapshot_unverified") else None
                     ),
+                    skill_manifest=_pinned_manifest(record),
                 )
             else:  # pin_move_reason keeps a pin only when both exist
                 raise RuntimeError("system prompt pin kept without pinned text")
@@ -547,6 +610,8 @@ class SystemPromptPinStore:
                 audit["pending"] = True
             if decision.pin_turn_id == turn_id:
                 audit["text"] = decision.text
+                if decision.skill_manifest is not None:
+                    audit[SKILL_MANIFEST_KEY] = decision.skill_manifest
             turn_request[PIN_KEY] = audit
             conn.execute(
                 text("UPDATE turn_logs SET request_json=:rj WHERE id=:id"),

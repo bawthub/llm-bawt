@@ -92,6 +92,8 @@ def test_blanket_exclusions_keep_rows_visible_with_a_reason():
         assert [(e.ref, e.applied, e.reason) for e in got.entries] == [
             ("a", False, reason), ("b", False, reason)], facts
         assert got.applied == () and got.injected == ()
+        # Loopy r1 B4: such a bot keeps its own skills; no selection reaches a harness.
+        assert got.skip_reason == reason and got.manifest() is None, facts
 
 
 def test_private_wins_over_every_other_exclusion():

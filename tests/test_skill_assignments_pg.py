@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from agent_bridge.skill_sources import AmbientSource
+from llm_bawt.bot_tags.facade import TagSnapshot
 from llm_bawt.service.routes import skills as skill_routes
 from llm_bawt.skills.resolver import Caps
 from llm_bawt.skills.service import SkillService, SkillServiceError
@@ -223,6 +224,45 @@ def test_private_bots_show_only_a_lock(world):
     assert (view["locked"], view["managed"], view["entries"], view["manifest"]) == (
         True, False, [], None)
     assert world.service.resolve_bot("fixture-private").injected == ()
+
+
+def _plant_managed(world, slug):
+    world.service.assignments()  # bootstraps the tables
+    with world.rig.engine.begin() as conn:
+        conn.execute(text("INSERT INTO skill_managed_bots (bot_slug) VALUES (:s)"), {"s": slug})
+        conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
+                          " VALUES ('bot', :s, 'alpha', 'injected')"), {"s": slug})
+
+
+def _managed_rows(world):
+    with world.rig.engine.connect() as conn:
+        return (sorted(conn.execute(text("SELECT bot_slug FROM skill_managed_bots")).scalars()),
+                _rows(world))
+
+
+@pytest.mark.parametrize(("slug", "status"), [
+    ("fixture-private", 403), ("fixture-unknown", 404)])
+def test_release_refuses_protected_and_unknown_bots_and_keeps_their_rows(world, slug, status):
+    _plant_managed(world, slug)
+    before = _managed_rows(world)
+    assert _status(world.service.release, slug)[0] == status
+    assert _managed_rows(world) == before
+
+
+def test_release_fails_closed_when_tags_are_unavailable(world):
+    world.service.adopt("fixture-one", None)
+    before = _managed_rows(world)
+    blind = SkillService(world.rig.engine, list_bots=world.service._list_bots,
+                         caps=world.service._caps, source=world.service.source,
+                         tags=SimpleNamespace(snapshot=lambda _conn: TagSnapshot.unavailable()))
+    assert _status(blind.release, "fixture-one")[0] == 503
+    assert _managed_rows(world) == before
+
+
+def test_a_bundle_bot_can_still_be_released(world):
+    _plant_managed(world, "fixture-bundle")
+    world.service.release("fixture-bundle")
+    assert _managed_rows(world) == ([], {})
 
 
 def test_routes_serve_the_service_over_http(world, monkeypatch):

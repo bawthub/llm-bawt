@@ -4,7 +4,8 @@ The API routes and the prompt section both go through :class:`SkillService`,
 so bot facts, the tag snapshot and the cap check are assembled one way.
 
 Writes are refused when they would:
-- touch a private bot (403) or run with the tag snapshot unreadable (503);
+- touch a private bot (403) or run with the tag snapshot unreadable (503),
+  releases included;
 - set ``off`` at tag scope, name an unknown skill or tag, or use a bad mode
   or position (422);
 - add a bot row to an unmanaged or bundle bot (409);
@@ -238,16 +239,25 @@ class SkillService:
         return self.effective(slug)
 
     def release(self, slug: str) -> None:
-        with self.store.write() as conn:
-            if not self.store.release(conn, slug):
+        """Stop managing ``slug``. Same lock and protection checks as every write."""
+        def validate(world: _World) -> list[str]:
+            # A bundle bot may still be released: release only removes management.
+            if not self._unprotected_bot(world, slug).managed:
                 raise SkillServiceError(404, f"{slug} is not managed")
+            return [slug]
 
-    def _writable_bot(self, world: _World, slug: str) -> BotFacts:
+        self._write(validate, lambda conn: self.store.release(conn, slug))
+
+    def _unprotected_bot(self, world: _World, slug: str) -> BotFacts:
         if slug not in world.bots:
             raise SkillServiceError(404, f"unknown bot {slug!r}")
         facts = world.facts(slug)
         if facts.private:
             raise SkillServiceError(403, f"{slug} is a protected bot")
+        return facts
+
+    def _writable_bot(self, world: _World, slug: str) -> BotFacts:
+        facts = self._unprotected_bot(world, slug)
         if facts.bundle:
             raise SkillServiceError(409, f"{slug} takes its skills from bundle {facts.bundle!r}")
         return facts

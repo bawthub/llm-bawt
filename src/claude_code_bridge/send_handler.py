@@ -331,6 +331,7 @@ class ClaudeSendMixin(
                         thread_session_id=thread_session_id,
                         request_id=request_id,
                         skill_bundle=req.skill_bundle,
+                        skill_selection=req.skill_selection,
                         native_route=native_route,
                     )
                     if mcp_tool_timeout_ms:
@@ -404,6 +405,7 @@ class ClaudeSendMixin(
                         stderr=_log_stderr,
                         task_turn_capability=task_turn_capability,
                         skill_bundle=req.skill_bundle,
+                        skill_selection=req.skill_selection,
                     )
 
                     session_persisted = False

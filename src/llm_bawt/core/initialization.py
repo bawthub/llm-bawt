@@ -102,6 +102,9 @@ class OrchestratorInitializationMixin:
         # policy allows; None otherwise). Set fresh every turn by the dispatch
         # paths, like the session override above.
         self._working_memory_section: str | None = None
+        # TASK-1309: this turn's skill resolution, set by the injected-skills
+        # section on every agent build; the session pin replays its manifest.
+        self._skill_resolution = None
 
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for: '{resolved_model_alias}'")

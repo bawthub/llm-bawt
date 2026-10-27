@@ -322,6 +322,14 @@ class CodexCommandMixin:
                             if codex_environment is not None
                             else self._ensure_codex()
                         )
+                        # TASK-1309: the session's pinned skill selection, every attempt.
+                        from agent_bridge.skill_codex import codex_config_overrides
+                        from agent_bridge.skill_selection import SELECTION_FIELD, ManagedSelection
+                        from .exec_patch import CONFIG_OVERRIDES
+                        CONFIG_OVERRIDES.set(tuple(codex_config_overrides(
+                            ManagedSelection.from_field(fields.get(SELECTION_FIELD)),
+                            env=codex_environment or os.environ,
+                        )))
                     except CodexMcpContextConfigError as context_error:
                         seq += 1
                         self._publish_event(

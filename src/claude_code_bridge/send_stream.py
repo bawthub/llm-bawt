@@ -136,6 +136,7 @@ class ClaudeStreamMixin:
         responses_transport: str | None = None,
         skill_bundle: str | None = None,
         native_route: NativeAuthRoute | None = None,
+        skill_selection: str | None = None,
     ) -> dict:
         """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``.
 
@@ -167,7 +168,7 @@ class ClaudeStreamMixin:
             # ANTHROPIC_AUTH_TOKEN inside the CLI; clear it so
             # the SDK doesn't fall back to api.anthropic.com.
             sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
-            from agent_bridge.skill_selection import claude_skill_names
+            from agent_bridge.skill_selection import ManagedSelection, claude_skill_names
 
             # The durable DB thread is the canonical conversation boundary.
             # Normal app dispatch always supplies it; the request id is a
@@ -184,7 +185,8 @@ class ClaudeStreamMixin:
                     bot_id=bot_id,
                     conversation_id=conversation_id,
                     responses_transport=responses_transport,
-                    skill_names=claude_skill_names(skill_bundle),
+                    skill_names=claude_skill_names(
+                        skill_bundle, ManagedSelection.from_field(skill_selection)),
                 )
             )
             # TASK-546: Override every internal/subagent model selector with a
@@ -247,6 +249,7 @@ class ClaudeStreamMixin:
         stderr,
         task_turn_capability: str | None = None,
         skill_bundle: str | None = None,
+        skill_selection: str | None = None,
     ) -> ClaudeAgentOptions:
         """Construct per-attempt options with isolated MCP request headers."""
         mcp_servers = copy.deepcopy(self._mcp_servers) if self._mcp_servers else {}
@@ -256,10 +259,10 @@ class ClaudeStreamMixin:
                 headers = dict(bawthub.get("headers") or {})
                 headers["X-LLM-Bawt-Task-Turn-Context"] = task_turn_capability
                 bawthub["headers"] = headers
-        from agent_bridge.skill_selection import claude_skill_options
+        from agent_bridge.skill_selection import ManagedSelection, claude_skill_options
 
         return ClaudeAgentOptions(
-            **claude_skill_options(skill_bundle),
+            **claude_skill_options(skill_bundle, ManagedSelection.from_field(skill_selection)),
             model=model,
             # TASK-1318: the CLI records the system prompt when a session
             # starts (and on the first turn after a manual /compact) and

@@ -103,7 +103,10 @@ def test_admitted_skills_render_in_position_order_with_metadata(world):
     assert section.metadata == {
         "source": "skills.resolve",
         "gate": "agent_backend & managed skills with injected assignments",
-        "refs": ["a", "b"], "tokens": 10, "manifest_sha": manifest["manifest_sha"]}
+        "refs": ["a", "b"], "tokens": 10, "manifest_sha": manifest["manifest_sha"],
+        "skipped": [{"ref": "big", "reason": "over_cap"}]}
+    # The turn pins the manifest of the very resolution this section rendered.
+    assert owner._skill_resolution is world["resolution"]
     assert world["asked"] == ["fixture-one"] and world["engine"] == "engine"
     assert owner.resolves == [(PREAMBLE_KEY, "bot", "fixture-one"), (ENTRY_KEY, "bot", "fixture-one")]
 
@@ -116,13 +119,18 @@ def test_nothing_to_inject_reads_no_templates_and_adds_nothing(world, resolution
         "no_injected": _resolution(rows=[Assignment("bot", "fixture-one", "a", "available")]),
     }[resolution]
     owner = _Owner(_TEMPLATES)
+    owner._skill_resolution = "stale from an earlier turn"
     assert _section(owner) is None
     assert owner.resolves == []
+    assert owner._skill_resolution is world["resolution"]
 
 
 def test_a_resolution_failure_skips_the_section(world):
     world["resolution"] = RuntimeError("db down")
-    assert _section(_Owner(_TEMPLATES)) is None
+    owner = _Owner(_TEMPLATES)
+    owner._skill_resolution = "stale from an earlier turn"
+    assert _section(owner) is None
+    assert owner._skill_resolution is None
 
 
 def test_an_entry_template_without_a_body_slot_skips_the_section(world):

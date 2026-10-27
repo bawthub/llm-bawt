@@ -113,6 +113,10 @@ services:
       # it from the shared volume. Override: BAWTHUB_SERVICE_TOKEN[_FILE] in .env.
       - BAWTHUB_SERVICE_TOKEN_EXPORT_FILE=/run/bawthub-service-token/token
       - BAWTHUB_SERVICE_TOKEN_EXPORT_UID=${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
+      # TASK-1309: skills are read from the bridge's own skill tree at the
+      # bridge's own path (bridge-dev, read-only below), so the catalog and
+      # injected skills match what the bridge loads.
+      - CLAUDE_CODE_SKILLS_PATH=/home/bridge/dev/agent-skills
     ports:
       - "${MCP_PORT:-8001}:8001"
       - "${SERVICE_PORT:-8642}:8642"
@@ -122,6 +126,8 @@ services:
       - app-storage:/app/storage
       - app-logs:/app/.logs
       - bawthub-service-token:/run/bawthub-service-token
+      # TASK-1309: the agent workspace, read-only, for skill content only.
+      - bridge-dev:/home/bridge/dev:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -224,6 +230,7 @@ volumes:
   app-logs:
   # TASK-1472: the exported BawtHub service token (app writes, frontend reads).
   bawthub-service-token:
-  # Agent workspace — written by claude-code-bridge, read-only in frontend.
+  # Agent workspace — written by claude-code-bridge, read-only in frontend
+  # and app.
   bridge-dev:
   bridge-claude:

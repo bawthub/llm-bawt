@@ -1,10 +1,69 @@
-"""Resolve an explicitly selected bundle; legacy bots remain unchanged."""
+"""Resolve a turn's skills: an explicit bundle, a managed selection, or ambient.
+
+A managed selection (TASK-1309) is the skill list the app pinned for the
+session (``llm_bawt.skills``); a bundle is the registry package path. They are
+exclusive. With neither, the harness discovers its ambient skills unchanged.
+"""
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from .skill_registry import SkillRegistry, _name
+
+#: Command field carrying a :class:`ManagedSelection`.
+SELECTION_FIELD = "skill_selection"
+#: The settings sources the Claude CLI loads when none are named. Passing
+#: ``skills`` makes the SDK default them to user+project only, which would
+#: silently drop local settings (hooks, permissions) for a managed bot.
+CLAUDE_DEFAULT_SETTING_SOURCES = ("user", "project", "local")
+
+
+class SkillSelectionError(ValueError):
+    """A managed selection that cannot be applied; the turn fails closed."""
+
+
+@dataclass(frozen=True)
+class ManagedSelection:
+    """The skills one managed session may use, by ambient ref (directory name).
+
+    Built from the resolver's manifest (``SkillResolution.manifest``); its
+    ``entries`` are the applied skills, available and injected alike.
+    """
+
+    refs: tuple[str, ...]
+    manifest_sha: str
+
+    @classmethod
+    def from_manifest(cls, manifest: Mapping) -> ManagedSelection:
+        from .skill_sources import _REF
+
+        entries = manifest.get("entries") if isinstance(manifest, Mapping) else None
+        sha = manifest.get("manifest_sha") if isinstance(manifest, Mapping) else None
+        if not isinstance(entries, list) or not isinstance(sha, str) or not sha:
+            raise SkillSelectionError("skill selection needs entries and a manifest_sha")
+        refs = [entry.get("ref") if isinstance(entry, Mapping) else None for entry in entries]
+        if not all(isinstance(ref, str) and _REF.fullmatch(ref) for ref in refs):
+            raise SkillSelectionError("skill selection has an invalid ref")
+        return cls(tuple(dict.fromkeys(refs)), sha)
+
+    @classmethod
+    def from_field(cls, raw: str | None) -> ManagedSelection | None:
+        """Parse the command field; absent means unmanaged, malformed raises."""
+        if raw is None or raw == "":
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise SkillSelectionError("skill selection is not JSON") from exc
+        return cls.from_manifest(data)
+
+    def to_field(self) -> str:
+        return json.dumps({"entries": [{"ref": ref} for ref in self.refs],
+                           "manifest_sha": self.manifest_sha}, separators=(",", ":"))
 
 
 def legacy_claude_skill_roots() -> tuple[Path, ...]:
@@ -15,15 +74,17 @@ def legacy_claude_skill_roots() -> tuple[Path, ...]:
     ) if configured else (Path.home() / ".claude" / "skills",)
 
 
-def claude_skill_names(bundle: str | None) -> tuple[str, ...]:
+def claude_skill_names(bundle: str | None,
+                       selection: ManagedSelection | None = None) -> tuple[str, ...]:
     """Return the exact Skill selectors available to one Claude CLI run.
 
-    Explicit bundles already carry their authoritative selector list in the
-    registry. Legacy/ambient runs discover the direct children of Claude's
-    skill directory, matching the CLI's own ``<name>/SKILL.md`` convention.
+    Explicit bundles and managed selections already carry their authoritative
+    selector list. Legacy/ambient runs discover the direct children of
+    Claude's skill directory, matching the CLI's own ``<name>/SKILL.md``
+    convention.
     """
-    if bundle is not None:
-        return tuple(claude_skill_options(bundle).get("skills") or ())
+    if bundle is not None or selection is not None:
+        return tuple(claude_skill_options(bundle, selection).get("skills") or ())
 
     names: set[str] = set()
     for root in legacy_claude_skill_roots():
@@ -73,7 +134,14 @@ def guard_resumed_bundle(bundle: str | None, *, thread: str | None, resume: str 
         _atomic_json(path, {"bundle_digest": digest, "bundle": bundle})
 
 
-def claude_skill_options(bundle: str | None) -> dict:
+def claude_skill_options(bundle: str | None, selection: ManagedSelection | None = None) -> dict:
+    if selection is not None:
+        if bundle is not None:
+            raise SkillSelectionError("a skill bundle and a managed selection are exclusive")
+        # ``skills`` filters the listing and allow-lists Skill(name); an empty
+        # list hides every skill. Settings sources stay the CLI's own.
+        return {"skills": list(selection.refs),
+                "setting_sources": list(CLAUDE_DEFAULT_SETTING_SOURCES)}
     if bundle is None:
         return {}
     _name(bundle)

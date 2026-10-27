@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+from collections.abc import Mapping
 
 from .publisher import COMMANDS_STREAM
 
@@ -66,6 +67,7 @@ class CommandPublisherMixin:
         skill_bundle: str | None = None,
         access_path: str | None = None,
         access_path_provider: str | None = None,
+        skill_selection: Mapping | None = None,
     ) -> None:
         """Publish one idempotent ``chat.send`` command to the bridge stream.
 
@@ -87,6 +89,12 @@ class CommandPublisherMixin:
             from .skill_registry import _name
 
             fields["skill_bundle"] = _name(skill_bundle)
+        if skill_selection is not None:  # TASK-1309: validated before it is published
+            from .skill_selection import SELECTION_FIELD, ManagedSelection, SkillSelectionError
+
+            if skill_bundle is not None:
+                raise SkillSelectionError("a skill bundle and a managed selection are exclusive")
+            fields[SELECTION_FIELD] = ManagedSelection.from_manifest(skill_selection).to_field()
         if attachments:
             fields["attachments"] = json.dumps(attachments, ensure_ascii=False)
         if system_prompt:
