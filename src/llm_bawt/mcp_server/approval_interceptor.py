@@ -358,9 +358,11 @@ class ApprovalAwareFastMCP(FastMCP):
                     "if verification fails. Changed target/configuration cancels execution."
                 )
             if name == "ops_run" and operations_snapshot and operations_snapshot.get("config"):
-                from ..ops.config_reconcile import approval_text  # TASK-1518
+                from ..ops import app_config_reconcile, config_reconcile  # TASK-1518, TASK-1474
 
-                approval_prompt = approval_text(
+                kind = (app_config_reconcile if operations_snapshot["spec"].get("action") == app_config_reconcile.ACTION
+                        else config_reconcile)
+                approval_prompt = kind.approval_text(
                     operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
                 )
             row, created = store.record_mcp_request(

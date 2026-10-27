@@ -544,7 +544,7 @@ def test_preflight_only_pulls_for_deploy(monkeypatch):
     executor = _pull_executor(images)
     monkeypatch.setattr(executor, "_check_settings", lambda _s: None)
     # The deploy's config-check prerequisites have their own tests (test_ops_config_reconcile).
-    monkeypatch.setattr(executor, "_check_config_worker", lambda _s: None)
+    monkeypatch.setattr(executor, "_check_config_worker", lambda _s, _action=None: None)
     monkeypatch.setattr(executor, "ensure_renderer_image", lambda _s: None)
     executor.client.ping = lambda: True
     executor.preflight({"spec": {**SPEC, "action": "rollback_image"}, "execution": {}})

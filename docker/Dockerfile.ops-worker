@@ -6,11 +6,14 @@
 ARG OPS_PYTHON_BASE
 FROM ${OPS_PYTHON_BASE}
 COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/ops/routing_reconcile.py \
-     src/llm_bawt/ops/compose_render.py src/llm_bawt/ops/compose_config.py src/llm_bawt/ops/config_reconcile.py /ops/
+     src/llm_bawt/ops/compose_render.py src/llm_bawt/ops/compose_config.py src/llm_bawt/ops/config_reconcile.py \
+     src/llm_bawt/ops/app_config_reconcile.py /ops/
 LABEL llm-bawt.ops.routing-reconcile="1"
 # TASK-1518: this worker renders the target's Compose service, reconciles its
 # configuration and refuses a deploy over configuration drift.
 LABEL llm-bawt.ops.config-reconcile="1"
+# TASK-1474: this worker reconciles a Compose-BUILT target (the llm-bawt app).
+LABEL llm-bawt.ops.app-config-reconcile="1"
 # TASK-1233: this worker enforces the quiesce start fence (worker.fence_expired).
 LABEL llm-bawt.ops.quiesce-fence="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

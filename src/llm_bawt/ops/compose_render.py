@@ -13,8 +13,9 @@ Docker CLI image with:
   the same path, so relative paths and the project ``.env`` resolve as they do
   for the operator. Both directory and files come from the target's Compose
   labels and must match the catalog spec's file names;
-* a fixed argv (``compose -p … -f … config``) and a single injected variable,
-  the pinned image reference for the image overlay.
+* a fixed argv (``compose -p … -f … config``) and at most one injected
+  variable, the pinned image reference for the image overlay (none for a
+  Compose-built target).
 
 The container is removed (with its anonymous volumes) in every outcome.
 Renderer stderr is never echoed: it can carry interpolated values. Only fixed
@@ -38,6 +39,8 @@ MAX_RENDER_BYTES = 4 * 1024 * 1024
 _WORKING_DIR = "com.docker.compose.project.working_dir"
 _CONFIG_FILES = "com.docker.compose.project.config_files"
 SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
+COMPOSE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.ya?ml")
+MAX_COMPOSE_FILES = 4
 _UNSET = re.compile(r'time="[^"]*" level=warning msg="The \\"([A-Za-z_][A-Za-z0-9_]{0,127})\\" '
                     r'variable is not set\. Defaulting to a blank string\."')
 
@@ -61,13 +64,26 @@ def compose_source(spec: dict, container: dict) -> dict:
     labels = container.get("Config", {}).get("Labels") or {}
     working_dir = labels.get(_WORKING_DIR) or ""
     files = (labels.get(_CONFIG_FILES) or "").split(",")
-    names = spec["compose_config"]["compose_files"]
+    names = spec["compose_config"].get("compose_files")
     if (not SAFE_PATH.fullmatch(working_dir) or posixpath.normpath(working_dir) != working_dir
             or working_dir == "/" or ".." in working_dir.split("/")):
         raise ComposeError("compose_source_invalid", detail="working directory label")
-    if files != [posixpath.join(working_dir, name) for name in names]:
+    if names is None:
+        # TASK-1474: which overlays an install layers is that install's own
+        # choice, so the spec names none. The files still must be distinct
+        # Compose basenames directly in the working directory, and the bound
+        # list is shown on the approval card.
+        if not label_files_valid(working_dir, files):
+            raise ComposeError("compose_source_invalid", detail="config files label")
+    elif files != [posixpath.join(working_dir, name) for name in names]:
         raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
     return {"project_dir": working_dir, "compose_files": files}
+
+
+def label_files_valid(working_dir: str, files: list) -> bool:
+    return (1 <= len(files) <= MAX_COMPOSE_FILES and len(set(files)) == len(files)
+            and all(isinstance(f, str) and posixpath.dirname(f) == working_dir
+                    and COMPOSE_FILE.fullmatch(posixpath.basename(f)) for f in files))
 
 
 def renderer_argv(spec: dict, source: dict, *, hash_only: bool) -> list[str]:
@@ -81,9 +97,11 @@ def renderer_argv(spec: dict, source: dict, *, hash_only: bool) -> list[str]:
 def renderer_body(spec: dict, source: dict, image_ref: str, argv: list[str], tag: str) -> dict:
     config = spec["compose_config"]
     directory = source["project_dir"]
+    # A Compose-built target (TASK-1474) has no image overlay to inject.
+    variable = config.get("image_variable")
     return {
         "Image": config["renderer_image"], "Entrypoint": ["docker"], "Cmd": argv,
-        "Env": [f"{config['image_variable']}={image_ref}"], "WorkingDir": directory,
+        "Env": [f"{variable}={image_ref}"] if variable else [], "WorkingDir": directory,
         "AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "OpenStdin": False, "Tty": False,
         "NetworkDisabled": True,
         "Labels": {RENDER_LABEL: "1", OPS_JOB_LABEL: tag,

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
+from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
+                                   app_config_binding, image_tag, validate_app_spec)
 from .compose_config import evaluate
 from .compose_render import ComposeError, ComposeRenderer
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
@@ -29,8 +31,11 @@ from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json,
                      target_selector)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
-# Ops whose target configuration is compared with its Compose service (TASK-1518).
-CONFIG_CHECKED_ACTIONS = frozenset({CONFIG_ACTION, DEPLOY_ACTION})
+# Ops whose target configuration is compared with its Compose service (TASK-1518),
+# and the worker capability label each needs (TASK-1474: the app reconcile).
+CONFIG_WORKER_LABELS = {CONFIG_ACTION: CONFIG_WORKER_LABEL, DEPLOY_ACTION: CONFIG_WORKER_LABEL,
+                        APP_CONFIG_ACTION: APP_CONFIG_WORKER_LABEL}
+CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
 
 
 class ExecutorError(RuntimeError):
@@ -179,6 +184,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_routing_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == CONFIG_ACTION:
         return validate_config_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == APP_CONFIG_ACTION:
+        return validate_app_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
     if is_release_spec(spec):
@@ -295,12 +302,12 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError("cannot inspect routing target") from exc
 
-    def _check_config_worker(self, settings):
+    def _check_config_worker(self, settings, action=CONFIG_ACTION):
         """The worker image carries the renderer, the reconciler and the deploy
         drift guard. An older one would deploy without the guard."""
         try:
             self._require_worker_label(
-                settings, CONFIG_WORKER_LABEL,
+                settings, CONFIG_WORKER_LABELS[action],
                 missing=("configured immutable ops worker lacks the Compose config check; "
                          "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
                 unverifiable="cannot verify the config-reconcile capability of the ops worker")
@@ -327,7 +334,7 @@ class DockerExecutor(Executor):
         """(renderer, container attrs, image attrs) after every prerequisite."""
         settings = self.execution_settings(spec)
         self._check_prerequisites(settings)
-        self._check_config_worker(settings)
+        self._check_config_worker(settings, spec["action"])
         self.ensure_renderer_image(spec)
         try:
             target = self.client.containers.get(spec["container_name"])
@@ -338,9 +345,22 @@ class DockerExecutor(Executor):
         renderer = ComposeRenderer(self._render_api_factory(), spec, tag="app" + os.urandom(4).hex())
         return renderer, target.attrs, image.attrs
 
+    def _image_tag_moved(self, spec, image):
+        """TASK-1474: does the Compose tag still name the running build? Shown
+        to the approver only; the worker swaps by image ID either way."""
+        try:
+            return self.client.images.get(image_tag(spec)).attrs["Id"] != image["Id"]
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                return True
+            raise ExecutorError(f"cannot inspect the Compose image tag {image_tag(spec)}") from exc
+
     def config_approval(self, spec):
         renderer, container, image = self._config_inputs(spec)
         try:
+            if spec["action"] == APP_CONFIG_ACTION:
+                return app_config_binding(spec, container, image, renderer,
+                                          image_tag_moved=self._image_tag_moved(spec, image))[0]
             return config_binding(spec, container, image, renderer)[0]
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
@@ -404,7 +424,7 @@ class DockerExecutor(Executor):
             # Cheap prerequisites only. The worker re-renders and compares under
             # the target lock; rendering here would churn renderer containers on
             # every reconcile tick of a job queued behind a prerequisite.
-            self._check_config_worker(snapshot["execution"])
+            self._check_config_worker(snapshot["execution"], snapshot["spec"]["action"])
             self.ensure_renderer_image(snapshot["spec"])
         if snapshot.get("quiesce"):
             self.check_quiesce_fence(snapshot["execution"])

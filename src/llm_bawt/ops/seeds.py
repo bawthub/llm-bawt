@@ -440,6 +440,39 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "risk_level": RISK_HIGH,
     "category": "configuration",
     "approval_prompt_prefix": "Reconcile production configuration with the same image (brief interruption)",
+}, {
+    # TASK-1474: the same for the llm-bawt app, whose image Compose builds.
+    # The app serves the approval itself, so the worker waits start_delay
+    # for the reply to drain; the ops reconciler records the outcome.
+    "slug": "llm-bawt.reconcile-app-config",
+    "title": "Reconcile llm-bawt app configuration",
+    "description": (
+        "Recreate the llm-bawt app from its declared Compose service using the SAME running image. "
+        "No build or pull; the image is bound by ID, never by tag. Approval shows changed names, "
+        "ports and dependencies only, never values. Dependencies must already be running and are "
+        "never restarted. Verifies health and restores the previous container on failure. "
+        "Cuts in-flight chat turns and MCP calls."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_app_config", container_name="llm-bawt-app",
+        compose_project=_LLM_BAWT_PROJECT, compose_service="app",
+        compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+        display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=180,
+        health_url="http://127.0.0.1:8642/health", health_status="ok",
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 5,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_HIGH,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile llm-bawt app configuration with the same image (cuts in-flight turns)",
 }]
 
 
