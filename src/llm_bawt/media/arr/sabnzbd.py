@@ -7,13 +7,13 @@ tools actually need: version check, queue, history, pause/resume.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 from typing import Any
 
 import httpx
 
-from .base import ArrAPIError, _read_env_pair
+from .base import ArrAPIError, ClientSlot, arr_timeout, resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -94,18 +94,12 @@ class SabnzbdClient:
         await self._client.aclose()
 
 
-_singleton: SabnzbdClient | None = None
+_slot = ClientSlot(lambda url, key: SabnzbdClient(url, key, timeout=arr_timeout()))
 
 
-def get_sabnzbd_client() -> SabnzbdClient:
-    global _singleton
-    if _singleton is None:
-        url, key = _read_env_pair(
-            "sabnzbd",
-            "LLM_BAWT_SABNZBD_URL",
-            "LLM_BAWT_SABNZBD_API_KEY",
-        )
-        _singleton = SabnzbdClient(
-            url, key, timeout=float(os.getenv("LLM_BAWT_ARR_TIMEOUT", "20"))
-        )
-    return _singleton
+async def get_sabnzbd_client() -> SabnzbdClient:
+    """The process-wide SABnzbd client for the current credentials (see Sonarr)."""
+    pair = await asyncio.to_thread(
+        resolve_credentials, "sabnzbd", "LLM_BAWT_SABNZBD_URL", "LLM_BAWT_SABNZBD_API_KEY",
+    )
+    return _slot.get(pair)

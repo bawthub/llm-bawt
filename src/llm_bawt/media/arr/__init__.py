@@ -5,21 +5,19 @@ APIs behind small, typed async clients. The MCP server's ``media_*``
 tools layer on top of these to give bots a unified media library
 interface.
 
-Configuration is read from env vars:
+Credentials (URL + API key) come from each service's encrypted
+``integration_connection:<service>`` record, saved under Integrations.
+Only when no record exists are the deprecated env vars read:
 
-    LLM_BAWT_SONARR_URL       e.g. http://sonarr-host:8989
-    LLM_BAWT_SONARR_API_KEY
-    LLM_BAWT_RADARR_URL       e.g. http://radarr-host:7878
-    LLM_BAWT_RADARR_API_KEY
-    LLM_BAWT_SABNZBD_URL      e.g. http://sabnzbd-host:8080
-    LLM_BAWT_SABNZBD_API_KEY
+    LLM_BAWT_SONARR_URL / LLM_BAWT_SONARR_API_KEY
+    LLM_BAWT_RADARR_URL / LLM_BAWT_RADARR_API_KEY
+    LLM_BAWT_SABNZBD_URL / LLM_BAWT_SABNZBD_API_KEY
 
-Each client is a lazy singleton; the first ``get_*_client()`` call
-creates the underlying ``httpx.AsyncClient`` and reuses it for the
-lifetime of the process.
+``await get_*_client()`` resolves credentials on every call and reuses one
+``httpx.AsyncClient`` per service until they change.
 """
 
-from .base import ArrAPIError, ArrNotConfigured
+from .base import ArrAPIError, ArrNotConfigured, ArrUnavailable
 from .radarr import RadarrClient, get_radarr_client
 from .sabnzbd import SabnzbdClient, get_sabnzbd_client
 from .sonarr import SonarrClient, get_sonarr_client
@@ -27,6 +25,7 @@ from .sonarr import SonarrClient, get_sonarr_client
 __all__ = [
     "ArrAPIError",
     "ArrNotConfigured",
+    "ArrUnavailable",
     "RadarrClient",
     "SabnzbdClient",
     "SonarrClient",

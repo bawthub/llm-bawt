@@ -6,11 +6,11 @@ adapted for movies.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 from typing import Any
 
-from .base import _BaseArrClient, _read_env_pair
+from .base import ClientSlot, _BaseArrClient, arr_timeout, resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -129,18 +129,12 @@ class RadarrClient(_BaseArrClient):
 # Lazy singleton
 # ---------------------------------------------------------------------------
 
-_singleton: RadarrClient | None = None
+_slot = ClientSlot(lambda url, key: RadarrClient(url, key, timeout=arr_timeout()))
 
 
-def get_radarr_client() -> RadarrClient:
-    global _singleton
-    if _singleton is None:
-        url, key = _read_env_pair(
-            "radarr",
-            "LLM_BAWT_RADARR_URL",
-            "LLM_BAWT_RADARR_API_KEY",
-        )
-        _singleton = RadarrClient(
-            url, key, timeout=float(os.getenv("LLM_BAWT_ARR_TIMEOUT", "20"))
-        )
-    return _singleton
+async def get_radarr_client() -> RadarrClient:
+    """The process-wide Radarr client for the current credentials (see Sonarr)."""
+    pair = await asyncio.to_thread(
+        resolve_credentials, "radarr", "LLM_BAWT_RADARR_URL", "LLM_BAWT_RADARR_API_KEY",
+    )
+    return _slot.get(pair)

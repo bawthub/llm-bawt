@@ -84,9 +84,13 @@ def test_read_contract_field_names_are_frozen():
     }
 
 
-def test_every_credential_integration_is_readable_by_bawthub():
-    assert {("integration", i) for i in CREDENTIAL_INTEGRATIONS} == {
+def test_only_bawthub_readable_integrations_are_on_the_bawthub_allowlist():
+    assert {("integration", i) for i, d in CREDENTIAL_INTEGRATIONS.items() if d.bawthub_readable} == {
         k for k in BAWTHUB_READABLE if k[0] == "integration"
+    }
+    # The media stack's keys are read in-process by llm-bawt only.
+    assert {i for i, d in CREDENTIAL_INTEGRATIONS.items() if not d.bawthub_readable} == {
+        "sonarr", "radarr", "sabnzbd",
     }
 
 

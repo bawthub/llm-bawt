@@ -11,7 +11,8 @@ Surface area (six tools — kept tight on purpose):
 
 Imported by ``server.py`` so registration happens on startup. Each tool
 returns plain dicts/lists that serialize as JSON. Configuration errors
-(missing env vars) surface as ``{"error": "...", "service": ...}``
+(no stored connection, or one that can't be used) surface as
+``{"error": "...", "service": ...}``
 rather than raised exceptions so bots can react.
 """
 
@@ -23,6 +24,7 @@ from typing import Any
 from llm_bawt.media.arr import (
     ArrAPIError,
     ArrNotConfigured,
+    ArrUnavailable,
     get_radarr_client,
     get_sabnzbd_client,
     get_sonarr_client,
@@ -41,6 +43,8 @@ def _err(e: Exception) -> dict:
     """Convert client errors into a structured response."""
     if isinstance(e, ArrNotConfigured):
         return {"error": str(e), "service": e.service, "configured": False}
+    if isinstance(e, ArrUnavailable):
+        return {"error": str(e), "service": e.service, "configured": True, "code": e.code}
     if isinstance(e, ArrAPIError):
         return {
             "error": e.message,
@@ -219,7 +223,7 @@ async def media_lookup(query: str, kind: str = "auto", limit: int = 5) -> dict:
 
     if "series" in kinds:
         try:
-            sonarr = get_sonarr_client()
+            sonarr = await get_sonarr_client()
             raw = await sonarr.lookup(query)
             results.extend(_condense_lookup_series(s) for s in raw[:limit])
         except Exception as e:
@@ -227,7 +231,7 @@ async def media_lookup(query: str, kind: str = "auto", limit: int = 5) -> dict:
 
     if "movie" in kinds:
         try:
-            radarr = get_radarr_client()
+            radarr = await get_radarr_client()
             raw = await radarr.lookup(query)
             results.extend(_condense_lookup_movie(m) for m in raw[:limit])
         except Exception as e:
@@ -284,7 +288,7 @@ async def media_add(
 
     try:
         if kind == "movie":
-            client = get_radarr_client()
+            client = await get_radarr_client()
             matches = await client.lookup(term)
             if not matches:
                 return {"error": f"no Radarr match for {term!r}"}
@@ -330,7 +334,7 @@ async def media_add(
                 "message": f"Added {added.get('title')} ({added.get('year')}) to Radarr",
             }
         else:  # series
-            client = get_sonarr_client()
+            client = await get_sonarr_client()
             matches = await client.lookup(term)
             if not matches:
                 return {"error": f"no Sonarr match for {term!r}"}
@@ -396,7 +400,7 @@ async def media_queue(limit_per_service: int = 25) -> dict:
     out: dict[str, Any] = {"sonarr": None, "radarr": None, "sabnzbd": None, "errors": {}}
 
     try:
-        sonarr = get_sonarr_client()
+        sonarr = await get_sonarr_client()
         s_queue = await sonarr.queue(page_size=limit_per_service)
         out["sonarr"] = {
             "total": s_queue.get("totalRecords", 0),
@@ -406,7 +410,7 @@ async def media_queue(limit_per_service: int = 25) -> dict:
         out["errors"]["sonarr"] = str(e)
 
     try:
-        radarr = get_radarr_client()
+        radarr = await get_radarr_client()
         r_queue = await radarr.queue(page_size=limit_per_service)
         out["radarr"] = {
             "total": r_queue.get("totalRecords", 0),
@@ -416,7 +420,7 @@ async def media_queue(limit_per_service: int = 25) -> dict:
         out["errors"]["radarr"] = str(e)
 
     try:
-        sab = get_sabnzbd_client()
+        sab = await get_sabnzbd_client()
         q = await sab.queue(limit=limit_per_service)
         slots = q.get("slots", []) or []
         out["sabnzbd"] = {
@@ -458,7 +462,7 @@ async def media_history(
 
     if kind in ("series", "all"):
         try:
-            sonarr = get_sonarr_client()
+            sonarr = await get_sonarr_client()
             evt = sonarr_event_map.get(event) if event else None
             h = await sonarr.history(page_size=limit, event_type=evt)
             out["sonarr"] = [
@@ -478,7 +482,7 @@ async def media_history(
 
     if kind in ("movie", "all"):
         try:
-            radarr = get_radarr_client()
+            radarr = await get_radarr_client()
             evt = radarr_event_map.get(event) if event else None
             h = await radarr.history(page_size=limit, event_type=evt)
             out["radarr"] = [
@@ -533,7 +537,7 @@ async def media_pipeline_status(query: str, kind: str = "auto") -> dict:
 
     if check_series:
         try:
-            sonarr = get_sonarr_client()
+            sonarr = await get_sonarr_client()
             q = await sonarr.queue(page_size=100)
             for r in q.get("records", []):
                 title = (r.get("title") or "") + " " + ((r.get("series") or {}).get("title") or "")
@@ -544,7 +548,7 @@ async def media_pipeline_status(query: str, kind: str = "auto") -> dict:
 
     if check_movie:
         try:
-            radarr = get_radarr_client()
+            radarr = await get_radarr_client()
             q = await radarr.queue(page_size=100)
             for r in q.get("records", []):
                 title = (r.get("title") or "") + " " + ((r.get("movie") or {}).get("title") or "")
@@ -555,7 +559,7 @@ async def media_pipeline_status(query: str, kind: str = "auto") -> dict:
 
     # 3) SAB slot scan
     try:
-        sab = get_sabnzbd_client()
+        sab = await get_sabnzbd_client()
         sq = await sab.queue(limit=100)
         for s in sq.get("slots", []) or []:
             if needle in (s.get("filename") or "").lower():
@@ -604,7 +608,7 @@ async def media_library_stats() -> dict:
     out: dict[str, Any] = {"series": None, "movies": None, "sabnzbd": None, "errors": {}}
 
     try:
-        sonarr = get_sonarr_client()
+        sonarr = await get_sonarr_client()
         all_series = await sonarr.list_series()
         s_queue = await sonarr.queue(page_size=1)
         s_missing = await sonarr.missing(page_size=1)
@@ -618,7 +622,7 @@ async def media_library_stats() -> dict:
         out["errors"]["sonarr"] = str(e)
 
     try:
-        radarr = get_radarr_client()
+        radarr = await get_radarr_client()
         all_movies = await radarr.list_movies()
         r_queue = await radarr.queue(page_size=1)
         r_missing = await radarr.missing(page_size=1)
@@ -633,7 +637,7 @@ async def media_library_stats() -> dict:
         out["errors"]["radarr"] = str(e)
 
     try:
-        sab = get_sabnzbd_client()
+        sab = await get_sabnzbd_client()
         q = await sab.queue(limit=1)
         out["sabnzbd"] = {
             "paused": q.get("paused"),

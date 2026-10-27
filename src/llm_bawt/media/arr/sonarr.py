@@ -15,11 +15,11 @@ appear.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 from typing import Any
 
-from .base import _BaseArrClient, _read_env_pair
+from .base import ClientSlot, _BaseArrClient, arr_timeout, resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -165,23 +165,17 @@ class SonarrClient(_BaseArrClient):
 # Lazy singleton
 # ---------------------------------------------------------------------------
 
-_singleton: SonarrClient | None = None
+_slot = ClientSlot(lambda url, key: SonarrClient(url, key, timeout=arr_timeout()))
 
 
-def get_sonarr_client() -> SonarrClient:
-    """Lazy-construct the process-wide Sonarr client.
+async def get_sonarr_client() -> SonarrClient:
+    """The process-wide Sonarr client for the current credentials.
 
-    Raises ``ArrNotConfigured`` if env vars are missing. Callers in the
-    MCP tool layer should catch and surface that as a structured error.
+    Raises ``ArrNotConfigured`` when there is no stored connection and no
+    legacy env, ``ArrUnavailable`` when the stored connection can't be used.
+    Callers in the MCP tool layer surface both as a structured error.
     """
-    global _singleton
-    if _singleton is None:
-        url, key = _read_env_pair(
-            "sonarr",
-            "LLM_BAWT_SONARR_URL",
-            "LLM_BAWT_SONARR_API_KEY",
-        )
-        _singleton = SonarrClient(
-            url, key, timeout=float(os.getenv("LLM_BAWT_ARR_TIMEOUT", "20"))
-        )
-    return _singleton
+    pair = await asyncio.to_thread(
+        resolve_credentials, "sonarr", "LLM_BAWT_SONARR_URL", "LLM_BAWT_SONARR_API_KEY",
+    )
+    return _slot.get(pair)

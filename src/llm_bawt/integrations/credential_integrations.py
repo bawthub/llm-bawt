@@ -50,6 +50,9 @@ class CredentialIntegration:
     fields: tuple[CredentialField, ...]
     # At least one of these (non-required) fields must be set.
     requires_one_of: tuple[str, ...] = ()
+    # Whether BawtHub's server may read it through the internal connection
+    # route. Integrations only llm-bawt itself uses stay off that allowlist.
+    bawthub_readable: bool = True
 
     def field(self, name: str) -> CredentialField | None:
         return next((f for f in self.fields if f.name == name), None)
@@ -110,6 +113,23 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
                 CredentialField("url", "Home Assistant URL", "url", placeholder="https://homeassistant.example"),
                 CredentialField("token", "Long-lived access token", "secret"),
             ),
+        ),
+        *(
+            CredentialIntegration(
+                id=service_id,
+                label=label,
+                description=description,
+                fields=(
+                    CredentialField("url", "Server URL", "url", placeholder=placeholder),
+                    CredentialField("api_key", "API key", "secret"),
+                ),
+                bawthub_readable=False,
+            )
+            for service_id, label, description, placeholder in (
+                ("sonarr", "Sonarr", "TV library and downloads for the media tools.", "https://sonarr.example"),
+                ("radarr", "Radarr", "Movie library and downloads for the media tools.", "https://radarr.example"),
+                ("sabnzbd", "SABnzbd", "Download queue for the media tools.", "https://sabnzbd.example"),
+            )
         ),
     )
 }

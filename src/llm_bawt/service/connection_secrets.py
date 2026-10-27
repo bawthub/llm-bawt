@@ -56,6 +56,11 @@ def _integration_spec(definition: CredentialIntegration) -> FieldSpec:
     )
 
 
+def integration_spec(integration_id: str) -> FieldSpec:
+    """The read contract for one credential integration, for in-process readers."""
+    return _integration_spec(CREDENTIAL_INTEGRATIONS[integration_id])
+
+
 # The connections BawtHub's server may read through
 # GET /v1/internal/connections/{kind}/{id}. Field names are a frozen contract
 # with BawtHub (TASK-1476 step "Contract: BawtHub reads secrets ..."). The
@@ -63,7 +68,8 @@ def _integration_spec(definition: CredentialIntegration) -> FieldSpec:
 # writes, so the writer and this reader can't drift apart.
 BAWTHUB_READABLE: dict[tuple[str, str], FieldSpec] = {
     ("provider", "xai"): FieldSpec(secret=("api_key",)),
-    **{("integration", d.id): _integration_spec(d) for d in CREDENTIAL_INTEGRATIONS.values()},
+    **{("integration", d.id): _integration_spec(d) for d in CREDENTIAL_INTEGRATIONS.values()
+       if d.bawthub_readable},
 }
 
 
@@ -181,5 +187,6 @@ __all__ = [
     "ConnectionUnavailable",
     "FieldSpec",
     "KINDS",
+    "integration_spec",
     "read_connection",
 ]
