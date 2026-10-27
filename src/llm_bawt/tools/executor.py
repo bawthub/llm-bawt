@@ -1349,9 +1349,29 @@ class ToolExecutor:
             return format_tool_result(tool_call.name, None, error=str(e))
 
     def _ensure_search_client(self) -> None:
-        """Lazy-init search client if possible."""
-        if self.search_client or not self.config:
+        """Lazy-init the search client, and keep a keyed one on the current key.
+
+        A Brave or Tavily client re-resolves its stored key on every call, so
+        a disconnect or rotation in Settings applies to an existing executor;
+        on a change the client is rebuilt (DuckDuckGo when the key is gone).
+        """
+        if not self.config:
             return
+        if self.search_client:
+            from ..search.base import SearchProvider
+            from ..search.credentials import search_key
+
+            provider = getattr(self.search_client, "PROVIDER", None)
+            if provider not in (SearchProvider.BRAVE, SearchProvider.TAVILY):
+                return
+            try:
+                current = search_key(self.config, provider).value
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed to resolve the {provider.value} key: {e}")
+                current = None
+            if current and current == getattr(self.search_client, "_api_key", None):
+                return
+            self.search_client = None
         try:
             from ..search import get_search_client
             self.search_client = get_search_client(self.config)

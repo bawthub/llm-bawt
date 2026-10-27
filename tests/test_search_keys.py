@@ -252,3 +252,33 @@ def test_probe_accepts_a_good_key_and_reports_outages(monkeypatch, real_store, c
 
     _fake_get(monkeypatch, httpx.ConnectError("down"))
     assert "unreachable" in cls(SimpleNamespace())._probe("synthetic-key")[1]
+
+
+def test_an_existing_executor_follows_a_disconnect_or_rotation(monkeypatch):
+    # Codex r1 Blocker: a cached keyed client kept sending a disconnected key.
+    from llm_bawt.search.brave_client import BraveSearchClient
+    from llm_bawt.search.ddgs_client import DuckDuckGoClient
+    from llm_bawt.search.factory import get_search_client
+    from llm_bawt.tools.executor import ToolExecutor
+    from llm_bawt.tools.parser import ToolCall
+
+    outcomes = {"brave": "stored-key"}
+    stub_stored_keys(monkeypatch, outcomes)
+    config = _config(SEARCH_PROVIDER="brave")
+    calls = []
+    monkeypatch.setattr(BraveSearchClient, "search",
+                        lambda self, query, **_kw: calls.append(self._api_key) or [])
+    monkeypatch.setattr(DuckDuckGoClient, "search", lambda self, query, **_kw: calls.append("ddg") or [])
+    executor = ToolExecutor(user_id="synthetic", config=config,
+                            search_client=get_search_client(config, provider=SearchProvider.BRAVE))
+
+    def search():
+        executor.execute(ToolCall(name="search", arguments={"query": "q"}, raw_text=""))
+
+    search()
+    outcomes["brave"] = "rotated-key"
+    search()
+    outcomes["brave"] = ConnectionUnavailable("not_connected")
+    search()
+
+    assert calls == ["stored-key", "rotated-key", "ddg"]
