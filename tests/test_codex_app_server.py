@@ -124,7 +124,8 @@ def test_another_version_is_refused_and_reaped(tmp_path, version):
 @REAL
 def test_a_cancel_during_the_refused_handshake_teardown_waits_for_the_reap(tmp_path, monkeypatch):
     """A cancel landing while spawn_app_server tears a refused child down is
-    held until the child is reaped, then re-raised."""
+    held until the child is reaped, then re-raised. The gate opens in the same
+    step as the cancel; the spawn's own exit records whether the child was reaped."""
     ledger = ProcessLedger()
     entered, release = None, None
     teardown = JsonRpcStdioClient._teardown
@@ -135,24 +136,28 @@ def test_a_cancel_during_the_refused_handshake_teardown_waits_for_the_reap(tmp_p
         return await teardown(self)
 
     monkeypatch.setattr(JsonRpcStdioClient, "_teardown", gated_teardown)
+    returncodes_at_exit = []
+
+    async def spawn():
+        try:
+            return await _spawn(tmp_path, version="0.158.0")
+        finally:
+            returncodes_at_exit.extend(proc.returncode for proc in ledger.procs)
 
     async def run():
         nonlocal entered, release
         entered, release = asyncio.Event(), asyncio.Event()
         bind_ledger(ledger)
-        task = asyncio.create_task(_spawn(tmp_path, version="0.158.0"))
+        task = asyncio.create_task(spawn())
         await asyncio.wait_for(entered.wait(), HANG_GUARD_S)
         task.cancel()
-        for _ in range(20):
-            await asyncio.sleep(0)
-        assert not task.done(), "spawn_app_server returned while its child was still being torn down"
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(run())
-    (proc,) = ledger.procs
-    assert proc.returncode is not None
+    assert len(returncodes_at_exit) == 1
+    assert returncodes_at_exit[0] is not None, "spawn_app_server returned before its child was reaped"
 
 
 def test_server_version_reads_the_user_agent():

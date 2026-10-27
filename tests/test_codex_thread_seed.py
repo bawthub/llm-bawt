@@ -13,6 +13,7 @@ from codex_bridge.app_server import (
     APP_SERVER_VERSION, METHOD_NOT_FOUND, AppServerError, AppServerVersionMismatch,
 )
 from codex_bridge.thread_seed import CodexSeedUnsupported, seed_items, seed_thread
+from tests import virtual_clock
 from tests.test_codex_reset_evidence import ANSWER, TASK, assert_no_ack, harness, send  # noqa: F401
 
 SEED = [
@@ -37,12 +38,15 @@ class FakeAppServer:
         self.calls: list[tuple[str, dict]] = []
         self.closed = 0
         self.reaped = False
+        self.inject_entered = asyncio.Event()
+        self.close_entered = asyncio.Event()
         self._close_task = None
 
     async def request(self, method, params, *, timeout=None):
         self.calls.append((method, params))
         if method == "thread/start":
             return {"thread": {"id": self.thread_id}}
+        self.inject_entered.set()
         if self.block_inject is not None:
             await self.block_inject.wait()
         if self.inject_error is not None:
@@ -54,6 +58,7 @@ class FakeAppServer:
         self.closed += 1
         if self._close_task is None:
             async def teardown():
+                self.close_entered.set()
                 if self.block_close is not None:
                     await self.block_close.wait()
                 self.reaped = True
@@ -216,33 +221,40 @@ def test_session_error_on_a_seeded_thread_is_not_retried_blank(harness):
 @pytest.mark.parametrize("second_cancel", [False, True], ids=["cancel-in-inject", "cancel-again-in-close"])
 def test_a_cancelled_seed_returns_only_after_the_app_server_is_reaped(second_cancel):
     """The send's session is released when seed_thread returns, so a cancel,
-    even one landing mid-teardown, must not return before the child is reaped."""
+    even one landing mid-teardown, must not return before the child is reaped.
+
+    The gate opens in the same step as the last cancel, so whichever runs
+    first, the seed's own exit records whether the teardown had finished.
+    """
     async def run():
-        inject, close = asyncio.Event(), asyncio.Event()
-        app_server = FakeAppServer(block_inject=inject, block_close=close)
+        close = asyncio.Event()
+        app_server = FakeAppServer(block_inject=asyncio.Event(), block_close=close)
         bridge = MagicMock()
         bridge._open_app_server = AsyncMock(return_value=app_server)
-        task = asyncio.create_task(seed_thread(
-            bridge, object(), (), model="m", cwd=None, messages=SEED, framing=FRAMING, timeout=1,
-        ))
-        while len(app_server.calls) < 2:
-            await asyncio.sleep(0)
+        reaped_at_exit = []
+
+        async def seed():
+            try:
+                return await seed_thread(bridge, object(), (), model="m", cwd=None,
+                                         messages=SEED, framing=FRAMING, timeout=1)
+            finally:
+                reaped_at_exit.append(app_server.reaped)
+
+        task = asyncio.create_task(seed())
+        await app_server.inject_entered.wait()
         task.cancel()
-        while app_server._close_task is None:
-            await asyncio.sleep(0)
+        await app_server.close_entered.wait()
         if second_cancel:
             task.cancel()
-        for _ in range(20):
-            await asyncio.sleep(0)
-        assert not task.done(), "seed_thread returned while the app-server was still being torn down"
-        assert not app_server.reaped
         close.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        return app_server
+        return app_server, reaped_at_exit
 
-    app_server = asyncio.run(run())
-    assert app_server.reaped and app_server.closed == 1
+    # The virtual-clock loop raises instead of hanging if an awaited event never fires.
+    app_server, reaped_at_exit = virtual_clock.run(run())
+    assert reaped_at_exit == [True], "seed_thread returned while the app-server was still being torn down"
+    assert app_server.closed == 1
 
 
 def test_method_not_found_names_the_pinned_app_server():
