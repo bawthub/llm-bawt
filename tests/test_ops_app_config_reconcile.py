@@ -452,16 +452,32 @@ def test_no_drift_verifies_only(tmp_path):
 
 @pytest.mark.parametrize("kwargs, text", [
     ({"health_exit": 22}, "in-container health request exited 22"),
-    ({"health_status": "degraded"}, "health status 'degraded'"),
-    ({"health_status": SECRET + " <x>"}, "health status '?'"),
+    ({"health_status": "degraded"}, "health status did not match expected 'ok'"),
+    ({"health_status": SECRET}, "health status did not match expected 'ok'"),
+    ({"health_status": SECRET + " <x>"}, "health status did not match expected 'ok'"),
 ])
 def test_failed_health_restores_the_previous_container(tmp_path, kwargs, text):
     api = AppDocker(compose=DRIFT, **kwargs)
     with pytest.raises(DeployFailed) as caught:
         reconciler(api, tmp_path).run()
     assert caught.value.outcome_known and caught.value.detail["restored"]
-    assert text in str(caught.value) and SECRET not in str(caught.value)
+    assert text in str(caught.value) and "degraded" not in str(caught.value) and SECRET not in str(caught.value)
+    assert SECRET not in json.dumps(caught.value.detail)
     assert api.by_name(APP_NAME)["Id"] == api.old_id
+
+
+def test_returned_health_status_never_reaches_the_durable_receipt(tmp_path):
+    api = AppDocker(compose=DRIFT, health_status=SECRET)
+    root = tmp_path / "receipts"
+    snap = {**snapshot(api), "execution": {**EXECUTION, "receipt_root": str(root)}}
+    path, digest = _write_request(root, snap)
+    assert worker_run(path, digest, api_factory=lambda _: api, sleep=lambda _: None)
+    written = [p for p in (root / JOB_ID).iterdir() if p.name != "request.json"]
+    assert written and all(SECRET not in p.read_text() for p in written)
+    fresh = _executor(AppDocker())
+    fresh._get_worker = lambda _name: None
+    result = fresh.reconcile(job_id=JOB_ID, snapshot=snap)
+    assert result.state == "failed" and SECRET not in (result.error or "") + (result.output_tail or "")
 
 
 def test_change_since_approval_refuses_before_create(tmp_path):

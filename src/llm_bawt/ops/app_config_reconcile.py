@@ -23,7 +23,6 @@ ops-reconciler imports its receipt, so the outcome survives the app's restart.
 from __future__ import annotations
 
 import json
-import re
 from urllib.parse import urlencode
 
 if __package__:
@@ -191,9 +190,8 @@ class AppConfigReconciler(ConfigReconciler):
             raise StepError("in-container health response is not JSON") from None
         status = payload.get("status") if isinstance(payload, dict) else None
         if status != self.spec["health_status"]:
-            # Never echo an arbitrary response value into a receipt.
-            shown = status if isinstance(status, str) and re.fullmatch(_PATTERNS["health_status"], status) else "?"
-            raise StepError(f"health status {shown!r}")
+            # The response body is untrusted: name only the expected value, never what came back.
+            raise StepError(f"health status did not match expected {self.spec['health_status']!r}")
         return {"status": status, "stat": self._stats(container_id)}
 
 
