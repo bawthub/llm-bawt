@@ -13,6 +13,8 @@ import shlex
 import sys
 from pathlib import Path
 
+from agent_bridge import crawl4ai_token
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SKILLS_PATH = "/home/bridge/dev/agent-skills"
@@ -75,7 +77,6 @@ def _normalize_mcp_settings(settings: dict) -> dict:
     crawl4ai_url = (
         os.getenv("CLAUDE_CODE_CRAWL4AI_MCP_URL") or _DEFAULT_CRAWL4AI_MCP_URL
     )
-    crawl4ai_token = os.getenv("CRAWL4AI_API_TOKEN", "")
 
     # "http" is the only URL-based type the Agent SDK/CLI accepts here —
     # "url" is silently dropped (server never registers).
@@ -96,10 +97,10 @@ def _normalize_mcp_settings(settings: dict) -> dict:
         "type": "sse",
         "url": crawl4ai_url,
     }
-    if crawl4ai_token:
-        crawl4ai_config["headers"] = {
-            "Authorization": f"Bearer {crawl4ai_token}",
-        }
+    # Derived token file first, legacy env second (TASK-1476).
+    crawl4ai_headers = crawl4ai_token.auth_headers()
+    if crawl4ai_headers:
+        crawl4ai_config["headers"] = crawl4ai_headers
     mcp_servers["crawl4ai"] = crawl4ai_config
 
     normalized = dict(settings)

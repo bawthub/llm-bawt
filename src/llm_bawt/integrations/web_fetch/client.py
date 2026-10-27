@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from agent_bridge import crawl4ai_token
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CRAWL4AI_URL = "http://localhost:11235"
@@ -62,11 +64,8 @@ class WebFetchClient:
 
         try:
             client = self._get_client()
-            # Build optional auth header
-            token = os.environ.get("CRAWL4AI_API_TOKEN", "")
-            headers = {}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
+            # Derived token file first, legacy env second (TASK-1476).
+            headers = crawl4ai_token.auth_headers()
 
             response = client.post(
                 "/crawl",

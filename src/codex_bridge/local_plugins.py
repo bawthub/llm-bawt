@@ -6,6 +6,8 @@ import os
 import shutil
 from pathlib import Path
 
+from agent_bridge import crawl4ai_token
+
 # Codex requires plugin contents to live at
 # ``<codex_home>/plugins/cache/<marketplace>/<plugin>/<version>/``.
 # The version subdir is mandatory but unused — Codex doesn't track
@@ -375,7 +377,8 @@ def ensure_crawl4ai_mcp_config(
 ) -> None:
     """Register the Crawl4AI native MCP server in Codex config."""
     url = os.getenv("CODEX_CRAWL4AI_MCP_URL", _DEFAULT_CRAWL4AI_MCP_URL)
-    token = os.getenv("CRAWL4AI_API_TOKEN", "")
+    # Derived token file first, legacy env second (TASK-1476).
+    token = crawl4ai_token.api_token()
     extra: list[str] = []
     if token:
         extra.append(f'headers = {{ Authorization = "Bearer {token}" }}')
