@@ -104,12 +104,13 @@ def compact_context_breakdown(raw: dict, *, read_ms: float) -> dict | None:
             and item["tokens"] >= 0
             for item in by_type
         ):
+            type_total = sum(_tokens(item["tokens"]) for item in by_type)
             non_wire = sum(
                 _tokens(item["tokens"]) for item in by_type
                 if item["name"] in NON_WIRE_ATTACHMENT_TYPES
             )
             attachment_total = result["message_breakdown"]["attachmentTokens"]
-            if non_wire <= attachment_total:
+            if type_total == attachment_total:
                 result["message_breakdown"]["wireAttachmentTokens"] = (
                     attachment_total - non_wire
                 )

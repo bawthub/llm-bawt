@@ -341,6 +341,7 @@ def test_context_breakdown_excludes_non_wire_attachment_bookkeeping_from_mix():
                 {"name": "deferred_tools_record", "tokens": 500},
                 {"name": "hook_success", "tokens": 50},
                 {"name": "skill_listing", "tokens": 9000},
+                {"name": "other_wire_attachment", "tokens": 3750},
             ],
         },
     }
@@ -356,6 +357,12 @@ def test_context_breakdown_excludes_non_wire_attachment_bookkeeping_from_mix():
     }}
     assert "wireAttachmentTokens" not in compact_context_breakdown(
         missing_types, read_ms=1)["message_breakdown"]
+    for incomplete_types in ([], [{"name": "skill_listing", "tokens": 9000}]):
+        incomplete = {**raw, "messageBreakdown": {
+            **raw["messageBreakdown"], "attachmentsByType": incomplete_types,
+        }}
+        assert "wireAttachmentTokens" not in compact_context_breakdown(
+            incomplete, read_ms=1)["message_breakdown"]
 
 
 def test_post_done_usage_keeps_cost_and_publishes_full_final_snapshot():
