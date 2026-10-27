@@ -115,12 +115,12 @@ class GroundedAnswer:
             return True
         target = max(MIN_CLIPPED_QUOTE_CHARS, current * 2 // 3)
         head = quote[:target]
+        # A word boundary is used only when it keeps the declared floor.
         space = head.rfind(" ")
-        if space >= target // 2:
-            head = head[:space]
-        head = head.rstrip()
-        if not head:
-            return False
+        if space >= target // 2 and len(head[:space].rstrip()) >= MIN_CLIPPED_QUOTE_CHARS:
+            head = head[:space].rstrip()
+        elif len(head.rstrip()) >= MIN_CLIPPED_QUOTE_CHARS:
+            head = head.rstrip()
         self.clipped = len(head)
         return True
 

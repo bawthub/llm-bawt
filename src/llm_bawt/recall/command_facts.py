@@ -6,12 +6,21 @@ recorded ``Bash`` command contributes only positively recognized facts built
 from validated operands, here ``git clone <url> [<dest>]`` with the ``cd`` that
 fixes its destination. Everything else contributes nothing (no text, no count).
 
-Parsing is fail-closed and left to right. The first token that is not a plain
-word or a ``&&``/``;``/newline separator ends the parse: substitution
-(``$``), backtick, backslash escape or line continuation, unbalanced quote,
-pipe, redirect, heredoc, subshell, background ``&`` or ``||``. Only segments
-completed *before* it are used; the shell runs those first and nothing later
-changes their words. The segment it interrupts and everything after are dropped.
+Parsing is fail-closed and left to right, by a tokenizer that accepts only
+what it can read exactly as the shell would. A word is a run of plain
+characters, or one quoted string with nothing attached to it. A separator is
+``&&``, ``;`` or a newline. Anything else ends the parse: ``#`` (a comment, or
+a word the shell might read as one), a quote joined to other characters
+(``'a'b`` is one shell word), substitution (``$``), backtick, backslash escape
+or line continuation, unbalanced quote, pipe, redirect, heredoc, subshell,
+background ``&`` or ``||``. Only segments completed *before* it are used; the
+shell runs those first and nothing later changes their words. The segment it
+interrupts and everything after are dropped.
+
+A path is checked as the shell would resolve it: a ``cd`` target and a clone
+destination must pass the path rules both as written and after joining the
+working directory. After a directory change into a denied path (or one the
+parser can't follow, naming one), a relative destination is refused too.
 
 A fact records an *attempted* invocation, not that it ran or succeeded, and
 says so in its rendered line.
@@ -21,7 +30,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import posixpath
 import re
-import shlex
 
 # Paths are deliberately selected historical operands. No shell metacharacter,
 # quote, space, percent-encoding, ``$`` or ``..`` segment can pass.
@@ -46,8 +54,16 @@ _CREDENTIAL_PATH = re.compile(r"""(?ix)
   | \.(?:pem|key|p12|pfx|jks|keystore)$
   | ^/proc/
 """)
-_PUNCTUATION = "();<>|&\n"
-# Characters that end the parse inside any word, quoted or not.
+# One token at the cursor. A plain run excludes every character with a shell
+# meaning (quotes, ``#``, ``$``, backtick, backslash, operators, whitespace).
+# ``\Z`` ends a word cleanly: a word must be followed by blank, a separator or
+# the end, so a quote joined to anything matches nothing and ends the parse.
+_TOKEN = re.compile(r"""
+    (?P<blank>[ \t]+)
+  | (?P<separator>&&|;|\n)
+  | (?P<word>(?:'[^']*'|"[^"]*"|[^\s'"\#$`\\;&|<>()]+)(?=[ \t;\n]|&&|\Z))
+""", re.VERBOSE)
+# Characters that end the parse inside a quoted word, too.
 _UNSAFE_IN_WORD = frozenset("$`\\\n")
 # Builtins that change (or may change) the working directory: after one that is
 # not a recognized ``cd <path>``, relative destinations are left unresolved.
@@ -79,40 +95,37 @@ def safe_repo(value: str) -> bool:
 
 
 def _word(token: str) -> str | None:
-    """A plain word, one fully quoted word unwrapped, or None to end the parse."""
+    """A plain word, one quoted word unwrapped, or None to end the parse."""
     if any(char in _UNSAFE_IN_WORD for char in token):
         return None
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"" \
-            and not set(token[1:-1]) & set("'\""):
-        return token[1:-1]
+    if token[0] in "'\"":
+        inner = token[1:-1]
+        # Neither quote kind inside: one plain string the shell reads verbatim.
+        return None if set(inner) & set("'\"") else inner
     return token
 
 
 def _segments(command: str) -> list[list[str]]:
     """Complete ``&&``/``;``/newline segments before the first unsafe token."""
-    lexer = shlex.shlex(command, posix=False, punctuation_chars=_PUNCTUATION)
-    lexer.whitespace = " \t"
-    lexer.whitespace_split = True
-    lexer.commenters = ""
     segments: list[list[str]] = []
     current: list[str] = []
-    try:
-        for token in lexer:
-            if set(token) <= set(_PUNCTUATION):
-                # Unquoted punctuation only; quoted "&&" is a word (non-posix keeps quotes).
-                if token.replace("\n", "") not in {"", "&&", ";"}:
-                    return segments
-                if current:
-                    segments.append(current)
-                current = []
-                continue
-            word = _word(token)
+    position = 0
+    while position < len(command):
+        match = _TOKEN.match(command, position)
+        if match is None:
+            # Anything the tokenizer can't read exactly: the interrupted
+            # segment is dropped with the rest.
+            return segments
+        position = match.end()
+        if match.lastgroup == "separator":
+            if current:
+                segments.append(current)
+            current = []
+        elif match.lastgroup == "word":
+            word = _word(match.group())
             if word is None:
                 return segments
             current.append(word)
-    except ValueError:
-        # Unbalanced quote: the interrupted segment is dropped with the rest.
-        return segments
     if current:
         segments.append(current)
     return segments
@@ -124,7 +137,19 @@ def _resolve(cwd: str | None, path: str) -> str | None:
     return posixpath.normpath(posixpath.join(cwd, path)) if cwd else None
 
 
-def _clone(words: list[str], cwd: str | None) -> CommandFact | None:
+def _safe_resolved(cwd: str | None, path: str, denied: bool) -> str | None:
+    """``path`` as the shell resolves it, if both it and the result pass; else None.
+
+    A relative path under an unknown directory stays as written, unless the
+    shell may be in a denied directory (``denied``): then it is refused.
+    """
+    if not safe_path(path) or (denied and not path.startswith(("/", "~"))):
+        return None
+    resolved = _resolve(cwd, path) or path
+    return resolved if safe_path(resolved) else None
+
+
+def _clone(words: list[str], cwd: str | None, denied: bool) -> CommandFact | None:
     """``git clone [switches] <repo> [<dest>]`` with validated operands, else None."""
     index, operands = 2, []
     while index < len(words):
@@ -144,9 +169,8 @@ def _clone(words: list[str], cwd: str | None) -> CommandFact | None:
         return None
     if len(operands) == 1:
         return CommandFact("clone", operands[0], None)
-    if not safe_path(operands[1]):
-        return None
-    return CommandFact("clone", operands[0], _resolve(cwd, operands[1]) or operands[1])
+    dest = _safe_resolved(cwd, operands[1], denied)
+    return CommandFact("clone", operands[0], dest) if dest is not None else None
 
 
 def command_facts(command: object) -> list[CommandFact]:
@@ -154,15 +178,21 @@ def command_facts(command: object) -> list[CommandFact]:
     if not isinstance(command, str) or not command or len(command) > MAX_COMMAND_CHARS:
         return []
     facts: list[CommandFact] = []
-    cwd: str | None = None
+    cwd: str | None = None  # the known absolute directory, or None when unknown
+    denied = False  # the shell may be in a directory the path rules deny
     for words in _segments(command):
-        if words[0] == "cd":
-            target = words[1] if len(words) == 2 else None
-            cwd = _resolve(cwd, target) if target is not None and safe_path(target) else None
-        elif words[:2] == ["git", "clone"]:
-            fact = _clone(words, cwd)
+        if words[:2] == ["git", "clone"]:
+            fact = _clone(words, cwd, denied)
             if fact is not None:
                 facts.append(fact)
+        elif words[0] == "cd" and len(words) == 2:
+            if _safe_resolved(cwd, words[1], denied) is None:
+                cwd, denied = None, True
+            else:
+                cwd = _resolve(cwd, words[1])
+                denied = denied and cwd is None
         elif words[0] in _CWD_CHANGERS:
+            # A change the parser can't follow; a denied operand may be the target.
             cwd = None
+            denied = denied or not all(safe_path(word) for word in words[1:])
     return facts[:MAX_FACTS]

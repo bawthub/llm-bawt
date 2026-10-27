@@ -396,6 +396,22 @@ def test_fit_drops_provenance_only_at_the_quote_floor_and_keeps_the_citation():
     assert len(kept["quote"]) <= 80
 
 
+@pytest.mark.parametrize("quote", [
+    "A" * 45 + " " + "B" * 74,  # the only word boundary lies under the floor (review repro)
+    "A" * 79 + "  " + "B" * 60,  # a cut at the floor would end in blanks
+    LONE_QUOTE,
+])
+def test_clip_never_cuts_a_quote_below_the_declared_floor(quote):
+    from llm_bawt.recall.service import MIN_CLIPPED_QUOTE_CHARS, GroundedAnswer
+    answer = GroundedAnswer([{"source": "messages", "id": "m1", "quote": quote}])
+    lengths = []
+    while answer.clip():
+        lengths.append(len(answer.entries()[0]["quote"]))
+    assert lengths and lengths == sorted(lengths, reverse=True)
+    assert min(lengths) == MIN_CLIPPED_QUOTE_CHARS
+    assert quote.startswith(answer.entries()[0]["quote"])
+
+
 @pytest.mark.asyncio
 async def test_minimum_output_budget_keeps_a_found_answer_with_every_source_reporting():
     # TASK-1557 guard: at the smallest accepted output_tokens, a found answer

@@ -49,6 +49,25 @@ def rendered(command: str) -> list[str]:
     f"git clone ssh://git@github.com/example/r {SECRET}",
     f"false || git clone https://github.com/example/r {SECRET}",
     f"git clone https://github.com/example/r {SECRET} extra",
+    # A comment: the shell runs nothing after '#' on the line (review B1).
+    f"# note; git clone https://github.com/example/r {SECRET}",
+    f"#git clone https://github.com/example/r {SECRET}",
+    f"echo x # && git clone https://github.com/example/r {SECRET}",
+    f"git clone https://github.com/example/r {SECRET}#x",
+    # A quote joined to other characters is ONE shell word (review B1).
+    f"git clone 'https://github.com/example/r'{SECRET}",
+    f"git clone https://github.com/example/r'{SECRET}'",
+    f"git clone \"https://github.com/example/r\"'{SECRET}'",
+    f"git clone https://github.com/example/r \"\"{SECRET}",
+    # A destination that resolves onto a credential path (review B2).
+    "cd /tmp/.docker && git clone https://github.com/example/r config.json",
+    "cd /home/u && git clone https://github.com/example/r .ssh",
+    "cd / && git clone https://github.com/example/r proc/1",
+    # The shell is now in a denied directory: a relative destination is under it.
+    "cd /srv/.aws && git clone https://github.com/example/r fixture",
+    "cd /srv && cd .ssh && git clone https://github.com/example/r fixture",
+    "cd /srv/.ssh && cd keys && git clone https://github.com/example/r fixture",
+    "pushd /srv/.ssh && git clone https://github.com/example/r fixture",
 ])
 def test_unrecognized_or_unsafe_commands_project_nothing(command):
     facts = rendered(command)
@@ -111,6 +130,27 @@ def test_repo_operand_rules(url, ok):
     assert safe_repo(url) is ok
 
 
+def test_segments_before_a_comment_are_kept_and_nothing_after():
+    command = f"cd /tmp && git clone https://github.com/example/r a # && git clone https://github.com/example/s {SECRET}"
+    assert rendered(command) == []  # the interrupted segment holds the first clone
+    command = f"git clone https://github.com/example/r a; # git clone https://github.com/example/s {SECRET}"
+    assert rendered(command) == ["attempted clone repo=https://github.com/example/r dest=a"]
+
+
+@pytest.mark.parametrize("command", [
+    f"git clone https://github.com/example/r {SECRET}",
+    f"cd /srv && git clone https://github.com/example/r {SECRET}",
+    f"cd /tmp/.docker && git clone https://github.com/example/r config.json && git clone https://github.com/example/r {SECRET}",
+    # An absolute destination, or a safe absolute cd, leaves the denied directory.
+    "cd /srv/.ssh && git clone https://github.com/example/r /srv/r",
+    "cd /srv/.ssh && cd /srv && git clone https://github.com/example/r fixture",
+])
+def test_every_emitted_destination_passes_the_path_rules(command):
+    facts = command_facts(command)
+    assert facts and all(fact.dest is None or safe_path(fact.dest) for fact in facts)
+    assert all(".ssh" not in (fact.dest or "") and "config.json" not in (fact.dest or "") for fact in facts)
+
+
 def test_tool_arg_facts_rejects_non_command_payloads():
     assert tool_arg_facts("{not json") is None
     assert tool_arg_facts(json.dumps(["git clone https://github.com/example/r"])) is None
@@ -148,6 +188,17 @@ async def test_source_selects_on_admitted_facts_only_and_admits_no_command_text(
     assert all(SECRET not in item.text and "curl" not in item.text for item in evidence)
     [(sql, params)] = database.reads
     assert params["bots"] == ["caller", "peer"] and "excluded" not in params["delivery_authors"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command, banned", [
+    (f"# note; git clone https://github.com/example/r {SECRET}", SECRET),
+    (f"git clone 'https://github.com/example/r'{SECRET}", SECRET),
+    ("cd /tmp/.docker && git clone https://github.com/example/r config.json", "config.json"),
+])
+async def test_rejected_operands_never_reach_source_evidence(command, banned):
+    evidence = await ToolArgSource(Database([call("1", command)])).search(f"{banned} example", SCOPE, ())
+    assert evidence == []
 
 
 @pytest.mark.asyncio
