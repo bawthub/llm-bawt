@@ -134,23 +134,6 @@ def reddit_credentials(config: Config) -> RedditCredentials:
     return RedditCredentials(client_id=found.meta["client_id"], client_secret=found.secret["client_secret"])
 
 
-def client_is_current(config: Config, client: object) -> bool:
-    """Whether a cached search client still holds the credentials stored now.
-
-    A long-lived client must follow a disconnect or rotation, so its holder
-    rebuilds it when this is False. Clients without credentials are always current.
-    """
-    provider = getattr(client, "PROVIDER", None)
-    if provider in _PROVIDER_IDS:
-        key = search_key(config, provider)
-        return bool(key) and key.value == getattr(client, "_api_key", None)
-    if provider == SearchProvider.REDDIT:
-        creds = reddit_credentials(config)
-        return bool(creds) and (creds.client_id, creds.client_secret) == (
-            getattr(client, "_client_id", None), getattr(client, "_client_secret", None))
-    return True
-
-
 PROVIDERS_SETTINGS = "Settings → Providers"
 INTEGRATIONS_SETTINGS = "Settings → Integrations"
 
@@ -172,7 +155,6 @@ __all__ = [
     "PROVIDERS_SETTINGS",
     "RedditCredentials",
     "SearchKey",
-    "client_is_current",
     "reddit_credentials",
     "resolve_key",
     "search_key",

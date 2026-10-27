@@ -283,6 +283,13 @@ def test_an_existing_executor_follows_a_disconnect_or_rotation(monkeypatch):
 
     assert calls == ["stored-key", "rotated-key", "ddg"]
 
+    # TASK-1476 Loopy r1 B1: reconnecting must bring Brave back, not leave the
+    # DuckDuckGo stand-in cached for the executor's lifetime.
+    outcomes["brave"] = "reconnected-key"
+    search()
+
+    assert calls == ["stored-key", "rotated-key", "ddg", "reconnected-key"]
+
 
 # --- a named provider never hides its failure (TASK-1562) -----------------------
 

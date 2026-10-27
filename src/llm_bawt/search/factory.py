@@ -7,7 +7,14 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import SearchClient, SearchProvider
-from .credentials import INTEGRATIONS_SETTINGS, reddit_credentials, search_key, unusable_reason
+from .credentials import (
+    INTEGRATIONS_SETTINGS,
+    RedditCredentials,
+    SearchKey,
+    reddit_credentials,
+    search_key,
+    unusable_reason,
+)
 
 if TYPE_CHECKING:
     from ..utils.config import Config
@@ -17,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 def is_search_available(provider: SearchProvider | str | None = None) -> bool:
     """Check if search is available for the given provider.
-    
+
     Args:
         provider: Specific provider to check, or None to check any
-        
+
     Returns:
         True if search is available
     """
@@ -31,13 +38,13 @@ def is_search_available(provider: SearchProvider | str | None = None) -> bool:
         from .brave_client import is_brave_available
         from .reddit_client import is_reddit_available
         return is_ddgs_available() or is_tavily_available() or is_brave_available() or is_reddit_available()
-    
+
     if isinstance(provider, str):
         try:
             provider = SearchProvider(provider.lower())
         except ValueError:
             return False
-    
+
     if provider == SearchProvider.DUCKDUCKGO:
         from .ddgs_client import is_ddgs_available
         return is_ddgs_available()
@@ -50,7 +57,7 @@ def is_search_available(provider: SearchProvider | str | None = None) -> bool:
     elif provider == SearchProvider.REDDIT:
         from .reddit_client import is_reddit_available
         return is_reddit_available()
-    
+
     return False
 
 
@@ -71,6 +78,102 @@ def _ddg_fallback(config: "Config", max_results: int, fallback: bool, why: str) 
         return DuckDuckGoClient(max_results=max_results, timeout=timeout)
     logger.error("DuckDuckGo fallback also unavailable")
     return None
+
+
+#: Keyed providers in auto-select order: (label, library it needs, what it needs configured).
+_KEYED = {
+    SearchProvider.TAVILY: ("Tavily", "tavily-python", "Tavily key"),
+    SearchProvider.BRAVE: ("Brave", "httpx", "Brave key"),
+    SearchProvider.REDDIT: ("Reddit", "httpx", "Reddit credentials"),
+}
+
+Credentials = SearchKey | RedditCredentials
+
+
+def _credentials(config: "Config", provider: SearchProvider) -> Credentials:
+    if provider == SearchProvider.REDDIT:
+        return reddit_credentials(config)
+    return search_key(config, provider)
+
+
+def _as_provider(value: SearchProvider | str | None, unknown: str) -> SearchProvider | None:
+    if value is None or isinstance(value, SearchProvider):
+        return value
+    try:
+        return SearchProvider(value.lower())
+    except ValueError:
+        logger.warning(unknown, value)
+        return None
+
+
+def _select(config: "Config", provider: SearchProvider | str | None,
+            ) -> tuple[SearchProvider, Credentials | None] | None:
+    """The provider to serve and its credentials, before any fallback.
+
+    The explicit provider, then ``SEARCH_PROVIDER``, then the first keyed
+    provider with usable credentials, then DuckDuckGo; None when none is available.
+    """
+    chosen = _as_provider(provider, "Unknown search provider: %s")
+    if chosen is None:
+        configured = getattr(config, "SEARCH_PROVIDER", None)
+        if configured:
+            chosen = _as_provider(configured, "Unknown search provider in config: %s")
+    if chosen is None:
+        for keyed, (label, _library, _needs) in _KEYED.items():
+            creds = _credentials(config, keyed)
+            if creds and is_search_available(keyed):
+                logger.debug("Auto-selected %s (credentials configured)", label)
+                return keyed, creds
+        if is_search_available(SearchProvider.DUCKDUCKGO):
+            logger.debug("Auto-selected DuckDuckGo (free fallback)")
+            return SearchProvider.DUCKDUCKGO, None
+        return None
+    return chosen, (_credentials(config, chosen) if chosen in _KEYED else None)
+
+
+def _unusable(provider: SearchProvider, creds: Credentials | None) -> str | None:
+    """Why a selected keyed provider can't serve (library missing, no usable credentials)."""
+    if provider not in _KEYED:
+        return None
+    label, library, needs = _KEYED[provider]
+    if not is_search_available(provider):
+        return f"{label} requested but {library} not installed"
+    if not creds:
+        return f"{label} requested but no usable {needs}"
+    return None
+
+
+def _served(config: "Config") -> tuple[SearchProvider | None, Credentials | None]:
+    """What ``get_search_client(config)`` would serve now, without building it."""
+    selected = _select(config, None)
+    if selected is None:
+        return None, None
+    provider, creds = selected
+    if _unusable(provider, creds) is None and (
+            provider in _KEYED or is_search_available(SearchProvider.DUCKDUCKGO)):
+        return provider, creds
+    if is_search_available(SearchProvider.DUCKDUCKGO):
+        return SearchProvider.DUCKDUCKGO, None
+    return None, None
+
+
+def client_is_current(config: "Config", client: object) -> bool:
+    """Whether a cached default client is what ``get_search_client(config)`` would serve now.
+
+    False when the provider that would serve changed (``SEARCH_PROVIDER``, a
+    first or restored connection, a disconnect) or its credentials rotated, so
+    a long-lived holder rebuilds it. That includes a DuckDuckGo stand-in once
+    the provider it replaced is usable again.
+    """
+    provider, creds = _served(config)
+    if getattr(client, "PROVIDER", None) != provider:
+        return False
+    if isinstance(creds, RedditCredentials):
+        return (creds.client_id, creds.client_secret) == (
+            getattr(client, "_client_id", None), getattr(client, "_client_secret", None))
+    if isinstance(creds, SearchKey):
+        return creds.value == getattr(client, "_api_key", None)
+    return True
 
 
 def get_search_client(
@@ -102,130 +205,61 @@ def get_search_client(
     Returns:
         Configured SearchClient or None if search unavailable
     """
-    # Determine provider
-    if provider is not None:
-        if isinstance(provider, str):
-            try:
-                provider = SearchProvider(provider.lower())
-            except ValueError:
-                logger.warning(f"Unknown search provider: {provider}")
-                provider = None
-    
-    if provider is None:
-        # Check config for preferred provider
-        config_provider = getattr(config, "SEARCH_PROVIDER", None)
-        if config_provider:
-            try:
-                provider = SearchProvider(config_provider.lower())
-            except ValueError:
-                logger.warning(f"Unknown search provider in config: {config_provider}")
-    
-    if provider is None:
-        # Auto-select based on availability
-        if search_key(config, SearchProvider.TAVILY) and is_search_available(SearchProvider.TAVILY):
-            provider = SearchProvider.TAVILY
-            logger.debug("Auto-selected Tavily (API key configured)")
-        elif search_key(config, SearchProvider.BRAVE) and is_search_available(SearchProvider.BRAVE):
-            provider = SearchProvider.BRAVE
-            logger.debug("Auto-selected Brave (API key configured)")
-        elif reddit_credentials(config) and is_search_available(SearchProvider.REDDIT):
-            provider = SearchProvider.REDDIT
-            logger.debug("Auto-selected Reddit API (credentials configured)")
-        elif is_search_available(SearchProvider.DUCKDUCKGO):
-            provider = SearchProvider.DUCKDUCKGO
-            logger.debug("Auto-selected DuckDuckGo (free fallback)")
-        else:
-            logger.warning("No search provider available")
-            return None
-    
-    # Get max results from config if not specified
+    selected = _select(config, provider)
+    if selected is None:
+        logger.warning("No search provider available")
+        return None
+    provider, creds = selected
+
     if max_results is None:
         max_results = getattr(config, "SEARCH_MAX_RESULTS", 5)
-    
-    # Ensure max_results is an int at this point
     max_results = int(max_results)
-    
-    # Create client (with fallback to DuckDuckGo if primary fails)
-    if provider == SearchProvider.TAVILY:
-        from .tavily_client import TavilyClient, is_tavily_available
-        
-        if not is_tavily_available():
-            return _ddg_fallback(config, max_results, fallback,
-                                 "Tavily requested but tavily-python not installed")
 
-        api_key = search_key(config, SearchProvider.TAVILY).value
-        if not api_key:
-            return _ddg_fallback(config, max_results, fallback,
-                                 "Tavily requested but no usable Tavily key")
-        
-        include_answer = getattr(config, "SEARCH_INCLUDE_ANSWER", False)
-        search_depth = getattr(config, "SEARCH_DEPTH", "basic")
-        
+    why = _unusable(provider, creds)
+    if why:
+        return _ddg_fallback(config, max_results, fallback, why)
+    timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+
+    if provider == SearchProvider.TAVILY:
+        from .tavily_client import TavilyClient
+
         return TavilyClient(
-            api_key=api_key,
+            api_key=creds.value,
             max_results=max_results,
-            include_answer=include_answer,
-            search_depth=search_depth,
+            include_answer=getattr(config, "SEARCH_INCLUDE_ANSWER", False),
+            search_depth=getattr(config, "SEARCH_DEPTH", "basic"),
         )
 
-    elif provider == SearchProvider.BRAVE:
-        from .brave_client import BraveSearchClient, is_brave_available
-
-        if not is_brave_available():
-            return _ddg_fallback(config, max_results, fallback,
-                                 "Brave requested but httpx not installed")
-
-        api_key = search_key(config, SearchProvider.BRAVE).value
-        if not api_key:
-            return _ddg_fallback(config, max_results, fallback,
-                                 "Brave requested but no usable Brave key")
-
-        include_summary = getattr(config, "SEARCH_INCLUDE_ANSWER", False)
-        safesearch = getattr(config, "BRAVE_SAFESEARCH", "moderate")
-        timeout = getattr(config, "SEARCH_TIMEOUT", 10)
+    if provider == SearchProvider.BRAVE:
+        from .brave_client import BraveSearchClient
 
         return BraveSearchClient(
-            api_key=api_key,
+            api_key=creds.value,
             max_results=max_results,
             timeout=timeout,
-            include_summary=include_summary,
-            safesearch=safesearch,
+            include_summary=getattr(config, "SEARCH_INCLUDE_ANSWER", False),
+            safesearch=getattr(config, "BRAVE_SAFESEARCH", "moderate"),
         )
 
-    elif provider == SearchProvider.REDDIT:
-        from .reddit_client import RedditSearchClient, is_reddit_available
+    if provider == SearchProvider.REDDIT:
+        from .reddit_client import RedditSearchClient
 
-        if not is_reddit_available():
-            return _ddg_fallback(config, max_results, fallback,
-                                 "Reddit requested but httpx not installed")
-
-        creds = reddit_credentials(config)
-        if not creds:
-            return _ddg_fallback(config, max_results, fallback,
-                                 "Reddit requested but no usable Reddit credentials")
-
-        user_agent = getattr(config, "REDDIT_USER_AGENT", "llm-bawt/0.1")
-        timeout = getattr(config, "SEARCH_TIMEOUT", 10)
         return RedditSearchClient(
             client_id=creds.client_id,
             client_secret=creds.client_secret,
-            user_agent=user_agent,
+            user_agent=getattr(config, "REDDIT_USER_AGENT", "llm-bawt/0.1"),
             max_results=max_results,
             timeout=timeout,
         )
-    
-    elif provider == SearchProvider.DUCKDUCKGO:
+
+    if provider == SearchProvider.DUCKDUCKGO:
         from .ddgs_client import DuckDuckGoClient, is_ddgs_available
-        
+
         if not is_ddgs_available():
             logger.error("DuckDuckGo requested but ddgs not installed")
             return None
-        
-        # Get timeout from config (default 10 seconds)
-        timeout = getattr(config, "SEARCH_TIMEOUT", 10)
-        
         return DuckDuckGoClient(max_results=max_results, timeout=timeout)
-    
+
     logger.error(f"Unknown search provider: {provider}")
     return None
 

@@ -1370,16 +1370,16 @@ class ToolExecutor:
         return f"Note: {reason} These results are from {served} instead."
 
     def _ensure_search_client(self) -> None:
-        """Lazy-init the search client, and keep a keyed one on the current credentials.
+        """Lazy-init the search client, and keep it on what the factory would serve now.
 
-        A keyed client re-resolves its stored credentials on every call, so a
-        disconnect or rotation applies to an existing executor; on a change
-        the client is rebuilt (DuckDuckGo when the credentials are gone).
+        Every call re-checks the selection and stored credentials, so a
+        disconnect, reconnect, rotation or provider change applies to an
+        existing executor; on a change the client is rebuilt.
         """
         if not self.config:
             return
         if self.search_client:
-            from ..search.credentials import client_is_current
+            from ..search.factory import client_is_current
 
             try:
                 if client_is_current(self.config, self.search_client):
