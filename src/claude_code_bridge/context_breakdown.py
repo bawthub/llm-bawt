@@ -12,6 +12,11 @@ MESSAGE_TOTALS = (
     "toolCallTokens", "toolResultTokens", "attachmentTokens",
     "assistantMessageTokens", "userMessageTokens",
 )
+# Claude CLI 2.1.310 filters these transcript records from the wire message
+# builder, though its messageBreakdown still counts them as attachments.
+NON_WIRE_ATTACHMENT_TYPES = frozenset({
+    "prompt_snapshot", "prompt_render_point", "deferred_tools_record",
+})
 
 
 def _tokens(value: Any) -> int:
@@ -89,4 +94,23 @@ def compact_context_breakdown(raw: dict, *, read_ms: float) -> dict | None:
         result["message_breakdown"] = {
             key: _tokens(messages.get(key)) for key in MESSAGE_TOTALS
         }
+        by_type = messages.get("attachmentsByType")
+        if isinstance(by_type, list) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("tokens"), (int, float))
+            and not isinstance(item["tokens"], bool)
+            and math.isfinite(item["tokens"])
+            and item["tokens"] >= 0
+            for item in by_type
+        ):
+            non_wire = sum(
+                _tokens(item["tokens"]) for item in by_type
+                if item["name"] in NON_WIRE_ATTACHMENT_TYPES
+            )
+            attachment_total = result["message_breakdown"]["attachmentTokens"]
+            if non_wire <= attachment_total:
+                result["message_breakdown"]["wireAttachmentTokens"] = (
+                    attachment_total - non_wire
+                )
     return result

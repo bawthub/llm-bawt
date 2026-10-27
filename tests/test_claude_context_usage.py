@@ -327,6 +327,37 @@ def test_context_breakdown_keeps_bounded_facts_not_raw_payloads():
     assert compact_context_breakdown({}, read_ms=1) is None
 
 
+def test_context_breakdown_excludes_non_wire_attachment_bookkeeping_from_mix():
+    raw = {
+        "totalTokens": 50000,
+        "categories": [{"name": "Messages", "tokens": 26000}],
+        "messageBreakdown": {
+            "toolCallTokens": 1000, "toolResultTokens": 2000,
+            "attachmentTokens": 40000, "assistantMessageTokens": 3000,
+            "userMessageTokens": 12000,
+            "attachmentsByType": [
+                {"name": "prompt_snapshot", "tokens": 26600},
+                {"name": "prompt_render_point", "tokens": 100},
+                {"name": "deferred_tools_record", "tokens": 500},
+                {"name": "hook_success", "tokens": 50},
+                {"name": "skill_listing", "tokens": 9000},
+            ],
+        },
+    }
+    result = compact_context_breakdown(raw, read_ms=1)
+    assert result["message_breakdown"]["attachmentTokens"] == 40000
+    assert result["message_breakdown"]["wireAttachmentTokens"] == 12800
+    assert "attachmentsByType" not in result["message_breakdown"]
+    assert "prompt_snapshot" not in str(result)
+
+    missing_types = {**raw, "messageBreakdown": {
+        key: value for key, value in raw["messageBreakdown"].items()
+        if key != "attachmentsByType"
+    }}
+    assert "wireAttachmentTokens" not in compact_context_breakdown(
+        missing_types, read_ms=1)["message_breakdown"]
+
+
 def test_post_done_usage_keeps_cost_and_publishes_full_final_snapshot():
     harness = _Harness()
     final = {"input_tokens": 20, "output_tokens": 7, "total_cost_usd": 0.3,
