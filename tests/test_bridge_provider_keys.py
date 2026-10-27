@@ -124,6 +124,95 @@ def test_resolver_never_falls_back_to_env_past_an_unusable_record(monkeypatch, c
     assert exc.value.code == code
 
 
+# --- app: health decides route eligibility -----------------------------------
+
+
+@pytest.fixture
+def real_store(monkeypatch):
+    """A real CredentialStore over SQLite with a swappable Fernet key."""
+    from cryptography.fernet import Fernet
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel
+
+    from llm_bawt.runtime_settings import RuntimeSetting, RuntimeSettingsStore
+    from llm_bawt.service.providers import base, crypto
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine, tables=[RuntimeSetting.__table__])
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE UNIQUE INDEX idx_runtime_settings_scope_key ON runtime_settings (scope_type, scope_id, key)"
+        ))
+    runtime = object.__new__(RuntimeSettingsStore)
+    runtime.engine = engine
+    runtime.config = None
+    monkeypatch.setattr(base, "RuntimeSettingsStore", lambda config: runtime)
+    fernet = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(crypto, "_get_fernet", lambda: fernet)
+
+    def rotate_root():
+        other = Fernet(Fernet.generate_key())
+        monkeypatch.setattr(crypto, "_get_fernet", lambda: other)
+
+    yield base.CredentialStore(SimpleNamespace()), rotate_root
+    engine.dispose()
+
+
+def _route(cls):
+    from llm_bawt.service.providers.registry import access_path_connections, route_eligibility
+
+    path = cls.access_path_keys[0]
+    connection = access_path_connections(SimpleNamespace(), [path])[path]
+    return connection, route_eligibility(path, "api-key", connection)
+
+
+@pytest.mark.parametrize("cls", ADAPTERS)
+def test_a_readable_stored_key_makes_the_route_assignable(real_store, cls):
+    store, _rotate = real_store
+    store.save(ConnectionRecord(provider=cls.id, status="connected", auth_method="api_key",
+                                secret={"api_key": "synthetic-key"}))
+
+    connection, eligibility = _route(cls)
+
+    assert connection["state"] == "ok"
+    assert eligibility["eligible"] is True
+
+
+@pytest.mark.parametrize("cls", ADAPTERS)
+def test_an_undecryptable_key_blocks_new_assignment(real_store, cls):
+    store, rotate_root = real_store
+    store.save(ConnectionRecord(provider=cls.id, status="connected", auth_method="api_key",
+                                secret={"api_key": "synthetic-key"}))
+    rotate_root()
+
+    connection, eligibility = _route(cls)
+
+    assert connection["state"] == "broken"
+    assert eligibility["eligible"] is False
+    assert "synthetic-key" not in str(connection)
+
+
+@pytest.mark.parametrize("cls", ADAPTERS)
+def test_a_disconnect_marker_or_no_record_is_not_assignable(real_store, cls):
+    store, _rotate = real_store
+    assert _route(cls)[0]["state"] == "unconfigured"
+    store.save(ConnectionRecord(provider=cls.id, status="connected", auth_method="api_key",
+                                secret={"api_key": "synthetic-key"}))
+    assert cls(SimpleNamespace()).disconnect() is True
+
+    connection, eligibility = _route(cls)
+
+    assert connection["state"] == "unconfigured"
+    assert eligibility["eligible"] is False
+
+
+def test_an_unavailable_store_is_unknown_not_connected(monkeypatch):
+    stub_stored_keys(monkeypatch, {"zai": ConnectionUnavailable("store_unavailable")})
+
+    assert _adapter(ZaiKeyAdapter).health()["state"] == "unknown"
+
+
 # --- app: the broker route --------------------------------------------------
 
 

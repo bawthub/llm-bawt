@@ -23,11 +23,16 @@ from collections.abc import Sequence
 from ...utils.config import Config
 from .base import (
     AUTH_API_KEY,
+    HEALTH_BROKEN,
+    HEALTH_OK,
+    HEALTH_UNCONFIGURED,
+    HEALTH_UNKNOWN,
     STATUS_CONNECTED,
     STATUS_DISCONNECTED,
     ConnectionRecord,
     ProviderAdapter,
     ValidateResult,
+    health_block,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +64,33 @@ class ApiKeyAdapter(ProviderAdapter):
             provider=self.id, status=STATUS_DISCONNECTED, auth_method=AUTH_API_KEY,
         ))
         return True
+
+    def health(self) -> dict:
+        if not self.keeps_disconnected_record:
+            return super().health()
+        # Same strict read as the broker and resolve_stored_api_key, so a
+        # route is assignable only when the key its readers get is usable.
+        from ..connection_secrets import (  # noqa: PLC0415 — import cycle
+            ConnectionUnavailable,
+            FieldSpec,
+            read_connection,
+        )
+
+        try:
+            found = read_connection(
+                self.config, "provider", self.id, FieldSpec(secret=(_SECRET_FIELD,)), store=self.store,
+            )
+        except ConnectionUnavailable as exc:
+            if exc.code == "not_connected":
+                return health_block(HEALTH_UNCONFIGURED, detail="not connected")
+            if exc.code == "unreadable":
+                return health_block(
+                    HEALTH_BROKEN, detail=f"{self.label} API key is unreadable; reconnect.", fix="reconnect",
+                )
+            return health_block(HEALTH_UNKNOWN, detail="credential store unavailable")
+        if found is None:
+            return health_block(HEALTH_UNCONFIGURED, detail="not connected")
+        return health_block(HEALTH_OK)
 
     # --- api key -------------------------------------------------------------
     def set_api_key(self, api_key: str) -> ValidateResult:
