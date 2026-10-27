@@ -360,14 +360,17 @@ def test_start_never_follows_redirects(setup):
 
 def test_shared_list_uses_nextcloud_descriptor_not_google_fields(setup, monkeypatch):
     from llm_bawt.integrations.connections import IntegrationConnections
+    from llm_bawt.integrations.credential_integrations import CREDENTIAL_INTEGRATIONS, CredentialIntegrations
     from llm_bawt.service.routes import integrations
     monkeypatch.setattr(routes, "manager", lambda: setup)
     monkeypatch.setattr(integrations, "get_service", lambda: SimpleNamespace(config=setup.config))
     monkeypatch.setattr(integrations, "IntegrationConnections", lambda _: IntegrationConnections(None, store=setup.store))
+    monkeypatch.setattr(integrations, "CredentialIntegrations", lambda _: CredentialIntegrations(None, store=setup.store))
     app = FastAPI()
     app.include_router(integrations.router)
     descriptors = TestClient(app).get("/v1/integrations").json()["integrations"]
-    assert {item["id"] for item in descriptors} == {"google-keep", "nextcloud-talk"}
+    assert {item["id"] for item in descriptors} == {"google-keep", "nextcloud-talk", *CREDENTIAL_INTEGRATIONS}
+    assert all(item["auth_method"] == "credentials" for item in descriptors if item["id"] in CREDENTIAL_INTEGRATIONS)
     descriptor = next(item for item in descriptors if item["id"] == "nextcloud-talk")
     assert descriptor["auth_method"] == "nextcloud_login_v2"
     assert "workspace" not in descriptor and "client" not in descriptor

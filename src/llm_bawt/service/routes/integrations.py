@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from llm_bawt.integrations.connections import IntegrationConnections, IntegrationError, REGISTRY
+from llm_bawt.integrations.credential_integrations import CREDENTIAL_INTEGRATIONS, CredentialIntegrations
 from ..dependencies import get_service
 
 router = APIRouter(prefix="/v1/integrations")
@@ -68,7 +69,27 @@ async def list_integrations():
     service = IntegrationConnections(get_service().config)
     descriptors = [await run_in_threadpool(service.descriptor, key) for key in REGISTRY if key != "nextcloud-talk"]
     descriptors.append(await run_in_threadpool(nextcloud_manager().descriptor))
+    credentials = CredentialIntegrations(get_service().config)
+    descriptors.extend([await run_in_threadpool(credentials.descriptor, key) for key in CREDENTIAL_INTEGRATIONS])
     return {"integrations": descriptors}
+
+
+class CredentialValues(BaseModel):
+    # Field names and limits are checked against the integration's definition;
+    # a blank secret keeps the stored one.
+    values: dict[str, str] = Field(max_length=16, repr=False)
+
+
+def credential_manager(integration_id: str) -> CredentialIntegrations:
+    if integration_id not in CREDENTIAL_INTEGRATIONS:
+        raise HTTPException(404, "Unknown integration")
+    return CredentialIntegrations(get_service().config)
+
+
+@router.put("/{integration_id}/credentials")
+async def configure_credentials(integration_id: str, body: CredentialValues):
+    result = await call(credential_manager(integration_id).configure, integration_id, body.values)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.put("/{integration_id}/client")
@@ -105,6 +126,8 @@ async def callback(integration_id: str, request: Request, state: str = "", code:
 
 @router.delete("/{integration_id}")
 async def disconnect(integration_id: str):
+    if integration_id in CREDENTIAL_INTEGRATIONS:
+        return {"disconnected": await call(credential_manager(integration_id).disconnect, integration_id)}
     return {"disconnected": await call(manager(integration_id).disconnect, integration_id)}
 
 

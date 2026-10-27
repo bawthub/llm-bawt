@@ -21,6 +21,7 @@ from typing import Literal
 from sqlmodel import Session, select
 
 from llm_bawt.integrations.connections import IntegrationStore
+from llm_bawt.integrations.credential_integrations import CREDENTIAL_INTEGRATIONS, CredentialIntegration
 from llm_bawt.runtime_settings import RuntimeSetting
 from llm_bawt.service.providers import crypto
 from llm_bawt.service.providers.base import STATUS_CONNECTED, CredentialStore
@@ -45,19 +46,24 @@ class FieldSpec:
     meta_optional: tuple[str, ...] = field(default=())
 
 
+def _integration_spec(definition: CredentialIntegration) -> FieldSpec:
+    """The read contract for a credential integration, from its own fields."""
+    return FieldSpec(
+        secret=definition.secret_names,
+        meta=definition.required_meta,
+        meta_any=definition.requires_one_of,
+        meta_optional=definition.optional_meta,
+    )
+
+
 # The connections BawtHub's server may read through
 # GET /v1/internal/connections/{kind}/{id}. Field names are a frozen contract
-# with BawtHub (TASK-1476 step "Contract: BawtHub reads secrets ...").
+# with BawtHub (TASK-1476 step "Contract: BawtHub reads secrets ..."). The
+# integration entries come from the same definitions the credentials form
+# writes, so the writer and this reader can't drift apart.
 BAWTHUB_READABLE: dict[tuple[str, str], FieldSpec] = {
     ("provider", "xai"): FieldSpec(secret=("api_key",)),
-    ("integration", "unraid"): FieldSpec(secret=("api_key",), meta=("url",)),
-    ("integration", "object-store"): FieldSpec(
-        secret=("access_key_id", "secret_access_key"), meta=("endpoint", "region", "bucket"),
-    ),
-    ("integration", "azure-speech"): FieldSpec(
-        secret=("key",), meta_any=("region", "endpoint"), meta_optional=("region", "endpoint"),
-    ),
-    ("integration", "home-assistant"): FieldSpec(secret=("token",), meta=("url",)),
+    **{("integration", d.id): _integration_spec(d) for d in CREDENTIAL_INTEGRATIONS.values()},
 }
 
 
