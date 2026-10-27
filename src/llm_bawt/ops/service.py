@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, valid_app_binding
+from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
 from .executor import ConfigCheckError, DockerExecutor, Executor, ExecutorError, validate_spec
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
@@ -18,7 +18,7 @@ from .release_store import ReleaseStore
 from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                       bind_image_invocation, binding_matches_args)
 from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, JOB_QUEUED,
-                     JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsOperation)
+                     JOB_QUIESCING, JOB_RUNNING, JOB_SUCCEEDED, JOB_TERMINAL_STATES, OpsOperation)
 from .quiesce import cancel_quiesce_job
 from .quiesce_settings import quiesce_binding
 from .quiesce_status import attach_members
@@ -26,6 +26,23 @@ from .store import IdempotencyConflict, OpsStore
 from .validation import ArgValidationError, canonical_json, validate_args
 
 logger = logging.getLogger(__name__)
+
+# TASK-1474 C: the app reconcile recreates the process serving every chat turn
+# from bind-mounted source, so it runs only from an approved ops_run request:
+# the card shows exactly what the snapshot trusts. A policy that allows
+# ops_run outright, the operator Run button and other internal callers are
+# refused.
+APPROVAL_REQUIRED = ("this operation runs only through an approval card: ask an agent to run it with ops_run "
+                     "and approve the card. The Run button and direct dispatch cannot start it")
+
+
+def _spec_action(operation) -> str | None:
+    try:
+        spec = json.loads(operation.command_script) if operation is not None else None
+    except (TypeError, ValueError):
+        return None
+    return spec.get("action") if isinstance(spec, dict) else None
+
 
 
 class OpsDispatchError(RuntimeError):
@@ -104,6 +121,17 @@ class OpsService:
                 f"source_not_published: the checkout is at {commit['head'][:12]} but "
                 f"{commit['repository']} {commit['branch']} is at {published[:12]}; publish that commit first"))
 
+    def _last_classification(self, operation_slug: str):
+        """The trust classification the last successful run executed, or
+        ``None`` (first run, or a run from before classification existed)."""
+        for job in self.store.list_jobs(operation_slug=operation_slug, state=JOB_SUCCEEDED, limit=1):
+            try:
+                previous = json.loads(job.invocation_snapshot_json or "null")["config"]["classification"]
+            except (ValueError, TypeError, KeyError):
+                return None
+            return previous if isinstance(previous, dict) else None
+        return None
+
     def prepare_invocation(self, operation_slug: str, args: dict | None) -> dict:
         """Trusted approval integration: persist this JSON BEFORE asking approval.
 
@@ -153,6 +181,8 @@ class OpsService:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
             if spec["action"] == APP_CONFIG_ACTION:
                 self._check_source_published(snapshot["config"]["source_commit"])
+                snapshot["newly_trusted"] = newly_trusted(snapshot["config"]["classification"],
+                                                          self._last_classification(operation_slug))
         elif spec["action"] in IMAGE_ACTIONS:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.
@@ -286,7 +316,16 @@ class OpsService:
                 release = self.releases.get_by_parent_job(existing.id)
                 result["release_id"] = release.id if release else None
             return result
+        if snapshot is None and _spec_action(self.store.get_operation_by_slug(operation_slug)) == APP_CONFIG_ACTION:
+            # Refused before prepare_invocation, which would start the sealed
+            # source check for a caller that can never run it.
+            raise OpsDispatchError("approval_required", APPROVAL_REQUIRED)
         snapshot = snapshot or self.prepare_invocation(operation_slug, supplied)
+        if snapshot["spec"].get("action") == APP_CONFIG_ACTION and (
+                approved_snapshot is None or create_fence is None or not approval_request_id):
+            # Keyed on what would EXECUTE, so a catalog edit between the check
+            # above and the snapshot cannot slip past it (TASK-1474 C-b).
+            raise OpsDispatchError("approval_required", APPROVAL_REQUIRED)
         current = self.store.get_operation_by_slug(operation_slug)
         if current is None or not current.enabled or current.soft_deleted_at is not None:
             raise OpsDispatchError("operation_disabled", "operation is currently disabled or deleted")
@@ -344,6 +383,11 @@ class OpsService:
             self.store.mark_terminal(job.id, state=JOB_LOST, error_text="legacy job has no immutable execution snapshot; not replayed")
             return
         snapshot = json.loads(job.invocation_snapshot_json)
+        if (snapshot.get("spec") or {}).get("action") == APP_CONFIG_ACTION and not job.approval_request_id:
+            # Defense in depth (TASK-1474 C-c): only an approved request creates one.
+            self.store.mark_terminal(job.id, state=JOB_FAILED,
+                error_text=f"approval_required: {APPROVAL_REQUIRED}; no action submitted")
+            return
         if snapshot.get("quiesce"):
             # create_job never queues one; refuse visibly rather than run it unheld.
             self.store.mark_terminal(job.id, state=JOB_FAILED,

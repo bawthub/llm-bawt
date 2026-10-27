@@ -44,35 +44,90 @@ else:  # standalone immutable worker
     from compose_render import ComposeError, SAFE_PATH
     from sealed_container import SealedContainer, SealedRunError
 
-SOURCE_FIELDS = ("source_repository", "source_branch", "source_mounts", "data_mounts")
+SOURCE_FIELDS = ("source_repository", "source_branch", "source_mounts", "data_mounts", "env_names")
 SOURCE_CHECK_LABEL = "llm-bawt.ops.source-check"
 SOURCE_ROLE = "source-check"
 REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 SHA = re.compile(r"[0-9a-f]{40}")
 MAX_MOUNTS = 32
-# Runtime variables that make Python (or the dynamic loader) take code from a
-# path the source check does not cover. Names are reported, never values.
-UNSAFE_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", "PYTHONSTARTUP",
-              "LD_PRELOAD", "LD_AUDIT", "BASH_ENV", "ENV")
-# Variables that steer where the shell, uv, Python or the dynamic loader find
-# executables, libraries, environments or configuration. Every path in their
-# value must be absolute, normalised and outside every mount: a data mount is
-# writable and unchecked, so ``PATH=/app/storage/bin:…`` would let
-# ``server.sh``'s unqualified ``uv`` run anything (TASK-1474 r1 B2). A token
-# without ``/`` may still be a RELATIVE path (uv resolves
-# ``UV_PROJECT_ENVIRONMENT=storage`` against the project root, the working
-# dir), so it is resolved against the container's working directory and must
-# land outside every mount (``600`` or ``utf-8`` resolve harmlessly); ``.``,
-# ``..`` and ``~…`` are refused (TASK-1474 r2 B2). A relative token with ``/``
-# and a URL are refused rather than parsed (``file:///…`` is a path).
-STEERING_ENV = ("PATH", "HOME", "VIRTUAL_ENV")
-STEERING_PREFIXES = ("PYTHON", "UV_", "LD_", "XDG_")
-SEARCH_PATHS = ("PATH", "LD_LIBRARY_PATH")  # an empty or relative entry means the cwd
 PYCACHE_PREFIX = "PYTHONPYCACHEPREFIX"
 PYCACHE_DIR = "__pycache__"
 MAX_SHOWN = 5
-_SHOWN = re.compile(r"[A-Za-z0-9._/-]{1,160}")
+_SHOWN = re.compile(r"[A-Za-z0-9._/%-]{1,160}")
+
+# ── the runtime environment is DEFAULT-DENY (TASK-1474 design cmvrac8sn) ────
+# The shell running server.sh, the dynamic loader, CPython, uv and git all
+# take code, configuration or search paths from the environment, and the
+# effective environment includes the bot-writable checkout's ``.env``. A
+# deny-list of dangerous names kept missing families (BASH_FUNC_uv%% was the
+# last), so every name must be classified instead:
+#
+# * a variable NAME is ``[A-Z][A-Z0-9_]*`` (Bash imports functions only from
+#   names like ``BASH_FUNC_uv%%``), and no value starts with ``() {``;
+# * :data:`PRODUCT_ENV` names the image's and the product's own runtime
+#   variables, each with a value rule;
+# * every other name must be listed in the spec's ``env_names``: data the app
+#   reads (keys, URLs, ports). Their values are never checked or shown, and
+#   ``env_names`` may not name a product variable or anything in
+#   :data:`RESERVED_ENV`/:data:`RESERVED_PREFIXES` (defense in depth: the
+#   human approving the card sees the list, the guardrail stops the obvious).
+ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+MAX_ENV_NAMES = 256
+_FUNCTION_VALUE = "() {"
+_FLAG = re.compile(r"[0-9A-Za-z]{0,8}")
+_DIGITS = re.compile(r"[0-9]{1,6}")
+_TOKEN = re.compile(r"[A-Za-z0-9._+-]{0,128}")
+_LANG = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
+_TZ = re.compile(r"[A-Za-z0-9_+-]{1,64}(?:/[A-Za-z0-9_+-]{1,64}){0,3}")
+RESERVED_ENV = frozenset({
+    "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PS1", "PS2", "PS3", "PS4",
+    "PROMPT_COMMAND", "HOME", "PATH", "SHELL", "TMPDIR", "TERMINFO", "TERMINFO_DIRS", "HOSTALIASES",
+    "LOCALDOMAIN", "RES_OPTIONS", "LOCPATH", "NLSPATH", "TZDIR", "LANGUAGE", "VIRTUAL_ENV", "CONDA_PREFIX",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "HTTP_PROXY", "HTTPS_PROXY",
+    "ALL_PROXY", "NO_PROXY", "HF_MODULES_CACHE", "HF_HUB_CACHE", "TRANSFORMERS_CACHE",
+    "SENTENCE_TRANSFORMERS_HOME",
+})
+RESERVED_PREFIXES = ("BASH_", "LD_", "DYLD_", "PYTHON", "UV_", "GIT_", "GCONV_", "GLIBC_", "MALLOC_",
+                     "OPENSSL_", "LC_", "XDG_", "PIP_", "NODE_", "PERL", "RUBY", "JAVA_")
+
+
+def _outside(path: str, mounts) -> bool:
+    """``path`` is clean and neither on, under nor holding a mount."""
+    return _clean_path(path) and not any(_within(path, d) or _within(d, path) for d in mounts)
+
+
+def _path_list(value: str, mounts) -> bool:
+    """A search path: every entry absolute, normalised and not under a mount.
+    An empty or relative entry means the working directory, so it refuses: a
+    data mount is writable and unchecked (``PATH=/app/storage/bin:…`` would
+    let server.sh's unqualified ``uv`` run anything, TASK-1474 r1 B2)."""
+    return all(_clean_path(entry) and not any(_within(entry, d) for d in mounts)
+               for entry in value.split(":"))
+
+
+def _locale(value: str, _mounts) -> bool:
+    return bool(_LANG.fullmatch(value)) and value not in (".", "..")
+
+
+# The product's own runtime variables: the base image's and the Compose
+# files'. Nothing else may steer the runtime.
+PRODUCT_ENV = {
+    "PATH": _path_list,
+    PYCACHE_PREFIX: _outside,
+    "HF_HOME": _outside,  # transformers adds $HF_HOME/modules to sys.path
+    "PYTHONUNBUFFERED": lambda v, _m: bool(_FLAG.fullmatch(v)),
+    "PYTHONDONTWRITEBYTECODE": lambda v, _m: bool(_FLAG.fullmatch(v)),
+    "UV_HTTP_TIMEOUT": lambda v, _m: bool(_DIGITS.fullmatch(v)),
+    "LANG": _locale,
+    "TZ": lambda v, _m: bool(_TZ.fullmatch(v)),
+    **{name: (lambda v, _m: bool(_TOKEN.fullmatch(v)))
+       for name in ("DEBIAN_FRONTEND", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256")},
+}
+
+
+def reserved_env_name(name: str) -> bool:
+    return name in PRODUCT_ENV or name in RESERVED_ENV or name.startswith(RESERVED_PREFIXES)
 HASH_CHUNK = 256
 _REGULAR = ("100644", "100755")
 _GIT_ENV = ["GIT_CONFIG_NOSYSTEM=1", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent",
@@ -109,7 +164,7 @@ def valid_branch(branch) -> bool:
 
 
 def validate_source_spec(spec: dict) -> None:
-    """The four source fields of an app spec; raises ValueError."""
+    """The source fields of an app spec; raises ValueError."""
     if not REPOSITORY.fullmatch(str(spec["source_repository"])):
         raise ValueError("source_repository must be owner/repo")
     if not valid_branch(spec["source_branch"]):
@@ -129,6 +184,15 @@ def validate_source_spec(spec: dict) -> None:
             raise ValueError("a source mount may not sit inside another source mount")
         if any(_within(path, d) or _within(d, path) for d in data):
             raise ValueError("source and data mounts must be disjoint, neither inside the other")
+    names = spec["env_names"]
+    if (not isinstance(names, list) or len(names) > MAX_ENV_NAMES or len(set(map(str, names))) != len(names)
+            or not all(isinstance(n, str) and ENV_NAME.fullmatch(n) for n in names)):
+        raise ValueError(f"env_names must be at most {MAX_ENV_NAMES} distinct variable names ([A-Z][A-Z0-9_]*)")
+    reserved = sorted(n for n in names if reserved_env_name(n))
+    if reserved:
+        raise ValueError("env_names may not name a runtime or product variable: "
+                         + ", ".join(reserved[:MAX_SHOWN]) + (f" (+{len(reserved) - MAX_SHOWN})"
+                                                             if len(reserved) > MAX_SHOWN else ""))
 
 
 def _mount_destinations(container: dict, image: dict, desired: dict) -> set:
@@ -178,49 +242,39 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
         paths.append(rel)
     env = {**dict(e.partition("=")[::2] for e in (image.get("Config") or {}).get("Env") or []),
            **desired["env"]}
-    unsafe = [name for name in UNSAFE_ENV if name in env]
-    if unsafe:
-        raise SourceStateError("source_env_unsafe", unsafe)
     mounts = [d for d in destinations if d]
+    opaque = _classify_env(env, mounts, set(spec["env_names"]))
+    compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
+    return {"paths": sorted(paths), "compose_files": compose_files,
+            "bytecode_ok": env.get(PYCACHE_PREFIX) is not None,
+            "classification": {"source_mounts": sorted(sources),
+                               "data_mounts": sorted(d for d in mounts if d in data),
+                               "opaque_env": opaque}}
+
+
+def _classify_env(env: dict, mounts: list, opaque_names: set) -> list:
+    """The opaque names present, sorted; raises for anything unclassified or
+    unsafe (see :data:`PRODUCT_ENV`). Names are reported, never values."""
+    unsafe = sorted(name for name, value in env.items() if not ENV_NAME.fullmatch(name)
+                    or not isinstance(value, str) or value.lstrip().startswith(_FUNCTION_VALUE))
+    if unsafe:
+        raise SourceStateError("source_env_unsafe", unsafe, detail="not a plain variable")
     # Python reads bytecode at the prefix INSTEAD of __pycache__, so a prefix
     # on (or holding) a mount loads a forged .pyc even when no __pycache__
     # exists under source (TASK-1474 r1 B1): a set prefix must be safe. Unset,
     # Python uses __pycache__ next to the source, which the checker refuses.
     prefix = env.get(PYCACHE_PREFIX)
-    if prefix is not None and not (_clean_path(prefix)
-                                   and not any(_within(prefix, d) or _within(d, prefix) for d in mounts)):
+    if prefix is not None and not _outside(prefix, mounts):
         raise SourceStateError("source_bytecode_unsafe", [PYCACHE_PREFIX],
                                detail="not an absolute path outside every mount")
-    # The recreated container keeps the current one's working directory
-    # (clone_create_body), else the image's; Docker's default is "/".
-    workdir = ((container.get("Config") or {}).get("WorkingDir")
-               or (image.get("Config") or {}).get("WorkingDir") or "/")
-    steering = [name for name, value in env.items()
-                if name != PYCACHE_PREFIX and (name in STEERING_ENV or name.startswith(STEERING_PREFIXES))
-                and not _paths_outside(name, value, mounts, workdir)]
-    if steering:
-        raise SourceStateError("source_env_unsafe", steering, detail="search or config path not outside every mount")
-    compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
-    return {"paths": sorted(paths), "compose_files": compose_files, "bytecode_ok": prefix is not None}
-
-
-def _paths_outside(name: str, value, mounts: list, workdir: str) -> bool:
-    """Every path in ``value``, absolute or relative to ``workdir``, is
-    normalised and outside every mount (see :data:`STEERING_ENV`)."""
-    if not isinstance(value, str):
-        return False
-    for token in value.split(":"):
-        if "/" in token or name in SEARCH_PATHS:
-            path = token
-        elif not token:
-            continue  # a separator run, e.g. PYTHONWARNINGS=ignore::DeprecationWarning
-        elif token in (".", "..") or token.startswith("~") or not (workdir == "/" or _clean_path(workdir)):
-            return False
-        else:
-            path = posixpath.join(workdir, token)
-        if not _clean_path(path) or any(_within(path, d) for d in mounts):
-            return False
-    return True
+    bad = sorted(name for name, value in env.items() if name in PRODUCT_ENV and not PRODUCT_ENV[name](value, mounts))
+    if bad:
+        raise SourceStateError("source_env_unsafe", bad, detail="value not allowed for this runtime variable")
+    unclassified = sorted(name for name in env if name not in PRODUCT_ENV and name not in opaque_names)
+    if unclassified:
+        raise SourceStateError("source_env_unclassified", unclassified,
+                               detail="list app-data names in the operation's env_names")
+    return sorted(name for name in env if name in opaque_names)
 
 
 def _records(out: bytes) -> list[str]:
@@ -347,5 +401,16 @@ def valid_source_commit(spec: dict, value) -> bool:
             and isinstance(value["head"], str) and bool(SHA.fullmatch(value["head"])))
 
 
-__all__ = ["PYCACHE_PREFIX", "SOURCE_CHECK_LABEL", "SOURCE_FIELDS", "SourceChecker", "SourceStateError",
-           "UNSAFE_ENV", "source_commit", "source_plan", "valid_source_commit", "validate_source_spec"]
+def valid_classification(spec: dict, value) -> bool:
+    """Shape of a binding's ``classification`` against its spec."""
+    return (isinstance(value, dict) and set(value) == {"source_mounts", "data_mounts", "opaque_env"}
+            and value["source_mounts"] == sorted(spec["source_mounts"])
+            and isinstance(value["data_mounts"], list) and value["data_mounts"] == sorted(set(value["data_mounts"]))
+            and set(value["data_mounts"]) <= set(spec["data_mounts"])
+            and isinstance(value["opaque_env"], list) and value["opaque_env"] == sorted(set(value["opaque_env"]))
+            and set(value["opaque_env"]) <= set(spec["env_names"]))
+
+
+__all__ = ["ENV_NAME", "PRODUCT_ENV", "PYCACHE_PREFIX", "RESERVED_ENV", "RESERVED_PREFIXES", "SOURCE_CHECK_LABEL",
+           "SOURCE_FIELDS", "SourceChecker", "SourceStateError", "reserved_env_name", "source_commit",
+           "source_plan", "valid_classification", "valid_source_commit", "validate_source_spec"]

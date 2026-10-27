@@ -325,6 +325,8 @@ def dispatch_job(body: DispatchRequest):
         status = {
             "operation_not_found": 404,
             "operation_disabled": 409,
+            # TASK-1474: an approval-card-only operation; the operator Run button can't start it.
+            "approval_required": 409,
             "args_invalid": 400,
             "idempotency_conflict": 409,
             "snapshot_invalid": 409,

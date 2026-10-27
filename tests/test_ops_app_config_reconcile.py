@@ -13,7 +13,7 @@ import pytest
 
 from llm_bawt.ops.app_config_reconcile import (
     SCHEMA, SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL, AppConfigReconciler, app_config_binding,
-    approval_text, valid_app_binding,
+    approval_text, newly_trusted, snapshot_approval_text, valid_app_binding,
 )
 from llm_bawt.ops.compose_config import BUILT_PROFILE, PINNED_PROFILE, translate
 from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer
@@ -32,7 +32,11 @@ from tests.test_ops_image_deploy import (
 )
 
 SEED = next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-app-config")
-SPEC = json.loads(SEED["command_script"])
+SEED_SPEC = json.loads(SEED["command_script"])
+# An install lists its app-data env names; the generic seed lists none.
+SPEC = {**SEED_SPEC, "env_names": ["LLM_BAWT_SERVICE_PORT", "NEW", "XAI_API_KEY"]}
+APP_OP = {**SEED, "enabled": True, "command_script": json.dumps(SPEC)}
+OPERATION = {"version": 7, "updated_at": "2026-10-27T01:02:03+00:00", "updated_by": "catalog-editor"}
 FRONTEND_SPEC = json.loads(next(s for s in SEEDS if s["slug"] == "bawthub.reconcile-prod-config")["command_script"])
 APP_NAME = SPEC["container_name"]
 TAG = f"{SPEC['compose_project']}-{SPEC['compose_service']}"
@@ -47,8 +51,16 @@ WORKER = "sha256:" + "0" * 64
 EXECUTION = {"start_delay_seconds": 0, "timeout_seconds": 60, "max_output_bytes": 65536}
 HEAD = "ab" * 20
 OPS_VOLUME = "/var/lib/llm-bawt-ops"
-SOURCE_PLAN = {"paths": ["server.sh", "src"], "compose_files": ["docker-compose.yml", "docker-compose.dev.yml"],
-               "bytecode_ok": False}
+
+
+def plan(*opaque, data=(OPS_VOLUME,), bytecode_ok=False):
+    return {"paths": ["server.sh", "src"], "compose_files": ["docker-compose.yml", "docker-compose.dev.yml"],
+            "bytecode_ok": bytecode_ok,
+            "classification": {"source_mounts": ["/app/server.sh", "/app/src"], "data_mounts": list(data),
+                               "opaque_env": sorted(opaque or ["LLM_BAWT_SERVICE_PORT"])}}
+
+
+SOURCE_PLAN = plan()
 
 
 class StubChecker:
@@ -179,7 +191,12 @@ def binding(api, spec=SPEC, *, moved=False, checker=None):
 
 
 def snapshot(api, **kwargs):
-    return {"spec": SPEC, "resolved_args": {}, "config": binding(api, **kwargs), "execution": EXECUTION}
+    return {"spec": SPEC, "resolved_args": {}, "config": binding(api, **kwargs), "execution": EXECUTION,
+            "newly_trusted": None}
+
+
+def card(bound, prefix=None, newly=None):
+    return approval_text(SPEC, bound, prefix, operation=OPERATION, newly_trusted=newly)
 
 
 def reconciler(api, tmp_path, snap=None):
@@ -194,7 +211,8 @@ def test_seed_is_disabled_delayed_and_warns_it_cuts_turns():
     assert not SEED["enabled"] and SEED["max_concurrent"] == 1 and SEED["risk_level"] == "high"
     assert SEED["start_delay_seconds"] > 0 and "Cuts in-flight chat turns" in SEED["description"]
     assert json.loads(SEED["args_schema_json"]) == {"type": "object", "properties": {}, "additionalProperties": False}
-    assert validate_spec(SEED["command_script"]) == SPEC
+    assert validate_spec(SEED["command_script"]) == SEED_SPEC
+    assert SEED_SPEC["env_names"] == []  # fails closed until the install classifies its names
     assert SPEC["compose_config"] == {"renderer_image": FRONTEND_SPEC["compose_config"]["renderer_image"]}
     for key, value in (("compose_config", {**SPEC["compose_config"], "compose_files": ["docker-compose.yml"]}),
                        ("compose_config", {**SPEC["compose_config"], "image_variable": "X"}),
@@ -244,7 +262,7 @@ def test_binding_shows_names_ports_and_dependencies_only():
     assert valid_app_binding(snapshot(api)) and SECRET not in json.dumps(bound)
     assert bound["source_commit"] == {"repository": SPEC["source_repository"], "branch": SPEC["source_branch"],
                                       "head": HEAD}
-    text = approval_text(SPEC, bound, None)
+    text = card(bound)
     assert "cuts in-flight chat turns" in text and "redis:service_healthy" in text and SECRET not in text
     assert f"Source: github.com/{SPEC['source_repository']} {SPEC['source_branch']} @ {HEAD}" in text
     assert "now names a different local build" not in text
@@ -378,6 +396,7 @@ def test_unmodelled_dependencies_refuse(dep):
 
 
 DRIFT = app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642", "NEW": "1"})
+DRIFT_PLAN = plan("LLM_BAWT_SERVICE_PORT", "NEW")
 
 
 @pytest.mark.parametrize("change, code", [
@@ -448,8 +467,8 @@ def test_moved_tag_is_flagged_and_the_running_image_id_is_deployed(tmp_path):
     api = AppDocker(compose=DRIFT, tag_moved=True)
     approved = _executor(api).config_approval(SPEC)
     assert approved["image_tag_moved"] is True and approved["drift"] == ["env:+NEW"]
-    assert "now names a different local build" in approval_text(SPEC, approved, None)
-    snap = {"spec": SPEC, "resolved_args": {}, "config": approved, "execution": EXECUTION}
+    assert "now names a different local build" in card(approved)
+    snap = {"spec": SPEC, "resolved_args": {}, "config": approved, "execution": EXECUTION, "newly_trusted": None}
     result = json.loads(reconciler(api, tmp_path, snap).run())
     assert api.create_bodies[0]["Image"] == APP_ID and result["deployed"]["image_id"] == APP_ID
     assert result["config"]["image_tag_moved"] is True
@@ -589,7 +608,7 @@ def test_approval_snapshot_is_bound_and_rejects_smuggling():
 
     api = AppDocker(compose=DRIFT)
     service, store, executor = _service(PublishedVerifier(HEAD))
-    store.create_operation({**SEED, "enabled": True})
+    store.create_operation(APP_OP)
     executor.config_approval = lambda spec: binding(api, spec)
     approved = service.prepare_invocation(SEED["slug"], {})
     assert approved["config"] == binding(api)
@@ -646,87 +665,307 @@ def test_a_pycache_prefix_on_or_holding_a_mount_refuses_even_with_no_pycache_in_
     assert not source.calls
 
 
-@pytest.mark.parametrize("where", ["compose", "image"])
-@pytest.mark.parametrize("name, value", [
-    ("PATH", f"{OPS_VOLUME}/bin:/usr/bin"),  # Loopy r1 B2: server.sh runs an unqualified uv
-    ("PATH", "/usr/bin:/app/src"), ("PATH", "/usr/bin::/bin"), ("PATH", "bin:/usr/bin"),
-    ("PATH", "/usr/../var/lib/llm-bawt-ops"), ("LD_LIBRARY_PATH", f"/usr/lib:{OPS_VOLUME}"),
-    ("UV_PROJECT_ENVIRONMENT", f"{OPS_VOLUME}/venv"), ("UV_CONFIG_FILE", "storage/uv.toml"),
-    ("VIRTUAL_ENV", f"{OPS_VOLUME}/venv"), ("XDG_CONFIG_HOME", OPS_VOLUME), ("HOME", f"{OPS_VOLUME}/home"),
-    ("UV_FIND_LINKS", f"file://{OPS_VOLUME}/wheels"),
-])
-def test_a_search_or_config_path_into_a_mount_refuses(source, where, name, value):
-    env = {"LLM_BAWT_SERVICE_PORT": "8642", name: value}
-    api = AppDocker(compose=app_compose(environment=env) if where == "compose" else None)
-    if where == "image":
-        api.images[APP_ID]["Config"]["Env"].append(f"{name}={value}")
-    with pytest.raises(SourceStateError) as caught:
-        binding(api, checker=source)
-    assert caught.value.code == "source_env_unsafe" and caught.value.names == [name]
-    assert value not in str(caught.value) and not source.calls
-
-
-def test_steering_values_outside_mounts_and_non_path_values_pass(source):
-    env = {"LLM_BAWT_SERVICE_PORT": "8642", "PATH": "/app/.venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin",
-           "UV_HTTP_TIMEOUT": "600", "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
-           "PYTHONWARNINGS": "ignore::DeprecationWarning", "HOME": "/root",
-           "PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache", "CLAUDE_CODE_SKILLS_PATH": f"{OPS_VOLUME}/skills"}
-    binding(AppDocker(compose=app_compose(environment=env)), checker=source)
-    assert source.calls[-1][1]["bytecode_ok"] is True
-
-
-def test_a_slashless_relative_path_into_a_mount_refuses_against_the_working_dir(source):
-    # Loopy r2 B2: uv resolves UV_PROJECT_ENVIRONMENT=storage against the
-    # project root (/app), landing in the writable /app/storage data mount.
-    api = AppDocker(compose=_with_env(_volumes(_vol("/app/storage")), UV_PROJECT_ENVIRONMENT="storage"))
-    api.images[APP_ID]["Config"]["WorkingDir"] = "/app"
-    with pytest.raises(SourceStateError) as caught:
-        binding(api, checker=source)
-    assert caught.value.code == "source_env_unsafe" and caught.value.names == ["UV_PROJECT_ENVIRONMENT"]
-    assert not source.calls
-
-
-@pytest.mark.parametrize("where", ["image", "container"])
-@pytest.mark.parametrize("name, value", [
-    ("UV_PROJECT_ENVIRONMENT", "llm-bawt-ops"), ("VIRTUAL_ENV", "llm-bawt-ops"), ("HOME", "llm-bawt-ops"),
-    ("XDG_CONFIG_HOME", "llm-bawt-ops"), ("UV_CACHE_DIR", "x:llm-bawt-ops"), ("UV_PROJECT_ENVIRONMENT", "."),
-    ("VIRTUAL_ENV", ".."), ("HOME", "~"), ("UV_CONFIG_FILE", "~root"),
-])
-def test_relative_steering_tokens_resolve_against_the_effective_working_dir(source, where, name, value):
-    api = AppDocker(compose=_with_env(app_compose(), **{name: value}))
-    config = api.images[APP_ID]["Config"] if where == "image" else api.by_name(APP_NAME)["Config"]
-    config["WorkingDir"] = "/var/lib"
-    with pytest.raises(SourceStateError) as caught:
-        binding(api, checker=source)
-    assert caught.value.code == "source_env_unsafe" and caught.value.names == [name]
-
-
-def test_the_current_containers_working_dir_wins_and_harmless_tokens_pass(source):
-    api = AppDocker(compose=_with_env(app_compose(), UV_PROJECT_ENVIRONMENT="llm-bawt-ops",
-                                      UV_HTTP_TIMEOUT="600", PYTHONIOENCODING="utf-8"))
-    api.images[APP_ID]["Config"]["WorkingDir"] = "/var/lib"  # would put it in the ops volume
-    api.by_name(APP_NAME)["Config"]["WorkingDir"] = "/app"  # what the recreated container keeps
-    binding(api, checker=source)
-    assert source.calls
-
+# ── TASK-1474 design cmvrac8sn: the runtime environment is default-deny ───
 
 def _with_env(compose, **env):
     compose["services"]["app"]["environment"] = {"LLM_BAWT_SERVICE_PORT": "8642", **env}
     return compose
 
 
-@pytest.mark.parametrize("where", ["compose", "image"])
-@pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP", "LD_PRELOAD",
-                                  "BASH_ENV", "ENV"])
-def test_runtime_env_that_loads_code_from_elsewhere_refuses(source, where, name):
-    api = AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642", name: "/srv/x"})
-                    if where == "compose" else None)
+def _env_api(where, env):
+    """``env`` in the rendered Compose service, or in the image's Env."""
+    api = AppDocker(compose=_with_env(app_compose(), **env) if where == "compose" else None)
     if where == "image":
-        api.images[APP_ID]["Config"]["Env"].append(f"{name}=/srv/x")
+        api.images[APP_ID]["Config"]["Env"] += [f"{k}={v}" for k, v in env.items()]
+    return api
+
+
+def _refused(api, source):
     with pytest.raises(SourceStateError) as caught:
         binding(api, checker=source)
-    assert caught.value.code == "source_env_unsafe" and caught.value.names == [name]
-    assert "/srv/x" not in str(caught.value) and not source.calls
+    assert not source.calls
+    return caught.value
+
+
+def test_exported_bash_uv_function_from_compose_is_refused(source):
+    # Codex design r1: Bash imports this function before server.sh invokes its unqualified uv.
+    value = "() { . /app/storage/evil.sh; }"
+    api = AppDocker(compose=_with_env(app_compose(), **{"BASH_FUNC_uv%%": value}))
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_env_unsafe"
+    assert caught.value.names == ["BASH_FUNC_uv%%"]
+    assert not source.calls
+
+
+@pytest.mark.parametrize("where", ["compose", "image"])
+@pytest.mark.parametrize("name, value, shown", [
+    ("BASH_FUNC_uv%%", "() { :; }", None), ("BASH_FUNC_uv()", "() { :; }", "<unprintable>"),
+    ("lower_case", "1", None), ("A-B", "1", None),
+    ("NEW", "() { /app/storage/x; }", None), ("NEW", "  () { /app/storage/x; }", None),  # listed name, function value
+], ids=["func-pct", "func-paren", "lowercase", "dash", "listed-function", "listed-function-indented"])
+def test_anything_but_a_plain_variable_refuses(source, where, name, value, shown):
+    error = _refused(_env_api(where, {name: value}), source)
+    assert error.code == "source_env_unsafe" and error.names == [shown or name]
+    assert "app/storage" not in str(error) and "not a plain variable" in str(error)
+
+
+@pytest.mark.parametrize("name, value", [
+    ("PATH", f"{OPS_VOLUME}/bin:/usr/bin"),  # Loopy r1 B2: server.sh runs an unqualified uv
+    ("PATH", "/usr/bin:/app/src"), ("PATH", "/usr/bin::/bin"), ("PATH", "bin:/usr/bin"), ("PATH", ""),
+    ("PATH", "/usr/../var/lib/llm-bawt-ops"),
+    ("HF_HOME", f"{OPS_VOLUME}/hf"), ("HF_HOME", "/var/lib"), ("HF_HOME", "hf"), ("HF_HOME", "/app/src"),
+    ("PYTHONUNBUFFERED", "1;x"), ("PYTHONDONTWRITEBYTECODE", "/x"), ("UV_HTTP_TIMEOUT", "6s"),
+    ("LANG", ".."), ("LANG", "C/../x"), ("TZ", "../etc/x"), ("TZ", "/etc/x"),
+    ("DEBIAN_FRONTEND", "a b"), ("GPG_KEY", "k/../x"), ("PYTHON_VERSION", "3.12;x"), ("PYTHON_SHA256", "a b"),
+])
+def test_a_product_variable_outside_its_value_rule_refuses(source, name, value):
+    for where in ("compose", "image"):
+        error = _refused(_env_api(where, {name: value}), source)
+        assert error.code == "source_env_unsafe" and error.names == [name]
+        assert "value not allowed" in str(error) and (not value or value not in str(error))
+
+
+def test_product_variables_within_their_rules_pass(source):
+    env = {"PATH": "/app/.venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin", "HF_HOME": "/root/.cache/hf-home",
+           "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1", "UV_HTTP_TIMEOUT": "600", "LANG": "C.UTF-8",
+           "TZ": "America/New_York", "DEBIAN_FRONTEND": "noninteractive", "GPG_KEY": "A035C8C19219BA821ECE",
+           "PYTHON_VERSION": "3.12.7", "PYTHON_SHA256": "ab" * 32, "PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache"}
+    bound = binding(_env_api("compose", env), checker=source)
+    assert source.calls[-1][1]["bytecode_ok"] is True
+    assert bound["classification"]["opaque_env"] == ["LLM_BAWT_SERVICE_PORT"]  # product names are not opaque
+
+
+@pytest.mark.parametrize("where", ["compose", "image"])
+@pytest.mark.parametrize("names", [
+    ["PYTHONPATH"], ["PYTHONHOME"], ["PYTHONSTARTUP"], ["PYTHONWARNINGS"], ["LD_PRELOAD"], ["BASH_ENV"],
+    ["ENV"], ["PS4", "SHELLOPTS"], ["UV_PROJECT_ENVIRONMENT"], ["UV_CONFIG_FILE"], ["VIRTUAL_ENV"], ["HOME"],
+    ["XDG_CONFIG_HOME"], ["GIT_DIR"], ["SSL_CERT_FILE"], ["HTTPS_PROXY"], ["CLAUDE_CODE_SKILLS_PATH"],
+])
+def test_an_unlisted_name_refuses_whatever_its_value(source, where, names):
+    # Default-deny: no family of steering variables has to be foreseen.
+    error = _refused(_env_api(where, {n: "/usr/lib" for n in names}), source)
+    assert error.code == "source_env_unclassified" and error.names == names
+    assert "env_names" in str(error) and "/usr/lib" not in str(error)
+
+
+def test_listed_app_data_names_are_opaque_and_their_values_unchecked(source):
+    bound = binding(_env_api("compose", {"XAI_API_KEY": f"{OPS_VOLUME}/{SECRET}", "NEW": "() x"}), checker=source)
+    assert bound["classification"] == {"source_mounts": ["/app/server.sh", "/app/src"],
+                                       "data_mounts": [OPS_VOLUME],
+                                       "opaque_env": ["LLM_BAWT_SERVICE_PORT", "NEW", "XAI_API_KEY"]}
+    assert SECRET not in json.dumps(bound)
+
+
+@pytest.mark.parametrize("names, match", [
+    ("XAI_API_KEY", "env_names must be"), ([1], "env_names must be"), (["lower"], "env_names must be"),
+    (["A", "A"], "env_names must be"), ([f"K{i}" for i in range(257)], "env_names must be"),
+    (["BASH_FUNC_uv%%"], "env_names must be"),
+    (["PYTHONPATH"], "PYTHONPATH"), (["PATH"], "PATH"), (["HF_HOME"], "HF_HOME"), (["UV_CACHE_DIR"], "UV_CACHE_DIR"),
+    (["LD_PRELOAD"], "LD_PRELOAD"), (["SHELLOPTS"], "SHELLOPTS"), (["GIT_DIR"], "GIT_DIR"),
+    (["A_OK", "BASH_ENV", "ENV", "HOME", "IFS", "PS4", "TMPDIR"], r"BASH_ENV, ENV, HOME, IFS, PS4 \(\+1\)"),
+])
+def test_env_names_are_distinct_plain_names_never_a_runtime_variable(names, match):
+    with pytest.raises(ValueError, match=match):
+        validate_spec(json.dumps({**SPEC, "env_names": names}))
+    with pytest.raises(ValueError):
+        validate_spec(json.dumps({k: v for k, v in SPEC.items() if k != "env_names"}))
+    assert validate_spec(json.dumps({**SPEC, "env_names": [f"K{i}" for i in range(256)]}))
+
+
+# ── the card: what this approval trusts that the last success did not ──────
+
+def test_a_first_run_card_lists_everything_it_trusts():
+    bound = binding(AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642",
+                                                               "XAI_API_KEY": SECRET})))
+    text = card(bound, "Run llm-bawt.reconcile-app-config?")
+    lines = text.splitlines()
+    assert lines[:6] == [
+        "Run llm-bawt.reconcile-app-config?",
+        "FIRST RUN: every mount and environment name below is newly trusted.",
+        "Catalog revision: v7, updated 2026-10-27T01:02:03+00:00 by catalog-editor (self-reported)",
+        "Source mounts (verified against the commit): /app/server.sh, /app/src",
+        f"Data mounts (unchecked, writable): {OPS_VOLUME}",
+        "Opaque env (2 names, values never shown or checked): LLM_BAWT_SERVICE_PORT, XAI_API_KEY"]
+    assert SECRET not in text
+    assert "by unknown (self-reported)" in approval_text(SPEC, bound, None, operation={"version": 1},
+                                                         newly_trusted=None)
+
+
+def test_an_env_names_edit_and_a_source_to_data_move_are_newly_trusted():
+    api = AppDocker(compose=app_compose(environment={"LLM_BAWT_SERVICE_PORT": "8642", "XAI_API_KEY": SECRET}))
+    earlier = binding(AppDocker())["classification"]  # the last success predates XAI_API_KEY
+    now = binding(api)
+    newly = newly_trusted(now["classification"], earlier)
+    assert newly == {"source_mounts": [], "data_mounts": [], "opaque_env": ["XAI_API_KEY"]}
+    assert card(now, newly=newly).splitlines()[1] == "NEWLY TRUSTED since the last successful run: opaque env XAI_API_KEY"
+    # A catalog edit that turns a source mount into an unchecked data mount.
+    moved_spec = {**SPEC, "source_mounts": ["/app/src"], "data_mounts": [*SPEC["data_mounts"], "/app/server.sh"]}
+    moved = binding(AppDocker(), moved_spec)["classification"]
+    newly = newly_trusted(moved, earlier)
+    assert newly == {"source_mounts": [], "data_mounts": ["/app/server.sh"], "opaque_env": []}
+    text = approval_text(moved_spec, binding(AppDocker(), moved_spec), None, operation=OPERATION, newly_trusted=newly)
+    assert text.splitlines()[1] == "NEWLY TRUSTED since the last successful run: data mounts /app/server.sh"
+    assert card(now, newly=newly_trusted(earlier, earlier)).splitlines()[1] == (
+        "Nothing newly trusted since the last successful run.")
+
+
+@pytest.mark.parametrize("previous", [None, "x", {}, {"source_mounts": [], "data_mounts": []},
+                                      {"source_mounts": [], "data_mounts": [], "opaque_env": "XAI_API_KEY"},
+                                      {"source_mounts": [], "data_mounts": [], "opaque_env": [1]}])
+def test_a_missing_or_malformed_last_run_reads_as_a_first_run(previous):
+    assert newly_trusted(binding(AppDocker())["classification"], previous) is None
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda s: s["config"]["classification"]["opaque_env"].remove("LLM_BAWT_SERVICE_PORT") or
+    s["config"]["classification"]["opaque_env"].append("EVIL"),
+    lambda s: s["config"]["classification"]["data_mounts"].append("/app/src"),
+    lambda s: s["config"]["classification"].update(source_mounts=["/app/src"]),
+    lambda s: s["config"]["classification"].update(opaque_env=["NEW", "LLM_BAWT_SERVICE_PORT"]),
+    lambda s: s["config"].pop("classification"),
+    lambda s: s.pop("newly_trusted"),
+    lambda s: s.update(newly_trusted={"source_mounts": [], "data_mounts": [], "opaque_env": ["NOT_PRESENT"]}),
+    lambda s: s.update(newly_trusted={"source_mounts": [], "data_mounts": []}),
+    lambda s: s.update(newly_trusted=[]),
+], ids=["opaque-unlisted", "data-not-in-spec", "source-short", "opaque-unsorted", "no-classification",
+        "no-newly", "newly-not-present", "newly-short", "newly-list"])
+def test_a_tampered_classification_or_trust_delta_is_not_a_binding(tamper):
+    snap = snapshot(AppDocker())
+    assert valid_app_binding(snap)
+    tamper(snap)
+    assert not valid_app_binding(snap)
+
+
+def test_a_classification_change_since_approval_cancels_before_create(tmp_path):
+    api = AppDocker(compose=DRIFT)
+    snap = snapshot(api)
+    api.images[APP_ID]["Config"]["Env"].append(f"XAI_API_KEY={SECRET}")  # a listed name, no Compose drift
+    with pytest.raises(DeployFailed, match=r"config_changed_since_approval \(classification\)") as caught:
+        reconciler(api, tmp_path, snap).run()
+    assert caught.value.outcome_known and not api.create_bodies and not api.side_effect_started
+
+
+# ── TASK-1474 C: only an approved ops_run starts it ────────────────────────
+
+class RecordingExecutor:
+    """Counts approval binds and dispatches; the bind is ``api``'s."""
+
+    def __init__(self, executor, api):
+        self.binds, self.dispatched = [], []
+        executor.config_approval = lambda spec: self.binds.append(spec) or binding(api, spec)
+        real = executor.dispatch
+        executor.dispatch = lambda **kw: self.dispatched.append(kw["job_id"]) or real(**kw)
+
+
+def _app_service(api=None):
+    service, store, executor = _service(PublishedVerifier(HEAD))
+    store.create_operation(APP_OP)
+    return service, store, RecordingExecutor(executor, api or AppDocker(compose=DRIFT))
+
+
+def _approval_system(service):
+    from llm_bawt.approval_policies import ToolApprovalPolicyStore
+    return SimpleNamespace(service=service, approvals=ToolApprovalPolicyStore(None, engine=service.store.engine))
+
+
+def test_an_approved_ops_run_is_admitted_and_a_key_replay_stays_a_read():
+    from llm_bawt.ops.approved_admission import ApprovedOpsAdmission
+    from tests.test_ops_approved_admission import _approved
+
+    service, store, recorder = _app_service()
+    system = _approval_system(service)
+    row = _approved(system, arguments={"operation": SEED["slug"], "args": {}, "idempotency_key": "app-1"})
+    assert ApprovedOpsAdmission(system.approvals, service).admit_due() == 1
+    receipt = json.loads(system.approvals.get_request(row.id).result_json)
+    assert receipt["state"] == "accepted" and len(recorder.dispatched) == 1
+    job = store.get_job(recorder.dispatched[0])
+    assert job.approval_request_id == row.id
+    assert json.loads(job.invocation_snapshot_json)["newly_trusted"] is None
+    binds = len(recorder.binds)
+    replay = service.dispatch_job(operation_slug=SEED["slug"], args={}, idempotency_key="app-1")
+    assert replay["id"] == job.id and len(recorder.binds) == binds and len(recorder.dispatched) == 1
+
+
+def test_the_next_card_compares_with_the_last_successful_run():
+    api = AppDocker(compose=DRIFT)
+    service, store, recorder = _app_service(api)
+    first = service.prepare_invocation(SEED["slug"], {})
+    job = service.dispatch_job(operation_slug=SEED["slug"], args={}, idempotency_key="app-1",
+                               approved_snapshot=first, create_fence=lambda _session: None,
+                               approval_request_id="approval-1")
+    assert "FIRST RUN" in snapshot_approval_text(first, None)
+    second = service.prepare_invocation(SEED["slug"], {})
+    assert second["newly_trusted"] is None  # the first run has not succeeded
+    store.mark_terminal(job["id"], state="succeeded")
+    api.compose = _with_env(app_compose(), NEW="1", XAI_API_KEY=SECRET)
+    third = service.prepare_invocation(SEED["slug"], {})
+    assert third["newly_trusted"] == {"source_mounts": [], "data_mounts": [], "opaque_env": ["XAI_API_KEY"]}
+    assert service._verify_snapshot(third, SEED["slug"], {}) == third
+    assert "NEWLY TRUSTED since the last successful run: opaque env XAI_API_KEY" in snapshot_approval_text(third, "?")
+
+
+def test_a_direct_dispatch_is_refused_before_the_source_is_checked():
+    # C-a: the operator Run button, an ops_run a policy allows outright, any internal caller.
+    service, store, recorder = _app_service()
+    with pytest.raises(OpsDispatchError) as caught:
+        service.dispatch_job(operation_slug=SEED["slug"], args={}, idempotency_key="run-button")
+    assert caught.value.code == "approval_required" and "approval card" in str(caught.value)
+    assert recorder.binds == [] and store.list_jobs() == []
+
+
+@pytest.mark.parametrize("fence, request_id", [(None, "approval-1"), (lambda _s: None, None),
+                                               (lambda _s: None, "")], ids=["no-fence", "no-request", "empty"])
+def test_an_approved_snapshot_without_its_approval_row_is_refused(fence, request_id):
+    # C-b: keyed on the snapshot that would execute, not on the caller's say-so.
+    service, store, recorder = _app_service()
+    approved = service.prepare_invocation(SEED["slug"], {})
+    with pytest.raises(OpsDispatchError) as caught:
+        service.dispatch_job(operation_slug=SEED["slug"], args={}, idempotency_key="k", approved_snapshot=approved,
+                             create_fence=fence, approval_request_id=request_id)
+    assert caught.value.code == "approval_required"
+    assert store.list_jobs() == [] and recorder.dispatched == []
+
+
+def test_a_queued_app_job_without_an_approval_row_never_dispatches():
+    # C-c: defense in depth for a row that reached the table some other way.
+    service, store, recorder = _app_service()
+    approved = service.prepare_invocation(SEED["slug"], {})
+    op = store.get_operation_by_slug(SEED["slug"])
+    job = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="smuggled",
+                           invocation_snapshot_json=canonical_json(approved), request_payload_json="{}",
+                           caller_actor="x", caller_bot_id=None, caller_user_id=None, caller_turn_id=None,
+                           caller_session_key=None, caller_backend=None)
+    service._dispatch_queued(job)
+    after = store.get_job(job.id)
+    assert after.state == "failed" and after.error_text.startswith("approval_required:")
+    assert "no action submitted" in after.error_text and recorder.dispatched == []
+
+
+def test_ops_run_allowed_outright_by_policy_is_refused(monkeypatch):
+    from tests.test_ops_approved_admission import _direct_ops_run
+
+    service, store, recorder = _app_service()
+    with pytest.raises(RuntimeError, match=r"^\[approval_required\] this operation runs only through an approval card"):
+        _direct_ops_run(service, monkeypatch, operation=SEED["slug"], args={})
+    assert recorder.binds == [] and store.list_jobs() == []
+
+
+def test_the_run_button_gets_a_clear_409(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from llm_bawt.service.routes import ops as routes
+
+    service, store, _recorder = _app_service()
+    monkeypatch.setattr(routes, "_store", lambda: store)
+    monkeypatch.setattr(routes, "_service", lambda: service)
+    app = FastAPI()
+    app.include_router(routes.router)
+    with TestClient(app) as client:
+        response = client.post("/v1/ops/jobs", json={"operation": SEED["slug"], "actor": "operator"})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "approval_required" and "The Run button" in detail["message"]
 
 
 def _volumes(*extra, drop=None):
@@ -801,7 +1040,7 @@ def test_source_is_rechecked_as_the_last_read_before_the_swap(tmp_path, source, 
     with pytest.raises(DeployFailed, match=code) as caught:
         reconciler(api, tmp_path, snap).run()
     assert caught.value.outcome_known and not api.create_bodies and not api.side_effect_started
-    assert len(source.calls) == 2 and source.calls[0] == source.calls[1] == (APP_DIR, SOURCE_PLAN)
+    assert len(source.calls) == 2 and source.calls[0] == source.calls[1] == (APP_DIR, DRIFT_PLAN)
     assert api.by_name(APP_NAME)["State"]["Running"]
 
 
@@ -816,7 +1055,7 @@ def test_a_reconcile_records_the_commit_and_verify_only_checks_once(tmp_path, so
 def test_published_source_is_asked_of_the_forge_for_the_spec_repository():
     verifier = PublishedVerifier(HEAD)
     service, store, executor = _service(verifier)
-    store.create_operation({**SEED, "enabled": True})
+    store.create_operation(APP_OP)
     api = AppDocker(compose=DRIFT)
     executor.config_approval = lambda spec: binding(api, spec)
     assert service.prepare_invocation(SEED["slug"], {})["config"]["source_commit"]["head"] == HEAD
@@ -830,7 +1069,7 @@ def test_published_source_is_asked_of_the_forge_for_the_spec_repository():
 ], ids=["unpublished", "forge-error", "no-branch-reader"])
 def test_unpublished_source_is_refused_before_anyone_is_asked(verifier, code):
     service, store, executor = _service(verifier)
-    store.create_operation({**SEED, "enabled": True})
+    store.create_operation(APP_OP)
     api = AppDocker(compose=DRIFT)
     executor.config_approval = lambda spec: binding(api, spec)
     with pytest.raises(OpsDispatchError) as caught:

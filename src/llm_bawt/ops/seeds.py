@@ -474,6 +474,11 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
                      "/root/.cache/huggingface", "/root/.cache/llm-bawt/models", "/var/lib/llm-bawt/media",
                      "/var/lib/llm-bawt-ops", "/var/run/docker.sock", "/home/bridge/dev/agent-skills",
                      "/run/bawthub-service-token"],
+        # Every environment name the container carries beyond the product's
+        # own runtime variables is app data, opaque to the approver: the
+        # install's operator lists its names here (never values). Empty fails
+        # closed: a reconcile refuses until each name is classified.
+        env_names=[],
     ),
     "args_schema_json": _schema({}),
     "args_defaults_json": _defaults(),

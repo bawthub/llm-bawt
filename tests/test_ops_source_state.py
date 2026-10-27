@@ -346,7 +346,8 @@ def test_the_check_reads_the_checkout_without_writing_to_it(repo, tmp_path):
 # ── spec validation ─────────────────────────────────────────────────────────
 
 GOOD = {"source_repository": "bawthub/llm-bawt", "source_branch": "master",
-        "source_mounts": ["/app/src", "/app/server.sh"], "data_mounts": ["/app/storage", "/var/lib/x"]}
+        "source_mounts": ["/app/src", "/app/server.sh"], "data_mounts": ["/app/storage", "/var/lib/x"],
+        "env_names": ["XAI_API_KEY", "LLM_BAWT_SERVICE_PORT"]}
 
 
 @pytest.mark.parametrize("key, value", [
@@ -357,6 +358,10 @@ GOOD = {"source_repository": "bawthub/llm-bawt", "source_branch": "master",
     ("source_mounts", ["app/src"]), ("source_mounts", ["/app/src", "/app/src/llm_bawt"]),
     ("source_mounts", ["/"]), ("data_mounts", ["/app"]), ("data_mounts", ["/app/src/data"]),
     ("data_mounts", ["/app/src"]), ("data_mounts", "/app/storage"),
+    ("env_names", "XAI_API_KEY"), ("env_names", ["xai_api_key"]), ("env_names", ["A", "A"]), ("env_names", [1]),
+    ("env_names", ["_A"]), ("env_names", ["A" * 129]), ("env_names", [f"K{i}" for i in range(257)]),
+    ("env_names", ["PATH"]), ("env_names", ["PYTHONPATH"]), ("env_names", ["HF_HOME"]), ("env_names", ["BASH_ENV"]),
+    ("env_names", ["LC_ALL"]), ("env_names", ["NODE_OPTIONS"]), ("env_names", ["PERL5OPT"]),
 ])
 def test_source_spec_is_validated(key, value):
     validate_source_spec(GOOD)

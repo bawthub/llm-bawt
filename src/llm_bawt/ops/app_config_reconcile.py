@@ -32,7 +32,7 @@ if __package__:
                                    valid_hashes, validate_renderer_image, validate_target_fields)
     from .image_deploy import StepError
     from .source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
-                               valid_source_commit, validate_source_spec)
+                               valid_classification, valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
     from compose_config import BUILT_PROFILE, evaluate, port_list
     from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
@@ -40,7 +40,7 @@ else:  # standalone immutable worker
                                   valid_hashes, validate_renderer_image, validate_target_fields)
     from image_deploy import StepError
     from source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
-                              valid_source_commit, validate_source_spec)
+                              valid_classification, valid_source_commit, validate_source_spec)
 
 ACTION = "reconcile_app_config"
 SCHEMA = "llm-bawt.ops.app-config-reconcile/v1"
@@ -60,7 +60,8 @@ _SPEC_KEYS = frozenset({"action", "compose_config", "display_values", "stat_path
                         "health_timeout_seconds", *SOURCE_FIELDS, *_PATTERNS})
 _BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "image_tag", "image_tag_moved", "source",
                            "current_config_hash", "desired_hash", "rendered_hash", "drift", "mounts",
-                           "ports", "depends_on", "display", "source_commit"})
+                           "ports", "depends_on", "display", "source_commit", "classification"})
+_CLASSES = ("source_mounts", "data_mounts", "opaque_env")
 
 
 def validate_app_spec(spec: dict) -> dict:
@@ -108,13 +109,40 @@ def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
                "desired_hash": result["desired_hash"], "rendered_hash": result["rendered_hash"],
                "drift": result["drift"], "mounts": result["mounts"], "ports": port_list(desired["ports"]),
                "depends_on": [f"{name}:{cond}" for name, cond in desired["depends_on"].items()],
-               "display": result["display"], "source_commit": source_commit(spec, head)}
+               "display": result["display"], "source_commit": source_commit(spec, head),
+               "classification": plan["classification"]}
     return binding, desired
+
+
+def newly_trusted(classification: dict, previous) -> dict | None:
+    """What this approval trusts that the last successful run did not:
+    ``None`` on a first run (no earlier classification to compare)."""
+    # A malformed record proves nothing was trusted before, so it reads as a
+    # first run: the card then shows everything as new, never less.
+    if not isinstance(previous, dict) or not all(
+            isinstance(previous.get(key), list) and all(isinstance(x, str) for x in previous[key])
+            for key in _CLASSES):
+        return None
+    return {key: sorted(set(classification[key]) - set(previous[key])) for key in _CLASSES}
+
+
+def _valid_newly_trusted(value, classification: dict) -> bool:
+    return value is None or (
+        isinstance(value, dict) and set(value) == set(_CLASSES)
+        and all(isinstance(value[k], list) and value[k] == sorted(set(value[k]))
+                and set(value[k]) <= set(classification[k]) for k in _CLASSES))
+
+
+def snapshot_approval_text(snapshot: dict, prefix: str | None) -> str:
+    """The approval card for a prepared invocation snapshot."""
+    return approval_text(snapshot["spec"], snapshot["config"], prefix, operation=snapshot["operation"],
+                         newly_trusted=snapshot["newly_trusted"])
 
 
 def valid_app_binding(snapshot: dict) -> bool:
     binding = snapshot.get("config")
-    if snapshot["resolved_args"] != {} or not isinstance(binding, dict) or set(binding) != _BINDING_KEYS:
+    if (snapshot["resolved_args"] != {} or not isinstance(binding, dict) or set(binding) != _BINDING_KEYS
+            or "newly_trusted" not in snapshot):
         return False
     try:
         spec = validate_app_spec(snapshot["spec"])
@@ -129,12 +157,43 @@ def valid_app_binding(snapshot: dict) -> bool:
                 and label_files_valid(source["project_dir"], source["compose_files"])
                 and all(isinstance(x, str) for x in lists)
                 and set(binding["display"]) == set(spec["display_values"])
-                and valid_source_commit(spec, binding["source_commit"]))
+                and valid_source_commit(spec, binding["source_commit"])
+                and valid_classification(spec, binding["classification"])
+                and _valid_newly_trusted(snapshot["newly_trusted"], binding["classification"]))
     except (TypeError, ValueError, KeyError, AttributeError):
         return False
 
 
-def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
+def _names(values) -> str:
+    return ", ".join(values) or "none"
+
+
+def trust_text(binding: dict, operation: dict, newly) -> str:
+    """The card's trust block (TASK-1474 design B2). Catalog writes are not
+    authenticated, so the approver is shown, in the form the worker executes,
+    every mount and environment name this run trusts, and first of all what
+    the last successful run did not trust."""
+    classes = binding["classification"]
+    if newly is None:
+        head = "FIRST RUN: every mount and environment name below is newly trusted."
+    elif any(newly.values()):
+        head = ("NEWLY TRUSTED since the last successful run: "
+                + "; ".join(f"{label} {_names(newly[key])}" for key, label in (
+                    ("data_mounts", "data mounts"), ("opaque_env", "opaque env"),
+                    ("source_mounts", "source mounts")) if newly[key]))
+    else:
+        head = "Nothing newly trusted since the last successful run."
+    who = operation.get("updated_by") or "unknown"
+    return (f"{head}\n"
+            f"Catalog revision: v{operation.get('version')}, updated {operation.get('updated_at')} "
+            f"by {who} (self-reported)\n"
+            f"Source mounts (verified against the commit): {_names(classes['source_mounts'])}\n"
+            f"Data mounts (unchecked, writable): {_names(classes['data_mounts'])}\n"
+            f"Opaque env ({len(classes['opaque_env'])} names, values never shown or checked): "
+            f"{_names(classes['opaque_env'])}\n")
+
+
+def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: dict, newly_trusted) -> str:
     """Approval card body: names, ports, mounts and A1 enum values only."""
     drift = ", ".join(binding["drift"]) or "none (verifies only)"
     shown = ", ".join(f"{k}={v}" for k, v in sorted(binding["display"].items())) or "none"
@@ -142,6 +201,7 @@ def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
              "image; rebuilding and redeploying is separate.\n") if binding["image_tag_moved"] else ""
     commit = binding["source_commit"]
     return (f"{prefix or 'Authorize same-image app configuration reconcile?'}\n"
+            f"{trust_text(binding, operation, newly_trusted)}"
             f"Target: {spec['container_name']} ({binding['container_id']})\n"
             f"Unchanged image: {binding['image_id']} (Compose tag {binding['image_tag']})\n{moved}"
             f"Source: github.com/{commit['repository']} {commit['branch']} @ {commit['head']} "
@@ -164,7 +224,8 @@ class AppConfigReconciler(ConfigReconciler):
 
     SCHEMA = SCHEMA
     ACTION_NAME = "reconcile-app-config"
-    DETAIL_KEYS = (*ConfigReconciler.DETAIL_KEYS, "ports", "depends_on", "image_tag_moved", "source_commit")
+    DETAIL_KEYS = (*ConfigReconciler.DETAIL_KEYS, "ports", "depends_on", "image_tag_moved", "source_commit",
+                   "classification")
 
     def __init__(self, *args, source_checker=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -244,4 +305,5 @@ class AppConfigReconciler(ConfigReconciler):
 
 __all__ = ["ACTION", "SCHEMA", "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL", "AppConfigReconciler",
            "app_config_binding",
-           "approval_text", "image_tag", "valid_app_binding", "validate_app_spec"]
+           "approval_text", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
+           "valid_app_binding", "validate_app_spec"]

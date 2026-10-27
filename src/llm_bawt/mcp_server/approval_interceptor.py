@@ -360,11 +360,14 @@ class ApprovalAwareFastMCP(FastMCP):
             if name == "ops_run" and operations_snapshot and operations_snapshot.get("config"):
                 from ..ops import app_config_reconcile, config_reconcile  # TASK-1518, TASK-1474
 
-                kind = (app_config_reconcile if operations_snapshot["spec"].get("action") == app_config_reconcile.ACTION
-                        else config_reconcile)
-                approval_prompt = kind.approval_text(
-                    operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
-                )
+                if operations_snapshot["spec"].get("action") == app_config_reconcile.ACTION:
+                    approval_prompt = app_config_reconcile.snapshot_approval_text(
+                        operations_snapshot, decision.prompt
+                    )
+                else:
+                    approval_prompt = config_reconcile.approval_text(
+                        operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
+                    )
             row, created = store.record_mcp_request(
                 request_id=request_id,
                 tool_use_id=call_context.tool_use_id,
