@@ -29,7 +29,8 @@ _SECRET_NAME = re.compile(r"(^|_)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)
 _POINTER_SUFFIXES = ("_FILE", "_PATH", "_UID", "_ENV", "_MODE")
 #: git's ``GIT_CONFIG_KEY_<n>`` holds a config key name (its value is ``GIT_CONFIG_VALUE_<n>``).
 _GIT_CONFIG_NAME = re.compile(r"^GIT_CONFIG_KEY_\d+$")
-_INTERPOLATION = re.compile(r"\$\{([A-Z][A-Z0-9_]*)")
+#: Compose interpolation, ``$NAME`` or ``${NAME...}``; ``$$`` is a literal ``$``.
+_INTERPOLATION = re.compile(r"\$(?:\$|\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))")
 _ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=")
 
 #: The bootstrap secrets that must stay in env.
@@ -80,10 +81,28 @@ def _env_templates() -> list[Path]:
     return [p for p in _tracked(".env*") if p.name != ".env"]
 
 
+def interpolated_names(text: str) -> set[str]:
+    return {braced or bare for braced, bare in _INTERPOLATION.findall(text) if braced or bare}
+
+
+def _scalars(node):
+    """Every string key and value in a parsed YAML tree (comments are already gone)."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _scalars(key)
+            yield from _scalars(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _scalars(item)
+    elif isinstance(node, str):
+        yield node
+
+
 def _compose_names(path: Path) -> set[str]:
-    text = path.read_text()
-    names = set(_INTERPOLATION.findall(text))
-    doc = yaml.safe_load(text) or {}
+    doc = yaml.safe_load(path.read_text()) or {}
+    names: set[str] = set()
+    for scalar in _scalars(doc):
+        names |= interpolated_names(scalar)
     for service in (doc.get("services") or {}).values():
         env = (service or {}).get("environment") or {}
         entries = env.keys() if isinstance(env, dict) else (str(e).split("=", 1)[0] for e in env)
@@ -97,6 +116,7 @@ def _template_names(path: Path) -> set[str]:
         match = _ASSIGNMENT.match(line)  # commented lines are documentation
         if match:
             names.add(match.group(1))
+            names |= interpolated_names(line[match.end():])
     return names
 
 
@@ -159,3 +179,71 @@ def test_the_retirement_list_only_shrinks():
     stale = sorted(name for name in PENDING_RETIREMENT if name not in shipped)
     assert not stale, f"No longer shipped; delete from PENDING_RETIREMENT: {stale}"
     assert not BOOTSTRAP & PENDING_RETIREMENT.keys()
+
+
+# --- the guard itself (Loopy r1 on 986f6dd) -------------------------------------
+
+
+@pytest.fixture
+def ship(tmp_path, monkeypatch):
+    """Replace the shipped files with one synthetic compose file and/or template."""
+    module = __import__(__name__, fromlist=["_"])
+
+    def _ship(compose: str = "", template: str = ""):
+        files = []
+        if compose:
+            files.append(tmp_path / "docker-compose.yml")
+            files[-1].write_text(compose)
+        monkeypatch.setattr(module, "_compose_files", lambda: files)
+        env = tmp_path / ".env.example"
+        env.write_text(template)
+        monkeypatch.setattr(module, "_env_templates", lambda: [env] if template else [])
+
+    return _ship
+
+
+_SERVICE = "services:\n  app:\n    image: example/app\n    environment:\n"
+
+
+@pytest.mark.parametrize("compose", [
+    _SERVICE + "      FRESH_API_KEY: dummy\n",
+    _SERVICE + "      - FRESH_API_KEY=dummy\n",
+    _SERVICE + "      - FRESH_API_KEY\n",
+    _SERVICE + "      AUTH_HEADER: Bearer ${FRESH_API_KEY}\n",
+    _SERVICE + "      AUTH_HEADER: Bearer ${FRESH_API_KEY:-}\n",
+    _SERVICE + "      AUTH_HEADER: Bearer $FRESH_API_KEY\n",
+    _SERVICE + "      - AUTH_HEADER=Bearer $FRESH_API_KEY\n",
+    "services:\n  app:\n    image: example/app\n    command: [\"run\", \"--key=$FRESH_API_KEY\"]\n",
+])
+def test_every_compose_form_of_a_new_credential_fails(ship, compose):
+    ship(compose=compose)
+
+    with pytest.raises(AssertionError, match="FRESH_API_KEY"):
+        test_no_new_credential_ships_through_env()
+
+
+@pytest.mark.parametrize("template", ["FRESH_API_KEY=\n", "AUTH=Bearer ${FRESH_API_KEY}\n"])
+def test_a_new_credential_in_a_template_fails(ship, template):
+    ship(template=template)
+
+    with pytest.raises(AssertionError, match="FRESH_API_KEY"):
+        test_no_new_credential_ships_through_env()
+
+
+@pytest.mark.parametrize(("compose", "template"), [
+    (_SERVICE + "      AUTH_HEADER: Bearer $$FRESH_API_KEY\n", ""),  # $$ is a literal $
+    ("# was ${FRESH_API_KEY}\n" + _SERVICE + "      MODE: on  # $FRESH_API_KEY\n", ""),
+    ("", "# FRESH_API_KEY=\n"),
+])
+def test_escapes_and_comments_ship_nothing(ship, compose, template):
+    ship(compose=compose, template=template)
+
+    assert "FRESH_API_KEY" not in _shipped_secret_names()
+
+
+def test_a_comment_does_not_keep_a_retired_name_alive(ship, monkeypatch):
+    ship(compose="# Previously passed ${CRAWL4AI_API_TOKEN}; now removed.\nservices: {}\n")
+    monkeypatch.setitem(PENDING_RETIREMENT, "CRAWL4AI_API_TOKEN", "retire")
+
+    with pytest.raises(AssertionError, match="CRAWL4AI_API_TOKEN"):
+        test_the_retirement_list_only_shrinks()
