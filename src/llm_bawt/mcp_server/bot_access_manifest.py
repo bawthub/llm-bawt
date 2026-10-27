@@ -45,7 +45,9 @@ UNSCOPED_MUTATION_TOOLS = frozenset({
 # and unknown targets alike, for every caller, owner included.
 # TASK-1323: resolves BotAccess per call and narrows its own scope. Outside
 # the guard on purpose: an excluded bot filter must not answer access_denied.
-SCOPED_RETRIEVAL_TOOLS = frozenset({"messages_find", "messages_context"})
+# TASK-1585: context_waste_report resolves BotAccess per call the same way,
+# minus every private bot (caller included), scoped to the caller's user.
+SCOPED_RETRIEVAL_TOOLS = frozenset({"messages_find", "messages_context", "context_waste_report"})
 GUARDED_TOOLS = BOT_TARGET_TOOLS | AGGREGATE_TOOLS | SPECIAL_TOOLS | PARTICIPANT_TOOLS
 CLASSIFIED_TOOLS = (GUARDED_TOOLS | SELF_NAMESPACE_TOOLS | NON_HISTORY_TOOLS
                     | UNSCOPED_MUTATION_TOOLS | SCOPED_RETRIEVAL_TOOLS)
