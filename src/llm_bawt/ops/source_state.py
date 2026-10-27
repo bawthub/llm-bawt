@@ -59,9 +59,13 @@ UNSAFE_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", 
 # executables, libraries, environments or configuration. Every path in their
 # value must be absolute, normalised and outside every mount: a data mount is
 # writable and unchecked, so ``PATH=/app/storage/bin:…`` would let
-# ``server.sh``'s unqualified ``uv`` run anything (TASK-1474 r1 B2). A value
-# token without ``/`` (``600``, ``1``, ``utf-8``) is not a path; a URL is
-# refused rather than parsed (``file:///…`` is a path). Fails closed.
+# ``server.sh``'s unqualified ``uv`` run anything (TASK-1474 r1 B2). A token
+# without ``/`` may still be a RELATIVE path (uv resolves
+# ``UV_PROJECT_ENVIRONMENT=storage`` against the project root, the working
+# dir), so it is resolved against the container's working directory and must
+# land outside every mount (``600`` or ``utf-8`` resolve harmlessly); ``.``,
+# ``..`` and ``~…`` are refused (TASK-1474 r2 B2). A relative token with ``/``
+# and a URL are refused rather than parsed (``file:///…`` is a path).
 STEERING_ENV = ("PATH", "HOME", "VIRTUAL_ENV")
 STEERING_PREFIXES = ("PYTHON", "UV_", "LD_", "XDG_")
 SEARCH_PATHS = ("PATH", "LD_LIBRARY_PATH")  # an empty or relative entry means the cwd
@@ -187,23 +191,34 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
                                    and not any(_within(prefix, d) or _within(d, prefix) for d in mounts)):
         raise SourceStateError("source_bytecode_unsafe", [PYCACHE_PREFIX],
                                detail="not an absolute path outside every mount")
+    # The recreated container keeps the current one's working directory
+    # (clone_create_body), else the image's; Docker's default is "/".
+    workdir = ((container.get("Config") or {}).get("WorkingDir")
+               or (image.get("Config") or {}).get("WorkingDir") or "/")
     steering = [name for name, value in env.items()
                 if name != PYCACHE_PREFIX and (name in STEERING_ENV or name.startswith(STEERING_PREFIXES))
-                and not _paths_outside(name, value, mounts)]
+                and not _paths_outside(name, value, mounts, workdir)]
     if steering:
         raise SourceStateError("source_env_unsafe", steering, detail="search or config path not outside every mount")
     compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
     return {"paths": sorted(paths), "compose_files": compose_files, "bytecode_ok": prefix is not None}
 
 
-def _paths_outside(name: str, value, mounts: list) -> bool:
-    """Every path in ``value`` is absolute, normalised and outside every mount."""
+def _paths_outside(name: str, value, mounts: list, workdir: str) -> bool:
+    """Every path in ``value``, absolute or relative to ``workdir``, is
+    normalised and outside every mount (see :data:`STEERING_ENV`)."""
     if not isinstance(value, str):
         return False
     for token in value.split(":"):
-        if "/" not in token and name not in SEARCH_PATHS:
-            continue
-        if not _clean_path(token) or any(_within(token, d) for d in mounts):
+        if "/" in token or name in SEARCH_PATHS:
+            path = token
+        elif not token:
+            continue  # a separator run, e.g. PYTHONWARNINGS=ignore::DeprecationWarning
+        elif token in (".", "..") or token.startswith("~") or not (workdir == "/" or _clean_path(workdir)):
+            return False
+        else:
+            path = posixpath.join(workdir, token)
+        if not _clean_path(path) or any(_within(path, d) for d in mounts):
             return False
     return True
 

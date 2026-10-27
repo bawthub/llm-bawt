@@ -675,6 +675,46 @@ def test_steering_values_outside_mounts_and_non_path_values_pass(source):
     assert source.calls[-1][1]["bytecode_ok"] is True
 
 
+def test_a_slashless_relative_path_into_a_mount_refuses_against_the_working_dir(source):
+    # Loopy r2 B2: uv resolves UV_PROJECT_ENVIRONMENT=storage against the
+    # project root (/app), landing in the writable /app/storage data mount.
+    api = AppDocker(compose=_with_env(_volumes(_vol("/app/storage")), UV_PROJECT_ENVIRONMENT="storage"))
+    api.images[APP_ID]["Config"]["WorkingDir"] = "/app"
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_env_unsafe" and caught.value.names == ["UV_PROJECT_ENVIRONMENT"]
+    assert not source.calls
+
+
+@pytest.mark.parametrize("where", ["image", "container"])
+@pytest.mark.parametrize("name, value", [
+    ("UV_PROJECT_ENVIRONMENT", "llm-bawt-ops"), ("VIRTUAL_ENV", "llm-bawt-ops"), ("HOME", "llm-bawt-ops"),
+    ("XDG_CONFIG_HOME", "llm-bawt-ops"), ("UV_CACHE_DIR", "x:llm-bawt-ops"), ("UV_PROJECT_ENVIRONMENT", "."),
+    ("VIRTUAL_ENV", ".."), ("HOME", "~"), ("UV_CONFIG_FILE", "~root"),
+])
+def test_relative_steering_tokens_resolve_against_the_effective_working_dir(source, where, name, value):
+    api = AppDocker(compose=_with_env(app_compose(), **{name: value}))
+    config = api.images[APP_ID]["Config"] if where == "image" else api.by_name(APP_NAME)["Config"]
+    config["WorkingDir"] = "/var/lib"
+    with pytest.raises(SourceStateError) as caught:
+        binding(api, checker=source)
+    assert caught.value.code == "source_env_unsafe" and caught.value.names == [name]
+
+
+def test_the_current_containers_working_dir_wins_and_harmless_tokens_pass(source):
+    api = AppDocker(compose=_with_env(app_compose(), UV_PROJECT_ENVIRONMENT="llm-bawt-ops",
+                                      UV_HTTP_TIMEOUT="600", PYTHONIOENCODING="utf-8"))
+    api.images[APP_ID]["Config"]["WorkingDir"] = "/var/lib"  # would put it in the ops volume
+    api.by_name(APP_NAME)["Config"]["WorkingDir"] = "/app"  # what the recreated container keeps
+    binding(api, checker=source)
+    assert source.calls
+
+
+def _with_env(compose, **env):
+    compose["services"]["app"]["environment"] = {"LLM_BAWT_SERVICE_PORT": "8642", **env}
+    return compose
+
+
 @pytest.mark.parametrize("where", ["compose", "image"])
 @pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP", "LD_PRELOAD",
                                   "BASH_ENV", "ENV"])
