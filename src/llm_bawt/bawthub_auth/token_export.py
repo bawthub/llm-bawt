@@ -44,21 +44,28 @@ def publish(path: Path, token: str | None, environ: Mapping[str, str], *,
     ``uid_env`` names the env var holding the reader's uid (the bridge-token
     exports use their own, TASK-1477). Raises ``ValueError`` (bad uid, nothing
     written) or ``OSError``; the caller reports those. Never logs.
+
+    Withdrawal comes before uid validation: a broken uid setting must never
+    keep a stale token on disk after the app lost the means to produce it.
     """
-    uid = _reader_uid(environ, uid_env)
     if token is None:
         path.unlink(missing_ok=True)
         return ExportResult.REMOVED
+    uid = _reader_uid(environ, uid_env)
     _write_atomically(path, token, uid)
     return ExportResult.WRITTEN
+
+
+# uid_t is 32-bit unsigned and 2**32 - 1 is (uid_t)-1, "leave unchanged".
+_MAX_UID = 2**32 - 2
 
 
 def _reader_uid(environ: Mapping[str, str], uid_env: str) -> int | None:
     raw = (environ.get(uid_env) or "").strip()
     if not raw:
         return None
-    if not raw.isdigit():
-        raise ValueError(f"{uid_env} must be a numeric uid")
+    if not raw.isdigit() or int(raw) > _MAX_UID:
+        raise ValueError(f"{uid_env} must be a numeric uid (0..{_MAX_UID})")
     return int(raw)
 
 

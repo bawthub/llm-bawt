@@ -100,7 +100,7 @@ def test_chown_to_own_uid_really_applies(derived, target):
     assert target.stat().st_uid == os.getuid()
 
 
-@pytest.mark.parametrize("uid", ["hono", "-1", "1001:1001"])
+@pytest.mark.parametrize("uid", ["hono", "-1", "1001:1001", str(2**32 - 1), str(2**65)])
 def test_non_numeric_uid_refuses_to_write(derived, target, uid):
     assert _export(target, **{EXPORT_UID_ENV: uid}) is ExportResult.FAILED
     assert not target.exists()
@@ -120,6 +120,12 @@ def test_no_token_removes_a_stale_export(target):
     """conftest makes derivation fail: both sides must fail closed together."""
     target.write_text("token-from-before-the-key-broke")
     assert _export(target) is ExportResult.REMOVED
+    assert not target.exists()
+
+
+def test_no_token_removes_a_stale_export_even_with_a_bad_uid(target):
+    target.write_text("token-from-before-the-key-broke")
+    assert _export(target, **{EXPORT_UID_ENV: "hono"}) is ExportResult.REMOVED
     assert not target.exists()
 
 

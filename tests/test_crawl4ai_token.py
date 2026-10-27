@@ -131,6 +131,26 @@ def test_underivable_root_removes_stale_files(tmp_path, caplog):
     assert "RuntimeError" in caplog.text
 
 
+@pytest.mark.parametrize("uid", ["bad-uid", str(2**65)])
+def test_underivable_root_removes_stale_token_even_with_a_bad_uid(tmp_path, uid):
+    stale = Path(_file(tmp_path, "old-value"))
+
+    def underivable():
+        raise RuntimeError("root unavailable")
+
+    result = export_crawl4ai_token({SERVER: str(stale), SERVER_UID: uid}, derive=underivable)
+    assert result["crawl4ai"] == "removed"
+    assert not stale.exists()
+
+
+@pytest.mark.parametrize("uid", [str(2**32 - 1), str(2**65)])
+def test_out_of_range_uid_fails_the_target_without_raising(tmp_path, uid):
+    target = tmp_path / "token"
+    result = export_crawl4ai_token({SERVER: str(target), SERVER_UID: uid}, derive=lambda: DERIVED)
+    assert result["crawl4ai"] == "failed"
+    assert not target.exists()
+
+
 def test_a_failed_target_does_not_stop_the_other(tmp_path):
     bridges = tmp_path / "b"
     env = {SERVER: str(tmp_path / "s"), SERVER_UID: "not-a-uid", BRIDGES: str(bridges)}
