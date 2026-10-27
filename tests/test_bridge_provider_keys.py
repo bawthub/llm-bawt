@@ -322,6 +322,52 @@ def test_zai_usage_reads_the_body_of_a_200(monkeypatch, payload, status):
     assert snap.available is (payload is _ZAI_PLAN)
 
 
+_ECHO_BAIT = "synthetic-key-must-not-echo"
+
+
+@pytest.mark.parametrize(
+    ("code", "described"),
+    [
+        (_ECHO_BAIT, "an unrecognized code"),
+        ({"detail": _ECHO_BAIT}, "an unrecognized code"),
+        ([_ECHO_BAIT], "an unrecognized code"),
+        (10**30, "an unrecognized code"),
+        (-1, "an unrecognized code"),
+        (True, "an unrecognized code"),
+        (1.5, "an unrecognized code"),
+        (None, "an unrecognized code"),
+        (1113, "code 1113"),
+    ],
+)
+def test_zai_failure_messages_never_echo_a_non_numeric_code(monkeypatch, code, described):
+    """Only a bounded int from the body reaches the connect detail or usage.error."""
+    from llm_bawt.service.providers import bridge_keys
+
+    payload = {"code": code, "success": False}
+
+    class _Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, _url, *, headers):
+            return _zai_response(payload)
+
+    monkeypatch.setattr(bridge_keys.httpx, "get", lambda *_a, **_k: _zai_response(payload))
+    stub_stored_keys(monkeypatch, {"zai": "stored-key"})
+    monkeypatch.setattr(zai_usage.httpx, "AsyncClient", _Client)
+
+    assert ZaiKeyAdapter._probe("candidate") == (None, f"Z.AI key check failed with {described}")
+    snap = asyncio.run(ZaiUsageAdapter().fetch())
+    assert snap.status == "error"
+    assert snap.error == f"z.ai usage endpoint failed with {described}."
+
+
 @pytest.mark.parametrize(
     ("adapter_cls", "provider_id", "env"),
     [

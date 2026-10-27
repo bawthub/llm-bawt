@@ -19,6 +19,11 @@ from .api_key import ApiKeyAdapter
 
 _TIMEOUT_S = 15.0
 _AUTH_CODES = (401, 403)
+_MAX_REPORTED_CODE = 99_999
+
+
+def _int_code(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 class ZaiEnvelopeError:
@@ -27,25 +32,34 @@ class ZaiEnvelopeError:
     z.ai's monitor API answers ``{"code": 401, "success": false, ...}`` with
     HTTP 200 for a bad or expired key, so the HTTP status alone can't tell a
     rejected key from a working one.
+
+    ``code`` is the body's code only when it is a plausible numeric status;
+    anything else in that field is untrusted provider data and is dropped, so
+    messages built from it never echo arbitrary JSON.
     """
 
     __slots__ = ("code", "unauthorized")
 
-    def __init__(self, code: Any, unauthorized: bool):
+    def __init__(self, code: int | None, unauthorized: bool):
         self.code = code
         self.unauthorized = unauthorized
+
+    @property
+    def described(self) -> str:
+        """``code N``, or a fixed phrase when the code isn't a numeric status."""
+        return f"code {self.code}" if self.code is not None else "an unrecognized code"
 
     @classmethod
     def from_payload(cls, payload: Any) -> ZaiEnvelopeError | None:
         """The failure ``payload`` reports, or None when it reports success."""
         if not isinstance(payload, dict):
             return None
-        code = payload.get("code")
-        failed = payload.get("success") is False or (
-            isinstance(code, int) and not isinstance(code, bool) and code not in (0, 200))
+        code = _int_code(payload.get("code"))
+        failed = payload.get("success") is False or (code is not None and code not in (0, 200))
         if not failed:
             return None
-        return cls(code, code in _AUTH_CODES)
+        reported = code if code is not None and 0 <= code <= _MAX_REPORTED_CODE else None
+        return cls(reported, code in _AUTH_CODES)
 
 
 def _zai_body_error(resp: httpx.Response) -> str | None:
@@ -58,7 +72,7 @@ def _zai_body_error(resp: httpx.Response) -> str | None:
         return None
     if failure.unauthorized:
         return "Z.AI rejected the API key"
-    return f"Z.AI key check failed with code {failure.code}"
+    return f"Z.AI key check failed with {failure.described}"
 
 
 def _probe(label: str, url: str, headers: dict[str, str],

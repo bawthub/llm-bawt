@@ -187,7 +187,7 @@ class ZaiUsageAdapter(UsageAdapter):
             return self._base(
                 available=False,
                 status=STATUS_ERROR,
-                error=f"z.ai usage endpoint failed with code {failure.code}.",
+                error=f"z.ai usage endpoint failed with {failure.described}.",
                 raw=payload,
             )
 
