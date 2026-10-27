@@ -41,6 +41,7 @@ from llm_bawt.working_memory.contracts import WorkingMemoryError
 from llm_bawt.working_memory.notice import prepare_notice
 from llm_bawt.working_memory.render import render_section
 from llm_bawt.working_memory.service import WorkingMemoryService
+from llm_bawt.working_memory.store import Actor
 from tests.bot_tag_fixtures import PRIVATE_MODES, make_private
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -99,7 +100,12 @@ def wm(private_app_pg, monkeypatch):
         user=f"user-{tag}", context=context, version=version, changes=changes,
     )
     with engine.begin() as conn:
-        for table in ("working_memory_items", "working_memory_changes", "working_memory_namespaces"):
+        conn.execute(text(
+            "DELETE FROM working_memory_task_purge_audit WHERE item_id IN"
+            " (SELECT item_id FROM working_memory_changes WHERE bot_id LIKE :p)"
+        ), {"p": f"test-wm-%-{tag}"})
+        for table in ("working_memory_task_suppressions", "working_memory_items",
+                      "working_memory_changes", "working_memory_namespaces"):
             conn.execute(text(f"DELETE FROM {table} WHERE bot_id LIKE :p"), {"p": f"test-wm-%-{tag}"})
         conn.execute(text("DELETE FROM runtime_settings WHERE scope_id LIKE :p"), {"p": f"test-wm-%-{tag}"})
         conn.execute(text("DELETE FROM bot_profiles WHERE slug LIKE :p"), {"p": f"test-wm-%-{tag}"})
@@ -789,6 +795,320 @@ def test_health_never_reads_an_opted_in_private_bot(wm, monkeypatch, mode):
     assert private not in {bot["bot_id"] for bot in report["bots"]}
     assert wm.bots["on"] in {bot["bot_id"] for bot in report["bots"]}
     assert private not in read and wm.bots["on"] in read
+
+
+# -- TASK-1530: canonical task pointers and durable suppression -----------------
+
+def _task_links(wm, monkeypatch):
+    from llm_bawt.working_memory import store as store_module
+    from llm_bawt.working_memory.task_links import TaskInfo
+
+    monkeypatch.setattr(store_module, "derive_key", lambda label: b"test-only-stable-key")
+    task = TaskInfo("task-" + uuid.uuid4().hex, "TASK-1530", "Task title", "IN_PROGRESS", wm.bots["on"])
+
+    class Catalog:
+        def get(self, ref):
+            if ref not in (task.id, task.short_id):
+                raise WorkingMemoryError("task_unavailable", "missing task")
+            return task
+
+    catalog = Catalog()
+    wm.service.catalog = catalog
+    return task, catalog
+
+
+@pytest.mark.parametrize("first", ["manual", "auto"])
+def test_link_canonicalizes_both_manual_and_association_orderings(wm, monkeypatch, first):
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+
+    def manual():
+        return wm.service.bot_create(ctx, {"kind": "initiative_link", "objective": "My pointer",
+                                            "initiative_task_id": task.short_id}, _key())
+
+    def auto():
+        return wm.service.link_associated(ctx, task.id)
+
+    if first == "manual":
+        original = manual()
+        assert auto()["item"]["id"] == original["item"]["id"]
+    else:
+        original = auto()
+        assert _code(manual) == "already_linked"
+    rows = wm.service.bot_list(ctx)["items"]
+    assert len(rows) == 1 and rows[0]["canonical_task_id"] == task.id
+    assert rows[0]["task_short_id"] == task.short_id
+
+
+def test_private_and_off_bots_never_resolve_or_touch_task_links(wm, monkeypatch):
+    class ForbiddenCatalog:
+        def get(self, ref):
+            pytest.fail("private/off bots must not read tasks")
+
+    wm.service.catalog = ForbiddenCatalog()
+    for name, code in (("protected", "protected_bot"), ("off", "not_enabled"),
+                       ("codex", "not_enabled")):
+        ctx = wm.context(bot=wm.bots[name])
+        assert _code(lambda: wm.service.link_associated(ctx, "task-id")) == code
+        with wm.engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT count(*) FROM working_memory_namespaces WHERE bot_id=:bot AND user_id=:user"
+            ), {"bot": wm.bots[name], "user": wm.user}).scalar_one() == 0
+
+
+def test_manual_task_lookup_must_verify_identity_before_writing(wm, monkeypatch):
+    task, catalog = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    fields = {"kind": "initiative_link", "objective": "pointer", "initiative_task_id": task.short_id}
+    catalog.get = lambda ref: (_ for _ in ()).throw(WorkingMemoryError("task_unavailable", "missing"))
+    assert _code(lambda: wm.service.bot_create(ctx, fields, _key())) == "task_unavailable"
+    assert wm.version() is None
+
+
+def test_task_pointer_renders_full_and_compact_json_fields(wm, monkeypatch):
+    from datetime import datetime, timezone
+    from llm_bawt.working_memory.render import full_line, title_line
+
+    task, _ = _task_links(wm, monkeypatch)
+    item = wm.service.link_associated(wm.context(), task.id)["item"]
+    for line in (full_line(item, None, datetime.now(timezone.utc)),
+                 title_line(item, None, datetime.now(timezone.utc))):
+        pointer = json.loads(line)
+        assert pointer["initiative_task_id"] == task.id
+        assert (pointer["task_short_id"], pointer["task_title"], pointer["task_status"]) == (
+            task.short_id, task.title, task.status)
+
+
+def test_lone_preexisting_removed_link_is_backfilled_as_suppressed(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    old = wm.service.store.create(wm.bots["on"], wm.user, {
+        "kind": "initiative_link", "initiative_task_id": task.short_id, "objective": "Old item",
+    }, idempotency_key=_key(), actor=Actor("bot", wm.bots["on"]))["item"]
+    with wm.engine.begin() as conn:
+        conn.execute(text("UPDATE working_memory_items SET removed_at=now() WHERE id=:id"), {"id": old["id"]})
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "removed"
+    assert _code(lambda: wm.service.bot_create(ctx, {
+        "kind": "initiative_link", "initiative_task_id": task.id, "objective": "again",
+    }, _key())) == "removed"
+    with wm.engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM working_memory_task_suppressions WHERE bot_id=:bot AND user_id=:user"
+        ), {"bot": wm.bots["on"], "user": wm.user}).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT count(*) FROM working_memory_items WHERE bot_id=:bot AND user_id=:user"
+            " AND kind='initiative_link' AND removed_at IS NULL"
+        ), {"bot": wm.bots["on"], "user": wm.user}).scalar_one() == 0
+
+
+def test_hard_purge_retains_opaque_suppression_without_item_text(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    item = wm.service.link_associated(ctx, task.id)["item"]
+    assert wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=True)["state"] == "purged"
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "removed"
+    with wm.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM working_memory_items WHERE id=:id"), {"id": item["id"]}).scalar_one() == 0
+        rows = conn.execute(text(
+            "SELECT row_to_json(s)::text FROM working_memory_task_suppressions s"
+            " WHERE bot_id=:bot AND user_id=:user"
+        ), {"bot": wm.bots["on"], "user": wm.user}).scalars().all()
+    assert len(rows) == 1 and task.id not in rows[0] and task.title not in rows[0]
+
+
+def test_link_audit_failure_refuses_all_creates_before_index_or_backfill(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    # Schema guard has already run; a missing index must still fail closed.
+    from llm_bawt.working_memory.store import _TASK_RELATIONS
+    from llm_bawt.utils.schema import ensure_relations
+
+    with wm.engine.begin() as conn:
+        conn.execute(text("DROP INDEX ux_working_memory_live_task_links"))
+    try:
+        assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "task_link_audit_pending"
+        assert _code(lambda: wm.service.bot_create(ctx, {
+            "kind": "initiative_link", "initiative_task_id": task.short_id, "objective": "new",
+        }, _key())) == "task_link_audit_pending"
+        with wm.engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT count(*) FROM working_memory_items WHERE bot_id=:bot AND user_id=:user"
+            ), {"bot": wm.bots["on"], "user": wm.user}).scalar_one() == 0
+    finally:
+        with wm.engine.begin() as conn:
+            ensure_relations(conn, _TASK_RELATIONS)
+
+
+def test_concurrent_manual_and_associated_cuids_use_one_link(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(
+            wm.service.bot_create, ctx,
+            {"kind": "initiative_link", "objective": f"manual {n}",
+             "initiative_task_id": task.short_id if n % 2 else task.id}, _key(),
+        ) for n in range(4)]
+        futures += [pool.submit(wm.service.link_associated, ctx, task.id) for _ in range(4)]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result()["item"]["id"])
+            except WorkingMemoryError as exc:
+                assert exc.code == "already_linked"
+    assert len(set(outcomes)) == 1
+    assert len(wm.service.store.list_items(wm.bots["on"], wm.user)["items"]) == 1
+
+
+def test_legacy_duplicate_prefers_owner_edited_row_and_retains_the_other(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    first = wm.service.store.create(wm.bots["on"], wm.user, {
+        "kind": "initiative_link", "initiative_task_id": task.short_id,
+        "objective": "oldest content", "refs": [{"kind": "doc", "id": "keep this"}],
+    }, idempotency_key=_key(), actor=Actor("bot", wm.bots["on"]))["item"]
+    second_key = _key()
+    second = wm.service.store.create(wm.bots["on"], wm.user, {
+        "kind": "initiative_link", "initiative_task_id": task.id, "objective": "owner content",
+    }, idempotency_key=second_key, actor=Actor("bot", wm.bots["on"]))["item"]
+    wm.service.owner_update(wm.bots["on"], wm.user, second["id"], 1, {"checkpoint": "owner note"})
+    result = wm.service.link_associated(wm.context(), task.id)
+    assert result["item"]["id"] == second["id"]
+    rows = wm.service.owner_list(wm.bots["on"], wm.user)["items"]
+    assert {row["id"] for row in rows} == {first["id"], second["id"]}
+    loser = next(row for row in rows if row["id"] == first["id"])
+    assert loser["status"] == "cancelled" and loser["refs"][0]["id"] == "keep this"
+    assert _code(lambda: wm.service.bot_update(wm.context(), first["id"], loser["revision"],
+                                                {"status": "active"})) == "already_linked"
+    assert _code(lambda: wm.service.owner_update(wm.bots["on"], wm.user, first["id"],
+                                                  loser["revision"], {"status": "active"})) == "already_linked"
+
+
+def test_soft_then_hard_task_removal_blocks_manual_and_auto_recreation(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    fields = {"kind": "initiative_link", "initiative_task_id": task.short_id, "objective": "pointer"}
+    key = _key()
+    item = wm.service.bot_create(ctx, fields, key)["item"]
+    wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=False)
+    assert _code(lambda: wm.service.bot_create(ctx, fields, key)) == "removed"
+    assert _code(lambda: wm.service.bot_create(ctx, fields, _key())) == "removed"
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "removed"
+    wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=True)
+    assert _code(lambda: wm.service.bot_create(ctx, fields, key)) == "removed"
+    assert _code(lambda: wm.service.bot_create(ctx, fields, _key())) == "removed"
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "removed"
+
+
+def test_rotated_suppression_key_fails_closed_for_links_and_purge(wm, monkeypatch):
+    from llm_bawt.working_memory import store as store_module
+
+    task, _ = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    item = wm.service.link_associated(ctx, task.id)["item"]
+    wm.service.owner_delete(wm.bots["on"], wm.user, item["id"], hard=False)
+    monkeypatch.setattr(store_module, "derive_key", lambda label: b"different-persisted-key")
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "task_link_audit_pending"
+    assert _code(lambda: wm.service.owner_delete(wm.bots["on"], wm.user, item["id"],
+                                                      hard=True)) == "task_link_audit_pending"
+    with wm.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM working_memory_items WHERE id=:id"),
+                            {"id": item["id"]}).scalar_one() == 1
+
+
+def test_historical_unidentifiable_purge_gates_new_task_links(wm, monkeypatch):
+    task, _ = _task_links(wm, monkeypatch)
+    old = wm.service.bot_create(wm.context(), {"objective": "unidentifiable"}, _key())["item"]
+    wm.service.owner_delete(wm.bots["on"], wm.user, old["id"], hard=True)
+    with wm.engine.begin() as conn:
+        conn.execute(text("DELETE FROM working_memory_task_purge_audit WHERE item_id=:id"), {"id": old["id"]})
+    assert _code(lambda: wm.service.link_associated(wm.context(), task.id)) == "task_link_audit_pending"
+    assert wm.service.store.list_items(wm.bots["on"], wm.user)["items"] == []
+
+
+def test_reconciliation_updates_task_pointer_and_archives_without_reopening(wm, monkeypatch):
+    task, catalog = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    item = wm.service.link_associated(ctx, task.id)["item"]
+    assert wm.service.bot_list(ctx)["version"] == 1  # unchanged task never bumps
+    catalog.get = lambda ref: dataclasses.replace(task, title="New title", status="BLOCKED")
+    listed = wm.service.bot_list(ctx)
+    assert listed["version"] == 2 and listed["items"][0]["task_title"] == "New title"
+    assert "New title" in render_section(wm.engine, bot_id=wm.bots["on"],
+                                         user_id=wm.user, session_id=None).text
+    catalog.get = lambda ref: dataclasses.replace(task, status="COMPLETED")
+    wm.service.bot_list(ctx)
+    assert wm.service.store.list_items(wm.bots["on"], wm.user)["items"] == []
+    assert wm.service.owner_list(wm.bots["on"], wm.user)["items"][0]["status"] == "done"
+    catalog.get = lambda ref: task
+    assert _code(lambda: wm.service.link_associated(ctx, task.id)) == "already_linked"
+
+
+@pytest.mark.parametrize("ending", ["CANCELLED", "reassigned"])
+def test_reconciliation_cancels_unavailable_task_ownership(wm, monkeypatch, ending):
+    task, catalog = _task_links(wm, monkeypatch)
+    ctx = wm.context()
+    item = wm.service.link_associated(ctx, task.id)["item"]
+    catalog.get = lambda ref: (dataclasses.replace(task, status="CANCELLED") if ending == "CANCELLED"
+                               else dataclasses.replace(task, assignee="different-bot"))
+    wm.service.bot_list(ctx)
+    assert wm.service.owner_list(wm.bots["on"], wm.user)["items"][0]["status"] == "cancelled"
+    assert wm.changes(item["id"])[-1]["session_id"] is None
+
+
+def test_task_pointer_actual_sent_prompt_keeps_pin_until_boundary(wm, ses, monkeypatch):
+    from llm_bawt.models.message import Message
+    from llm_bawt.service.system_prompt_pin import SystemPromptPinStore, apply_session_pin
+    from llm_bawt.service.turn_logs import TurnLogStore
+    from llm_bawt.working_memory.task_links import TaskCatalog
+
+    task, catalog = _task_links(wm, monkeypatch)
+    monkeypatch.setattr(TaskCatalog, "get", catalog.get)
+    TurnLogStore(wm.settings.config)
+    sid = ses.new()
+    turns = []
+    client = SimpleNamespace(
+        _backend=SimpleNamespace(pins_system_prompt=True),
+        compose_system_prompt=lambda base: base,
+    )
+
+    def sent(section, *, cold):
+        tid = "turn-" + uuid.uuid4().hex
+        turns.append(tid)
+        with wm.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO turn_logs (id, created_at, path, stream, bot_id, user_id, status, user_prompt)"
+                " VALUES (:id, now(), '/test', true, :bot, :user, 'ok', 'hi')"
+            ), {"id": tid, "bot": wm.bots["on"], "user": wm.user})
+        ctx = SimpleNamespace(
+            svc=SimpleNamespace(_turn_log_store=SimpleNamespace(engine=wm.engine)),
+            bot_id=wm.bots["on"], user_prompt="hi", bridge_reset_action=None,
+            thread_binding={"thread_session_id": sid,
+                            **({} if cold else {"thread_resume_id": "existing-sdk-session"})},
+        )
+        messages, decision = apply_session_pin(
+            ctx, client, [Message("system", section.text), Message("user", "hi")],
+            turn_id=tid, sections={"working_memory": section.meta},
+        )
+        assert decision is not None
+        if decision.is_boundary:
+            assert SystemPromptPinStore(wm.engine).confirm(session_id=sid, turn_id=tid)
+        return messages[0].content, decision
+
+    try:
+        original = render_section(wm.engine, bot_id=wm.bots["on"], user_id=wm.user, session_id=sid)
+        first, _ = sent(original, cold=True)
+        assert task.short_id not in first
+        item = wm.service.link_associated(ses.ctx(sid), task.id)["item"]
+        fresh = render_section(wm.engine, bot_id=wm.bots["on"], user_id=wm.user, session_id=sid)
+        assert task.short_id in fresh.text and task.id in fresh.text
+        kept, decision = sent(fresh, cold=False)
+        assert kept == first and task.short_id not in kept
+        assert _notice(wm, sid, decision) == prompts.DEFAULT_NOTICE
+        assert wm.service.bot_list(ses.ctx(sid))["items"][0]["id"] == item["id"]
+        new, boundary = sent(fresh, cold=True)
+        assert boundary.is_boundary and task.short_id in new and task.id in new
+    finally:
+        with wm.engine.begin() as conn:
+            conn.execute(text("DELETE FROM turn_logs WHERE id = ANY(:ids)"), {"ids": turns})
 
 
 # -- Loopy 2a r1 regressions (written by Loopy, adapted) -----------------------

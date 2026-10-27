@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextvars import ContextVar, Token
@@ -185,9 +186,34 @@ async def associate_current_task(task_ref: str) -> dict[str, Any]:
         response.raise_for_status()
         payload = response.json()
     association = payload.get("association") if isinstance(payload, dict) else None
-    return {
+    result = {
         "ok": True,
         "taskRef": task_ref,
         "source": "AGENT",
         "association": association,
     }
+    # This is deliberately after the association commits. Memory failures
+    # cannot roll back or masquerade as a failed task/turn association.
+    canonical = association.get("taskId") if isinstance(association, dict) else None
+    if isinstance(canonical, str) and canonical:
+        try:
+            from llm_bawt.working_memory.service import WorkingMemoryService
+            from llm_bawt.working_memory.contracts import WorkingMemoryError
+            from llm_bawt.utils.config import Config
+            from llm_bawt.utils.db import get_shared_engine
+
+            service = WorkingMemoryService(get_shared_engine(Config()))
+            link = await asyncio.to_thread(service.link_associated, context, canonical)
+            result["workingMemoryLink"] = {
+                "state": link.get("state", "linked"), "taskId": canonical,
+                "itemId": link.get("item", {}).get("id"),
+            }
+        except WorkingMemoryError as error:
+            # An off/private bot has no working-memory surface at all.
+            if error.code not in ("protected_bot", "not_enabled"):
+                result["workingMemoryLink"] = error.as_dict()
+                logger.warning("task association succeeded but working-memory link failed: %s", error.code)
+        except Exception:
+            result["workingMemoryLink"] = {"error": "unavailable", "message": "task link not verified"}
+            logger.warning("task association succeeded but working-memory link failed", exc_info=True)
+    return result

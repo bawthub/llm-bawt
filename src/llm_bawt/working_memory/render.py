@@ -75,13 +75,22 @@ def _common(item: dict[str, Any], session_id: str | None, now: datetime) -> dict
     return out
 
 
+def task_pointer(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "initiative_task_id": item.get("canonical_task_id") or item.get("initiative_task_id"),
+        "task_short_id": item.get("task_short_id"),
+        "task_title": item.get("task_title"),
+        "task_status": item.get("task_status"),
+    }
+
+
 def full_line(item: dict[str, Any], session_id: str | None, now: datetime) -> str:
     value: dict[str, Any] = {
         "id": item["id"], "revision": item["revision"], "status": item["status"],
         "objective": item["objective"],
     }
     if item.get("kind") == "initiative_link":
-        value["initiative_task_id"] = item.get("initiative_task_id")
+        value.update(task_pointer(item))
     for key in ("priority", "next_action", "checkpoint"):
         if item.get(key) is not None:
             value[key] = item[key]
@@ -94,6 +103,8 @@ def full_line(item: dict[str, Any], session_id: str | None, now: datetime) -> st
 
 def title_line(item: dict[str, Any], session_id: str | None, now: datetime) -> str:
     value = {"id": item["id"], "status": item["status"], "objective": item["objective"]}
+    if item.get("kind") == "initiative_link":
+        value.update(task_pointer(item))
     value.update(_common(item, session_id, now))
     return _line(value)
 
@@ -147,6 +158,9 @@ def render_section(engine, *, bot_id: str, user_id: str, session_id: str | None,
     try:
         if session_mode(engine, session_id) == SUPPRESSED:
             return SectionRender(None, None, SUPPRESSED)
+        from .service import WorkingMemoryService
+
+        WorkingMemoryService(engine).reconcile(bot_id, user_id)
         snapshot = WorkingMemoryStore(engine).render_snapshot(bot_id, user_id)
     except Exception as error:  # WorkingMemoryError("unavailable") or a session-row read failure
         metrics.record_render_failure(bot_id)
