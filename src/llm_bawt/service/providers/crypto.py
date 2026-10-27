@@ -136,6 +136,24 @@ def derive_key(label: str) -> bytes:
     return hmac.new(raw, label.encode("utf-8"), hashlib.sha256).digest()
 
 
+def require_persistent_root() -> None:
+    """Raise :class:`EphemeralKeyError` unless :func:`encrypt` uses the persisted root.
+
+    The persisted root is the env key, or the key file. A value encrypted under
+    a key that exists only in this process (generated, couldn't be saved) can't
+    be read by the next process, so writers that must outlive the process (an
+    import that records success) check this first. A cached in-process key that
+    differs from the persisted one fails the same way.
+    """
+    from cryptography.fernet import Fernet, InvalidToken
+
+    key = _load_or_create_key(require_persisted=True)
+    try:
+        Fernet(key).decrypt(_get_fernet().encrypt(b"root-check"))
+    except (InvalidToken, ValueError):
+        raise EphemeralKeyError("the active master key is not the persisted one") from None
+
+
 def encrypt(plaintext: str) -> str:
     """Return ``enc:v1:<ciphertext>`` for a plaintext string."""
     if plaintext is None:

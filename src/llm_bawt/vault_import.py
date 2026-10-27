@@ -14,6 +14,14 @@ and one encrypted store, so this command copies what the vault holds into
 * the insert is read back through the same transaction and its key compared
   (by SHA-256, in process) with the vault plaintext before ``imported`` is
   recorded. A mismatch rolls the insert back;
+* every write for one destination (ledger rows, the insert and its
+  read-back) happens in one transaction under a per-destination advisory
+  lock, after re-reading the ledger and the destination there. A decision
+  made from a stale snapshot writes nothing, so a concurrent importer can't
+  bring back a key the operator disconnected after another import;
+* nothing is imported unless the active encryption key is the persisted root
+  (env or key file): a record encrypted under a key that exists only in this
+  process would be unreadable by the next one (``failed:ephemeral_root``);
 * progress is durable per name in ``vault_import_ledger``. ``failed`` retries
   on the next run. A ``conflict`` (two names for one destination holding
   different keys) is re-evaluated while the destination is still absent, so
@@ -209,6 +217,9 @@ class VaultImporter:
             return []
         rows = self._list_vault()
         seen = self._ledger()
+        # Recording "imported" under a key the next process can't read would
+        # strand the credential, so mapped names fail until the root persists.
+        root_problem = self.store.durable_key_problem()
         results: list[Outcome] = []
         groups: dict[str, _Group] = {}
         for row in rows:
@@ -218,7 +229,7 @@ class VaultImporter:
             else:
                 groups.setdefault(destination, _Group(destination)).rows.append(row)
         for group in groups.values():
-            results.extend(self._import_group(group, seen))
+            results.extend(self._import_group(group, seen, root_problem))
         return sorted(results, key=lambda outcome: outcome.name)
 
     def _unmapped(self, row: VaultRow, previous) -> list[Outcome]:
@@ -226,47 +237,89 @@ class VaultImporter:
             return [Outcome(row.name, None, UNMAPPED, previous.detail_code, processed=False)]
         return self._record_all([row], None, UNMAPPED, None)
 
-    def _import_group(self, group: _Group, seen: dict[str, Any]) -> list[Outcome]:
-        destination = group.destination
-        with self.engine.connect() as conn:
-            exists = self.store.exists_in(conn, destination)
+    def _split(self, group: _Group, seen: dict[str, Any], exists: bool) -> tuple[list[VaultRow], list[Outcome]]:
+        """``(due rows, settled outcomes)`` for ``group`` against ledger ``seen``."""
         due = [row for row in group.rows if self._due(row, seen.get(row.name), exists)]
-        settled = [Outcome(row.name, destination, seen[row.name].outcome, seen[row.name].detail_code,
+        settled = [Outcome(row.name, group.destination, seen[row.name].outcome, seen[row.name].detail_code,
                            processed=False) for row in group.rows if row not in due]
+        return due, settled
+
+    def _import_group(self, group: _Group, seen: dict[str, Any], root_problem: str | None) -> list[Outcome]:
+        """Decide outside the fence (decryption is slow), then commit inside it.
+
+        ``seen`` and the existence check here are only a pre-filter: another
+        importer may have finished since they were read. :meth:`_commit`
+        re-reads both under the destination lock and writes only what is
+        still due.
+        """
+        with self.engine.connect() as conn:
+            exists = self.store.exists_in(conn, group.destination)
+        due, settled = self._split(group, seen, exists)
         if not due:
             return settled
         if exists:
-            return settled + self._record_all(due, destination, SKIPPED_EXISTS, None)
+            return self._commit(group, SKIPPED_EXISTS, None)
+        if root_problem:
+            return self._commit(group, FAILED, root_problem)
         values: dict[str, str] = {}
         for row in group.rows:
             try:
                 values[row.name] = self._decrypt(row)
             except LookupError as error:
-                return settled + self._record_all(due, destination, FAILED, str(error.args[0]))
+                return self._commit(group, FAILED, str(error.args[0]))
             except Exception as error:  # noqa: BLE001 - reported by type only
-                return settled + self._record_all(due, destination, FAILED, _error_code(error))
+                return self._commit(group, FAILED, _error_code(error))
         if len(set(values.values())) > 1:
-            return settled + self._record_all(due, destination, CONFLICT, "names_disagree")
-        value = next(iter(values.values()))
-        return settled + self._insert(due, destination, value)
+            return self._commit(group, CONFLICT, "names_disagree")
+        return self._commit(group, IMPORTED, None, next(iter(values.values())))
 
-    def _insert(self, due: list[VaultRow], destination: str, value: str) -> list[Outcome]:
-        record = ConnectionRecord(provider=destination, status=STATUS_CONNECTED, auth_method=AUTH_API_KEY,
-                                  meta=dict(SOURCE_META), secret={SECRET_FIELD: value})
+    def _fence(self, conn, destination: str) -> None:
+        """Serialize every importer's writes for ``destination`` until commit."""
+        if conn.dialect.name == "postgresql":
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:target))"),
+                         {"target": f"llm-bawt/vault-import/{destination}"})
+
+    def _commit(self, group: _Group, outcome: str, detail: str | None, value: str | None = None,
+                *, retry: bool = True) -> list[Outcome]:
+        """Re-check eligibility under the destination fence, then write ``outcome``.
+
+        One transaction holds the fence from the fresh ledger read through the
+        insert, its read-back and the ledger write, so a decision made from a
+        stale snapshot (another importer imported, then the operator
+        disconnected) writes nothing.
+        """
+        destination = group.destination
         try:
             with self.engine.begin() as conn:
+                self._fence(conn, destination)
+                names = [row.name for row in group.rows]
+                fresh = {row.name: row for row in conn.execute(select(ledger).where(ledger.c.name.in_(names)))}
+                exists = self.store.exists_in(conn, destination)
+                due, settled = self._split(group, fresh, exists)
+                if not due:
+                    return settled
+                if exists:
+                    detail = "created_concurrently" if outcome == IMPORTED else detail
+                    return settled + self._record_all(due, destination, SKIPPED_EXISTS, detail, conn)
+                if outcome != IMPORTED:
+                    return settled + self._record_all(due, destination, outcome, detail, conn)
+                record = ConnectionRecord(provider=destination, status=STATUS_CONNECTED, auth_method=AUTH_API_KEY,
+                                          meta=dict(SOURCE_META), secret={SECRET_FIELD: value})
                 if not self.store.create_if_absent(record, conn=conn):
-                    # A writer got there between the existence check and now.
-                    return self._record_all(due, destination, SKIPPED_EXISTS, "created_concurrently", conn)
+                    # A writer outside the fence (a connect card) got there first.
+                    return settled + self._record_all(due, destination, SKIPPED_EXISTS, "created_concurrently", conn)
                 stored = self.store.load_in(conn, destination)
                 if (stored is None or stored.status != STATUS_CONNECTED
-                        or _sha256(str((stored.secret or {}).get(SECRET_FIELD) or "")) != _sha256(value)):
+                        or _sha256(str((stored.secret or {}).get(SECRET_FIELD) or "")) != _sha256(value or "")):
                     raise _VerifyMismatch
-                return self._record_all(due, destination, IMPORTED, None, conn)
+                return settled + self._record_all(due, destination, IMPORTED, None, conn)
         except _VerifyMismatch:
-            return self._record_all(due, destination, FAILED, "verify_mismatch")
+            failure = "verify_mismatch"
         except Exception as error:  # noqa: BLE001 - reported by type only
-            return self._record_all(due, destination, FAILED, _error_code(error))
+            if not retry:
+                raise
+            failure = _error_code(error)
+        return self._commit(group, FAILED, failure, retry=False)
 
 
 def read_master_key(path: str | None) -> str | None:

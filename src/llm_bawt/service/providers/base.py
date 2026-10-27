@@ -236,6 +236,22 @@ class CredentialStore:
             payload["secret_enc"] = crypto.encrypt(json.dumps(record.secret))
         return payload
 
+    @staticmethod
+    def durable_key_problem() -> str | None:
+        """``None`` when records are encrypted under the persisted root, else a code.
+
+        ``ephemeral_root`` means the active key exists only in this process, so
+        what this process writes the next one can't read. Any other failure (an
+        unusable key) is reported by exception type only.
+        """
+        try:
+            crypto.require_persistent_root()
+        except crypto.EphemeralKeyError:
+            return "ephemeral_root"
+        except Exception as error:  # noqa: BLE001 - never echo: may include key material
+            return f"error:{type(error).__name__}"
+        return None
+
     def create_if_absent(self, record: ConnectionRecord, *, conn: Any = None) -> bool:
         """Store ``record`` only if no row exists for it; True when this call inserted it.
 

@@ -35,7 +35,10 @@ VALUES = (ANTHROPIC, OPENAI, XAI_ONE, XAI_TWO, GEMINI, KEY, OTHER_KEY)
 
 @pytest.fixture
 def env(monkeypatch):
-    fernet = Fernet(Fernet.generate_key())
+    root = Fernet.generate_key()
+    fernet = Fernet(root)
+    # The active key is the persisted (env) root, as on a real install.
+    monkeypatch.setenv("LLM_BAWT_SECRET_KEY", root.decode())
     monkeypatch.setattr(crypto, "_get_fernet", lambda: fernet)
     config = require_test_db_config()
     engine = get_shared_engine(config)
@@ -198,6 +201,80 @@ def test_verify_mismatch_rolls_back_the_insert(env, monkeypatch):
     assert result["ANTHROPIC_API_KEY"].detail_code == "verify_mismatch"
     assert row_json(engine, "anthropic-api") is None
     assert ledger_rows(engine)["ANTHROPIC_API_KEY"]["outcome"] == "failed"
+
+
+def test_stale_importer_cannot_resurrect_a_disconnected_import(env, monkeypatch):
+    # Loopy r1 B1: importer A reads the ledger, importer B imports, the operator
+    # disconnects, then A resumes from its stale snapshot.
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    stale = VaultImporter(engine, store, KEY)
+    read_ledger = stale._ledger
+
+    def pause_after_ledger_read():
+        snapshot = read_ledger()
+        assert run(engine, store)["ANTHROPIC_API_KEY"].outcome == "imported"
+        assert store.delete("anthropic-api")
+        return snapshot
+
+    monkeypatch.setattr(stale, "_ledger", pause_after_ledger_read)
+    result = by_name(stale.run())
+    assert result["ANTHROPIC_API_KEY"].processed is False
+    assert row_json(engine, "anthropic-api") is None
+    assert ledger_rows(engine)["ANTHROPIC_API_KEY"]["outcome"] == "imported"
+
+
+def test_stale_failure_does_not_overwrite_a_concurrent_import(env, monkeypatch):
+    # A stale decision of any kind (here a decrypt failure) must not replace
+    # the ledger's "imported", or a later rerun would retry and resurrect.
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    stale = VaultImporter(engine, store, OTHER_KEY)  # its decrypt fails
+    read_ledger = stale._ledger
+
+    def pause_after_ledger_read():
+        snapshot = read_ledger()
+        assert run(engine, store)["ANTHROPIC_API_KEY"].outcome == "imported"
+        assert store.delete("anthropic-api")
+        return snapshot
+
+    monkeypatch.setattr(stale, "_ledger", pause_after_ledger_read)
+    stale.run()
+    assert ledger_rows(engine)["ANTHROPIC_API_KEY"]["outcome"] == "imported"
+    assert run(engine, store)["ANTHROPIC_API_KEY"].processed is False
+    assert row_json(engine, "anthropic-api") is None
+
+
+def test_import_refuses_a_root_key_that_was_not_persisted(env, monkeypatch, tmp_path):
+    # Loopy r1 B2: no env root and a key file that can't be written. Load the
+    # real crypto module separately from the fixture's in-memory Fernet.
+    import importlib.util
+
+    from llm_bawt.service.providers import base
+
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    spec = importlib.util.spec_from_file_location("isolated_crypto", crypto.__file__)
+    fresh_crypto = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh_crypto)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("fixture")
+    monkeypatch.delenv("LLM_BAWT_SECRET_KEY", raising=False)
+    monkeypatch.setattr(fresh_crypto, "_key_file", lambda: blocker / "secret.key")
+    monkeypatch.setattr(base, "crypto", fresh_crypto)
+    result = run(engine, store)
+    assert (result["ANTHROPIC_API_KEY"].outcome, result["ANTHROPIC_API_KEY"].detail_code) == (
+        "failed", "ephemeral_root")
+    assert row_json(engine, "anthropic-api") is None
+
+
+def test_import_refuses_a_cached_key_that_differs_from_the_persisted_root(env, monkeypatch):
+    engine, store = env
+    vault_set(engine, "ANTHROPIC_API_KEY", ANTHROPIC)
+    monkeypatch.setenv("LLM_BAWT_SECRET_KEY", Fernet.generate_key().decode())  # not the active key
+    result = run(engine, store)
+    assert result["ANTHROPIC_API_KEY"].detail_code == "ephemeral_root"
+    assert row_json(engine, "anthropic-api") is None
 
 
 def test_missing_master_key_fails_mapped_names_only(env):
