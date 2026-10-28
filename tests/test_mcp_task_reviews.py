@@ -301,6 +301,17 @@ def test_null_or_empty_optional_entry_fields_are_not_sent():
     ) == {"findingId": "f1", "resolution": "DEFERRED", "task": "TASK-9", "note": "later"}
 
 
+def test_empty_required_entry_fields_reach_bawthub_for_validation():
+    # Codex r1 Should-fix: only optional keys are dropped, so a malformed
+    # required id is BawtHub's validation answer, not a local KeyError.
+    assert task_review_tools._resolution_payload(
+        {"finding_id": "", "resolution": "FIXED", "revision": "abc1234"}
+    ) == {"findingId": "", "resolution": "FIXED", "revision": "abc1234"}
+    assert task_review_tools._finding_payload(
+        {"severity": "NIT", "title": "", "detail": "d"}
+    ) == {"severity": "NIT", "title": "", "detail": "d"}
+
+
 @pytest.mark.anyio
 async def test_review_tool_discovery_lets_optional_entry_fields_be_null():
     tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}

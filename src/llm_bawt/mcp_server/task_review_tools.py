@@ -139,22 +139,30 @@ class FindingResolutionInput(TypedDict):
     note: NotRequired[str | None]
 
 
-def _present(entry: dict) -> dict:
+_FINDING_OPTIONAL = frozenset({"file", "line", "failure_scenario"})
+_RESOLUTION_OPTIONAL = frozenset({"revision", "task", "note"})
+
+
+def _present(entry: dict, optional: frozenset[str]) -> dict:
     # Strict-schema clients send every optional key, as null or "". Either
     # means absent; BawtHub rejects e.g. a task on a FIXED resolution.
-    return {key: value for key, value in entry.items() if value is not None and value != ""}
+    # Required keys pass through untouched, so BawtHub validates them.
+    return {
+        key: value for key, value in entry.items()
+        if key not in optional or (value is not None and value != "")
+    }
 
 
 def _finding_payload(finding: ReviewFindingInput) -> dict:
     """BawtHub's wire shape. Validation stays in BawtHub, the one source of truth."""
-    out = _present(dict(finding))
+    out = _present(dict(finding), _FINDING_OPTIONAL)
     if "failure_scenario" in out:
         out["failureScenario"] = out.pop("failure_scenario")
     return out
 
 
 def _resolution_payload(resolution: FindingResolutionInput) -> dict:
-    out = _present(dict(resolution))
+    out = _present(dict(resolution), _RESOLUTION_OPTIONAL)
     out["findingId"] = out.pop("finding_id")
     return out
 
@@ -300,7 +308,7 @@ async def resolve_review_finding(
     if turn is None:
         return {"error": "resolve_requires_signed_turn", "code": "resolve_requires_signed_turn"}
     body: dict[str, Any] = {"actorBotId": bot_id, "resolution": resolution, "provenance": SIGNED_TURN}
-    body.update(_present({"revision": revision, "task": task, "note": note}))
+    body.update(_present({"revision": revision, "task": task, "note": note}, _RESOLUTION_OPTIONAL))
     path = _internal_path(task_id, review_id, "findings", finding_id, "resolve")
     try:
         return await _internal_post(path, body)
