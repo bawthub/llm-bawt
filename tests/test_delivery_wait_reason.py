@@ -75,3 +75,65 @@ def test_loop_listens_before_reading_gates_and_republishes_on_connect(monkeypatc
     except asyncio.CancelledError:
         pass
     assert calls == ["listen", "read", "republish", "wait", "close"]
+
+
+def test_a_dropped_listener_reconnects_and_republishes_without_waiting_out_the_lease(monkeypatch):
+    """Codex r2 B1: a listener failure mid-wait reconnects promptly and republishes."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from llm_bawt.service import gate_change_republisher as rep
+
+    calls = []
+
+    class Waiter:
+        def __init__(self, engine, *, channel):
+            self.connected, self.waits = False, 0
+
+        def ensure_listening(self):
+            calls.append("listen")
+            fresh, self.connected = not self.connected, True
+            return fresh
+
+        def wait(self, stop, timeout):
+            self.waits += 1
+            calls.append(f"wait{self.waits}")
+            if self.waits == 1:
+                raise OSError("connection reset")
+            raise asyncio.CancelledError
+
+        def close(self):
+            calls.append("close")
+            self.connected = False
+
+    monkeypatch.setattr(rep, "RECONNECT_SECONDS", 0)
+    monkeypatch.setattr(rep, "next_expiry_wait", lambda engine: calls.append("read") or 3600.0)
+    monkeypatch.setattr(rep, "republish_waiting", lambda d: calls.append("republish"))
+    engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    service = SimpleNamespace(_inter_bot_dispatcher=SimpleNamespace(store=SimpleNamespace(engine=engine)))
+    try:
+        asyncio.run(rep.run_gate_change_republisher(service, waiter_factory=Waiter))
+    except asyncio.CancelledError:
+        pass
+    assert calls == ["listen", "read", "republish", "wait1", "close",
+                     "listen", "read", "republish", "wait2", "close"]
+
+
+def test_waiter_wait_raises_on_a_broken_connection():
+    """The override does not swallow a broken socket into a long sleep."""
+    import threading
+
+    import pytest
+
+    from llm_bawt.service.gate_change_republisher import GateChangeWaiter
+
+    class Broken:
+        notifies = []
+
+        def poll(self):
+            raise OSError("gone")
+
+    waiter = GateChangeWaiter(engine=None)
+    waiter._conn = Broken()
+    with pytest.raises(OSError):
+        waiter.wait(threading.Event(), 3600)

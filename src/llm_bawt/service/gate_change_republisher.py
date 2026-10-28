@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import select
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -88,6 +90,26 @@ class GateChangeWaiter(JobCreatedWaiter):
         self._conn = self._connect()
         return True
 
+    def wait(self, stop: threading.Event, timeout: float) -> bool:
+        """Like the base wait, but a broken listener raises at once (Codex r2 B1).
+
+        The base wait logs and sleeps out the rest of ``timeout`` on a listener
+        failure; here that could be a whole gate lease with nothing listening.
+        The loop instead closes, reconnects after :data:`RECONNECT_SECONDS`
+        and republishes, since a change in the outage was not heard.
+        """
+        deadline = time.monotonic() + timeout
+        if self._drain():
+            return True
+        while not stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            ready, _, _ = select.select([self._conn], [], [], min(self.SLICE_SECONDS, remaining))
+            if ready and self._drain():
+                return True
+        return False
+
 
 async def run_gate_change_republisher(service: Any, *, waiter_factory=GateChangeWaiter) -> None:
     """The app loop: LISTEN, read the next expiry, wait for a change or it, republish.
@@ -118,7 +140,13 @@ async def run_gate_change_republisher(service: Any, *, waiter_factory=GateChange
                 deadline = None
             if fresh:
                 await _republish(dispatcher)
-            woke = await asyncio.to_thread(waiter.wait, stop, deadline if deadline is not None else IDLE_WAIT_SECONDS)
+            try:
+                woke = await asyncio.to_thread(waiter.wait, stop, deadline if deadline is not None else IDLE_WAIT_SECONDS)
+            except Exception:  # noqa: BLE001 - reconnect now; the reconnect republishes
+                log.warning("gate change listener dropped; reconnecting", exc_info=True)
+                waiter.close()
+                await asyncio.sleep(RECONNECT_SECONDS)
+                continue
             if woke or deadline is not None:
                 await _republish(dispatcher)
     finally:
