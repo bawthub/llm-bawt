@@ -23,7 +23,7 @@ from sqlmodel import Session, create_engine
 from llm_bawt.ops.release_models import RELEASE_AWAITING_DEPLOY_APPROVAL, ReleaseRun
 
 from llm_bawt.ops import OpsDispatchError, OpsService, OpsStore
-from llm_bawt.ops.compose_render import RENDER_LABEL
+from llm_bawt.ops.compose_render import RENDER_LABEL, RENDER_PATH
 from llm_bawt.ops.executor import (ConfigCheckError, DispatchResult, DockerExecutor, Executor, ExecutorError,
                                    ReconcileResult, validate_spec)
 from llm_bawt.ops.image_deploy import (DEPLOY_SCHEMA, DeployFailed, ImageDeployer,
@@ -165,7 +165,8 @@ class FakeDocker:
         self.render_bodies.append(body)
         cid = hashlib.sha256(name.encode()).hexdigest()
         self.containers[cid] = {"Id": cid, "Name": f"/{name}", "Image": RENDERER_ID, "_render": True,
-                                "Config": {"Image": body["Image"], "Cmd": body["Cmd"], "Env": body["Env"],
+                                "Config": {"Image": body["Image"], "Entrypoint": body["Entrypoint"],
+                                           "Cmd": body["Cmd"], "Env": body["Env"],
                                            "Labels": body["Labels"]},
                                 "HostConfig": body["HostConfig"], "State": {"Running": False, "Status": "created"}}
         return {"Id": cid}
@@ -177,7 +178,9 @@ class FakeDocker:
         if "--hash" in argv:
             out = f"{argv[-1]} {CONFIG_HASH}\n"
         else:
-            image = container["Config"]["Env"][0].partition("=")[2]
+            # The renderer runs ``env -i PATH=… VAR=ref … docker`` (TASK-1476).
+            env = dict(e.partition("=")[::2] for e in container["Config"]["Entrypoint"] if "=" in e)
+            image = env.get(IMAGE_VARIABLE.strip("${}"), "")
             out = json.dumps(self.compose).replace(IMAGE_VARIABLE, image)
         return _Stream(_frame(1, out) + (_frame(2, self.render_stderr) if self.render_stderr else b""))
 
@@ -276,11 +279,12 @@ def test_deploy_renders_the_target_compose_service_sealed_at_the_new_ref(tmp_pat
     _deployer(api, tmp_path).run()
     assert len(api.render_bodies) == 2  # the JSON config, then Compose's config hash
     body = api.render_bodies[0]
-    assert body["Image"] == RENDERER and body["Entrypoint"] == ["docker"]
+    assert body["Image"] == RENDERER and body["Entrypoint"] == [
+        "env", "-i", f"PATH={RENDER_PATH}", f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}", "docker"]
     assert body["Cmd"] == ["compose", "-p", "bawthub", "-f", COMPOSE_FILES[0], "-f", COMPOSE_FILES[1],
                            "config", "--format", "json", "frontend-prod"]
     assert api.render_bodies[1]["Cmd"][-3:] == ["config", "--hash", "frontend-prod"]
-    assert body["Env"] == [f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}"] and body["NetworkDisabled"] is True
+    assert body["Env"] == [] and body["NetworkDisabled"] is True  # the image's env never reaches Compose
     host = body["HostConfig"]
     assert host["Binds"] == [f"{PROJECT_DIR}:{PROJECT_DIR}:ro"] and host["NetworkMode"] == "none"
     assert host["ReadonlyRootfs"] and host["CapDrop"] == ["ALL"] and host["Privileged"] is False

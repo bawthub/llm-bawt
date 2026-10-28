@@ -126,6 +126,9 @@ def _argv_runs_docker(node):
         return False
     if Path(head).name == "docker":
         return True
+    # env [-i] [NAME=value …] docker … (TASK-1476's clean-environment renderer)
+    if Path(head).name == "env" and any(Path(_const_str(e) or "").name == "docker" for e in node.elts[1:]):
+        return True
     # sh -c "docker ..."
     args = [_text(e) for e in node.elts[1:]]
     return Path(head).name in SHELLS and "-c" in args and any(
@@ -255,6 +258,7 @@ def test_scanner_detects_each_access_kind():
     assert _parse("import os\nos.system('docker compose up -d')") == {"runs docker"}
     assert _parse("import asyncio\nasyncio.create_subprocess_exec('docker', 'ps')") == {"runs docker"}
     assert _parse("sealed.run(entrypoint=['docker'], cmd=argv)") == {"runs docker"}
+    assert _parse("sealed.run(entrypoint=['env', '-i', *env, 'docker'], cmd=argv)") == {"runs docker"}
     # r1 B1: shell wrappers and the Engine API without the socket path.
     assert _parse("import subprocess\nsubprocess.run(['sh', '-c', 'docker ps'])") == {"runs docker"}
     assert _parse("import subprocess\nsubprocess.run(['/bin/bash', '-c', 'set -e; docker restart x'])") == {"runs docker"}

@@ -33,7 +33,7 @@ from urllib.parse import urlencode
 
 if __package__:
     from .compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
-    from .compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
+    from .compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_interpolation_env
     from .config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                    current_config_hash, valid_hashes, validate_renderer_image,
                                    validate_target_fields)
@@ -43,7 +43,7 @@ if __package__:
                                valid_classification, valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
     from compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
-    from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
+    from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid, validate_interpolation_env
     from config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
                                   current_config_hash, valid_hashes, validate_renderer_image,
                                   validate_target_fields)
@@ -89,12 +89,13 @@ def validate_health_value(spec: dict) -> None:
 
 
 def validate_label_compose_config(spec: dict) -> None:
-    """No compose_files (the target's labels name them) and no image_variable
-    (nothing is interpolated)."""
+    """No compose_files (the target's labels name them) and no image_variable;
+    only the declared ``interpolation_env`` is interpolated (TASK-1476)."""
     config = spec["compose_config"]
-    if not isinstance(config, dict) or set(config) != {"renderer_image"}:
-        raise ValueError("app compose_config requires exactly renderer_image")
+    if not isinstance(config, dict) or not {"renderer_image"} <= set(config) <= {"renderer_image", "interpolation_env"}:
+        raise ValueError("app compose_config requires exactly renderer_image (and optional interpolation_env)")
     validate_renderer_image(config)
+    validate_interpolation_env(config)
 
 
 def uses_process_profile(desired: dict) -> bool:

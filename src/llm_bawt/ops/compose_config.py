@@ -500,6 +500,17 @@ def drift(desired: dict, actual: dict) -> list[str]:
     return sorted(names)
 
 
+def mount_source_changes(desired: dict, actual: dict) -> list[str]:
+    """Targets mounted on both sides whose type or source differs (TASK-1476).
+
+    A rebind must never move a data mount: a renderer that interpolated the
+    wrong ``HOME`` once pointed every home bind at empty directories, which the
+    daemon then created. Read-only flips and added/removed mounts stay ordinary
+    drift; a moved source refuses with the target paths only."""
+    return sorted(target for target, want in desired.items() if target in actual
+                  and (want["type"], want["source"]) != (actual[target]["type"], actual[target]["source"]))
+
+
 def mount_list(mounts: dict) -> list[str]:
     return [f"{m['source']}->{target}:{'ro' if m['read_only'] else 'rw'}"
             for target, m in sorted(mounts.items())]
@@ -533,7 +544,11 @@ def evaluate(spec: dict, container: dict, image: dict, renderer, image_ref: str,
     source = compose_source(spec, container)
     rendered = renderer.render(source, image_ref)
     desired = translate(rendered["config"], spec, image_ref, profile)
-    names = drift(normalized(desired, image), normalized(running(container), image))
+    actual = running(container)
+    changed = mount_source_changes(desired["mounts"], actual["mounts"])
+    if changed:
+        raise ComposeError("mount_source_changed", changed)
+    names = drift(normalized(desired, image), normalized(actual, image))
     return {"source": source, "rendered_hash": rendered["hash"], "desired": desired, "drift": names,
             "desired_hash": canonical_hash({"source": source, "image_ref": image_ref,
                                             "rendered_hash": rendered["hash"], "desired": desired}),

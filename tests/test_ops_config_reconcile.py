@@ -297,7 +297,8 @@ def test_executor_config_check_refuses_drift_by_name_at_the_given_ref():
         executor.config_check(DEPLOY_SPEC, f"{REPO}@{DIGEST}")
     assert caught.value.code == "config_drift" and "env:+XAI_API_KEY" in str(caught.value)
     assert SECRET not in str(caught.value)
-    assert api.render_bodies[0]["Env"] == [f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}"]
+    assert api.render_bodies[0]["Env"] == []  # env -i: the ref rides the entrypoint (TASK-1476)
+    assert f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}" in api.render_bodies[0]["Entrypoint"]
     api.compose = compose_project()
     assert executor.config_check(DEPLOY_SPEC, f"{REPO}@{DIGEST}") is None
     bare = {k: v for k, v in DEPLOY_SPEC.items() if k != "compose_config"}

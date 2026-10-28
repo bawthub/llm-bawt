@@ -16,12 +16,12 @@ from urllib.parse import quote
 
 if __package__:
     from .compose_config import apply_desired, canonical_hash, evaluate
-    from .compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH
+    from .compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH, validate_interpolation_env
     from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from .service_identity import SPEC_PATTERNS, ComposeServiceRef
 else:  # standalone immutable worker
     from compose_config import apply_desired, canonical_hash, evaluate
-    from compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH
+    from compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH, validate_interpolation_env
     from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from service_identity import SPEC_PATTERNS, ComposeServiceRef
 
@@ -46,8 +46,10 @@ def validate_compose_config(value) -> dict:
     """``compose_config`` shared by deploy_image and this op. Basenames only: the
     project directory comes from the target's own Compose labels (no host path
     in a catalog seed)."""
-    if not isinstance(value, dict) or set(value) != {"compose_files", "renderer_image", "image_variable"}:
-        raise ValueError("compose_config requires exactly compose_files, renderer_image, image_variable")
+    required = {"compose_files", "renderer_image", "image_variable"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | {"interpolation_env"}:
+        raise ValueError("compose_config requires exactly compose_files, renderer_image, image_variable"
+                         " (and optional interpolation_env)")
     files = value["compose_files"]
     if (not isinstance(files, list) or not 1 <= len(files) <= MAX_COMPOSE_FILES or len(set(files)) != len(files)
             or not all(isinstance(f, str) and COMPOSE_FILE.fullmatch(f) for f in files)):
@@ -55,6 +57,7 @@ def validate_compose_config(value) -> dict:
     validate_renderer_image(value)
     if not isinstance(value["image_variable"], str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value["image_variable"]):
         raise ValueError("compose_config.image_variable is invalid")
+    validate_interpolation_env(value)
     return value
 
 

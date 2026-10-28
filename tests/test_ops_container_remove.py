@@ -201,6 +201,7 @@ def test_render_uses_the_rows_files_every_profile_and_no_injected_env():
                            "-f", f"{PROJECT_DIR}/docker-compose.dev.yml",
                            "--profile", "*", "config", "--format", "json"]
     assert body["Env"] == [] and body["Image"] == RENDERER
+    assert body["Entrypoint"][:2] == ["env", "-i"] and body["Entrypoint"][-1] == "docker"
 
 
 # ── the worker ──────────────────────────────────────────────────────────────

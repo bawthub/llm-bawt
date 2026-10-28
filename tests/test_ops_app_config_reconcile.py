@@ -1063,8 +1063,17 @@ def _bind(source, target="/app/server.sh"):
     (_volumes(_vol("/app/server.sh"), drop="/app/server.sh"), "source_mount_invalid", "/app/server.sh"),
 ], ids=["unclassified", "shadowed", "missing", "outside", "project-root", "git-dir", "volume"])
 def test_every_mount_is_classified_and_source_mounts_bind_the_project(source, compose, code, name):
+    api = AppDocker(compose=compose)
+    # The running container already has the rendered /app/server.sh, so the
+    # classifier (not TASK-1476's moved-mount refusal) is what refuses here.
+    (mount,) = [v for v in compose["services"]["app"]["volumes"] if v["target"] == "/app/server.sh"] or [None]
+    if mount is not None:
+        source_name = mount["source"] if mount["type"] == "bind" else compose["volumes"][mount["source"]]["name"]
+        host = api.by_name(APP_NAME)["HostConfig"]
+        host["Binds"] = [b for b in host["Binds"] if not b.endswith(":/app/server.sh:rw")] + [
+            f"{source_name}:/app/server.sh:rw"]
     with pytest.raises(SourceStateError) as caught:
-        binding(AppDocker(compose=compose), checker=source)
+        binding(api, checker=source)
     assert caught.value.code == code and caught.value.names == [name] and not source.calls
 
 

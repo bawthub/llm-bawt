@@ -8,13 +8,15 @@ import json
 import pytest
 
 from llm_bawt.ops.compose_config import (
-    CONFIG_HASH_LABEL, UNEXPECTED_VALUE, UNSET_VALUE, apply_desired, display_values, drift,
-    normalized, running, translate,
+    CONFIG_HASH_LABEL, UNEXPECTED_VALUE, UNSET_VALUE, apply_desired, display_values, drift, evaluate,
+    mount_source_changes, normalized, running, translate,
 )
-from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer, compose_source, demux_streams
+from llm_bawt.ops.compose_render import (
+    RENDER_PATH, ComposeError, ComposeRenderer, compose_source, demux_streams, renderer_env,
+)
 from llm_bawt.ops.config_reconcile import validate_compose_config
 from tests.test_ops_image_deploy import (
-    COMPOSE_FILES, NAME, PROJECT_DIR, RENDERER, REPO, SPEC, TOKEN_TARGET, FakeDocker, _frame,
+    COMPOSE_FILES, NAME, PROJECT_DIR, RENDERER, REPO, SPEC, TOKEN_TARGET, FakeDocker, _frame, _Stream,
     compose_project,
 )
 
@@ -193,6 +195,15 @@ def test_compose_source_reads_the_target_labels():
     lambda c: c.update(compose_files=["a.json"]),
     lambda c: c.update(renderer_image="docker:27-cli"),
     lambda c: c.update(image_variable="lower"),
+    lambda c: c.update(interpolation_env={"HOME": "home/op"}),
+    lambda c: c.update(interpolation_env={"HOME": "/home/../root"}),
+    lambda c: c.update(interpolation_env={"HOME": "/"}),
+    lambda c: c.update(interpolation_env={"HOME": "/home/op x"}),
+    lambda c: c.update(interpolation_env={"PATH": "/bin"}),
+    lambda c: c.update(interpolation_env={"lower": "x"}),
+    lambda c: c.update(interpolation_env={c["image_variable"]: "x"}),
+    lambda c: c.update(interpolation_env={f"V{i}": "x" for i in range(9)}),
+    lambda c: c.update(interpolation_env=["HOME"]),
 ])
 def test_compose_config_validation(mutate):
     config = copy.deepcopy(SPEC["compose_config"])
@@ -248,3 +259,115 @@ def test_renderer_output_is_bounded_and_stderr_never_echoed():
     assert caught.value.code == "renderer_warning" and "sk-live" not in str(caught.value)
     with pytest.raises(ValueError):
         ComposeRenderer(api, SPEC, tag="Bad Tag")
+
+
+# ── TASK-1476: the renderer's own HOME never reaches interpolation ─────────
+# The cutover r3 rendered ${HOME} binds as /root/... because the renderer image
+# runs as root: every home bind pointed at an empty directory the daemon made.
+
+OPERATOR_HOME = "/home/op"
+HOME_BIND = "/home/agent/.codex"  # the in-container target of a ${HOME} bind
+
+
+class _ComposeShell(FakeDocker):
+    """Emulates the renderer process environment: the image's default env
+    (HOME=/root, as root) plus Docker ``Env``, unless the entrypoint is
+    ``env -i``, which leaves only its own NAME=value arguments. Unset
+    variables warn exactly as Compose does."""
+
+    IMAGE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/root"}
+
+    def attach_stream(self, container_id):
+        container = self.containers[container_id]
+        argv, entrypoint = container["Config"]["Cmd"], container["Config"]["Entrypoint"]
+        args = entrypoint[2:-1] if entrypoint[:2] == ["env", "-i"] else []
+        env = dict(e.partition("=")[::2] for e in args) if args else {
+            **self.IMAGE_ENV, **dict(e.partition("=")[::2] for e in container["Config"]["Env"])}
+        if "--hash" in argv:
+            return super().attach_stream(container_id)
+        text, err = json.dumps(self.compose), ""
+        for name in ("HOME", SPEC["compose_config"]["image_variable"]):
+            if "${" + name + "}" in text:
+                if name in env:
+                    text = text.replace("${" + name + "}", env[name])
+                else:
+                    err += (f'time="2026-10-28T00:00:00Z" level=warning msg="The \\"{name}\\" '
+                            'variable is not set. Defaulting to a blank string."\n')
+                    text = text.replace("${" + name + "}", "")
+        return _Stream(_frame(1, text) + (_frame(2, err) if err else b""))
+
+
+def _home_spec(home=None):
+    spec = copy.deepcopy(SPEC)
+    if home is not None:
+        spec["compose_config"]["interpolation_env"] = {"HOME": home}
+    return spec
+
+
+def _home_api(running_source=f"{OPERATOR_HOME}/.codex"):
+    volumes = compose_project()["services"]["frontend-prod"]["volumes"] + [
+        {"type": "bind", "source": "${HOME}/.codex", "target": HOME_BIND, "bind": {"create_host_path": True}}]
+    api = _ComposeShell(compose=compose_project(volumes=volumes))
+    api.by_name(NAME)["HostConfig"]["Binds"].append(f"{running_source}:{HOME_BIND}:rw")
+    return api
+
+
+def test_renderer_env_is_clean_with_only_declared_values():
+    assert renderer_env(_home_spec()["compose_config"], REF) == [
+        f"PATH={RENDER_PATH}", f"BAWTHUB_FRONTEND_IMAGE={REF}"]
+    assert renderer_env(_home_spec(OPERATOR_HOME)["compose_config"], REF) == [
+        f"PATH={RENDER_PATH}", f"BAWTHUB_FRONTEND_IMAGE={REF}", f"HOME={OPERATOR_HOME}"]
+
+
+def test_regression_the_image_home_was_rendered_into_home_binds():
+    """The old ``entrypoint=["docker"]`` path, emulated: ${HOME} became /root."""
+    api = _home_api()
+    api.compose = json.loads(json.dumps(api.compose))
+    old = _ComposeShell.attach_stream
+    container = {"Config": {"Cmd": ["compose", "config"], "Entrypoint": ["docker"],
+                            "Env": [f"BAWTHUB_FRONTEND_IMAGE={REF}"]}}
+    api.containers["old"] = container
+    out, _ = demux_streams(old(api, "old").read(1 << 20))
+    assert "/root/.codex" in out
+
+
+def test_undeclared_home_refuses_instead_of_rendering_the_renderer_home():
+    api = _home_api()
+    with pytest.raises(ComposeError) as caught:
+        ComposeRenderer(api, _home_spec(), tag="t1").render(compose_source(SPEC, api.by_name(NAME)), REF)
+    assert caught.value.code == "unset_compose_variable" and caught.value.names == ["HOME"]
+    assert not api.renderers_left()
+
+
+def test_bogus_declared_home_refuses_before_any_container():
+    api = _home_api()
+    with pytest.raises(ValueError):
+        ComposeRenderer(api, _home_spec("home/op"), tag="t1").render(compose_source(SPEC, api.by_name(NAME)), REF)
+    assert not api.render_bodies
+
+
+def test_declared_home_renders_the_operator_sources():
+    api = _home_api()
+    result = evaluate(_home_spec(OPERATOR_HOME), api.by_name(NAME), IMAGE,
+                      ComposeRenderer(api, _home_spec(OPERATOR_HOME), tag="t1"), REF)
+    assert f"{OPERATOR_HOME}/.codex->{HOME_BIND}:rw" in result["mounts"]
+    assert not [n for n in result["drift"] if n.startswith("mount:")]
+
+
+def test_a_moved_data_mount_source_refuses_with_target_names_only():
+    """Wrong-but-declared HOME (/root) against a container bound to the operator's."""
+    api = _home_api()
+    with pytest.raises(ComposeError) as caught:
+        evaluate(_home_spec("/root"), api.by_name(NAME), IMAGE, ComposeRenderer(api, _home_spec("/root"), tag="t1"), REF)
+    assert caught.value.code == "mount_source_changed" and caught.value.names == [HOME_BIND]
+    assert "/root" not in str(caught.value).replace(HOME_BIND, "")
+
+
+def test_mount_source_changes_ignores_read_only_flips_and_added_or_removed_mounts():
+    want = {"/a": {"type": "bind", "source": "/x", "read_only": True},
+            "/b": {"type": "bind", "source": "/y", "read_only": False}}
+    have = {"/a": {"type": "bind", "source": "/x", "read_only": False},
+            "/c": {"type": "volume", "source": "v", "read_only": False}}
+    assert mount_source_changes(want, have) == []
+    have["/a"] = {"type": "volume", "source": "/x", "read_only": True}
+    assert mount_source_changes(want, have) == ["/a"]

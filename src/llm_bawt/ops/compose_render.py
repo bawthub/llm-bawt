@@ -13,9 +13,13 @@ Docker CLI image with:
   the same path, so relative paths and the project ``.env`` resolve as they do
   for the operator. Both directory and files come from the target's Compose
   labels and must match the catalog spec's file names;
-* a fixed argv (``compose -p … -f … config``) and at most one injected
-  variable, the pinned image reference for the image overlay (none for a
-  Compose-built target).
+* a fixed argv (``compose -p … -f … config``) run under ``env -i``: the
+  renderer image's own environment (notably ``HOME=/root``) never reaches
+  interpolation (TASK-1476). Compose sees only a fixed ``PATH``, the pinned
+  image reference for the image overlay (none for a Compose-built target) and
+  the spec's declared ``interpolation_env`` (e.g. the operator's ``HOME``,
+  deployment data owned by the catalog row). Anything else a Compose file
+  references is unset and refuses.
 
 The container is removed (with its anonymous volumes) in every outcome.
 Renderer stderr is never echoed: it can carry interpolated values. Only fixed
@@ -46,6 +50,12 @@ _CONFIG_FILES = "com.docker.compose.project.config_files"
 SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
 COMPOSE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.ya?ml")
 MAX_COMPOSE_FILES = 4
+RENDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+MAX_INTERPOLATION_ENV = 8
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
+_ENV_VALUE = re.compile(r"[A-Za-z0-9._/:@-]{1,255}")
+# Path-valued names: a declared value must be a clean absolute path.
+_PATH_NAMES = frozenset({"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"})
 _UNSET = re.compile(r'time="[^"]*" level=warning msg="The \\"([A-Za-z_][A-Za-z0-9_]{0,127})\\" '
                     r'variable is not set\. Defaulting to a blank string\."')
 
@@ -62,6 +72,31 @@ class ComposeError(ValueError):
         if detail:
             text += f" ({detail})"
         super().__init__(text)
+
+
+def validate_interpolation_env(config: dict) -> dict:
+    """``compose_config.interpolation_env`` (optional): the only variables besides
+    the image variable Compose may interpolate. Names and plain values only."""
+    value = config.get("interpolation_env", {})
+    if not isinstance(value, dict) or len(value) > MAX_INTERPOLATION_ENV:
+        raise ValueError(f"compose_config.interpolation_env must map at most {MAX_INTERPOLATION_ENV} names")
+    for name, item in value.items():
+        if (not isinstance(name, str) or not _ENV_NAME.fullmatch(name) or name == "PATH"
+                or name == config.get("image_variable")):
+            raise ValueError("compose_config.interpolation_env has an invalid name")
+        if not isinstance(item, str) or not _ENV_VALUE.fullmatch(item):
+            raise ValueError(f"compose_config.interpolation_env.{name} is invalid")
+        if name in _PATH_NAMES and not working_dir_valid(item):
+            raise ValueError(f"compose_config.interpolation_env.{name} must be a clean absolute path")
+    return value
+
+
+def renderer_env(config: dict, image_ref: str) -> list[str]:
+    """The renderer's whole environment, ``env -i`` arguments: a fixed PATH, the
+    image variable (if any) and the declared ``interpolation_env``."""
+    declared = [f"{name}={value}" for name, value in sorted(validate_interpolation_env(config).items())]
+    variable = config.get("image_variable")
+    return [f"PATH={RENDER_PATH}", *([f"{variable}={image_ref}"] if variable else []), *declared]
 
 
 def compose_source(spec: dict, container: dict) -> dict:
@@ -157,10 +192,10 @@ class ComposeRenderer:
         sealed = SealedContainer(self.api, self.spec["compose_config"]["renderer_image"], role=RENDER_ROLE,
                                  tag=self.tag, labels={RENDER_LABEL: "1"})
         # A Compose-built target (TASK-1474) has no image overlay to inject.
-        variable = self.spec["compose_config"].get("image_variable")
+        env = renderer_env(self.spec["compose_config"], image_ref)
         try:
-            status, raw = sealed.run(entrypoint=["docker"], cmd=argv,
-                                     env=[f"{variable}={image_ref}"] if variable else [],
+            # ``env -i``: Docker ``Env`` would only add to the image's own (HOME=/root).
+            status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],
                                      directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES)
         except SealedRunError as exc:
             raise ComposeError(f"renderer_{exc.kind}") from None
