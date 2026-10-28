@@ -1,6 +1,7 @@
-"""TASK-1169 S1c: /v1/health/services[/{id}] over typed Compose identity.
+"""TASK-1169 S1c/S2a: /v1/health/services[/{id}] over typed Compose identity.
 
-The service set is what enabled catalog ops target; instances come from the
+The service set is what enabled catalog ops target together with every
+observed Compose service (S2a); instances come from the
 cached inventory with an opaque instance id; nothing reaches Docker or the DB
 on a GET.
 """
@@ -291,6 +292,7 @@ def test_stale_inventory_nulls_instances_but_keeps_catalog(world):
     clock.advance(11)  # inventory now 31s old, catalog 11s
     code, body = state.services()
     assert code == 503 and body["fresh"] is False and "stale" in body["reason"]
+    assert (body["inventoryFresh"], body["catalogFresh"]) == (False, True)
     assert body["unlabeledCount"] is None
     assert [s["instances"] for s in body["services"]] == [None, None, None]
     assert body["services"][0]["capabilities"]
@@ -306,14 +308,33 @@ def test_down_inventory_nulls_instances(world):
     assert body["reason"] == "container observation unavailable"
 
 
-def test_unavailable_catalog_nulls_services(world):
+def test_unavailable_catalog_keeps_observed_services_with_unknown_capabilities(world):
+    # S2a: a stale catalog leaves the inventory half usable. Observed services
+    # are listed with real instances and capabilities null (actions unknown);
+    # catalog-only services (no instances) are not knowable and not listed.
     _, state, _, _, _ = world
     state.publish_catalog(CatalogSample(state.sample_time(), "down", "operation catalog unavailable"))
     code, body = state.services()
-    assert code == 503 and body["services"] is None and body["reason"] == "operation catalog unavailable"
+    assert code == 503 and body["fresh"] is False and body["reason"] == "operation catalog unavailable"
+    assert (body["inventoryFresh"], body["catalogFresh"]) == (True, False)
     assert body["unlabeledCount"] == 1  # inventory itself is still fresh
+    assert [(s["id"], s["capabilities"]) for s in body["services"]] == [("bawthub.tts", None)]
+    assert [i["name"] for i in body["services"][0]["instances"]] == ["bawthub-tts-1"]
     code, body = state.services("bawthub.tts")
-    assert code == 503 and body["service"] is None
+    assert code == 503 and body["service"]["capabilities"] is None
+    assert len(body["service"]["instances"]) == 1
+    # Catalogued but unobserved, or never seen: unknown, never a 404.
+    for unknown in ("llm-bawt.crawl4ai", "bawthub.frontend"):
+        assert state.services(unknown) == (503, {**body, "service": None})
+
+
+def test_both_halves_unavailable_null_services(world):
+    clock, state, _, _, _ = world
+    clock.advance(31)
+    code, body = state.services()
+    assert code == 503 and body["services"] is None
+    assert (body["inventoryFresh"], body["catalogFresh"]) == (False, False)
+    assert state.services("bawthub.tts")[1]["service"] is None
 
 
 def test_initial_state_is_never_fresh():
@@ -333,8 +354,95 @@ def test_single_service_and_unknown_id(world):
     _, state, _, _, _ = world
     code, body = state.services("llm-bawt.crawl4ai")
     assert code == 200 and body["service"]["capabilities"][0]["args"] == {"service": "crawl4ai"}
-    assert set(body) == {"schemaVersion", "observedAt", "fresh", "reason", "unlabeledCount", "service"}
+    assert set(body) == {"schemaVersion", "observedAt", "fresh", "inventoryFresh", "catalogFresh",
+                         "reason", "unlabeledCount", "service"}
     assert state.services("bawthub.frontend") == (404, {"error": "not found"})
+
+
+# --- S2a: catalog targets union observed Compose services ------------------
+
+def test_observed_services_without_ops_are_listed_with_no_capabilities(world):
+    _, state, client, rows, probe = world
+    rows += [container("bawthub-backend-1", service="backend"),
+             container("other-db-1", project="other", service="db"),
+             container("other-db-2", project="other", service="db")]
+    client.api.containers.return_value = [{"Id": str(i)} for i in range(len(rows))]
+    probe.collect_docker()
+    code, body = state.services()
+    assert code == 200 and (body["inventoryFresh"], body["catalogFresh"]) == (True, True)
+    by_id = {s["id"]: s for s in body["services"]}
+    assert list(by_id) == sorted(by_id) == ["bawthub.backend", "bawthub.tts", "llm-bawt.crawl4ai",
+                                            "llm-bawt.playwright-mcp", "other.db"]
+    assert by_id["bawthub.backend"]["capabilities"] == [] and by_id["other.db"]["capabilities"] == []
+    assert [i["name"] for i in by_id["other.db"]["instances"]] == ["other-db-1", "other-db-2"]
+    assert by_id["bawthub.tts"]["capabilities"]  # catalogued caps unchanged
+    assert by_id["llm-bawt.crawl4ai"]["instances"] == []  # catalogued, none present
+    assert body["unlabeledCount"] == 1
+    code, body = state.services("other.db")
+    assert code == 200 and body["service"]["project"] == "other" and body["service"]["capabilities"] == []
+
+
+def test_stale_inventory_single_lookup_is_unknown_not_absent(world):
+    clock, state, _, _, _ = world
+    clock.advance(20)
+    state.publish_catalog(CatalogSample(state.sample_time(), "ok", services=catalog_targets(CATALOG)))
+    clock.advance(11)
+    code, body = state.services("bawthub.tts")
+    assert code == 503 and body["service"]["instances"] is None and body["service"]["capabilities"]
+    assert (body["inventoryFresh"], body["catalogFresh"]) == (False, True)
+    # An uncatalogued id may be an observed service: unknown (503), not 404.
+    code, body = state.services("bawthub.backend")
+    assert code == 503 and body["service"] is None
+
+
+def test_union_past_the_service_bound_fails_the_inventory_half_closed(world, monkeypatch):
+    _, state, client, rows, probe = world
+    monkeypatch.setattr("llm_bawt.ops.health_state.MAX_SERVICES", 4)
+    rows += [container(f"x-s{i}-1", project="x", service=f"s{i}") for i in range(2)]
+    client.api.containers.return_value = [{"Id": str(i)} for i in range(len(rows))]
+    probe.collect_docker()
+    code, body = state.services()
+    assert code == 503 and body["reason"] == "service inventory exceeds bounded snapshot"
+    assert (body["inventoryFresh"], body["catalogFresh"]) == (False, True)
+    assert body["unlabeledCount"] is None
+    # Never a truncated union: the catalogued services alone, instances unknown.
+    assert [(s["id"], s["instances"]) for s in body["services"]] == [
+        ("bawthub.tts", None), ("llm-bawt.crawl4ai", None), ("llm-bawt.playwright-mcp", None)]
+    assert state.services("x.s0")[0:1] == (503,)
+
+
+def test_union_past_the_byte_budget_fails_the_inventory_half_closed(world, monkeypatch):
+    _, state, _, _, _ = world
+    assert state.services()[0] == 200
+    monkeypatch.setattr("llm_bawt.ops.health_state.MAX_SERVICES_BODY_BYTES", 100)
+    code, body = state.services()
+    assert code == 503 and body["reason"] == "service inventory exceeds bounded snapshot"
+    assert [s["instances"] for s in body["services"]] == [None, None, None]
+
+
+def test_widest_union_never_exceeds_consumers_body_limit(monkeypatch):
+    # The largest admitted catalog next to a 1000-row max-width inventory
+    # spread over the most distinct services: either it fits or the
+    # inventory half fails closed. The body stays under 512 KiB either way.
+    monkeypatch.setattr("llm_bawt.ops.health_collector.DockerExecutor.readiness", Mock(return_value=None))
+    n = max(i for i in range(1, MAX_CAPABILITIES // 64 + 1) if admits(max_width_catalog(i)))
+    targets = catalog_targets(max_width_catalog(n))
+    for distinct in (64, 255, 256, 257, 1000):
+        rows = []
+        for i in range(1000):
+            row = container(f"{i:04d}".zfill(255), cid=f"{i:064d}", project="q" * 63,
+                            service=f"{i % distinct:04d}" + "s" * 59, status="restarting")
+            row["State"].update(StartedAt="2026-10-28T05:56:33.196123+14:00", Health={"Status": "unhealthy"})
+            rows.append(row)
+        state = Clock().state()
+        OpsHealthCollector(state, lambda: None, client_factory=lambda: docker_client(rows)).collect_docker()
+        state.publish_catalog(CatalogSample(state.sample_time(), "ok", services=targets))
+        code, body = state.services()
+        assert len(json.dumps(body, separators=(",", ":"), allow_nan=False).encode()) < 512 * 1024
+        if code == 200:
+            assert sum(len(s["instances"]) for s in body["services"]) == 1000
+        else:
+            assert body["reason"] == "service inventory exceeds bounded snapshot"
 
 
 WIDE_PROJECT = "p" * 63

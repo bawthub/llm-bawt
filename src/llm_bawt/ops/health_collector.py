@@ -16,6 +16,7 @@ from sqlalchemy import text
 from .executor import DockerExecutor
 from .health_state import (
     MAX_CONTAINERS,
+    MAX_SERVICES,
     CatalogSample,
     ContainerObservation,
     HealthSample,
@@ -33,7 +34,6 @@ CONTAINER_HEALTH = frozenset({"healthy", "unhealthy", "starting"})
 # largest /v1/health/services body under the consumers' 512 KiB limit next
 # to a full 1000-container inventory.
 MAX_OPERATIONS = 500
-MAX_SERVICES = 256
 MAX_CAPABILITIES = 512
 MAX_ENUM_VALUES = 64
 # Serialized catalog budget (services rendered with empty instances). Every

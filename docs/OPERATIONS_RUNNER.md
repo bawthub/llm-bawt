@@ -439,14 +439,16 @@ The fixed GET-only contract (`ops/health_http.py`):
   configured target is absent. No partial inventory is advertised as complete.
   Kept as-is for existing consumers until TASK-1170 moves them to services.
 * `GET /v1/health/services` and `GET /v1/health/services/{project}.{service}`
-  (TASK-1169 S1c) → `{schemaVersion:1,observedAt,fresh,reason,unlabeledCount,
-  services}` (the single form has `service` instead of `services`). The service
-  set is exactly what **enabled** catalog operations target: a fixed
-  `compose_project`+`compose_service`, or one entry per value of the bounded
-  `enum` on the argument a `compose_service_from_arg` op names. A dynamic
-  selector without a bounded enum contributes nothing, never "all services";
-  name-only (`container_name`) and release ops contribute nothing. Each service
-  is `{id,project,service,instances,capabilities}`:
+  (TASK-1169 S1c/S2a) → `{schemaVersion:1,observedAt,fresh,inventoryFresh,
+  catalogFresh,reason,unlabeledCount,services}` (the single form has `service`
+  instead of `services`). The service set is every service **enabled** catalog
+  operations target together with every Compose service the inventory
+  observes (S2a). An op targets a fixed `compose_project`+`compose_service`,
+  or one entry per value of the bounded `enum` on the argument a
+  `compose_service_from_arg` op names. A dynamic selector without a bounded
+  enum contributes nothing, never "all services"; name-only
+  (`container_name`) and release ops contribute nothing. Each service is
+  `{id,project,service,instances,capabilities}`:
   * `instances` lists `{instanceId,name,state,health,startedAt,restartCount}`
     for the containers whose Compose labels match. `restartCount` is Docker's
     `RestartCount`: restart-policy restarts since the last API start or
@@ -458,21 +460,30 @@ The fixed GET-only contract (`ops/health_http.py`):
     never returned. Zero, many or `null` instances are the consumer's
     refusal cases, not something this route resolves.
   * `capabilities` lists `{operation,action,args}`; `args` holds the enum
-    selector (`{"service":"crawl4ai"}`) or is `{}`.
+    selector (`{"service":"crawl4ai"}`) or is `{}`. A service no enabled op
+    targets has `[]`; `null` means the catalog is not fresh (actions unknown).
 
   `fresh` (and HTTP 200) needs a fresh inventory **and** a fresh catalog
-  snapshot; otherwise 503 with `reason`. A stale catalog makes `services` (or
-  `service`) `null`; a stale inventory keeps the catalogued services with
-  `instances:null` and `unlabeledCount:null`. Containers without valid Compose
-  labels are not listed, only counted in `unlabeledCount`. An id outside the
-  catalogued set is 404 `{"error":"not found"}`; only the exact
-  `<project>.<service>` grammar of `ops/service_identity.py` routes, with no
-  query string. `observedAt` is the older of the two sample starts. The
-  catalog is read by the database worker each tick (read-only, 2s statement
-  timeout; at most 500 enabled ops, 256 services, 512 capabilities and 120 KiB
-  of rendered catalog, else the whole catalog sample fails closed, so the
-  body stays under 512 KiB next to a full inventory). A malformed op only
-  drops itself. It is not a readiness check:
+  snapshot; otherwise 503 with `reason`, and `inventoryFresh`/`catalogFresh`
+  say which half is usable. A stale catalog keeps the **observed** services,
+  with real `instances` and `capabilities:null` (catalogued services with no
+  instance are not knowable then and are omitted). A stale inventory keeps the
+  catalogued services with `instances:null` and `unlabeledCount:null`. Both
+  stale: `services` (or `service`) is `null`. Containers without valid Compose
+  labels are not listed, only counted in `unlabeledCount`. On a fresh response
+  an id in neither set is 404 `{"error":"not found"}`; when not fresh, an id
+  missing from the usable half is unknown, so 503 with `service:null`. Only the
+  exact `<project>.<service>` grammar of `ops/service_identity.py` routes,
+  with no query string. `observedAt` is the older of the two sample starts.
+  The catalog is read by the database worker each tick (read-only, 2s
+  statement timeout; at most 500 enabled ops, 256 services, 512 capabilities
+  and 120 KiB of rendered catalog, else the whole catalog sample fails
+  closed). The union is bounded again on read: more than 256 services or a
+  rendered list over 511 KiB fails the inventory half closed (`reason`
+  `service inventory exceeds bounded snapshot`, catalogued services only,
+  `instances:null`) rather than truncating, so the body stays under the
+  consumers' 512 KiB. A malformed op only drops itself. It is not a readiness
+  check:
   `/health/ready` keeps its four checks.
 
 `checkedAt` is the collection **start**, not HTTP request time or completion.

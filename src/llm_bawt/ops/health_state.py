@@ -3,12 +3,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
 from threading import Lock
 import time
 
 STALE_SECONDS = 30.0
 FUTURE_TOLERANCE_SECONDS = 5.0
 MAX_CONTAINERS = 1000
+# TASK-1169 S2a: bounds on the /v1/health/services service set. The catalog
+# and the inventory are each bounded at collection; the union is bounded
+# again at read time so the consumers' 512 KiB body limit always holds. The
+# envelope around the services list is under 1 KiB.
+MAX_SERVICES = 256
+MAX_SERVICES_BODY_BYTES = 512 * 1024 - 1024
 
 
 @dataclass(frozen=True)
@@ -78,11 +85,12 @@ class ServiceTarget:
     def service_id(self):
         return f"{self.project}.{self.service}"
 
-    def to_api(self, instances):
-        """One /v1/health/services entry; ``instances`` is a list or None."""
+    def to_api(self, instances, *, capabilities_known=True):
+        """One /v1/health/services entry. ``instances`` is a list or None;
+        ``capabilities`` is None when the catalog snapshot is not fresh."""
         return {"id": self.service_id, "project": self.project, "service": self.service,
                 "instances": instances,
-                "capabilities": [c.to_api() for c in self.capabilities]}
+                "capabilities": [c.to_api() for c in self.capabilities] if capabilities_known else None}
 
 
 @dataclass(frozen=True)
@@ -171,14 +179,23 @@ class OpsHealthState:
         }
 
     def services(self, service_id: str | None = None):
-        """TASK-1169 S1c: ``/v1/health/services[/{id}]``.
+        """TASK-1169 S1c/S2a: ``/v1/health/services[/{id}]``.
 
-        The service set is exactly what enabled catalog ops target. A fresh
-        response (200) needs both a fresh inventory and a fresh catalog;
-        otherwise 503. ``instances`` is ``null`` when the inventory is not
-        fresh and ``[]`` when no container carries the service's labels, so a
-        consumer can tell "unknown" from "none". Containers without valid
-        Compose labels are counted in ``unlabeledCount``, never listed.
+        The service set is every catalog target together with every Compose
+        service the inventory observes (S2a); a service no enabled op targets
+        has ``capabilities: []``. 200 needs a fresh inventory and a fresh
+        catalog; otherwise 503 with ``inventoryFresh``/``catalogFresh``
+        saying which half is usable:
+
+        * stale catalog: the observed services are listed with real
+          ``instances`` and ``capabilities: null`` (actions unknown);
+        * stale inventory: the catalogued services are listed with
+          ``instances: null`` (``[]`` stays "observed, none present");
+        * both stale: ``services`` is null.
+
+        Containers without valid Compose labels are counted in
+        ``unlabeledCount``, never listed. A union past ``MAX_SERVICES`` or the
+        body budget fails the inventory half closed rather than truncating.
         """
         inventory, catalog, stopping = self._read_services()
         now = self.sample_time()
@@ -188,36 +205,53 @@ class OpsHealthState:
                 None if sample.status == "ok" else sample.reason)
 
         inventory_reason, catalog_reason = unavailable(inventory), unavailable(catalog)
-        inventory_ok, catalog_ok = inventory_reason is None, catalog_reason is None
+        catalog_ok = catalog_reason is None
         instances: dict[tuple[str, str], list[ContainerObservation]] = {}
         unlabeled = 0
-        for container in inventory.containers if inventory_ok else ():
+        for container in inventory.containers if inventory_reason is None else ():
             if container.project is None or container.service is None:
                 unlabeled += 1
             else:
                 instances.setdefault((container.project, container.service), []).append(container)
 
-        def render(target):
-            found = instances.get((target.project, target.service), [])
-            return target.to_api([c.instance_api() for c in found] if inventory_ok else None)
+        def entries(inventory_ok):
+            targets = {(t.project, t.service): t for t in catalog.services} if catalog_ok else {}
+            if inventory_ok:
+                for key in instances:
+                    targets.setdefault(key, ServiceTarget(*key, ()))
+            return [
+                t.to_api([c.instance_api() for c in instances.get(key, [])] if inventory_ok else None,
+                         capabilities_known=catalog_ok)
+                for key, t in sorted(targets.items(), key=lambda item: item[1].service_id)]
+
+        rendered = None
+        if inventory_reason is None:
+            rendered = entries(True)
+            if (len(rendered) > MAX_SERVICES or len(json.dumps(
+                    rendered, separators=(",", ":")).encode()) > MAX_SERVICES_BODY_BYTES):
+                inventory_reason, rendered = "service inventory exceeds bounded snapshot", None
+        inventory_ok = inventory_reason is None
+        if rendered is None:
+            # Catalog-only (or nothing): bounded by the catalog's own budget.
+            rendered = entries(False) if catalog_ok else None
 
         fresh = inventory_ok and catalog_ok
         body = {
             "schemaVersion": 1,
             "observedAt": min(inventory.sampled.wall, catalog.sampled.wall).isoformat(),
             "fresh": fresh,
+            "inventoryFresh": inventory_ok,
+            "catalogFresh": catalog_ok,
             "reason": inventory_reason or catalog_reason,
             "unlabeledCount": unlabeled if inventory_ok else None,
         }
         code = 200 if fresh else 503
         if service_id is None:
-            body["services"] = [render(t) for t in catalog.services] if catalog_ok else None
+            body["services"] = rendered
             return code, body
-        if not catalog_ok:
-            body["service"] = None  # unknown whether the id is catalogued
-            return code, body
-        target = next((t for t in catalog.services if t.service_id == service_id), None)
-        if target is None:
+        found = next((e for e in rendered or () if e["id"] == service_id), None)
+        if found is None and fresh:
             return 404, {"error": "not found"}
-        body["service"] = render(target)
+        # Not fresh: an id missing from the usable half is unknown, not absent.
+        body["service"] = found
         return code, body

@@ -86,7 +86,7 @@ It is **not currently a FastAPI operations control service**. Its HTTP interface
 | `/health/live` | The HTTP server answers; not proof the reconciliation loop progresses. |
 | `/health/ready` | Database, Docker, executor prerequisites and actual loop progress are fresh/ready. |
 | `/v1/health/containers` | Versioned, sanitized inventory keyed by exact Docker names. |
-| `/v1/health/services[/{id}]` | Services enabled catalog ops target, by `<project>.<service>`, with opaque instance ids and capabilities (TASK-1169 S1c; contract in `OPERATIONS_RUNNER.md`). |
+| `/v1/health/services[/{id}]` | Every observed Compose service plus every service enabled catalog ops target, by `<project>.<service>`, with opaque instance ids and capabilities (`[]` when no op targets it, `null` when the catalog is stale) (TASK-1169 S1c/S2a; contract in `OPERATIONS_RUNNER.md`). |
 
 The HTTP handlers do not probe Docker/DB or dispatch jobs. This separation keeps health HTTP responsive during blocked background calls. The collection-start timestamp and freshness limits prevent old success from remaining healthy forever.
 
