@@ -204,7 +204,7 @@ class SendRequest:
         raw_ttl = (fields.get("prompt_cache_ttl") or "").strip()
         prompt_cache_ttl = normalize_prompt_cache_ttl(raw_ttl)
         if raw_ttl and prompt_cache_ttl is None:
-            logger.warning("Ignoring invalid prompt_cache_ttl=%r for %s", raw_ttl, bot_slug)
+            logger.warning("Ignoring invalid prompt_cache_ttl for %s", bot_slug)
 
         # TASK-593: app-resolved, DB-managed base SDK tool policy. Keep the raw
         # field until proxy routing is known; the pure resolver below decodes it,

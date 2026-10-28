@@ -369,7 +369,7 @@ class AgentBackendClient(LLMClient):
         raw_ttl = resolve_bot_runtime_setting(self.config, bot_id, "prompt_cache_ttl")
         ttl = normalize_prompt_cache_ttl(raw_ttl)
         if raw_ttl not in (None, "") and ttl is None:
-            logger.warning("Ignoring invalid prompt_cache_ttl %r for bot %s", raw_ttl, bot_id)
+            logger.warning("Ignoring invalid prompt_cache_ttl for bot %s", bot_id)
         return {
             **config,
             "question_answer_wait_seconds": int(resolve_global_runtime_setting(
