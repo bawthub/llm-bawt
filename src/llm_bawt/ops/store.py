@@ -21,6 +21,7 @@ from sqlmodel import Session, SQLModel, select
 
 from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
+from .container_remove import ACTION as REMOVE_ACTION, validate_remove_schema  # TASK-1439 T2c
 from .executor import validate_spec
 from .release_spec import is_release_spec
 from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
@@ -230,6 +231,9 @@ class OpsStore:
         for key in ("container_name_from_arg", "compose_service_from_arg"):
             if key in spec and schema.get("properties", {}).get(spec[key], {}).get("type") != "string":
                 raise ValueError(f"{key} must reference a declared string argument")
+        if spec["action"] == REMOVE_ACTION:
+            # TASK-1439 T2c: the row's args enum is the removal allowlist.
+            validate_remove_schema(spec, schema)
         for field in ("title", "description", "risk_level"):
             if not isinstance(getattr(op, field), str):
                 raise ValueError(f"{field} must be a string")

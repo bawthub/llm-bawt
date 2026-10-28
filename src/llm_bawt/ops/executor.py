@@ -21,6 +21,8 @@ from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LA
                                    app_config_binding, uses_process_profile, validate_app_spec)
 from .compose_config import evaluate
 from .compose_render import ComposeError, ComposeRenderer
+from .container_remove import (ACTION as REMOVE_ACTION, WORKER_CAPABILITY_LABEL as REMOVE_WORKER_LABEL,
+                               RemoveRefused, removal_binding, target_name, validate_remove_spec)
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
                                config_binding, validate_compose_config, validate_config_spec)
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
@@ -64,8 +66,9 @@ class QuiesceFenceUnsupported(ExecutorError):
 
 
 class ConfigCheckError(ExecutorError):
-    """A Compose config check refused. ``code`` is fixed (``config_drift``,
-    ``config_reconcile_unavailable`` or a :class:`ComposeError` code) and the
+    """A Compose config check or a container-removal check refused. ``code`` is
+    fixed (``config_drift``, ``config_reconcile_unavailable``, a
+    :class:`ComposeError` code or a :class:`RemoveRefused` code) and the
     message carries names only, never a value."""
 
     def __init__(self, code: str, message: str):
@@ -142,6 +145,10 @@ class Executor(ABC):
     def probe(self, container_name: str, argv: list[str]) -> str:
         """Stdout of a fixed cutover probe argv in a running target; read-only."""
         raise ExecutorError(f"{self.kind()} executor cannot run cutover probes")
+
+    def remove_approval(self, spec: dict, args: dict) -> dict:
+        """Binding for removing one stopped Compose orphan (TASK-1439 T2c); read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot remove containers")
 
     def config_check(self, spec: dict, image_ref: str | None = None) -> None:
         """Refuse (ConfigCheckError) when the target's running configuration
@@ -226,6 +233,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_plan_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == REMOVE_ACTION:
+        return validate_remove_spec(spec)
     if is_release_spec(spec):
         return validate_release_spec(spec)
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
@@ -450,6 +459,34 @@ class DockerExecutor(Executor):
                 "config_drift: the running target differs from its Compose service ("
                 + ", ".join(result["drift"]) + "); run the config reconcile operation first"))
 
+    def _check_remove_worker(self, settings):
+        self._require_worker_label(
+            settings, REMOVE_WORKER_LABEL,
+            missing=(f"configured immutable ops worker lacks {REMOVE_WORKER_LABEL}; "
+                     "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
+            unverifiable="cannot verify the container-remove capability of the ops worker")
+
+    def remove_approval(self, spec, args):
+        """TASK-1439 T2c: every removal refusal, read-only, before an approval card."""
+        settings = self.execution_settings(spec)
+        self._check_prerequisites(settings)
+        self._check_remove_worker(settings)
+        self.ensure_renderer_image(spec)
+        try:
+            name = target_name(spec, args)
+            try:
+                target = self.client.containers.get(name)
+                target.reload()
+            except Exception as exc:
+                if getattr(exc, "status_code", None) == 404:
+                    raise RemoveRefused("not_found", f"container {name!r} does not exist on this "
+                                                     "executor's Docker host") from None
+                raise ExecutorError(f"cannot inspect removal target {name!r}") from exc
+            renderer = ComposeRenderer(self._render_api_factory(), spec, tag="rm" + os.urandom(4).hex())
+            return removal_binding(spec, name, target.attrs, renderer)
+        except RemoveRefused as exc:
+            raise ConfigCheckError(exc.code, str(exc)) from exc
+
     def check_target(self, spec, args):
         # TASK-1002: this executor only reaches its own Docker daemon. A target
         # that lives on another host (e.g. Unraid) must fail HERE, before an
@@ -500,6 +537,10 @@ class DockerExecutor(Executor):
         self._check_prerequisites(snapshot["execution"])
         if snapshot["spec"].get("action") == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
+        if snapshot["spec"].get("action") == REMOVE_ACTION:
+            # The worker re-renders and re-checks every refusal under the lock.
+            self._check_remove_worker(snapshot["execution"])
+            self.ensure_renderer_image(snapshot["spec"])
         if snapshot["spec"].get("action") in CONFIG_CHECKED_ACTIONS:
             # Cheap prerequisites only. The worker re-renders and compares under
             # the target lock; rendering here would churn renderer containers on

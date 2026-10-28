@@ -70,8 +70,7 @@ def compose_source(spec: dict, container: dict) -> dict:
     working_dir = labels.get(_WORKING_DIR) or ""
     files = (labels.get(_CONFIG_FILES) or "").split(",")
     names = spec["compose_config"].get("compose_files")
-    if (not SAFE_PATH.fullmatch(working_dir) or posixpath.normpath(working_dir) != working_dir
-            or working_dir == "/" or ".." in working_dir.split("/")):
+    if not working_dir_valid(working_dir):
         raise ComposeError("compose_source_invalid", detail="working directory label")
     if names is None:
         # TASK-1474: which overlays an install layers is that install's own
@@ -83,6 +82,13 @@ def compose_source(spec: dict, container: dict) -> dict:
     elif files != [posixpath.join(working_dir, name) for name in names]:
         raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
     return {"project_dir": working_dir, "compose_files": files}
+
+
+def working_dir_valid(working_dir: str) -> bool:
+    """A Compose working-directory label safe to bind read-only at the same path."""
+    return (isinstance(working_dir, str) and bool(SAFE_PATH.fullmatch(working_dir))
+            and posixpath.normpath(working_dir) == working_dir and working_dir != "/"
+            and ".." not in working_dir.split("/"))
 
 
 def label_files_valid(working_dir: str, files: list) -> bool:
@@ -130,6 +136,22 @@ class ComposeRenderer:
         if not match:
             raise ComposeError("renderer_output_invalid", detail="config hash")
         return {"config": config, "hash": match.group(1)}
+
+    def project(self, source: dict, project: str) -> dict:
+        """The WHOLE rendered project, every profile included (TASK-1439 T2c):
+        a container-removal check must see every service that could claim a
+        name, not only one service or the active profiles. No injected env."""
+        argv = ["compose", "-p", project]
+        for path in source["compose_files"]:
+            argv += ["-f", path]
+        raw = self._run(source, "", argv + ["--profile", "*", "config", "--format", "json"])
+        try:
+            config = json.loads(raw)
+        except ValueError:
+            raise ComposeError("renderer_output_invalid") from None
+        if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
+            raise ComposeError("renderer_output_invalid")
+        return config
 
     def _run(self, source: dict, image_ref: str, argv: list[str]) -> str:
         sealed = SealedContainer(self.api, self.spec["compose_config"]["renderer_image"], role=RENDER_ROLE,

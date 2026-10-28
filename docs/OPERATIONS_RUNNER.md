@@ -75,6 +75,34 @@ the same pinned image. Both need a worker image labelled
 deploys are refused until the worker is rebuilt and the live deploy row gains
 `compose_config` (activation order in that doc).
 
+## Remove one stopped Compose orphan (TASK-1439 T2c; not activated)
+
+Action `remove` deletes ONE stopped container that no Compose service declares
+any more, and nothing else: no recreate, restart, network, volume or image
+call. The spec is exactly
+`{"action": "remove", "container_name_from_arg", "compose_project",
+"compose_config": {"compose_files": [1..4 basenames], "renderer_image"}}`.
+There is no seed. An operator creates a one-off row whose args schema has a
+required, closed string argument; that argument's `enum` IS the allowlist, and
+the store rejects a row without it.
+
+At approval and again in the worker (under the same per-name target lock as
+deploys, right before the DELETE), the job refuses with a fixed, known outcome
+and nothing removed: `args_invalid`, `not_found`, `ops_container` (ops
+workers/renderers), `target_running` (only `exited`/`created`/`dead`),
+`compose_labels_missing`, `compose_project_mismatch`, `compose_source_invalid`,
+`compose_declared`, `compose_unverifiable` (any render failure, including a
+missing overlay), `target_replaced` (the name now has another Id) or
+`target_busy`. The check renders the WHOLE project from the row's file set with
+`--profile *` in the sealed renderer, and a service claims the target by its
+Compose service label, its `container_name` or the default
+`<project>-<service>-<n>` name. The container's stale `config_files` label is
+never used. The DELETE is `force=false&v=false&link=false`, so Docker itself
+returns 409 (`target_running`, known) for a container started in between; a
+lost reply is `lost`. The GPU voice guard leaves it ungated (it starts
+nothing). Needs a worker image labelled `llm-bawt.ops.container-remove="1"`;
+without it the job is refused before any approval card.
+
 ## Quiesce start fence: worker rollout (TASK-1233)
 
 A quiesce job dispatches with `fence.start_not_after`, and the worker refuses a

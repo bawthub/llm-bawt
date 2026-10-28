@@ -357,6 +357,10 @@ class ApprovalAwareFastMCP(FastMCP):
                     "Verifies the hostname-routed health report; restores the previous container "
                     "if verification fails. Changed target/configuration cancels execution."
                 )
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("remove"):
+                from ..ops import container_remove  # TASK-1439 T2c: one stopped orphan
+
+                approval_prompt = container_remove.approval_text(operations_snapshot["remove"], decision.prompt)
             if name == "ops_run" and operations_snapshot and operations_snapshot.get("config"):
                 from ..ops import (  # TASK-1518, TASK-1474, TASK-1476
                     app_config_reconcile,

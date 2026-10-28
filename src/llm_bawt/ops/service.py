@@ -13,6 +13,7 @@ from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, va
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagged_binding
 from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
+from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
@@ -279,6 +280,15 @@ class OpsService:
                 raise OpsDispatchError("plan_invalid", (
                     "the service plan does not validate: targets must share one Compose project, distinct "
                     "containers, depend only on earlier targets, and the records target must be the app"))
+        elif spec["action"] == REMOVE_ACTION:
+            # TASK-1439 T2c: the approver sees the one stopped container and the
+            # project render proving no service claims it; the worker re-checks.
+            try:
+                snapshot["remove"] = executor.remove_approval(spec, merged)
+            except ConfigCheckError as exc:
+                raise OpsDispatchError(exc.code, str(exc)) from exc
+            except (ValueError, ExecutorError) as exc:
+                raise OpsDispatchError("target_unavailable", str(exc)) from exc
         elif spec["action"] in IMAGE_ACTIONS:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.
@@ -349,6 +359,8 @@ class OpsService:
                 raise ValueError("snapshot quiesce binding mismatch")
             if not valid_routing_binding(detached):
                 raise ValueError("snapshot routing binding mismatch")
+            if not valid_remove_binding(detached):
+                raise ValueError("snapshot removal binding mismatch")
             if not _valid_config_snapshot(detached):
                 raise ValueError("snapshot config binding mismatch")
             if detached["spec"].get("action") == PLAN_ACTION:

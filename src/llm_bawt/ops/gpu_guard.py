@@ -5,11 +5,13 @@ would put both models on one card. Only the GPU handoff controller may
 dispatch such a job, with a :class:`GpuHandoffFence` it built, and the job
 dispatches only while the handoff row still admits its idempotency key.
 
-The predicate is deny-by-default on action: every action except the two
-below is gated, so an action added later is gated until it is classified.
+The predicate is deny-by-default on action: every action except those in
+UNGATED_ACTIONS below is gated, so an action added later is gated until it is
+classified.
 """
 from __future__ import annotations
 
+from .container_remove import ACTION as REMOVE_ACTION
 from .executor import ExecutorError
 from .image_deploy import IMAGE_ACTIONS
 from .release_spec import RELEASE_ACTION
@@ -21,7 +23,8 @@ GPU_VOICE_SERVICES = frozenset({"stt", "tts"})
 #: ``stop`` frees VRAM and ``pull`` touches no container. A release spec runs
 #: on the release executor, which dispatches a workflow and no container; its
 #: image deploy is a separate ``deploy_image`` job, gated on its own.
-UNGATED_ACTIONS = frozenset({"stop", "pull", RELEASE_ACTION})
+#: ``remove`` (TASK-1439 T2c) deletes one stopped container and starts nothing.
+UNGATED_ACTIONS = frozenset({"stop", "pull", RELEASE_ACTION, REMOVE_ACTION})
 #: Actions the worker resolves with :func:`target_selector`; every other
 #: action names its target by literal Compose identity plus container_name.
 SELECTOR_ACTIONS = frozenset({"start", "restart"})
