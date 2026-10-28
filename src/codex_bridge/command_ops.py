@@ -762,8 +762,8 @@ class CodexCommandMixin(CodexAppServerMixin):
                 )
             elif message_backend == self._backend_name:
                 # Unknown RPC addressed to us. A backend-less unknown method
-                # may belong to another bridge (OpenClaw's agents.files.*);
-                # answering it would race the owner's reply.
+                # may belong to another bridge; answering it would race the
+                # owner's reply.
                 self._publisher.publish_rpc_result(
                     request_id, {"ok": False, "error": f"unknown method: {method}"},
                 )

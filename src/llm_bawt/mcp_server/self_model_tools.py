@@ -225,9 +225,6 @@ async def self_model(
     harness = str(before.get("harness") or "").lower()
 
     if action == "view":
-        if harness == "openclaw":
-            return {**base, "current": current, "options": [],
-                    "note": "OpenClaw bots have no catalog endpoint to switch."}
         try:
             options = await _options_for(harness)
         except Exception as exc:
@@ -236,8 +233,6 @@ async def self_model(
 
     if action != "switch":
         return {**base, "error": f"Unknown action '{action}'. Valid: view, switch."}
-    if harness == "openclaw":
-        return {**base, "current": current, "error": "OpenClaw bots have no catalog endpoint to switch."}
     if not isinstance(endpoint_id, int) or isinstance(endpoint_id, bool):
         return {**base, "current": current, "error": "action='switch' requires an integer endpoint_id (see view)."}
     prompt = (continue_prompt or "").strip()

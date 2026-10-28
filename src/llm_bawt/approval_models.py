@@ -186,7 +186,7 @@ class ToolApprovalPolicy(SQLModel, table=True):
     enabled: bool = Field(
         default=True, sa_column=Column(Boolean, nullable=False, index=True)
     )
-    # "*" = any bridge, else a backend name ("claude-code", "codex", "openclaw").
+    # "*" = any bridge, else a backend name ("claude-code", "codex", "local").
     backend_scope: str = Field(
         default="*", sa_column=Column(String(64), nullable=False, index=True)
     )

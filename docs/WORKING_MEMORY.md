@@ -43,7 +43,7 @@ Non-goals:
 - NG1. Guaranteed delivery of item content mid-session. Nick chose B+notice over C (step 23).
 - NG2. Changing a live pin mid-session, including on delete (Nick B3, section 11).
 - NG3. Scrubbing turn logs or SDK transcripts (Nick D4, section 11).
-- NG4. Codex, openclaw and chat-bot delivery. Enabling is refused there (section 8.3).
+- NG4. Codex and chat-bot delivery. Enabling is refused there (section 8.3).
 - NG5. Replacing initiative state or the harness's in-turn todo list (section 4).
 - NG6. Semantic memories tagged "todo".
 
@@ -201,7 +201,7 @@ From TASK-1318 step 6 and `system_prompt_pin.py`:
 ### 8.3 Other harnesses
 
 - **Codex.** `pins_system_prompt` is False, and the codex bridge pastes a fresh render onto every user message (`codex_bridge/event_ops.py:91-92`). The section would go live every turn and grow the thread. Enabling is refused on codex until TASK-1318's held Codex change lands and is reviewed here.
-- **openclaw and chat.** No capability (`task_turn_context.py:23`). Refused.
+- **chat.** No capability (`task_turn_context.py:23`). Refused.
 - **gpt bots on the claude-code bridge** (`openai_chatgpt/*`) get the same CLI snapshot and the same pin, so they are in scope.
 
 ## 9. Notice

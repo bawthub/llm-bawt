@@ -344,7 +344,7 @@ def test_stream_keys_scope_each_window_to_its_user_plus_global_config():
 
 
 def test_route_claims_before_hello_and_streams_from_the_cursor_reader(monkeypatch):
-    from llm_bawt.service.routes import openclaw_ws
+    from llm_bawt.service.routes import event_stream
 
     redis = FakeRedis()
 
@@ -361,10 +361,10 @@ def test_route_claims_before_hello_and_streams_from_the_cursor_reader(monkeypatc
         async def close(self):
             self.closed = True
 
-    monkeypatch.setattr(openclaw_ws, "RedisSubscriber", Sub)
+    monkeypatch.setattr(event_stream, "RedisSubscriber", Sub)
 
     async def scenario():
-        gen = openclaw_ws._unified_event_stream("redis://unused", ["probe-bot"], "probe-user", "window-1")
+        gen = event_stream._unified_event_stream("redis://unused", ["probe-bot"], "probe-user", "window-1")
         hello = await gen.__anext__()
         # Claimed before hello: an event published now must be delivered.
         assert redis.hashes["ui:cursor:window-1"]["owner"]
@@ -534,7 +534,7 @@ def test_pending_lookup_failure_also_fails_closed_but_nogroup_is_absence():
 
 
 def test_route_fails_closed_without_hello_when_the_claim_fails(monkeypatch):
-    from llm_bawt.service.routes import openclaw_ws
+    from llm_bawt.service.routes import event_stream
 
     redis = FakeRedis()
     closed = []
@@ -554,13 +554,13 @@ def test_route_fails_closed_without_hello_when_the_claim_fails(monkeypatch):
         async def close(self):
             closed.append(True)
 
-    monkeypatch.setattr(openclaw_ws, "RedisSubscriber", Sub)
+    monkeypatch.setattr(event_stream, "RedisSubscriber", Sub)
 
     async def scenario():
         ids = await redis.publish(2)
         redis.legacy_group(STREAM, "ui:window-1", last_delivered=ids[1], pending=[], idle_ms=1000)
         redis.xinfo_groups = failed_lookup
-        gen = openclaw_ws._unified_event_stream("redis://unused", ["probe-bot"], "probe-user", "window-1")
+        gen = event_stream._unified_event_stream("redis://unused", ["probe-bot"], "probe-user", "window-1")
         return [frame async for frame in gen]
 
     frames = virtual_clock.run(scenario())

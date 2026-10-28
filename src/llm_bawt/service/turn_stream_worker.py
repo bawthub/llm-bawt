@@ -262,7 +262,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 return
 
             # Choose streaming method based on whether bot uses tools.
-            # Agent-backend models (e.g. claude-code/openclaw) already handle
+            # Agent-backend models (e.g. claude-code/codex) already handle
             # tool execution in their own bridge/runtime and may report
             # tool_format="none" at the llm-bawt model layer, so they must not
             # be forced through llm-bawt's text/native tool loop here.
@@ -418,7 +418,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 # ``text_offset`` (chars emitted before it) is exact.
                 #
                 # TASK-456: this was originally gated to agent backends
-                # (claude-code / openclaw) — the only path whose text lacked a
+                # (claude-code and the other bridges) — the only path whose text lacked a
                 # durable/resumable channel. The gate is now removed so NATIVE
                 # chat bots also publish coalesced text_delta. Two reasons:
                 #   (1) it gives native bots the same cross-tab / cold-reload

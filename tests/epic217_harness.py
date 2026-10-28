@@ -431,7 +431,7 @@ def run_layer_b(report: Report) -> None:
     # would have been wrong. See the TASK-359 response for the byte-level
     # justification. The kept symbols and why:
     #   - useOrphanedActivityReKey: genuine turn_id -> message-id activity
-    #     routing for bridge (OpenClaw) tool events that carry NO
+    #     routing for bridge tool events that carry NO
     #     trigger_message_id. It already skips local-* keys — never part of the
     #     optimistic-id swap. Deleting it breaks agent tool-card routing.
     #   - isRealMessageId: COLLAPSED to a UUID regex (the `local-user-*`

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from llm_bawt.service.routes import openclaw_ws
+from llm_bawt.service.routes import event_stream
 
 
 class _FakeSubscriber:
@@ -56,13 +56,13 @@ class _FakeSubscriber:
 
 
 def _frames(monkeypatch, interval: float) -> list[tuple[str, dict]]:
-    monkeypatch.setattr(openclaw_ws, "RedisSubscriber", _FakeSubscriber)
-    monkeypatch.setattr(openclaw_ws, "HEARTBEAT_INTERVAL_S", interval)
+    monkeypatch.setattr(event_stream, "RedisSubscriber", _FakeSubscriber)
+    monkeypatch.setattr(event_stream, "HEARTBEAT_INTERVAL_S", interval)
 
     async def collect() -> list[str]:
         return [
             chunk
-            async for chunk in openclaw_ws._unified_event_stream(
+            async for chunk in event_stream._unified_event_stream(
                 "redis://unused", ["caid"], "nick", "window-x"
             )
         ]
@@ -92,12 +92,12 @@ def test_events_pass_through_and_heartbeat_is_throttled(monkeypatch):
 
 
 def test_config_only_sse_receives_global_events_without_a_user_or_bot(monkeypatch):
-    monkeypatch.setattr(openclaw_ws, "RedisSubscriber", _FakeSubscriber)
-    monkeypatch.setattr(openclaw_ws, "get_service", lambda: SimpleNamespace(
+    monkeypatch.setattr(event_stream, "RedisSubscriber", _FakeSubscriber)
+    monkeypatch.setattr(event_stream, "get_service", lambda: SimpleNamespace(
         _redis_subscriber=SimpleNamespace(_redis_url="redis://unused"),
     ))
     app = FastAPI()
-    app.include_router(openclaw_ws.router)
+    app.include_router(event_stream.router)
     client = TestClient(app)
 
     response = client.get("/v1/ws?config_only=true&consumer_id=window-guest")
@@ -114,3 +114,24 @@ def test_config_only_sse_receives_global_events_without_a_user_or_bot(monkeypatc
         "/v1/ws?config_only=true&consumer_id=x&bot_id=al",
     ):
         assert client.get(invalid).status_code == 400
+
+
+def test_stream_requires_a_full_scope_or_config_only(monkeypatch):
+    """The per-session legacy stream is gone: partial scopes are refused."""
+    monkeypatch.setattr(event_stream, "RedisSubscriber", _FakeSubscriber)
+    monkeypatch.setattr(event_stream, "get_service", lambda: SimpleNamespace(
+        _redis_subscriber=SimpleNamespace(_redis_url="redis://unused"),
+    ))
+    app = FastAPI()
+    app.include_router(event_stream.router)
+    client = TestClient(app)
+
+    for invalid in (
+        "/v1/ws",
+        "/v1/ws?session_key=agent:main:main",
+        "/v1/ws?bot_id=al&user_id=u",
+        "/v1/ws?bot_id=al&consumer_id=w",
+    ):
+        response = client.get(invalid)
+        assert response.status_code == 400, invalid
+        assert "consumer_id" in response.json()["detail"]

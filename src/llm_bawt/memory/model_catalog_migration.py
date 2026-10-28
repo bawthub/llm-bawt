@@ -128,16 +128,6 @@ DECLARE
     endpoint_vendor TEXT;
     endpoint_model_key TEXT;
 BEGIN
-    IF NEW.harness = 'openclaw' THEN
-        IF NEW.endpoint_id IS NOT NULL THEN
-            RAISE EXCEPTION 'bot %: openclaw owns its model and cannot pin endpoint_id', NEW.slug
-            USING ERRCODE = 'check_violation';
-        END IF;
-        NEW.default_model := NULL;
-        NEW.agent_backend := 'openclaw';
-        RETURN NEW;
-    END IF;
-
     IF NEW.endpoint_id IS NULL THEN
         RAISE EXCEPTION 'bot %: harness % requires endpoint_id', NEW.slug, NEW.harness
         USING ERRCODE = 'not_null_violation';
@@ -198,8 +188,6 @@ DROP FUNCTION IF EXISTS bot_profiles_check_model_backend();
 
 
 def _compatible(harness: str, vendor: str, protocol: str) -> bool:
-    if harness == "openclaw":
-        return True
     if harness == "chat":
         return protocol == "chat-completions"
     if harness == "codex":
@@ -217,8 +205,6 @@ def _compatible(harness: str, vendor: str, protocol: str) -> bool:
 
 def _derive_harness(agent_backend: str | None, vendor: str, protocol: str) -> str:
     backend = (agent_backend or "").strip().lower()
-    if backend == "openclaw":
-        return "openclaw"
     if backend == "codex":
         return "codex"
     if backend == "claude-code":
@@ -242,8 +228,6 @@ def _endpoint_preference(agent_backend: str | None, vendor: str, protocol: str) 
         }:
             return 1
         return 10
-    if backend == "openclaw":
-        return 0
     return 0 if protocol == "chat-completions" else 10
 
 
@@ -268,6 +252,28 @@ def _seed_access_paths(conn) -> None:
         )
 
 
+#: Harness retired with its bridge (TASK-1439). Its rows have no endpoint to
+#: repair onto, so the migration refuses rather than guessing a new harness.
+_REMOVED_HARNESS = "openclaw"
+
+
+def _refuse_removed_harness(conn) -> None:
+    slugs = conn.execute(
+        text("""
+            SELECT slug FROM bot_profiles
+             WHERE lower(coalesce(harness, '')) = :removed
+                OR lower(coalesce(agent_backend, '')) = :removed
+             ORDER BY slug
+        """),
+        {"removed": _REMOVED_HARNESS},
+    ).scalars().all()
+    if slugs:
+        raise RuntimeError(
+            f"bot_profiles rows still use the removed {_REMOVED_HARNESS!r} harness: "
+            f"{', '.join(slugs)}. Move them to another harness or delete them first."
+        )
+
+
 def _repair_bot_assignments(conn) -> list[str]:
     table_exists = conn.execute(
         text("""
@@ -280,6 +286,7 @@ def _repair_bot_assignments(conn) -> list[str]:
 
     conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS harness VARCHAR(32)"))
     conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS endpoint_id BIGINT"))
+    _refuse_removed_harness(conn)
     conn.execute(text("ALTER TABLE bot_profiles DROP CONSTRAINT IF EXISTS bot_profiles_default_model_fk"))
     conn.execute(text("ALTER TABLE bot_profiles DROP CONSTRAINT IF EXISTS bot_profiles_harness_check"))
     conn.execute(text("ALTER TABLE bot_profiles DROP CONSTRAINT IF EXISTS bot_profiles_endpoint_fk"))
@@ -308,21 +315,6 @@ def _repair_bot_assignments(conn) -> list[str]:
         backend = (bot["agent_backend"] or "").strip().lower()
         harness = (bot["harness"] or "").strip().lower()
         endpoint = endpoints_by_id.get(int(bot["endpoint_id"])) if bot["endpoint_id"] is not None else None
-
-        if backend == "openclaw" or harness == "openclaw":
-            if harness == "openclaw" and endpoint is None and bot["default_model"] is None:
-                continue
-            conn.execute(
-                text("""
-                    UPDATE bot_profiles
-                       SET harness = 'openclaw', endpoint_id = NULL, default_model = NULL,
-                           agent_backend = 'openclaw'
-                     WHERE slug = :slug
-                """),
-                {"slug": slug},
-            )
-            repaired.append(slug)
-            continue
 
         valid = (
             endpoint is not None
@@ -379,7 +371,7 @@ def _repair_bot_assignments(conn) -> list[str]:
             ALTER COLUMN harness SET DEFAULT 'chat',
             ALTER COLUMN harness SET NOT NULL,
             ADD CONSTRAINT bot_profiles_harness_check
-                CHECK (harness IN ('chat','claude-code','codex','claude-proxy','openclaw')),
+                CHECK (harness IN ('chat','claude-code','codex','claude-proxy')),
             ADD CONSTRAINT bot_profiles_endpoint_fk
                 FOREIGN KEY (endpoint_id) REFERENCES model_endpoints(id)
                 ON UPDATE CASCADE ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
@@ -392,8 +384,7 @@ def _repair_bot_assignments(conn) -> list[str]:
           FROM bot_profiles b
           LEFT JOIN model_endpoints e ON e.id = b.endpoint_id
           LEFT JOIN access_paths a ON a.id = e.access_path_id
-         WHERE (b.harness <> 'openclaw' AND b.endpoint_id IS NULL)
-            OR (b.harness = 'openclaw' AND b.endpoint_id IS NOT NULL)
+         WHERE b.endpoint_id IS NULL
             OR (b.harness = 'chat' AND a.protocol IS DISTINCT FROM 'chat-completions')
             OR (b.harness = 'codex' AND a.protocol IS DISTINCT FROM 'responses')
             OR (b.harness = 'claude-code'

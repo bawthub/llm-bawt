@@ -12,9 +12,9 @@ from agent_bridge.abort_contract import AbortReply, AbortState, process_boot_id
 from agent_bridge.abort_rpc import abort_target, answer_abort, cancel_request_handler
 from agent_bridge.session_queue import SessionQueue
 from tests.test_claude_code_send_boundaries import SESSION, _SDKStream, _SendHarness
-from tests.test_other_bridge_abort_targeting import abort, make_bridge, until
+from tests.test_other_bridge_abort_targeting import abort, make_bridge
 
-BACKENDS = ["claude-code", "codex", "local", "openclaw"]
+BACKENDS = ["claude-code", "codex", "local"]
 
 
 def _bridge(kind):
@@ -91,53 +91,6 @@ def test_claude_running_request_reply_waits_for_and_reports_the_send_teardown(mo
         assert sdk.disconnect_calls == 1
         await asyncio.gather(send, return_exceptions=True)
         assert harness._run_teardowns == {}
-    asyncio.run(asyncio.wait_for(run(), timeout=5))
-
-
-def test_openclaw_gateway_failure_is_an_error_and_not_cancelled():
-    from tests.test_other_bridge_abort_targeting import Gateway, send
-
-    async def run():
-        ws = Gateway()
-        ws.rejected = True
-        ws.abort_release.set()
-        bridge = make_bridge("openclaw", ws)
-        redis = SimpleNamespace(xack=AsyncMock())
-        task = asyncio.create_task(send(bridge, "active", redis))
-        await until(lambda: bridge._request_runs.get(("bot:user", "active"), {}).get("run_id"))
-        reply = _parse(await abort(bridge, "active", redis), "openclaw")
-        assert (reply.state, reply.cancelled) == (AbortState.ERROR, False)
-        assert "gateway unavailable" in reply.detail
-        assert not task.done() and not task.cancelling()
-        ws.release.set()
-        await task
-    asyncio.run(asyncio.wait_for(run(), timeout=5))
-
-
-@pytest.mark.parametrize("response, detail", [
-    ({"ok": False, "error": "nope"}, "Gateway rejected request-scoped abort: nope"),
-    ({"ok": True, "payload": {"aborted": False}}, "Gateway did not abort the requested run"),
-])
-def test_openclaw_gateway_refusal_is_an_error_and_not_cancelled(response, detail):
-    from tests.test_other_bridge_abort_targeting import Gateway, send
-
-    class Refusing(Gateway):
-        async def _request(self, method, params):
-            self.abort_calls.append((method, params))
-            return response
-
-    async def run():
-        ws = Refusing()
-        bridge = make_bridge("openclaw", ws)
-        redis = SimpleNamespace(xack=AsyncMock())
-        task = asyncio.create_task(send(bridge, "active", redis))
-        await until(lambda: bridge._request_runs.get(("bot:user", "active"), {}).get("run_id"))
-        reply = _parse(await abort(bridge, "active", redis), "openclaw")
-        assert (reply.state, reply.cancelled) == (AbortState.ERROR, False)
-        assert detail in reply.detail
-        assert not task.done() and not task.cancelling()
-        ws.release.set()
-        await task
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 

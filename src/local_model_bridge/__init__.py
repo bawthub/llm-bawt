@@ -6,8 +6,7 @@ llama-cpp-python, or vLLM), streams the generated text back over the
 per-run Redis response stream as ``AgentEvent``s, and serializes all CUDA
 work onto a single-worker thread pool.
 
-The main app sees identical events regardless of whether the openclaw-bridge,
-the claude-code-bridge, the codex-bridge, or this local-model-bridge handled
+The main app sees identical events regardless of which agent bridge handled
 the request.
 
 Architecture (TASK-276): isolating local inference in a separate process

@@ -41,7 +41,7 @@ class Bot:
     avatar_render: str | None = None  # Self-hosted data: URL render of avatar (no CDN at runtime)
     nextcloud: dict | None = None  # Nextcloud integration config (bot_id, secret, etc.)
     bot_type: str = "chat"  # High-level bot type (chat or agent)
-    agent_backend: str | None = None  # External agent backend slug (e.g. "openclaw")
+    agent_backend: str | None = None  # External agent backend slug (e.g. "claude-code")
     agent_backend_config: dict[str, Any] = field(default_factory=dict)  # Backend-specific config
     settings: dict[str, Any] = field(default_factory=dict)  # Effective bot settings
 

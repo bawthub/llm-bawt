@@ -1,7 +1,7 @@
 """Agent backend plugin system for llm-bawt.
 
 Agent backends allow bots to delegate chat handling to external agent systems
-(e.g. OpenClaw, Claude Code) instead of using the built-in LLM pipeline.
+(e.g. Claude Code, Codex) instead of using the built-in LLM pipeline.
 
 Third-party packages register backends via entry points::
 

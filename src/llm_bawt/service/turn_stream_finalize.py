@@ -57,8 +57,8 @@ class TurnStreamFinalizer:
         upstream-error signal from the bridge (agent path) or the finalize
         exception handler below (chat path)?
 
-        The claude-code bridge ERROR event handler at
-        ``chat_streaming_bridge.py:877`` already writes ``status="error"`` on
+        The agent stream worker's error handler in
+        ``turn_stream_worker.py`` already writes ``status="error"`` on
         the turn log BEFORE this finalize runs. Without this check, the
         subsequent ``_finalize_turn`` + ``turn_complete`` emit at line 253
         would clobber that honest error back to ``status="completed"`` /
@@ -187,15 +187,9 @@ class TurnStreamFinalizer:
                 # response_text below, so live clients render the same marker
                 # without a history refetch.
                 _partial = ctx.full_response_holder[0] or ""
-                # Guard: the legacy openclaw path (chat_streaming_bridge.py,
-                # TASK-202) already appends its own visible "⚠️ … error" block
-                # to the text before ERROR terminates — don't double-mark.
-                if "⚠️" in _partial[-600:]:
-                    _final_text = _partial
-                else:
-                    _final_text = _partial.rstrip() + turn_failure_suffix(
-                        _partial, upstream_error_text
-                    )
+                _final_text = _partial.rstrip() + turn_failure_suffix(
+                    _partial, upstream_error_text
+                )
                 ctx.full_response_holder[0] = _final_text
                 svc._finalize_turn(
                     llm_bawt=ctx.llm_bawt,
@@ -414,9 +408,8 @@ class TurnStreamFinalizer:
         # same bytes the DB persisted. Additive optional field.
         #
         # TASK-714 extension: also carry the text on upstream-error terminals.
-        # The claude-code bridge appends its visible error marker
-        # ("⚠️ openclaw bridge error\n\n```\n...\n```") to full_response_holder
-        # before ERROR is raised — preserving it here lets the client-side
+        # The error branch above appends the visible failure marker to
+        # full_response_holder — preserving it here lets the client-side
         # assistant bubble still render the honest failure if the partial
         # buffer is empty. Cancellation carries the preserved partial too;
         # timeout without content remains None.

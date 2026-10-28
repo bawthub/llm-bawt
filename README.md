@@ -10,7 +10,7 @@ The public site describes BawtHub as "one conversation, every device." This repo
 - Bot profiles stored in Postgres, including prompts, voices, tool access, and default models
 - OpenAI-compatible chat streaming at `POST /v1/chat/completions`
 - Per-bot history, summaries, semantic memory, and user/bot profiles
-- Agent backends for OpenClaw and Claude Code, with Codex bridge support still present
+- Agent backends for Claude Code and Codex
 - Task submission/status APIs used by the BawtHub agent dashboard
 - Media upload/storage routes for chat attachments and generated assets
 - Local embedding and optional local model support through `local-model-bridge`
@@ -37,7 +37,6 @@ BawtHub surfaces
 
         -> optional bridges
               |- claude-code-bridge
-              |- openclaw-bridge
               `- codex-bridge
 
         -> backing services
@@ -60,7 +59,6 @@ The MCP server on port `8001` exposes memory/history/profile/task tools to agent
 ### Bridges
 
 - `claude-code-bridge` runs Claude Agent SDK bots and now also supports provider-routed models through its Anthropic-compatible proxy path.
-- `openclaw-bridge` connects Redis-backed agent dispatch to OpenClaw workers.
 - `codex-bridge` is still available for Codex SDK based bots.
 
 ### Storage
@@ -105,7 +103,6 @@ Important compose services:
 - `app` — FastAPI service + MCP server
 - `redis` — bridge transport
 - `claude-code-bridge`
-- `openclaw-bridge`
 - `codex-bridge`
 - `local-model-bridge`
 - `crawl4ai`
@@ -191,7 +188,6 @@ src/llm_bawt/
   integrations/    Home Assistant, nextcloud, web fetch, provider links
 
 src/agent_bridge/          shared bridge transport/runtime pieces
-src/openclaw_bridge/       OpenClaw bridge
 src/claude_code_bridge/    Claude Code bridge + proxy path
 src/codex_bridge/          Codex bridge
 src/local_model_bridge/    embeddings + local inference service

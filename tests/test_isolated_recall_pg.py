@@ -176,13 +176,13 @@ def test_recency_lifts_the_terse_newer_statement_over_an_older_dense_one(rig):
     assert [row.id for row in rig.recall("continuity setting")] == [new, old]
 
 
-OPENCLAW_QUESTION = ("What happened when Nick ran openclaw auth login openai-codex in March, "
+LOGIN_QUESTION = ("What happened when Nick ran gizmoctl auth login openai-codex in March, "
                      "and what was the error?")
 
 
 def test_coverage_outranks_recency_for_an_old_exact_answer(rig):
     """Live miss: a 225-day-old exact answer lost to today's 1-2 generic-word matches."""
-    march = rig.add("Ran `openclaw auth login openai-codex` and it failed with: error: unknown "
+    march = rig.add("Ran `gizmoctl auth login openai-codex` and it failed with: error: unknown "
                     "command 'auth'. The login subcommand moved.", at=rig.now - 225 * DAY)
     recent = [rig.add(text_, at=rig.now - 60 * (i + 1)) for i, text_ in enumerate([
         "Nick, that error is gone now.",
@@ -193,14 +193,14 @@ def test_coverage_outranks_recency_for_an_old_exact_answer(rig):
         "Error budget is fine.",
         "Nick said the error happened twice.",
     ])]
-    rows = rig.recall(OPENCLAW_QUESTION)
+    rows = rig.recall(LOGIN_QUESTION)
     assert rows[0].id == march
     assert set(row.id for row in rows) - {march} <= set(recent)
     # Recency still decides between answers in the same coverage bucket (both
     # 7/10 lexemes, the newer one terser): newest first.
-    newer = rig.add("Ran openclaw auth login openai-codex: error, unknown command.",
+    newer = rig.add("Ran gizmoctl auth login openai-codex: error, unknown command.",
                     at=rig.now - 3 * DAY)
-    assert [row.id for row in rig.recall(OPENCLAW_QUESTION)][:2] == [newer, march]
+    assert [row.id for row in rig.recall(LOGIN_QUESTION)][:2] == [newer, march]
 
 
 def test_literal_receipt_beats_new_generic_history_and_keeps_provenance(rig):

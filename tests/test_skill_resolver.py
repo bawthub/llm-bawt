@@ -84,7 +84,7 @@ def test_off_at_tag_scope_is_never_honoured():
 def test_blanket_exclusions_keep_rows_visible_with_a_reason():
     rows = [_bot("a", "injected"), _bot("b", "available")]
     source = _Source({"a": 10, "b": 10})
-    cases = [(_facts(private=True), PROTECTED_BOT), (_facts(harness="openclaw"), UNSUPPORTED_HARNESS),
+    cases = [(_facts(private=True), PROTECTED_BOT), (_facts(harness="local"), UNSUPPORTED_HARNESS),
              (_facts(harness=None), UNSUPPORTED_HARNESS), (_facts(bot_type="chat"), UNSUPPORTED_HARNESS),
              (_facts(bundle="pkg"), NOT_IN_BUNDLE)]
     for facts, reason in cases:
@@ -97,7 +97,7 @@ def test_blanket_exclusions_keep_rows_visible_with_a_reason():
 
 
 def test_private_wins_over_every_other_exclusion():
-    got = resolve(_facts(private=True, harness="openclaw", bundle="pkg"), [_bot("a", "injected")],
+    got = resolve(_facts(private=True, harness="local", bundle="pkg"), [_bot("a", "injected")],
                   _Source({"a": 10}), CAPS)
     assert got.entries[0].reason == PROTECTED_BOT
 
@@ -169,7 +169,7 @@ def test_harness_capabilities_fall_back_to_unsupported():
     assert capabilities_for("claude-code").supported
     assert capabilities_for("codex").injection == "until_first_compaction"
     assert capabilities_for("codex").reinject_on_resume == "unverified"
-    assert capabilities_for("openclaw").supported is False
+    assert capabilities_for("local").supported is False
     unknown = capabilities_for("something-new")
     assert (unknown.harness, unknown.supported, unknown.injection) == (
         "something-new", False, "not_applied")

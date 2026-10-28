@@ -279,10 +279,10 @@ class TestClaudeNewPreprocessing:
 # ──────────────────────────────────────────────────────────────────────────
 # Dispatch binding (_bind_agent_thread) — hermetic fakes
 # ──────────────────────────────────────────────────────────────────────────
-from llm_bawt.service.chat_streaming_bridge import ChatStreamingBridgeMixin
+from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
 
 
-class _Bridge(ChatStreamingBridgeMixin):
+class _Bridge(BridgeSessionResetMixin):
     pass
 
 
@@ -315,7 +315,7 @@ class TestBindAgentThread:
         assert out is None
 
     def test_non_claude_code_never_binds(self):
-        lb = _fake_llm_bawt(backend="openclaw")
+        lb = _fake_llm_bawt(backend="local")
         out = _Bridge()._bind_agent_thread(lb, SimpleNamespace(session_id="t-1"))
         assert out is None
 

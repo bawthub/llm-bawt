@@ -42,7 +42,6 @@ HARNESS_CAPABILITIES: dict[str, HarnessCapabilities] = {
     # compaction; whether ``exec resume`` re-renders them is not established.
     "codex": HarnessCapabilities("codex", True, UNTIL_FIRST_COMPACTION,
                                  DENY_LIST_COMPLEMENT, UNVERIFIED),
-    "openclaw": HarnessCapabilities("openclaw", False, NOT_APPLIED, NONE, NO),
 }
 
 

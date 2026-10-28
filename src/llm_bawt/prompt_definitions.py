@@ -212,7 +212,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         metadata={
             "notes": (
                 "Prepended to user messages sent to agent backends "
-                "(Claude Code, Codex, OpenClaw) ONLY when tts_mode=true. "
+                "(Claude Code, Codex) ONLY when tts_mode=true. "
                 "Text-mode turns are passed through untouched. Exists because "
                 "agent SDKs lock the system prompt at session start and ignore "
                 "it on resume — so the existing chat.tts_output_instructions "
@@ -231,7 +231,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         metadata={
             "notes": (
                 "Prepended to EVERY user message sent to agent backends "
-                "(Claude Code, Codex, OpenClaw) when the request flag "
+                "(Claude Code, Codex) when the request flag "
                 "inject_user_prefix=true. Independent of tts_mode and of "
                 "chat.agent_voice_prefix — if both are active, they stack. "
                 "Exists for the same reason agent_voice_prefix does (agent "
@@ -297,7 +297,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         metadata={
             "notes": (
                 "Shared system-prompt block for AGENT backends (Claude Code, "
-                "Codex, OpenClaw). Injected ONLY when the per-bot runtime setting "
+                "Codex). Injected ONLY when the per-bot runtime setting "
                 "`agent_global_prompt_enabled` is true. Added to the cacheable "
                 "system-prompt prefix (agent-only; chat bots never see it). "
                 "Default body steers planning away from harness plan mode and "

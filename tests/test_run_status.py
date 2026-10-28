@@ -40,7 +40,7 @@ def test_bad_params_answer_error_not_absence(params):
 def test_a_raising_state_lookup_answers_error_for_the_named_request():
     def boom(sk, rid):
         raise RuntimeError("queue gone")
-    reply = answer_run_status("openclaw", PARAMS, boom)
+    reply = answer_run_status("local", PARAMS, boom)
     assert reply["state"] == "error" and reply["request_id"] == "r1"
     assert reply["detail"] == "RuntimeError: queue gone"
 
@@ -104,7 +104,7 @@ def test_registered_and_stopping_wins_over_phase_and_tombstone():
 
 
 def test_registered_tombstoned_request_still_reports_its_phase():
-    # OpenClaw tombstones before the gateway confirms; the run is still live.
+    # A bridge may tombstone before its run confirms the stop; the run is still live.
     q = _queue(RequestPhase.RUNNING, tombstoned=True)
     assert queue_run_state(q, "bot:user", "r1") is RunState.RUNNING
 
@@ -148,9 +148,9 @@ def test_a_new_pid1_boot_without_the_request_proves_restart(backend):
 
 
 def test_only_backends_whose_runs_die_with_the_bridge_prove_restart():
-    """Snark step 34: openclaw runs live in the gateway, so a new openclaw-bridge boot proves nothing."""
+    """Snark step 34: a new boot proves a restart only for backends whose runs are bridge children."""
     assert RESTART_PROOF_BACKENDS == {"claude-code", "codex"}
-    for backend in ("openclaw", "local-model", "made-up"):
+    for backend in ("local", "local-model", "made-up"):
         sighted = RunSighting("r1", backend, "boot-a", pid1=True)
         assert not proves_restart(sighted, _reply(backend=backend))
 

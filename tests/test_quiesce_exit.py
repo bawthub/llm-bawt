@@ -54,8 +54,8 @@ def test_a_pid1_restart_of_a_sighted_run_is_b_on_the_answering_boot(backend, sta
 
 
 @pytest.mark.parametrize(("member", "reply"), [
-    (_member(sighting=RunSighting("req-1", "openclaw", "boot-a", True), backend="openclaw"),
-     _reply(backend="openclaw")),                                               # openclaw never proves
+    (_member(sighting=RunSighting("req-1", "local", "boot-a", True), backend="local"),
+     _reply(backend="local")),                                                  # local never proves
     (_member(sighting=None, accepted=RunSighting("req-1", "claude-code", "boot-a", None)),
      _reply()),                                                                 # accepted pid1 unknown
     (_member(sighting=RunSighting("req-1", "claude-code", "boot-a", False)), _reply()),  # sighted not PID 1
@@ -84,10 +84,10 @@ def test_an_unattempted_terminal_is_no_evidence_for_not_found():
 
 
 @pytest.mark.parametrize("terminal", [None, "unattempted"])
-@pytest.mark.parametrize("backend", ["claude-code", "openclaw"])
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
 def test_a_tombstone_alone_is_never_evidence(terminal, backend):
     # Vex r1 B1: a bridge unregisters in ``finally`` whatever its teardown did
-    # (claude teardown crash -> exited null; openclaw tombstones as the abort
+    # (claude teardown crash -> exited null; codex tombstones as an abort
     # starts), so ``tombstoned`` from the very boot that held the run proves nothing.
     held = RunSighting("req-1", backend, "boot-a", False)
     tomb = _reply(RunState.TOMBSTONED, boot_id="boot-a", backend=backend, pid1=False)

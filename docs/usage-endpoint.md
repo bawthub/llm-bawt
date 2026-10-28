@@ -92,7 +92,7 @@ from the committed turn row:
   balance: null, updated_at, refresh: true}`, so readers refetch the report once.
 
 `updated_at` and `balance.updated_at` are fractional epochs that order updates.
-Passive OpenClaw runs have no app turn and move no balance.
+Runs with no app turn move no balance.
 
 The turn-log scan (`backfill_ledger`) runs only on ledger creation, legacy
 migration (the retired `anthropic_api_balance_anchor` runtime setting moves into

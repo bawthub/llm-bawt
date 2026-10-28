@@ -892,10 +892,6 @@ def _infer_type(alias: str) -> str:
         return "grok"
     if low.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"
-    if low.startswith("openclaw"):
-        return "openclaw"
-    if low == "openclaw":
-        return "agent_backend"
     return "other"
 
 
@@ -926,7 +922,7 @@ def _list_models_from_service(config: Config):
         grouped[mtype].append(model)
 
     provider_order = [
-        "openai", "codex", "grok", "openclaw", "ollama", "vllm",
+        "openai", "codex", "grok", "ollama", "vllm",
         "gguf", "huggingface", "agent_backend", "other",
     ]
     present = [p for p in provider_order if grouped.get(p)]

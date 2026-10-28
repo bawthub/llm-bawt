@@ -100,7 +100,7 @@ def test_provider_key_broker_sends_the_file_token(monkeypatch, tmp_path):
     assert seen["headers"] == {HEADER: DERIVED}
 
 
-_SENDER_PACKAGES = ("claude_code_bridge", "codex_bridge", "openclaw_bridge", "agent_bridge")
+_SENDER_PACKAGES = ("claude_code_bridge", "codex_bridge", "agent_bridge")
 _GATE_NAMES = {
     "x-bridge-token",
     "bridge_claude_token_secret",

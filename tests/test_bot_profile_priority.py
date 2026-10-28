@@ -43,7 +43,7 @@ def test_db_bot_profiles_load_correctly(monkeypatch) -> None:
         },
         "claw": {
             "name": "Claw",
-            "description": "openclaw agent bot",
+            "description": "codex agent bot",
             "system_prompt": "claw prompt",
             "requires_memory": True,
             "voice_optimized": False,
@@ -55,7 +55,7 @@ def test_db_bot_profiles_load_correctly(monkeypatch) -> None:
             "uses_home_assistant": False,
             "default_model": None,
             "nextcloud": None,
-            "agent_backend": "openclaw",
+            "agent_backend": "codex",
             "agent_backend_config": {"session_key": "agent:claw:main"},
         },
     }
@@ -84,7 +84,7 @@ def test_db_bot_profiles_load_correctly(monkeypatch) -> None:
     claw = bots_module.get_bot("claw")
     assert claw is not None
     assert claw.bot_type == "agent"
-    assert claw.agent_backend == "openclaw"
+    assert claw.agent_backend == "codex"
     assert bots_module.get_raw_bot_data("claw")["bot_type"] == "agent"
 
 

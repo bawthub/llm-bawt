@@ -497,9 +497,8 @@ async def self_system_prompt(
 
     Editing writes straight through the same path as the admin UI
     (``PATCH /v1/bots/{slug}/profile``): the DB row is upserted, the in-memory
-    bot registry is reloaded, per-bot instance caches are invalidated, and for
-    OpenClaw agents the new prompt is pushed to SOUL.md. It never rewrites the
-    current in-flight context. Agent backends that pin the prompt per session
+    bot registry is reloaded and per-bot instance caches are invalidated. It
+    never rewrites the current in-flight context. Agent backends that pin the prompt per session
     (``pins_system_prompt``, TASK-1318) keep it until the next session
     boundary: /new, reset, model switch, or the first turn after a manual
     /compact. Unpinned bots pick the change up on the next turn. The result's

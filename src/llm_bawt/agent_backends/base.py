@@ -1,7 +1,7 @@
 """Abstract base class for agent backend plugins.
 
 Agent backends handle chat requests by delegating to external agent systems
-(e.g. OpenClaw, Claude Code, custom agents) instead of using llm-bawt's
+(e.g. Claude Code, Codex, custom agents) instead of using llm-bawt's
 internal LLM pipeline.
 
 Third-party packages can implement this interface and register via entry points:

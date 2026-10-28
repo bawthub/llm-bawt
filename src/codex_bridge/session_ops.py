@@ -136,7 +136,7 @@ class CodexSessionMixin:
         Used to defensively skip legacy RPCs (no `backend` field on the
         message) that target bots owned by other bridges. Without this
         guard, the codex bridge would happily clear session_keys on
-        claude-code / openclaw bots — a cross-backend interference bug.
+        claude-code or local bots — a cross-backend interference bug.
         """
         if not self._app_api_url or not bot_id:
             return True

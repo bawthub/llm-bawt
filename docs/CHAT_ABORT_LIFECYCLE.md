@@ -76,8 +76,6 @@ window. Browser state is not persisted as a competing lifecycle source.
   persistence, logging or event publication throws.
 - Response/error strings are literal logging data, not Rich markup.
 - Claude cancellation terminal events preserve partial text, usage and IDs.
-- OpenClaw receives an exact gateway runId at chat.send acknowledgement. Abort
-  waits at most five seconds for that identity, then fails retryably if unknown.
 - Local inference retains the session lock until its cancelled native worker
   actually exits; cancellation is observed at a token boundary.
 - Detached SSH/host jobs are **not** claimed to be killed by agent cancellation.

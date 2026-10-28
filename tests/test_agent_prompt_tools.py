@@ -70,7 +70,6 @@ class _PromptProbe:
     (
         ("claude-code", "claude-code"),
         ("agent_backend", "codex"),
-        ("agent_backend", "openclaw"),
     ),
 )
 def test_native_agent_harness_prompt_omits_app_tool_protocol(model_type, harness):

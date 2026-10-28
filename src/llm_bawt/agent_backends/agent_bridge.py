@@ -1,9 +1,9 @@
 """Shared agent-bridge backend — generic base for bridge-style agents.
 
-All bridge backends (OpenClaw, Codex, Claude Code) speak the same
+All bridge backends (Claude Code, Codex, local model) speak the same
 Redis command/event protocol; only the upstream transport differs:
 
-  Main App → Redis command → Bridge → upstream (WS / SDK / process)
+  Main App → Redis command → Bridge → upstream (SDK / process)
   Upstream → Bridge → Redis run stream → Main App
 
 Concrete backends subclass :class:`AgentBridgeBackend` and override
@@ -115,7 +115,7 @@ def _friendly_tool_name(name: str, arguments: dict[str, Any]) -> str:
 class AgentBridgeBackend(AgentBackend):
     """Agent backend that sends messages through the agent-bridge transport.
 
-    Subclassed by ``OpenClawBackend``, ``CodexBackend``, ``ClaudeCodeBackend``.
+    Subclassed by ``CodexBackend``, ``ClaudeCodeBackend`` and ``LocalModelBackend``.
     Each subclass overrides ``name`` (registry key, also stamped onto every
     event as ``provider``) and may override ``_resolve_session_key`` to
     define backend-specific session routing.
@@ -180,7 +180,7 @@ class AgentBridgeBackend(AgentBackend):
         attachments: list | None = None,
         trigger_message_id: str | None = None,
     ) -> Iterator[str | dict[str, Any]]:
-        """Stream OpenClaw response deltas and tool events via the bridge.
+        """Stream response deltas and tool events via the bridge.
 
         Sends a command to the bridge via Redis, then subscribes to the
         per-run response stream. Yields text deltas and tool event dicts.

@@ -8,7 +8,7 @@ Terminal event cause (TASK-1231B)
 A cancelled run still ends with ``raw.end_reason == "aborted"``: that value is
 what the app's stream consumers switch on to finalize a turn as aborted rather
 than completed (``agent_backends/agent_bridge.py``,
-``service/chat_streaming_bridge.py``). Changing it would make a killed turn
+``service/turn_stream_worker.py``). Changing it would make a killed turn
 look like a finished reply. The *cause* is therefore an additive field,
 ``raw.abort_cause``, present only when the bridge knows the run was cancelled
 for a reason other than an abort/cancel RPC. Today that is only

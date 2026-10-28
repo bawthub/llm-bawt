@@ -9,7 +9,7 @@ for members (a) never covered:
 * **(b) restart.** ``not_found``/``tombstoned`` from a boot that held none of
   the run's durable holder records, and :func:`agent_bridge.run_status.proves_restart`
   holds against every one of them: a backend whose runs die with the bridge,
-  PID 1 on both sides. openclaw never proves. ``boot_id`` is the answering boot.
+  PID 1 on both sides. local never proves. ``boot_id`` is the answering boot.
 * **(c) same boot.** The run's compact terminal record (``RUN_TERMINAL_RETENTION_S``)
   says ``teardown.exited``: ``true`` stamps a confirmed exit, ``false`` stamps
   ``exit_unconfirmed`` (re-probed every pass, never drained). A terminal with
@@ -182,7 +182,7 @@ def judge(member: SweepMember, reply: RunStatusReply | None, terminal: RunTermin
         return Judgement("terminal_exited" if exited else "terminal_survivor",
                          _record("c", reply.request_id, reply.backend, terminal.boot_id, exited))
     # A tombstone alone is never evidence (Vex r1 B1): every bridge releases a
-    # request in ``finally`` whatever its teardown did, and openclaw tombstones
+    # request in ``finally`` whatever its teardown did, and codex tombstones
     # as an abort starts, so the run may still be alive in the boot that
     # answers ``tombstoned``.
     if terminal is not None:

@@ -86,7 +86,7 @@ class ServiceLLMBawt(BaseLLMBawt):
     def _init_bot(self, config: Config):
         """Initialize bot, then patch AgentBackendClient with bot-specific config."""
         super()._init_bot(config)
-        # The virtual model 'openclaw' is registered once with the first bot's
+        # An agent backend's virtual model is registered once with the first bot's
         # config.  Now that self.bot is loaded, override the client's bot_config
         # so each bot uses its own session_key / settings.
         from ..clients.agent_backend_client import AgentBackendClient
@@ -647,7 +647,7 @@ class ServiceLLMBawt(BaseLLMBawt):
         if task_turn_capability:
             _q_kwargs["task_turn_capability"] = task_turn_capability
 
-        # Agent backends (claude-code/openclaw) execute tools in their OWN
+        # Agent backends (claude-code/codex) execute tools in their OWN
         # bridge/runtime — they must NOT go through llm-bawt's tool loop. The
         # streaming path already enforces this (not is_agent_backend); mirror it
         # here so non-streaming stays consistent AND so inject_messages reaches

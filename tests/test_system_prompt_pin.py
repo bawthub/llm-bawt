@@ -375,11 +375,10 @@ def test_client_marks_pinned_prompt_and_codex_delivery():
 def test_backend_flags():
     from llm_bawt.agent_backends.claude_code import ClaudeCodeBackend
     from llm_bawt.agent_backends.codex import CodexBackend
-    from llm_bawt.agent_backends.openclaw import OpenClawBackend
+    from llm_bawt.agent_backends.base import AgentBackend
 
     assert ClaudeCodeBackend.pins_system_prompt and CodexBackend.pins_system_prompt
-    assert not OpenClawBackend.pins_system_prompt
-    assert OpenClawBackend().compose_system_prompt("x", {}) == "x"
+    assert not AgentBackend.pins_system_prompt
     assert ClaudeCodeBackend().system_prompt_delivery(True) is None
 
 

@@ -44,7 +44,6 @@ CHECKED_SLUGS = ROSTER - DURABLE_AGENT_HARNESSES
 KNOWN_DEBT: dict[tuple[str, str], int] = {
     ("llm_bawt/bots.py", "nova"): 3,
     ("llm_bawt/cli/display_cmd.py", "nova"): 1,
-    ("llm_bawt/cli/openclaw_handler.py", "vex"): 1,
     ("llm_bawt/core/client.py", "nova"): 1,
     ("llm_bawt/core/initialization.py", "nova"): 1,
     ("llm_bawt/mcp_server/extraction.py", "nova"): 1,

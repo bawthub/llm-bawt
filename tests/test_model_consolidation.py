@@ -5,7 +5,7 @@ Covers:
   * universal SDK model injection in ``ServiceLLMBawt._init_bot``
     (claude-code now behaves like codex)
   * ``_resolve_request_model`` returning the REAL catalog alias for agent
-    bots, with virtual-alias fallback and openclaw exemption
+    bots, with virtual-alias fallback
 """
 
 from types import SimpleNamespace
@@ -429,19 +429,6 @@ def test_resolve_agent_bot_falls_back_to_virtual_alias(monkeypatch):
     assert alias == "claude-code"
 
 
-def test_resolve_openclaw_bot_keeps_virtual_alias(monkeypatch):
-    """Openclaw gateway owns its model — always virtual alias, even with default_model set."""
-    bot = SimpleNamespace(slug="vex", agent_backend="openclaw", default_model="grok-4-fast")
-    _patch_bot_manager(monkeypatch, bot)
-    mgr = _make_manager(
-        defined_models={"grok-4-fast": {"type": "grok", "model_id": "grok-4-fast"}},
-        available=["grok-4-fast", "openclaw"],
-        agent_backend_models={"vex": "openclaw"},
-    )
-    alias, _ = mgr._resolve_request_model(None, "vex", local_mode=False)
-    assert alias == "openclaw"
-
-
 # ---------------------------------------------------------------------------
 # settings-route config-time validation — normalized endpoint model (TASK-616)
 # ---------------------------------------------------------------------------
@@ -497,26 +484,10 @@ def test_normalize_drops_empty_model_key():
     assert payload["agent_backend_config"] == {}
 
 
-def test_normalize_openclaw_untouched():
+def test_normalize_non_catalog_backend_untouched():
     payload = {"slug": "vex", "agent_backend_config": {"model": "anything"}}
-    validation._normalize_agent_backend_config_model("openclaw", payload)
+    validation._normalize_agent_backend_config_model("local", payload)
     assert payload["agent_backend_config"] == {"model": "anything"}
-
-
-def test_validate_openclaw_nulls_endpoint():
-    # Openclaw owns its model: endpoint_id/default_model are cleared and the
-    # backend is canonicalized — no catalog lookup required.
-    payload = {
-        "slug": "vex",
-        "agent_backend": "openclaw",
-        "endpoint_id": 99,
-        "default_model": "stale",
-    }
-    validation._validate_model_endpoint(payload)
-    assert payload["endpoint_id"] is None
-    assert payload["default_model"] is None
-    assert payload["agent_backend"] == "openclaw"
-    assert payload["harness"] == "openclaw"
 
 
 def test_validate_missing_endpoint_id_422():

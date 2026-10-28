@@ -1,4 +1,4 @@
-"""Chat completion streaming mixin (native + OpenClaw bridge).
+"""Chat completion streaming mixin (native + agent bridges).
 
 Extracted from background_service.py — handles SSE streaming for
 chat completions including tool call handling and bridge integration.
@@ -21,8 +21,8 @@ from ..bots import (
     StreamingTTSScrubber,
     should_scrub_for_tts,
 )
-from .chat_streaming_bridge import ChatStreamingBridgeMixin
 from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
+from .session_lifecycle.bridge_reset import BridgeSessionResetMixin
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
 from .stream_request_attachments import prepare_stream_request_attachments
@@ -55,12 +55,11 @@ def request_failed_events(response_id: str, created: int, model: str, error: Exc
 # alongside the worker/publisher that use them.
 
 
-class ChatStreamingMixin(ChatStreamingBridgeMixin):
+class ChatStreamingMixin(BridgeSessionResetMixin):
     """Mixin providing streaming chat completions for BackgroundService.
 
-    Bridge/session responsibilities (``_stream_via_bridge`` and the
-    conversation-offset / OpenClaw session helpers) live on the inherited
-    :class:`ChatStreamingBridgeMixin` (TASK-554).
+    Agent session reset lives on the inherited
+    :class:`BridgeSessionResetMixin` (TASK-554).
     """
 
 
@@ -188,9 +187,6 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             yield "data: [DONE]\n\n"
             return
 
-        # OpenClaw bots now flow through the normal AgentBackendClient.stream_raw()
-        # pipeline, which routes via Redis -> Bridge -> WS automatically.
-
         chunk_queue: asyncio.Queue = asyncio.Queue()
         full_response_holder = [""]  # Use list to allow mutation in nested function
         # TTS scrub decision — computed ONCE here (single source of truth via
@@ -228,9 +224,8 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
         loop = asyncio.get_running_loop()
 
         # Start new generation.
-        # For agent_backend (OpenClaw) bots the gateway queues messages as
-        # separate runs, so we must NOT cancel a previous generation — each
-        # request streams independently.  For native models we cancel the
+        # Agent-backend bots queue messages as separate runs, so we must NOT
+        # cancel a previous generation — each request streams independently.  For native models we cancel the
         # previous generation so only the latest request runs.
         is_agent_backend = llm_bawt.client.model_definition.get("type") in ("agent_backend", "claude-code")
 
@@ -601,7 +596,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
             emote_filter = (
                 StreamingEmoteFilter() if (tts_scrub and not is_agent_backend) else None
             )
-            oc_tool_call_index = 0  # OpenClaw agent backend tool call index
+            agent_tool_call_index = 0  # agent backend tool call index
 
             from .chat_stream_buffer import content_buffer
             _content_buf, _drain_content_buf = content_buffer(response_id, created, model_alias)
@@ -800,7 +795,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                     yield (f"data: {json.dumps(data)}\n\n")
                     continue
 
-                # OpenClaw agent backend tool events (from openclaw.py queue)
+                # Agent backend tool events (from the agent_bridge backend queue)
                 if isinstance(chunk, dict) and chunk.get("event") == "tool_call":
                     tc_name = chunk.get("name", "unknown")
                     tc_args = chunk.get("arguments", {})
@@ -816,7 +811,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                             "index": 0,
                             "delta": {
                                 "tool_calls": [{
-                                    "index": oc_tool_call_index,
+                                    "index": agent_tool_call_index,
                                     "id": tc_id,
                                     "type": "function",
                                     "function": {
@@ -838,7 +833,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                         }],
                     }
                     yield (f"data: {json.dumps(data)}\n\n")
-                    oc_tool_call_index += 1
+                    agent_tool_call_index += 1
                     # Tool events already published from background thread
                     continue
 
@@ -848,7 +843,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                     continue
 
                 if isinstance(chunk, dict) and chunk.get("event") == "tool_result":
-                    if oc_tool_call_index > 0:
+                    if agent_tool_call_index > 0:
                         data = {
                             "id": response_id,
                             "object": "chat.completion.chunk",
@@ -857,7 +852,7 @@ class ChatStreamingMixin(ChatStreamingBridgeMixin):
                             "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
                         }
                         yield (f"data: {json.dumps(data)}\n\n")
-                        oc_tool_call_index = 0
+                        agent_tool_call_index = 0
                     continue
 
                 if isinstance(chunk, dict) and chunk.get("event") == "await_tool_result":

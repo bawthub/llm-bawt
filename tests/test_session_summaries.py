@@ -31,7 +31,7 @@ from llm_bawt.memory.summarization import (
     group_messages_by_thread,
     split_session_into_chunks,
 )
-from llm_bawt.service.chat_streaming_bridge import ChatStreamingBridgeMixin
+from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -202,7 +202,7 @@ class TestSummarizeThreadPolicy:
 # /new pre-seed summarize gate
 # ──────────────────────────────────────────────────────────────────────────
 
-class _Bridge(ChatStreamingBridgeMixin):
+class _Bridge(BridgeSessionResetMixin):
     def __init__(self, bg_client=None):
         self.config = SimpleNamespace(
             DEFAULT_USER="nick", REDIS_URL="redis://localhost:6379",

@@ -89,10 +89,9 @@ def test_only_bawthub_readable_integrations_are_on_the_bawthub_allowlist():
         k for k in BAWTHUB_READABLE if k[0] == "integration"
     }
     # The media stack's, Reddit's and the Talk provisioner's credentials are
-    # read in-process by llm-bawt only; the OpenClaw gateway token goes to the
-    # openclaw bridge through the bridge-gated route, never to BawtHub.
+    # read in-process by llm-bawt only.
     assert {i for i, d in CREDENTIAL_INTEGRATIONS.items() if not d.bawthub_readable} == {
-        "sonarr", "radarr", "sabnzbd", "reddit", "talk-provisioner", "openclaw",
+        "sonarr", "radarr", "sabnzbd", "reddit", "talk-provisioner",
     }
 
 

@@ -209,10 +209,8 @@ RESTART_PROOF_BACKENDS = frozenset({"claude-code", "codex"})
 """Backends whose run processes are the bridge process's own children.
 
 Only for these can a bridge restart kill a run: claude-code's CLI and codex's
-per-turn ``codex`` subprocess live in the bridge container's PID namespace.
-openclaw runs execute in the OpenClaw gateway, outside the bridge, so a new
-openclaw-bridge boot proves nothing about them (TASK-1233, Snark step 34).
-Any backend not named here never proves a restart."""
+per-turn ``codex`` subprocess live in the bridge container's PID namespace
+(TASK-1233). Any backend not named here never proves a restart."""
 
 LIVE_STATES = frozenset({RunState.PREFLIGHT, RunState.QUEUED, RunState.RUNNING, RunState.STOPPING})
 """States in which the answering process holds the request in its registry."""
@@ -261,7 +259,7 @@ def proves_restart(sighting: RunSighting, reply: RunStatusReply) -> bool:
     Only when all of these hold:
 
     * the backend is in :data:`RESTART_PROOF_BACKENDS` (its runs die with the
-      bridge; openclaw's never do);
+      bridge);
     * the same backend answers for the same request from a different boot and
       says the request is absent there (``not_found``/``tombstoned``);
     * BOTH the sighted and the answering process were their container's PID 1.

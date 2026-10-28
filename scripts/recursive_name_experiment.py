@@ -97,7 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bot-id", default="byte", help="llm bot_id to target (default: %(default)s)")
     parser.add_argument("--turns", type=int, default=10, help="Number of recursive turns (default: %(default)s)")
     parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional pause between turns")
-    parser.add_argument("--output", default="/home/vex/.openclaw/workspace/tmp/name-loop.md", help="Markdown transcript output path")
+    parser.add_argument("--output", required=True, help="Markdown transcript output path")
     parser.add_argument("--json-output", default=None, help="Optional JSON output path")
     parser.add_argument("--system-prompt-file", default=None, help="Optional file to replace the built-in system prompt")
     parser.add_argument("--seed-note", default=None, help="Extra user guidance to append to the experiment prompt")

@@ -174,13 +174,13 @@ def test_a_pid1_restart_after_a_sighting_drains_claude_code(sweep):
     assert _dispatched(sweep, job_id)
 
 
-def test_an_openclaw_restart_never_drains(sweep):
-    sweep.sql("UPDATE bot_profiles SET agent_backend='openclaw' WHERE slug=:b", b=sweep.bot)
-    turn_id, req = sweep.turn_with("openclaw")
+def test_a_local_bridge_restart_never_drains(sweep):
+    sweep.sql("UPDATE bot_profiles SET agent_backend='local' WHERE slug=:b", b=sweep.bot)
+    turn_id, req = sweep.turn_with("local")
     _job, gate_id = sweep.hold(turn_id)
-    sweep.bridge.answer(req, "running", boot="boot-a", backend="openclaw")
+    sweep.bridge.answer(req, "running", boot="boot-a", backend="local")
     sweep.run_once()
-    sweep.bridge.answer(req, "not_found", boot="boot-b", backend="openclaw")
+    sweep.bridge.answer(req, "not_found", boot="boot-b", backend="local")
     sweep.run_once()
     assert sweep.drain(gate_id)[turn_id] == (False, "no_execution_exit")
 

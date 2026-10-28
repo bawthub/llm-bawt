@@ -1,11 +1,10 @@
 """Claude Code agent backend.
 
 Uses the shared agent-bridge Redis command/event protocol, but routes
-to the claude-code-bridge (Agent SDK) instead of the openclaw-bridge
-(WebSocket gateway).
+to the claude-code-bridge (Claude Agent SDK).
 
 Each user gets their own Claude conversation thread — the session key
-is scoped by user_id (e.g. ``claude-code:main:nick``).
+is scoped by user_id (e.g. ``claude-code:main:<user_id>``).
 """
 
 from __future__ import annotations

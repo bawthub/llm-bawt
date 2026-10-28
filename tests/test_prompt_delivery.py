@@ -494,7 +494,7 @@ def test_prompt_instance_uses_override_without_personal_model_or_client_mutation
     from llm_bawt.clients.agent_backend_client import AgentBackendClient
     from llm_bawt.service.prompt_execution import PromptLLMBawt, create_prompt_instance
     from llm_bawt.service.schemas import ChatCompletionRequest
-    from llm_bawt.service.chat_streaming_bridge import ChatStreamingBridgeMixin
+    from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
     import llm_bawt.core.initialization as initialization
     import copy
 
@@ -530,7 +530,7 @@ def test_prompt_instance_uses_override_without_personal_model_or_client_mutation
     assert instance.config is not config
     assert rig.service._session_model_overrides == {(BOT, OWNER): "personal-model"}
     assert rig.bot.default_model == "first" and rig.bot.endpoint_id == 1
-    binding = ChatStreamingBridgeMixin()._bind_agent_thread(instance, request)
+    binding = BridgeSessionResetMixin()._bind_agent_thread(instance, request)
     assert binding["explicit_thread"] and binding["thread_session_id"] == "automation"
     assert binding["thread_resume_id"] == "sdk-automation"
     assert "thread_session_id" not in instance.client._bot_config

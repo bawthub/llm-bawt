@@ -153,9 +153,6 @@ class BackgroundService(
         from ..approval_policies import ToolApprovalPolicyStore
         self._tool_approval_policy_store = ToolApprovalPolicyStore(config)
 
-        # OpenClaw WS session bridge (set by api.py lifespan if enabled)
-        self._session_bridge: Any | None = None
-
         # Keyed pool of background-task API clients, one per resolved model
         # alias (TASK-281). Replaces the old single reassignable _bg_client slot
         # that thrashed/raced when concurrent background jobs resolved different

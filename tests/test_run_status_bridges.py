@@ -11,9 +11,9 @@ import pytest
 from agent_bridge.run_status import RUN_STATUS_METHOD, RunState, RunStatusReply
 from agent_bridge.session_queue import RequestPhase
 from tests.test_claude_code_send_boundaries import SESSION, _SDKStream, _SendHarness
-from tests.test_other_bridge_abort_targeting import Gateway, abort, make_bridge, send, until
+from tests.test_other_bridge_abort_targeting import abort, make_bridge, send, until
 
-BACKENDS = ["claude-code", "codex", "local", "openclaw"]
+BACKENDS = ["claude-code", "codex", "local"]
 UNSET = object()
 OTHER = "bot:user"  # the session make_bridge's send() uses
 
@@ -21,7 +21,7 @@ OTHER = "bot:user"  # the session make_bridge's send() uses
 def _bridge(kind):
     if kind == "claude-code":
         return _SendHarness()
-    bridge = make_bridge(kind, Gateway() if kind == "openclaw" else None)
+    bridge = make_bridge(kind)
     if kind == "codex":
         # A backend-less RPC makes codex look up bot ownership; claim it so the
         # backend check under test is the only thing that can drop the call.
@@ -147,8 +147,6 @@ def test_run_status_not_addressed_to_this_bridge_is_unanswered(kind, backend):
         task = asyncio.create_task(hold())
         await entered.wait()
         assert await _call(bridge, "r", backend) is None
-        if kind == "openclaw":
-            assert bridge._ws_client.abort_calls == []  # never forwarded to the gateway
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     _run(run())
@@ -173,7 +171,7 @@ def test_claude_real_sends_report_running_then_queued(monkeypatch):
     _run(run())
 
 
-@pytest.mark.parametrize("kind", ["codex", "local", "openclaw"])
+@pytest.mark.parametrize("kind", ["codex", "local"])
 def test_a_real_send_behind_another_reports_queued(kind):
     async def run():
         bridge = _bridge(kind)
@@ -195,25 +193,6 @@ def test_a_real_send_behind_another_reports_queued(kind):
         assert await _state(bridge, "queued", kind, OTHER) is RunState.TOMBSTONED
         gate.set()
         await active
-    _run(run())
-
-
-def test_openclaw_is_stopping_while_its_gateway_abort_is_pending():
-    async def run():
-        bridge = _bridge("openclaw")
-        ws = bridge._ws_client
-        redis = SimpleNamespace(xack=AsyncMock())
-        task = asyncio.create_task(send(bridge, "active", redis))
-        await until(lambda: bridge._request_runs.get((OTHER, "active"), {}).get("run_id"))
-        assert await _state(bridge, "active", "openclaw", OTHER) is RunState.RUNNING
-        rpc = asyncio.create_task(abort(bridge, "active", redis))
-        await ws.abort_started.wait()
-        assert await _state(bridge, "active", "openclaw", OTHER) is RunState.STOPPING
-        ws.abort_release.set()
-        await rpc
-        ws.release.set()
-        await asyncio.gather(task, return_exceptions=True)
-        assert await _state(bridge, "active", "openclaw", OTHER) is RunState.TOMBSTONED
     _run(run())
 
 

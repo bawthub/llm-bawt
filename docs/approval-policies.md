@@ -14,7 +14,7 @@ The pure matcher is `agent_bridge/approval.py`.
   second bridge gate.
 - Claude Code native tools and external MCP tools use the PreToolUse bridge gate
   (and the equivalent permission callback when applicable).
-- Codex, OpenClaw and direct clients do **not** enforce this layer on their native
+- Codex and direct clients do **not** enforce this layer on their native
   tools. Calling the first-party MCP server still reaches its server gate.
 - AskUserQuestion uses its separate interactive-question path, not this gate.
 

@@ -153,17 +153,6 @@ CREDENTIAL_INTEGRATIONS: dict[str, CredentialIntegration] = {
             bawthub_readable=False,
             keeps_disconnected_record=True,
         ),
-        # Read by llm-bawt in-process and by the openclaw-bridge through the
-        # bridge-gated connection route; both fall back to the legacy env
-        # token while no record exists.
-        CredentialIntegration(
-            id="openclaw",
-            label="OpenClaw gateway",
-            description="Bearer token for your OpenClaw gateway, used by OpenClaw bots.",
-            fields=(CredentialField("token", "Gateway token", "secret"),),
-            bawthub_readable=False,
-            keeps_disconnected_record=True,
-        ),
         CredentialIntegration(
             id="talk-provisioner",
             label="Nextcloud Talk provisioner",

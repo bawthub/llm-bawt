@@ -133,7 +133,7 @@ class RuntimeTunables(BaseModel):
     TOP_P: float = Field(default=0.95, description="Nucleus sampling cutoff. Lower = less random.")
 
     # --- Agent Behavior --- #
-    AGENT_GLOBAL_PROMPT_ENABLED: bool = Field(default=False, description="For agent backends (Claude Code, Codex, OpenClaw): inject the shared 'agents.global_prompt' dynamic prompt into the system prompt (steers planning to the BawtHub task system instead of harness plan mode). Opt-in per bot.")
+    AGENT_GLOBAL_PROMPT_ENABLED: bool = Field(default=False, description="For agent backends (Claude Code, Codex): inject the shared 'agents.global_prompt' dynamic prompt into the system prompt (steers planning to the BawtHub task system instead of harness plan mode). Opt-in per bot.")
 
 
 # Map of runtime settings key -> RuntimeTunables field name (trivial: just uppercase)
@@ -272,33 +272,11 @@ class Config(RuntimeTunables, BaseSettings):
         ),
     )
 
-    # --- OpenClaw Settings --- #
-    OPENCLAW_GATEWAY_TOKEN: str = Field(
-        default="",
-        description="Bearer token for OpenClaw gateway (used by bridge)",
-    )
-    OPENCLAW_WS_ENABLED: bool = Field(
-        default=False,
-        description="Enable OpenClaw integration via bridge",
-    )
-    OPENCLAW_WS_URL: str = Field(
-        default="",
-        description="OpenClaw gateway WebSocket URL (e.g. ws://gateway-host:18789/v1/ws). Empty = bridge disabled.",
-    )
+    # --- Agent Bridge Transport --- #
     REDIS_URL: str = Field(
         default="",
         description="Redis URL for bridge command/event transport (e.g. redis://redis:6379/0)",
     )
-    # Deprecated: kept for env file compat, silently ignored
-    OPENCLAW_GATEWAY_URL: str = Field(default="", exclude=True)
-    OPENCLAW_AGENT_ID: str = Field(default="main", exclude=True)
-    OPENCLAW_STREAM_ENABLED: bool = Field(default=True, exclude=True)
-    OPENCLAW_USE_SSH_FALLBACK: bool = Field(default=False, exclude=True)
-    OPENCLAW_MODE: str = Field(default="ws_bridge", exclude=True)
-    OPENCLAW_WS_RECONNECT_MAX_DELAY: int = Field(default=60, exclude=True)
-    OPENCLAW_INGEST_DROP_PATTERNS: str = Field(default="", exclude=True)
-    OPENCLAW_INGEST_DROP_EVENTS: str = Field(default="", exclude=True)
-    OPENCLAW_INGEST_DROP_MSG_TYPES: str = Field(default="", exclude=True)
 
     # --- Agent Task API Settings --- #
     TASK_API_URL: str = Field(

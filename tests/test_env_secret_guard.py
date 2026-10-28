@@ -57,7 +57,6 @@ PENDING_RETIREMENT: dict[str, str] = {
     "LLM_BAWT_S3_ACCESS_KEY": "TASK-1476: object-store connection is record-first",
     "LLM_BAWT_S3_SECRET_KEY": "TASK-1476: object-store connection is record-first",
     # Still env-only; each needs a DB home first.
-    "OPENCLAW_GATEWAY_TOKEN": "TASK-1476: legacy fallback only; drop from compose once the OpenClaw record is saved",
     "CRAWL4AI_API_TOKEN": "TASK-1476: the crawl4ai container needs it at boot",
     "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1476: Reddit search credentials have no connection yet",
     "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1476: talk provisioner token has no connection yet",
@@ -143,13 +142,13 @@ def test_the_guard_scans_the_shipped_files():
 
 @pytest.mark.parametrize(("name", "shaped"), [
     ("LLM_BAWT_BRAVE_API_KEY", True),
-    ("OPENCLAW_GATEWAY_TOKEN", True),
+    ("EXAMPLE_GATEWAY_TOKEN", True),
     ("LLM_BAWT_S3_SECRET_KEY", True),
     ("REDDIT_CLIENT_SECRET", True),
     ("POSTGRES_PASSWORD", True),
     ("BAWTHUB_SERVICE_TOKEN_FILE", False),
     ("BAWTHUB_SERVICE_TOKEN_EXPORT_UID", False),
-    ("OPENCLAW_GATEWAY_TOKEN_ENV", False),
+    ("EXAMPLE_GATEWAY_TOKEN_ENV", False),
     ("CLAUDE_USAGE_CREDENTIALS_PATH", False),
     ("CLAUDE_USAGE_CREDENTIALS_MODE", False),
     ("GIT_CONFIG_KEY_0", False),

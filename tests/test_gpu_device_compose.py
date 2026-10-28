@@ -27,6 +27,6 @@ def test_local_model_gpu_uses_native_cdi_without_legacy_hook() -> None:
 def test_cdi_does_not_grant_gpu_to_app_or_agent_bridges() -> None:
     services = yaml.safe_load(COMPOSE.read_text())["services"]
 
-    for name in ("app", "claude-code-bridge", "openclaw-bridge", "codex-bridge"):
+    for name in ("app", "claude-code-bridge", "codex-bridge"):
         assert not services[name].get("devices"), name
         assert not services[name].get("gpus"), name

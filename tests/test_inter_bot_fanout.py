@@ -326,7 +326,7 @@ def test_a_batch_whose_targets_all_fail_differently_lists_each(user_batch):
 
 
 def test_a_selector_that_matches_nothing_is_a_422(user_batch):
-    response = _user_batch(targets={"backends": ["openclaw"]})
+    response = _user_batch(targets={"backends": ["no-such-backend"]})
     assert response.status_code == 422
     assert response.json()["detail"]["error"] == "no_targets"
 

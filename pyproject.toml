@@ -27,7 +27,7 @@ dependencies = [
     "textual-dev>=1.5.0",
     "pyperclip>=1.8.0",
     "ipython>=8.0.0",
-    # OpenClaw WS bridge
+    # WebSocket client (ChatGPT transport in the claude-code proxy)
     "websockets>=13.0",
     # Redis (shared agent-bridge transport: events, commands, fanout)
     "redis[hiredis]>=5.0.0",
@@ -120,7 +120,6 @@ llm-service = "llm_bawt.service.server:main"
 llm-memory = "llm_bawt.memory_debug:main"
 llm-mcp-server = "llm_bawt.mcp_server:run_server"
 llm-nextcloud = "llm_bawt.integrations.nextcloud.cli:nextcloud_cli"
-openclaw-bridge = "openclaw_bridge.__main__:main"
 claude-code-bridge = "claude_code_bridge.__main__:main"
 codex-bridge = "codex_bridge.__main__:main"
 
@@ -128,7 +127,6 @@ codex-bridge = "codex_bridge.__main__:main"
 postgresql = "llm_bawt.memory.postgresql:PostgreSQLMemoryBackend"
 
 [project.entry-points."llm_bawt.agent_backends"]
-openclaw = "llm_bawt.agent_backends.openclaw:OpenClawBackend"
 claude-code = "llm_bawt.agent_backends.claude_code:ClaudeCodeBackend"
 codex = "llm_bawt.agent_backends.codex:CodexBackend"
 

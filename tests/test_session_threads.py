@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_bawt.service.chat_streaming_bridge import ChatStreamingBridgeMixin
+from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -32,7 +32,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────
 
-class _Bridge(ChatStreamingBridgeMixin):
+class _Bridge(BridgeSessionResetMixin):
     """Bare mixin host recording _rotate_chat_session calls."""
 
     def __init__(self, rotate_result: bool = True):
@@ -120,13 +120,13 @@ def test_chat_new_refuses_false_confirmation_and_follow_up(monkeypatch, command)
 
 class TestChatRotation:
     def test_no_backend_returns_false_for_legacy_fallback(self):
-        b = ChatStreamingBridgeMixin()
+        b = BridgeSessionResetMixin()
         assert b._rotate_chat_session(_llm(backend=None), "nova",
                                       working_memory_mode="pinned") is None  # TASK-257: falsy, not False
 
     def test_rotate_failure_returns_false(self):
         backend = SimpleNamespace(rotate_session=lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom")))
-        b = ChatStreamingBridgeMixin()
+        b = BridgeSessionResetMixin()
         assert b._rotate_chat_session(_llm(backend=backend), "nova",
                                       working_memory_mode="pinned") is None  # TASK-257: falsy, not False
 
@@ -141,7 +141,7 @@ class TestChatRotation:
             SimpleNamespace(role="summary", content="s"),
             SimpleNamespace(role="assistant", content="b"),
         ]
-        b = ChatStreamingBridgeMixin()
+        b = BridgeSessionResetMixin()
         assert b._rotate_chat_session(
             llm, "nova", working_memory_mode="suppressed",
         ) == "new-session-id"  # TASK-257: returns the new id
@@ -153,7 +153,7 @@ class TestChatRotation:
     def test_keyed_rotation_defers_switch_event_to_receipt_outbox(self, monkeypatch, key):
         events = []
         backend = SimpleNamespace(user_id="owner", rotate_session=lambda **_kw: "successor")
-        bridge = ChatStreamingBridgeMixin()
+        bridge = BridgeSessionResetMixin()
         monkeypatch.setattr(bridge, "_publish_thread_switched",
                             lambda *args, **kwargs: events.append((args, kwargs)))
         for _ in range(2):
@@ -179,7 +179,6 @@ class TestNewDetectionParity:
         "claude_code_bridge/send_preflight.py",
         "claude_code_bridge/session_ops.py",
         "codex_bridge/command_ops.py",
-        "openclaw_bridge/bridge.py",
     ]
 
     @pytest.mark.parametrize("rel", SITES)

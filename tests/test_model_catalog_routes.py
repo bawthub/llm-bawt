@@ -183,7 +183,6 @@ def test_access_paths_unfiltered_lists_every_row_with_a_connection():
 
 
 @pytest.mark.parametrize(("harness", "agent_backend", "message"), [
-    (None, "openclaw", "Unknown agent_backend"),
     (None, "nope", "Unknown agent_backend"),
     ("claude-code", "claude-code", "not both"),
 ])

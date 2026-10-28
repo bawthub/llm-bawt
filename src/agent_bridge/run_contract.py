@@ -24,7 +24,7 @@ and not every path publishes one. The sentinel's stream fields are
 
 * ``true``: every process the run spawned was reaped (claude-code: the CLI and
   its known descendants; codex: each per-turn ``codex`` subprocess). For a
-  bridge whose run spawns no process (openclaw, local-model), the run task and
+  bridge whose run spawns no process (local-model), the run task and
   any worker it started have finished.
 * ``false``: teardown ran and something survived, or a cancelled run's work
   could not be shown to have stopped.
@@ -40,8 +40,8 @@ ran there and ``exited`` is ``true``. That rests on two delivery facts (Vex
 r2 N1): a request id's ``chat.send`` is published once per dedupe window
 (``command_publisher.command_dedupe_ttl_s``), and bridges read commands with
 ``">"`` only, so a send published before a restart never reaches the new
-process. If either broke, a republished send refused by a new openclaw bridge
-could mark a run the gateway still holds as exited. No consumer reads ``disconnect`` as
+process. If either broke, a republished send refused by a new bridge process
+could mark as exited a run that an earlier process still holds. No consumer reads ``disconnect`` as
 success or failure; only ``exited`` is evidence.
 
 Only ``exited is True`` is evidence that execution stopped

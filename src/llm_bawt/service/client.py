@@ -289,7 +289,7 @@ class ServiceClient:
                 return self._stream_chat_completion(payload)
             else:
                 # Use a long timeout for chat completions — agent-backend
-                # turns (claude-code, openclaw) routinely take 30–90s.  The
+                # turns (claude-code, codex) routinely take 30–90s.  The
                 # default self.timeout (5s) is only appropriate for cheap
                 # admin/list endpoints.
                 response = self._request(

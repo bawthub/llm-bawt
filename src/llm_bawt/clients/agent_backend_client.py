@@ -1,11 +1,11 @@
-"""LLM client shell for agent backends (e.g. OpenClaw).
+"""LLM client shell for agent backends (e.g. Claude Code, Codex).
 
 This wraps an :class:`AgentBackend` as a standard :class:`LLMClient` so that
 the entire pipeline (history, memory, extraction, summarization, tool-call
 SSE events) flows through the normal ``ServiceLLMBawt`` path.
 
 The model alias for these virtual models is the backend name itself
-(e.g. ``openclaw``).  A synthetic model definition with
+(e.g. ``claude-code``).  A synthetic model definition with
 ``type: "agent_backend"`` is injected into ``config.defined_models`` at
 service startup for each bot that declares ``agent_backend``.
 """
@@ -277,7 +277,7 @@ class AgentBackendClient(LLMClient):
         if hasattr(self._backend, "stream_raw"):
             backend_kwargs: dict[str, Any] = {"attachments": attachments}
             # Only forward trigger_message_id to backends that accept it
-            # (OpenClaw + subclasses do; older custom backends may not).
+            # (AgentBridgeBackend subclasses do; custom backends may not).
             try:
                 import inspect
                 sig = inspect.signature(self._backend.stream_raw)

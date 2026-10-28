@@ -106,7 +106,7 @@ def _normalize_tool_call_details(tool_calls: list[dict] | None) -> list[dict]:
         if item.get("text_offset") is not None:
             entry["text_offset"] = item["text_offset"]
         # Backend that produced this tool call ("codex", "claude-code",
-        # "openclaw"). Persisted so /v1/tool-calls recall can re-route to
+        # "local"). Persisted so /v1/tool-calls recall can re-route to
         # the frontend's provider-aware renderer registry
         # (FileChangeBody / BashBody / …). Without this, codex turns
         # rehydrate from the DB without provider and the registry never
@@ -337,7 +337,7 @@ class TurnLifecycleMixin:
         for tc in llm_bawt.client.get_tool_calls():
             result_payload = tc.get("result")
             if result_payload is None:
-                result_payload = "Result not exposed by OpenClaw API (see assistant response)."
+                result_payload = "Result not exposed by backend (see assistant response)."
             entry = {
                     "iteration": 1,
                     "tool": tc.get("display_name") or tc.get("name", "unknown"),
@@ -418,7 +418,7 @@ class TurnLifecycleMixin:
             # Streaming-captured calls have call_id for reliable dedup; extracted
             # calls from the agent backend API may lack it.
             tool_call_details.extend(extracted_tool_calls)
-            # For agent backends (e.g. OpenClaw), tools execute remotely so
+            # For agent backends (e.g. Claude Code), tools execute remotely so
             # tool_context is empty.  Synthesize it from the extracted calls
             # so that tool usage is persisted alongside the response.
             if not tool_context:

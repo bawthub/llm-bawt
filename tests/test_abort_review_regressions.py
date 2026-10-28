@@ -62,7 +62,7 @@ def service(store):
     return SimpleNamespace(_turn_log_store=store, config=None, _redis_subscriber=None)
 
 
-@pytest.mark.parametrize("backend", ["codex", "openclaw", "local"])
+@pytest.mark.parametrize("backend", ["codex", "local"])
 def test_claude_does_not_answer_another_bridges_abort(backend):
     bridge = ClaudeCommandMixin()
     bridge._backend_name = "claude-code"

@@ -27,7 +27,7 @@ ROUTER = "traefik.http.routers.frontprod-api"
 RULE = "(Host(`app.bawthub.com`) || Host(`echo.ferreri.us`)) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/clog`))"
 REF = REPO + "@sha256:" + "a" * 64
 REPORT = {"status": "down", "summary": {"ok": 1, "degraded": 0, "down": 1},
-          "checks": [{"slug": "bawthub.database", "status": "ok"}, {"slug": "bridge.openclaw", "status": "down"}]}
+          "checks": [{"slug": "bawthub.database", "status": "ok"}, {"slug": "bridge.codex", "status": "down"}]}
 
 
 class RoutingDocker(FakeDocker):

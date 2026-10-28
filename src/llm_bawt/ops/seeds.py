@@ -141,7 +141,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         "slug": "llm-bawt.restart-bridge",
         "title": "Restart an agent bridge",
         "description": (
-            "Restart claude-code-bridge, openclaw-bridge, or codex-bridge. HIGH "
+            "Restart claude-code-bridge or codex-bridge. HIGH "
             "risk: kills active agent sessions hosted by that bridge. Requires "
             "explicit operator approval each time."
         ),
@@ -158,7 +158,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
             {
                 "bridge": {
                     "type": "string",
-                    "enum": ["claude-code-bridge", "openclaw-bridge", "codex-bridge"],
+                    "enum": ["claude-code-bridge", "codex-bridge"],
                 }
             },
             required=["bridge"],
@@ -175,8 +175,7 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         "quiesce_timeout_seconds": 600,
         "quiesce_scope_json": json.dumps({
             "backend_from_arg": "bridge",
-            "map": {"claude-code-bridge": "claude-code", "openclaw-bridge": "openclaw",
-                    "codex-bridge": "codex"},
+            "map": {"claude-code-bridge": "claude-code", "codex-bridge": "codex"},
         }, sort_keys=True),
     },
     {

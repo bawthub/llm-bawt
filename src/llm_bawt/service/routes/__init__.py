@@ -2,14 +2,13 @@
 
 from .admin_gates import router as admin_gates_router
 from .bawthub_auth_secrets import router as bawthub_auth_secrets_router
-from .internal_connections import bridge_router as internal_bridge_connections_router
 from .internal_connections import router as internal_connections_router
 from .bot_grants import router as bot_grants_router
-from .bot_soul import router as bot_soul_router
 from .bot_tags import router as bot_tags_router
 from .botchat import router as botchat_router
 from .chat import router as chat_router
 from .config import router as config_router
+from .event_stream import router as event_stream_router
 from .health import router as health_router
 from .google_home_probe import router as google_home_probe_router
 from .history import router as history_router
@@ -20,7 +19,6 @@ from .llm import router as llm_router
 from .memory import router as memory_router
 from .models import router as models_router
 from .model_catalog import router as model_catalog_router
-from .openclaw_ws import router as openclaw_ws_router
 from .nextcloud import router as nextcloud_router
 from .nextcloud_setup import router as nextcloud_setup_router
 from .prompts import router as prompts_router
@@ -58,7 +56,7 @@ all_routers = [
     nextcloud_router,
     models_router,
     model_catalog_router,
-    openclaw_ws_router,
+    event_stream_router,
     botchat_router,
     chat_router,
     tasks_router,
@@ -80,7 +78,6 @@ all_routers = [
     nextcloud_setup_router,  # Specific setup routes precede generic integration paths.
     integrations_router,
     settings_router,
-    bot_soul_router,
     bot_tags_router,
     bot_grants_router,
     skills_router,
@@ -97,7 +94,6 @@ all_routers = [
     working_memory_router,
     bawthub_auth_secrets_router,
     internal_connections_router,
-    internal_bridge_connections_router,
     admin_gates_router,
 ]
 

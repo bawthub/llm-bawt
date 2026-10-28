@@ -1,7 +1,7 @@
 """TASK-1232 P1: an RPC is answered only by the backend it addresses.
 
-Before this, a backend-less ``agents.files.*`` call (OpenClaw-only) was also
-answered "unknown method" by claude-code and codex, and ``send_rpc`` returned
+Before this, a backend-less call to a method only one bridge serves was also
+answered "unknown method" by every other bridge, and ``send_rpc`` returned
 whichever reply landed first.
 """
 
@@ -35,11 +35,11 @@ def _bridges():
 
 
 @pytest.mark.parametrize("name", ["claude-code", "codex"])
-@pytest.mark.parametrize("backend", [None, "openclaw"])
+@pytest.mark.parametrize("backend", [None, "local"])
 def test_unknown_method_not_addressed_here_is_left_to_its_owner(name, backend):
     bridge = _bridges()[name]
     redis = MagicMock(xack=AsyncMock())
-    asyncio.run(bridge._handle_rpc(_rpc("agents.files.get", backend), "msg-1", redis))
+    asyncio.run(bridge._handle_rpc(_rpc("other.method", backend), "msg-1", redis))
     bridge._publisher.publish_rpc_result.assert_not_called()
     redis.xack.assert_awaited_once()
 
@@ -48,9 +48,9 @@ def test_unknown_method_not_addressed_here_is_left_to_its_owner(name, backend):
 def test_unknown_method_addressed_here_fails_fast(name):
     bridge = _bridges()[name]
     redis = MagicMock(xack=AsyncMock())
-    asyncio.run(bridge._handle_rpc(_rpc("agents.files.get", name), "msg-1", redis))
+    asyncio.run(bridge._handle_rpc(_rpc("other.method", name), "msg-1", redis))
     bridge._publisher.publish_rpc_result.assert_called_once_with(
-        "rpc-1", {"ok": False, "error": "unknown method: agents.files.get"})
+        "rpc-1", {"ok": False, "error": "unknown method: other.method"})
 
 
 # -- reply identity -------------------------------------------------------
@@ -129,26 +129,26 @@ def _reply(payload, backend=None):
 
 def test_send_rpc_skips_a_foreign_reply_and_returns_the_owners():
     subscriber = _subscriber([
-        ("1-0", _reply({"ok": False, "error": "unknown method: agents.files.get"}, "claude-code")),
-        ("2-0", _reply({"ok": True, "payload": {"content": "soul"}}, "openclaw")),
+        ("1-0", _reply({"ok": False, "error": "unknown method: other.method"}, "claude-code")),
+        ("2-0", _reply({"ok": True, "payload": {"content": "owner"}}, "local")),
     ])
     result = asyncio.run(subscriber.send_rpc(
-        "agents.files.get", {}, "rpc-1", timeout_s=2, backend="openclaw"))
-    assert result == {"ok": True, "payload": {"content": "soul"}}
+        "other.method", {}, "rpc-1", timeout_s=2, backend="local"))
+    assert result == {"ok": True, "payload": {"content": "owner"}}
     sent = subscriber._pub_redis.xadd.call_args.args[1]
-    assert sent["backend"] == "openclaw"
+    assert sent["backend"] == "local"
 
 
 def test_send_rpc_advances_past_foreign_replies_across_reads():
     subscriber = _subscriber([
         ("1-0", _reply({"ok": False}, "codex")),
-        ("2-0", _reply({"ok": True}, "openclaw")),
+        ("2-0", _reply({"ok": True}, "local")),
     ])
     # One entry per read so the cursor must move for the owner's to be seen.
     real = subscriber._redis.xread
     subscriber._redis.xread = lambda streams, count, block: real(streams, 1, block)
     assert asyncio.run(subscriber.send_rpc(
-        "agents.files.get", {}, "rpc-1", timeout_s=2, backend="openclaw")) == {"ok": True}
+        "other.method", {}, "rpc-1", timeout_s=2, backend="local")) == {"ok": True}
     assert subscriber._redis.cursors == ["0-0", "1-0"]
 
 
@@ -156,47 +156,12 @@ def test_send_rpc_times_out_when_only_foreign_replies_arrive():
     subscriber = _subscriber([("1-0", _reply({"ok": False}, "claude-code"))])
     with pytest.raises(TimeoutError):
         asyncio.run(subscriber.send_rpc(
-            "agents.files.get", {}, "rpc-1", timeout_s=0.3, backend="openclaw"))
+            "other.method", {}, "rpc-1", timeout_s=0.3, backend="local"))
 
 
-@pytest.mark.parametrize("backend", [None, "openclaw"])
+@pytest.mark.parametrize("backend", [None, "local"])
 def test_send_rpc_accepts_an_unstamped_reply_from_a_pre_identity_bridge(backend):
     subscriber = _subscriber([("1-0", _reply({"ok": True}))])
     assert asyncio.run(subscriber.send_rpc(
-        "agents.files.get", {}, "rpc-1", timeout_s=2, backend=backend)) == {"ok": True}
+        "other.method", {}, "rpc-1", timeout_s=2, backend=backend)) == {"ok": True}
 
-
-# -- callers ----------------------------------------------------------------
-
-
-def test_soul_push_addresses_openclaw(monkeypatch):
-    from llm_bawt.service.routes import settings
-
-    subscriber = MagicMock(send_rpc=AsyncMock(return_value={"ok": True}))
-    monkeypatch.setattr("llm_bawt.agent_backends.agent_bridge.get_agent_subscriber",
-                        lambda: subscriber)
-    asyncio.run(settings._push_soul_background("bot", "main", "prompt"))
-    assert subscriber.send_rpc.await_args.kwargs["backend"] == "openclaw"
-
-
-@pytest.mark.parametrize("route, method", [("sync_soul", "agents.files.get"),
-                                           ("push_soul", "agents.files.set")])
-def test_soul_routes_address_openclaw(monkeypatch, route, method):
-    from types import SimpleNamespace
-
-    from llm_bawt.service.routes import bot_soul
-
-    profile = SimpleNamespace(agent_backend="openclaw", system_prompt="prompt",
-                              agent_backend_config={"session_key": "agent:main:main"})
-    store = MagicMock(engine=object(), get=MagicMock(return_value=profile))
-    monkeypatch.setattr(bot_soul, "get_service", lambda: SimpleNamespace(config=None))
-    monkeypatch.setattr(bot_soul, "get_bot_profile_store", lambda config: store)
-    subscriber = MagicMock(send_rpc=AsyncMock(side_effect=RuntimeError("stop here")))
-    monkeypatch.setattr("llm_bawt.agent_backends.agent_bridge.get_agent_subscriber",
-                        lambda: subscriber)
-    handler = getattr(bot_soul, route)
-    with pytest.raises(Exception):
-        asyncio.run(handler("bot"))
-    call = subscriber.send_rpc.await_args
-    assert call.kwargs["method"] == method
-    assert call.kwargs["backend"] == "openclaw"

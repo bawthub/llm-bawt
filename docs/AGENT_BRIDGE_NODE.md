@@ -51,7 +51,7 @@ Discover the live ops catalog first. A plain bridge restart **cannot** apply an
 image change. At implementation time the catalog has no build/recreate executor;
 manual host Docker/Compose activation requires explicit approval for that exact
 run. Recreate **only `claude-code-bridge`** for the REA prerequisite. Do not
-restart Redis, app, Codex or OpenClaw. This interrupts the agent running the
+restart Redis, app or Codex. This interrupts the agent running the
 operation, so save the receipt/task state and explain the handoff before running
 it. Do not create a delayed background restart script.
 
@@ -75,7 +75,7 @@ docker tag VERIFIED_CANDIDATE_IMAGE_ID llm-bawt-agent-bridge:latest
 docker compose up -d --no-deps --no-build --force-recreate claude-code-bridge
 ```
 
-All three bridges share the image tag, but running Codex/OpenClaw containers keep
+Both bridges share the image tag, but a running Codex container keeps
 their old image until explicitly recreated. Updating the tag affects subsequent
 recreates: report that remaining rollout scope rather than claiming every bridge
 is upgraded. No git commit/push is implied by image activation.

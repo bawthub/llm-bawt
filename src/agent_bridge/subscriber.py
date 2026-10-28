@@ -1,7 +1,6 @@
 """Redis Streams subscriber — consumer side counterpart to RedisPublisher.
 
-Used by the main app to read events from Redis Streams instead of
-the in-memory FanoutHub.
+Used by the main app to read agent events from Redis Streams.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from .steer_contract import FRAMED_MESSAGE_FIELD, INTERRUPT_FRAME_FIELD, INTERRU
 from .ui_stream import LEGACY_UI_GROUP_PREFIX, UiStreamReader, unified_stream_keys
 from .publisher import (
     COMMANDS_STREAM,
-    EVENTS_STREAM_PREFIX,
     HISTORY_STREAM,
     RUN_STREAM_PREFIX,
     UNIFIED_EVENTS_PREFIX,
@@ -67,7 +65,7 @@ class RedisSubscriber(CommandPublisherMixin):
         # would raise "Timeout reading from redis". Keep reads unbounded and
         # bound only the initial connect.
         # Stash the URL so long-lived holders (e.g. the SSE endpoint) can spin
-        # up their own dedicated client per connection — see openclaw_ws.py.
+        # up their own dedicated client per connection — see event_stream.py.
         self._redis_url = redis_url
         self._redis = aioredis.from_url(
             redis_url,
@@ -113,62 +111,6 @@ class RedisSubscriber(CommandPublisherMixin):
             logger.info("Redis subscriber connected")
         except Exception as e:
             logger.error("Redis subscriber connect failed: %s", e)
-
-    async def subscribe(
-        self,
-        session_key: str,
-        *,
-        run_id: str | None = None,
-        timeout_s: float = 300,
-    ) -> AsyncIterator[AgentEvent]:
-        """Stream events for a session from Redis Streams.
-
-        If run_id is provided, yields events until RUN_COMPLETED for that run,
-        then stops. Otherwise streams indefinitely until cancelled.
-        """
-        stream_key = f"{EVENTS_STREAM_PREFIX}{session_key}"
-        last_id = "$"  # only new events
-        deadline = asyncio.get_event_loop().time() + timeout_s
-
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                return
-
-            # XREAD with block (in ms), max 1s blocks to allow timeout checks
-            block_ms = min(int(remaining * 1000), 1000)
-            try:
-                results = await self._redis.xread(
-                    {stream_key: last_id},
-                    count=100,
-                    block=block_ms,
-                )
-            except Exception:
-                logger.exception("Redis XREAD error on %s", stream_key)
-                await asyncio.sleep(1)
-                continue
-
-            if not results:
-                continue
-
-            for _stream_name, messages in results:
-                for msg_id, fields in messages:
-                    last_id = msg_id
-                    payload_str = fields.get("payload", "{}")
-                    try:
-                        data = json.loads(payload_str)
-                        event = AgentEvent.from_dict(data)
-                    except Exception:
-                        logger.debug("Failed to parse event from Redis: %s", payload_str[:200])
-                        continue
-
-                    yield event
-
-                    # If tracking a specific run, stop on completion
-                    if run_id and event.run_id == run_id:
-                        from .events import AgentEventKind
-                        if event.kind in (AgentEventKind.RUN_COMPLETED, AgentEventKind.ERROR):
-                            return
 
     async def send_steer(
         self,

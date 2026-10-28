@@ -1,10 +1,9 @@
 # ── Shared agent-bridge image ────────────────────────────────────────────
-# Every harness bridge (openclaw / claude-code / codex) runs the SAME image,
+# Every harness bridge (claude-code / codex) runs the SAME image,
 # built from Dockerfile.agent-bridge. The build + image name live here ONCE and
 # are merged into each bridge service via `<<: *agent-bridge-image`, so:
 #   • the image name is defined in a single place (no drift), and
-#   • `docker compose build|up --build <any-bridge>` actually rebuilds it —
-#     no more "the build is secretly only on openclaw-bridge" footgun.
+#   • `docker compose build|up --build <any-bridge>` actually rebuilds it.
 # NOTE: local-model-bridge is deliberately NOT part of this — it needs the GPU
 # `Dockerfile` (torch/vllm/llama-cpp), not this slim CPU image.
 x-agent-bridge-image: &agent-bridge-image
@@ -152,46 +151,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-
-  openclaw-bridge:
-    <<: *agent-bridge-image
-    container_name: llm-bawt-openclaw-bridge
-    command: ["python", "-m", "openclaw_bridge"]
-    env_file:
-      - ./.env
-    environment:
-      - OPENCLAW_WS_URL=${OPENCLAW_WS_URL:-}
-      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
-      - OPENCLAW_BRIDGE_LOG_LEVEL=${OPENCLAW_BRIDGE_LOG_LEVEL:-INFO}
-      - LLM_BAWT_API_URL=http://app:8642
-      # Override SERVICE_HOST inherited from .env (which is 0.0.0.0 — meant
-      # for the app container's bind address). From inside a bridge, the
-      # service is reachable at the compose service name `app`. This lets
-      # the editable `llm` CLI (installed via uv tool in Dockerfile.agent-bridge)
-      # talk to the API without a flag override.
-      - LLM_BAWT_SERVICE_HOST=app
-      - REDIS_URL=redis://redis:6379/0
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-      - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-      - "echo:${ECHO_LAN_HOST_IP:-10.0.0.101}"
-    volumes:
-      - ./.logs:/app/.logs
-      - ${HOME}/.config/llm-bawt:/home/bridge/.config/llm-bawt
-      # Shared agent scripts (bw-secret etc.) — live, no rebuild needed
-      - ${HOME}/dev/agent-skills/scripts:/opt/agent-skills/bin:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-      app:
-        condition: service_started
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8680/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
   claude-code-bridge:
     <<: *agent-bridge-image

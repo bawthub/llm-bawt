@@ -57,7 +57,7 @@ def test_pinned_backend_note_names_session_boundary(monkeypatch, backend: str) -
 @pytest.mark.parametrize(
     "profile",
     [
-        {"bot_type": "agent", "agent_backend": "openclaw"},
+        {"bot_type": "agent", "agent_backend": "local"},
         {"bot_type": "chat"},
         {"bot_type": "agent", "agent_backend": "no-such-backend"},
     ],

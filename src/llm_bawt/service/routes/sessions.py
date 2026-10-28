@@ -212,7 +212,7 @@ def resolve_agent_session_key(
     transcripts are model-agnostic, so Claude model metadata is informational
     and never blocks resume. Other backends retain their existing model guard.
 
-    A value containing ``:`` is a routing key (openclaw / legacy bug), never an
+    A value containing ``:`` is a routing key (legacy bug), never an
     SDK session id.
     """
     meta = meta or {}
@@ -584,7 +584,7 @@ async def put_agent_session_key(
     if not backend or not session_key:
         raise HTTPException(status_code=422, detail="backend and session_key required")
     if ":" in session_key:
-        # Routing keys (openclaw "agent:main:main", legacy "bot:user") are
+        # Routing keys ("agent:main:main", legacy "bot:user") are
         # never SDK session ids — refuse rather than poison the thread.
         raise HTTPException(status_code=422, detail="session_key looks like a routing key")
 

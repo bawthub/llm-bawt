@@ -190,8 +190,8 @@ archived predecessor; clean mode sends an explicit empty seed. Duplicate
 idempotency keys perform at most one rotation.
 
 Backend capability is explicit: Claude Code/proxy-routed OpenAI supports both
-reset modes; native Codex currently supports only clean reset; OpenClaw supports
-neither. `reset_session_before_delivery`/`retain_history` are compatibility
+reset modes; native Codex currently supports only clean reset; any other
+backend supports neither. `reset_session_before_delivery`/`retain_history` are compatibility
 inputs and contradictory combinations fail. At critical context health, an
 otherwise-`continue` durable send may be automatically escalated by per-bot
 runtime policy. See [AGENT_CONTEXT_CONTROL.md](AGENT_CONTEXT_CONTROL.md).
@@ -214,7 +214,7 @@ delivery rather than an untracked rejection, and the enqueue call returns 404 or
 
 Each delivery also owns a deterministic `req_delivery_*` bridge request ID. The
 shared Redis command publisher atomically deduplicates request IDs across Claude
-Code, Codex, and OpenClaw. A retry either publishes once or reattaches to the
+Code and Codex. A retry either publishes once or reattaches to the
 same `agent:run:*` stream, while stable user-message/turn IDs make llm-bawt
 history and turn creation idempotent. Durable command/run keys use a seven-day
 sliding retention window. Within that bounded recovery window, retries and app
@@ -235,8 +235,8 @@ stolen by a second process:
   the same turn/message/bridge request IDs;
 - exhausted attempts -> `FAILED` dead letter.
 
-Durable mode is capability-gated to Redis-backed Claude Code, Codex, and OpenClaw
-agent harnesses. Local/chat backends are recorded as inspectable `FAILED`
+Durable mode is capability-gated to Redis-backed Claude Code and Codex agent
+harnesses. Local/chat backends are recorded as inspectable `FAILED`
 deliveries because their tool side effects cannot be safely reattached after an
 ambiguous process failure.
 

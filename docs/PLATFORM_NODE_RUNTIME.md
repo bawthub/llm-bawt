@@ -48,10 +48,9 @@ that installation. Distro packages remain untouched: removing them would remove
 `/var/lib/llm-bawt/runtime-backups/TASK-1062-<UTC timestamp>/` (including an absent
 command manifest). Do not remove distro Node as cosmetic cleanup.
 
-Ubuntu's `openclaw-gateway` user unit now starts `/usr/local/bin/node`; its actual
-running executable resolves into `/opt/node-v24.21.0`. A unit restart was explicitly
-authorized during this rollout. Future gateway/bridge interruptions still need
-their own authorization.
+At the time of this rollout, Ubuntu's `openclaw-gateway` user unit was switched to
+`/usr/local/bin/node` under an explicitly authorized unit restart. That gateway and
+its bridge were retired on 2026-10-28 (TASK-1439).
 
 ## Image rollback identities
 

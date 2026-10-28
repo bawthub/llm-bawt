@@ -55,7 +55,7 @@ PROMPT_MANIFEST: tuple[SectionSpec, ...] = (
     SectionSpec("base_prompt", STABLE, "_sec_base_prompt"),
     SectionSpec("global_instructions", STABLE, "_sec_global_instructions"),
     # --- per-turn (rides the copy) ---
-    # Native agent harnesses (Claude Code, Codex, OpenClaw) own their tool
+    # Native agent harnesses (Claude Code, Codex) own their tool
     # schemas and calling protocol. App-side tool prompts are chat-only; injecting
     # them into an agent system prompt duplicates and contradicts the harness.
     SectionSpec("tools", PER_TURN, "_sec_tools", applies_to=("chat",)),

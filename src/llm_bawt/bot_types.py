@@ -6,7 +6,7 @@ from typing import Any
 
 # Harnesses with a durable bridge session: they support queued/steered
 # delivery, so ordinary starts must go through the shared delivery outbox.
-DURABLE_AGENT_HARNESSES = frozenset({"claude-code", "codex", "openclaw"})
+DURABLE_AGENT_HARNESSES = frozenset({"claude-code", "codex"})
 
 
 def durable_agent_backend(bot: Any) -> str | None:

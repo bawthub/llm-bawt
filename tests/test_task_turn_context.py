@@ -44,7 +44,7 @@ def test_round_trip_preserves_all_trusted_identifiers(fernet: Fernet) -> None:
 def test_first_party_agent_backends_support_task_turn_context() -> None:
     assert codec.backend_supports_task_turn_context("claude-code") is True
     assert codec.backend_supports_task_turn_context("codex") is True
-    assert codec.backend_supports_task_turn_context("openclaw") is False
+    assert codec.backend_supports_task_turn_context("local") is False
 
 
 def test_invalid_or_missing_capability_fails_closed(fernet: Fernet) -> None:

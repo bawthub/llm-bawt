@@ -113,7 +113,7 @@ def test_request_cancel_rpc_never_uses_session_wide_abort():
     })
 
 
-@pytest.mark.parametrize("backend", ["claude-code", "openclaw"])
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
 def test_app_timeout_cancels_only_supported_request_and_preserves_error(monkeypatch, backend):
     from agent_bridge import subscriber as transport
 

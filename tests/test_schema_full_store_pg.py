@@ -194,12 +194,22 @@ def test_upgrade_synthetic_legacy_converges(full_store_db, tmp_path, monkeypatch
 
     from llm_bawt.runtime_settings import BotProfile
 
+    # The pristine store has no catalog endpoint to bind, and every harness
+    # requires one, so the legacy NULL row is planted with the endpoint
+    # trigger paused for this one insert. Re-enabling needs its own transaction:
+    # the insert leaves deferred trigger events that block ALTER TABLE.
     with engine.begin() as conn:
-        conn.execute(BotProfile.__table__.insert().values(
-            slug="synthetic-null-preflight", name="Synthetic", description="",
-            system_prompt="Synthetic", harness="openclaw", tts_mode=None,
-            created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
-        ))
+        conn.exec_driver_sql("ALTER TABLE public.bot_profiles DISABLE TRIGGER bot_profiles_model_endpoint_check")
+    try:
+        with engine.begin() as conn:
+            conn.execute(BotProfile.__table__.insert().values(
+                slug="synthetic-null-preflight", name="Synthetic", description="",
+                system_prompt="Synthetic", harness="chat", tts_mode=None,
+                created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            ))
+    finally:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("ALTER TABLE public.bot_profiles ENABLE TRIGGER bot_profiles_model_endpoint_check")
     with pytest.raises(RuntimeError, match="tts_mode contains NULL"):
         upgrade_shared_schema(engine, expected_db=config.POSTGRES_DATABASE)
     assert tool["compare"](before, capture("rejected-null-before")) == []

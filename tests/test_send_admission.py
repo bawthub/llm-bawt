@@ -240,7 +240,7 @@ def test_claude_host_shutdown_cancels_a_preflight_send():
 
 # -- Other bridges ----------------------------------------------------------
 
-OTHER = ["codex", "local", "openclaw"]
+OTHER = ["codex", "local"]
 
 
 def _xacks(redis, msg_id):
@@ -253,7 +253,6 @@ def test_other_bridge_tombstoned_send_is_refused_without_side_effects(kind, mess
     async def run():
         bridge = make_bridge(kind)
         bridge._publish_session_reset_unified = MagicMock()
-        bridge._reset_openclaw_session = AsyncMock(return_value=True)
         redis = SimpleNamespace(xack=AsyncMock())
         assert (await abort(bridge, "r1", redis))["state"] == "tombstoned"
         await send(bridge, "r1", redis, message=message)
@@ -261,76 +260,9 @@ def test_other_bridge_tombstoned_send_is_refused_without_side_effects(kind, mess
         bridge._publisher.publish_run_accepted.assert_not_called()
         assert _xacks(redis, "r1") == 1
         bridge._publish_session_reset_unified.assert_not_called()
-        bridge._reset_openclaw_session.assert_not_awaited()
         assert not bridge._publisher.publish_run_event.called
-        if kind != "openclaw":
-            bridge._publish_event.assert_not_called()
+        bridge._publish_event.assert_not_called()
         assert ("bot:user", "r1") not in bridge._session_queue._request_tasks
-    asyncio.run(asyncio.wait_for(run(), timeout=5))
-
-
-@pytest.mark.parametrize("message", ["/new", "/new do it"])
-def test_openclaw_stop_during_new_reset_publishes_one_terminal(message):
-    async def run():
-        bridge = make_bridge("openclaw")
-        bridge._publish_session_reset_unified = MagicMock()
-        bridge._discard_changed_file_request = MagicMock()
-        entered = asyncio.Event()
-
-        async def reset(session_key):
-            entered.set()
-            await asyncio.Event().wait()
-
-        bridge._reset_openclaw_session = AsyncMock(side_effect=reset)
-        redis = SimpleNamespace(xack=AsyncMock())
-        task = asyncio.create_task(send(bridge, "r1", redis, message=message))
-        await entered.wait()
-        assert bridge._session_queue.request_phase("bot:user", "r1") is RequestPhase.PREFLIGHT
-        assert (await abort(bridge, "r1", redis))["state"] == "cancelled"
-        await asyncio.gather(task, return_exceptions=True)
-        assert task.cancelled()
-        # Stopped in preflight: the gateway never started a run for it.
-        bridge._publisher.publish_run_done.assert_called_once_with(
-            "r1", teardown=TeardownReport(exited=True))
-        assert _xacks(redis, "r1") == 1
-        assert not bridge._publisher.publish_run_event.called
-        assert ("bot:user", "r1") not in bridge._session_queue._request_tasks
-    asyncio.run(asyncio.wait_for(run(), timeout=5))
-
-
-@pytest.mark.parametrize("unavailable_run_id", [False, True])
-def test_openclaw_failed_abort_of_a_running_request_still_tombstones(unavailable_run_id):
-    """The Stop is recorded even when the gateway abort fails (bridge
-    ``_abort_request`` tombstones before reading run state)."""
-    from tests.test_other_bridge_abort_targeting import Gateway
-
-    async def run():
-        ws = Gateway()
-        ws.no_events = unavailable_run_id
-        if unavailable_run_id:
-            ws.send_ack.clear()
-        ws.rejected = True
-        ws.abort_release.set()
-        bridge = make_bridge("openclaw", ws)
-        bridge._abort_run_id_timeout_s = 0.01
-        bridge._wait_for_history_reply = AsyncMock(return_value=None)
-        redis = SimpleNamespace(xack=AsyncMock())
-        task = asyncio.create_task(send(bridge, "active", redis))
-        await ws.started.wait()
-        assert ("bot:user", "active") in bridge._request_runs
-        assert (await abort(bridge, "active", redis))["state"] == "error"
-        assert bridge._session_queue.is_tombstoned("bot:user", "active")
-        ws.send_ack.set()
-        ws.release.set()
-        await task
-        ws.started.clear()
-        run_dones = bridge._publisher.publish_run_done.call_count
-        await send(bridge, "active", redis, message="hello again")
-        assert not ws.started.is_set()
-        assert bridge._publisher.publish_run_done.call_count == run_dones + 1
-        # This process accepted "active" before: the refusal proves nothing.
-        assert bridge._publisher.publish_run_done.call_args.kwargs == {"teardown": UNATTEMPTED}
-        assert ("bot:user", "active") not in bridge._session_queue._request_tasks
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 

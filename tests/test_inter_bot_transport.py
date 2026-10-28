@@ -137,7 +137,7 @@ def test_session_policy_normalization_and_capabilities():
     assert codex.reset_retain_history and codex.reset_without_history
     validate_session_policy("codex", SessionPolicy.RESET_RETAIN_HISTORY)
     with pytest.raises(ValueError, match="does not support"):
-        validate_session_policy("openclaw", SessionPolicy.RESET_WITHOUT_HISTORY)
+        validate_session_policy("local", SessionPolicy.RESET_WITHOUT_HISTORY)
 
     selected, reason = preventive_session_policy(
         requested=SessionPolicy.CONTINUE,
@@ -160,7 +160,7 @@ def test_session_policy_normalization_and_capabilities():
         requested=SessionPolicy.CONTINUE,
         health_state="critical",
         configured_critical_policy="reset_retain_history",
-        backend="openclaw",
+        backend="local",
     )
     assert selected == SessionPolicy.CONTINUE
     assert "no safe reset" in reason

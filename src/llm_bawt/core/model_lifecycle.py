@@ -189,7 +189,7 @@ class ModelLifecycleManager:
         """
         with self._model_lock:
             # Only unload if the previous model holds local resources (GGUF/vLLM).
-            # API clients (openai, grok) and agent backends (openclaw, claude-code)
+            # API clients (openai, grok) and agent backends (claude-code, codex)
             # are stateless — no need to unload/reload when switching between them.
             if self._current_client is not None and self._current_model_alias != alias:
                 prev_info = self.get_model_info(self._current_model_alias) or {}

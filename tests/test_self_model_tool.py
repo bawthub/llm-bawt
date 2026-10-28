@@ -38,7 +38,7 @@ def _not_found(url: str) -> httpx.HTTPStatusError:
 
 def _profile(slug: str, endpoint_id: int | None, model: str | None, harness: str) -> dict:
     backend = {"claude-code": "claude-code", "claude-proxy": "claude-code",
-               "openclaw": "openclaw", "codex": "codex"}.get(harness)
+               "codex": "codex"}.get(harness)
     return {"slug": slug, "endpoint_id": endpoint_id, "default_model": model,
             "harness": harness, "agent_backend": backend}
 
@@ -405,16 +405,6 @@ def test_unreadable_tags_refuse_every_cross_bot_call(monkeypatch):
 
     assert "private bot" in res["error"]
     assert own["switched"] is True and h.patches == [("al", 2144)]
-
-
-def test_openclaw_bot_has_nothing_to_switch(monkeypatch):
-    h = Harness(monkeypatch, {"oc": _profile("oc", None, None, "openclaw")})
-
-    view = _run(smt.self_model(bot_id="oc"))
-    switch = _run(smt.self_model(bot_id="oc", action="switch", endpoint_id=2144))
-
-    assert view["options"] == [] and "OpenClaw" in view["note"]
-    assert "OpenClaw" in switch["error"] and h.patches == []
 
 
 @pytest.mark.parametrize("endpoint_id", [None, True])

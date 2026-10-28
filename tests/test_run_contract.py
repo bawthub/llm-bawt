@@ -7,7 +7,7 @@ import json
 import logging
 import signal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -35,9 +35,6 @@ from claude_code_bridge.run_teardown import RunTeardown
 from claude_code_bridge.run_terminal import RunTerminalLatch
 from codex_bridge.process_ledger import ProcessLedger, bind_ledger, register_process
 from local_model_bridge.bridge import LocalModelBridge
-from openclaw_bridge.bridge import SessionBridge
-from openclaw_bridge.ingest import EventIngestPipeline
-from openclaw_bridge.ws_client import is_run_terminal
 from tests import virtual_clock
 from tests.test_claude_code_send_boundaries import SESSION, _SDKStream, _SendHarness
 
@@ -90,19 +87,19 @@ def test_only_a_reap_proves_exit(exited):
 
 
 def test_accepted_round_trips_and_names_this_boot():
-    accepted = RunAccepted.here("r1", "openclaw")
+    accepted = RunAccepted.here("r1", "local")
     assert accepted.boot_id == process_boot_id()
     assert RunAccepted.from_dict(accepted.to_dict()) == accepted
     with pytest.raises(RunContractError):
-        RunAccepted.from_dict({"request_id": "r1", "backend": "openclaw"})
+        RunAccepted.from_dict({"request_id": "r1", "backend": "local"})
 
 
 def test_accepted_pid1_is_optional_and_typed():
     """TASK-1233 Vex S2: pid1 names the accepting process's PID-1 status."""
-    accepted = RunAccepted.here("r1", "openclaw")
+    accepted = RunAccepted.here("r1", "local")
     assert accepted.pid1 is process_is_pid1()
     assert accepted.to_dict()["pid1"] is accepted.pid1
-    legacy = {"request_id": "r1", "backend": "openclaw", "boot_id": "b"}
+    legacy = {"request_id": "r1", "backend": "local", "boot_id": "b"}
     assert RunAccepted.from_dict(legacy).pid1 is None
     assert RunAccepted.from_dict({**legacy, "pid1": True}).pid1 is True
     for bad in ("true", 1, 0):
@@ -208,7 +205,7 @@ def test_accepted_event_names_backend_and_boot():
 
 
 def test_subscribe_run_yields_the_parsed_terminal_last():
-    terminal = RunTerminal("r1", "openclaw", "boot-1", REAPED)
+    terminal = RunTerminal("r1", "local", "boot-1", REAPED)
 
     async def run():
         sub = RedisSubscriber.__new__(RedisSubscriber)
@@ -219,7 +216,7 @@ def test_subscribe_run_yields_the_parsed_terminal_last():
 
     event, = asyncio.run(run())
     assert event.kind == AgentEventKind.RUN_TERMINAL
-    assert event.raw == terminal.to_dict() and event.provider == "openclaw"
+    assert event.raw == terminal.to_dict() and event.provider == "local"
 
 
 def test_legacy_or_malformed_terminal_still_ends_the_run_with_no_evidence(caplog):
@@ -230,7 +227,7 @@ def test_legacy_or_malformed_terminal_still_ends_the_run_with_no_evidence(caplog
     assert "Malformed run terminal" in caplog.text
 
 
-# -- Generic admission (codex, openclaw, local) ---------------------------------
+# -- Generic admission (codex, local) ---------------------------------
 
 
 def _admit(queue, run, *, request_id="r1", probe=None):
@@ -384,32 +381,6 @@ def test_codex_ledger_is_scoped_to_the_send_task():
         register_process(_proc(None))  # outside any send: ignored
         assert ledger.procs == (proc,)
     asyncio.run(run())
-
-
-# -- OpenClaw ---------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("raw,terminal", [
-    ({"type": "event", "event": "agent", "payload": {"stream": "lifecycle", "data": {"phase": "end"}}}, True),
-    ({"type": "event", "event": "agent", "payload": {"stream": "lifecycle", "data": {"phase": "error"}}}, True),
-    ({"type": "event", "event": "agent", "payload": {"stream": "error", "data": {}}}, True),
-    ({"type": "event", "event": "chat", "payload": {"state": "Final"}}, True),
-    ({"type": "event", "event": "agent", "payload": {"stream": "lifecycle", "data": {"phase": "start"}}}, False),
-    ({"type": "event", "event": "agent", "payload": {"stream": "assistant", "data": {"delta": "x"}}}, False),
-    ({"type": "res", "event": "chat", "payload": {"state": "final"}}, False),
-])
-def test_openclaw_run_terminal_events(raw, terminal):
-    assert is_run_terminal(raw) is terminal
-
-
-def test_openclaw_exit_needs_a_settled_gateway_run_once_running():
-    bridge = SessionBridge(MagicMock(), EventIngestPipeline(), MagicMock(), MagicMock())
-    key = ("bot:user", "r1")
-    assert bridge._exit_report(key, RunOutcome(True, False)) == TeardownReport(exited=False)
-    bridge._gateway_settled.add(key)
-    assert bridge._exit_report(key, RunOutcome(True, True)) == TeardownReport(exited=True)
-    assert key not in bridge._gateway_settled
-    assert bridge._exit_report(key, RunOutcome(False, True)) == TeardownReport(exited=True)
 
 
 # -- Local model -----------------------------------------------------------------

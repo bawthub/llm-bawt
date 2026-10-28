@@ -40,7 +40,7 @@ class AgentEventKind(str, Enum):
     # TASK-257: emitted by the APP layer (not the bridges) when a /new — or an
     # explicit session.reset — rotates a bot's durable DB thread. Rotation is
     # app-owned (TASK-284), so a single app-side emit covers claude-code,
-    # codex, openclaw AND chat bots for free. Payload (raw dict on the unified
+    # codex AND chat bots for free. Payload (raw dict on the unified
     # stream): {_type:"thread_switched", bot_id, user_id, new_session_id,
     # source:"new_command"|"session_reset"}. Lets the UI refresh its
     # conversation list deterministically instead of text-matching "/new" or
@@ -144,7 +144,7 @@ class AgentEvent:
     # total_cost_usd, ...}.
     token_usage: dict | None = None
     # Identifies which agent backend produced this event ("claude-code",
-    # "codex", "openclaw"). Lets the UI dispatch tool rendering by
+    # "codex"). Lets the UI dispatch tool rendering by
     # (provider, tool_name) so each harness can show its own native tool
     # shapes (e.g. codex file_change carries only path+kind, no diff).
     provider: str | None = None
@@ -152,8 +152,8 @@ class AgentEvent:
     # that triggered this run.  Stamped on TOOL_START / TOOL_END events by
     # every bridge so the frontend can bucket tool activity under the
     # originating user message without relying on turn_id heuristics.
-    # Optional because passive subscription paths (e.g. CLI sessions on
-    # the OpenClaw gateway) have no originating frontend message.
+    # Optional because app-emitted events (e.g. thread switches) have no
+    # originating frontend message.
     trigger_message_id: str | None = None
     # SDK-supplied tool_use id for the *specific* tool call this event refers
     # to.  Stamped on TOOL_START / TOOL_END / AWAIT_TOOL_RESULT events by the

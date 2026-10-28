@@ -44,7 +44,7 @@ def _request(**update) -> ChatCompletionRequest:
 @pytest.mark.parametrize("bot,expected", [
     (SimpleNamespace(agent_backend="claude-code", harness=None), "claude-code"),
     (SimpleNamespace(agent_backend=None, harness="codex"), "codex"),
-    (SimpleNamespace(agent_backend="", harness="OpenClaw"), "openclaw"),
+    (SimpleNamespace(agent_backend="", harness="Codex"), "codex"),
     (SimpleNamespace(agent_backend="local", harness="chat"), None),
     (SimpleNamespace(), None),
 ])

@@ -22,7 +22,6 @@ PG_ACCEPTANCE_SUITES = (
     "test_message_tsv_pg.py::",
     "test_message_author_backfill_pg.py::",
     "test_session_continuity_pg.py::",
-    "test_agent_bridge.py::TestEventStore::",
     "test_agent_context.py::",
     "test_idle_context_reset_pg.py::",
     "test_turn_context_snapshot_pg.py::",

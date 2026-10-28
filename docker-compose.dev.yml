@@ -29,10 +29,6 @@ services:
     # Restart on reboot and on failure
     restart: unless-stopped
 
-  openclaw-bridge:
-    volumes:
-      - ./src:/app/src
-
   claude-code-bridge:
     volumes:
       - ./src:/app/src

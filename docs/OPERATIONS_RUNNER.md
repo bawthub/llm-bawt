@@ -183,7 +183,7 @@ write late.)
   every holder record of the run: the *accept* first (`bridge_run_accepts`,
   the boot that admitted the send, written by the run's stream worker from
   `RUN_ACCEPTED` via `TurnExecution.record_accept`; first accept wins), then
-  the sighting. claude-code or codex only (openclaw never proves), a boot
+  the sighting. claude-code or codex only (no other backend proves), a boot
   different from every holder, and PID 1 on every holder and on the answering
   boot. Stamps `exited: true` with the answering boot.
 - **(c) terminal record:** `teardown.exited` true stamps a confirmed exit;
@@ -195,7 +195,7 @@ write late.)
   process had accepted before (redelivered after a Stop) publishes the
   all-null teardown.
 - **A tombstone alone is never evidence.** Every bridge unregisters a request
-  in `finally` whatever its teardown did, and openclaw tombstones as its abort
+  in `finally` whatever its teardown did, and codex tombstones as its abort
   starts, so `tombstoned` with no terminal (or an `exited: null` one) writes
   nothing.
 - **Abort:** `not_found` with no holder record (no accept, no sighting) and no

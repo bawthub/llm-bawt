@@ -102,12 +102,11 @@ class ModelEndpoint:
 class ProtocolCompatibility:
     """Single source of truth for harness/access-path compatibility."""
 
-    HARNESS_PROTOCOLS: Mapping[str, str | None] = {
+    HARNESS_PROTOCOLS: Mapping[str, str] = {
         "chat": "chat-completions",
         "codex": "responses",
         "claude-code": "anthropic-messages",
         "claude-proxy": "anthropic-messages",
-        "openclaw": None,
     }
     PROXY_TARGETS = frozenset(
         {"anthropic-messages", "chat-completions", "responses"}
@@ -125,8 +124,6 @@ class ProtocolCompatibility:
             return True
         if normalized not in cls.HARNESS_PROTOCOLS:
             return False
-        if normalized == "openclaw":
-            return True
         if normalized == "claude-code":
             return (
                 access_path.vendor == "anthropic"
@@ -310,9 +307,6 @@ class ModelCatalog:
             prefix = cls._provider_prefix(endpoint.access_path)
             if prefix and upstream:
                 concrete_model = f"{prefix}/{upstream}"
-        elif normalized_harness == "openclaw":
-            model_type = "agent_backend"
-            backend = "openclaw"
         elif normalized_harness == "chat":
             if endpoint.access_path.engine_kind == "llama-cpp":
                 model_type = "gguf"

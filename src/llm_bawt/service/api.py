@@ -145,29 +145,12 @@ async def lifespan(app):
         # Start below, after the shared transport and durable dispatcher exist.
     service._scheduler = scheduler
 
-    # Start the shared Redis agent transport for every bridge harness. OpenClaw,
-    # Claude Code, and Codex all depend on this subscriber; OpenClaw-specific
-    # session mapping remains optional inside the shared setup.
+    # Start the shared Redis agent transport for every bridge harness. Claude
+    # Code, Codex and the local-model bridge all depend on this subscriber.
     redis_subscriber = None
     history_drain_task = None
     if config.REDIS_URL:
         try:
-            # Build session_key -> bot_id mapping from openclaw bots
-            from ..bots import BotManager
-            session_to_bot: dict[str, str] = {}
-            bot_mgr = BotManager(config)
-
-            for bot in bot_mgr.list_bots():
-                if bot.agent_backend != "openclaw":
-                    continue
-                bc = bot.agent_backend_config or {}
-                sk = bc.get("session_key")
-                if sk:
-                    session_to_bot[sk] = bot.slug
-
-            if session_to_bot:
-                log.info("OpenClaw session->bot mapping: %s", session_to_bot)
-
             from agent_bridge.subscriber import RedisSubscriber
             from ..agent_backends.agent_bridge import set_agent_subscriber
 
@@ -288,9 +271,7 @@ async def lifespan(app):
             )
 
             log.info(
-                "Shared agent Redis subscriber started (redis=%s, openclaw_sessions=%s)",
-                config.REDIS_URL,
-                list(session_to_bot.keys()),
+                "Shared agent Redis subscriber started (redis=%s)", config.REDIS_URL,
             )
         except Exception:
             log.exception("Failed to start shared agent Redis transport")

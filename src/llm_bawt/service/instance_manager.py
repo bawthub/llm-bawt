@@ -156,11 +156,7 @@ class InstanceManagerMixin:
                     )
                 except Exception:  # noqa: BLE001
                     resolved_backend = None
-                if (
-                    backend_name != "openclaw"
-                    and default_alias
-                    and resolved_backend == backend_name
-                ):
+                if default_alias and resolved_backend == backend_name:
                     self._default_model = default_alias
                 else:
                     self._default_model = backend_name
@@ -209,8 +205,7 @@ class InstanceManagerMixin:
         #    model identity — shows the actual model in turn logs / SSE /
         #    task attribution).  Fall back to the legacy virtual backend
         #    alias (e.g. 'claude-code') only when default_model is missing
-        #    or incompatible.  Openclaw is exempt: its gateway owns the
-        #    model, so openclaw bots always use the virtual alias.
+        #    or incompatible.
         backend_name = self._agent_backend_models.get(bot.slug if bot else bot_id)
         if backend_name:
             if requested_model and requested_model != backend_name:
@@ -221,28 +216,27 @@ class InstanceManagerMixin:
                 default_alias = bot_model_ref(self.config, bot) if bot else None
             except Exception:  # noqa: BLE001
                 default_alias = getattr(bot, "default_model", None) if bot else None
-            if backend_name != "openclaw":
-                # ``bot_model_ref`` deliberately returns the canonical endpoint
-                # ref, which need not exist in the legacy compatibility key list.
-                try:
-                    resolved_backend = agent_backend_for_model_def(
-                        resolve_model_config(
-                            self.config,
-                            default_alias,
-                            harness=getattr(bot, "harness", None),
-                            default={},
-                        )
+            # ``bot_model_ref`` deliberately returns the canonical endpoint
+            # ref, which need not exist in the legacy compatibility key list.
+            try:
+                resolved_backend = agent_backend_for_model_def(
+                    resolve_model_config(
+                        self.config,
+                        default_alias,
+                        harness=getattr(bot, "harness", None),
+                        default={},
                     )
-                except Exception:  # noqa: BLE001
-                    resolved_backend = None
-                if default_alias and resolved_backend == backend_name:
-                    return default_alias, warnings
-                log.warning(
-                    "Agent bot '%s' has missing/incompatible default_model=%r for "
-                    "backend '%s'; falling back to virtual alias '%s'. Set the "
-                    "bot's Model to a %s catalog entry.",
-                    bot_id, default_alias, backend_name, backend_name, backend_name,
                 )
+            except Exception:  # noqa: BLE001
+                resolved_backend = None
+            if default_alias and resolved_backend == backend_name:
+                return default_alias, warnings
+            log.warning(
+                "Agent bot '%s' has missing/incompatible default_model=%r for "
+                "backend '%s'; falling back to virtual alias '%s'. Set the "
+                "bot's Model to a %s catalog entry.",
+                bot_id, default_alias, backend_name, backend_name, backend_name,
+            )
             if backend_name in self._available_models:
                 return backend_name, warnings
 

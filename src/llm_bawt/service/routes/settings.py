@@ -1,8 +1,4 @@
-"""Runtime settings and bot profile routes.
-
-OpenClaw SOUL.md sync lives in ``bot_soul.py`` (split out under the monolith
-gate, TASK-1521).
-"""
+"""Runtime settings and bot profile routes."""
 
 import json
 import logging
@@ -37,7 +33,6 @@ from ..runtime_switch_rotation import (
 )
 from ..dependencies import (
     get_bot_profile_store,
-    get_prompt_template_store,
     get_runtime_settings_store,
     get_service,
 )
@@ -54,7 +49,6 @@ from ..schemas import (
     RuntimeSettingsResponse,
     RuntimeSettingUpsertRequest,
 )
-from .bot_soul import openclaw_agent_id, push_soul_background as _push_soul_background
 from .bot_profile_validation import (
     _humanize_bot_constraint_error,
     _request_to_profile_payload,
@@ -106,27 +100,6 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]])
             policy.validate_setting_write(scope_type, scope_id, key, value)
         except WorkingMemoryError as exc:
             raise HTTPException(status_code=400, detail=exc.message) from exc
-
-
-def _resolve_effective_bot_prompt(config, profile) -> str:
-    """Effective prompt for a bot: persona override body if set, else base (TASK-477).
-
-    Falls back to the stored ``system_prompt`` if the override id is missing or
-    no longer resolves to a persona template.
-    """
-    override_id = getattr(profile, "prompt_override_id", None)
-    base = profile.system_prompt or ""
-    if not override_id:
-        return base
-    try:
-        from ...prompt_registry import PERSONA_CATEGORY
-
-        row = get_prompt_template_store(config).get_by_id(int(override_id))
-        if row is not None and row.category == PERSONA_CATEGORY and (row.body or "").strip():
-            return row.body
-    except Exception as e:
-        logger.warning("Could not resolve persona override id=%s for %s: %s", override_id, profile.slug, e)
-    return base
 
 
 def _profile_tags(engine, slugs: list[str] | None = None) -> dict[str, list[str]] | None:
@@ -352,10 +325,6 @@ async def _persist_bot_profile(
     _invalidate_bot_instance_cache(service, profile.slug)
     _clear_session_model_overrides(service, bot_id=profile.slug)
     rotated_threads = _rotate_threads_on_runtime_switch(store.engine, previous, profile)
-
-    effective_prompt = _resolve_effective_bot_prompt(service.config, profile)
-    if profile.agent_backend == "openclaw" and effective_prompt.strip():
-        await _push_soul_background(profile.slug, openclaw_agent_id(profile), effective_prompt)
 
     response = _to_profile_response(profile, settings=_effective_bot_settings(service, profile.slug),
                                     tags=_profile_tags(store.engine, [profile.slug]))

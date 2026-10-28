@@ -170,7 +170,6 @@ def _persist(monkeypatch, previous, profile, *, rotate=None):
     monkeypatch.setattr(settings, "_reload_service_model_catalog", lambda _service: None)
     monkeypatch.setattr(settings, "_invalidate_bot_instance_cache", lambda *_args: None)
     monkeypatch.setattr(settings, "_clear_session_model_overrides", lambda *_a, **_k: None)
-    monkeypatch.setattr(settings, "_resolve_effective_bot_prompt", lambda *_args: "")
     monkeypatch.setattr(settings, "_effective_bot_settings", lambda *_args: {})
     monkeypatch.setattr(settings, "_to_profile_response", lambda profile, settings, tags=None: profile)
     monkeypatch.setattr(settings, "rotate_active_threads", rotate or (

@@ -56,7 +56,6 @@ def api(rig, monkeypatch):  # noqa: F811
     monkeypatch.setattr(settings, "_reload_service_model_catalog", lambda _service: None)
     monkeypatch.setattr(settings, "_invalidate_bot_instance_cache", lambda *_args: None)
     monkeypatch.setattr(settings, "_clear_session_model_overrides", lambda *_a, **_k: None)
-    monkeypatch.setattr(settings, "_resolve_effective_bot_prompt", lambda *_args: "")
     monkeypatch.setattr(settings, "_effective_bot_settings", lambda *_args: {})
     monkeypatch.setattr(settings, "_publish_bot_profile_changed", publish)
 

@@ -175,9 +175,9 @@ dev-run: ## [uv] Run llm from .venv (e.g. make dev-run ARGS="--status")
 .PHONY: run up docker-dev down restart restart-app rebuild logs docker-status docker-shell docker-exec
 
 run: ## Stop app + bridges, rebuild dev, tail logs
-	$(DEV_COMPOSE) down --remove-orphans --timeout 5 app openclaw-bridge claude-code-bridge
-	$(DEV_COMPOSE) up -d app openclaw-bridge claude-code-bridge app
-	docker compose logs -f --tail=50 app openclaw-bridge claude-code-bridge
+	$(DEV_COMPOSE) down --remove-orphans --timeout 5 app claude-code-bridge
+	$(DEV_COMPOSE) up -d app claude-code-bridge
+	docker compose logs -f --tail=50 app claude-code-bridge
 
 up: ## Docker compose up (production)
 	@echo "Starting containers (production mode)..."

@@ -26,8 +26,7 @@ from llm_bawt.service.turn_gates import GateScope
 from tests.test_ops_executor import JOB, FakeAPI, FakeContainer, setup
 from tests.test_ops_service import _make, _op_data, _store
 
-BRIDGE_MAP = {"claude-code-bridge": "claude-code", "openclaw-bridge": "openclaw",
-              "codex-bridge": "codex"}
+BRIDGE_MAP = {"claude-code-bridge": "claude-code", "codex-bridge": "codex"}
 BRIDGE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["bridge"],
                  "properties": {"bridge": {"type": "string", "enum": sorted(BRIDGE_MAP)}}}
 FROM_ARG = json.dumps({"backend_from_arg": "bridge", "map": BRIDGE_MAP})
@@ -91,7 +90,7 @@ def test_scope_resolution():
     assert resolve_scope('{"all_agents": true}', {}) == GateScope.every_agent()
     assert resolve_scope('{"backends": ["Codex"]}', {}) == GateScope.on_backends("codex")
     assert resolve_scope('{"bots": ["byte"]}', {}) == GateScope.for_bots("byte")
-    assert resolve_scope(FROM_ARG, {"bridge": "openclaw-bridge"}) == GateScope.on_backends("openclaw")
+    assert resolve_scope(FROM_ARG, {"bridge": "codex-bridge"}) == GateScope.on_backends("codex")
     with pytest.raises(ValueError, match="no backend"):
         resolve_scope(FROM_ARG, {"bridge": "other"})
 

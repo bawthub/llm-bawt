@@ -1,4 +1,4 @@
-"""Redis Streams publisher — replaces the in-memory FanoutHub.
+"""Redis Streams publisher for agent bridge events.
 
 Events are published to a Redis Stream keyed by session:
     agent:events:{session_key}
@@ -31,7 +31,7 @@ EVENTS_STREAM_PREFIX = "agent:events:"
 HISTORY_STREAM = "agent:history"
 COMMANDS_STREAM = "agent:commands"
 RUN_STREAM_PREFIX = "agent:run:"
-# Unified event stream for all bots (native + OpenClaw): events:{bot_id}:{user_id}
+# Unified event stream for all bots: events:{bot_id}:{user_id}
 UNIFIED_EVENTS_PREFIX = "events:"
 # Shared bot-configuration notifications (no user-specific data in payloads).
 GLOBAL_CONFIG_STREAM = f"{UNIFIED_EVENTS_PREFIX}system:__config__"
@@ -72,7 +72,7 @@ class RedisPublisher:
         )
         self._connected = False
         # Bridges instantiate one publisher and pass their backend name here
-        # ("claude-code", "codex", "openclaw"). Stamps every event at the
+        # ("claude-code", "codex"). Stamps every event at the
         # publish boundary so downstream consumers can dispatch on provider
         # without each call site remembering to set it.
         self._default_provider = default_provider
@@ -238,8 +238,7 @@ class RedisPublisher:
     ) -> str | None:
         """Publish an event to the unified event stream for a bot+user pair.
 
-        Used for tool execution events, OpenClaw agent events, and any
-        application-level events that the UI consumes via consumer groups.
+        Used for tool execution events and any application-level events that the UI consumes via consumer groups.
         """
         if not self._connected:
             return None

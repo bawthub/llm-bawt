@@ -28,7 +28,7 @@ ROLE = "fixture_role"
 _BOTS = {
     "fixture-one": ("agent", "claude-code", {}),
     "fixture-two": ("agent", "codex", {}),
-    "fixture-claw": ("agent", "openclaw", {}),
+    "fixture-local": ("agent", "local", {}),
     "fixture-chat": ("chat", None, {}),
     "fixture-bundle": ("agent", "claude-code", {"skill_bundle": "fixture-pkg"}),
     "fixture-private": ("agent", "claude-code", {}),
@@ -109,7 +109,7 @@ def test_adopt_seeds_every_skill_as_available_and_release_drops_it(world):
 
 
 @pytest.mark.parametrize(("slug", "status"), [
-    ("fixture-private", 403), ("fixture-bundle", 409), ("fixture-claw", 422),
+    ("fixture-private", 403), ("fixture-bundle", 409), ("fixture-local", 422),
     ("fixture-chat", 422), ("fixture-unknown", 404)])
 def test_adopt_refuses_bots_that_cannot_take_managed_skills(world, slug, status):
     assert _status(world.service.adopt, slug, None)[0] == status
@@ -308,7 +308,7 @@ def test_routes_serve_the_service_over_http(world, monkeypatch):
     assert catalog["alpha"]["file_count"] == 1
     assert catalog["alpha"]["token_estimate"] == world.sizes["alpha"]
     assert {h["harness"] for h in client.get("/v1/skills/harnesses").json()["data"]} == {
-        "claude-code", "codex", "openclaw"}
+        "claude-code", "codex"}
     tree = client.get("/v1/skills/catalog/alpha/tree").json()
     assert [f["path"] for f in tree["files"]] == ["SKILL.md"]
     assert client.get("/v1/skills/catalog/alpha/file", params={"path": "SKILL.md"}).json()[

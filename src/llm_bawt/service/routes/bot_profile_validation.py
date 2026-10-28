@@ -90,8 +90,7 @@ def _validate_profile_payload(payload: dict[str, object]) -> None:
 
 
 #: Agent backends whose model is canonically configured via ``default_model``
-#: (a catalog alias). Openclaw is exempt — its gateway owns the model, and
-#: its ``agent_backend_config`` keys are session-path strings.
+#: (a catalog alias).
 _CATALOG_MODEL_BACKENDS = ("claude-code", "codex")
 
 
@@ -149,16 +148,9 @@ def _validate_model_endpoint(payload: dict[str, object]) -> None:
     )
 
     harness = str(payload.get("harness") or "").strip().lower()
-    backend = str(payload.get("agent_backend") or "").strip().lower()
     if not harness:
-        harness = "openclaw" if backend == "openclaw" else "chat"
+        harness = "chat"
         payload["harness"] = harness
-
-    if harness == "openclaw":
-        payload["endpoint_id"] = None
-        payload["default_model"] = None
-        payload["agent_backend"] = "openclaw"
-        return
 
     endpoint_id = payload.get("endpoint_id")
     if not isinstance(endpoint_id, int):

@@ -2,8 +2,7 @@
 
 Uses the shared agent-bridge Redis command/event protocol, but routes
 to ``codex-bridge`` (OpenAI Codex SDK / ChatGPT-mode OAuth) instead of
-the openclaw-bridge (WebSocket gateway) or claude-code-bridge (Claude
-Agent SDK).
+the claude-code-bridge (Claude Agent SDK).
 
 Each bot+user pair gets its own Codex thread — the persisted ``session_key``
 in ``agent_backend_config`` is the Codex ``thread_id`` written by the

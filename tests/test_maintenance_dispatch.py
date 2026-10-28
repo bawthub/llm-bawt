@@ -117,7 +117,7 @@ def test_enqueue_snapshot_does_not_invert_scheduler_target_job_lock_order(monkey
 @pytest.mark.asyncio
 async def test_archived_source_dispatch_binds_original_thread_without_activation():
     from llm_bawt.agent_context import rotate_delivery_session
-    from llm_bawt.service.chat_streaming_bridge import ChatStreamingBridgeMixin
+    from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
 
     dispatcher = _make_dispatcher()
     frontend_id = "7efbf344-ee7d-44cd-852c-4cc9cbe97a61"
@@ -149,7 +149,7 @@ async def test_archived_source_dispatch_binds_original_thread_without_activation
     seen = []
 
     async def stream(request):
-        binding = ChatStreamingBridgeMixin()._bind_agent_thread(llm, request)
+        binding = BridgeSessionResetMixin()._bind_agent_thread(llm, request)
         assert binding == {"thread_session_id": "original-session",
                            "thread_resume_id": "original-sdk", "explicit_thread": True}
         assert request.user_message_id == frontend_id

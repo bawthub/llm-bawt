@@ -208,7 +208,7 @@ def build_agent_image_manifest(
     """Render a plain-text 'Attached Files' manifest for agent backends.
 
     TASK-391 — when a chat turn carrying image attachments is dispatched
-    to an agent backend (Claude Code / Codex / OpenClaw), the model can
+    to an agent backend (Claude Code / Codex), the model can
     *see* the image bytes inline, but its shell/tools cannot fetch the
     same asset (blob: URLs are browser-local). This helper turns the tiny
     persisted refs ``[{"asset_id": "ma_xxx", "kind": "image"}, ...]`` into

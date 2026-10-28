@@ -41,7 +41,7 @@ def test_reset_action_is_serialized_beside_unmodified_message(backend, action, m
 
 @pytest.mark.parametrize("backend,action", [
     ("codex", "unsupported"),
-    ("openclaw", "reset_only"),
+    ("local", "reset_only"),
 ])
 def test_publisher_rejects_unsupported_reset_action(backend, action):
     publisher = CommandPublisherMixin()

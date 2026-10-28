@@ -39,7 +39,7 @@ for name in (
     "redis", "sqlalchemy", "psycopg2", "websockets", "httpx", "anyio",
     "claude_agent_sdk", "openai_codex_sdk", "openai_codex", "openai",
     "fastapi", "uvicorn", "pydantic", "PIL", "yaml", "tomlkit",
-    "claude_code_bridge.bridge", "codex_bridge.bridge", "openclaw_bridge.bridge",
+    "claude_code_bridge.bridge", "codex_bridge.bridge",
 ):
     importlib.import_module(name)
 for package, suffix in (

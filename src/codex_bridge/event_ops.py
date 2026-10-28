@@ -176,7 +176,7 @@ class CodexEventMixin:
         thread_session_id: str | None = None,
         reset_evidence: CodexResetEvidence | None = None,
     ) -> tuple[int, bool, Any]:
-        """Translate a single ``ThreadEvent`` into OpenClawEvents.
+        """Translate a single ``ThreadEvent`` into AgentEvents.
 
         Returns ``(next_seq, did_persist_session, usage_or_none)``.
         ``usage`` is non-None only on ``turn.completed``.

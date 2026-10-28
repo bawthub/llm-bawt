@@ -133,7 +133,7 @@ Propagation trail (all in this repo — the bridge is a dumb executor here too):
    `TaskTurnCapabilityMiddleware` binds the ASGI header to a `ContextVar`;
    `open_task_turn_context()` verifies the Fernet token in the app process.
 
-Native Codex and OpenClaw bridges do not mint or forward the capability; MCP
+The native Codex bridge does not mint or forward the capability; MCP
 task tools that require it (`tasks_associate_current`, the
 `associate_current_turn=true` flag on `tasks_update` / `tasks_create`) fail
 closed on those bridges. See

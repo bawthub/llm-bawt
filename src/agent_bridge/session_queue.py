@@ -1,6 +1,6 @@
 """Per-session message serialization and active-task tracking.
 
-Shared between OpenClaw and Claude Code bridges to ensure consistent
+Shared by the agent bridges to ensure consistent
 behavior: only one send runs at a time per session, and abort support
 works uniformly.
 
@@ -49,9 +49,8 @@ class RequestPhase(str, Enum):
 class SessionQueue:
     """Serialize sends per session and track active tasks for abort.
 
-    Both the OpenClaw gateway and Claude Code SDK process one turn at a
-    time per session.  Sending concurrent messages to the same session
-    causes state corruption (run-queue overwrites, stale history fallback,
+    Every agent backend processes one turn at a time per session.  Sending
+    concurrent messages to the same session causes state corruption (run-queue overwrites, stale history fallback,
     tangled SDK session state).
 
     Usage in a bridge command listener::
@@ -218,8 +217,8 @@ class SessionQueue:
     def tombstone(self, session_key: str, request_id: str) -> None:
         """Record a Stop for this request without cancelling anything.
 
-        For a bridge whose stop must first be confirmed elsewhere (OpenClaw's
-        gateway abort) before the local task may be cancelled.
+        For a bridge whose stop must first be confirmed elsewhere (codex's
+        app-server interrupt) before the local task may be cancelled.
         """
         if (session_key, request_id) in self._request_tasks or self._accepted.contains(session_key, request_id):
             self._accepted.add(session_key, request_id)

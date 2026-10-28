@@ -54,8 +54,6 @@ def capabilities_for_backend(backend: str | None) -> AgentContextCapabilities:
         # fresh thread through app-server ``thread/inject_items`` (TASK-1579),
         # whichever transport then runs the turn.
         return AgentContextCapabilities(name, False, False, True, True)
-    if name == "openclaw":
-        return AgentContextCapabilities(name, False, False, False, False)
     return AgentContextCapabilities(name or "unknown", False, False, False, False)
 
 

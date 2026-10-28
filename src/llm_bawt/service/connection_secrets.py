@@ -77,14 +77,6 @@ BAWTHUB_READABLE: dict[tuple[str, str], FieldSpec] = {
 }
 
 
-# The connections an agent bridge may read through
-# GET /v1/internal/bridge/connections/{kind}/{id} (X-Bridge-Token broker gate).
-# Only credentials a bridge process itself presents belong here.
-BRIDGE_READABLE: dict[tuple[str, str], FieldSpec] = {
-    ("integration", "openclaw"): integration_spec("openclaw"),
-}
-
-
 class ConnectionUnavailable(Exception):
     """A record exists (or the store is down) but can't be used.
 
@@ -249,7 +241,6 @@ def resolve_integration(config, integration_id: str, legacy: Mapping[str, str | 
 
 __all__ = [
     "BAWTHUB_READABLE",
-    "BRIDGE_READABLE",
     "ConnectionSecret",
     "ConnectionUnavailable",
     "FieldSpec",

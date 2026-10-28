@@ -125,7 +125,7 @@ def test_missing_subscriber_and_status_coverage(client, store, monkeypatch):
     monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(config=None))
     monkeypatch.setattr(routes, "get_tool_approval_policy_store", lambda cfg: store)
     body = client.get("/v1/tool-approval-policies/status").json()
-    assert all(r["enforcement"] == "unsupported" for r in body["coverage"] if r["backend"] in ("codex", "openclaw"))
+    assert all(r["enforcement"] == "unsupported" for r in body["coverage"] if r["backend"] == "codex")
     assert "best-effort" in " ".join(body["notes"])
 
 

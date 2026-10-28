@@ -101,7 +101,7 @@ class ChatNonStreamMixin:
         local_mode = not request.augment_memory
 
         # Resolve model using shared bot/config logic
-        # Agent-backend bots resolve to their virtual model (e.g. "openclaw")
+        # Agent-backend bots resolve to their virtual model (e.g. "claude-code")
         try:
             model_alias, model_warnings = self._resolve_request_model(request.model, bot_id, local_mode)
         except Exception as e:
@@ -126,7 +126,7 @@ class ChatNonStreamMixin:
             raise ValueError("No user message found in request")
 
         # Start generation lifecycle.
-        # Agent backends (openclaw / claude-code) can run independent requests
+        # Agent backends (claude-code / codex) can run independent requests
         # concurrently, so avoid the per-bot cancellation gate used for local
         # single-model execution.
         model_type = llm_bawt.client.model_definition.get("type", "")

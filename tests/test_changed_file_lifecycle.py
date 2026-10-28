@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 from agent_bridge.changed_file_lifecycle import ChangedFileLifecycleMixin
 from agent_bridge.events import AgentEvent, AgentEventKind
+from claude_code_bridge.bridge import ClaudeCodeBridge
 from codex_bridge.bridge import CodexBridge
-from openclaw_bridge.bridge import SessionBridge
 
 
 class _Bridge(ChangedFileLifecycleMixin):
@@ -57,5 +57,5 @@ def test_shared_lifecycle_publishes_incremental_file_event(tmp_path: Path):
 
 
 def test_active_bridge_classes_share_the_lifecycle_contract():
+    assert issubclass(ClaudeCodeBridge, ChangedFileLifecycleMixin)
     assert issubclass(CodexBridge, ChangedFileLifecycleMixin)
-    assert issubclass(SessionBridge, ChangedFileLifecycleMixin)

@@ -62,15 +62,15 @@ Defaults are runtime settings and can be overridden per bot:
 
 Before a durable inter-bot send, a critical `continue` delivery is automatically
 escalated according to capability. Claude uses retained reset by default; Codex
-falls back to clean reset; OpenClaw continues because it has no safe rotation
-primitive. Explicit caller policy always wins.
+falls back to clean reset; a backend with no safe rotation primitive continues.
+Explicit caller policy always wins.
 
 MCP: `agent_context_health(bot_id, user_id?)`.
 
 For Claude backends, `agent_context_compact(bot_id, idempotency_key,
 sender_bot_id?)` queues exactly one durable `/compact` maintenance turn with
 `when_idle` semantics. It never interrupts an active turn. Unsupported backends
-are rejected before enqueue; Codex and OpenClaw do not receive `/compact` as
+are rejected before enqueue; Codex does not receive `/compact` as
 ordinary prose. The bare-command summary policy, explicit-instruction precedence,
 automatic-compaction command-hook finding (distinct from the Python callback
 limitation), and activation status are documented in
@@ -93,7 +93,6 @@ Capability matrix:
 |---|---:|---:|---:|---:|
 | Claude Code / proxy-routed OpenAI | yes | native `/compact` | yes | yes |
 | Native Codex | no | no exposed API | no | yes |
-| OpenClaw | no | no app contract | no | no |
 
 Compatibility fields `reset_session_before_delivery` and `retain_history`
 normalize into the enum. Contradictory combinations return 422.
@@ -163,9 +162,7 @@ their pointer moves only when it still names the replaced session.
 
 Native Codex retains clean reset support, including standalone reset with a
 verified empty successor provider binding. It rejects retained/configured
-history it cannot seed instead of silently discarding it. OpenClaw keeps its
-legacy typed `/new` command and explicit-thread guard; its support for typed
-commands does not imply support for app-managed bot-policy resets.
+history it cannot seed instead of silently discarding it.
 
 ## Idle oversized-context job (TASK-1185 / TASK-1188)
 
