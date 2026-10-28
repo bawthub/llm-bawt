@@ -33,8 +33,8 @@ hold the same values the env did and readers prefer the record, so leaving
 them in place changes no credential a service sees.
 
 Run inside the app image: ``python -m llm_bawt.env_import [--check] [--only DEST ...]``.
-``--only`` lets a destination with its own precondition (OpenClaw waits for
-the bridge broker gate) be adopted in a later, separate run.
+``--only`` limits a run to named destinations, so one with its own
+precondition can be adopted in a later, separate run.
 """
 from __future__ import annotations
 
@@ -87,7 +87,6 @@ SPECS: tuple[Spec, ...] = (
     _api_key("kimi-coding", "KIMI_CODING_API_KEY"),
     _api_key("brave", "LLM_BAWT_BRAVE_API_KEY"),
     _api_key("newsapi", "LLM_BAWT_NEWSAPI_API_KEY"),
-    Spec("openclaw", INTEGRATION, (("token", ("OPENCLAW_GATEWAY_TOKEN", "LLM_BAWT_OPENCLAW_GATEWAY_TOKEN")),)),
     Spec("object-store", INTEGRATION, (
         ("endpoint", ("LLM_BAWT_S3_ENDPOINT",)),
         ("region", ("LLM_BAWT_S3_REGION",)),

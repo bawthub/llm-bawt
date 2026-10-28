@@ -44,8 +44,6 @@ FULL_ENV = {
     "KIMI_CODING_API_KEY": KIMI,
     "LLM_BAWT_BRAVE_API_KEY": BRAVE,
     "LLM_BAWT_NEWSAPI_API_KEY": NEWS,
-    "OPENCLAW_GATEWAY_TOKEN": CLAW,
-    "LLM_BAWT_OPENCLAW_GATEWAY_TOKEN": CLAW,
     "LLM_BAWT_S3_ENDPOINT": "https://s3.example",
     "LLM_BAWT_S3_REGION": "us-east-1",
     "LLM_BAWT_S3_BUCKET": "media",
@@ -57,8 +55,12 @@ FULL_ENV = {
     "LLM_BAWT_RADARR_API_KEY": RADARR,
     "LLM_BAWT_SABNZBD_URL": "https://sabnzbd.example",
     "LLM_BAWT_SABNZBD_API_KEY": SAB,
-    "OPENAI_API_KEY": UNMAPPED,  # set but not adoptable: never read
+    # Set but not adoptable: never read. OpenClaw is being removed (TASK-1439), not adopted.
+    "OPENAI_API_KEY": UNMAPPED,
+    "OPENCLAW_GATEWAY_TOKEN": CLAW,
+    "LLM_BAWT_OPENCLAW_GATEWAY_TOKEN": CLAW_OTHER,
 }
+NOT_ADOPTABLE = {"OPENAI_API_KEY", "OPENCLAW_GATEWAY_TOKEN", "LLM_BAWT_OPENCLAW_GATEWAY_TOKEN"}
 
 
 @pytest.fixture
@@ -88,10 +90,10 @@ def row_count(engine) -> int:
 
 
 def test_mapping_is_closed():
-    assert {name for spec in SPECS for name in spec.env_names} == set(FULL_ENV) - {"OPENAI_API_KEY"}
+    assert {name for spec in SPECS for name in spec.env_names} == set(FULL_ENV) - NOT_ADOPTABLE
     assert {(spec.destination, spec.kind) for spec in SPECS} == {
         ("zai", "provider"), ("kimi-coding", "provider"), ("brave", "provider"), ("newsapi", "provider"),
-        ("openclaw", "integration"), ("object-store", "integration"), ("sonarr", "integration"),
+        ("object-store", "integration"), ("sonarr", "integration"),
         ("radarr", "integration"), ("sabnzbd", "integration")}
 
 
@@ -106,10 +108,10 @@ def test_every_destination_imports_verified_and_is_removable(env):
     store = integrations.load("object-store")
     assert store.meta == {"endpoint": "https://s3.example", "region": "us-east-1", "bucket": "media"}
     assert store.secret == {"access_key_id": S3_ACCESS, "secret_access_key": S3_SECRET}
-    assert integrations.load("openclaw").secret == {"token": CLAW}
+    assert integrations.load("openclaw") is None
     sab = integrations.load("sabnzbd")
     assert (sab.meta, sab.secret) == ({"url": "https://sabnzbd.example"}, {"api_key": SAB})
-    assert remove_names(list(result.values())) == sorted(set(FULL_ENV) - {"OPENAI_API_KEY"})
+    assert remove_names(list(result.values())) == sorted(set(FULL_ENV) - NOT_ADOPTABLE)
     # A rerun with the lines still present finds matching records: still removable, no writes.
     again = run(providers, integrations, FULL_ENV)
     assert {o.outcome for o in again.values()} == {"already_present"}
@@ -144,15 +146,17 @@ def test_unreadable_row_is_left_alone(env):
     assert not result["newsapi"].removable
 
 
-def test_alias_conflict_writes_nothing_and_agreeing_aliases_import_once(env):
+def test_alias_conflict_writes_nothing_and_agreeing_aliases_import_once(env, monkeypatch):
     engine, providers, integrations = env
-    split = {"OPENCLAW_GATEWAY_TOKEN": CLAW, "LLM_BAWT_OPENCLAW_GATEWAY_TOKEN": CLAW_OTHER}
+    # No shipped spec has two names for one field today; the rule still holds for one that does.
+    monkeypatch.setattr(env_import, "SPECS", (env_import._api_key("zai", "ZAI_API_KEY", "LEGACY_ZAI_KEY"),))
+    split = {"ZAI_API_KEY": ZAI, "LEGACY_ZAI_KEY": KIMI}
     result = run(providers, integrations, split)
-    assert (result["openclaw"].outcome, result["openclaw"].removable) == ("conflict", False)
+    assert (result["zai"].outcome, result["zai"].removable) == ("conflict", False)
     assert row_count(engine) == 0
-    result = run(providers, integrations, {"LLM_BAWT_OPENCLAW_GATEWAY_TOKEN": CLAW})
-    assert result["openclaw"].outcome == "imported"
-    assert result["openclaw"].env_names == ("LLM_BAWT_OPENCLAW_GATEWAY_TOKEN",)
+    result = run(providers, integrations, {"ZAI_API_KEY": ZAI, "LEGACY_ZAI_KEY": ZAI})
+    assert (result["zai"].outcome, result["zai"].env_names) == ("imported", ("ZAI_API_KEY", "LEGACY_ZAI_KEY"))
+    assert providers.load("zai").secret == {"api_key": ZAI}
 
 
 def test_partial_integration_is_incomplete_and_not_written(env):
@@ -174,10 +178,12 @@ def test_invalid_url_is_incomplete(env):
 def test_read_back_mismatch_rolls_the_insert_back(env, monkeypatch):
     engine, providers, integrations = env
     monkeypatch.setattr(integrations, "load_in", lambda conn, provider: ConnectionRecord(
-        provider=provider, status=STATUS_CONNECTED, auth_method="credentials", secret={"token": "other"}))
-    result = run(providers, integrations, {"OPENCLAW_GATEWAY_TOKEN": CLAW})
-    assert (result["openclaw"].outcome, result["openclaw"].detail_code) == ("failed", "verify_mismatch")
-    assert not result["openclaw"].removable
+        provider=provider, status=STATUS_CONNECTED, auth_method="credentials",
+        meta={"url": "https://sonarr.example"}, secret={"api_key": "other"}))
+    result = run(providers, integrations, {"LLM_BAWT_SONARR_URL": "https://sonarr.example",
+                                           "LLM_BAWT_SONARR_API_KEY": SONARR})
+    assert (result["sonarr"].outcome, result["sonarr"].detail_code) == ("failed", "verify_mismatch")
+    assert not result["sonarr"].removable
     assert row_count(engine) == 0
 
 
@@ -222,7 +228,7 @@ def test_main_reports_names_and_codes_never_values(env, monkeypatch, capsys, cap
     engine, providers, integrations = env
     for name, value in FULL_ENV.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("LLM_BAWT_OPENCLAW_GATEWAY_TOKEN", CLAW_OTHER)  # one unresolved conflict
+    monkeypatch.setenv("LLM_BAWT_RADARR_URL", "radarr:7878")  # one unresolved: invalid URL
     with caplog.at_level(logging.DEBUG):
         code = env_import.main([])
     assert code == 1
@@ -230,10 +236,11 @@ def test_main_reports_names_and_codes_never_values(env, monkeypatch, capsys, cap
     lines = [json.loads(line) for line in out.splitlines()]
     summary = lines[-1]
     by_dest = {line["destination"]: line for line in lines[:-1]}
-    assert by_dest["openclaw"]["outcome"] == "conflict"
+    assert "openclaw" not in by_dest
+    assert (by_dest["radarr"]["outcome"], by_dest["radarr"]["detail_code"]) == ("incomplete", "invalid_url")
     assert by_dest["zai"] == {"destination": "zai", "env_names": ["ZAI_API_KEY"], "outcome": "imported",
                               "detail_code": None, "removable": True}
-    assert "OPENCLAW_GATEWAY_TOKEN" not in summary["remove_names"]
+    assert not {"OPENCLAW_GATEWAY_TOKEN", "LLM_BAWT_RADARR_API_KEY"} & set(summary["remove_names"])
     assert "LLM_BAWT_S3_SECRET_KEY" in summary["remove_names"]
     assert summary["check"] is False
     for value in SECRETS:
