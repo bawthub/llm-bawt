@@ -257,6 +257,8 @@ services:
       # default_model catalog entry (type=claude-code).  See
       # src/claude_code_bridge/bridge.py (raises on missing model).
       - CLAUDE_CODE_BRIDGE_LOG_LEVEL=${CLAUDE_CODE_BRIDGE_LOG_LEVEL:-INFO}
+      # TASK-1474: bytecode stays out of the ./src mount (see the app).
+      - PYTHONPYCACHEPREFIX=/tmp/llm-bawt-pycache
       - LLM_BAWT_API_URL=http://app:8642
       # Override SERVICE_HOST inherited from .env (which is 0.0.0.0 — meant
       # for the app container's bind address). From inside a bridge, the
@@ -351,6 +353,8 @@ services:
       - CODEX_MODEL=${CODEX_MODEL:-gpt-5.4}
       - CODEX_BACKEND_NAME=${CODEX_BACKEND_NAME:-codex}
       - CODEX_BRIDGE_LOG_LEVEL=${CODEX_BRIDGE_LOG_LEVEL:-INFO}
+      # TASK-1474: bytecode stays out of the ./src mount (see the app).
+      - PYTHONPYCACHEPREFIX=/tmp/llm-bawt-pycache
       - CODEX_BRIDGE_HEALTH_PORT=8682
       - CODEX_BRIDGE_REQUEST_TIMEOUT=${CODEX_BRIDGE_REQUEST_TIMEOUT:-900}
       - CODEX_BRIDGE_CWD=${CODEX_BRIDGE_CWD:-/home/bridge/dev}
@@ -446,8 +450,10 @@ services:
     # TASK-1476: no env_file (see the app).
     environment:
       # This root-running service also bind-mounts ./src in development. Never
-      # leave root-owned Python bytecode in the shared working tree.
+      # leave root-owned Python bytecode in the shared working tree, and never
+      # read a stale .pyc from it (TASK-1474, see the app).
       - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPYCACHEPREFIX=/tmp/llm-bawt-pycache
       - LOCAL_MODEL_BACKEND_NAME=${LOCAL_MODEL_BACKEND_NAME:-local}
       - LOCAL_MODEL_BRIDGE_LOG_LEVEL=${LOCAL_MODEL_BRIDGE_LOG_LEVEL:-INFO}
       - LOCAL_MODEL_BRIDGE_HEALTH_PORT=8683

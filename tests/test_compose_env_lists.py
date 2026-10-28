@@ -167,6 +167,23 @@ def test_every_template_name_still_reaches_a_container():
     )
 
 
+def test_every_source_mounted_service_keeps_bytecode_out_of_the_checkout():
+    """TASK-1474: a service that runs the ``./src`` mount neither reads nor writes
+    ``__pycache__`` there; the ops source guard refuses a dirty checkout."""
+    overlay = ROOT / "docker-compose.dev.yml"
+    mounted = {
+        name for name, service in _services(overlay).items()
+        if any(str(v).split(":")[0] == "./src" for v in service.get("volumes") or [])
+    }
+    assert {"app", "claude-code-bridge", "codex-bridge"} <= mounted
+    services = _services(ROOT / "docker-compose.yml")
+    missing = sorted(
+        name for name in mounted
+        if not _environment(services.get(name) or {}).get("PYTHONPYCACHEPREFIX", "").startswith("/tmp/")
+    )
+    assert not missing, f"Set PYTHONPYCACHEPREFIX to a container-local path on {missing}"
+
+
 @pytest.mark.parametrize(("service", "files"), [
     ({"env_file": "./.env"}, True),
     ({"env_file": [{"path": "./.env", "required": False}]}, True),
