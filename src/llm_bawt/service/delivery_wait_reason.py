@@ -15,10 +15,13 @@ takes no lock and decides nothing.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
 from .turn_gates import DENY, GateActor, GateBlock, gate_blocks
 from .user_stop_hold import hold_owner
+
+logger = logging.getLogger(__name__)
 
 TURN_RUNNING = "turn_running"
 SYSTEM_HOLD = "system_hold"
@@ -59,8 +62,12 @@ def annotate_rows(engine, records: list[Any], views: list[dict[str, Any]]) -> li
     targets = [record.target_bot_id for record in records if is_waiting_chat(record)]
     if not targets or engine is None:
         return views
-    with engine.connect() as conn:
-        reasons = wait_reasons(conn, targets)
+    try:
+        with engine.connect() as conn:
+            reasons = wait_reasons(conn, targets)
+    except Exception:  # noqa: BLE001 - the listing never fails on its label (Codex r1 S1)
+        logger.warning("could not read delivery wait reasons", exc_info=True)
+        return views
     for record, view in zip(records, views):
         if is_waiting_chat(record):
             view["wait_reason"] = reasons[record.target_bot_id]

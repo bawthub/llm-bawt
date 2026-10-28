@@ -139,3 +139,18 @@ def test_rolled_back_gate_is_never_announced(gated):
         assert not listener.notifies
     finally:
         listener.close()
+
+
+def test_republish_pages_past_one_batch(gated, monkeypatch):
+    """Codex r1 B2: every waiting row relabels, not just the first batch."""
+    from llm_bawt.service import gate_change_republisher as rep
+
+    bot = gated.bot()
+    _, first = _chat_row(gated, bot)
+    deliveries, second = _chat_row(gated, bot)
+    monkeypatch.setattr(rep, "REPUBLISH_BATCH", 1)
+    announced = []
+    dispatcher = SimpleNamespace(store=deliveries, announce_lifecycle=announced.append, wake=lambda *a: None)
+    rep.republish_waiting(dispatcher)
+    ids = [row.id for row in announced]
+    assert first.id in ids and second.id in ids
