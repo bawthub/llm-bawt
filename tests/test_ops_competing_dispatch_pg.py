@@ -121,12 +121,14 @@ def test_a_second_dispatcher_leaves_a_job_another_is_dispatching_untouched(rig):
     first.preflight = held
     with ThreadPoolExecutor(1) as pool:
         winner = pool.submit(rig.services[0]._dispatch_queued, rig.job(job_id))
-        assert entered.wait(HANG_GUARD_S)
-        # Mid-preflight on instance 0: instance 1's pass returns without effect.
-        rig.services[1]._dispatch_queued(rig.stores[1].get_job(job_id))
-        loser_view = rig.job(job_id)
-        assert (loser_view.state, loser_view.error_text, loser_view.dispatched_at) == (JOB_QUEUED, None, None)
-        release.set()
+        try:
+            assert entered.wait(HANG_GUARD_S)
+            # Mid-preflight on instance 0: instance 1's pass returns without effect.
+            rig.services[1]._dispatch_queued(rig.stores[1].get_job(job_id))
+            loser_view = rig.job(job_id)
+            assert (loser_view.state, loser_view.error_text, loser_view.dispatched_at) == (JOB_QUEUED, None, None)
+        finally:
+            release.set()  # Before the pool's exit joins the held winner.
         winner.result(timeout=HANG_GUARD_S)
     assert (first.submits, second.submits, rig.creates()) == (1, 0, 1)
     assert rig.job(job_id).state == JOB_ACCEPTED
@@ -146,14 +148,16 @@ def test_two_concurrent_claims_on_one_job_let_exactly_one_win(rig):
     tx = holder.begin()
     pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
     holder.execute(text("SELECT 1 FROM ops_operations WHERE slug = :s FOR UPDATE"), {"s": slug})
-    try:
-        with ThreadPoolExecutor(2) as pool:
-            claims = [pool.submit(store.claim_job, job_id) for store in rig.stores]
+    with ThreadPoolExecutor(2) as pool:
+        claims = [pool.submit(store.claim_job, job_id) for store in rig.stores]
+        try:
             wait_blocked_by(rig.stores[0].engine, pid, claims[0])
+        finally:
+            # Released before the pool's exit joins claimers blocked on it, so
+            # a failed wait fails the test instead of hanging it.
             tx.commit()
-            results = sorted(claim.result(timeout=HANG_GUARD_S) for claim in claims)
-    finally:
-        holder.close()
+            holder.close()
+        results = sorted(claim.result(timeout=HANG_GUARD_S) for claim in claims)
     assert results == [False, True]
     job = rig.job(job_id)
     assert (job.state, job.error_text) == (JOB_DISPATCHING, None)
