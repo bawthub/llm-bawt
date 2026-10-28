@@ -39,7 +39,9 @@ class SearchKeyAdapter(ApiKeyAdapter):
             "description": self.description,
         }
 
-    def _probe_request(self, key: str) -> tuple[str, dict[str, str]]:
+    @staticmethod
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
+        """The key check's GET: also run by the cutover probe (TASK-1476)."""
         raise NotImplementedError
 
     def _probe(self, key: str) -> tuple[str | None, str | None]:
@@ -66,7 +68,8 @@ class BraveSearchKeyAdapter(SearchKeyAdapter):
     # Brave answers an invalid subscription token with 422.
     rejected_statuses = frozenset({400, 401, 403, 422})
 
-    def _probe_request(self, key: str) -> tuple[str, dict[str, str]]:
+    @staticmethod
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
         # One single-result query: Brave has no free key-check endpoint.
         return ("https://api.search.brave.com/res/v1/web/search?q=brave&count=1",
                 {"X-Subscription-Token": key, "Accept": "application/json"})
@@ -80,7 +83,8 @@ class TavilySearchKeyAdapter(SearchKeyAdapter):
     setup_url = "https://app.tavily.com/"
     description = "Optional web search. Without a key, web search uses DuckDuckGo."
 
-    def _probe_request(self, key: str) -> tuple[str, dict[str, str]]:
+    @staticmethod
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
         # The usage endpoint checks the key without spending search credits.
         return "https://api.tavily.com/usage", {"Authorization": f"Bearer {key}"}
 
@@ -93,7 +97,8 @@ class NewsApiKeyAdapter(SearchKeyAdapter):
     setup_url = "https://newsapi.org/register"
     description = "Optional news search and headlines tool (newsapi.org)."
 
-    def _probe_request(self, key: str) -> tuple[str, dict[str, str]]:
+    @staticmethod
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
         return "https://newsapi.org/v2/top-headlines/sources", {"X-Api-Key": key}
 
 

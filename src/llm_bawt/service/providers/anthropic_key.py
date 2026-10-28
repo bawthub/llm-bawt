@@ -29,15 +29,17 @@ class AnthropicKeyAdapter(ApiKeyAdapter):
     access_path_keys = ("anthropic-api",)
 
     @staticmethod
-    def _probe(key: str) -> tuple[str | None, str | None]:
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
+        """The key check's GET (list models): also run by the cutover probe (TASK-1476)."""
+        return _KEY_CHECK_URL, {"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION}
+
+    @classmethod
+    def _probe(cls, key: str) -> tuple[str | None, str | None]:
         if key.startswith("sk-ant-admin"):
             return None, "This is an Admin key; it can't run models. Add it under Usage reporting key (Admin)."
+        url, headers = cls._probe_request(key)
         try:
-            resp = httpx.get(
-                _KEY_CHECK_URL,
-                headers={"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION},
-                timeout=15.0,
-            )
+            resp = httpx.get(url, headers=headers, timeout=15.0)
         except httpx.HTTPError as exc:
             return None, f"Anthropic unreachable: {exc}"
         if resp.status_code == 401:

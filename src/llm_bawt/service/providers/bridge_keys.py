@@ -109,12 +109,16 @@ class ZaiKeyAdapter(ApiKeyAdapter):
     env_vars = ("ZAI_API_KEY", "Z_AI_API_KEY")
 
     @staticmethod
-    def _probe(key: str) -> tuple[str | None, str | None]:
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
+        """The key check's GET: also run by the cutover probe (TASK-1476)."""
         # The usage endpoint is free to call. It rejects a bad key in the body
         # (HTTP 200, ``code: 401``), so the body is checked too.
-        return _probe("Z.AI", "https://api.z.ai/api/monitor/usage/quota/limit",
-                      {"x-api-key": key, "anthropic-version": "2023-06-01"},
-                      body_error=_zai_body_error)
+        return ("https://api.z.ai/api/monitor/usage/quota/limit",
+                {"x-api-key": key, "anthropic-version": "2023-06-01"})
+
+    @classmethod
+    def _probe(cls, key: str) -> tuple[str | None, str | None]:
+        return _probe("Z.AI", *cls._probe_request(key), body_error=_zai_body_error)
 
 
 class KimiCodingKeyAdapter(ApiKeyAdapter):
@@ -127,9 +131,14 @@ class KimiCodingKeyAdapter(ApiKeyAdapter):
     env_vars = ("KIMI_CODING_API_KEY", "KIMI_API_KEY")
 
     @staticmethod
-    def _probe(key: str) -> tuple[str | None, str | None]:
-        return _probe("Kimi For Coding", "https://api.kimi.com/coding/v1/models",
-                      {"Authorization": f"Bearer {key}", "Accept": "application/json"})
+    def _probe_request(key: str) -> tuple[str, dict[str, str]]:
+        """The key check's GET: also run by the cutover probe (TASK-1476)."""
+        return ("https://api.kimi.com/coding/v1/models",
+                {"Authorization": f"Bearer {key}", "Accept": "application/json"})
+
+    @classmethod
+    def _probe(cls, key: str) -> tuple[str | None, str | None]:
+        return _probe("Kimi For Coding", *cls._probe_request(key))
 
 
 class MoonshotKeyAdapter(ApiKeyAdapter):

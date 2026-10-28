@@ -32,20 +32,28 @@ class BrokerKeyNotInstalled(BrokerKeyError):
     """The broker answered 503: no key is connected for this provider."""
 
 
-def fetch_provider_api_key(provider_id: str) -> str:
-    """Return the connected key for ``provider_id`` or raise ``BrokerKeyError``."""
+def broker_response(provider_id: str) -> httpx.Response:
+    """The broker's raw answer for ``provider_id`` (also read by the cutover probe).
+
+    Raises ``BrokerKeyError`` when ``LLM_BAWT_API_URL`` is unset and lets
+    ``httpx.HTTPError`` through on a transport failure.
+    """
     api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
     if not api_url:
         raise BrokerKeyError(
             f"LLM_BAWT_API_URL not set — cannot reach the {provider_id} API-key broker"
         )
-    headers = bridge_token.headers()
+    return httpx.get(
+        f"{api_url}/v1/providers/{provider_id}/token",
+        headers=bridge_token.headers(),
+        timeout=BROKER_TIMEOUT_S,
+    )
+
+
+def fetch_provider_api_key(provider_id: str) -> str:
+    """Return the connected key for ``provider_id`` or raise ``BrokerKeyError``."""
     try:
-        response = httpx.get(
-            f"{api_url}/v1/providers/{provider_id}/token",
-            headers=headers,
-            timeout=BROKER_TIMEOUT_S,
-        )
+        response = broker_response(provider_id)
     except httpx.HTTPError as exc:
         raise BrokerKeyError(f"{provider_id} API-key broker unreachable: {exc}") from exc
     if response.is_error:
