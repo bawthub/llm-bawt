@@ -391,6 +391,7 @@ def _executor(api, *, worker_labels=None, renderer_present=True, pulls=None):
     executor = DockerExecutor(client_factory=lambda: client, worker_image=WORKER, receipt_volume="receipts",
                               receipt_root="/receipts", render_api_factory=lambda: api)
     executor._check_prerequisites = lambda _settings: None
+    executor.self_target = lambda _snapshot: None  # Not under test here (TASK-1169 S4c).
     return executor
 
 

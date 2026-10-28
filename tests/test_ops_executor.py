@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ class NotFound(Exception):
 
 class FakeContainer:
     def __init__(self, labels=None, status="created", mounts=None):
+        self.id = uuid.uuid4().hex * 2  # A full container ID (TASK-1169 S4c).
         self.labels = labels or {}
         self.status = status
         self.starts = 0
@@ -37,7 +39,8 @@ class FakeContainer:
 
 class FakeContainers:
     def __init__(self, root):
-        self.rows = {"fake-app": FakeContainer(mounts=[{"Type": "volume", "Name": "receipts", "Destination": str(root), "RW": True}])}
+        self.rows = {"fake-app": FakeContainer(mounts=[{"Type": "volume", "Name": "receipts", "Destination": str(root), "RW": True}]),
+                     "app": FakeContainer(status="running")}  # setup()'s restart target
         self.creates = []
 
     def get(self, name):

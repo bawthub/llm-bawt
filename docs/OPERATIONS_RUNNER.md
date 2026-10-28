@@ -335,6 +335,54 @@ freeze lifts on its own with nothing running. None of these routes is an
 admission edge, so a freeze never blocks its own status or thaw. Freezes are
 also listed in `GET /v1/ops/holds` (operator-owned, `job` null).
 
+## Execution modes: process and isolated (TASK-1169 S4; not activated)
+
+Every Docker operation row has an `execution_mode`. The approval pins it,
+and a row moved to another mode needs a new approval.
+
+- **`isolated`** runs the worker in its own container. This is how every
+  Docker operation ran before S4, and the migration backfilled existing rows
+  to it.
+- **`process`** is the default for new rows. It runs the same pinned worker
+  code as a bounded child of the ops service. The child has a scrubbed
+  environment and rlimits, and its process group is killed at
+  `timeout_seconds` + `LLM_BAWT_OPS_WORKER_KILL_GRACE`.
+
+Both modes write the same request and receipt files. Release rows never
+start a worker, so their mode is inert.
+
+**Worker slots (S4b).** Process-mode jobs that are QUIESCING, DISPATCHING,
+ACCEPTED or RUNNING hold a slot (`worker_slot_at`). There are at most
+`LLM_BAWT_OPS_WORKER_CONCURRENCY` slots (default 4) across every dispatcher.
+The check runs on PostgreSQL under one advisory lock, in the same transaction
+as the claim or the quiesce open step.
+- A job waiting for a slot stays QUEUED with no error, so its preflight
+  deadline does not start.
+- A quiesce job waits before any hold opens.
+- Isolated jobs are not counted. Per-operation `max_concurrent` applies in
+  both modes.
+
+**Self-management (S4c).** The ops service identifies its own container by
+its full ID and Compose project/service labels. It looks the container up
+through `LLM_BAWT_OPS_APP_CONTAINER`, or `HOSTNAME`, which Docker sets to the
+short ID by default. Every Docker job's targets are inspected at prepare and
+again at every dispatch preflight. Matching is by full ID or by labels, never
+by name, so an alias, an abbreviated ID or a recreated ops service all
+match. The following are refused before any approval card, image pull, slot
+or spawn:
+
+| Code | When |
+|---|---|
+| `self_identity_unknown` | The ops service cannot identify its own container. Every Docker job is refused (fail closed). |
+| `self_target_unverifiable` | A target that could be the ops service cannot be inspected. |
+| `self_management_requires_isolated` | A process-mode job targets the ops service: the worker would die with it. Set the row to `isolated`. |
+| `self_stop_unrecoverable` | `stop` or `remove` of the ops service, in either mode: nothing would be left to import the receipt. |
+
+An isolated restart, recreate, config reconcile or image deploy/rollback of
+the ops service is allowed. The worker container outlives the restart, and
+the new ops service imports its receipt. The approval card says "Target is
+the ops service itself".
+
 ## GPU voice guard and the fenced TTS restart (TASK-1171)
 
 Starting or recreating BawtHub's Moshi `stt`/`tts` while video owns the GPU

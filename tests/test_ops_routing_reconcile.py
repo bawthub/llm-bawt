@@ -188,6 +188,7 @@ def test_legacy_worker_capability_fails_before_dispatch(monkeypatch):
     images = SimpleNamespace(get=lambda _: SimpleNamespace(attrs={"Config": {"Labels": {}}}))
     executor = DockerExecutor(client_factory=lambda: SimpleNamespace(images=images))
     monkeypatch.setattr(executor, "_check_prerequisites", lambda _: None)
+    monkeypatch.setattr(executor, "self_target", lambda _s: None)  # Not under test (TASK-1169 S4c).
     with pytest.raises(ExecutorError, match="deploy the tested worker first"):
         executor.routing_approval(SPEC)
     with pytest.raises(ExecutorError, match="deploy the tested worker first"):

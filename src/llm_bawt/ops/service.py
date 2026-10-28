@@ -19,6 +19,7 @@ from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError
                        validate_spec)
 from .execution_mode import snapshot_execution_mode
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
+from .self_target import SelfTargetError
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
 from .routing_reconcile import ACTION as ROUTING_ACTION, valid_routing_binding
@@ -352,6 +353,13 @@ class OpsService:
                                                       plan_targets=_plan_target_specs(snapshot))
         except GpuGuardUnverifiable as exc:
             raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
+        # TASK-1169 S4c: inspected here and again by every dispatch preflight.
+        try:
+            target = executor.self_target(snapshot)
+        except SelfTargetError as exc:
+            raise OpsDispatchError(exc.code, str(exc)) from exc
+        if target is not None:
+            snapshot["self_target"] = target  # The approval card names it.
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
         return json.loads(canonical_json(snapshot))
 

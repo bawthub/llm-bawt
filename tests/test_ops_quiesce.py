@@ -324,6 +324,7 @@ def _labelled_docker(monkeypatch, labels):
     images = SimpleNamespace(get=lambda _: SimpleNamespace(attrs={"Config": {"Labels": labels}}))
     executor = DockerExecutor(client_factory=lambda: SimpleNamespace(images=images))
     monkeypatch.setattr(executor, "_check_prerequisites", lambda _: None)
+    monkeypatch.setattr(executor, "self_target", lambda _s: None)  # Not under test (TASK-1169 S4c).
     return executor, images
 
 

@@ -41,6 +41,8 @@ from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, tagged_conf
 from .validation import canonical_json
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
+from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
+                          self_target as classify_self_target)
 from .worker_launch import ContainerLauncher, Liveness, container_worker_name
 from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
@@ -146,6 +148,13 @@ class Executor(ABC):
     def check_target(self, spec: dict, args: dict) -> None:
         """Approval-time, read-only: the spec's target exists where this executor
         acts. Raise ExecutorError so nobody approves a guaranteed failure."""
+
+    def self_target(self, snapshot: dict) -> str | None:
+        """Read-only: what this job targets of the ops service's own container,
+        else None; refuses a self-target the job's mode cannot survive
+        (TASK-1169 S4c, :mod:`.self_target`). An executor that acts on no
+        container on the ops service's own host cannot target it."""
+        return None
 
     def target_compose_identity(self, spec: dict, args: dict) -> tuple[str | None, str | None]:
         """Read-only: the ``(project, service)`` Compose labels of the container
@@ -253,6 +262,7 @@ class DockerExecutor(Executor):
                  pull_auth=None, render_api_factory=None):
         self._client_factory = client_factory
         self._client = None
+        self._own = None  # The ops service's own container identity (S4c).
         # TASK-1518: the sealed Compose renderer speaks the worker's stdlib
         # Docker API (attach before start); injectable in tests.
         self._render_api_factory = render_api_factory or (lambda: DockerAPI(60))
@@ -538,6 +548,33 @@ class DockerExecutor(Executor):
                 f"compose selector {filters['label']} matched {len(matches)} containers on this "
                 "executor's Docker host, expected one")
 
+    def self_target(self, snapshot):
+        return classify_self_target(snapshot, own=self._own_identity, inspect=self._container_identity)
+
+    def _own_identity(self):
+        """The ops service's own container, read once: its full ID cannot
+        change while this process lives. A failed read is not cached."""
+        if self._own is None:
+            owner = os.getenv("LLM_BAWT_OPS_APP_CONTAINER") or os.getenv("HOSTNAME", "")
+            if not owner:
+                raise SelfTargetError(SELF_IDENTITY_UNKNOWN, "no LLM_BAWT_OPS_APP_CONTAINER or HOSTNAME to look up")
+            try:
+                container = self.client.containers.get(owner)
+                own = ContainerIdentity.from_labels(container.id, container.labels)
+            except Exception as exc:
+                raise SelfTargetError(SELF_IDENTITY_UNKNOWN, f"cannot inspect own container: {exc}") from exc
+            if not own.container_id:
+                raise SelfTargetError(SELF_IDENTITY_UNKNOWN, "own container reports no ID")
+            self._own = own
+        return self._own
+
+    def _container_identity(self, name):
+        try:
+            container = self.client.containers.get(name)
+            return ContainerIdentity.from_labels(container.id, container.labels)
+        except Exception as exc:
+            raise SelfTargetError(SELF_TARGET_UNVERIFIABLE, f"cannot inspect target container {name!r}: {exc}") from exc
+
     def target_compose_identity(self, spec, args):
         try:
             name = spec.get("container_name") or target_selector(spec, args)[0]
@@ -567,22 +604,28 @@ class DockerExecutor(Executor):
         launcher = self._launcher_for(snapshot)
         self._check_prerequisites(snapshot["execution"])
         launcher.preflight(snapshot["execution"])
-        if snapshot["spec"].get("action") == ROUTING_ACTION:
+        action = snapshot["spec"].get("action")
+        if action == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
-        if snapshot["spec"].get("action") == REMOVE_ACTION:
-            # The worker re-renders and re-checks every refusal under the lock.
+        if action == REMOVE_ACTION:
             self._check_remove_worker(snapshot["execution"])
+        if action in CONFIG_CHECKED_ACTIONS:
+            self._check_config_worker(snapshot["execution"], action)
+        if snapshot.get("quiesce"):
+            self.check_quiesce_fence(snapshot["execution"])
+        # TASK-1169 S4c: a self-target the mode cannot survive, after the cheap
+        # capability refusals and before any image pull, slot or spawn.
+        self.self_target(snapshot)
+        if action == REMOVE_ACTION:
+            # The worker re-renders and re-checks every refusal under the lock.
             self.require_renderer_image(snapshot["spec"])
-        if snapshot["spec"].get("action") in CONFIG_CHECKED_ACTIONS:
+        if action in CONFIG_CHECKED_ACTIONS:
             # Cheap prerequisites only. The worker re-renders and compares under
             # the target lock; rendering here would churn renderer containers on
             # every reconcile tick of a job queued behind a prerequisite.
-            self._check_config_worker(snapshot["execution"], snapshot["spec"]["action"])
             for target in (snapshot.get("plan") or {}).get("targets") or [snapshot]:
                 self.ensure_renderer_image(target["spec"])
-        if snapshot.get("quiesce"):
-            self.check_quiesce_fence(snapshot["execution"])
-        if snapshot["spec"].get("action") == DEPLOY_ACTION:
+        if action == DEPLOY_ACTION:
             self.ensure_release_image(snapshot["release"]["image_ref"])
 
     def ensure_release_image(self, ref):
