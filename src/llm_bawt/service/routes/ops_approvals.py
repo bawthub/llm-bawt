@@ -178,7 +178,15 @@ async def get_ops_approval(request_id: str, request: Request):
         card = _card(row)
     if card is None:
         raise _refuse(404, "not_found", "no such approval request")
-    own_decision = row.resolved_by_bot == caller.bot_id
+    return approver_detail(row, card, approver=caller.bot_id)
+
+
+def approver_detail(row, card: OpsApprovalCard, *, approver: str) -> OpsApprovalDetail:
+    """What an eligible approver sees of ``row``; only the resolver sees its reason.
+
+    Callers check ``approver_eligible`` first: this is projection, not authorization.
+    """
+    own_decision = row.resolved_by_bot == approver
     return OpsApprovalDetail(
         **card.model_dump(), status=row.status, resolved_by_bot=row.resolved_by_bot,
         resolved_at=row.resolved_at,

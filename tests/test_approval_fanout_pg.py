@@ -180,3 +180,36 @@ def _deliver(ctx, delivery_id):
         conn.execute(sa_text(
             "UPDATE inter_bot_deliveries SET status='DELIVERED', delivered_at=now() WHERE id=:id"
         ), {"id": delivery_id})
+
+
+def test_history_marks_notice_rows_and_stubs_them_once_ineligible(fan, monkeypatch):
+    from types import SimpleNamespace
+
+    from llm_bawt.media import assets
+    from llm_bawt.service.routes.history_approval_notice import hydrate_approver_notices_for_page
+
+    request_id = fan.card()
+    fan.pump.run_pass()
+    [notice] = _notices(fan)
+    message_id = str(notice["user_message_id"])
+    with fan.deliveries.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS sessions (id text, bot_id text, user_id text)")
+        conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS messages (id text, bot_id text, session_id text, role text)")
+        conn.execute(sa_text("INSERT INTO sessions VALUES ('s1', :b, :u)"), {"b": HOLDER, "u": USER})
+        conn.execute(sa_text("INSERT INTO messages VALUES (:m, :b, 's1', 'user'), ('m-plain', :b, 's1', 'user')"),
+                     {"m": message_id, "b": HOLDER})
+    monkeypatch.setattr(assets, "_build_engine", lambda _config: fan.deliveries.engine)
+    service = SimpleNamespace(config=None)
+    page = [{"id": message_id, "role": "user"}, {"id": "m-plain", "role": "user"}]
+
+    cards = hydrate_approver_notices_for_page(service, HOLDER, page, USER)
+    assert set(cards) == {message_id}
+    card = cards[message_id]
+    assert (card["request_id"], card["kind"], card["available"]) == (request_id, fanout.REQUEST_KIND, True)
+    assert card["detail"]["request_id"] == request_id and card["detail"]["reason"] is None
+    assert SECRET not in str(card)
+    assert hydrate_approver_notices_for_page(service, HOLDER, page, "fixture-other-user") == {}
+
+    assert fan.api.as_person(HOLDER, granted=False).status_code == 200
+    assert hydrate_approver_notices_for_page(service, HOLDER, page, USER)[message_id] == {
+        "request_id": request_id, "kind": fanout.REQUEST_KIND, "available": False, "detail": None}

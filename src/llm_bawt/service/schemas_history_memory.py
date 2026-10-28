@@ -23,6 +23,19 @@ class MessageAuthor(BaseModel):
     avatar_render: str | None = None
 
 
+class ApproverNotice(BaseModel):
+    """An approval notice in an approver bot's chat (TASK-1661).
+
+    Re-checked at read time: ``available`` is False (and ``detail`` None) once
+    the bot may no longer see the card. ``detail`` is the masked approver view.
+    """
+
+    request_id: str
+    kind: str
+    available: bool
+    detail: dict | None = None
+
+
 class ScheduledMessageOrigin(BaseModel):
     """Trusted display-only provenance from a durable prompt occurrence."""
 
@@ -64,6 +77,7 @@ class HistoryMessage(BaseModel):
     interrupt_content_offset: int | None = None
     author: MessageAuthor
     scheduler: ScheduledMessageOrigin | None = None
+    approval_notice: ApproverNotice | None = None
 
 class HistoryResponse(BaseModel):
     """Response for conversation history.

@@ -6,6 +6,7 @@ from ..dependencies import get_media_asset_store, get_service
 from ..logging import get_service_logger
 from ..schemas import HistoryClearResponse, HistoryMessage, HistoryResponse
 from .history_scheduler import hydrate_scheduler_for_page
+from .history_approval_notice import hydrate_approver_notices_for_page
 
 read_router = APIRouter()
 mutation_router = APIRouter()
@@ -517,6 +518,9 @@ def _build_history_response(
     scheduler_by_id = hydrate_scheduler_for_page(
         service, effective_bot_id, page_messages, origin_user_id
     )
+    notices_by_id = hydrate_approver_notices_for_page(
+        service, effective_bot_id, page_messages, origin_user_id
+    )
     history_messages = []
     for msg in page_messages:
         message_id = str(msg.get("id") or "")
@@ -537,6 +541,7 @@ def _build_history_response(
             interrupt_content_offset=(interrupt_anchor[1] if interrupt_anchor else None),
             author=_message_author_payload(msg),
             scheduler=scheduler_by_id.get(message_id) if msg.get("role") == "user" else None,
+            approval_notice=notices_by_id.get(message_id) if msg.get("role") == "user" else None,
         ))
 
     oldest_timestamp = history_messages[0].timestamp if history_messages else None
