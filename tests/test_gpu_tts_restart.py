@@ -102,6 +102,29 @@ def test_unreadable_identity_fails_closed():
         gpu_voice_target({"action": "deploy_image"}, {}, Inspector())
 
 
+@pytest.mark.parametrize("identity", [(None, None), ("bawthub", None), (None, "tts"), ("", "tts"), None])
+@pytest.mark.parametrize("live", [False, True])
+def test_named_container_without_complete_labels_fails_closed(identity, live):
+    """Codex r1 B1: a named container whose Compose labels are missing or
+    partial could still be a voice service, so it refuses like an unreadable one."""
+    with pytest.raises(GpuGuardUnverifiable):
+        gpu_voice_target({"action": "restart", "container_name": "bawthub-tts-1"}, {},
+                         Inspector(identity), live=live)
+
+
+def test_partial_literal_identity_reads_the_container():
+    spec = {"action": "deploy_image", "container_name": "c", "compose_project": "bawthub"}
+    assert gpu_voice_target(spec, {}, Inspector(("bawthub", "tts"))) == "tts"
+    with pytest.raises(GpuGuardUnverifiable):
+        gpu_voice_target(spec, {}, Inspector((None, None)))
+
+
+def test_selector_with_an_empty_service_fails_closed():
+    spec = {"action": "start", "compose_project": "bawthub", "compose_service_from_arg": "svc"}
+    with pytest.raises(GpuGuardUnverifiable):
+        gpu_voice_target(spec, {"svc": ""}, Inspector())
+
+
 def test_live_recheck_catches_a_relabelled_container():
     spec = {"action": "deploy_image", "container_name": "c", "compose_project": "bawthub",
             "compose_service": "web"}
@@ -230,6 +253,29 @@ def test_unverifiable_target_refuses_before_any_job(world):
         world.ops.dispatch_job(operation_slug="named", args={}, idempotency_key="k")
     assert exc.value.code == "gpu_guard_unverifiable"
     assert job_count(world.engine) == 0
+
+
+def test_unlabelled_named_container_refuses_before_any_job(world):
+    """Codex r1 B1 at the service: no job row for a container with no Compose labels."""
+    world.ops_store.create_operation({"slug": "named", "enabled": True,
+                                      "command_script": '{"action":"restart","container_name":"bawthub-tts-1"}',
+                                      "args_schema_json": {"type": "object", "properties": {}}}, actor="t")
+    world.executor.identity = (None, None)
+    with pytest.raises(OpsDispatchError) as exc:
+        world.ops.dispatch_job(operation_slug="named", args={}, idempotency_key="k")
+    assert exc.value.code == "gpu_guard_unverifiable"
+    assert job_count(world.engine) == 0 and world.executor.dispatches == []
+
+
+def test_labels_lost_before_dispatch_keep_the_job_unsubmitted(world):
+    """Codex r1 B1 at dispatch: labels gone by the live re-check → queued, no worker."""
+    world.ops_store.create_operation({"slug": "web.restart", "enabled": True,
+        "command_script": '{"action":"restart","container_name":"web"}',
+        "args_schema_json": {"type": "object", "properties": {}}}, actor="t")
+    world.executor.identity = ("bawthub", "web")
+    world.executor.on_preflight = lambda: setattr(world.executor, "identity", (None, None))
+    world.ops.dispatch_job(operation_slug="web.restart", args={}, idempotency_key="k")
+    assert world.ops_store.get_job_by_key("k").state == JOB_QUEUED and world.executor.dispatches == []
 
 
 def test_fence_and_job_commit_together(world):

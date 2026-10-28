@@ -35,11 +35,22 @@ def _gated(project, service) -> bool:
     return project == GPU_VOICE_PROJECT and service in GPU_VOICE_SERVICES
 
 
-def _inspect(executor, spec, args) -> tuple[str | None, str | None] | None:
+def _complete(identity) -> bool:
+    return (isinstance(identity, tuple) and len(identity) == 2
+            and all(isinstance(part, str) and part for part in identity))
+
+
+def _inspect(executor, spec, args) -> tuple[str, str]:
+    """The named container's live Compose identity. A container without both
+    labels could still be a voice service, so a missing or partial identity
+    refuses like an unreadable one."""
     try:
-        return executor.target_compose_identity(spec, args)
+        identity = executor.target_compose_identity(spec, args)
     except ExecutorError as exc:
         raise GpuGuardUnverifiable(f"cannot read the target's Compose identity: {exc}") from exc
+    if not _complete(identity):
+        raise GpuGuardUnverifiable(f"the target container carries no complete Compose identity: {identity!r}")
+    return identity
 
 
 def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = False) -> str | None:
@@ -61,18 +72,25 @@ def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = 
         if name is None:
             # The worker selects exactly the containers carrying these labels.
             labels = dict(item.split("=", 1) for item in filters["label"])
-            identities = [(labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service"))]
+            identity = (labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service"))
+            if not _complete(identity):
+                raise GpuGuardUnverifiable(f"the target selector names no complete Compose identity: {identity!r}")
+            identities = [identity]
         else:
             identities = [_inspect(executor, spec, resolved_args)]
     else:
         literal = (spec.get("compose_project"), spec.get("compose_service"))
-        if None in literal and not spec.get("container_name"):
+        if _complete(literal):
+            identities = [literal]
+            if live and spec.get("container_name"):
+                identities.append(_inspect(executor, spec, resolved_args))
+        elif spec.get("container_name"):
+            # A partial literal identity proves nothing: read the container's.
+            identities = [_inspect(executor, spec, resolved_args)]
+        else:
             raise GpuGuardUnverifiable(f"{action!r} names no Compose identity or container")
-        identities = [literal]
-        if live and spec.get("container_name"):
-            identities.append(_inspect(executor, spec, resolved_args))
     for identity in identities:
-        if identity is not None and _gated(*identity):
+        if _gated(*identity):
             return identity[1]
     return None
 
