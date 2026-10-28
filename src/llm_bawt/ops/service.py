@@ -17,7 +17,7 @@ from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
-from .execution_mode import is_legacy_snapshot, snapshot_execution_mode
+from .execution_mode import snapshot_execution_mode
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
@@ -468,10 +468,10 @@ class OpsService:
             raise OpsDispatchError("operation_disabled", "operation is currently disabled or deleted")
         if current.id != snapshot["operation"]["id"]:
             raise OpsDispatchError("snapshot_invalid", "operation identity changed")
-        if is_legacy_snapshot(snapshot) and current.execution_mode != snapshot_execution_mode(snapshot):
-            # A pre-S4 approval runs as it was approved (a Docker job isolated),
-            # but only while the row still says so. An admin move to another
-            # mode needs a new approval.
+        if current.execution_mode != snapshot_execution_mode(snapshot):
+            # An approval runs where it was approved (a pre-S4 Docker one
+            # isolated), but only while the row still says so: an admin move
+            # to another mode needs a new approval.
             raise OpsDispatchError("snapshot_invalid", "snapshot execution execution_mode mismatch")
         op = OpsOperation(**{k: v for k, v in snapshot["operation"].items()
                              if k not in {"created_at", "updated_at", "soft_deleted_at"}})

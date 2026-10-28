@@ -122,12 +122,24 @@ def test_prepare_pins_the_rows_mode_in_both_copies():
     assert snapshot_execution_mode(snapshot) == "isolated"
 
 
-def test_the_approved_mode_executes_even_after_the_row_changes():
+def test_an_approval_is_refused_once_the_row_moved_to_another_mode():
     store = _store()
     store.create_operation(_op_data(execution_mode="isolated"))
-    service, executor = _make(store)
+    service, _ = _make(store)
     snapshot = service.prepare_invocation(SLUG, ARGS)
     store.update_operation(SLUG, {"execution_mode": "process"})
+    with pytest.raises(OpsDispatchError) as exc:
+        service.dispatch_job(operation_slug=SLUG, args=ARGS, approved_snapshot=snapshot)
+    assert exc.value.code == "snapshot_invalid"
+    assert "execution_mode mismatch" in str(exc.value)
+    assert not store.list_jobs()
+
+
+def test_an_approval_dispatches_in_its_mode_while_the_row_agrees():
+    store = _store()
+    store.create_operation(_op_data(execution_mode="isolated"))
+    service, _ = _make(store)
+    snapshot = service.prepare_invocation(SLUG, ARGS)
     job = service.dispatch_job(operation_slug=SLUG, args=ARGS, approved_snapshot=snapshot)
     assert json.loads(store.get_job(job["id"]).invocation_snapshot_json)["execution"]["execution_mode"] == "isolated"
 
