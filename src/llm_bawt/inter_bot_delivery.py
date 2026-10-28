@@ -31,6 +31,7 @@ from .service.dispatcher_leadership import (
     probe_lock_session,
     release_lock_session,
 )
+from .service.approval_fanout import ensure_fanout_schema
 from .service.delivery_cancel_notice import ensure_cancel_notice_schema
 from .service.turn_gates import ensure_gate_schema
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
@@ -108,6 +109,7 @@ class InterBotDeliveryStore:
         # The delivery claim asks the system gate under the target lock (TASK-1233).
         ensure_gate_schema(self.engine)
         ensure_cancel_notice_schema(self.engine)  # TASK-1327 sender notices
+        ensure_fanout_schema(self.engine)  # TASK-1661 approver notices
 
     def acquire_dispatcher_lock(
         self, lock_name: str = "inter-bot-dispatcher"

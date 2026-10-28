@@ -3,7 +3,8 @@
 The delivery dispatcher's job is claiming and running deliveries. Everything
 else its leader does on the same cadence lives here: new-session receipts and
 their outbox, Nextcloud Talk replies, the quiesce control producer and the
-cancelled-delivery sender notices (TASK-1327). A sweep calls
+cancelled-delivery sender notices (TASK-1327) and the approver notices
+(TASK-1661). A sweep calls
 ``run_pass`` once; ``stop`` tears the work down before leadership is released.
 """
 
@@ -25,18 +26,21 @@ class LeaderSidePumps:
     """Single owner of the dispatcher leader's non-claim pumps."""
 
     def __init__(self, service: Any, store: Any, *, talk_replies: Any = None,
-                 quiesce_control: Any = None, cancel_notices: Any = None) -> None:
+                 quiesce_control: Any = None, cancel_notices: Any = None,
+                 approver_notices: Any = None) -> None:
         self.service = service
         self.store = store
         self.talk_replies = talk_replies
         self.quiesce_control = quiesce_control
         self.cancel_notices = cancel_notices
+        self.approver_notices = approver_notices
         self.talk_reply_task: asyncio.Task | None = None
         self._new_session_outbox = None
         self._control_recheck: asyncio.TimerHandle | None = None
 
     @classmethod
     def build(cls, service: Any, store: Any) -> "LeaderSidePumps":
+        from .approval_fanout import ApprovalFanoutPump
         from .delivery_cancel_notice import CancelNoticePump
         from .quiesce_control import build_producer
         from .talk_reply_outbox import TalkReplyOutbox
@@ -48,6 +52,7 @@ class LeaderSidePumps:
             # TASK-1431 S3: link each quiesce-held running run to its control row.
             quiesce_control=build_producer(store),
             cancel_notices=CancelNoticePump(store) if engine is not None else None,
+            approver_notices=ApprovalFanoutPump(store) if engine is not None else None,
         )
 
     async def run_pass(self, emit: Emit) -> None:
@@ -64,7 +69,12 @@ class LeaderSidePumps:
         if self.quiesce_control is not None:
             await self._produce_controls()
         if self.cancel_notices is not None:
-            await self._send_cancel_notices(emit)
+            await self._send_notices(emit, self.cancel_notices)
+        if self.approver_notices is not None:
+            try:
+                await self._send_notices(emit, self.approver_notices)
+            except Exception:  # new pump (TASK-1661): never fails the sweep
+                logger.exception("Approver notice pass failed")
 
     async def _produce_controls(self) -> None:
         """Link held runs to control rows; wake the dispatcher for what needs it.
@@ -95,8 +105,9 @@ class LeaderSidePumps:
         if handle is not None:
             handle.cancel()
 
-    async def _send_cancel_notices(self, emit: Emit) -> None:
-        notices = (await asyncio.to_thread(self.cancel_notices.run_pass)).notified
+    async def _send_notices(self, emit: Emit, pump: Any) -> None:
+        """Run one notice pump and announce the deliveries it enqueued."""
+        notices = (await asyncio.to_thread(pump.run_pass)).notified
         for notice in notices:
             await emit(notice)
         dispatcher = getattr(self.service, "_inter_bot_dispatcher", None)

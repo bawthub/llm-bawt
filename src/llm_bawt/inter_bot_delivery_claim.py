@@ -81,6 +81,18 @@ class DeliveryClaim:
                     WHERE id=:id AND status='QUEUED'
                 """), {"id": head["id"]})
                 return None
+            from .service.approval_fanout import claim_fence
+
+            # TASK-1661: an approval notice whose approver lost eligibility (or
+            # whose card was decided) since enqueue is cancelled, not run.
+            fenced = claim_fence(conn, head)
+            if fenced is not None:
+                conn.execute(sa_text("""
+                    UPDATE inter_bot_deliveries SET status='CANCELLED',
+                        next_retry_at=NULL, last_error=:reason, updated_at=now()
+                    WHERE id=:id AND status='QUEUED'
+                """), {"id": head["id"], "reason": fenced})
+                return None
             if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"]),
                            exclude_owner_id=exempt_owner) is not None:
                 # A live system gate holds the head: it stays QUEUED with no

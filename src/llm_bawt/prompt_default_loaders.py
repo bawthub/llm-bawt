@@ -127,6 +127,18 @@ def load_deliveries_cancel_notice() -> str:
     return DEFAULT_CANCEL_NOTICE
 
 
+def load_approvals_approver_request() -> str:
+    from .service.approval_fanout_prompt import DEFAULT_APPROVER_REQUEST
+
+    return DEFAULT_APPROVER_REQUEST
+
+
+def load_approvals_approver_resolved() -> str:
+    from .service.approval_fanout_prompt import DEFAULT_APPROVER_RESOLVED
+
+    return DEFAULT_APPROVER_RESOLVED
+
+
 def load_ops_quiesce_receipt() -> str:
     from .ops.quiesce_prompts import DEFAULT_RECEIPT
 

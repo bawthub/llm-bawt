@@ -355,6 +355,19 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "are pending; off does neither. An unknown value acts as report."
         ),
     ),
+    "approver_fanout_mode": SettingDefinition(
+        key="approver_fanout_mode",
+        type="str",
+        default="notify",
+        applies_to=(),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Approver notices",
+        help=(
+            "When another bot's ops approval is pending, tell each bot that may decide "
+            "it, and tell them when it is decided. notify sends the notices; report only "
+            "logs how many are pending; off does neither. An unknown value acts as report."
+        ),
+    ),
     "timeout_seconds": SettingDefinition(
         key="timeout_seconds",
         type="int",

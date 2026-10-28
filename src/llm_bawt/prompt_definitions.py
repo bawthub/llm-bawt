@@ -27,6 +27,8 @@ from .chat_prompt_defaults import (
 )
 from .prompt_default_loaders import (
     load_agents_docs,
+    load_approvals_approver_request,
+    load_approvals_approver_resolved,
     load_agents_project_plan,
     load_agents_review,
     load_agents_task_execution,
@@ -484,6 +486,34 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "to the original request, so it must tell the bot to check what it "
             "already completed and not repeat side effects. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "approvals.approver_request": PromptDefinition(
+        key="approvals.approver_request",
+        title="Approver Notice: Approval Requested",
+        category="agent_execution",
+        required_vars=("request_id", "requested_by", "operation", "title", "risk_level",
+                       "severity", "args"),
+        loader=load_approvals_approver_request,
+        metadata={"notes": (
+            "Body of the system delivery (TASK-1661) that tells a bot holding the "
+            "approve_ops grant that another bot's ops_run approval is pending. "
+            "{args} are the operation's arguments with x-sensitive values masked. "
+            "It must name ops_approvals_get and ops_approval_resolve and say "
+            "someone else may decide first. Approver-bot overrides supported."
+        )},
+    ),
+    "approvals.approver_resolved": PromptDefinition(
+        key="approvals.approver_resolved",
+        title="Approver Notice: Approval Decided",
+        category="agent_execution",
+        required_vars=("request_id", "requested_by", "operation", "status", "resolved_by"),
+        loader=load_approvals_approver_resolved,
+        metadata={"notes": (
+            "Steer-only follow-up (TASK-1661) telling an approver bot that a request "
+            "it was notified about has been decided by someone else. {resolved_by} "
+            "is a bot slug or \"a person\"; the resolver's reason is never included. "
+            "Approver-bot overrides supported."
         )},
     ),
     "deliveries.cancel_notice": PromptDefinition(
