@@ -12,7 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from llm_bawt.ops.app_config_reconcile import (
-    SCHEMA, SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL, AppConfigReconciler, app_config_binding,
+    BUILT_PROFILE_LABEL, SCHEMA, SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL, AppConfigReconciler,
+    app_config_binding,
     approval_text, newly_trusted, snapshot_approval_text, valid_app_binding,
 )
 from llm_bawt.ops.compose_config import BUILT_PROFILE, PINNED_PROFILE, translate
@@ -186,7 +187,7 @@ class AppDocker(FakeDocker):
 
 def binding(api, spec=SPEC, *, moved=False, checker=None):
     return app_config_binding(spec, api.by_name(APP_NAME), api.images[APP_ID],
-                              ComposeRenderer(api, spec, tag="app1"), image_tag_moved=moved,
+                              ComposeRenderer(api, spec, tag="app1"), tag_moved=lambda _tag: moved,
                               source_checker=checker or StubChecker())[0]
 
 
@@ -242,12 +243,16 @@ def test_pinned_profile_still_refuses_process_keys(key, value):
     assert caught.value.code == "unsupported_compose_key" and caught.value.names == ["command"]
 
 
-def test_built_profile_refuses_an_image_key_and_requires_build():
-    for service, code in (({"image": TAG}, "unsupported_compose_key"), ({"build": None}, "compose_image_mismatch")):
+def test_built_profile_refuses_a_pulled_image_key_and_requires_build():
+    # A declared image is the build's local tag only (more in test_ops_app_config_backend.py).
+    for service, code in (({"image": "ghcr.io/x/app:1"}, "unsupported_compose_key"),
+                          ({"image": f"{TAG}@sha256:" + "a" * 64}, "unsupported_compose_key"),
+                          ({"build": None}, "compose_image_mismatch")):
         rendered = app_compose(**service)
         with pytest.raises(ComposeError) as caught:
             translate(rendered, SPEC, TAG, BUILT_PROFILE)
         assert caught.value.code == code
+    assert translate(app_compose(image=TAG), SPEC, TAG, BUILT_PROFILE)["image"] == f"{TAG}:latest"
 
 
 # ── binding ─────────────────────────────────────────────────────────────────
@@ -263,7 +268,8 @@ def test_binding_shows_names_ports_and_dependencies_only():
     assert bound["source_commit"] == {"repository": SPEC["source_repository"], "branch": SPEC["source_branch"],
                                       "head": HEAD}
     text = card(bound)
-    assert "cuts in-flight chat turns" in text and "redis:service_healthy" in text and SECRET not in text
+    assert "cuts its in-flight requests" in text and "redis:service_healthy" in text and SECRET not in text
+    assert "Security options after: none" in text
     assert f"Source: github.com/{SPEC['source_repository']} {SPEC['source_branch']} @ {HEAD}" in text
     assert "now names a different local build" not in text
 
@@ -444,7 +450,8 @@ class _NotFound(Exception):
 def _executor(api, *, worker_labels=None):
     def get_image(ref):
         if ref == WORKER:
-            labels = ({WORKER_CAPABILITY_LABEL: "1", SOURCE_GUARD_LABEL: "1"} if worker_labels is None
+            labels = ({WORKER_CAPABILITY_LABEL: "1", SOURCE_GUARD_LABEL: "1", BUILT_PROFILE_LABEL: "1"}
+                      if worker_labels is None
                       else worker_labels)
             return SimpleNamespace(attrs={"Config": {"Labels": labels}})
         try:
@@ -486,6 +493,8 @@ def test_unmoved_tag_and_a_target_already_running_by_id():
     ({"llm-bawt.ops.config-reconcile": "1"}, WORKER_CAPABILITY_LABEL),
     # TASK-1474: a worker that reconciles the app but predates the source guard.
     ({WORKER_CAPABILITY_LABEL: "1"}, SOURCE_GUARD_LABEL),
+    # TASK-1474 step 4: ...or predates the v2 built profile (image, security_opt, health field/value).
+    ({WORKER_CAPABILITY_LABEL: "1", SOURCE_GUARD_LABEL: "1"}, BUILT_PROFILE_LABEL),
 ])
 def test_legacy_worker_without_the_app_capability_refuses(source, labels, missing):
     api = AppDocker()
@@ -506,7 +515,8 @@ def test_drift_is_reconciled_and_values_stay_private(tmp_path):
     snap = snapshot(api)
     output = reconciler(api, tmp_path, snap).run()
     result = json.loads(output)
-    assert result["health"] == {"status": "ok", "stat": {}} and result["previous"]["image_id"] == APP_ID
+    assert result["health"] == {"field": "status", "status": "matched", "stat": {}}
+    assert result["previous"]["image_id"] == APP_ID
     assert api.exec_cmds[-1] == ["curl", "-fsS", "--max-time", "10", SPEC["health_url"]]
     body = api.create_bodies[0]
     assert f"XAI_API_KEY={SECRET}" in body["Env"] and body["Cmd"] == CMD
@@ -521,7 +531,7 @@ def test_drift_is_reconciled_and_values_stay_private(tmp_path):
 def test_no_drift_verifies_only(tmp_path):
     api = AppDocker()
     result = json.loads(reconciler(api, tmp_path).run())
-    assert result["unchanged"] and result["health"]["status"] == "ok"
+    assert result["unchanged"] and result["health"]["status"] == "matched"
     assert not api.create_bodies and not api.side_effect_started
 
 
@@ -599,6 +609,7 @@ def test_worker_image_carries_the_module_and_capability_label():
         assert f"src/llm_bawt/ops/{module}.py" in dockerfile
     assert f'LABEL {WORKER_CAPABILITY_LABEL}="1"' in dockerfile
     assert f'LABEL {SOURCE_GUARD_LABEL}="1"' in dockerfile
+    assert f'LABEL {BUILT_PROFILE_LABEL}="1"' in dockerfile
 
 
 # ── app side: snapshot binding ─────────────────────────────────────────────

@@ -463,7 +463,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         compose_project=_LLM_BAWT_PROJECT, compose_service="app",
         compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
         display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=180,
-        health_url="http://127.0.0.1:8642/health", health_status="ok",
+        health_url="http://127.0.0.1:8642/health", health_field="status", health_value="ok",
         # The app runs its source from bind mounts of the checkout, so the
         # source must be exactly the published branch head. Every container
         # mount is named here as source or data; anything else refuses.
@@ -489,6 +489,55 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "risk_level": RISK_HIGH,
     "category": "configuration",
     "approval_prompt_prefix": "Reconcile llm-bawt app configuration with the same image (cuts in-flight turns)",
+}, {
+    # TASK-1474 step 4: the BawtHub backend, also Compose-built, recreated at
+    # the same image. Not a self-target (the app serves the approval), so no
+    # start delay. Same refusals and trust block as the app row.
+    "slug": "bawthub.reconcile-backend-config",
+    "title": "Reconcile BawtHub backend configuration",
+    "description": (
+        "Recreate the BawtHub backend from its declared Compose service using the SAME running image. "
+        "No build or pull; the image is bound by ID, never by tag. Approval shows changed names, "
+        "ports and security options only, never environment values. Refuses unless the bind-mounted "
+        "source is exactly the published branch head. Verifies health and restores the previous "
+        "container on failure. Cuts active voice sessions and in-flight backend requests."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_app_config", container_name="bawthub-backend-1",
+        compose_project=_BAWTHUB_PROJECT, compose_service="backend",
+        compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+        display_values={},
+        # Mode/owner of the service token by fixed argv, never its contents.
+        stat_paths=["/run/bawthub-service-token/token"],
+        stop_grace_seconds=10, health_timeout_seconds=120,
+        health_url="http://127.0.0.1:80/v1/health", health_field="ok", health_value=True,
+        # Destinations are the product's own Compose file's container paths.
+        source_repository="bawthub/bawthub", source_branch="main",
+        source_mounts=["/app/bawthub"],
+        data_mounts=["/app/services/moshi-server/configs", "/var/run/docker.sock", "/run/bawthub-service-token"],
+        # The backend's own Compose environment names (never values): data it
+        # reads (URLs, keys, ids, voice names); none is executed.
+        env_names=["AZURE_SPEECH_ENDPOINT", "AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION", "AZURE_VOICE_FILTER",
+                   "BAWTHUB_COMPOSE_PROJECT", "BAWTHUB_LLM_MODEL", "BAWTHUB_LLM_URL",
+                   "BAWTHUB_SERVICE_TOKEN_FILE", "BAWTHUB_STT_URL", "BAWTHUB_TTS_DEFAULT_PROVIDER",
+                   "BAWTHUB_TTS_DOCKER_CONTAINER", "BAWTHUB_TTS_URL", "DATABASE_URL", "GROK_TTS_DEFAULT_VOICE",
+                   "GROK_TTS_LANGUAGE", "GROK_TTS_LATENCY_MODE", "GROK_TTS_TEXT_NORMALIZATION",
+                   "HOME_ASSISTANT_TOKEN", "HOME_ASSISTANT_URL", "HOME_ASSISTANT_WEATHER_ENTITY_ID",
+                   "XAI_API_KEY"],
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_HIGH,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile BawtHub backend configuration with the same image (cuts voice sessions)",
 }]
 
 

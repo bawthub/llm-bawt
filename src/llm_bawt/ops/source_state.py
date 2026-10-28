@@ -80,6 +80,7 @@ _DIGITS = re.compile(r"[0-9]{1,6}")
 _TOKEN = re.compile(r"[A-Za-z0-9._+-]{0,128}")
 _LANG = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
 _TZ = re.compile(r"[A-Za-z0-9_+-]{1,64}(?:/[A-Za-z0-9_+-]{1,64}){0,3}")
+_HOSTNAME = re.compile(r"[A-Za-z0-9.-]{0,253}")
 RESERVED_ENV = frozenset({
     "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "GLOBIGNORE", "PS1", "PS2", "PS3", "PS4",
     "PROMPT_COMMAND", "HOME", "PATH", "SHELL", "TMPDIR", "TERMINFO", "TERMINFO_DIRS", "HOSTALIASES",
@@ -119,6 +120,11 @@ PRODUCT_ENV = {
     "PYTHONUNBUFFERED": lambda v, _m: bool(_FLAG.fullmatch(v)),
     "PYTHONDONTWRITEBYTECODE": lambda v, _m: bool(_FLAG.fullmatch(v)),
     "UV_HTTP_TIMEOUT": lambda v, _m: bool(_DIGITS.fullmatch(v)),
+    # TASK-1474 (BawtHub backend image). UV_LOCKED only ever asserts the
+    # lock: 0/false would let `uv run` resolve afresh, so they stay refused.
+    "UV_COMPILE_BYTECODE": lambda v, _m: v in ("0", "1", "true", "false"),
+    "UV_LOCKED": lambda v, _m: v in ("1", "true"),
+    "HOSTNAME": lambda v, _m: bool(_HOSTNAME.fullmatch(v)),
     "LANG": _locale,
     "TZ": lambda v, _m: bool(_TZ.fullmatch(v)),
     **{name: (lambda v, _m: bool(_TOKEN.fullmatch(v)))

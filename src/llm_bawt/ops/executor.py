@@ -16,9 +16,9 @@ from pathlib import Path
 
 from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
-from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, SOURCE_GUARD_LABEL,
+from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, SOURCE_GUARD_LABEL,
                                    WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL, app_config_binding,
-                                   image_tag, validate_app_spec)
+                                   validate_app_spec)
 from .compose_config import evaluate
 from .compose_render import ComposeError, ComposeRenderer
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
@@ -35,9 +35,10 @@ from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json,
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 # Ops whose target configuration is compared with its Compose service (TASK-1518),
 # and the worker capability labels each needs (TASK-1474: the app reconcile and
-# its source guard; an app worker without the guard would swap unpublished source).
+# its source guard; an app worker without the guard would swap unpublished source;
+# and the v2 built profile, whose spec shape an older worker would refuse mid-job).
 CONFIG_WORKER_LABELS = {CONFIG_ACTION: (CONFIG_WORKER_LABEL,), DEPLOY_ACTION: (CONFIG_WORKER_LABEL,),
-                        APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL)}
+                        APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL, BUILT_PROFILE_LABEL)}
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
 
 
@@ -349,15 +350,15 @@ class DockerExecutor(Executor):
         renderer = ComposeRenderer(self._render_api_factory(), spec, tag="app" + os.urandom(4).hex())
         return renderer, target.attrs, image.attrs
 
-    def _image_tag_moved(self, spec, image):
+    def _image_tag_moved(self, tag, image):
         """TASK-1474: does the Compose tag still name the running build? Shown
         to the approver only; the worker swaps by image ID either way."""
         try:
-            return self.client.images.get(image_tag(spec)).attrs["Id"] != image["Id"]
+            return self.client.images.get(tag).attrs["Id"] != image["Id"]
         except Exception as exc:
             if getattr(exc, "status_code", None) == 404:
                 return True
-            raise ExecutorError(f"cannot inspect the Compose image tag {image_tag(spec)}") from exc
+            raise ExecutorError(f"cannot inspect the Compose image tag {tag}") from exc
 
     def config_approval(self, spec):
         renderer, container, image = self._config_inputs(spec)
@@ -366,7 +367,7 @@ class DockerExecutor(Executor):
                 checker = SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],
                                         tag="src" + os.urandom(4).hex())
                 return app_config_binding(spec, container, image, renderer, source_checker=checker,
-                                          image_tag_moved=self._image_tag_moved(spec, image))[0]
+                                          tag_moved=lambda tag: self._image_tag_moved(tag, image))[0]
             return config_binding(spec, container, image, renderer)[0]
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc

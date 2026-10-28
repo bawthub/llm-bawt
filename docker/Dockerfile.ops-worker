@@ -18,6 +18,9 @@ LABEL llm-bawt.ops.app-config-reconcile="1"
 # TASK-1474: ...and refuses unless the app's bind-mounted source is exactly the
 # approved commit (sealed git check, source_state.py).
 LABEL llm-bawt.ops.app-source-guard="1"
+# TASK-1474 step 4: ...with the v2 built profile (declared image, pull_policy and
+# security_opt; health field/value), so the BawtHub backend is a second target.
+LABEL llm-bawt.ops.built-profile-v2="1"
 # TASK-1233: this worker enforces the quiesce start fence (worker.fence_expired).
 LABEL llm-bawt.ops.quiesce-fence="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

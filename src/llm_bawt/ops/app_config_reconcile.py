@@ -1,32 +1,38 @@
-"""Same-image reconcile of a Compose-BUILT service (the llm-bawt app). STANDARD LIBRARY ONLY (TASK-1474).
+"""Same-image reconcile of a Compose-BUILT service. STANDARD LIBRARY ONLY (TASK-1474).
 
+Targets: the llm-bawt app and the BawtHub backend, one catalog row each.
 The frontend reconcile (:mod:`config_reconcile`) recreates a digest-pinned
-image. The app is built by Compose instead, so:
+image. These are built by Compose instead, so:
 
 * the binding pins the running image ID and never re-resolves the Compose tag
-  (``<project>-<service>``). A tag that now names another local build is shown
-  on the approval card (``image_tag_moved``); it is never drift and never
-  deployed. ``build`` is accepted and inert: a reconcile never builds or pulls;
+  (the declared ``image``, else ``<project>-<service>``). A tag that now names
+  another local build is shown on the approval card (``image_tag_moved``); it
+  is never drift and never deployed. ``build`` and ``pull_policy`` are
+  accepted and inert: a reconcile never builds or pulls;
 * the per-kind :data:`BUILT_PROFILE` also models command/entrypoint, published
-  ports, stdin_open/tty and container_name;
+  ports, stdin_open/tty, container_name and security_opt (whose values the
+  card shows: they can weaken confinement);
 * ``depends_on`` is a precondition, not drift: right before the swap every
   dependency must be exactly one running (and, for ``service_healthy``,
   healthy) container of the same project. A dependency is only ever read;
 * the compose files are the ones the target's own labels record (an install's
   overlay set is its own), validated and shown on the approval card;
-* health is the app's own in-container health URL plus Docker health.
+* health is the target's own in-container health URL (one JSON field must
+  equal the spec's value) plus Docker health.
 
-The target is the app that dispatched the job: recreating it cuts in-flight
-chat turns and the MCP server. The worker is a separate container and the
-ops-reconciler imports its receipt, so the outcome survives the app's restart.
+When the target is the app that dispatched the job, recreating it cuts
+in-flight chat turns and the MCP server. The worker is a separate container
+and the ops-reconciler imports its receipt, so the outcome survives the app's
+restart.
 """
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import urlencode
 
 if __package__:
-    from .compose_config import BUILT_PROFILE, evaluate, port_list
+    from .compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
     from .compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
     from .config_reconcile import (ConfigReconciler, check_compose_identity, current_config_hash,
                                    valid_hashes, validate_renderer_image, validate_target_fields)
@@ -34,7 +40,7 @@ if __package__:
     from .source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
                                valid_classification, valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
-    from compose_config import BUILT_PROFILE, evaluate, port_list
+    from compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
     from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
     from config_reconcile import (ConfigReconciler, check_compose_identity, current_config_hash,
                                   valid_hashes, validate_renderer_image, validate_target_fields)
@@ -49,18 +55,24 @@ SCHEMA = "llm-bawt.ops.app-config-reconcile/v1"
 # unpublished source.
 WORKER_CAPABILITY_LABEL = "llm-bawt.ops.app-config-reconcile"
 SOURCE_GUARD_LABEL = "llm-bawt.ops.app-source-guard"
+# ...and the v2 built profile (image/pull_policy/security_opt, health
+# field/value). An older worker would refuse the spec shape mid-job; with
+# this label required, dispatch refuses first with config_reconcile_unavailable.
+BUILT_PROFILE_LABEL = "llm-bawt.ops.built-profile-v2"
 _PATTERNS = {
     "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
     "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
     "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
     "health_url": r"http://127\.0\.0\.1:[1-9][0-9]{0,4}/[A-Za-z0-9._/-]{0,128}",
-    "health_status": r"[A-Za-z0-9._-]{1,32}",
+    "health_field": r"[a-z_]{1,32}",
 }
+_HEALTH_VALUE = re.compile(r"[A-Za-z0-9._-]{1,32}")
 _SPEC_KEYS = frozenset({"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
-                        "health_timeout_seconds", *SOURCE_FIELDS, *_PATTERNS})
+                        "health_timeout_seconds", "health_value", *SOURCE_FIELDS, *_PATTERNS})
 _BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "image_tag", "image_tag_moved", "source",
                            "current_config_hash", "desired_hash", "rendered_hash", "drift", "mounts",
-                           "ports", "depends_on", "display", "source_commit", "classification"})
+                           "ports", "depends_on", "security_opt", "display", "source_commit",
+                           "classification"})
 _CLASSES = ("source_mounts", "data_mounts", "opaque_env")
 
 
@@ -70,6 +82,9 @@ def validate_app_spec(spec: dict) -> dict:
     if spec["action"] != ACTION:
         raise ValueError("not an app config reconcile spec")
     validate_target_fields(spec, _PATTERNS)
+    value = spec["health_value"]
+    if value is not True and not (isinstance(value, str) and _HEALTH_VALUE.fullmatch(value)):
+        raise ValueError("health_value must be a short token or true")
     config = spec["compose_config"]
     # No compose_files (the target's labels name them) and no image_variable
     # (Compose builds the image; nothing is interpolated).
@@ -80,38 +95,60 @@ def validate_app_spec(spec: dict) -> dict:
     return spec
 
 
-def image_tag(spec: dict) -> str:
-    """The tag Compose gives the image it builds for this service."""
+def image_tag(spec: dict, desired: dict | None = None) -> str:
+    """The tag Compose gives the image it builds for this service: the
+    declared ``image`` (normalised by :func:`built_image_tag`), else
+    ``<project>-<service>``."""
+    if desired is not None and "image" in desired:
+        return desired["image"]
     return f"{spec['compose_project']}-{spec['compose_service']}"
 
 
+def _image_refs(tag: str) -> set:
+    """The ``Config.Image`` forms Compose may have created the container with."""
+    return {tag, tag.removesuffix(":latest")}
+
+
 def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
-                       image_tag_moved: bool, source_checker) -> tuple[dict, dict]:
+                       tag_moved, source_checker) -> tuple[dict, dict]:
     """``(public approval binding, private desired config)``; raises ValueError.
 
-    ``image_tag_moved`` is resolved by the caller: the app at approval; the
-    worker carries the approved value forward and never resolves the tag.
-    ``source_checker`` proves the source mounts are exactly one commit
-    (:mod:`source_state`); whether that commit is published is the app's
-    check, made against the binding's ``source_commit``."""
+    ``tag_moved(tag) -> bool`` is resolved by the caller: the app inspects the
+    tag at approval; the worker carries the approved value forward and never
+    resolves it. ``source_checker`` proves the source mounts are exactly one
+    commit (:mod:`source_state`); whether that commit is published is the
+    app's check, made against the binding's ``source_commit``."""
     validate_app_spec(spec)
     check_compose_identity(spec, container)
-    ref, tag = container["Config"].get("Image", ""), image_tag(spec)
-    if image["Id"] != container["Image"] or ref not in (tag, image["Id"]):
+    ref = container["Config"].get("Image", "")
+    if image["Id"] != container["Image"]:
         raise ValueError("app config target must run its own Compose-built image")
     result = evaluate(spec, container, image, renderer, ref, BUILT_PROFILE)
     desired = result["desired"]
+    tag = image_tag(spec, desired)
+    if ref != image["Id"] and ref not in _image_refs(tag):
+        raise ValueError("app config target must run its own Compose-built image")
     plan = source_plan(spec, result["source"], container, image, desired)
     head = source_checker.check(result["source"]["project_dir"], plan)
     binding = {"container_id": container["Id"], "image_id": image["Id"], "image_ref": ref,
-               "image_tag": tag, "image_tag_moved": bool(image_tag_moved), "source": result["source"],
+               "image_tag": tag, "image_tag_moved": bool(tag_moved(tag)), "source": result["source"],
                "current_config_hash": current_config_hash(container, image),
                "desired_hash": result["desired_hash"], "rendered_hash": result["rendered_hash"],
                "drift": result["drift"], "mounts": result["mounts"], "ports": port_list(desired["ports"]),
                "depends_on": [f"{name}:{cond}" for name, cond in desired["depends_on"].items()],
+               "security_opt": list(desired.get("security_opt", [])),
                "display": result["display"], "source_commit": source_commit(spec, head),
                "classification": plan["classification"]}
     return binding, desired
+
+
+def _valid_image_tag(spec: dict, tag) -> bool:
+    if tag == image_tag(spec):
+        return True
+    try:
+        return built_image_tag(tag) == tag
+    except ValueError:
+        return False
 
 
 def newly_trusted(classification: dict, previous) -> dict | None:
@@ -147,10 +184,12 @@ def valid_app_binding(snapshot: dict) -> bool:
     try:
         spec = validate_app_spec(snapshot["spec"])
         source = binding["source"]
-        lists = binding["drift"] + binding["mounts"] + binding["ports"] + binding["depends_on"]
+        lists = (binding["drift"] + binding["mounts"] + binding["ports"] + binding["depends_on"]
+                 + binding["security_opt"])
         return (valid_hashes(binding)
-                and binding["image_tag"] == image_tag(spec)
-                and binding["image_ref"] in (binding["image_tag"], binding["image_id"])
+                and _valid_image_tag(spec, binding["image_tag"])
+                and (binding["image_ref"] == binding["image_id"]
+                     or binding["image_ref"] in _image_refs(binding["image_tag"]))
                 and type(binding["image_tag_moved"]) is bool
                 and set(source) == {"project_dir", "compose_files"}
                 and bool(SAFE_PATH.fullmatch(source["project_dir"]))
@@ -219,10 +258,11 @@ def approval_text(spec: dict, binding: dict, prefix: str | None, *, operation: d
             f"Ports after: {', '.join(binding['ports']) or 'none'}\n"
             f"Requires running: {', '.join(binding['depends_on']) or 'nothing'} (never restarted)\n"
             f"Mounts after: {'; '.join(binding['mounts']) or 'none'}\n"
+            f"Security options after: {', '.join(binding['security_opt']) or 'none'}\n"
             f"Shown values: {shown}\n"
             f"Fingerprints: current {binding['current_config_hash'][:16]}, desired {binding['desired_hash'][:16]}\n"
             "No build or pull. Environment values other than those shown are never displayed. "
-            "Recreating this target cuts in-flight chat turns and MCP calls; the outcome is recorded "
+            "Recreating this target cuts its in-flight requests and sessions; the outcome is recorded "
             "by the ops reconciler. Restores the previous container if health verification fails. "
             "Any change to the container or the rendered configuration cancels execution.")
 
@@ -251,7 +291,8 @@ class AppConfigReconciler(ConfigReconciler):
     def _bind(self, old, image, binding):
         checker = self._source_checker()
         actual, desired = app_config_binding(self.spec, old, image, self._renderer(),
-                                             image_tag_moved=binding["image_tag_moved"], source_checker=checker)
+                                             tag_moved=lambda _tag: binding["image_tag_moved"],
+                                             source_checker=checker)
         if actual["source_commit"] != binding["source_commit"]:
             raise SourceStateError("source_moved_since_approval", detail="the checkout is not the approved commit")
         self._source_check = (checker, actual["source"]["project_dir"],
@@ -304,14 +345,17 @@ class AppConfigReconciler(ConfigReconciler):
             payload = json.loads(out)
         except ValueError:
             raise StepError("in-container health response is not JSON") from None
-        status = payload.get("status") if isinstance(payload, dict) else None
-        if status != self.spec["health_status"]:
+        field, value = self.spec["health_field"], self.spec["health_value"]
+        found = payload.get(field) if isinstance(payload, dict) else None
+        # JSON true is matched by identity: 1 and "true" are not true.
+        if not (found is True if value is True else type(found) is str and found == value):
             # The response body is untrusted: name only the expected value, never what came back.
-            raise StepError(f"health status did not match expected {self.spec['health_status']!r}")
-        return {"status": status, "stat": self._stats(container_id)}
+            raise StepError(f"health {field} did not match expected {value!r}")
+        return {"field": field, "status": "matched", "stat": self._stats(container_id)}
 
 
-__all__ = ["ACTION", "SCHEMA", "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL", "AppConfigReconciler",
+__all__ = ["ACTION", "BUILT_PROFILE_LABEL", "SCHEMA", "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL",
+           "AppConfigReconciler",
            "app_config_binding",
            "approval_text", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
            "valid_app_binding", "validate_app_spec"]

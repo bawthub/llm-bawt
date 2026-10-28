@@ -18,9 +18,11 @@ running container exactly as a plain image deploy would.
 
 The allowlist is a frozen per-kind :class:`ServiceProfile` (TASK-1474). The
 pinned frontend models no process or port settings. A Compose-BUILT service
-(the llm-bawt app) additionally models command/entrypoint, published ports,
-stdin_open/tty, container_name and depends_on; its ``build`` key is accepted
-but inert, because a reconcile never builds.
+(the llm-bawt app, the BawtHub backend) additionally models command/entrypoint,
+published ports, stdin_open/tty, container_name, depends_on and security_opt.
+Its ``build`` and ``pull_policy`` keys are accepted but inert, because a
+reconcile never builds or pulls; a declared ``image`` only names the tag the
+build carries (:func:`built_image_tag`).
 """
 from __future__ import annotations
 
@@ -40,6 +42,15 @@ SERVICE_KEYS = frozenset({"command", "entrypoint", "environment", "extra_hosts",
                           "networks", "pull_policy", "restart", "volumes"})
 # The worker never pulls; the pinned image must already be on the daemon.
 PULL_POLICIES = frozenset({"missing", "never"})
+# A built service's own image is never pulled either: ``build`` and ``never``
+# say so. Anything that would pull (``always``, ``missing``…) refuses.
+BUILT_PULL_POLICIES = frozenset({"build", "never"})
+# The tag Compose gives a build: a LOCAL name (no registry host, no digest).
+_LOCAL_IMAGE = re.compile(r"(?P<name>[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*)"
+                          r"(?::(?P<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}))?")
+# ``type=value`` / ``type:value`` options only; a seccomp profile path or
+# inline JSON (``seccomp=/x.json``) is not modelled and refuses.
+_SECURITY_OPT = re.compile(r"[a-z][a-z-]{0,31}[=:][A-Za-z0-9_.-]{1,64}")
 _VOLUME_KEYS = frozenset({"type", "source", "target", "read_only", "bind", "volume"})
 _BIND_KEYS = frozenset({"create_host_path"})
 _RESTART = re.compile(r"(no|always|unless-stopped|on-failure)(?::([0-9]{1,3}))?")
@@ -59,20 +70,36 @@ UNSET_VALUE = "<unset>"
 @dataclass(frozen=True)
 class ServiceProfile:
     """What one target kind may declare. ``built``: Compose builds the image, so
-    ``build`` is accepted and inert and ``image`` must be absent; otherwise the
-    service interpolates the pinned ``image``. ``models_process``: command,
-    entrypoint, ports, stdin_open/tty, container_name and depends_on."""
+    ``build`` is required and inert and a declared ``image`` is only the build's
+    local tag; otherwise the service interpolates the pinned ``image``.
+    ``models_process``: command, entrypoint, ports, stdin_open/tty,
+    container_name, depends_on and security_opt. ``pull_policies``: the
+    accepted ``pull_policy`` values (absent is always accepted)."""
 
     name: str
     keys: frozenset
     built: bool
     models_process: bool
+    pull_policies: frozenset
 
 
-PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_process=False)
+PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_process=False,
+                                pull_policies=PULL_POLICIES)
 BUILT_PROFILE = ServiceProfile("built", frozenset({
-    "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts",
-    "labels", "networks", "ports", "restart", "stdin_open", "tty", "volumes"}), built=True, models_process=True)
+    "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "image",
+    "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tty", "volumes"}),
+    built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+
+
+def built_image_tag(value) -> str:
+    """The rendered ``image`` of a built service as the tag its build carries
+    (an untagged name is ``:latest``). A registry host or a digest refuses:
+    this op never pulls, so the name can only be a local build's tag."""
+    match = _LOCAL_IMAGE.fullmatch(value) if isinstance(value, str) else None
+    first = match["name"].split("/")[0] if match else ""
+    if not match or ("/" in match["name"] and ("." in first or first == "localhost")):
+        raise ComposeError("unsupported_compose_key", ["image"])
+    return f"{match['name']}:{match['tag'] or 'latest'}"
 
 
 def canonical_hash(value) -> str:
@@ -178,16 +205,34 @@ def _depends_on(value) -> dict:
     return dict(sorted(out.items()))
 
 
+def _security_opt(value) -> list:
+    """``HostConfig.SecurityOpt``; absent, ``[]`` and ``null`` are the same."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) and _SECURITY_OPT.fullmatch(v) for v in value) \
+            or len(set(value)) != len(value):
+        raise ComposeError("unsupported_compose_key", ["security_opt"])
+    return list(value)
+
+
 def _process(service: dict, spec: dict) -> dict:
     if service.get("entrypoint") is not None:
         raise ComposeError("unsupported_compose_key", ["entrypoint"])
-    if service.get("container_name") != spec["container_name"]:
+    # Undeclared, Compose names the (single) container <project>-<service>-1.
+    declared = service.get("container_name") or f"{spec['compose_project']}-{spec['compose_service']}-1"
+    if declared != spec["container_name"]:
         raise ComposeError("compose_container_name_mismatch")
-    return {"cmd": _argv(service.get("command"), "command"), "entrypoint": None,
-            "ports": _ports(service.get("ports")),
-            "stdin_open": _flag(service.get("stdin_open"), "stdin_open"),
-            "tty": _flag(service.get("tty"), "tty"),
-            "depends_on": _depends_on(service.get("depends_on"))}
+    process = {"cmd": _argv(service.get("command"), "command"), "entrypoint": None,
+               "ports": _ports(service.get("ports")),
+               "stdin_open": _flag(service.get("stdin_open"), "stdin_open"),
+               "tty": _flag(service.get("tty"), "tty"),
+               "depends_on": _depends_on(service.get("depends_on"))}
+    # Stored only when set, so a service that declares none keeps the desired
+    # (and its hash) it had before security_opt was modelled.
+    security = _security_opt(service.get("security_opt"))
+    if security:
+        process["security_opt"] = security
+    return process
 
 
 def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfile = PINNED_PROFILE) -> dict:
@@ -199,16 +244,19 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
     unknown = sorted(set(service) - profile.keys)
     if unknown:
         raise ComposeError("unsupported_compose_key", unknown)
-    if service.get("pull_policy", "missing") not in PULL_POLICIES:
+    if "pull_policy" in service and service["pull_policy"] not in profile.pull_policies:
         raise ComposeError("unsupported_pull_policy")
     if not profile.models_process:
         for key in ("command", "entrypoint"):
             if service.get(key) is not None:
                 raise ComposeError("unsupported_compose_key", [key])
+    built_tag = None
     if profile.built:
         # The running image ID is bound instead; ``build`` is never acted on.
         if not isinstance(service.get("build"), dict):
             raise ComposeError("compose_image_mismatch")
+        if service.get("image") is not None:
+            built_tag = built_image_tag(service["image"])
     elif service.get("image") != image_ref:
         raise ComposeError("compose_image_mismatch")
     top_volumes = rendered.get("volumes") or {}
@@ -258,6 +306,8 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
                "restart": [restart.group(1), int(restart.group(2) or 0)]}
     if profile.models_process:
         desired.update(_process(service, spec))
+    if built_tag is not None:
+        desired["image"] = built_tag  # identity only: the swap uses the bound image ID
     return desired
 
 
@@ -295,7 +345,8 @@ def running(container: dict) -> dict:
             "extra_hosts": sorted(host.get("ExtraHosts") or []),
             "restart": [policy.get("Name") or "no", int(policy.get("MaximumRetryCount") or 0)],
             "cmd": config.get("Cmd"), "entrypoint": config.get("Entrypoint"), "ports": ports,
-            "stdin_open": bool(config.get("OpenStdin")), "tty": bool(config.get("Tty"))}
+            "stdin_open": bool(config.get("OpenStdin")), "tty": bool(config.get("Tty")),
+            "security_opt": list(host.get("SecurityOpt") or [])}
 
 
 def normalized(state: dict, image: dict) -> dict:
@@ -333,6 +384,10 @@ def drift(desired: dict, actual: dict) -> list[str]:
     for field, name in _PROCESS_FIELDS:
         if field in desired and desired[field] != actual[field]:
             names.append(f"{name}:~")
+    # A process-modelling profile owns SecurityOpt: an undeclared option on the
+    # running container (it can weaken confinement) is drift and is removed.
+    if "ports" in desired and desired.get("security_opt", []) != actual.get("security_opt", []):
+        names.append("security_opt:~")
     return sorted(names)
 
 
@@ -404,6 +459,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
     host["RestartPolicy"] = {"Name": desired["restart"][0], "MaximumRetryCount": desired["restart"][1]}
     if "ports" in desired:
         host["PortBindings"] = json.loads(json.dumps(desired["ports"]))
+        host["SecurityOpt"] = list(desired.get("security_opt", [])) or None
     if host.get("NetworkMode") not in desired["networks"]:
         host["NetworkMode"] = desired["networks"][0]
     current = body.get("NetworkingConfig", {}).get("EndpointsConfig") or {}
