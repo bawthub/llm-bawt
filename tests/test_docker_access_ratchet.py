@@ -14,7 +14,8 @@ It enforces these bounded patterns (it cannot prove arbitrary dynamic
 strings): importing ``docker`` (``import``, ``from``,
 ``importlib``/``__import__``); a non-docstring string naming the daemon
 socket, ``DOCKER_HOST`` or the Engine API (ports 2375/2376,
-``http+docker://``, ``/containers/...`` and ``/v1.NN/...`` endpoint paths);
+``http+docker://``, ``/containers/...`` paths, any versioned
+``/v1.NN/...`` endpoint);
 a subprocess argv, ``sh -c`` wrapper, shell string or container
 entrypoint/command that runs ``docker``; a compose service that mounts the
 socket or its parent directory (bind paths normalized) or sets
@@ -39,7 +40,7 @@ DAEMON_ENV = re.compile(r"\bDOCKER_HOST\b(?!_)")
 #: The Docker Engine API reached without the socket path: the daemon's TCP
 #: ports, the http+docker scheme, or Engine API endpoint paths.
 ENGINE_API = re.compile(
-    r":237[56]\b|\bhttp\+docker://|/v1\.\d+/(containers|images|networks|volumes|services|exec)\b"
+    r":237[56]\b|\bhttp\+docker://|/v1\.\d{2,}/[A-Za-z_]"
     r"|/containers/(json|create)\b|/containers/[^/\s\"']+/(json|start|stop|restart|kill|exec|logs)\b")
 #: A shell command line that runs the docker CLI.
 SHELL_DOCKER = re.compile(r"(^|[;&|(]|\$\()\s*(sudo\s+)?(\S*/)?docker(-compose)?(\s|$)")
@@ -262,6 +263,10 @@ def test_scanner_detects_each_access_kind():
     assert _parse("import httpx\nhttpx.get(f'{engine_url}/v1.43/images/json')") == {"engine api"}
     assert _parse("import httpx\nhttpx.post(f'{u}/v1.43/networks/create')") == {"engine api"}
     assert _parse("import httpx\nhttpx.get(u + '/v1.43/volumes')") == {"engine api"}
+    # Loopy r1: any versioned Engine endpoint, through the file prefilter.
+    assert _parse("import httpx\nhttpx.get(f'{engine_url}/v1.43/info')") == {"engine api"}
+    assert _parse("import httpx\nhttpx.post(f'{engine_url}/v1.43/build')") == {"engine api"}
+    assert _parse("url = 'https://graph.microsoft.com/v1.0/me'") == set()
 
 
 def test_scanner_ignores_docstrings_and_lookalikes():
