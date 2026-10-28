@@ -64,7 +64,8 @@ SUBPROCESS_CALLS = frozenset({
 #: may hold only the access kinds listed; a new kind fails, and every listed
 #: kind must still be found, or the entry is stale.
 OPS_ADAPTER = {
-    "llm_bawt/ops/executor.py": ({"import docker", "daemon socket"}, "submits workers, runs typed actions"),
+    "llm_bawt/ops/executor.py": ({"import docker"}, "submits workers, runs typed actions"),
+    "llm_bawt/ops/worker_launch.py": ({"daemon socket"}, "mounts the daemon socket into the isolated worker"),
     "llm_bawt/ops/health_collector.py": ({"import docker"}, "samples container state for /v1/health"),
     "llm_bawt/ops/worker.py": ({"daemon socket", "engine api"}, "the one-shot worker's daemon connection"),
     "llm_bawt/ops/sealed_container.py": ({"engine api"}, "worker-side sealed container create/start/exec"),
