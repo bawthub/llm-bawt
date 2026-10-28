@@ -11,7 +11,6 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
 
 from ..service.providers.github_deploy import GhcrPullAdapter
@@ -20,6 +19,9 @@ from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LA
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
                                    app_config_binding, uses_process_profile, validate_app_spec)
 from .compose_config import evaluate
+# TASK-1169 S4: the error/result types live in executor_types; re-exported here.
+from .executor_types import (ConfigCheckError, DispatchResult, ExecutorError,  # noqa: F401
+                             QuiesceFenceUnsupported, ReconcileResult)
 from .dev_config_reconcile import (ACTION as DEV_CONFIG_ACTION, WORKER_CAPABILITY_LABEL as DEV_CONFIG_WORKER_LABEL,
                                    dev_config_binding, validate_dev_spec)
 from .compose_render import ComposeError, ComposeRenderer
@@ -37,7 +39,8 @@ from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABE
 from .source_state import SourceChecker
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, tagged_config_binding, validate_tagged_spec
 from .validation import canonical_json
-from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
+from .worker_launch import ContainerLauncher, Liveness, container_worker_name
+from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
@@ -57,47 +60,6 @@ CONFIG_WORKER_LABELS[PLAN_ACTION] = (*dict.fromkeys((*CONFIG_WORKER_LABELS[APP_C
                                                      *CONFIG_WORKER_LABELS[TAGGED_CONFIG_ACTION])),
                                      PLAN_WORKER_LABEL)
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
-
-
-class ExecutorError(RuntimeError):
-    pass
-
-
-class QuiesceFenceUnsupported(ExecutorError):
-    """The worker this executor would start provably cannot enforce the quiesce
-    start fence (TASK-1169 S3). Definitive, unlike a fence that cannot be read
-    right now: a job pinned to that worker can never run fenced."""
-
-
-class ConfigCheckError(ExecutorError):
-    """A Compose config check or a container-removal check refused. ``code`` is
-    fixed (``config_drift``, ``config_reconcile_unavailable``, a
-    :class:`ComposeError` code or a :class:`RemoveRefused` code) and the
-    message carries names only, never a value."""
-
-    def __init__(self, code: str, message: str):
-        self.code = code
-        super().__init__(message)
-
-
-@dataclass
-class DispatchResult:
-    host_unit_name: str
-    status_file_path: str = ""
-    log_file_path: str = ""
-    terminal_state: str | None = None  # Compatibility only; never trusted by service.
-    exit_code: int | None = None
-    output: str | None = None
-
-
-@dataclass
-class ReconcileResult:
-    state: str | None
-    exit_code: int | None = None
-    output_tail: str | None = None
-    error: str | None = None
-    started_at: str | None = None
-    finished_at: str | None = None
 
 
 class Executor(ABC):
@@ -283,6 +245,10 @@ class DockerExecutor(Executor):
         # TASK-997: release images are pulled HERE (deploy preflight) with the
         # DB-stored ghcr-pull credential; the worker never holds one.
         self._pull_auth = pull_auth or _stored_pull_auth
+        # TASK-1169 S4: the worker runtime. Isolated mode is the container
+        # launcher; job-level request/receipt handling stays here.
+        self._launcher = ContainerLauncher(client=lambda: self.client,
+                                           get_worker=lambda name: self._get_worker(name))
 
     def kind(self):
         return "docker"
@@ -630,11 +596,7 @@ class DockerExecutor(Executor):
                    m.get("Destination") == root and m.get("RW") for m in mounts):
             raise ExecutorError("configured receipt path is not the configured writable named volume in this container")
 
-    @staticmethod
-    def worker_name(job_id):
-        if not re.fullmatch(r"[0-9a-f]{32}", job_id):
-            raise ExecutorError("invalid job id")
-        return f"llm-bawt-ops-{job_id}"
+    worker_name = staticmethod(container_worker_name)
 
     def _get_worker(self, name):
         try:
@@ -686,67 +648,12 @@ class DockerExecutor(Executor):
             if path.read_bytes() != raw:
                 raise ExecutorError("immutable request conflict")
             digest = hashlib.sha256(raw).hexdigest()
-            name = self.worker_name(job_id)
-            worker = self._get_worker(name)
-            volumes = {settings["receipt_volume"]: {"bind": "/receipts", "mode": "rw"},
-                       "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"}}
-            if worker is None:
-                try:
-                    worker = self.client.containers.create(
-                        settings["worker_image"],
-                        command=[f"/receipts/{job_id}/request.json", digest],
-                        name=name, detach=True, network_mode="none", read_only=True,
-                        cap_drop=["ALL"], security_opt=["no-new-privileges:true"],
-                        restart_policy={"Name": "no"}, mem_limit="128m", pids_limit=32,
-                        # Docker merges labels inherited from the immutable base
-                        # image with labels supplied here. The current worker
-                        # image was derived from the Compose app image and thus
-                        # carries project=llm-bawt/service=app; override those
-                        # identities so the worker can never select itself as a
-                        # Compose operation target.
-                        labels={
-                            "com.docker.compose.project": "llm-bawt-ops-worker",
-                            "com.docker.compose.service": "ops-worker",
-                            OPS_JOB_LABEL: job_id,
-                            "llm-bawt.ops.request": digest,
-                        },
-                        volumes=volumes,
-                    )
-                except Exception as exc:
-                    if getattr(exc, "status_code", None) != 409:
-                        raise
-                    worker = self._get_worker(name)
-            self._verify_worker(worker, job_id, digest)
-            self._start_created_once(worker, directory)
+            name = self._launcher.launch(job_id=job_id, settings=settings, directory=directory, digest=digest)
             return DispatchResult(name, str(directory / "receipt.json"))
         except ExecutorError:
             raise
         except Exception as exc:
             raise ExecutorError(f"Docker worker submission uncertain: {exc}") from exc
-
-    @staticmethod
-    def _start_created_once(worker, directory):
-        # Container.start is not a compare-and-swap. Two observers of 'created'
-        # could otherwise start, then RESTART a fast-exited worker. Serialize
-        # status/start and persist the attempt BEFORE the daemon call. A lost
-        # start response remains uncertain and is never retried blindly.
-        with (directory / "dispatch.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            worker.reload()
-            if worker.status != "created":
-                return True
-            marker = directory / "start-attempt.json"
-            if marker.exists():
-                return False
-            atomic_json(marker, {"start_attempted": True})
-            worker.start()
-            return True
-
-    @staticmethod
-    def _verify_worker(worker, job_id, digest):
-        labels = worker.labels or {}
-        if labels.get("llm-bawt.ops.job") != job_id or labels.get("llm-bawt.ops.request") != digest:
-            raise ExecutorError("deterministic worker identity conflict")
 
     def reconcile(self, *, job_id: str, snapshot: dict, output_tail_bytes=4096,
                   fence: dict | None = None, **_kwargs):
@@ -788,19 +695,15 @@ class DockerExecutor(Executor):
                     return ReconcileResult(state, receipt.get("exit_code"),
                         (receipt.get("output_tail") or "").encode()[-max(1, output_tail_bytes):].decode(errors="replace"),
                         receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"))
-            worker = self._get_worker(self.worker_name(job_id))
-            if worker is None:
+            liveness = self._launcher.probe(job_id=job_id, directory=directory, digest=digest)
+            if liveness is Liveness.MISSING:
                 atomic_json(directory / "abandoned.json", {"reason": "worker missing during reconciliation"})
                 return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")
-            self._verify_worker(worker, job_id, digest)
-            worker.reload()
-            if worker.status == "created":
-                # Creation succeeded but submitter died before start. Safe to
-                # start this SAME never-run identity, never create a replacement.
-                if not directory.is_dir() or not self._start_created_once(worker, directory):
-                    return ReconcileResult("lost", error="worker start previously attempted without confirmation; not replayed")
+            if liveness is Liveness.START_UNCONFIRMED:
+                return ReconcileResult("lost", error="worker start previously attempted without confirmation; not replayed")
+            if liveness is Liveness.STARTED:
                 return ReconcileResult("accepted")
-            if worker.status in ("exited", "dead", "removing"):
+            if liveness is Liveness.EXITED:
                 # Receipt publication may have raced our first read, immediately
                 # before Docker reported exit. Re-read once after that observation.
                 if path.exists():
