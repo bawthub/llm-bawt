@@ -103,7 +103,7 @@ A readiness healthcheck exists in Compose source but has not been activated in t
 | Ops collectors/execution | Separate Docker access implementations | Cohesive runtime adapter, TASK-1169 |
 | Hono dev/prod | Docker list/sync/state/start/stop/restart helpers | TASK-1170 |
 | Hono repository browsing | `repos.ts` imports `getContainerMounts` for path discovery | Explicit deployment/repo-path configuration, TASK-1170 |
-| Voice backend | Configured `restart_tts_container.sh` directly restarts TTS through the socket | TASK-1171 |
+| Voice backend | Bundled `restart_tts_container.sh` (fixed argv, no shell; `BAWTHUB_TTS_RESTART_CMD` retired, TASK-1606) directly restarts the label-verified TTS container through the socket | TASK-1171 |
 | GPU handoff in app | Direct Docker inspection of STT/TTS; mutations already use consented ops jobs | TASK-1171 |
 | Traefik | Docker provider watches labels through a socket mount | Deployment-owned routing, TASK-1172 |
 
