@@ -36,8 +36,15 @@ MAX_OPERATIONS = 500
 MAX_SERVICES = 256
 MAX_CAPABILITIES = 512
 MAX_ENUM_VALUES = 64
+# Serialized catalog budget (services rendered with empty instances). Every
+# emitted field is already length-bounded, but 512 maximum-width capabilities
+# plus a maximum inventory would still exceed 512 KiB, so the rendered catalog
+# itself is bounded: 120 KiB + a 1000-row maximum-width inventory (~388 KB)
+# + the envelope stays under the consumers' limit.
+MAX_CATALOG_BYTES = 120 * 1024
 OPERATION_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 ACTION_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+ARG_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 CATALOG_QUERY = text(
     "SELECT slug, command_script, args_schema_json FROM ops_operations "
     "WHERE enabled IS TRUE AND soft_deleted_at IS NULL ORDER BY slug LIMIT :limit")
@@ -114,9 +121,14 @@ def _operation_capabilities(slug, command_script, args_schema_json):
         selectors = [(spec["compose_service"], ())]
     elif "compose_service_from_arg" in spec and "compose_service" not in spec:
         arg = spec["compose_service_from_arg"]
-        prop = ((schema or {}).get("properties") or {}).get(arg) if isinstance(schema, dict) else None
+        # Type-check every level before any lookup: an unhashable arg or a
+        # non-mapping schema/properties must only drop this op.
+        if not isinstance(arg, str) or not ARG_NAME.fullmatch(arg) or not isinstance(schema, dict):
+            return []
+        props = schema.get("properties")
+        prop = props.get(arg) if isinstance(props, dict) else None
         enum = prop.get("enum") if isinstance(prop, dict) else None
-        if (not isinstance(arg, str) or not isinstance(enum, list)
+        if (not isinstance(enum, list)
                 or not 0 < len(enum) <= MAX_ENUM_VALUES
                 or not all(isinstance(v, str) for v in enum)):
             return []
@@ -141,15 +153,25 @@ def catalog_targets(rows):
     by_service: dict[ComposeServiceRef, list[ServiceCapability]] = {}
     total = 0
     for slug, command_script, args_schema_json in rows:
-        for ref, capability in _operation_capabilities(slug, command_script, args_schema_json):
+        try:
+            pairs = _operation_capabilities(slug, command_script, args_schema_json)
+        except Exception:
+            # Defence in depth: an unforeseen malformed shape (e.g. JSON
+            # nested past the recursion limit) drops only this op.
+            pairs = []
+        for ref, capability in pairs:
             by_service.setdefault(ref, []).append(capability)
             total += 1
     if total > MAX_CAPABILITIES or len(by_service) > MAX_SERVICES:
         raise ValueError("catalog exceeds bounded snapshot")
-    return tuple(
+    targets = tuple(
         ServiceTarget(ref.project, ref.service,
                       tuple(sorted(caps, key=lambda c: (c.operation, c.args))))
         for ref, caps in sorted(by_service.items(), key=lambda item: item[0].service_id))
+    rendered = json.dumps([t.to_api([]) for t in targets], separators=(",", ":")).encode()
+    if len(rendered) > MAX_CATALOG_BYTES:
+        raise ValueError("catalog exceeds bounded snapshot")
+    return targets
 
 
 def docker_client():

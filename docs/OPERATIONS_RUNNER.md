@@ -422,8 +422,10 @@ The fixed GET-only contract (`ops/health_http.py`):
   `<project>.<service>` grammar of `ops/service_identity.py` routes, with no
   query string. `observedAt` is the older of the two sample starts. The
   catalog is read by the database worker each tick (read-only, 2s statement
-  timeout; at most 500 enabled ops, 256 services and 512 capabilities, else the
-  whole catalog sample fails closed). It is not a readiness check:
+  timeout; at most 500 enabled ops, 256 services, 512 capabilities and 120 KiB
+  of rendered catalog, else the whole catalog sample fails closed, so the
+  body stays under 512 KiB next to a full inventory). A malformed op only
+  drops itself. It is not a readiness check:
   `/health/ready` keeps its four checks.
 
 `checkedAt` is the collection **start**, not HTTP request time or completion.

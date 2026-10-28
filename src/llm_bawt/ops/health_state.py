@@ -74,6 +74,12 @@ class ServiceTarget:
     def service_id(self):
         return f"{self.project}.{self.service}"
 
+    def to_api(self, instances):
+        """One /v1/health/services entry; ``instances`` is a list or None."""
+        return {"id": self.service_id, "project": self.project, "service": self.service,
+                "instances": instances,
+                "capabilities": [c.to_api() for c in self.capabilities]}
+
 
 @dataclass(frozen=True)
 class CatalogSample:
@@ -189,9 +195,7 @@ class OpsHealthState:
 
         def render(target):
             found = instances.get((target.project, target.service), [])
-            return {"id": target.service_id, "project": target.project, "service": target.service,
-                    "instances": [c.instance_api() for c in found] if inventory_ok else None,
-                    "capabilities": [c.to_api() for c in target.capabilities]}
+            return target.to_api([c.instance_api() for c in found] if inventory_ok else None)
 
         fresh = inventory_ok and catalog_ok
         body = {

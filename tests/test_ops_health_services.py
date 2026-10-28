@@ -18,6 +18,7 @@ import pytest
 
 from llm_bawt.ops.health_collector import (
     MAX_CAPABILITIES,
+    MAX_CATALOG_BYTES,
     MAX_OPERATIONS,
     OpsHealthCollector,
     catalog_targets,
@@ -169,6 +170,17 @@ def test_catalog_targets_fixed_and_bounded_enum_selectors():
     ("bad slug!", json.dumps({"action": "restart", "compose_project": "p", "compose_service": "a"}), "{}"),
     ("x.json", "{not json", "{}"),
     ("x.list", "[]", "{}"),
+    # Codex r1 B1: unhashable selector / non-mapping properties or schema.
+    op("x.listarg", {"action": "restart", "compose_project": "p", "compose_service_from_arg": []},
+       {"type": "object", "properties": {}}),
+    op("x.propslist", {"action": "restart", "compose_project": "p", "compose_service_from_arg": "s"},
+       {"type": "object", "properties": ["not a map"]}),
+    op("x.schemalist", {"action": "restart", "compose_project": "p", "compose_service_from_arg": "s"},
+       ["not a map"]),
+    # Codex r1 B2: an over-long selector name never reaches the response.
+    op("x.widearg", {"action": "restart", "compose_project": "p", "compose_service_from_arg": "s" * 65},
+       enum_schema("s" * 65, ["a"])),
+    ("x.deep", json.dumps({"action": "restart"}), "[" * 100000 + "]" * 100000),
 ])
 def test_unusable_ops_contribute_nothing_and_do_not_poison_others(row):
     assert [t.service_id for t in catalog_targets([row, *CATALOG])] == [
@@ -309,20 +321,54 @@ def test_single_service_and_unknown_id(world):
     assert state.services("bawthub.frontend") == (404, {"error": "not found"})
 
 
+WIDE_PROJECT = "p" * 63
+WIDE_SERVICES = [f"{j:02d}" + "s" * 61 for j in range(64)]
+
+
+def max_width_catalog(n_ops):
+    """``n_ops`` ops of 64 capabilities each, every emitted field at its max width."""
+    arg = "a" * 64
+    return [op(f"{i:03d}" + "o" * 125, {"action": "r" * 64, "compose_project": WIDE_PROJECT,
+                                        "compose_service_from_arg": arg}, enum_schema(arg, WIDE_SERVICES))
+            for i in range(n_ops)]
+
+
+def admits(rows):
+    try:
+        catalog_targets(rows)
+    except ValueError:
+        return False
+    return True
+
+
+def test_rendered_catalog_byte_budget_fails_closed():
+    # 512 max-width capabilities on 64 services pass every count bound, but
+    # not the rendered-byte bound (Codex r1 B2).
+    rows = max_width_catalog(MAX_CAPABILITIES // 64)
+    assert not admits(rows)
+    assert admits(max_width_catalog(1))
+
+
 def test_maximum_catalog_and_inventory_fit_consumers_body_limit(monkeypatch):
     monkeypatch.setattr("llm_bawt.ops.health_collector.DockerExecutor.readiness", Mock(return_value=None))
+    # The largest max-width catalog the byte budget admits, next to a
+    # 1000-row inventory with every field at its widest.
+    n = max(i for i in range(1, MAX_CAPABILITIES // 64 + 1) if admits(max_width_catalog(i)))
+    targets = catalog_targets(max_width_catalog(n))
+    rendered = json.dumps([t.to_api([]) for t in targets], separators=(",", ":")).encode()
+    assert len(rendered) > MAX_CATALOG_BYTES * 3 // 4
+    rows = []
+    for i in range(1000):
+        row = container(f"{i:04d}".zfill(255), cid=f"{i:064d}", project=WIDE_PROJECT,
+                        service=WIDE_SERVICES[i % 64], status="restarting")
+        row["State"].update(StartedAt="2026-10-28T05:56:33.196123+14:00", Health={"Status": "unhealthy"})
+        rows.append(row)
     state = Clock().state()
-    services = [f"s{i:03d}" for i in range(64)]
-    catalog = [op(f"x.op{i}", {"action": "restart", "compose_project": "p", "compose_service_from_arg": "s"},
-                  enum_schema("s", services)) for i in range(MAX_CAPABILITIES // 64)]
-    rows = [container(f"{i:04d}".zfill(255), cid=f"{i:064d}", project="p", service=services[i % 64])
-            for i in range(1000)]
     OpsHealthCollector(state, lambda: None, client_factory=lambda: docker_client(rows)).collect_docker()
-    state.publish_catalog(CatalogSample(state.sample_time(), "ok", services=catalog_targets(catalog)))
+    state.publish_catalog(CatalogSample(state.sample_time(), "ok", services=targets))
     code, body = state.services()
     assert code == 200 and sum(len(s["instances"]) for s in body["services"]) == 1000
-    assert sum(len(s["capabilities"]) for s in body["services"]) == MAX_CAPABILITIES
-    assert len(json.dumps(body, separators=(",", ":")).encode()) < 512 * 1024
+    assert len(json.dumps(body, separators=(",", ":"), allow_nan=False).encode()) < 512 * 1024
 
 
 # --- HTTP surface ----------------------------------------------------------
