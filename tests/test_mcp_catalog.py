@@ -164,7 +164,9 @@ async def test_catalog_token_budgets():
     # in-band, so a coordinator ordains approvers without a raw route): 4,253 (+49).
     # TASK-1609: ops_approvals_list / ops_approval_resolve (a grant holder
     # decides other bots' ops cards; own-request and race refusals in-band): 4,330 (+77).
-    assert sum(descriptions) <= 4330, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1615 slice 2: tasks_reviews_resolve_finding (settle one non-Blocker
+    # finding; the three resolutions in-band): 4,367 (+37).
+    assert sum(descriptions) <= 4367, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -239,7 +241,11 @@ async def test_catalog_token_budgets():
     # TASK-1615: typed findings on tasks_reviews_add (severity enum, title,
     # detail, optional file/line/failure_scenario): 15,828 (+121). Review
     # findings become rows BawtHub groups by severity, not prose to re-parse.
-    assert total <= 15828, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1615 slice 2: rechecks_review_id and typed resolutions on
+    # tasks_reviews_add, plus tasks_reviews_resolve_finding: 16,147 (+319).
+    # An r2 settles each r1 finding as a row instead of prose, so the popup
+    # and Gavel's SHIP check read Blocker state rather than re-parsing reviews.
+    assert total <= 16147, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

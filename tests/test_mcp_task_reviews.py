@@ -162,8 +162,122 @@ async def test_review_tool_discovery_types_findings():
     tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
     add = tools["tasks_reviews_add"].inputSchema
     assert "findings" in add["properties"] and "findings" not in add["required"]
-    item = next(iter(add["$defs"].values()))
+    item = add["$defs"]["ReviewFindingInput"]
     assert item["properties"]["severity"]["enum"] == [
         "BLOCKER", "SHOULD_FIX", "NIT", "QUESTION", "PRE_EXISTING",
     ]
     assert set(item["required"]) == {"severity", "title", "detail"}
+
+
+# TASK-1615 slice 2: signed reviews use the internal route; old builds fall back.
+
+@pytest.fixture
+def signed(monkeypatch):
+    """A signed reviewer turn, with provenance resolution stubbed out."""
+    async def fake_get(path, params=None):
+        return {"id": "task-cuid", "shortId": "TASK-1"}
+
+    monkeypatch.setattr(task_review_tools, "signed_review_turn", lambda *args, **kwargs: object())
+    monkeypatch.setattr(task_review_tools, "resolve_review_provenance",
+                        lambda turn, refs: {"provenance": "signed_turn"})
+    monkeypatch.setattr(task_review_tools, "_api_get", fake_get)
+
+
+@pytest.fixture
+def internal(monkeypatch):
+    """BawtHub's internal listener, answering with the handler set per test."""
+    state = {"requests": [], "respond": None}
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        state["requests"].append(request)
+        return state["respond"](request)
+
+    monkeypatch.setattr(task_review_tools, "service_auth", lambda: None)
+    monkeypatch.setattr(task_review_tools.httpx, "AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    return state
+
+
+def test_internal_route_404_is_missing_only_when_it_is_not_json(internal):
+    internal["respond"] = lambda request: httpx.Response(404, text="404 Not Found")
+    with pytest.raises(task_review_tools.InternalReviewRouteMissing):
+        run(task_review_tools._internal_post("/internal/tasks/TASK-1/reviews", {}))
+    internal["respond"] = lambda request: httpx.Response(
+        404, json={"error": "Review not found", "code": "review_not_found"})
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        run(task_review_tools._internal_post("/internal/tasks/TASK-1/reviews", {}))
+    assert task_review_tools._internal_error(raised.value) == {
+        "error": "Review not found", "status": 404, "code": "review_not_found"}
+
+
+def test_signed_review_rule_errors_keep_code_and_details(internal, signed):
+    internal["respond"] = lambda request: httpx.Response(409, json={
+        "error": "Blocker still open", "code": "blocker_unresolved", "details": {"findingIds": ["f1"]}})
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "APPROVE", "ok", "loopy",
+        idempotency_key="k", rechecks_review_id="r1", resolutions=[],
+    )) == {"error": "Blocker still open", "status": 409, "code": "blocker_unresolved",
+           "details": {"findingIds": ["f1"]}}
+    [request] = internal["requests"]
+    assert request.url.path == "/internal/tasks/TASK-1/reviews/r1/recheck"
+
+
+def test_signed_review_falls_back_to_public_route_on_an_old_bawthub(monkeypatch, internal, signed):
+    internal["respond"] = lambda request: httpx.Response(404, text="404 Not Found")
+    public = []
+
+    async def fake_post(path, json, headers=None):
+        public.append((path, json, headers))
+        return {"id": "review-old"}
+
+    monkeypatch.setattr(task_review_tools, "_api_post", fake_post)
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "DESIGN", "APPROVE", "ok", "loopy")) == {"id": "review-old"}
+    [request] = internal["requests"]
+    assert request.url.path == "/internal/tasks/TASK-1/reviews"
+    # The public route gets the review as before slice 2: no actor in the body.
+    assert public == [("/tasks/TASK-1/reviews", {
+        "stage": "DESIGN", "verdict": "APPROVE", "body": "ok", "provenance": "signed_turn",
+    }, {"X-Agent-Bot-Id": "loopy"})]
+
+
+def test_recheck_and_resolution_never_fall_back(monkeypatch, internal, signed):
+    internal["respond"] = lambda request: httpx.Response(404, text="404 Not Found")
+
+    async def fake_post(path, json, headers=None):
+        raise AssertionError("no public fallback")
+
+    monkeypatch.setattr(task_review_tools, "_api_post", fake_post)
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "APPROVE", "ok", "loopy",
+        idempotency_key="k", rechecks_review_id="r1",
+    )) == {"error": "This BawtHub build cannot record rechecks yet", "code": "recheck_unavailable"}
+    assert run(task_review_tools.resolve_review_finding(
+        "TASK-1", "r1", "f1", "WITHDRAWN", "loopy",
+    )) == {"error": "This BawtHub build cannot resolve findings yet", "code": "resolve_unavailable"}
+
+
+def test_recheck_arguments_are_checked_before_any_request(monkeypatch):
+    def no_turn(*args, **kwargs):
+        raise AssertionError("checked before the signed turn")
+
+    monkeypatch.setattr(task_review_tools, "signed_review_turn", no_turn)
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "APPROVE", "ok", "loopy",
+        resolutions=[{"finding_id": "f1", "resolution": "FIXED"}],
+    )) == {"error": "resolutions need rechecks_review_id", "code": "invalid_review"}
+    assert run(task_review_tools.add_task_review(
+        "TASK-1", "IMPLEMENTATION", "APPROVE", "ok", "loopy", rechecks_review_id="r1",
+    )) == {"error": "a recheck needs idempotency_key", "code": "invalid_review"}
+
+
+@pytest.mark.anyio
+async def test_review_tool_discovery_types_rechecks_and_resolution():
+    tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
+    add = tools["tasks_reviews_add"].inputSchema
+    assert {"rechecks_review_id", "resolutions"} <= add["properties"].keys()
+    assert not {"rechecks_review_id", "resolutions"} & set(add["required"])
+    resolve = tools["tasks_reviews_resolve_finding"].inputSchema
+    assert set(resolve["required"]) == {"task_id", "review_id", "finding_id", "resolution", "bot_id"}
+    assert resolve["properties"]["resolution"]["enum"] == ["FIXED", "DEFERRED", "WITHDRAWN"]

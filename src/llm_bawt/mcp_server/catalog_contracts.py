@@ -78,6 +78,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "tasks_get_context": "Read task/project briefing by cuid/TASK-N before work.",
     "tasks_reviews_list": "Task reviews, newest first; cursor paginates. Not response.",
     "tasks_reviews_add": "Append review, not response/status. Author: own bot_id; retry: stable idempotency_key.",
+    "tasks_reviews_resolve_finding": "Settle one non-Blocker finding: FIXED (revision), DEFERRED (task) or WITHDRAWN.",
     "tasks_associate_current": "Link trusted turn when actually working a task, never from a mention. Supply cuid or TASK-N; unsupported context fails closed.",
     "tasks_create": f"Create task/steps. Own bot_id; associate_current_turn links new work via trusted turn. {_IMAGES_GUIDE} {_BLOCKED_GUIDE}",
     "tasks_update": f"Patch; UI/UX Nick can see → REVIEW with dev URL/steps. Other work: Snark/Rook close COMPLETED after review (Tier 0: self-check), attributable push and test/live receipt. BUG is human-locked. {_BLOCKED_POINTER} Own bot_id fills missing owner; associate_current_turn links work and its images.",

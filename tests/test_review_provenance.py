@@ -41,7 +41,7 @@ def world(monkeypatch):
         "vendors": {"model-r@path-r": "vendor-r", "model-a@path-a": "vendor-a"},
         "deliveries": [(AUTHOR, SENDER_TURN)],
         "task": dict(TASK),
-        "posts": [], "gets": [], "delivery_reads": [],
+        "posts": [], "routes": [], "paths": [], "gets": [], "delivery_reads": [],
     }
 
     def turn_model(turn_id, bot_id):
@@ -68,6 +68,14 @@ def world(monkeypatch):
 
     async def fake_post(path, json, headers=None):
         state["posts"].append(json)
+        state["routes"].append("public")
+        return {"id": "review-1"}
+
+    async def fake_internal_post(path, json):
+        # TASK-1615 slice 2: a signed review goes to the internal route.
+        state["posts"].append(json)
+        state["routes"].append("internal")
+        state["paths"].append(path)
         return {"id": "review-1"}
 
     monkeypatch.setattr(provenance, "turn_model", turn_model)
@@ -75,6 +83,7 @@ def world(monkeypatch):
     monkeypatch.setattr(provenance, "provider_of", provider_of)
     monkeypatch.setattr(task_review_tools, "_api_get", fake_get)
     monkeypatch.setattr(task_review_tools, "_api_post", fake_post)
+    monkeypatch.setattr(task_review_tools, "_internal_post", fake_internal_post)
     return state
 
 
@@ -91,7 +100,8 @@ def _review(capability=None, *, bot_id=REVIEWER, body="Reviewed on model-x@path-
 
 def _provenance(payload):
     return {key: value for key, value in payload.items()
-            if key not in {"stage", "verdict", "body", "targetRevision", "idempotencyKey"}}
+            if key not in {"stage", "verdict", "body", "targetRevision", "idempotencyKey",
+                           "actorBotId"}}
 
 
 def test_a_signed_review_records_turn_models_and_ignores_the_body(world, fernet):
@@ -105,6 +115,7 @@ def test_a_signed_review_records_turn_models_and_ignores_the_body(world, fernet)
         "authorModel": None, "authorProvider": None, "crossProvider": None,
         "provenanceNotes": [AUTHOR_NOTE],
     }
+    assert payload["actorBotId"] == REVIEWER and world["routes"] == ["internal"]
     # Both task forms are matched; the delivery read is scoped to the signed turn.
     assert world["gets"] == ["/tasks/TASK-7"]
     assert world["delivery_reads"] == [(TURN, REVIEWER, [TASK["id"], TASK["shortId"]])]
@@ -122,6 +133,7 @@ def test_an_unsigned_review_says_so_and_reads_nothing(world):
     assert _review() == {"id": "review-1"}
     [payload] = world["posts"]
     assert _provenance(payload) == {"provenance": "unsigned"}
+    assert world["routes"] == ["public"] and "actorBotId" not in payload
     assert world["gets"] == [] and world["delivery_reads"] == []
 
 
@@ -189,3 +201,86 @@ def test_a_retry_from_the_same_turn_sends_identical_provenance(world, fernet):
     _review(_capability())
     _review(_capability())
     assert world["posts"][0] == world["posts"][1]
+
+
+# TASK-1615 slice 2: rechecks and finding resolutions need the signed turn.
+
+def _signed(capability, call):
+    binding = task_association.set_current_task_turn_capability(capability) if capability else None
+    try:
+        return asyncio.run(call)
+    finally:
+        if binding is not None:
+            task_association.reset_current_task_turn_capability(binding)
+
+
+def _recheck(**overrides):
+    arguments = {
+        "rechecks_review_id": "review-r1", "idempotency_key": "TASK-7:r2",
+        "resolutions": [{"finding_id": "finding-1", "resolution": "FIXED", "revision": "abc1234"}],
+    } | overrides
+    return task_review_tools.add_task_review(
+        "TASK-7", "IMPLEMENTATION", "APPROVE", "Blocker fixed.", REVIEWER, **arguments)
+
+
+def test_a_signed_recheck_goes_to_the_recheck_route_with_wire_resolutions(world, fernet):
+    assert _signed(_capability(), _recheck()) == {"id": "review-1"}
+    [payload] = world["posts"]
+    assert world["paths"] == ["/internal/tasks/TASK-7/reviews/review-r1/recheck"]
+    assert payload["resolutions"] == [
+        {"findingId": "finding-1", "resolution": "FIXED", "revision": "abc1234"}]
+    assert payload["provenance"] == "signed_turn" and payload["actorBotId"] == REVIEWER
+    assert payload["idempotencyKey"] == "TASK-7:r2"
+
+
+def test_an_unsigned_recheck_is_refused_before_any_request(world):
+    assert _signed(None, _recheck()) == {
+        "error": "recheck_requires_signed_turn", "code": "recheck_requires_signed_turn"}
+    assert world["posts"] == [] and world["gets"] == [] and world["delivery_reads"] == []
+
+
+@pytest.mark.parametrize("credential", ["foreign", "forged"])
+def test_a_recheck_with_a_bad_turn_is_refused(world, fernet, credential):
+    capability = _capability(bot_id="fixture-other") if credential == "foreign" else "not-a-token"
+    assert _signed(capability, _recheck()) == {"error": "caller_unavailable"}
+    assert world["posts"] == []
+
+
+def _resolve(bot_id=REVIEWER):
+    return task_review_tools.resolve_review_finding(
+        "TASK-7", "review-r1", "finding/2", "DEFERRED", bot_id, task="TASK-8", note="Later.")
+
+
+def test_a_signed_resolution_posts_only_the_signed_marker(world, fernet):
+    assert _signed(_capability(), _resolve()) == {"id": "review-1"}
+    assert world["paths"] == ["/internal/tasks/TASK-7/reviews/review-r1/findings/finding%2F2/resolve"]
+    assert world["posts"] == [{
+        "actorBotId": REVIEWER, "resolution": "DEFERRED", "provenance": "signed_turn",
+        "task": "TASK-8", "note": "Later.",
+    }]
+    # A resolution needs no model provenance, so it reads nothing else.
+    assert world["gets"] == [] and world["delivery_reads"] == []
+
+
+@pytest.mark.parametrize("capability", [None, "not-a-token", "foreign"])
+def test_an_unsigned_or_bad_resolution_is_refused(world, fernet, capability):
+    if capability == "foreign":
+        capability = _capability(bot_id="fixture-other")
+    expected = ({"error": "resolve_requires_signed_turn", "code": "resolve_requires_signed_turn"}
+                if capability is None else {"error": "caller_unavailable"})
+    assert _signed(capability, _resolve()) == expected
+    assert world["posts"] == []
+
+
+def test_the_signed_turn_check_names_the_tool_being_called(monkeypatch):
+    from llm_bawt.mcp_server import bot_access_identity
+
+    names = []
+
+    def fake_trusted_caller(name, arguments):
+        names.append(name)
+
+    monkeypatch.setattr(bot_access_identity, "trusted_caller", fake_trusted_caller)
+    assert provenance.signed_review_turn("bot", {}) is None
+    assert provenance.signed_review_turn("bot", {}, tool="tasks_reviews_resolve_finding") is None
+    assert names == ["tasks_reviews_add", "tasks_reviews_resolve_finding"]

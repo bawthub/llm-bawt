@@ -54,8 +54,11 @@ def _received(row: Any) -> bool:
     return steer_started(row)
 
 
-def signed_review_turn(bot_id: str, arguments: dict) -> Any | None:
+def signed_review_turn(bot_id: str, arguments: dict, tool: str = "tasks_reviews_add") -> Any | None:
     """The reviewer's signed turn, or None for an unsigned caller.
+
+    ``tool`` names the MCP tool being called; a service capability is bound
+    to one tool name and its arguments.
 
     A supplied but bad credential, or one signed for another bot than the
     ``bot_id`` argument, raises ``caller_unavailable``; it never falls back to
@@ -64,7 +67,7 @@ def signed_review_turn(bot_id: str, arguments: dict) -> Any | None:
     from .bot_access_identity import trusted_caller
     from .task_association import current_task_turn_context
 
-    caller = trusted_caller("tasks_reviews_add", arguments)
+    caller = trusted_caller(tool, arguments)
     if caller is None:
         return None
     if caller.bot_id != bot_id:
