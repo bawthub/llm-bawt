@@ -112,7 +112,9 @@ def _path_list(value: str, mounts) -> bool:
     entries = value.split(":")
     if not all(_clean_path(entry) for entry in entries):
         return False
-    under = [[d for d in mounts if _within(entry, d)] for entry in entries]
+    # A mount nested below an entry counts too: a read-only entry with a
+    # writable mount inside it is writable (TASK-1476 r1 B2).
+    under = [[d for d in mounts if _within(entry, d) or _within(d, entry)] for entry in entries]
     first = next((i for i, found in enumerate(under) if found), len(entries))
     return all(found and all(mounts[d] for d in found) for found in under[first:])
 

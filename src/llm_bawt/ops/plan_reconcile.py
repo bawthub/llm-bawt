@@ -419,8 +419,11 @@ class PlanReconciler:
         return line["records"]
 
     def _probe(self, step, container_id, probe_id):
-        """The probe line; ValueError when it is not exactly the schema."""
-        _code, stdout = step._exec(container_id, probe_argv(probe_id))
+        """The probe line; ValueError when it is not exactly the schema or the
+        probe exited nonzero (the probes always exit 0, TASK-1476 r1 B1)."""
+        code, stdout = step._exec(container_id, probe_argv(probe_id))
+        if code != 0:
+            raise ValueError(f"probe exited {code}")
         return read_probe(probe_id, stdout)
 
     # ── volumes ──────────────────────────────────────────────────────────

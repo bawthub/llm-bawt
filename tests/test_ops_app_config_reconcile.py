@@ -23,7 +23,7 @@ from llm_bawt.ops.executor import ConfigCheckError, DockerExecutor, validate_spe
 from llm_bawt.ops.image_deploy import DeployFailed
 from llm_bawt.ops.release import ReleaseVerificationError
 from llm_bawt.ops.seeds import SEEDS
-from llm_bawt.ops.source_state import SourceStateError
+from llm_bawt.ops.source_state import SourceStateError, _path_list
 from llm_bawt.ops.validation import canonical_json
 from llm_bawt.ops.service import OpsDispatchError
 from llm_bawt.ops.worker import OPS_JOB_LABEL, run as worker_run
@@ -773,6 +773,13 @@ def test_a_trailing_path_entry_may_be_a_read_only_data_mount(source):
 def test_a_read_only_data_path_entry_before_any_other_refuses(source, path):
     error = _refused(_ro_data_api(path), source)
     assert error.code == "source_env_unsafe" and error.names == ["PATH"]
+
+
+@pytest.mark.parametrize("mounts", [{"/ro": True, "/ro/helper": False}, {"/ro/helper": False}])
+def test_a_path_entry_containing_a_writable_mount_refuses(mounts):
+    # TASK-1476 r1 B2: a writable mount nested under an entry makes it writable.
+    assert _path_list("/usr/bin:/ro", mounts) is False
+    assert _path_list("/usr/bin:/ro", {"/ro": True, "/ro/helper": True}) is True
 
 
 def test_a_trailing_path_entry_on_a_writable_data_mount_refuses(source):

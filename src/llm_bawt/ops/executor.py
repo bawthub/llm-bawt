@@ -430,6 +430,8 @@ class DockerExecutor(Executor):
             result = self.client.containers.get(container_name).exec_run(argv, stdout=True, stderr=False)
         except Exception as exc:
             raise ExecutorError(f"cannot run the probe in {container_name}: {type(exc).__name__}") from exc
+        if result.exit_code != 0:  # the probes always exit 0 (TASK-1476 r1 B1)
+            raise ExecutorError(f"the probe in {container_name} exited {result.exit_code}")
         return (result.output or b"").decode(errors="replace")
 
     def config_check(self, spec, image_ref=None):

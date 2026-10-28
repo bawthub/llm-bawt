@@ -16,7 +16,7 @@ import pytest
 
 from llm_bawt.env_import import SPECS as ENV_IMPORT_SPECS
 from llm_bawt.ops.app_config_reconcile import ACTION as APP_CONFIG_ACTION
-from llm_bawt.ops.executor import CONFIG_WORKER_LABELS, validate_spec
+from llm_bawt.ops.executor import CONFIG_WORKER_LABELS, DockerExecutor, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed, ImageDeployer, Swap
 from llm_bawt.ops.plan_approval import PlanError, approval_text, bind_plan, credential_names
 from llm_bawt.ops.plan_reconcile import (
@@ -150,7 +150,7 @@ class Step:
         answer = self.probe.get((argv[-1], container_id), self.probe.get(argv[-1]))
         if answer is None:
             answer = _ok(argv[-1], RECORDS if argv[-1] == RECORDS_PROBE else None)
-        return 0, answer
+        return answer if isinstance(answer, tuple) else (0, answer)
 
 
 def _known_restored(step):
@@ -293,6 +293,7 @@ def test_a_failed_revert_continues_with_the_rest_is_unknown_and_keeps_created_vo
 @pytest.mark.parametrize("where, stdout, code", [
     ("bridge", "not json\n", "probe_unverifiable"),
     ("bridge", _ok("records", RECORDS), "probe_unverifiable"),  # a line answering another probe
+    ("bridge", (1, emit("broker", True, 200, "ok")), "probe_unverifiable"),  # ok line, nonzero exit (r1 B1)
     ("bridge", emit("broker", False, 502, "http_error"), "http_error"),
     ("app", emit("brave_search", False, 401, "unauthorized"), "unauthorized"),
 ])
@@ -577,6 +578,19 @@ def test_an_unverifiable_records_line_refuses_approval():
     with pytest.raises(PlanError) as caught:
         _bind(executor=executor)
     assert caught.value.code == "probe_unverifiable"
+
+
+def test_a_probe_that_exits_nonzero_refuses_approval():
+    # TASK-1476 r1 B1: a valid ok line from a probe that exited nonzero is unverifiable.
+    api, container = _app_api()
+    executor = DockerExecutor(client_factory=lambda: None)
+    output = _ok(RECORDS_PROBE, RECORDS).encode()
+    target = SimpleNamespace(exec_run=lambda argv, **kw: SimpleNamespace(exit_code=1, output=output))
+    executor._client = SimpleNamespace(containers=SimpleNamespace(get=lambda name: target))
+    executor.config_bind = PlanExecutor(api, container).config_bind
+    with pytest.raises(PlanError) as caught:
+        _bind(executor=executor)
+    assert caught.value.code == "records_unavailable"
 
 
 @pytest.mark.parametrize("tamper", [
