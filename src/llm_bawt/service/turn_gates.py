@@ -453,7 +453,24 @@ def release_gates(conn, *, owner_id: str, gate_id: int | None = None) -> list[in
         "UPDATE system_gates SET released_at=now()"
         f" WHERE owner_id=:owner AND released_at IS NULL{clause} RETURNING id"
     ), {"owner": owner_id, "id": gate_id}).all()
-    return sorted(int(row[0]) for row in rows)
+    released = sorted(int(row[0]) for row in rows)
+    for released_id in released:
+        notify_gate_change(conn, released_id)
+    return released
+
+
+GATE_CHANGED_CHANNEL = "system_gate_changed"
+
+
+def notify_gate_change(conn, gate_id: int) -> None:
+    """Tell listeners a gate opened or released (TASK-1676), on commit.
+
+    Postgres delivers a NOTIFY only if the writing transaction commits, so a
+    rolled-back gate is never announced. Payload: the gate id.
+    """
+    if _is_postgres(conn):
+        conn.execute(sa_text("SELECT pg_notify(:channel, :gate)"),
+                     {"channel": GATE_CHANGED_CHANNEL, "gate": str(gate_id)})
 
 
 def has_execution_evidence(turn: Mapping[str, Any]) -> bool:
@@ -683,6 +700,7 @@ def insert_gate(conn, spec: GateSpec, *, fresh: bool = False) -> GateBlock:
         "scope": spec.scope.to_json(), "reason": spec.reason,
         "allow": json.dumps(sorted(spec.allow_actors)), "ttl": float(spec.ttl_seconds),
     }).mappings().one()
+    notify_gate_change(conn, int(row["id"]))
     return _block(row)
 
 

@@ -326,6 +326,9 @@ async def lifespan(app):
     # needs the shared Redis transport started above.
     from .quiesce_exit_sweep import run_quiesce_exit_sweep
     service._quiesce_exit_task = asyncio.create_task(run_quiesce_exit_sweep(service))
+    # TASK-1676: relabel waiting chat sends when a gate opens, releases or lapses.
+    from .gate_change_republisher import run_gate_change_republisher
+    service._gate_change_task = asyncio.create_task(run_gate_change_republisher(service))
 
     # Log startup with rich formatting
     log.startup(
@@ -391,6 +394,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_mcp_continuation_task",
     "_ops_receipt_task",
     "_quiesce_exit_task",
+    "_gate_change_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
 )

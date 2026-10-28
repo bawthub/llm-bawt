@@ -23,6 +23,7 @@ from ...inter_bot_send import (  # noqa: F401  (re-exported for importers and te
 from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ..dependencies import get_service
 from ..delivery_reply import DeliveryReplyMismatch, resolve_delivery_reply
+from ..delivery_wait_reason import annotate_rows
 from ..inter_bot_reply_view import ReplyViewMismatch, inter_bot_reply_view
 
 router = APIRouter()
@@ -176,7 +177,8 @@ def list_deliveries(
         exclude_user_chat=not include_chat,
     )
     project = (lambda row: row.to_compact()) if view == "compact" else (lambda row: row.to_api())
-    return {"deliveries": [project(row) for row in rows], "total": len(rows)}
+    views = annotate_rows(_dispatcher().store.engine, rows, [project(row) for row in rows])
+    return {"deliveries": views, "total": len(rows)}
 
 
 @router.post("/v1/inter-bot-deliveries/{delivery_id}/retry", tags=["Inter-Bot Deliveries"], status_code=202)

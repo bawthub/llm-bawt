@@ -19,6 +19,7 @@ from ..bot_types import durable_agent_backend
 from ..message_authorship import AuthorReference
 from ..request_identity import AdmissionUnavailable, canonical_uuid
 from .delivery_reply import IN_FLIGHT_RECEIPT, QUEUED_RECEIPT
+from .delivery_wait_reason import wait_reason as read_wait_reason
 from .turn_admission import lock_target
 
 
@@ -32,8 +33,10 @@ class OrdinaryTurnDecision:
     delivery_status: str | None = None
     bot_id: str | None = None
     user_id: str | None = None
+    # TASK-1676: why a QUEUED row waits (``delivery_wait_reason``), else None.
+    wait_reason: dict[str, Any] | None = None
 
-    def receipt(self) -> dict[str, str]:
+    def receipt(self) -> dict[str, Any]:
         result = {
             "object": QUEUED_RECEIPT if self.delivery_id else IN_FLIGHT_RECEIPT,
             "turn_id": self.turn_id,
@@ -47,6 +50,8 @@ class OrdinaryTurnDecision:
         if self.delivery_id:
             result["delivery_id"] = self.delivery_id
             result["status"] = self.delivery_status or "QUEUED"
+            if self.wait_reason is not None:
+                result["wait_reason"] = self.wait_reason
         elif self.delivery_status:
             # An exact retry can arrive after its directly started turn ended.
             # Do not describe a terminal row as work that is still in flight.
@@ -180,4 +185,5 @@ class OrdinaryTurnQueue:
                 "queued", record.turn_id, record.user_message_id,
                 record.assistant_message_id, record.id, record.status,
                 bot_id=bot_id, user_id=user_id,
+                wait_reason=read_wait_reason(conn, bot_id) if record.status == "QUEUED" else None,
             )

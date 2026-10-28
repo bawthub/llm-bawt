@@ -1,7 +1,13 @@
-"""The wire shape of a delivery lifecycle event (pure projection, no I/O)."""
+"""The wire shape of a delivery lifecycle event.
+
+:func:`delivery_event` is a pure projection; :func:`lifecycle_event` adds the
+one gate read a waiting chat row's ``wait_reason`` needs (TASK-1676).
+"""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from typing import Any
 
@@ -9,11 +15,29 @@ from ..inter_bot_delivery import DELIVERED, DISPATCHING, FAILED, QUEUED, Deliver
 from ..inter_bot_delivery_retry import retry_original_author
 from ..inter_bot_delivery_steer_fence import steer_uncertain
 
+logger = logging.getLogger(__name__)
+
 _MAINTENANCE_STATES = {QUEUED: "queued", DISPATCHING: "started", DELIVERED: "completed",
                        FAILED: "refused", "CANCELLED": "cancelled"}
 
 
-def delivery_event(record: DeliveryRecord, *, default_user: str) -> dict[str, Any]:
+async def lifecycle_event(engine, record: DeliveryRecord, *, default_user: str) -> dict[str, Any]:
+    """:func:`delivery_event` plus a waiting chat row's ``wait_reason``.
+
+    A failed gate read publishes the event without it; the UI keeps its turn wording.
+    """
+    from .delivery_wait_reason import record_wait_reason
+
+    try:
+        reason = await asyncio.to_thread(record_wait_reason, engine, record)
+    except Exception:  # noqa: BLE001 - the lifecycle event still goes out
+        logger.warning("could not read a delivery wait reason", exc_info=True)
+        reason = None
+    return delivery_event(record, default_user=default_user, wait_reason=reason)
+
+
+def delivery_event(record: DeliveryRecord, *, default_user: str,
+                   wait_reason: dict[str, Any] | None = None) -> dict[str, Any]:
     """The ``inter_bot_delivery`` event for ``record``, routed to its owning user."""
     event = {
         "_type": "inter_bot_delivery",
@@ -48,6 +72,8 @@ def delivery_event(record: DeliveryRecord, *, default_user: str) -> dict[str, An
         "revision": record.revision,
         "ts": time.time(),
     }
+    if wait_reason is not None:
+        event["wait_reason"] = wait_reason
     if record.metadata.get("prompt_schedule"):
         event["user_id"] = record.author_entity_id
         event["bot_id"] = record.target_bot_id

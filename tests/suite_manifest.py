@@ -72,6 +72,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_review_provenance_pg.py::",
     "test_quiesce_exit_sweep_pg.py::",
     "test_system_gate_admission_pg.py::",
+    "test_delivery_wait_reason_pg.py::",
     "test_purge_ops_pg.py::",
     "test_recovery_sweep_pg.py::",
     "test_session_reset_lineage_pg.py::",

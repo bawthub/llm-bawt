@@ -987,9 +987,10 @@ class InterBotDeliveryDispatcher:
         subscriber = getattr(self.service, "_redis_subscriber", None)
         if subscriber is None:
             return
-        from .inter_bot_delivery_events import delivery_event, maintenance_steer_event
+        from .inter_bot_delivery_events import lifecycle_event, maintenance_steer_event
 
-        event = delivery_event(record, default_user=self.service.config.DEFAULT_USER)
+        engine = getattr(self.store, "engine", None)  # TASK-1676: the wait-reason gate read
+        event = await lifecycle_event(engine, record, default_user=self.service.config.DEFAULT_USER)
         try:
             steer_event = maintenance_steer_event(record)
             if steer_event is not None:
