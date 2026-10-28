@@ -17,7 +17,9 @@ services:
     entrypoint: ["python", "-m", "llm_bawt.ops.reconciler"]
     command: []
     # Internal network only: no host port, proxy route or generic Docker API.
-    expose: ["8650"]
+    # 8650 is the GET-only health surface; 8651 is the app's bearer-authenticated
+    # prepare/readiness channel (TASK-1169 S3).
+    expose: ["8650", "8651"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8650/health/ready', timeout=2).read()"]
       interval: 15s

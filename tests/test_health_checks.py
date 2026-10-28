@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from llm_bawt.ops.executor import DockerExecutor
 from llm_bawt.ops.models import JOB_QUEUED, JOB_RUNNING
+from llm_bawt.ops.service import OpsDispatchError, OpsService
 from llm_bawt.service.health_checks import (
     DEGRADED, DOWN, OK, check_ops_executors, check_ops_queue, overall,
 )
@@ -38,9 +39,28 @@ def test_readiness_names_missing_receipt_mount(tmp_path, monkeypatch):
     executor = _executor(tmp_path, monkeypatch, root=str(tmp_path / "absent"))
     assert executor.readiness() == "receipt volume is not mounted at configured app path"
     assert executor.available() is False
-    [row] = check_ops_executors(SimpleNamespace(executors=lambda: {"docker": executor}))
+    service = OpsService(SimpleNamespace(engine=None), executor=executor,
+                         release_store=SimpleNamespace(), release_verifier=SimpleNamespace())
+    [row] = check_ops_executors(service)
     assert row == {"name": "ops.executor.docker", "status": DOWN,
                    "reason": "receipt volume is not mounted at configured app path"}
+
+
+def test_ops_executor_rows_come_from_the_ops_service_readiness():
+    # TASK-1169 S3c: the app's admission-only service asks the ops service.
+    ready = SimpleNamespace(executor_readiness=lambda: {"release": None, "docker": "socket gone"})
+    assert check_ops_executors(ready) == [
+        {"name": "ops.executor.docker", "status": DOWN, "reason": "socket gone"},
+        {"name": "ops.executor.release", "status": "ok", "reason": None},
+    ]
+
+
+def test_unreachable_ops_service_is_one_down_control_row():
+    def unreachable():
+        raise OpsDispatchError("ops_unavailable", "ops_unavailable: cannot connect")
+
+    assert check_ops_executors(SimpleNamespace(executor_readiness=unreachable)) == [
+        {"name": "ops.control", "status": DOWN, "reason": "ops_unavailable: cannot connect"}]
 
 
 def test_readiness_wraps_daemon_errors(tmp_path, monkeypatch):

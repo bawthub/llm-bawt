@@ -298,7 +298,8 @@ def test_compose_has_internal_only_listener_and_readiness_healthcheck():
 
     compose = yaml.safe_load((Path(__file__).parents[1] / "docker-compose.ops.yml").read_text())
     service = compose["services"]["ops-reconciler"]
-    assert service["expose"] == ["8650"]
+    # 8650 health, 8651 the app's control channel (TASK-1169 S3); neither published.
+    assert service["expose"] == ["8650", "8651"]
     assert "ports" not in service
     assert "/health/ready" in service["healthcheck"]["test"][-1]
     assert "group_add" not in service

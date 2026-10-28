@@ -15,11 +15,11 @@ def database_engine():
     return get_shared_engine(Config())  # reuse process-wide pool; no schema bootstrap
 
 
-def build_reconciler(interval):
+def build_full_service():
+    """The ops service's full OpsService: executors, the release coordinator,
+    the quiesce driver and its own approval store. Returns (service, approvals)."""
     from ..approval_policy_store import ToolApprovalPolicyStore
     from ..utils.config import Config
-    from .approved_admission import ApprovedOpsAdmission
-    from .reconciler import OpsReconciler
     from .release_executor import build_ops_service
     from .store import OpsStore
 
@@ -34,19 +34,41 @@ def build_reconciler(interval):
     # Quiesce jobs are driven only here, never by the app (TASK-1233).
     from .quiesce import build_quiesce_driver
     service.quiesce_driver = build_quiesce_driver(store.engine)
-    return OpsReconciler(service, interval=interval,
+    return service, approvals
+
+
+def build_control_service():
+    return build_full_service()[0]
+
+
+def build_reconciler(interval):
+    from .approved_admission import ApprovedOpsAdmission
+    from .reconciler import JobCreatedWaiter, OpsReconciler
+
+    service, approvals = build_full_service()
+    engine = service.store.engine
+    # The app's job creation notifies; wake on it rather than the interval.
+    waiter = JobCreatedWaiter(engine) if engine.dialect.name == "postgresql" else None
+    return OpsReconciler(service, interval=interval, waiter=waiter,
                          admission=ApprovedOpsAdmission(approvals, service))
 
 
 class OpsHealthRuntime:
     def __init__(self, *, interval=5.0, state=None, collector=None,
-                 reconciler_factory=build_reconciler, address=("0.0.0.0", 8650)):
+                 reconciler_factory=build_reconciler, address=("0.0.0.0", 8650),
+                 control_address=None, control_factory=build_control_service):
         self.state = state or OpsHealthState()
         self.stop = Event()
         self.collector = collector or OpsHealthCollector(self.state, database_engine)
         self.reconciler_factory = reconciler_factory
         self.interval = interval
         self.http = OpsHealthServer(self.state, address)
+        # The app's prepare/readiness channel (TASK-1169 S3a): its own listener,
+        # so a slow Docker read there never delays the health surface.
+        self.control = None
+        if control_address is not None:
+            from .control_http import OpsControlServer
+            self.control = OpsControlServer(control_factory, control_address)
         self.workers: list[Thread] = []
 
     def _reconcile(self):
@@ -64,6 +86,8 @@ class OpsHealthRuntime:
     def start(self):
         # No database/Docker initialization on the HTTP thread or before listen.
         self.http.start()
+        if self.control is not None:
+            self.control.start()
         for name, target in (
             ("ops-health-database", lambda: self.collector.run(self.collector.collect_storage, self.stop)),
             ("ops-health-docker", lambda: self.collector.run(self.collector.collect_docker, self.stop)),
@@ -77,6 +101,8 @@ class OpsHealthRuntime:
         self.state.stop()
         self.stop.set()
         self.http.close()
+        if self.control is not None:
+            self.control.close()
         # A stuck RPC cannot hold SIGTERM indefinitely. One fixed daemon per
         # producer; never spawn replacement threads for a blocked collector.
         deadline = time.monotonic() + 2

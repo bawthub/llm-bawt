@@ -313,6 +313,10 @@ DISPATCH_ERROR_STATUS = {
     "executor_unavailable": 503,
     "dispatch_failed": 502,
     "executor_kind_unknown": 500,
+    # TASK-1169 S3: the app prepares through the ops service; nothing was created.
+    "ops_unavailable": 503,
+    # An admission-only service was asked to run an executor: a code defect.
+    "ops_admission_only": 500,
 }
 
 

@@ -286,6 +286,13 @@ class Config(RuntimeTunables, BaseSettings):
             "container state (Set via LLM_BAWT_OPS_HEALTH_URL)"
         ),
     )
+    OPS_CONTROL_URL: str = Field(
+        default="http://ops-reconciler:8651",
+        description=(
+            "Base URL of the ops-reconciler's internal control listener, where the app asks "
+            "it to prepare ops invocations (TASK-1169 S3; Set via LLM_BAWT_OPS_CONTROL_URL)"
+        ),
+    )
 
     # --- Agent Task API Settings --- #
     TASK_API_URL: str = Field(

@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 # error_text prefix of a job failed for preflight past its deadline (TASK-1169 S1e).
 PREFLIGHT_FAILED = "preflight_failed"
+# Notified in a job's insert transaction, so the ops reconciler dispatches it
+# without waiting out its interval (TASK-1169 S3b). A wake-up only: the
+# reconciler still scans the ledger, so a lost notify costs one interval.
+JOB_CREATED_CHANNEL = "ops_job_created"
 
 
 def _utcnow():
@@ -352,6 +356,10 @@ class OpsStore:
                 fence(session)
             session.add(row)
             try:
+                if self.engine.dialect.name == "postgresql":
+                    # Delivered only if this transaction commits.
+                    session.execute(text("SELECT pg_notify(:channel, :job_id)"),
+                                    {"channel": JOB_CREATED_CHANNEL, "job_id": row.id})
                 session.commit()
             except IntegrityError:
                 session.rollback()

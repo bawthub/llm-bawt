@@ -11,8 +11,9 @@ from typing import Any
 
 from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
-from .executor import ConfigCheckError, DockerExecutor, Executor, ExecutorError, validate_spec
-from .gpu_guard import GpuGuardUnverifiable, gpu_voice_target
+from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
+                       validate_spec)
+from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
 from .routing_reconcile import ACTION as ROUTING_ACTION, valid_routing_binding
@@ -84,27 +85,68 @@ def _timestamp(raw):
     return datetime.fromisoformat(raw.replace("Z", "+00:00")) if raw else None
 
 
+class _NoTargetReads:
+    """Stands in for an executor where no Docker read may happen: the GPU guard
+    then resolves a target only from the spec itself (TASK-1169 S3b)."""
+
+    @staticmethod
+    def target_compose_identity(spec, args):
+        raise ExecutorError("no Docker read is available here")
+
+
 class OpsService:
     def __init__(self, store: OpsStore, *, executor: Executor | None = None,
                  release_verifier: ReleaseVerifier | None = None,
-                 release_store: ReleaseStore | None = None, quiesce_driver=None):
+                 release_store: ReleaseStore | None = None, quiesce_driver=None,
+                 admission_only: bool = False, preparer=None):
+        """``admission_only`` (the app, TASK-1169 S3): this service admits and
+        reads jobs and never reaches an executor. ``preparer.prepare(slug,
+        args)`` builds snapshots in the ops process, and the ops reconciler
+        dispatches and reconciles every job this service creates."""
         self.store = store
         # Only the reconciler process drives quiesce jobs (TASK-1233); every
         # other OpsService just reports them.
         self.quiesce_driver = quiesce_driver
         self.releases = release_store or ReleaseStore(None, engine=store.engine)
         self._release_verifier = release_verifier or GitHubReleaseVerifier()
+        self.admission_only = admission_only
+        if admission_only:
+            if executor is not None or preparer is None:
+                raise ValueError("an admission-only OpsService takes a preparer and no executor")
+            self.preparer = preparer
+            self._executors = {}
+            return
+        self.preparer = None
         default = executor or DockerExecutor()
         self._executors = {default.kind(): default}
 
     def register_executor(self, executor):
+        if self.admission_only:
+            raise ValueError("an admission-only OpsService runs no executor")
         self._executors[executor.kind()] = executor
 
     def executors(self):
         """Registered executors by kind (read-only copy, for health reporting)."""
         return dict(self._executors)
 
+    def executor_readiness(self) -> dict[str, str | None]:
+        """Each executor kind's readiness reason (``None`` when ready), from
+        the process that runs them: the ops service's for an admission-only
+        one. Raises OpsDispatchError when that process can't be asked."""
+        if self.admission_only:
+            return self.preparer.executor_readiness()
+        readiness = {}
+        for kind, executor in sorted(self._executors.items()):
+            try:
+                readiness[kind] = executor.readiness()
+            except Exception as exc:  # noqa: BLE001 - reported, never raised
+                readiness[kind] = f"{type(exc).__name__}: {exc}"
+        return readiness
+
     def _resolve_executor(self, kind):
+        if self.admission_only:
+            raise OpsDispatchError("ops_admission_only",
+                                   "this process admits ops jobs; the ops service prepares and runs them")
         executor = self._executors.get(kind)
         if executor is None:
             raise OpsDispatchError("executor_kind_unknown", f"no executor registered for {kind!r}")
@@ -156,7 +198,10 @@ class OpsService:
         dispatch_job verifies the snapshot and original input, then executes this
         exact revision even if defaults/spec/config have subsequently changed.
         Current enabled/deleted state remains an emergency execution interlock.
+        An admission-only service asks the ops service to build it (TASK-1169 S3a).
         """
+        if self.admission_only:
+            return self.preparer.prepare(operation_slug, args)
         op = self.store.get_operation_by_slug(operation_slug)
         if op is None:
             raise OpsDispatchError("operation_not_found", f"unknown operation slug: {operation_slug!r}")
@@ -237,6 +282,12 @@ class OpsService:
             snapshot["quiesce"] = binding
             # Never put a quiesce action before an approver that cannot run fenced.
             self._require_quiesce_fence(executor, execution)
+        # TASK-1169 S3b: the GPU voice guard's creation check reads this, so the
+        # process that creates the job needs no Docker read of its own.
+        try:
+            snapshot["gpu_target"] = gpu_voice_target(spec, merged, executor, live=False)
+        except GpuGuardUnverifiable as exc:
+            raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
         return json.loads(canonical_json(snapshot))
 
@@ -354,8 +405,9 @@ class OpsService:
         quiesce = bool(snapshot.get("quiesce"))
         if quiesce and getattr(getattr(self.store.engine, "dialect", None), "name", None) != "postgresql":
             raise OpsDispatchError("quiesce_unavailable", "quiesce operations require the PostgreSQL ops store")
-        if quiesce:
+        if quiesce and not self.admission_only:
             # Re-checked for an approved snapshot: the worker it pins is what runs.
+            # Admission-only, the ops driver checks it before opening any hold.
             self._require_quiesce_fence(self._resolve_executor(snapshot["execution"]["executor_kind"]),
                                         snapshot["execution"])
         callback = (self._receipt_callback(snapshot, bot_id=caller_bot_id, user_id=caller_user_id,
@@ -372,8 +424,10 @@ class OpsService:
         except IdempotencyConflict as exc:
             raise OpsDispatchError("idempotency_conflict", str(exc)) from exc
         # A quiescing job returns at once; the reconciler's driver holds,
-        # drains and dispatches it.
-        self._dispatch_queued(job)
+        # drains and dispatches it. Admission-only, every job does: the
+        # reconciler, woken by the create notify, dispatches it (TASK-1169 S3b).
+        if not self.admission_only:
+            self._dispatch_queued(job)
         result = self.store.get_job(job.id).to_api()
         if op.executor_kind == "release":
             release = self.releases.get_by_parent_job(job.id)
@@ -384,6 +438,32 @@ class OpsService:
         executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
         return gpu_voice_target(snapshot["spec"], snapshot["resolved_args"], executor, live=live)
 
+    def _creation_gpu_target(self, snapshot):
+        """The GPU voice service a job would start or recreate, for the creation
+        guard. Prepare records it as ``gpu_target`` (TASK-1169 S3b), which must
+        agree with whatever the spec alone proves. A snapshot from before that
+        field is resolved from the spec; one whose target needs a Docker read
+        refuses in a process without Docker, and reads it in the ops service."""
+        try:
+            from_spec = gpu_voice_target(snapshot["spec"], snapshot["resolved_args"], _NoTargetReads(),
+                                         live=False)
+            proven = True
+        except GpuGuardUnverifiable:
+            from_spec, proven = None, False
+        if "gpu_target" in snapshot:
+            recorded = snapshot["gpu_target"]
+            if recorded is not None and recorded not in GPU_VOICE_SERVICES:
+                raise GpuGuardUnverifiable(f"the snapshot records an unknown gpu_target {recorded!r}")
+            if proven and recorded != from_spec:
+                raise GpuGuardUnverifiable("the snapshot's gpu_target contradicts its spec")
+            return recorded
+        if proven:
+            return from_spec
+        if self.admission_only:
+            raise GpuGuardUnverifiable("the snapshot records no gpu_target and its target needs a Docker read; "
+                                       "prepare the operation again")
+        return self._gpu_voice_target(snapshot, live=False)
+
     def _require_gpu_handoff(self, snapshot, create_fence):
         """Creation point of the GPU voice guard (TASK-1171): a job that would
         start or recreate a GPU voice service is created only under a fence the
@@ -391,7 +471,7 @@ class OpsService:
         from ..media.gpu_handoff_store import GpuHandoffFence
 
         try:
-            service = self._gpu_voice_target(snapshot, live=False)
+            service = self._creation_gpu_target(snapshot)
         except GpuGuardUnverifiable as exc:
             raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
         if service is not None and not isinstance(create_fence, GpuHandoffFence):
@@ -499,6 +579,12 @@ class OpsService:
             try:
                 executor.preflight(snapshot)
                 self._check_gpu_handoff(job, snapshot)
+            except QuiesceFenceUnsupported as exc:
+                # The app no longer re-checks the fence at creation (TASK-1169
+                # S3c): a worker that provably can't run fenced fails the job here.
+                self.quiesce_driver.refuse_unopened(
+                    job.id, f"quiesce_unavailable: {exc}; no hold opened, no action submitted")
+                return
             except ExecutorError as exc:
                 # Before any hold: nothing is held while prerequisites are
                 # fixed, until the job's open deadline fails it.
@@ -513,7 +599,9 @@ class OpsService:
         if job is None:
             return None
         include_output = output_tail_bytes is not None and output_tail_bytes > 0
-        if job.state not in JOB_TERMINAL_STATES and reconcile_if_active:
+        # Admission-only, every status read is a read: the ops reconciler
+        # dispatches and reconciles (TASK-1169 S3b).
+        if job.state not in JOB_TERMINAL_STATES and reconcile_if_active and not self.admission_only:
             if job.state == JOB_QUEUED:
                 self._dispatch_queued(job)
                 job = self.store.get_job(job_id)

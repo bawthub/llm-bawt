@@ -12,13 +12,15 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
 from llm_bawt.ops import JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_SUCCEEDED, OpsDispatchError, OpsService
-from llm_bawt.ops.executor import ReconcileResult
+from llm_bawt.ops.executor import ExecutorError, QuiesceFenceUnsupported, ReconcileResult
+from llm_bawt.ops.reconciler import JobCreatedWaiter
 from llm_bawt.ops.models import JOB_QUIESCING
 from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 from llm_bawt.ops.quiesce import MARGIN_SECONDS, QuiesceDriver, TurnGates, caller_instruction, record_ack
@@ -546,3 +548,65 @@ def test_an_approved_quiesce_job_is_refused_for_an_unfenced_worker(rig):
                                  idempotency_key=uuid.uuid4().hex, approved_snapshot=approved)
     assert exc.value.code == "quiesce_unavailable" and "fence" in str(exc.value)
     assert rig.sql("SELECT count(*) FROM ops_jobs WHERE operation_slug=:s", s=rig.slug).scalar() == 0
+
+
+# ── TASK-1169 S3: the app admits, the ops service drives ───────────────────
+
+HANG_GUARD_S = 30.0
+
+
+def _admission(rig):
+    """The app's OpsService on the same ledger; it prepares in the ops service."""
+    return OpsService(rig.store, admission_only=True,
+                      preparer=SimpleNamespace(prepare=rig.service.prepare_invocation))
+
+
+def test_an_unfenced_worker_fails_an_admitted_quiesce_job_before_any_hold(rig, monkeypatch):
+    app = _admission(rig)
+    job_id = app.dispatch_job(operation_slug=rig.slug, args={"target": "a"},
+                              idempotency_key=uuid.uuid4().hex)["id"]
+    assert rig.row(job_id)["state"] == JOB_QUIESCING  # the app checks no fence itself
+
+    def unfenced(snapshot):
+        raise QuiesceFenceUnsupported("worker does not enforce the quiesce start fence")
+
+    monkeypatch.setattr(rig.executor, "preflight", unfenced)
+    status = rig.service.get_job_status(job_id)
+    assert status["state"] == JOB_FAILED
+    assert rig.row(job_id)["error_text"].startswith("quiesce_unavailable: ")
+    assert rig.gates_of(job_id) == [] and rig.executor.dispatch_calls == []
+
+
+def test_a_transient_fence_failure_still_waits_for_its_deadline(rig, monkeypatch):
+    job_id = rig.job()
+
+    def unverifiable(snapshot):
+        raise ExecutorError("cannot inspect the worker image")
+
+    monkeypatch.setattr(rig.executor, "preflight", unverifiable)
+    assert rig.service.get_job_status(job_id)["state"] == JOB_QUIESCING
+    assert "cannot inspect the worker image" in rig.row(job_id)["error_text"]
+
+
+def test_a_created_job_notifies_and_a_rolled_back_one_does_not(rig):
+    waiter = JobCreatedWaiter(rig.engine)
+    settled = Event()
+    settled.set()
+    try:
+        assert waiter.wait(settled, 0) is False  # LISTEN is open before any job exists
+        first = rig.job()
+        existing = rig.row(first)
+        # A second insert under the same key rolls back and returns the first job.
+        replay = rig.store.create_job(
+            operation=rig.store.get_operation_by_slug(rig.slug), args_json=existing["args_json"],
+            display_args_json=existing["display_args_json"], idempotency_key=existing["idempotency_key"],
+            invocation_snapshot_json=existing["invocation_snapshot_json"],
+            request_payload_json=existing["request_payload_json"], state=JOB_QUIESCING)
+        assert replay.id == first
+        second = rig.job()
+        while len(waiter.received) < 2:
+            assert waiter.wait(Event(), HANG_GUARD_S)  # timing-ok: hang guard on a notify that is sent
+        waiter.wait(settled, 0)  # drain anything else already delivered
+        assert waiter.received == [first, second]
+    finally:
+        waiter.close()

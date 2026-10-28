@@ -47,6 +47,12 @@ class ExecutorError(RuntimeError):
     pass
 
 
+class QuiesceFenceUnsupported(ExecutorError):
+    """The worker this executor would start provably cannot enforce the quiesce
+    start fence (TASK-1169 S3). Definitive, unlike a fence that cannot be read
+    right now: a job pinned to that worker can never run fenced."""
+
+
 class ConfigCheckError(ExecutorError):
     """A Compose config check refused. ``code`` is fixed (``config_drift``,
     ``config_reconcile_unavailable`` or a :class:`ComposeError` code) and the
@@ -127,7 +133,7 @@ class Executor(ABC):
     def check_quiesce_fence(self, settings: dict) -> None:
         """Read-only: the worker this executor would start enforces the quiesce
         start fence (TASK-1233). Fails closed unless an executor proves it."""
-        raise ExecutorError(f"{self.kind()} executor cannot enforce the quiesce start fence")
+        raise QuiesceFenceUnsupported(f"{self.kind()} executor cannot enforce the quiesce start fence")
 
     def check_target(self, spec: dict, args: dict) -> None:
         """Approval-time, read-only: the spec's target exists where this executor
@@ -272,13 +278,13 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError(f"cannot inspect deploy target health {spec['container_name']}: {exc}") from exc
 
-    def _require_worker_label(self, settings, label, *, missing, unverifiable):
+    def _require_worker_label(self, settings, label, *, missing, unverifiable, missing_error=ExecutorError):
         """The configured immutable worker image proves a capability by label."""
         try:
             worker = self.client.images.get(settings["worker_image"])
             labels = worker.attrs.get("Config", {}).get("Labels") or {}
             if labels.get(label) != "1":
-                raise ExecutorError(missing)
+                raise missing_error(missing)
         except ExecutorError:
             raise
         except Exception as exc:
@@ -297,7 +303,8 @@ class DockerExecutor(Executor):
             settings, QUIESCE_FENCE_LABEL,
             missing=("configured immutable ops worker does not enforce the quiesce start fence; "
                      "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
-            unverifiable="cannot verify quiesce fence support of the ops worker")
+            unverifiable="cannot verify quiesce fence support of the ops worker",
+            missing_error=QuiesceFenceUnsupported)
 
     def routing_approval(self, spec):
         self._check_prerequisites(self.execution_settings(spec))

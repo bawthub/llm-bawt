@@ -73,14 +73,17 @@ def check_redis(url: str) -> dict:
 
 
 def check_ops_executors(ops) -> list[dict]:
-    rows = []
-    for kind, executor in sorted(ops.executors().items()):
-        try:
-            reason = executor.readiness()
-        except Exception as exc:  # noqa: BLE001
-            reason = f"{type(exc).__name__}: {exc}"
-        rows.append(_check(f"ops.executor.{kind}", DOWN if reason else OK, reason))
-    return rows
+    """Executor readiness as the process that runs them reports it: the ops
+    service, for the app's admission-only OpsService (TASK-1169 S3c). When
+    that process can't be asked, one ``ops.control`` row says so."""
+    from ..ops.service import OpsDispatchError
+
+    try:
+        readiness = ops.executor_readiness()
+    except OpsDispatchError as exc:
+        return [_check("ops.control", DOWN, str(exc))]
+    return [_check(f"ops.executor.{kind}", DOWN if reason else OK, reason)
+            for kind, reason in sorted(readiness.items())]
 
 
 def _age_seconds(ts: datetime | None, now: datetime) -> float | None:

@@ -2,7 +2,7 @@
 
 **Status:** design baseline; implementation and rollout are queued, not complete.
 
-**Updated:** 2026-10-21 (TASK-1220 approved-admission move, implemented, not deployed). **Accountable owner:** Snark.
+**Updated:** 2026-10-28 (TASK-1169 S3 ops as sole executor, implemented, not deployed). **Accountable owner:** Snark.
 
 **Tasks:** TASK-1169–TASK-1173. Related health delivery: TASK-1157.
 
@@ -24,19 +24,25 @@ This document is the migration design and decision record. [OPERATIONS_RUNNER.md
 UI/operator or agent MCP
           |
           v
-llm-bawt app: catalog + approval integration + OpsService
-          |                         |
-          | Docker target checks    | immediate job dispatch
-          v                         v
-       Docker daemon <------ per-job Docker worker container
-          ^                         |
-          |                         v
-ops-reconciler process <---- durable request/receipt volume
-          |
-          +---------------- canonical ops job database
+llm-bawt app: catalog + approval integration + admission-only OpsService
+          |                                   |
+          | prepare (:8651, bearer)           | create job QUEUED (+ NOTIFY ops_job_created)
+          v                                   v
+ops-reconciler process ---------------> canonical ops job database
+   | target checks, dispatch,  ^ LISTEN wakes the loop; the interval is the fallback
+   | reconciliation            |
+   v                           |
+Docker daemon <------ per-job Docker worker container ----> durable request/receipt volume
 ```
 
-The app constructs `DockerExecutor`, resolves targets during invocation preparation, and dispatches directly submitted jobs immediately: a directly allowed MCP `ops_run` (MCP server process) and `POST /v1/ops/jobs`. A `get_job_status()` read still dispatches/reconciles active jobs unless the caller passes `reconcile_if_active=False`. The separate reconciler also pumps the ledger; conditional claims coordinate dispatchers. **Approved** MCP `ops_run` calls are the exception: since TASK-1220 the app records only the decision and the reconciler admits the job (below).
+**TASK-1169 S3 (implemented, not deployed):** the ops-reconciler is the only executor. The app's `OpsService` is admission-only (`build_admission_ops_service`). It builds no `DockerExecutor` and registers no executor: `_resolve_executor` raises `ops_admission_only`. It asks the ops service to prepare each invocation over the internal control listener (`ops/control_http.py`, `:8651`, never published), then creates the job QUEUED (or QUIESCING) and returns. `get_job_status()` in the app is a pure read. The job insert notifies `ops_job_created` in its own transaction, which wakes the reconciler loop at once; a lost notify costs one interval. Callers already handle a queued result: the BawtHub Run dialog, `ops_run` and the GPU handoff adapter, which polls. A release job's `release_id` stays null until the reconciler creates the release.
+
+- **Control channel.** `POST /v1/ops/prepare` returns the ops service's snapshot or a coded refusal, which keeps its own status. Auth is a bearer derived from the master key under `ops-control-token/v1`, not the BawtHub service token: the reconciler mounts the key but not BawtHub's token override. The client verifies the snapshot hash. It retries once, and only where nothing ran: a connection that never opened, or `ops_busy`. Everything else (timeout, 5xx, an old reconciler's 404, a non-protocol body) is `ops_unavailable`, which maps to HTTP 503 and creates nothing. The server runs at most `LLM_BAWT_OPS_CONTROL_CONCURRENCY` (default 2) requests at a time under a 20s budget; one more gets 503 `ops_busy`, and an over-budget request gets 504 `ops_timeout`. `GET /v1/ops/executors` feeds the app's `ops.executor.*` health rows; when it is unreachable they collapse into one DOWN `ops.control` row.
+- **GPU guard target.** Prepare records `gpu_target` in the snapshot, so the app's creation check needs no Docker read. The app checks it against whatever the spec alone proves. A snapshot without the field whose target needs a Docker read is refused in the app with `gpu_guard_unverifiable`. Dispatch still re-checks live in the reconciler.
+- **Quiesce fence.** The app no longer re-checks it at creation. The reconciler's driver does, before opening any hold. A worker that provably lacks the fence (`QuiesceFenceUnsupported`) fails the job at once with `quiesce_unavailable`, with no hold opened. A fence that can't be read right now waits out the job's open deadline, as before.
+- **Deploy order:** ops-reconciler first, with `8651` exposed (`docker-compose.ops.yml`, so `up -d`, not a restart), then the app. An S3 app facing an older reconciler fails closed with `ops_unavailable`.
+
+Approved MCP `ops_run` admission (TASK-1220, below) already ran in the reconciler.
 
 ### Approved MCP `ops_run` admission (TASK-1220) — implemented, not yet deployed
 
@@ -100,7 +106,7 @@ A readiness healthcheck exists in Compose source but has not been activated in t
 
 | Consumer | Current dependency | Migration |
 | --- | --- | --- |
-| llm-bawt app | Docker executor/preflight, image pulls, job dispatch and status reconciliation | TASK-1169 |
+| llm-bawt app | Admission-only: prepares through the ops control channel; no executor, dispatch or reconciliation. The Docker socket and worker env in its compose are not yet removed | Done in source, TASK-1169 S3; mount removal follows activation |
 | Ops collectors/execution | Separate Docker access implementations | Cohesive runtime adapter, TASK-1169 |
 | Hono dev/prod | Docker list/sync/state/start/stop/restart helpers | TASK-1170 |
 | Hono repository browsing | `repos.ts` imports `getContainerMounts` for path discovery | Explicit deployment/repo-path configuration, TASK-1170 |
@@ -121,6 +127,7 @@ Source changes ship inert. Each row below needs its activation step before the l
 | `bawthub.reconcile-backend-config` drops `/var/run/docker.sock` and `BAWTHUB_TTS_DOCKER_CONTAINER`/`BAWTHUB_COMPOSE_PROJECT` | Seed row changed | Seeds never update existing rows: `PATCH` the live row, then recreate the backend without the socket |
 | GPU handoff observation via ops health | App has no Docker client for it | `LLM_BAWT_OPS_HEALTH_URL` only if the reconciler isn't at the default `http://ops-reconciler:8650`; app restart |
 | `restartCount` on `/v1/health/services` instances | Collector + schema | ops-reconciler restart |
+| TASK-1169 S3: app admission-only, ops sole executor, control listener `:8651`, `ops_job_created` notify. The app's GPU creation check reads the snapshot's `gpu_target` | Done in source | ops-reconciler first via `docker compose up -d ops-reconciler` (the new `8651` expose needs a recreate, not a restart), confirm its `/health/ready`, then app restart. The reverse order leaves the app refusing every run with `ops_unavailable` until the reconciler is up |
 
 Production Hono has a socket mount but its non-root user lacks socket permission; dev Hono has effective access. A `:ro` socket mount, as used by Traefik, does not restrict Docker API methods. Agent bridges have no direct socket mount in the inspected deployment, but host SSH/operator privileges are a separate surface, not removed by this design.
 
@@ -245,7 +252,8 @@ This is the single working design for the five tasks, not a frozen proposal.
 
 Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 
-- `src/llm_bawt/ops/service.py`: admission, target preparation, dispatch and status reconciliation currently combined.
+- `src/llm_bawt/ops/service.py`: admission, target preparation, dispatch and status reconciliation; `admission_only` limits the app's instance to admission and reads (TASK-1169 S3).
+- `src/llm_bawt/ops/control_protocol.py`, `control_http.py`, `control_client.py`: the app/ops control channel and `build_admission_ops_service` (TASK-1169 S3).
 - `src/llm_bawt/ops/store.py`: durable ledger and claims.
 - `src/llm_bawt/ops/executor.py`, `worker.py`, `image_deploy.py`: Docker execution and per-job worker lifecycle.
 - `src/llm_bawt/ops/release_executor.py`: release execution/coordinator integration.
@@ -265,3 +273,4 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - **2026-10-18:** Caid review narrows scope: reuse ledger, portable service contracts, shared observations, routing owned by deployment, guardrails first. Follow-up found repository mount inspection; TASK-1170 explicitly covers it.
 - **2026-10-18:** Nick asks for a proper FastAPI operations service and a repo design document maintained through implementation, then transitioned to skills upon completion. This document records that direction; no service/code rollout performed.
 - **2026-10-21 (TASK-1220):** After the approval-time stale-import incident, Nick approved moving admission of approved MCP `ops_run` from the app into the ops reconciler. Snark's design review added these must-fixes: the admission deadline, recovery exclusion, the pending resolve contract, the shared contract, the hash check, no lazy imports, and per-row isolation. Nick set a 10-minute admission window, and chose to degrade and refuse (not crash) when MCP tool registration fails at startup. Implemented and tested; not yet deployed. This is the first step of the §3 ownership move ("approved job admission" to ops). Directly submitted jobs still dispatch in the app until TASK-1169.
+- **2026-10-28 (TASK-1169 S3):** The ops-reconciler becomes the sole executor and the app admission-only (design r1 and v1.1, reviewed by Codex). The app prepares over an internal bearer-authenticated listener on `:8651`, with no local fallback. Job creation notifies the reconciler. The quiesce fence check moves to the reconciler's driver. Deviation from the design: the control bearer is derived from the master key, not the BawtHub service token, because the reconciler doesn't mount that token's override. Implemented, not deployed.

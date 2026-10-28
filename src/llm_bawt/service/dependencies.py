@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - FastAPI is optional at import time
 
 from ..approval_policies import ToolApprovalPolicyStore
 from ..ops import OpsStore
-from ..ops.release_executor import build_ops_service
+from ..ops.control_client import build_admission_ops_service
 from .logging import generate_request_id as _generate_request_id
 from .schemas import UserProfileAttribute
 
@@ -181,16 +181,16 @@ def get_ops_store(config: Any):
 def get_ops_service(config: Any):
     """Process-wide ``OpsService`` singleton (TASK-639).
 
-    Registers both the Docker worker and durable release executors. Callers
-    swapping executors for tests should construct their own OpsService.
-    The ops imports are module-level: the approval continuation outbox reaches
-    this on its first ops receipt, and a first-use import there would load the
-    live bind-mounted tree into a process holding older modules (TASK-1220).
+    Admission-only (TASK-1169 S3c): it admits and reads jobs, asks the ops
+    service to prepare them and registers no executor, so this process builds
+    no Docker client. The ops reconciler dispatches, reconciles and advances
+    releases. The ops imports are module-level: the approval continuation
+    outbox reaches this on its first ops receipt, and a first-use import there
+    would load the live bind-mounted tree into a process holding older modules
+    (TASK-1220).
     """
     return _get_or_build_store(
-        "ops_service", config, lambda: build_ops_service(
-            config, get_ops_store(config),
-            approvals=lambda: get_tool_approval_policy_store(config)),
+        "ops_service", config, lambda: build_admission_ops_service(config, get_ops_store(config)),
     )
 
 

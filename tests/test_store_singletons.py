@@ -150,7 +150,7 @@ def test_nested_store_factory_does_not_deadlock(monkeypatch) -> None:
     # Patched where the accessors look them up: dependencies imports both at
     # module level so the continuation outbox never imports on first use.
     monkeypatch.setattr(dependencies, "OpsStore", lambda config: ("store", config))
-    monkeypatch.setattr(dependencies, "build_ops_service", lambda config, store, **_kwargs: ("service", store))
+    monkeypatch.setattr(dependencies, "build_admission_ops_service", lambda config, store: ("service", store))
     config = object()
 
     done = threading.Event()

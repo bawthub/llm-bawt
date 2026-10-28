@@ -390,6 +390,17 @@ class QuiesceDriver:
             self._write(conn, job["id"], {"error_text": error, "quiesce_json": json.dumps(receipt)})
             return StepResult("preflight_blocked")
 
+    def refuse_unopened(self, job_id: str, error: str) -> StepResult:
+        """Fail a not-yet-opened job at once: its pinned worker provably cannot
+        run fenced (TASK-1169 S3), so waiting out its open deadline helps nobody."""
+        with self.engine.begin() as conn:
+            job = self._claim(conn, job_id)
+            if job is None:
+                return StepResult("not_owner")
+            if job["quiesce_gate_id"] is not None:
+                return StepResult("opened")
+            return self._fail(conn, job, error)
+
     def _open(self, conn, job, snapshot) -> StepResult:
         if self._open_expired(conn, job, snapshot):
             return self._fail_unopened(conn, job, job["error_text"])
