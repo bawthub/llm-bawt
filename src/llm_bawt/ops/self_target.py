@@ -31,6 +31,7 @@ ops service are allowed, and the approval card names the self target.
 """
 from __future__ import annotations
 
+import re
 from typing import Callable, Mapping, NamedTuple
 
 from .container_remove import ACTION as REMOVE_ACTION
@@ -82,6 +83,12 @@ class ContainerIdentity(NamedTuple):
         return f"container {self.container_id}"
 
 
+def is_full_container_id(value: str | None) -> bool:
+    """Docker's full container ID: 64 lowercase hex. An abbreviated ID is a
+    prefix, so it cannot prove two containers different (fail closed)."""
+    return bool(value) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def is_self(own: ContainerIdentity, target: ContainerIdentity) -> bool:
     if own.container_id and target.container_id == own.container_id:
         return True
@@ -110,10 +117,10 @@ def _targets(spec: Mapping, args: Mapping, inspect: Callable[[str], ContainerIde
         name, filters = None, None
     if name is not None:
         inspected = inspect(name)
-        if not inspected.container_id:
+        if not is_full_container_id(inspected.container_id):
             # Without its full ID the target cannot be proven not to be the
             # ops service (labels alone may be absent); fail closed.
-            raise SelfTargetError(SELF_TARGET_UNVERIFIABLE, f"target container {name!r} reports no ID")
+            raise SelfTargetError(SELF_TARGET_UNVERIFIABLE, f"target container {name!r} reports no full ID")
         found.append(inspected)
     elif filters is not None:
         # The worker selects exactly the containers carrying these labels.

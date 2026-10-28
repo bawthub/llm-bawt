@@ -241,8 +241,34 @@ def test_a_created_worker_is_not_started_by_recovery_once_its_target_is_refused(
         raise SelfTargetError(SELF_STOP_UNRECOVERABLE, "now the ops service")
     executor.self_target = refuse
     result = executor.reconcile(job_id=DOCKER_JOB, snapshot=snapshot)
+    # No start was ever attempted, so it is certain nothing ran.
     assert result.state == "failed" and SELF_STOP_UNRECOVERABLE in result.error
     assert worker.starts == 0
+
+
+def test_a_created_worker_with_an_earlier_start_attempt_stays_unconfirmed_not_refused(tmp_path, monkeypatch):
+    executor, client, snapshot = docker_setup(tmp_path, monkeypatch)
+    original = client.containers.create
+
+    def create(*args, **kwargs):
+        original(*args, **kwargs)
+        raise TimeoutError("response lost")
+    client.containers.create = create
+    with pytest.raises(ExecutorError):
+        executor.dispatch(job_id=DOCKER_JOB, snapshot=snapshot)
+    worker = client.containers.rows[executor.worker_name(DOCKER_JOB)]
+    directory = tmp_path / DOCKER_JOB
+    (directory / "start-attempt.json").write_text('{"start_attempted": true}')
+    checks = []
+
+    def refuse(_snapshot):
+        checks.append("checked")
+        raise SelfTargetError(SELF_STOP_UNRECOVERABLE, "now the ops service")
+    executor.self_target = refuse
+    result = executor.reconcile(job_id=DOCKER_JOB, snapshot=snapshot)
+    # That earlier start may still complete: lost, never a certain "failed".
+    assert result.state == "lost" and "without confirmation" in result.error
+    assert checks == [] and worker.starts == 0 and not (directory / "receipt.json").exists()
 
 
 def test_an_inspected_target_without_a_full_id_fails_closed():
@@ -251,3 +277,18 @@ def test_an_inspected_target_without_a_full_id_fails_closed():
     with pytest.raises(SelfTargetError) as caught:
         self_target(snapshot, own=lambda: OWN, inspect=containers.__getitem__)
     assert caught.value.code == SELF_TARGET_UNVERIFIABLE
+
+
+def test_an_abbreviated_id_cannot_prove_a_target_is_not_the_ops_service():
+    containers = dict(CONTAINERS, short=ContainerIdentity(OWN_ID[:12], None, None))
+    snapshot = _snapshot({"action": "restart", "container_name": "short"})
+    with pytest.raises(SelfTargetError) as caught:
+        self_target(snapshot, own=lambda: OWN, inspect=containers.__getitem__)
+    assert caught.value.code == SELF_TARGET_UNVERIFIABLE
+
+
+def test_the_docker_executor_needs_its_own_full_id(tmp_path, monkeypatch):
+    executor, client, snapshot = _docker(tmp_path, monkeypatch, own_labels={})
+    client.containers.rows["fake-app"].id = OWN_ID[:12]
+    with pytest.raises(ExecutorError, match=SELF_IDENTITY_UNKNOWN):
+        executor.self_target(snapshot)

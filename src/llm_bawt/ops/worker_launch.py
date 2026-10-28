@@ -62,6 +62,28 @@ class WorkerLauncher(ABC):
         return None
 
 
+class RecoveryRefused(ExecutorError):
+    """``revalidate`` refused a recovery start (TASK-1169 S4c).
+
+    ``prior_attempt`` says whether an earlier start of this job was already
+    attempted. If so, that start may still be running, so side effects are
+    unknown. If not, nothing of this job ever ran."""
+
+    def __init__(self, cause: ExecutorError, *, prior_attempt: bool):
+        super().__init__(str(cause))
+        self.cause, self.prior_attempt = cause, prior_attempt
+
+
+def refuse_recovery(revalidate: Callable[[], None] | None, *, prior_attempt: bool) -> None:
+    """Run ``revalidate`` before a recovery start; a refusal says what is known."""
+    if revalidate is None:
+        return
+    try:
+        revalidate()
+    except ExecutorError as exc:
+        raise RecoveryRefused(exc, prior_attempt=prior_attempt) from exc
+
+
 def container_worker_name(job_id: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise ExecutorError("invalid job id")
@@ -121,11 +143,7 @@ class ContainerLauncher(WorkerLauncher):
         if worker.status == "created":
             # Creation succeeded but submitter died before start. Safe to
             # start this SAME never-run identity, never create a replacement.
-            if not directory.is_dir():
-                return Liveness.START_UNCONFIRMED
-            if revalidate is not None:
-                revalidate()
-            if not self._start_created_once(worker, directory):
+            if not directory.is_dir() or not self._start_created_once(worker, directory, revalidate):
                 return Liveness.START_UNCONFIRMED
             return Liveness.STARTED
         if worker.status in ("exited", "dead", "removing"):
@@ -133,7 +151,7 @@ class ContainerLauncher(WorkerLauncher):
         return Liveness.ALIVE
 
     @staticmethod
-    def _start_created_once(worker, directory):
+    def _start_created_once(worker, directory, revalidate=None):
         # Container.start is not a compare-and-swap. Two observers of 'created'
         # could otherwise start, then RESTART a fast-exited worker. Serialize
         # status/start and persist the attempt BEFORE the daemon call. A lost
@@ -145,7 +163,9 @@ class ContainerLauncher(WorkerLauncher):
                 return True
             marker = directory / "start-attempt.json"
             if marker.exists():
-                return False
+                return False  # An earlier start may still complete: unconfirmed, never re-checked as certain.
+            # No start was ever attempted, so a refusal here is certain: nothing ran.
+            refuse_recovery(revalidate, prior_attempt=False)
             atomic_json(marker, {"start_attempted": True})
             worker.start()
             return True

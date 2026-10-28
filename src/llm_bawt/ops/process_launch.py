@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from .executor_types import ExecutorError
 from .worker import atomic_json, utcnow
-from .worker_launch import Liveness, WorkerLauncher, container_worker_name
+from .worker_launch import Liveness, WorkerLauncher, container_worker_name, refuse_recovery
 
 #: The files ``docker/Dockerfile.ops-worker`` copies to ``/ops/`` (pinned by a test).
 WORKER_FILES = frozenset({
@@ -402,8 +402,9 @@ class ProcessLauncher(WorkerLauncher):
         attempt = int(intent.get("attempt") or 0)
         if attempt >= 2 or settings is None or not directory.is_dir():
             return Liveness.START_UNCONFIRMED
-        if revalidate is not None:
-            revalidate()  # A refusal propagates: the caller records it, not "unconfirmed".
+        # A spawn was intended before, and its child may have outlived its
+        # dispatcher (own session): a refusal leaves side effects unknown.
+        refuse_recovery(revalidate, prior_attempt=True)
         try:
             # Nothing began executing: one respawn of the SAME request. The
             # worker re-checks the start delay and the fence inside.
