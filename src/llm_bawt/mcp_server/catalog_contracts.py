@@ -118,7 +118,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "self_model": "View or persistently switch bot_id's model endpoint; applies next turn, not this one. continue_prompt queues one when_idle follow-up turn on the new model.",
     "ops_list_operations": "Discover enabled ops and schemas before ops_run; include_disabled grants no execution permission.",
     "ops_run": "Run a discovered op with validated args and idempotency_key. Approval/queued is not success; verify ops_job_status and target health. Never bypass a denial.",
-    "ops_job_status": "Read/reconcile an ops job's terminal state and exit code; output_tail_bytes optionally includes bounded command output.",
+    "ops_job_status": "Read-only ops job state and exit code; the reconciler records progress. output_tail_bytes: bounded output.",
     "ops_quiesce_ack": "Answer the quiesce holding this turn: stopping|cannot_stop, optional note.",
     "media_lookup": "Search movie/series titles before media_add; returns exact external IDs and existing-library status. kind: auto|movie|series.",
     "media_add": "Add movie|series and optionally start downloading (search_now defaults true). Prefer external_id from media_lookup; query otherwise picks first match. Advanced options: skill reference.",

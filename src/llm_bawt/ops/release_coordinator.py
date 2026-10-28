@@ -1,11 +1,12 @@
 """Durable BawtHub release state machine (TASK-1030).
 
-One ``bawthub.release-prod`` ops job owns one ``ops_release_runs`` row. Every
-status read of that job (MCP ``ops_job_status``, the continuation outbox, the
-HTTP API, the independent ops reconciler) calls :meth:`ReleaseCoordinator.pump`
-through the release executor. A pump is cheap when nothing is due
-(``next_check_at`` throttle) and claim-fenced when something is, so any number
-of readers in any number of processes advance exactly one release safely.
+One ``bawthub.release-prod`` ops job owns one ``ops_release_runs`` row. The
+independent ops reconciler's per-job pass calls :meth:`ReleaseCoordinator.pump`
+through the release executor; MCP ``ops_job_status``, the HTTP API and the
+continuation outbox only read the job (TASK-1169 S1d). A pump is cheap when
+nothing is due (``next_check_at`` throttle) and claim-fenced when something is,
+so any number of passes in any number of processes advance exactly one release
+safely.
 
 Invariants (each has a regression test in tests/test_release_coordinator.py):
 
