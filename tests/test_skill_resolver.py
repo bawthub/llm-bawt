@@ -242,3 +242,21 @@ def test_the_app_catalog_and_the_bridge_discover_the_same_tree(monkeypatch, tmp_
     assert source.roots == legacy_claude_skill_roots() == (first, second)
     assert tuple(sorted(e.ref for e in source.list())) == claude_skill_names(None) == (
         "alpha", "beta", "gamma")
+
+
+def test_a_partly_unreadable_catalog_applies_no_disable(tmp_path):
+    # One readable root and one missing root: the listing is partial, and an
+    # allow-list built from it would hide the missing root's skills.
+    from agent_bridge.skill_sources import AmbientSource
+
+    root = tmp_path / "mounted"
+    (root / "alpha").mkdir(parents=True)
+    (root / "alpha" / "SKILL.md").write_text("---\nname: alpha\ndescription: d\n---\n")
+    source = AmbientSource((root, tmp_path / "not-mounted"))
+    assert [e.ref for e in source.list()] == ["alpha"] and source.complete() is False
+
+    resolution = resolve(_facts(), [Assignment("bot", "fixture-one", "alpha", "disable", 0)],
+                         source, Caps(per_skill=100, total=100))
+
+    assert resolution.catalog_unreadable is True
+    assert resolution.manifest() is None

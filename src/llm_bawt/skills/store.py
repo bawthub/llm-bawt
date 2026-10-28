@@ -41,16 +41,21 @@ _schema_guard = SchemaBootstrapGuard()
 
 
 def _migrate_exceptions_only(conn) -> None:
-    """Bring an adopt-era table to the exceptions-only model; idempotent.
+    """Bring an adopt-era table to the exceptions-only model, once.
 
-    - The CHECK accepts both vocabularies for one release, so a process still
-      on the adopt-era code can keep writing during a rolling restart.
+    Every step runs only while an adopt-era CHECK still exists, so it happens
+    exactly once. A later bootstrap never rewrites rows an adopt-era process
+    wrote during the rolling-restart overlap; the reader canonicalizes legacy
+    mode names (``canonical_mode``), so those rows keep their meaning.
+
+    - The vocab CHECK accepts both vocabularies for one release.
     - Adopt seeded one ``available`` bot row per skill. Under the new default
       those rows change nothing (``off`` was bot-only, so no tag disable sits
       under them), so they are deleted rather than renamed.
     - ``off``/``injected`` rows are renamed to ``disable``/``inject``.
     - ``skill_managed_bots`` is emptied, not dropped: adopt-era code still
-      reads it, and with no rows it treats every bot as unmanaged (ambient).
+      reads it, and with no rows it treats every bot as unmanaged (ambient),
+      which is the new default too.
     """
     conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:name))"), {"name": _LOCK})
     legacy_checks = conn.execute(text("""
@@ -58,12 +63,9 @@ def _migrate_exceptions_only(conn) -> None:
         WHERE conrelid = 'skill_assignments'::regclass
           AND conname IN ('skill_assignments_mode_check', 'skill_assignments_off_is_bot_only')
     """)).scalar_one()
-    has_vocab = conn.execute(text("""
-        SELECT count(*) FROM pg_constraint
-        WHERE conrelid = 'skill_assignments'::regclass AND conname = :name
-    """), {"name": _MODE_CHECK}).scalar_one()
-    if legacy_checks or not has_vocab:
-        conn.execute(text(f"""
+    if not legacy_checks:
+        return
+    conn.execute(text(f"""
         ALTER TABLE skill_assignments
             DROP CONSTRAINT IF EXISTS skill_assignments_mode_check,
             DROP CONSTRAINT IF EXISTS skill_assignments_off_is_bot_only,

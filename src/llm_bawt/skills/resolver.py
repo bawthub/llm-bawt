@@ -200,7 +200,10 @@ def resolve(facts: BotFacts, rows: Iterable[Assignment], source: SkillSource,
     blanket = _skip_reason(facts)
     order = sorted(winners.values(), key=lambda r: (r.position, r.skill_ref))
     needs_catalog = blanket is None and any(r.mode == DISABLE for r in order)
-    catalog = tuple(e.ref for e in source.list()) if needs_catalog else ()
+    # A partial listing (one root unreadable) would hide that root's skills,
+    # so it counts as unreadable too: no disables apply.
+    catalog = (tuple(e.ref for e in source.list())
+               if needs_catalog and source.complete() else ())
     entries: list[ResolvedSkill] = []
     total = 0
     for row in order:

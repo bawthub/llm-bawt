@@ -226,6 +226,16 @@ def test_the_migration_turns_an_adopt_era_table_into_exceptions(world):
     assert "skill_assignments_off_is_bot_only" not in names
     assert "skill_assignments_mode_check" not in names
 
+    # An adopt-era writer still running after the migration: its rows survive
+    # every later bootstrap, and the reader takes them in the new vocabulary.
+    with world.rig.engine.begin() as conn:
+        conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
+                          " VALUES ('bot', 'fixture-two', 'alpha', 'available')"))
+        store_module._bootstrap(conn)
+    assert _rows(world)[("bot", "fixture-two", "alpha")] == "available"
+    alpha = _entries(world, "fixture-two")["alpha"]
+    assert (alpha["mode"], alpha["origin"]) == ("enable", "bot")
+
 
 def test_removing_a_missing_row_is_404_and_changes_nothing(world):
     world.service.put("bot", "fixture-one", "alpha", "disable", 0, None)

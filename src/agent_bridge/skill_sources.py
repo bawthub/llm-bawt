@@ -119,6 +119,14 @@ class SkillSource(ABC):
     def list(self) -> tuple[SkillEntry, ...]:
         """Every skill this source offers, sorted by ref."""
 
+    def complete(self) -> bool:
+        """Whether every place this source lists from is readable right now.
+
+        An allow-list built from a partial listing would hide the skills of the
+        unreadable part, so callers that turn a listing into one check this.
+        """
+        return True
+
     def get(self, ref: str) -> SkillEntry | None:
         return next((entry for entry in self.list() if entry.ref == ref), None)
 
@@ -199,6 +207,14 @@ class AmbientSource(SkillSource):
         from .skill_selection import legacy_claude_skill_roots
 
         return legacy_claude_skill_roots()
+
+    def complete(self) -> bool:
+        for configured in self.roots:
+            try:
+                os.scandir(configured.resolve()).close()  # raises now; iterdir is lazy
+            except OSError:
+                return False
+        return True
 
     def list(self) -> tuple[SkillEntry, ...]:
         found: dict[str, SkillEntry] = {}
