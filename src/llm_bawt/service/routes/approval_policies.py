@@ -46,6 +46,8 @@ from ...approval_policies import (
     REQ_DENIED,
     REQ_PENDING,
     REQ_RESPONDED,
+    BOT_RESOLVER_PREFIX,
+    RESOLVED_VIA_USER,
     awaits_ops_admission,
     is_approved_ops_run,
 )
@@ -367,7 +369,9 @@ def _stored_mcp_resolution(row) -> dict[str, Any]:
     return response
 
 
-async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolved_by: str | None):
+async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolved_by: str | None,
+                               resolved_via: str = RESOLVED_VIA_USER,
+                               resolved_turn_id: str | None = None):
     """Resolve and claim one MCP invocation; replay only idempotent operations."""
     new_status = {
         "approve": REQ_APPROVED,
@@ -376,7 +380,9 @@ async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolv
         "respond": REQ_RESPONDED,
     }[outcome]
     already_resolved = row.status != REQ_PENDING
-    updated = store.resolve_request(row.id, status=new_status, resolved_by=resolved_by, message=message, continuation_owner="server")
+    updated = store.resolve_request(row.id, status=new_status, resolved_by=resolved_by, message=message,
+                                    continuation_owner="server", resolved_via=resolved_via,
+                                    resolved_turn_id=resolved_turn_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Request disappeared during resolve")
 
@@ -452,6 +458,58 @@ async def _resolve_mcp_request(store, row, *, outcome: str, message: str, resolv
     return response
 
 
+async def resolve_mcp_card(store, row, *, outcome: str, message: str, resolved_by: str | None,
+                           resolved_via: str = RESOLVED_VIA_USER,
+                           resolved_turn_id: str | None = None):
+    """Resolve one MCP approval, reconcile its tool card and publish the event.
+
+    Every MCP resolver goes through here: a person through the decide route and
+    a bot holding ``approve_ops`` (``routes/ops_approvals.py``). Returns the
+    resolve contract and the persisted row; a resolver that lost the
+    compare-and-set gets the winner's decision, resolver and reason.
+    """
+    result = await _resolve_mcp_request(
+        store, row, outcome=outcome, message=message, resolved_by=resolved_by,
+        resolved_via=resolved_via, resolved_turn_id=resolved_turn_id,
+    )
+    # The SDK call already ended with an ``approval_required`` placeholder.
+    # Replace that exact card's persisted result with the server-owned
+    # execution outcome. Approval IDs and SDK tool-use IDs are distinct on
+    # this path; never assume request_id is the tool identity. An ops_run
+    # awaiting admission has no outcome yet: record the decision only; the
+    # continuation outbox writes the real result (TASK-1220).
+    awaiting = bool(result.get("awaiting_admission"))
+    try:
+        cards = ToolCallStore(get_turn_log_store().engine)
+        if awaiting:
+            cards.mark_approval_status(
+                tool_use_id=row.tool_use_id or "",
+                approval_request_id=row.id,
+                approval_status=result["status"],
+            )
+        else:
+            cards.resolve_approval_result(
+                tool_use_id=row.tool_use_id or "",
+                approval_request_id=row.id,
+                approval_status=result["status"],
+                result=result.get("result"),
+                is_error=bool(result.get("result_is_error")),
+            )
+    except Exception:
+        log.debug("Could not reconcile MCP approval tool card %s", row.id, exc_info=True)
+    final = store.get_request(row.id) or row
+    await publish_approval_resolved(
+        _subscriber(), row.bot_id, row.user_id, row.id, row.turn_id, result["status"],
+        tool_use_id=row.tool_use_id,
+        result=result.get("result"),
+        is_error=bool(result.get("result_is_error")),
+        execution_state=result.get("execution_state"),
+        has_result=not awaiting,
+        resolver=final,
+    )
+    return result, final
+
+
 @router.get("/v1/tool-approval-requests", tags=["Approval Policies"])
 def list_requests(status: str | None = None, bot_id: str | None = None, limit: int = 50, offset: int = 0):
     store = _store()
@@ -483,6 +541,12 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
     instead of the canned refusal — for correcting false-positive gates with
     bespoke guidance. Idempotent on already-resolved.
     """
+    # The bot prefix marks a grant holder's decision (routes/ops_approvals.py);
+    # a body can't claim one (TASK-1609).
+    if (body.resolved_by or "").strip().lower().startswith(BOT_RESOLVER_PREFIX):
+        raise HTTPException(status_code=400, detail={
+            "code": "reserved_resolver",
+            "message": f"resolved_by may not start with {BOT_RESOLVER_PREFIX!r}"})
     store = _store()
     row = store.get_request(request_id)
     if row is None:
@@ -520,7 +584,8 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Request disappeared during resolve")
-        await publish_approval_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
+        await publish_approval_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status,
+                                        resolver=row)
         return {
             "ok": True, "detail": "already_resolved" if already_resolved else row.status,
             "status": row.status, "request_id": request_id, "bot_id": bot_id,
@@ -533,45 +598,8 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
     if row.request_kind == KIND_MCP:
         # MCP approvals are server-owned: execute the exact stored invocation
         # once, persist its actual result, and never ask the model to re-issue.
-        result = await _resolve_mcp_request(
-            store,
-            row,
-            outcome=outcome,
-            message=message,
-            resolved_by=body.resolved_by,
-        )
-        # The SDK call already ended with an ``approval_required`` placeholder.
-        # Replace that exact card's persisted result with the server-owned
-        # execution outcome. Approval IDs and SDK tool-use IDs are distinct on
-        # this path; never assume request_id is the tool identity. An ops_run
-        # awaiting admission has no outcome yet: record the decision only; the
-        # continuation outbox writes the real result (TASK-1220).
-        awaiting = bool(result.get("awaiting_admission"))
-        try:
-            cards = ToolCallStore(get_turn_log_store().engine)
-            if awaiting:
-                cards.mark_approval_status(
-                    tool_use_id=row.tool_use_id or "",
-                    approval_request_id=request_id,
-                    approval_status=result["status"],
-                )
-            else:
-                cards.resolve_approval_result(
-                    tool_use_id=row.tool_use_id or "",
-                    approval_request_id=request_id,
-                    approval_status=result["status"],
-                    result=result.get("result"),
-                    is_error=bool(result.get("result_is_error")),
-                )
-        except Exception:
-            log.debug("Could not reconcile MCP approval tool card %s", request_id, exc_info=True)
-        await publish_approval_resolved(
-            _subscriber(), bot_id, user_id, request_id, row.turn_id, result["status"],
-            tool_use_id=row.tool_use_id,
-            result=result.get("result"),
-            is_error=bool(result.get("result_is_error")),
-            execution_state=result.get("execution_state"),
-            has_result=not awaiting,
+        result, _final = await resolve_mcp_card(
+            store, row, outcome=outcome, message=message, resolved_by=body.resolved_by,
         )
         return result
 
@@ -616,7 +644,8 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
             row = store.get_request(request_id)
             if row.grant_state != "sent":
                 raise HTTPException(status_code=503, detail="Approval grant is dispatching or uncertain; do not dispatch continuation")
-    await publish_approval_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status)
+    await publish_approval_resolved(_subscriber(), bot_id, user_id, request_id, row.turn_id, row.status,
+                                    resolver=row)
     server_owned = row.continuation_owner == "server" and prompt is not None
     return {
         "ok": True, "detail": "already_resolved" if already_resolved else row.status,

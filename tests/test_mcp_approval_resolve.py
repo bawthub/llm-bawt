@@ -213,7 +213,11 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
         "result": payload["result"],
         "is_error": False,
     }]
-    assert fanout[0][1] == {
+    fanned = dict(fanout[0][1])
+    # TASK-1609: the event carries the persisted resolver, not the body.
+    resolver = fanned.pop("resolver")
+    assert (resolver.id, resolver.resolved_by, resolver.resolved_via) == (row.id, "nick", "user")
+    assert fanned == {
         "tool_use_id": "toolu_01ABC",
         "result": payload["result"],
         "is_error": False,

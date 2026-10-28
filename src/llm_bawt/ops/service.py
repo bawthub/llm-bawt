@@ -51,7 +51,8 @@ class OpsDispatchError(RuntimeError):
         super().__init__(message)
 
 
-def _display_args(args, schema_json):
+def display_args(args, schema_json):
+    """``args`` with every ``x-sensitive`` value (per ``schema_json``) masked."""
     def redact(value, schema):
         if schema.get("x-sensitive"):
             return "***"
@@ -345,7 +346,7 @@ class OpsService:
                     if quiesce and not approval_request_id else None)
         try:
             job = self.store.create_job(operation=op, args_json=canonical_json(snapshot["resolved_args"]),
-                display_args_json=canonical_json(_display_args(snapshot["resolved_args"], op.args_schema_json)),
+                display_args_json=canonical_json(display_args(snapshot["resolved_args"], op.args_schema_json)),
                 idempotency_key=key, invocation_snapshot_json=canonical_json(snapshot), request_payload_json=payload,
                 caller_actor=caller_actor, caller_bot_id=caller_bot_id, caller_user_id=caller_user_id,
                 caller_turn_id=caller_turn_id, caller_session_key=caller_session_key, caller_backend=caller_backend,

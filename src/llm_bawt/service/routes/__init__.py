@@ -32,6 +32,7 @@ from .skills import router as skills_router
 from .session_continuity import router as session_continuity_router
 from .approval_policies import router as approval_policies_router
 from .ops import router as ops_router
+from .ops_approvals import router as ops_approvals_router
 from .tasks import router as tasks_router
 from .task_events import router as task_events_router
 from .ha_weather import router as ha_weather_router
@@ -87,6 +88,7 @@ all_routers = [
     config_router,
     approval_policies_router,
     ops_router,
+    ops_approvals_router,
     profiles_router,
     llm_router,
     media_router,

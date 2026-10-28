@@ -280,7 +280,9 @@ _PATH_FUNCTIONS = {
     "src/llm_bawt/ops/reconciler.py": {"tick", "run"},
     "src/llm_bawt/service/routes/approval_policies.py": {
         "resolve_approval", "_resolve_mcp_request", "_stored_mcp_resolution",
-        "_subscriber", "_mcp_result_is_error"},
+        "_subscriber", "_mcp_result_is_error", "resolve_mcp_card"},
+    # TASK-1609: a grant holder's decision takes the same path.
+    "src/llm_bawt/service/routes/ops_approvals.py": None,  # the whole module
     "src/llm_bawt/service/approval_events.py": {"publish_approval_resolved"},
     "src/llm_bawt/service/approval_continuations.py": {
         "dispatch_due_continuations_once", "_terminal_ops_result", "_admission_card_result",

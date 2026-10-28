@@ -116,6 +116,15 @@ REQ_RESPONDED = "responded"
 REQ_EXPIRED = "expired"
 REQ_SUPERSEDED = "superseded"
 
+# TASK-1609: how a request was resolved. ``resolved_by`` is a caller-supplied
+# label on the human route; only the signed-turn ops-approval route writes
+# RESOLVED_VIA_BOT_GRANT, so it alone attests that a bot resolved the card.
+RESOLVED_VIA_USER = "user"
+RESOLVED_VIA_BOT_GRANT = "bot_grant"
+# The human route refuses resolved_by values carrying this prefix, so no
+# unattested row can look like a bot's decision.
+BOT_RESOLVER_PREFIX = "bot:"
+
 # TASK-639: request kind. "harness" = classic bridge-hook approvals (Bash and
 # other bridge-layer gated tools; the client dispatches a one-shot grant +
 # continuation). "mcp" = server-side approval interception at the BawtHub
@@ -296,6 +305,10 @@ class ToolApprovalRequest(SQLModel, table=True):
     resolved_turn_id: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
 
     resolution_message: str = Field(default="", sa_column=Column(Text, nullable=False, server_default=""))
+    resolved_via: str = Field(
+        default=RESOLVED_VIA_USER,
+        sa_column=Column(Text, nullable=False, server_default=RESOLVED_VIA_USER),
+    )
     continuation_owner: str = Field(default="client", sa_column=Column(String(16), nullable=False, server_default="client"))
     operations_snapshot_json: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     execution_claim_token: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
@@ -387,6 +400,13 @@ class ToolApprovalRequest(SQLModel, table=True):
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
 
+    @property
+    def resolved_by_bot(self) -> str | None:
+        """The approving bot's slug, only when the grant route resolved it."""
+        if self.resolved_via != RESOLVED_VIA_BOT_GRANT or not self.resolved_by:
+            return None
+        return self.resolved_by.removeprefix(BOT_RESOLVER_PREFIX) or None
+
     def to_api(self) -> dict[str, Any]:
         try:
             args = json.loads(self.tool_arguments_json) if self.tool_arguments_json else {}
@@ -412,6 +432,8 @@ class ToolApprovalRequest(SQLModel, table=True):
             "status": self.status,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
             "resolved_by": self.resolved_by,
+            "resolved_via": self.resolved_via,
+            "resolved_by_bot": self.resolved_by_bot,
             "resolution_message": self.resolution_message,
             "continuation_owner": self.continuation_owner,
             "continuation_id": self.continuation_id,

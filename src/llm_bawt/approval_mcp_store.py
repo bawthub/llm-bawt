@@ -865,6 +865,25 @@ class McpApprovalStoreMixin:
             )
             return list(session.exec(stmt).all())
 
+    def list_pending_ops_runs(self, *, user_id: str, limit: int = 100) -> list[ToolApprovalRequest]:
+        """One user's pending ``ops_run`` approvals, oldest first (TASK-1609)."""
+        if self.engine is None:
+            raise ApprovalStoreUnavailable("Approval database unavailable")
+        with Session(self.engine) as session:
+            return list(
+                session.exec(
+                    select(ToolApprovalRequest)
+                    .where(
+                        ToolApprovalRequest.request_kind == KIND_MCP,
+                        ToolApprovalRequest.tool_name == OPS_RUN_TOOL,
+                        ToolApprovalRequest.status == REQ_PENDING,
+                        ToolApprovalRequest.user_id == user_id,
+                    )
+                    .order_by(ToolApprovalRequest.created_at, ToolApprovalRequest.id)
+                    .limit(min(max(1, limit), 200))
+                ).all()
+            )
+
     def find_recoverable_mcp_requests(self, *, limit=20, lease_seconds=300):
         """App-side recovery: resolved MCP rows with no committed result.
 

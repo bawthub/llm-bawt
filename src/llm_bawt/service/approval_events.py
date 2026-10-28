@@ -27,12 +27,16 @@ async def publish_approval_resolved(
     is_error=None,
     execution_state=None,
     has_result=True,
+    resolver=None,
 ) -> None:
     """Fan out resolution and, for MCP, its terminal original-call result.
 
     ``has_result=False`` (an approved ops_run awaiting admission) omits the
     ``result`` key entirely: a client that sees ``result: null`` would
     finalize the card as a null success (TASK-1220).
+
+    ``resolver`` is the persisted row (TASK-1609): who resolved it, how, and
+    the reason travel with the event, read from the winner, never the body.
     """
     if subscriber is None:
         return
@@ -51,6 +55,13 @@ async def publish_approval_resolved(
     }
     if not has_result:
         del event["result"], event["is_error"]
+    if resolver is not None:
+        event.update(
+            resolved_by=resolver.resolved_by,
+            resolved_via=resolver.resolved_via,
+            resolved_by_bot=resolver.resolved_by_bot,
+            resolution_message=resolver.resolution_message,
+        )
     try:
         await subscriber._redis.xadd(
             f"events:{bot_id}:{user_id}",

@@ -26,6 +26,8 @@ from .approval_models import (
     REQ_PENDING,
     REQ_RESPONDED,
     REQ_SUPERSEDED,
+    RESOLVED_VIA_BOT_GRANT,
+    RESOLVED_VIA_USER,
     ToolApprovalRequest,
     _utcnow,
 )
@@ -130,8 +132,13 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
         resolved_turn_id: str | None = None,
         message: str = "",
         continuation_owner: str | None = None,
+        resolved_via: str = RESOLVED_VIA_USER,
     ) -> ToolApprovalRequest | None:
-        """First terminal decision wins, including message and dispatch ownership."""
+        """First terminal decision wins, including message and dispatch ownership.
+
+        ``resolved_via`` is written in the same compare-and-set as the decision,
+        so a losing resolver's provenance never lands on the winner's row.
+        """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         if status not in (
@@ -143,6 +150,8 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
             REQ_SUPERSEDED,
         ):
             raise ValueError("Invalid approval resolution status")
+        if resolved_via not in (RESOLVED_VIA_USER, RESOLVED_VIA_BOT_GRANT):
+            raise ValueError("Invalid approval resolver kind")
         with Session(self.engine) as session:
             values = dict(
                 status=status,
@@ -150,6 +159,7 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                 resolved_by=resolved_by,
                 resolved_turn_id=resolved_turn_id,
                 resolution_message=message,
+                resolved_via=resolved_via,
             )
             if continuation_owner is not None:
                 if continuation_owner not in ("server", "client", "none"):

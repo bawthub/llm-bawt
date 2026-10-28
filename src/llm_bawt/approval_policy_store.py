@@ -167,6 +167,7 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
         ]
         for name, sql_type in {
             "resolution_message": "TEXT NOT NULL DEFAULT ''",
+            "resolved_via": "TEXT NOT NULL DEFAULT 'user'",  # TASK-1609
             "continuation_owner": "VARCHAR(16) NOT NULL DEFAULT 'client'",
             "operations_snapshot_json": "TEXT",
             "execution_claim_token": "VARCHAR(64)",

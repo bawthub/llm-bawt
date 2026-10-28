@@ -101,6 +101,8 @@ TOOL_SUMMARIES: dict[str, str] = {
     "bots_list_available": "List inter-bot message targets with tags and live state (busy/idle turn, queue, gate, approvals, session); tag filters. Private and inactive bots are hidden.",
     "bots_profile_patch": "Edit a bot's profile/tags (full set) with a reason; compare-and-set, 409 writes nothing. Private bots and own tags refused. Returns before/after + rollback.",
     "bots_grant_set": "Grant or revoke a grant tag (approve_ops) on another bot with a reason; grant managers only. Own and private bots refused. Audited, idempotent.",
+    "ops_approvals_list": "approve_ops holders: other bots' pending ops approvals you may decide; sensitive args masked.",
+    "ops_approval_resolve": "approve_ops holders: approve or deny another bot's pending ops approval with a reason; never your own. Loser of a race gets already_resolved.",
     "bots_send_message": "Durable async message: steer a busy capable bot or start one idle turn. delivery=when_idle skips steering; steer_only never starts a turn; wait_for_reply blocks. targets fans out (key required). force never permits concurrent turns.",
     "bots_route_message": "Queue a separate routed bot turn using trusted caller identity; never steer or broaden opt-in. Reuse idempotency_key for retries.",
     "bots_delivery_get": "Read durable delivery status/error by delivery_id; accepted or queued is not completed.",
