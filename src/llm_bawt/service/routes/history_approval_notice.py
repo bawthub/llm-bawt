@@ -69,6 +69,8 @@ def _notice(conn, approver: str, owner: str, found) -> dict:
     row = _store().get_request(request_id)
     card = _card(row) if row is not None and eligible_on(
         conn, approver=approver, row=row, user_id=owner) else None
-    detail = approver_detail(row, card, approver=approver).model_dump(mode="json") if card else None
+    # /v1/history is not bot-authenticated, so the resolver-only reason never rides here.
+    detail = (approver_detail(row, card, approver=approver).model_copy(update={"reason": None})
+              .model_dump(mode="json") if card else None)
     return {"request_id": request_id, "kind": found["kind"],
             "available": detail is not None, "detail": detail}

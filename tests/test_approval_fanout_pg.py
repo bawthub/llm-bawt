@@ -213,3 +213,43 @@ def test_history_marks_notice_rows_and_stubs_them_once_ineligible(fan, monkeypat
     assert fan.api.as_person(HOLDER, granted=False).status_code == 200
     assert hydrate_approver_notices_for_page(service, HOLDER, page, USER)[message_id] == {
         "request_id": request_id, "kind": fanout.REQUEST_KIND, "available": False, "detail": None}
+
+
+def test_a_notice_fenced_at_claim_after_the_decision_gets_no_follow_up(fan):
+    request_id = fan.card()
+    fan.pump.run_pass()
+    [notice] = _notices(fan)
+    fan.store.resolve_request(request_id, status=REQ_DENIED, resolved_by="fixture-person",
+                              message="person reason", continuation_owner="server")
+
+    assert _claim(fan, HOLDER) is None      # fenced before the pump saw the decision
+    assert tuple(_status(fan, notice["id"])) == ("CANCELLED", fanout.WITHDRAWN)
+    fan.pump.run_pass()
+
+    assert len(_notices(fan)) == 1
+    assert _pair(fan, request_id, HOLDER) == fanout.CANCELLED
+
+
+def test_history_never_carries_the_resolver_reason(fan, monkeypatch):
+    from types import SimpleNamespace
+
+    from llm_bawt.media import assets
+    from llm_bawt.service.routes.history_approval_notice import hydrate_approver_notices_for_page
+
+    request_id = fan.card()
+    fan.pump.run_pass()
+    [notice] = _notices(fan)
+    _deliver(fan, notice["id"])
+    assert fan.resolve(HOLDER, request_id, reason="holder reason").status_code == 200
+    message_id = str(notice["user_message_id"])
+    with fan.deliveries.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS sessions (id text, bot_id text, user_id text)")
+        conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS messages (id text, bot_id text, session_id text, role text)")
+        conn.execute(sa_text("INSERT INTO sessions VALUES ('s1', :b, :u)"), {"b": HOLDER, "u": USER})
+        conn.execute(sa_text("INSERT INTO messages VALUES (:m, :b, 's1', 'user')"), {"m": message_id, "b": HOLDER})
+    monkeypatch.setattr(assets, "_build_engine", lambda _config: fan.deliveries.engine)
+
+    [card] = hydrate_approver_notices_for_page(
+        SimpleNamespace(config=None), HOLDER, [{"id": message_id, "role": "user"}], USER).values()
+    assert card["detail"]["status"] != "pending" and card["detail"]["reason"] is None
+    assert "holder reason" not in str(card)

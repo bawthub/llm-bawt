@@ -334,13 +334,22 @@ class ApprovalFanoutPump:
 
     @staticmethod
     def _cancel_queued(conn, delivery_id: str | None, reason: str) -> bool:
+        """Cancel a still-queued request notice; True when the approver never saw it.
+
+        Unseen covers a notice cancelled here, one already fenced at claim
+        (CANCELLED) and one that failed: none of them gets a follow-up.
+        """
         if not delivery_id:
             return False
-        return bool(conn.execute(sa_text("""
+        if conn.execute(sa_text("""
             UPDATE inter_bot_deliveries SET status='CANCELLED', next_retry_at=NULL,
                 last_error=:reason, updated_at=now()
             WHERE id=:id AND status='QUEUED'
-        """), {"id": delivery_id, "reason": reason}).rowcount)
+        """), {"id": delivery_id, "reason": reason}).rowcount:
+            return True
+        status = conn.execute(sa_text("SELECT status FROM inter_bot_deliveries WHERE id=:id"),
+                              {"id": delivery_id}).scalar()
+        return status in (None, "CANCELLED", "FAILED")
 
     def _enqueue(self, conn, row, approver: str, kind: str, card: dict[str, Any]) -> DeliveryRecord:
         resolved = kind == RESOLVED_KIND
@@ -396,5 +405,3 @@ def notice_text(key: str, bot_id: str, variables: dict[str, Any]) -> str:
     if not (rendered or "").strip():
         raise ValueError(f"prompt {key} rendered blank for {bot_id}")
     return rendered
-
-
