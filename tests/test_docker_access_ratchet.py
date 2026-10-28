@@ -10,17 +10,23 @@ an executable ratchet over ``src/`` and the compose files:
 - an allowlist entry that no longer matches anything fails too, so removing
   an offender also removes its entry.
 
-Access means any of: importing ``docker`` (``import``, ``from``,
-``importlib``/``__import__``), a non-docstring string naming the daemon
-socket or ``DOCKER_HOST``, a subprocess argv, shell string or container
-entrypoint that runs ``docker``, or a compose service that mounts the
-socket (or its parent directory) or sets ``DOCKER_HOST``. Host tooling
-outside ``src/`` (``scripts/``, ``tenant.sh``, the Makefile) is not product
-runtime and is out of scope; the compose files it ships are covered.
+It enforces these bounded patterns (it cannot prove arbitrary dynamic
+strings): importing ``docker`` (``import``, ``from``,
+``importlib``/``__import__``); a non-docstring string naming the daemon
+socket, ``DOCKER_HOST`` or the Engine API (ports 2375/2376,
+``http+docker://``, ``/containers/...`` and ``/v1.NN/...`` endpoint paths);
+a subprocess argv, ``sh -c`` wrapper, shell string or container
+entrypoint/command that runs ``docker``; a compose service that mounts the
+socket or its parent directory (bind paths normalized) or sets
+``DOCKER_HOST``. Host tooling outside ``src/`` (``scripts/``,
+``tenant.sh``, the Makefile) is not product runtime and is out of scope;
+the compose files it ships are covered.
 """
 from __future__ import annotations
 
 import ast
+import posixpath
+import re
 from functools import cache
 from pathlib import Path
 
@@ -29,7 +35,17 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 SOCKET = "docker.sock"
-DAEMON_ENV = "DOCKER_HOST"
+DAEMON_ENV = re.compile(r"\bDOCKER_HOST\b(?!_)")
+#: The Docker Engine API reached without the socket path: the daemon's TCP
+#: ports, the http+docker scheme, or Engine API endpoint paths.
+ENGINE_API = re.compile(
+    r":237[56]\b|\bhttp\+docker://|/v1\.\d+/(containers|images|networks|volumes|services|exec)\b"
+    r"|/containers/(json|create)\b|/containers/[^/\s\"']+/(json|start|stop|restart|kill|exec|logs)\b")
+#: A shell command line that runs the docker CLI.
+SHELL_DOCKER = re.compile(r"(^|[;&|(]|\$\()\s*(sudo\s+)?(\S*/)?docker(-compose)?(\s|$)")
+SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
+#: Files that can hold any access kind spell one of these; skip parsing the rest.
+PREFILTER = re.compile(r"docker|:237[56]|/containers/", re.IGNORECASE)
 #: Mounting a socket's parent directory exposes the socket too.
 SOCKET_PARENTS = frozenset({"/run", "/var/run", "/var/run/docker", "/run/docker"})
 DOCKER_MODULES = frozenset({"docker", "aiodocker"})
@@ -39,15 +55,21 @@ SUBPROCESS_CALLS = frozenset({
     "execv", "execvp", "execvpe", "spawnv", "spawnvp",
 })
 
-#: The ops Docker adapter: the one place that talks to the daemon. Every
-#: finding in these files is allowed; each file must still have one, or it
-#: no longer belongs here.
+#: The ops Docker adapter: the one place that talks to the daemon. Each file
+#: may hold only the access kinds listed; a new kind fails, and every listed
+#: kind must still be found, or the entry is stale.
 OPS_ADAPTER = {
-    "llm_bawt/ops/executor.py": "submits workers and runs typed actions",
-    "llm_bawt/ops/health_collector.py": "samples container state for /v1/health",
-    "llm_bawt/ops/worker.py": "the one-shot worker's daemon connection",
-    "llm_bawt/ops/compose_render.py": "sealed `docker compose config` render (entrypoint docker)",
-    "llm_bawt/ops/seeds.py": "catalog data: the deployed mounts a sealed recreate preserves",
+    "llm_bawt/ops/executor.py": ({"import docker", "daemon socket"}, "submits workers, runs typed actions"),
+    "llm_bawt/ops/health_collector.py": ({"import docker"}, "samples container state for /v1/health"),
+    "llm_bawt/ops/worker.py": ({"daemon socket", "engine api"}, "the one-shot worker's daemon connection"),
+    "llm_bawt/ops/sealed_container.py": ({"engine api"}, "worker-side sealed container create/start/exec"),
+    "llm_bawt/ops/image_deploy.py": ({"engine api"}, "worker-side pinned image deploy/rollback"),
+    "llm_bawt/ops/app_config_reconcile.py": ({"engine api"}, "worker-side container lookup for app-config apply"),
+    "llm_bawt/ops/config_reconcile.py": ({"engine api"}, "worker-side exec for config apply"),
+    "llm_bawt/ops/routing_reconcile.py": ({"engine api"}, "worker-side exec for routing apply"),
+    "llm_bawt/ops/compose_render.py": ({"runs docker"}, "sealed `docker compose config` render"),
+    # Catalog data only: the deployed mounts a sealed recreate preserves.
+    "llm_bawt/ops/seeds.py": ({"daemon socket"}, "data_mounts strings, no client"),
 }
 #: Compose services inside the ops boundary.
 OPS_COMPOSE = {
@@ -83,11 +105,25 @@ def _call_name(func):
     return None
 
 
+def _text(node):
+    """A constant string, or the constant parts of an f-string joined."""
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_const_str(v) or "{}" for v in node.values)
+    return _const_str(node)
+
+
 def _argv_runs_docker(node):
-    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
-        head = _const_str(node.elts[0])
-        return head is not None and Path(head).name == "docker"
-    return False
+    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+        return False
+    head = _const_str(node.elts[0])
+    if head is None:
+        return False
+    if Path(head).name == "docker":
+        return True
+    # sh -c "docker ..."
+    args = [_text(e) for e in node.elts[1:]]
+    return Path(head).name in SHELLS and "-c" in args and any(
+        a and SHELL_DOCKER.search(a) for a in args[args.index("-c") + 1:])
 
 
 def _runs_docker(call):
@@ -99,10 +135,8 @@ def _runs_docker(call):
     first = call.args[0]
     if _argv_runs_docker(first):
         return True
-    text = _const_str(first)
-    if text is None and isinstance(first, ast.JoinedStr) and first.values:
-        text = _const_str(first.values[0])
-    return text is not None and text.lstrip().split(" ", 1)[0] in ("docker", "docker-compose")
+    text = _text(first)
+    return text is not None and SHELL_DOCKER.search(text) is not None
 
 
 def scan_source(tree):
@@ -126,8 +160,12 @@ def scan_source(tree):
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
             if SOCKET in node.value:
                 found.add("daemon socket")
-            if DAEMON_ENV in node.value:
+            if DAEMON_ENV.search(node.value):
                 found.add("DOCKER_HOST")
+            if ENGINE_API.search(node.value):
+                found.add("engine api")
+        elif isinstance(node, ast.JoinedStr) and ENGINE_API.search(_text(node)):
+            found.add("engine api")  # f"/containers/{cid}/restart"
     return found
 
 
@@ -136,8 +174,7 @@ def _source_findings():
     found = []
     for path in sorted(SRC.rglob("*.py")):
         text = path.read_text()
-        # Every access kind spells "docker" or "DOCKER"; skip parsing the rest.
-        if "docker" not in text.lower():
+        if not PREFILTER.search(text):
             continue
         rel = path.relative_to(SRC).as_posix()
         found.extend((rel, kind) for kind in sorted(scan_source(ast.parse(text, filename=str(path)))))
@@ -145,9 +182,8 @@ def _source_findings():
 
 
 def _volume_source(volume):
-    if isinstance(volume, dict):
-        return str(volume.get("source", ""))
-    return str(volume).split(":", 1)[0]
+    source = str(volume.get("source", "")) if isinstance(volume, dict) else str(volume).split(":", 1)[0]
+    return posixpath.normpath(source) if source.startswith("/") else source
 
 
 def scan_service(service):
@@ -158,7 +194,7 @@ def scan_service(service):
         return True
     env = service.get("environment") or {}
     keys = env.keys() if isinstance(env, dict) else (str(e).split("=", 1)[0] for e in env)
-    return DAEMON_ENV in keys
+    return "DOCKER_HOST" in keys
 
 
 @cache
@@ -172,7 +208,8 @@ def _compose_findings():
 
 
 def test_no_new_direct_docker_access_in_src():
-    offenders = {("src", rel, kind) for rel, kind in _source_findings() if rel not in OPS_ADAPTER}
+    offenders = {("src", rel, kind) for rel, kind in _source_findings()
+                 if kind not in OPS_ADAPTER.get(rel, ((), ""))[0]}
     assert offenders - OFFENDERS.keys() == set(), "route Docker access through ops (TASK-1169)"
 
 
@@ -186,7 +223,8 @@ def test_every_allowlist_entry_still_matches():
     compose = set(_compose_findings())
     live = {("src", rel, kind) for rel, kind in src} | {("compose", f, s) for f, s in compose}
     assert set(OFFENDERS) - live == set(), "an offender is gone: delete its OFFENDERS entry"
-    assert set(OPS_ADAPTER) - {rel for rel, _ in src} == set(), "adapter file has no Docker access"
+    allowed = {(rel, kind) for rel, (kinds, _) in OPS_ADAPTER.items() for kind in kinds}
+    assert allowed - src == set(), "an adapter access kind is gone: narrow OPS_ADAPTER"
     assert set(OPS_COMPOSE) - compose == set(), "ops compose service no longer mounts the daemon"
 
 
@@ -209,6 +247,14 @@ def test_scanner_detects_each_access_kind():
     assert _parse("import os\nos.system('docker compose up -d')") == {"runs docker"}
     assert _parse("import asyncio\nasyncio.create_subprocess_exec('docker', 'ps')") == {"runs docker"}
     assert _parse("sealed.run(entrypoint=['docker'], cmd=argv)") == {"runs docker"}
+    # r1 B1: shell wrappers and the Engine API without the socket path.
+    assert _parse("import subprocess\nsubprocess.run(['sh', '-c', 'docker ps'])") == {"runs docker"}
+    assert _parse("import subprocess\nsubprocess.run(['/bin/bash', '-c', 'set -e; docker restart x'])") == {"runs docker"}
+    assert _parse("import subprocess\nsubprocess.run(f'cd {d} && docker compose up', shell=True)") == {"runs docker"}
+    assert _parse("import httpx\nhttpx.get('http://127.0.0.1:2375/containers/json')") == {"engine api"}
+    assert _parse("import httpx\nhttpx.post(f'{base}/v1.43/containers/{cid}/restart')") == {"engine api"}
+    assert _parse("s = 'http+docker://localhost/info'") == {"engine api"}
+    assert _parse("api.request('POST', f'/containers/{cid}/restart')") == {"engine api"}
 
 
 def test_scanner_ignores_docstrings_and_lookalikes():
@@ -216,12 +262,23 @@ def test_scanner_ignores_docstrings_and_lookalikes():
     assert _parse('def f():\n    """Uses DOCKER_HOST."""') == set()
     assert _parse("from .docker_names import x\nimport dockerfile_parse") == set()
     assert _parse("import subprocess\nsubprocess.run(['git', 'docker'])") == set()
+    assert _parse("import subprocess\nsubprocess.run(['sh', '-c', 'echo docker'])") == set()
+    assert _parse("import os\nos.environ.get('DOCKER_HOST_IP')") == set()
+    assert _parse("url = 'http://h:23750/x'") == set()
+
+
+def test_adapter_exemption_is_per_kind():
+    # r1 B2: a new access kind in a boundary file is still an offender.
+    assert "import docker" not in OPS_ADAPTER["llm_bawt/ops/seeds.py"][0]
+    assert all(kinds and reason for kinds, reason in OPS_ADAPTER.values())
 
 
 def test_compose_scanner_detects_socket_and_daemon_env():
     assert scan_service({"volumes": ["/var/run/docker.sock:/var/run/docker.sock"]})
     assert scan_service({"volumes": [{"type": "bind", "source": "/run/docker.sock", "target": "/x"}]})
     assert scan_service({"volumes": ["/var/run/:/host-run:ro"]})
+    assert scan_service({"volumes": ["/run/../var/run:/host-run:ro"]})  # r1 B1: normalized.
+    assert scan_service({"volumes": [{"type": "bind", "source": "/var//run/./docker.sock", "target": "/s"}]})
     assert scan_service({"environment": {"DOCKER_HOST": "tcp://h:2375"}})
     assert scan_service({"environment": ["DOCKER_HOST=unix:///x"]})
     assert not scan_service({"volumes": ["./src:/app/src:ro"], "environment": {"A": "1"}})
