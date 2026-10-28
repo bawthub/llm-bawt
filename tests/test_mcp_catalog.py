@@ -245,7 +245,10 @@ async def test_catalog_token_budgets():
     # tasks_reviews_add, plus tasks_reviews_resolve_finding: 16,147 (+319).
     # An r2 settles each r1 finding as a row instead of prose, so the popup
     # and Gavel's SHIP check read Blocker state rather than re-parsing reviews.
-    assert total <= 16147, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1615 follow-up: optional finding/resolution entry fields accept
+    # null: 16,203 (+56). Strict-schema clients (Codex) send every key, and
+    # a forced task="" made BawtHub refuse a FIXED resolution.
+    assert total <= 16203, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

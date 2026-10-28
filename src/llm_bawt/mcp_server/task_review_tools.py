@@ -121,9 +121,9 @@ class ReviewFindingInput(TypedDict):
     severity: Literal["BLOCKER", "SHOULD_FIX", "NIT", "QUESTION", "PRE_EXISTING"]
     title: str
     detail: str
-    file: NotRequired[str]
-    line: NotRequired[int]
-    failure_scenario: NotRequired[str]
+    file: NotRequired[str | None]
+    line: NotRequired[int | None]
+    failure_scenario: NotRequired[str | None]
 
 
 Resolution = Literal["FIXED", "DEFERRED", "WITHDRAWN"]
@@ -134,21 +134,27 @@ class FindingResolutionInput(TypedDict):
     # DEFERRED to an existing task (never a Blocker), or WITHDRAWN.
     finding_id: str
     resolution: Resolution
-    revision: NotRequired[str]
-    task: NotRequired[str]
-    note: NotRequired[str]
+    revision: NotRequired[str | None]
+    task: NotRequired[str | None]
+    note: NotRequired[str | None]
+
+
+def _present(entry: dict) -> dict:
+    # Strict-schema clients send every optional key, as null or "". Either
+    # means absent; BawtHub rejects e.g. a task on a FIXED resolution.
+    return {key: value for key, value in entry.items() if value is not None and value != ""}
 
 
 def _finding_payload(finding: ReviewFindingInput) -> dict:
     """BawtHub's wire shape. Validation stays in BawtHub, the one source of truth."""
-    out = dict(finding)
+    out = _present(dict(finding))
     if "failure_scenario" in out:
         out["failureScenario"] = out.pop("failure_scenario")
     return out
 
 
 def _resolution_payload(resolution: FindingResolutionInput) -> dict:
-    out = dict(resolution)
+    out = _present(dict(resolution))
     out["findingId"] = out.pop("finding_id")
     return out
 
@@ -294,9 +300,7 @@ async def resolve_review_finding(
     if turn is None:
         return {"error": "resolve_requires_signed_turn", "code": "resolve_requires_signed_turn"}
     body: dict[str, Any] = {"actorBotId": bot_id, "resolution": resolution, "provenance": SIGNED_TURN}
-    for key, value in (("revision", revision), ("task", task), ("note", note)):
-        if value is not None:
-            body[key] = value
+    body.update(_present({"revision": revision, "task": task, "note": note}))
     path = _internal_path(task_id, review_id, "findings", finding_id, "resolve")
     try:
         return await _internal_post(path, body)

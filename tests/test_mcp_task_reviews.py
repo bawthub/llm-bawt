@@ -281,3 +281,34 @@ async def test_review_tool_discovery_types_rechecks_and_resolution():
     resolve = tools["tasks_reviews_resolve_finding"].inputSchema
     assert set(resolve["required"]) == {"task_id", "review_id", "finding_id", "resolution", "bot_id"}
     assert resolve["properties"]["resolution"]["enum"] == ["FIXED", "DEFERRED", "WITHDRAWN"]
+
+
+def test_null_or_empty_optional_entry_fields_are_not_sent():
+    """TASK-1615 follow-up: a strict-schema client sends every optional key.
+
+    Loopy's FIXED resolution arrived with task="" and BawtHub refused it
+    ("FIXED takes no task"). Null and "" mean absent for optional entry keys.
+    """
+    assert task_review_tools._resolution_payload(
+        {"finding_id": "f1", "resolution": "FIXED", "revision": "abc1234", "task": "", "note": None}
+    ) == {"findingId": "f1", "resolution": "FIXED", "revision": "abc1234"}
+    assert task_review_tools._finding_payload(
+        {"severity": "NIT", "title": "t", "detail": "d", "file": "", "line": None,
+         "failure_scenario": None}
+    ) == {"severity": "NIT", "title": "t", "detail": "d"}
+    assert task_review_tools._resolution_payload(
+        {"finding_id": "f1", "resolution": "DEFERRED", "task": "TASK-9", "note": "later"}
+    ) == {"findingId": "f1", "resolution": "DEFERRED", "task": "TASK-9", "note": "later"}
+
+
+@pytest.mark.anyio
+async def test_review_tool_discovery_lets_optional_entry_fields_be_null():
+    tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
+    defs = tools["tasks_reviews_add"].inputSchema["$defs"]
+    resolution = defs["FindingResolutionInput"]
+    assert set(resolution["required"]) == {"finding_id", "resolution"}
+    for key in ("revision", "task", "note"):
+        assert {"type": "null"} in resolution["properties"][key]["anyOf"]
+    finding = defs["ReviewFindingInput"]
+    for key in ("file", "line", "failure_scenario"):
+        assert {"type": "null"} in finding["properties"][key]["anyOf"]
