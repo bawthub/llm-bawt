@@ -333,3 +333,18 @@ def test_the_list_shows_resolvable_cards_masked_and_nothing_else(ops):
     assert SECRET not in response.text
     assert set(card) == {"request_id", "requested_by", "created_at", "severity", "operation",
                          "title", "risk_level", "args"}
+
+
+def test_older_cards_the_caller_cannot_see_do_not_fill_the_page(ops, monkeypatch):
+    monkeypatch.setattr(routes, "LIST_LIMIT", 2)
+    ops.card(bot=HOLDER)                                     # own requests, oldest
+    ops.card(bot=HOLDER)
+    ops.card(bot=BYSTANDER)                                  # private requester
+    ops.card(bot="fixture-unknown-bot")                      # not a known bot
+    shown = ops.card()
+    _private(ops, BYSTANDER)
+
+    response = ops.listing(HOLDER)
+
+    assert response.status_code == 200, response.text
+    assert [c["request_id"] for c in response.json()["data"]] == [shown]

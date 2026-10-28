@@ -54,6 +54,8 @@ from .service_auth import NO_STORE, read_body
 router = APIRouter(tags=["Approval Policies"])
 
 REASON_MAX = 1000
+#: Most cards one listing returns.
+LIST_LIMIT = 100
 
 
 class OpsApprovalDecision(BaseModel):
@@ -156,7 +158,11 @@ async def list_ops_approvals(request: Request):
     """Pending ops cards the calling grant holder may resolve, oldest first."""
     caller = _caller(request)
     tags = await asyncio.to_thread(_require_holder, caller)
-    rows = await asyncio.to_thread(_store().list_pending_ops_runs, user_id=caller.user_id)
+    # Known, non-private requesters other than the caller: the same rule as
+    # _visible, applied in the query so ineligible cards can't fill the page.
+    requesters = (tags.known_bots - tags.private_bots - {caller.bot_id}) if tags.available else ()
+    rows = await asyncio.to_thread(_store().list_pending_ops_runs, user_id=caller.user_id,
+                                   requesters=requesters, limit=LIST_LIMIT)
     cards = [_card(row) for row in rows
              if _visible(row, caller, tags) and row.bot_id != caller.bot_id]
     return OpsApprovalList(data=[card for card in cards if card is not None])

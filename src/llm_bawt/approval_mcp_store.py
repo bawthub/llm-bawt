@@ -7,6 +7,7 @@ import logging
 import re
 from datetime import timedelta
 from hashlib import sha256
+from collections.abc import Collection
 from typing import Any
 
 from sqlalchemy import and_, case, func, not_, or_, update
@@ -865,10 +866,18 @@ class McpApprovalStoreMixin:
             )
             return list(session.exec(stmt).all())
 
-    def list_pending_ops_runs(self, *, user_id: str, limit: int = 100) -> list[ToolApprovalRequest]:
-        """One user's pending ``ops_run`` approvals, oldest first (TASK-1609)."""
+    def list_pending_ops_runs(
+        self, *, user_id: str, requesters: Collection[str], limit: int = 100,
+    ) -> list[ToolApprovalRequest]:
+        """One user's pending ``ops_run`` approvals from ``requesters``, oldest first (TASK-1609).
+
+        The requester filter runs before the bound, so cards the caller may not
+        see can't fill the page and hide one it may.
+        """
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
+        if not requesters:
+            return []
         with Session(self.engine) as session:
             return list(
                 session.exec(
@@ -878,6 +887,8 @@ class McpApprovalStoreMixin:
                         ToolApprovalRequest.tool_name == OPS_RUN_TOOL,
                         ToolApprovalRequest.status == REQ_PENDING,
                         ToolApprovalRequest.user_id == user_id,
+                        ToolApprovalRequest.bot_id.in_(sorted(requesters)),
+                        ToolApprovalRequest.operations_snapshot_json.is_not(None),
                     )
                     .order_by(ToolApprovalRequest.created_at, ToolApprovalRequest.id)
                     .limit(min(max(1, limit), 200))
