@@ -62,6 +62,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_delivery_shutdown_handoff_pg.py::",
     "test_ops_quiesce_pg.py::",
     "test_ops_preflight_deadline_pg.py::",
+    "test_ops_competing_dispatch_pg.py::",
     "test_ops_quiesce_visibility_pg.py::",
     "test_gpu_tts_restart_pg.py::",
     "test_quiesce_control_producer_pg.py::",
