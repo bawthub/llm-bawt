@@ -36,7 +36,6 @@ from .ops import router as ops_router
 from .tasks import router as tasks_router
 from .task_events import router as task_events_router
 from .ha_weather import router as ha_weather_router
-from .context_waste import router as context_waste_router
 from .turn_logs import router as turn_logs_router
 from .recall_evidence import router as recall_evidence_router
 from .workspace_provenance import router as workspace_provenance_router
@@ -63,7 +62,6 @@ all_routers = [
     chat_router,
     tasks_router,
     task_events_router,
-    context_waste_router,  # /v1/turn-logs/waste precedes /v1/turn-logs/{turn_id}.
     turn_logs_router,
     recall_evidence_router,
     workspace_provenance_router,

@@ -56,7 +56,6 @@ TOOL_SUMMARIES: dict[str, str] = {
     "messages_get_for_summary": "Read original messages referenced by a stored summary_id.",
     "messages_mark_recalled": "Mark specified messages as recalled from summary expansion; writes metadata.",
     "messages_remove_last_partial": "Delete bot_id's latest message if role matches. Despite the name, it does NOT verify partial status; use only for an explicitly authorized cleanup.",
-    "context_waste_report": "Context-waste digest for bots you may read, private excluded: repeated identical tool output, oversized results and the cheaper call, tool-result transcript share. Counts/sizes/hashes only.",
     "context_get_recent": "Read recent messages plus relevant memories for bot_id; query optionally guides memory retrieval.",
     "context_recall": "Read-only isolated recall; trusted caller required. Returns bounded cited quotes, not transcripts. tasks is default; task_details adds reviews/steps; tool_evidence is metadata; tool_args adds attempted git clones. Expiring handles refresh evidence; repeat sources/task_ids. Uses configured utility model.",
     "working_memory_list": "Read your own working-memory items for the current user from trusted turn identity; open only unless include_archived.",

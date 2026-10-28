@@ -157,11 +157,10 @@ async def test_catalog_token_budgets():
     # TASK-1557: context_recall names its new default (tasks) and the two
     # opt-in depths, task_details and tool_args: 4,136 (+11). Without them a
     # caller can't know reviews, steps and clone facts are searchable.
-    # TASK-1585: context_waste_report (the private exclusion and the
-    # counts-only contract stated in-band): 4,187 (+51).
     # TASK-1531: notify_user (the when-to-notify policy stated in-band, so a
     # bot sees it on the one schema it loads): 4,255 (+68).
-    assert sum(descriptions) <= 4255, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1585: the turn-log digest tool was removed: 4,204 (-51).
+    assert sum(descriptions) <= 4204, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -227,11 +226,10 @@ async def test_catalog_token_budgets():
     # An unknown window used to come back as the default board, unannounced.
     # TASK-1557: context_recall's sources enum gains task_details and
     # tool_args, plus the summary above: 15,189 (+19).
-    # TASK-1585: context_waste_report (two optional args): 15,297 (+108). It
-    # replaces ad-hoc SQL over tool_call_records for recurring-waste digests.
     # TASK-1531: notify_user (typed urgency enum, bounded message/title/link/
     # dedupe_key, and the summary above): 15,529 (+232).
-    assert total <= 15529, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1585: the turn-log digest tool was removed: 15,421 (-108).
+    assert total <= 15421, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
