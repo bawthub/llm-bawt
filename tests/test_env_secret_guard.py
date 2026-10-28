@@ -50,12 +50,8 @@ PENDING_RETIREMENT: dict[str, str] = {
     "OPENAI_API_KEY": "TASK-1476: openai-api connection is DB-first; env is the legacy fallback",
     "ANTHROPIC_API_KEY": "TASK-1476: anthropic-api connection is DB-first; env is the legacy fallback",
     "CLAUDE_CODE_OAUTH_TOKEN": "TASK-1476: the claude connection feeds the bridge; env is a dead fallback",
-    "ZAI_API_KEY": "TASK-1476: zai connection is record-first; env applies only with no record",
-    "KIMI_CODING_API_KEY": "TASK-1476: kimi-coding connection is record-first; env applies only with no record",
     "LLM_BAWT_HA_NATIVE_MCP_TOKEN": "TASK-1476: home-assistant connection is record-first",
     "LLM_BAWT_HA_MCP_AUTH_TOKEN": "TASK-1476: reserved HA MCP auth; folds into home-assistant",
-    "LLM_BAWT_S3_ACCESS_KEY": "TASK-1476: object-store connection is record-first",
-    "LLM_BAWT_S3_SECRET_KEY": "TASK-1476: object-store connection is record-first",
     # Still env-only; each needs a DB home first.
     "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1476: Reddit search credentials have no connection yet",
     "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1476: talk provisioner token has no connection yet",

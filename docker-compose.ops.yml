@@ -25,11 +25,27 @@ services:
       retries: 3
       start_period: 30s
     stop_grace_period: 5s
-    env_file: [./.env]
+    # TASK-1476: no env_file. The reconciler reads the database settings and
+    # logging config; a bare name takes its value from the project .env and
+    # is omitted when unset. Provider credentials it decrypts come from the DB.
     environment:
       LLM_BAWT_OPS_WORKER_IMAGE: ${LLM_BAWT_OPS_WORKER_IMAGE:?Set immutable worker image ID or digest}
       LLM_BAWT_OPS_RECEIPT_VOLUME: ${LLM_BAWT_OPS_RECEIPT_VOLUME:?Set dedicated named volume name}
       LLM_BAWT_OPS_RECEIPT_ROOT: /var/lib/llm-bawt-ops
+      POSTGRES_HOST:
+      POSTGRES_PORT:
+      POSTGRES_USER:
+      POSTGRES_PASSWORD:
+      POSTGRES_DATABASE:
+      LLM_BAWT_POSTGRES_HOST:
+      LLM_BAWT_POSTGRES_PORT:
+      LLM_BAWT_POSTGRES_USER:
+      LLM_BAWT_POSTGRES_PASSWORD:
+      LLM_BAWT_POSTGRES_DATABASE:
+      LLM_BAWT_DEFAULT_USER:
+      LLM_BAWT_LOG_DIR:
+      LLM_BAWT_LOG_PREFIX:
+      LLM_BAWT_REDIS_URL:
     volumes:
       - ./src:/app/src:ro
       # Read only the app's existing encryption key, not its full config directory.

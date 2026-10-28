@@ -21,7 +21,8 @@ def _env(service: dict) -> dict[str, str]:
     env = service.get("environment") or {}
     if isinstance(env, dict):
         return {k: str(v) for k, v in env.items()}
-    return dict(item.split("=", 1) for item in env)
+    # A bare NAME passes the deployment .env value through; it has no literal here.
+    return {name: value for name, _, value in (item.partition("=") for item in env)}
 
 
 def _split(volume: str) -> list[str]:

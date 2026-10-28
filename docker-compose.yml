@@ -25,8 +25,11 @@ services:
     # (no torch / sentence-transformers / llama-cpp / vllm). local-model-bridge
     # keeps the GPU `Dockerfile`.
     container_name: llm-bawt-app
-    env_file:
-      - ./.env
+    # TASK-1476: no env_file. The app gets exactly the names below; a bare
+    # `- NAME` takes its value from the project .env and is omitted when unset.
+    # Credentials adopted into records (python -m llm_bawt.env_import) and the
+    # derived Crawl4AI token are deliberately absent, as are BW_PASSWORD and
+    # COMPOSE_FILE. tests/test_compose_env_lists.py keeps this list closed.
     environment:
       # Source is bind-mounted in dev. The container runs as root, so writing
       # bytecode here creates root-owned __pycache__ directories that block host
@@ -87,6 +90,72 @@ services:
       - CLAUDE_CODE_SKILLS_PATH=/home/bridge/dev/agent-skills
       # TASK-636: CODEX_AUTH_PATH removed — the app reads the codex bundle
       # from the encrypted DB store (provider_connection:openai_chatgpt).
+      # -- From .env (TASK-1476) --
+      # Database (bootstrap).
+      - POSTGRES_HOST
+      - POSTGRES_PORT
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DATABASE
+      - LLM_BAWT_POSTGRES_HOST
+      - LLM_BAWT_POSTGRES_PORT
+      - LLM_BAWT_POSTGRES_USER
+      - LLM_BAWT_POSTGRES_PASSWORD
+      - LLM_BAWT_POSTGRES_DATABASE
+      # Config (utils/config.py, env_prefix LLM_BAWT_) and runtime settings.
+      - LLM_BAWT_DEFAULT_USER
+      - LLM_BAWT_DEFAULT_BOT
+      - LLM_BAWT_DEFAULT_MODEL_ALIAS
+      - LLM_BAWT_USE_SERVICE
+      - LLM_BAWT_SERVICE_HOST
+      - LLM_BAWT_SERVICE_PORT
+      - SERVICE_PORT
+      - LLM_BAWT_HISTORY_DURATION_SECONDS
+      - LLM_BAWT_HISTORY_RELOAD_TTL_SECONDS
+      - LLM_BAWT_MODEL_CACHE_DIR
+      - LLM_BAWT_LLAMA_CPP_N_CTX
+      - LLM_BAWT_LLAMA_CPP_N_GPU_LAYERS
+      - LLM_BAWT_LLAMA_CPP_N_BATCH
+      - LLM_BAWT_LLAMA_CPP_FLASH_ATTN
+      - LLM_BAWT_LOG_DIR
+      - LLM_BAWT_LOG_PREFIX
+      - LLM_BAWT_DEBUG_TURN_LOG
+      - LLM_BAWT_REDIS_URL
+      - LLM_BAWT_MCP_SERVER_URL
+      - LLM_BAWT_MCP_ALLOWED_HOSTS
+      - LLM_BAWT_SEARCH_PROVIDER
+      - LLM_BAWT_REDDIT_CLIENT_ID
+      - LLM_BAWT_REDDIT_USER_AGENT
+      - LLM_BAWT_CRAWL4AI_URL
+      - LLM_BAWT_STORAGE_BACKEND
+      - LLM_BAWT_S3_FALLBACK_FS
+      - LLM_BAWT_NEXTCLOUD_URL
+      - LLM_BAWT_TALK_PROVISIONER_URL
+      - LLM_BAWT_HA_MCP_ENABLED
+      - LLM_BAWT_HA_MCP_URL
+      - LLM_BAWT_HA_MCP_TIMEOUT
+      - LLM_BAWT_HA_MCP_TOOL_EXCLUDE
+      - LLM_BAWT_HA_NATIVE_MCP_URL
+      - LLM_BAWT_OPS_WORKER_IMAGE
+      - LLM_BAWT_OPS_RECEIPT_VOLUME
+      # Hugging Face / transformers logging.
+      - HF_HOME
+      - HF_HUB_DISABLE_PROGRESS_BARS
+      - TOKENIZERS_PARALLELISM
+      - TRANSFORMERS_NO_ADVISORY_WARNINGS
+      - TRANSFORMERS_VERBOSITY
+      # Credentials still read from env: each is in PENDING_RETIREMENT
+      # (tests/test_env_secret_guard.py) and leaves when its reader is
+      # record-only.
+      - OPENAI_API_KEY
+      - XAI_API_KEY
+      - LLM_BAWT_XAI_API_KEY
+      - ANTHROPIC_API_KEY
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - LLM_BAWT_HA_MCP_AUTH_TOKEN
+      - LLM_BAWT_HA_NATIVE_MCP_TOKEN
+      - LLM_BAWT_REDDIT_CLIENT_SECRET
+      - LLM_BAWT_TALK_PROVISIONER_TOKEN
     ports:
       - "${MCP_PORT:-8001}:8001"
       - "${SERVICE_PORT:-8642}:8642"
@@ -176,8 +245,8 @@ services:
     <<: *agent-bridge-image
     container_name: llm-bawt-claude-code-bridge
     command: ["python", "-m", "claude_code_bridge"]
-    env_file:
-      - ./.env
+    # TASK-1476: no env_file (see the app). z.ai and Kimi keys come from the
+    # app broker (records); their env names are no longer passed.
     environment:
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       # TASK-636: the bridge consumes Claude tokens via the broker endpoint
@@ -200,14 +269,12 @@ services:
       # from the app's broker endpoint (GET /v1/providers/openai_chatgpt/token).
       # Z.AI (Zhipu GLM) — native Anthropic Messages API passthrough.
       # Powers bots whose model_id is namespaced "zai/<glm-model>".
-      - ZAI_API_KEY=${ZAI_API_KEY:-}
       # xAI (Grok) — standard OpenAI Responses API via the proxy's default
       # call path. Powers bots whose model_id is namespaced "xai/<grok-model>"
       # (e.g. xai/grok-4.5). LLM_BAWT_XAI_API_KEY accepted as an alias.
       - XAI_API_KEY=${XAI_API_KEY:-${LLM_BAWT_XAI_API_KEY:-}}
       # Kimi For Coding subscription — Chat Completions-only coding surface.
       # Keep separate from Moonshot OpenPlatform: different endpoint + billing.
-      - KIMI_CODING_API_KEY=${KIMI_CODING_API_KEY:-}
       # Local inference (Ollama / llama-server on the LAN) — native Anthropic
       # Messages passthrough. Powers bots whose model_id is namespaced
       # "local/<ollama-model>" (e.g. local/qwen3.8:27b). Key is optional.
@@ -222,6 +289,15 @@ services:
       - BRIDGE_BROKER_TOKEN_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
       - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
+      # -- From .env (TASK-1476) --
+      - CLAUDE_CODE_CWD
+      - CLAUDE_CODE_PERMISSION_MODE
+      - CLAUDE_CODE_SESSION_PREFIXES
+      - LLM_BAWT_REDIS_URL
+      # Credentials still read from env (PENDING_RETIREMENT).
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - LLM_BAWT_XAI_API_KEY
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
@@ -266,8 +342,8 @@ services:
     <<: *agent-bridge-image
     container_name: llm-bawt-codex-bridge
     command: ["python", "-m", "codex_bridge"]
-    env_file:
-      - ./.env
+    # TASK-1476: no env_file. Codex reads nothing else from .env (it scrubs
+    # OPENAI_API_KEY anyway: codex_bridge/transport.py).
     environment:
       - CODEX_HOME=/home/bridge/.codex
       # TASK-636: CODEX_AUTH_PATH removed — the bridge materializes auth.json
@@ -367,8 +443,7 @@ services:
     ipc: host  # Required for vLLM multiprocess engine shared memory
     security_opt:
       - apparmor:unconfined  # AppArmor not available on this kernel; nvidia-ctk owns daemon.json
-    env_file:
-      - ./.env
+    # TASK-1476: no env_file (see the app).
     environment:
       # This root-running service also bind-mounts ./src in development. Never
       # leave root-owned Python bytecode in the shared working tree.
@@ -405,6 +480,34 @@ services:
       # at the compose service name `app`.
       - LLM_BAWT_SERVICE_HOST=app
       - REDIS_URL=redis://redis:6379/0
+      # -- From .env (TASK-1476) --
+      - POSTGRES_HOST
+      - POSTGRES_PORT
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DATABASE
+      - LLM_BAWT_POSTGRES_HOST
+      - LLM_BAWT_POSTGRES_PORT
+      - LLM_BAWT_POSTGRES_USER
+      - LLM_BAWT_POSTGRES_PASSWORD
+      - LLM_BAWT_POSTGRES_DATABASE
+      - LLM_BAWT_DEFAULT_USER
+      - LLM_BAWT_DEFAULT_MODEL_ALIAS
+      - LLM_BAWT_MODEL_CACHE_DIR
+      - LLM_BAWT_LLAMA_CPP_N_CTX
+      - LLM_BAWT_LLAMA_CPP_N_GPU_LAYERS
+      - LLM_BAWT_LLAMA_CPP_N_BATCH
+      - LLM_BAWT_LLAMA_CPP_FLASH_ATTN
+      - LLM_BAWT_LOG_DIR
+      - LLM_BAWT_LOG_PREFIX
+      - LLM_BAWT_REDIS_URL
+      - HF_HOME
+      - HF_HUB_DISABLE_PROGRESS_BARS
+      - TOKENIZERS_PARALLELISM
+      - TRANSFORMERS_NO_ADVISORY_WARNINGS
+      - TRANSFORMERS_VERBOSITY
+      # Model downloads (PENDING_RETIREMENT).
+      - HF_TOKEN
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
