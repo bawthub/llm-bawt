@@ -28,6 +28,7 @@ from .resolver import (
     Caps,
     SkillResolution,
     canonical_mode,
+    legacy_rows,
     newly_over_cap,
     resolve,
 )
@@ -36,6 +37,9 @@ from .store import SkillAssignmentStore
 PER_SKILL_CAP_KEY = "skills_skill_token_cap"
 TOTAL_CAP_KEY = "skills_total_token_cap"
 MAX_POSITION = 10_000
+#: Databases (by URL) this process has seen migrated. The migration is
+#: one-way, so a hit skips the per-request schema check.
+_MIGRATED: set[str] = set()
 
 
 class SkillServiceError(Exception):
@@ -54,6 +58,8 @@ class _World:
     rows: list[Assignment]
     snapshot: TagSnapshot
     bots: dict[str, Any]
+    #: The adopt-era table is not migrated yet; ``rows`` are its conversion.
+    pending: bool = False
 
     def facts(self, slug: str) -> BotFacts:
         bot = self.bots[slug]
@@ -94,14 +100,57 @@ class SkillService:
     # -- shared reads ------------------------------------------------------
 
     def _world(self, conn) -> _World:
-        return _World(rows=self.store.rows(conn), snapshot=self._tags.snapshot(conn),
-                      bots={b.slug: b for b in self._list_bots()})
+        world = _World(rows=self.store.rows(conn), snapshot=self._tags.snapshot(conn),
+                       bots={b.slug: b for b in self._list_bots()})
+        if self._is_migrated(conn):
+            return world
+        # Not migrated yet: resolve through the same conversion the migration
+        # persists, so a deferred migration changes no bot's skills.
+        rows = legacy_rows(world.rows, self.store.managed(conn),
+                           [world.facts(s) for s in world.bots], self._catalog_refs())
+        return _World(rows, world.snapshot, world.bots, pending=True)
+
+    def _catalog_refs(self) -> tuple[str, ...] | None:
+        """Every catalog ref, or None when any root is unreadable."""
+        if not self.source.complete():
+            return None
+        return tuple(e.ref for e in self.source.list())
+
+    def _is_migrated(self, conn) -> bool:
+        key = str(self.store.engine.url)
+        if key not in _MIGRATED and not self.store.pending(conn):
+            _MIGRATED.add(key)
+        return key in _MIGRATED
+
+    def migrate(self) -> bool:
+        """Run the one-time adopt-era conversion; True once the table is migrated.
+
+        Deferred (False, nothing written) while the catalog or the tag snapshot
+        is unreadable: the conversion needs both. A later call retries.
+        """
+        with self.store.read() as conn:
+            if self._is_migrated(conn):
+                return True
+        catalog = self._catalog_refs()
+        if catalog is None:
+            return False
+        with self.store.write() as conn:
+            if self._is_migrated(conn):
+                return True
+            snapshot = self._tags.snapshot(conn)
+            if not snapshot.available:
+                return False
+            world = _World(self.store.rows(conn), snapshot, {b.slug: b for b in self._list_bots()})
+            self.store.migrate(conn, legacy_rows(world.rows, self.store.managed(conn),
+                                                 [world.facts(s) for s in world.bots], catalog))
+        return True
 
     def _resolve(self, world: _World, slug: str, caps: Caps) -> SkillResolution:
         return resolve(world.facts(slug), world.rows, self.source, caps)
 
     def resolve_bot(self, slug: str) -> SkillResolution | None:
         """This bot's resolution, or None when it is unknown."""
+        self.migrate()
         with self.store.read() as conn:
             world = self._world(conn)
         if slug not in world.bots:
@@ -154,6 +203,7 @@ class SkillService:
     # -- per-bot views -----------------------------------------------------
 
     def bots_summary(self) -> dict:
+        self.migrate()
         caps = self._caps()
         with self.store.read() as conn:
             world = self._world(conn)
@@ -179,6 +229,7 @@ class SkillService:
         return {"caps": vars(caps), "tags_available": world.snapshot.available, "bots": bots}
 
     def effective(self, slug: str) -> dict:
+        self.migrate()
         caps = self._caps()
         with self.store.read() as conn:
             world = self._world(conn)
@@ -256,6 +307,9 @@ class SkillService:
 
     def _write(self, validate: Callable[[_World], list[str]], apply: Callable[[Any], None]) -> None:
         caps = self._caps()
+        if not self.migrate():
+            raise SkillServiceError(503, "skills migration is pending (catalog or bot tags "
+                                         "unreadable); skills can't be changed")
         with self.store.write() as conn:
             before_world = self._world(conn)
             if not before_world.snapshot.available:

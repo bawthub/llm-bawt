@@ -7,7 +7,9 @@ caller makes on the rows it read there cannot race another write.
 Rows are exceptions to "every skill enabled": ``enable | disable | inject``
 at bot or tag scope. The adopt-era schema (``off | available | injected``,
 ``off`` bot-only, a ``skill_managed_bots`` table) is migrated in place by
-:func:`_migrate_exceptions_only`.
+:meth:`SkillAssignmentStore.migrate`, once, with rows the service computes
+(:func:`.resolver.legacy_rows`), because the conversion needs the skill
+catalog and the bot list.
 """
 from __future__ import annotations
 
@@ -40,48 +42,11 @@ _LOCK = "llm_bawt.skill_assignments"
 _schema_guard = SchemaBootstrapGuard()
 
 
-def _migrate_exceptions_only(conn) -> None:
-    """Bring an adopt-era table to the exceptions-only model, once.
-
-    Every step runs only while an adopt-era CHECK still exists, so it happens
-    exactly once. A later bootstrap never rewrites rows an adopt-era process
-    wrote during the rolling-restart overlap; the reader canonicalizes legacy
-    mode names (``canonical_mode``), so those rows keep their meaning.
-
-    - The vocab CHECK accepts both vocabularies for one release.
-    - Adopt seeded one ``available`` bot row per skill. Under the new default
-      those rows change nothing (``off`` was bot-only, so no tag disable sits
-      under them), so they are deleted rather than renamed.
-    - ``off``/``injected`` rows are renamed to ``disable``/``inject``.
-    - ``skill_managed_bots`` is emptied, not dropped: adopt-era code still
-      reads it, and with no rows it treats every bot as unmanaged (ambient),
-      which is the new default too.
-    """
-    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:name))"), {"name": _LOCK})
-    legacy_checks = conn.execute(text("""
-        SELECT count(*) FROM pg_constraint
-        WHERE conrelid = 'skill_assignments'::regclass
-          AND conname IN ('skill_assignments_mode_check', 'skill_assignments_off_is_bot_only')
-    """)).scalar_one()
-    if not legacy_checks:
-        return
-    conn.execute(text(f"""
-        ALTER TABLE skill_assignments
-            DROP CONSTRAINT IF EXISTS skill_assignments_mode_check,
-            DROP CONSTRAINT IF EXISTS skill_assignments_off_is_bot_only,
-            DROP CONSTRAINT IF EXISTS {_MODE_CHECK},
-            ADD CONSTRAINT {_MODE_CHECK} CHECK (mode IN ({_ALL_MODES}))"""))
-    conn.execute(text("DELETE FROM skill_assignments WHERE scope_type = 'bot' AND mode = 'available'"))
-    for old, new in LEGACY_MODES.items():
-        conn.execute(text("UPDATE skill_assignments SET mode = :new WHERE mode = :old"),
-                     {"old": old, "new": new})
-    if conn.execute(text("SELECT to_regclass('skill_managed_bots')")).scalar() is not None:
-        conn.execute(text("DELETE FROM skill_managed_bots"))
+_LEGACY_CHECKS = ("skill_assignments_mode_check", "skill_assignments_off_is_bot_only")
 
 
 def _bootstrap(conn) -> None:
     ensure_relations(conn, _RELATIONS)
-    _migrate_exceptions_only(conn)
 
 
 class SkillAssignmentStore:
@@ -115,6 +80,21 @@ class SkillAssignmentStore:
             FROM skill_assignments ORDER BY scope_type, scope_id, position, skill_ref"""))
         return [Assignment(**row) for row in result.mappings()]
 
+    @staticmethod
+    def pending(conn) -> bool:
+        """True while the table still has the adopt-era schema."""
+        return bool(conn.execute(text("""
+            SELECT count(*) FROM pg_constraint
+            WHERE conrelid = 'skill_assignments'::regclass AND conname = ANY(:names)"""),
+            {"names": list(_LEGACY_CHECKS)}).scalar_one())
+
+    @staticmethod
+    def managed(conn) -> frozenset[str]:
+        """Adopt-era managed bots (empty once migrated or never adopted)."""
+        if conn.execute(text("SELECT to_regclass('skill_managed_bots')")).scalar() is None:
+            return frozenset()
+        return frozenset(conn.execute(text("SELECT bot_slug FROM skill_managed_bots")).scalars())
+
     # -- writes (inside :meth:`write`) -------------------------------------
 
     @staticmethod
@@ -128,6 +108,26 @@ class SkillAssignmentStore:
                 updated_by = EXCLUDED.updated_by, updated_at = now()"""),
             {"scope_type": row.scope_type, "scope_id": row.scope_id, "skill_ref": row.skill_ref,
              "mode": row.mode, "position": row.position, "updated_by": row.updated_by})
+
+    @staticmethod
+    def migrate(conn, rows: list[Assignment]) -> None:
+        """Replace the adopt-era table with ``rows``, inside :meth:`write`.
+
+        The caller re-checks :meth:`pending` under the write lock. The CHECK
+        swap is the done marker; the vocab CHECK accepts both vocabularies for
+        one release. ``skill_managed_bots`` is emptied, not dropped.
+        """
+        conn.execute(text(f"""
+            ALTER TABLE skill_assignments
+                DROP CONSTRAINT IF EXISTS skill_assignments_mode_check,
+                DROP CONSTRAINT IF EXISTS skill_assignments_off_is_bot_only,
+                DROP CONSTRAINT IF EXISTS {_MODE_CHECK},
+                ADD CONSTRAINT {_MODE_CHECK} CHECK (mode IN ({_ALL_MODES}))"""))
+        conn.execute(text("DELETE FROM skill_assignments"))
+        for row in rows:
+            SkillAssignmentStore.upsert(conn, row)
+        if conn.execute(text("SELECT to_regclass('skill_managed_bots')")).scalar() is not None:
+            conn.execute(text("DELETE FROM skill_managed_bots"))
 
     @staticmethod
     def delete(conn, scope_type: str, scope_id: str, skill_ref: str) -> bool:

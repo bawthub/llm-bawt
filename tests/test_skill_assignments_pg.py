@@ -32,6 +32,7 @@ _BOTS = {
     "fixture-chat": ("chat", None, {}),
     "fixture-bundle": ("agent", "claude-code", {"skill_bundle": "fixture-pkg"}),
     "fixture-private": ("agent", "claude-code", {}),
+    "fixture-three": ("agent", "claude-code", {}),
 }
 
 
@@ -187,10 +188,32 @@ def test_the_schema_refuses_an_unknown_mode(world):
                               f" VALUES ('tag', '{ROLE}', 'alpha', 'loud')"))
 
 
-def test_the_migration_turns_an_adopt_era_table_into_exceptions(world):
-    from llm_bawt.skills import store as store_module
+_ADOPT_ERA_ROWS = f"""
+    INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode) VALUES
+    ('tag', '{ROLE}', 'alpha', 'injected'),
+    ('bot', 'fixture-one', 'alpha', 'available'),
+    ('bot', 'fixture-one', 'beta', 'off'),
+    ('bot', 'fixture-one', 'gamma', 'injected'),
+    ('bot', 'fixture-two', 'beta', 'available'),
+    ('bot', 'fixture-three', 'gamma', 'off')"""
 
+# What the adopt-era resolver gave each bot: (listed refs, injected refs).
+# fixture-one: managed; its bot 'available' alpha overrides the tag's
+#   'injected' alpha (case 1), beta is off, gamma injected.
+# fixture-two: managed; alpha injected by tag, beta listed, gamma had no row
+#   so it was not listed (case 3).
+# fixture-three: unmanaged, so ambient: every skill, nothing injected, its own
+#   row and the tag's 'injected' alpha ignored (case 2).
+_ADOPT_ERA_EFFECTIVE = {
+    "fixture-one": ({"alpha", "gamma"}, ["gamma"]),
+    "fixture-two": ({"alpha", "beta"}, ["alpha"]),
+    "fixture-three": ({"alpha", "beta", "gamma"}, []),
+}
+
+
+def _adopt_era_table(world):
     with world.rig.engine.begin() as conn:
+        tag(conn, "fixture-three", ROLE)
         conn.execute(text("""
             CREATE TABLE skill_assignments (
                 scope_type TEXT NOT NULL CHECK (scope_type IN ('bot', 'tag')),
@@ -203,38 +226,71 @@ def test_the_migration_turns_an_adopt_era_table_into_exceptions(world):
                     CHECK (mode <> 'off' OR scope_type = 'bot'))"""))
         conn.execute(text("CREATE TABLE skill_managed_bots (bot_slug TEXT PRIMARY KEY,"
                           " adopted_by TEXT, adopted_at TIMESTAMPTZ NOT NULL DEFAULT now())"))
-        conn.execute(text("INSERT INTO skill_managed_bots (bot_slug) VALUES ('fixture-one')"))
-        conn.execute(text(f"""
-            INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode) VALUES
-            ('bot', 'fixture-one', 'alpha', 'available'), ('bot', 'fixture-one', 'beta', 'off'),
-            ('bot', 'fixture-one', 'gamma', 'injected'), ('tag', '{ROLE}', 'alpha', 'available')"""))
+        conn.execute(text("INSERT INTO skill_managed_bots (bot_slug)"
+                          " VALUES ('fixture-one'), ('fixture-two')"))
+        conn.execute(text(_ADOPT_ERA_ROWS))
 
-    for _ in range(2):  # idempotent: a second process start changes nothing
-        with world.rig.engine.begin() as conn:
-            store_module._bootstrap(conn)
 
-    assert _rows(world) == {("bot", "fixture-one", "beta"): "disable",
+def _effective_set(service, slug):
+    resolution = service.resolve_bot(slug)
+    manifest = resolution.manifest()
+    listed = ({"alpha", "beta", "gamma"} if manifest is None
+              else {e["ref"] for e in manifest["entries"]})
+    return listed, [e.ref for e in resolution.injected]
+
+
+def _legacy_checks(world):
+    with world.rig.engine.connect() as conn:
+        return set(conn.execute(text(
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'skill_assignments'::regclass"
+            " AND conname IN ('skill_assignments_mode_check',"
+            " 'skill_assignments_off_is_bot_only')")).scalars())
+
+
+def test_the_migration_keeps_every_bots_effective_skills(world):
+    _adopt_era_table(world)
+
+    for _ in range(2):  # a second call finds it migrated and changes nothing
+        assert world.service.migrate() is True
+
+    assert {slug: _effective_set(world.service, slug)
+            for slug in _ADOPT_ERA_EFFECTIVE} == _ADOPT_ERA_EFFECTIVE
+    assert _rows(world) == {("tag", ROLE, "alpha"): "inject",
+                            ("bot", "fixture-one", "alpha"): "enable",
+                            ("bot", "fixture-one", "beta"): "disable",
                             ("bot", "fixture-one", "gamma"): "inject",
-                            ("tag", ROLE, "alpha"): "enable"}
+                            ("bot", "fixture-two", "gamma"): "disable",
+                            ("bot", "fixture-three", "alpha"): "enable"}
+    assert _legacy_checks(world) == set()
     with world.rig.engine.begin() as conn:
         assert conn.execute(text("SELECT count(*) FROM skill_managed_bots")).scalar_one() == 0
-        # Both vocabularies are writable for one release (a rolling restart's old writer).
-        conn.execute(text(f"INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
-                          f" VALUES ('tag', '{ROLE}', 'beta', 'off')"))
-        names = set(conn.execute(text("SELECT conname FROM pg_constraint WHERE conrelid ="
-                                      " 'skill_assignments'::regclass")).scalars())
-    assert "skill_assignments_off_is_bot_only" not in names
-    assert "skill_assignments_mode_check" not in names
-
-    # An adopt-era writer still running after the migration: its rows survive
-    # every later bootstrap, and the reader takes them in the new vocabulary.
-    with world.rig.engine.begin() as conn:
+        # Both vocabularies stay writable for one release; the reader maps the old one.
         conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
                           " VALUES ('bot', 'fixture-two', 'alpha', 'available')"))
-        store_module._bootstrap(conn)
-    assert _rows(world)[("bot", "fixture-two", "alpha")] == "available"
     alpha = _entries(world, "fixture-two")["alpha"]
     assert (alpha["mode"], alpha["origin"]) == ("enable", "bot")
+
+
+def test_a_deferred_migration_writes_nothing_and_resolves_as_before(world, monkeypatch):
+    _adopt_era_table(world)
+    before = _rows(world)
+    monkeypatch.setattr(world.service.source, "complete", lambda: False)
+
+    assert world.service.migrate() is False
+    assert _rows(world) == before
+    assert _legacy_checks(world) == {"skill_assignments_mode_check",
+                                     "skill_assignments_off_is_bot_only"}
+    assert _status(world.service.put, "bot", "fixture-one", "beta", "enable", 0, None)[0] == 503
+    # Cases 1 and 2 hold while deferred. Case 3 needs the catalog, so on an
+    # unreadable catalog it fails open like any disable does.
+    assert _effective_set(world.service, "fixture-one") == ({"alpha", "beta", "gamma"}, ["gamma"])
+    assert _effective_set(world.service, "fixture-three") == _ADOPT_ERA_EFFECTIVE["fixture-three"]
+    assert _effective_set(world.service, "fixture-two")[1] == ["alpha"]
+
+    monkeypatch.undo()
+    assert world.service.migrate() is True
+    assert {slug: _effective_set(world.service, slug)
+            for slug in _ADOPT_ERA_EFFECTIVE} == _ADOPT_ERA_EFFECTIVE
 
 
 def test_removing_a_missing_row_is_404_and_changes_nothing(world):

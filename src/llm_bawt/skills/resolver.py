@@ -243,6 +243,65 @@ def resolve(facts: BotFacts, rows: Iterable[Assignment], source: SkillSource,
                            catalog, source.kind)
 
 
+def legacy_rows(rows: Iterable[Assignment], managed: frozenset[str],
+                bots: Iterable[BotFacts], catalog: Iterable[str] | None) -> list[Assignment]:
+    """Exception rows that resolve, for every bot, as the adopt-era rows did.
+
+    The single conversion rule: the store's one-time migration persists it and,
+    until that migration has run, the service resolves through it, so a
+    deferred migration cannot change any bot's skills. Adopt-era semantics:
+    an unmanaged bot ignored every row (ambient discovery); a managed bot got
+    exactly the refs with a winning ``available``/``injected`` row (bot row
+    over tag rows; ``off`` was bot-only).
+
+    - Modes are renamed (``off``/``available``/``injected`` to
+      ``disable``/``enable``/``inject``).
+    - A bot ``available`` row is kept as ``enable`` only where it overrides a
+      tag ``injected`` row the bot carries; elsewhere it changes nothing and
+      is dropped.
+    - An unmanaged bot's own rows are dropped (they never applied), and each
+      tag ``injected`` row it carries gets a bot ``enable`` so it stays ambient.
+    - A managed bot gets a bot ``disable`` for every catalog ref no row listed.
+      Without a ``catalog`` (unreadable) that step is skipped, which fails open
+      like any other disable on an unreadable catalog.
+    - Private bots and rows for unknown bots are only renamed: neither model
+      applies them.
+    """
+    renamed = [Assignment(r.scope_type, r.scope_id, r.skill_ref,
+                          canonical_mode(r.mode) or r.mode, r.position, r.updated_by)
+               for r in rows]
+    tag_rows = [r for r in renamed if r.scope_type == "tag"]
+    facts = {f.slug: f for f in bots}
+    out = list(tag_rows)
+    for r in renamed:
+        bot = facts.get(r.scope_id) if r.scope_type == "bot" else None
+        if r.scope_type != "bot" or bot is None or bot.private:
+            if r.scope_type == "bot":
+                out.append(r)
+            continue
+        if r.scope_id not in managed:
+            continue
+        if r.mode == ENABLE and not any(t.mode == INJECT and t.skill_ref == r.skill_ref
+                                        and t.scope_id in bot.tags for t in tag_rows):
+            continue
+        out.append(r)
+    refs = tuple(catalog) if catalog is not None else ()
+    for bot in sorted(facts.values(), key=lambda f: f.slug):
+        if bot.private:
+            continue
+        carried = [t for t in tag_rows if t.scope_id in bot.tags]
+        if bot.slug not in managed:
+            for ref in sorted({t.skill_ref for t in carried if t.mode == INJECT}):
+                out.append(Assignment("bot", bot.slug, ref, ENABLE))
+            continue
+        listed = {r.skill_ref for r in renamed
+                  if r.scope_type == "bot" and r.scope_id == bot.slug}
+        listed |= {t.skill_ref for t in carried}
+        out.extend(Assignment("bot", bot.slug, ref, DISABLE)
+                   for ref in refs if ref not in listed)
+    return out
+
+
 def newly_over_cap(before: SkillResolution, after: SkillResolution) -> frozenset[str]:
     """Refs a write would push over a cap that were not over it already."""
     return after.over_cap - before.over_cap
