@@ -64,12 +64,16 @@ class OpsControlServer:
 
     def __init__(self, service_factory, address=("0.0.0.0", CONTROL_PORT), *,
                  concurrency: int | None = None, budget_seconds: float = DEFAULT_BUDGET_SECONDS,
-                 token_source=control_token):
+                 token_source=control_token, budget_wait=None):
+        """``budget_wait(done, seconds) -> bool`` waits for the work within the
+        budget (default ``done.wait``); tests replace it to end the budget
+        without a wall-clock race."""
         self._service_factory = service_factory
         self._service = None
         self._service_lock = Lock()
         self.slots = BoundedSemaphore(concurrency or control_concurrency())
         self.budget_seconds = budget_seconds
+        self._budget_wait = budget_wait or (lambda done, seconds: done.wait(seconds))
         self._token_source = token_source
         control = self
 
@@ -185,7 +189,7 @@ class OpsControlServer:
                 done.set()
 
         Thread(target=run, name="ops-control-work", daemon=True).start()
-        if not done.wait(self.budget_seconds):
+        if not self._budget_wait(done, self.budget_seconds):
             return handler.fail(504, "ops_timeout", f"the ops service did not answer within {self.budget_seconds:g}s")
         if "body" in outcome:
             return handler.reply(200, outcome["body"])

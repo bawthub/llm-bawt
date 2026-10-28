@@ -93,7 +93,7 @@ def test_prepare_over_the_channel_matches_the_in_process_snapshot(rig):
 ])
 def test_refusals_keep_their_code_and_status(rig, slug, args, code, status):
     raw = httpx.post(rig.url + PREPARE_PATH, json={"operation": slug, "args": args},
-                     headers={"Authorization": f"Bearer {TOKEN}"})
+                     headers={"Authorization": f"Bearer {TOKEN}"}, timeout=HANG_GUARD_S)
     assert raw.status_code == status
     assert raw.json()["refusal"]["code"] == code and raw.json()[PROTOCOL_FIELD] == 1
     with pytest.raises(OpsDispatchError) as exc:
@@ -105,7 +105,7 @@ def test_refusals_keep_their_code_and_status(rig, slug, args, code, status):
 def test_prepare_requires_the_control_bearer(rig, header):
     headers = {"Authorization": header} if header else {}
     response = httpx.post(rig.url + PREPARE_PATH, json={"operation": SLUG, "args": {"target": "a"}},
-                          headers=headers)
+                          headers=headers, timeout=HANG_GUARD_S)
     assert response.status_code == 401 and response.json()["code"] == "unauthorized"
     wrong = OpsControlClient(rig.url, token_source=lambda: "wrong")
     with pytest.raises(OpsDispatchError) as exc:
@@ -119,7 +119,8 @@ def test_an_unusable_key_refuses_everyone():
 
     server, url = _served(SimpleNamespace(), token_source=no_key)
     try:
-        response = httpx.get(url + EXECUTORS_PATH, headers={"Authorization": f"Bearer {TOKEN}"})
+        response = httpx.get(url + EXECUTORS_PATH, headers={"Authorization": f"Bearer {TOKEN}"},
+                             timeout=HANG_GUARD_S)
         assert response.status_code == 503 and response.json()["code"] == "ops_control_unconfigured"
     finally:
         server.close()
@@ -150,8 +151,8 @@ def test_a_body_without_length_or_over_the_limit_is_refused_unread(rig):
 
 def test_unknown_routes_and_methods(rig):
     auth = {"Authorization": f"Bearer {TOKEN}"}
-    assert httpx.post(rig.url + "/v1/ops/other", headers=auth).status_code == 404
-    assert httpx.delete(rig.url + PREPARE_PATH, headers=auth).status_code == 405
+    assert httpx.post(rig.url + "/v1/ops/other", headers=auth, timeout=HANG_GUARD_S).status_code == 404
+    assert httpx.delete(rig.url + PREPARE_PATH, headers=auth, timeout=HANG_GUARD_S).status_code == 405
 
 
 def test_executor_readiness_comes_from_the_ops_service(rig):
@@ -194,7 +195,7 @@ def test_busy_prepares_never_delay_health_and_one_more_is_turned_away():
         live = httpx.get("http://127.0.0.1:%d/health/live" % health.address[1], timeout=HANG_GUARD_S)
         assert live.status_code == 200
         busy = httpx.post(url + PREPARE_PATH, json={"operation": SLUG, "args": {}},
-                          headers={"Authorization": f"Bearer {TOKEN}"})
+                          headers={"Authorization": f"Bearer {TOKEN}"}, timeout=HANG_GUARD_S)
         assert busy.status_code == 503 and busy.json()["code"] == "ops_busy"
         assert busy.headers["Retry-After"] == "2"
         slept = []
@@ -214,13 +215,25 @@ def test_busy_prepares_never_delay_health_and_one_more_is_turned_away():
 
 def test_over_budget_is_504_and_the_slot_frees_only_when_the_work_returns():
     service = BlockingService()
-    server, url = _served(service, concurrency=1, budget_seconds=0.05)
+    budgets = []
+
+    def budget_spent(done, seconds):
+        # The budget runs out once the work is underway and still blocked, with
+        # no wall-clock race: the work can't finish until release is set.
+        budgets.append(seconds)
+        assert service.entered.acquire(timeout=HANG_GUARD_S)
+        return done.is_set()
+
+    server, url = _served(service, concurrency=1, budget_wait=budget_spent)
     auth = {"Authorization": f"Bearer {TOKEN}"}
     try:
-        timed_out = httpx.post(url + PREPARE_PATH, json={"operation": SLUG, "args": {}}, headers=auth)
+        timed_out = httpx.post(url + PREPARE_PATH, json={"operation": SLUG, "args": {}}, headers=auth,
+                               timeout=HANG_GUARD_S)
         assert timed_out.status_code == 504 and timed_out.json()["code"] == "ops_timeout"
+        assert budgets == [server.budget_seconds]
         # The abandoned prepare still holds the only slot.
-        still = httpx.post(url + PREPARE_PATH, json={"operation": SLUG, "args": {}}, headers=auth)
+        still = httpx.post(url + PREPARE_PATH, json={"operation": SLUG, "args": {}}, headers=auth,
+                           timeout=HANG_GUARD_S)
         assert still.json()["code"] == "ops_busy"
         service.release.set()
         assert service.returned.wait(HANG_GUARD_S)
