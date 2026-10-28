@@ -200,7 +200,27 @@ def test_check_mode_writes_nothing(env):
     engine, providers, integrations = env
     result = run(providers, integrations, FULL_ENV, check=True)
     assert {o.outcome for o in result.values()} == {"would_import"}
+    assert not any(o.removable for o in result.values())
+    assert remove_names(list(result.values())) == []
     assert row_count(engine) == 0
+
+
+def test_main_check_lists_only_names_an_existing_record_matches(env, monkeypatch, capsys):
+    engine, providers, integrations = env
+    for name, value in FULL_ENV.items():
+        monkeypatch.setenv(name, value)
+    providers.save(ConnectionRecord(provider="zai", status=STATUS_CONNECTED, auth_method=AUTH_API_KEY,
+                                    secret={"api_key": ZAI}))
+    assert env_import.main(["--check"]) == 0
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    summary = lines[-1]
+    by_dest = {line["destination"]: line for line in lines[:-1]}
+    assert (by_dest["zai"]["outcome"], by_dest["zai"]["removable"]) == ("already_present", True)
+    assert all((line["outcome"], line["removable"]) == ("would_import", False)
+               for dest, line in by_dest.items() if dest != "zai")
+    # Deleting a would_import name after a check-only run would lose the only copy.
+    assert summary == {"check": True, "remove_names": ["ZAI_API_KEY"]}
+    assert row_count(engine) == 1
 
 
 def test_unset_names_are_no_source(env):

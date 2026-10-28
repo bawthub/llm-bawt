@@ -21,7 +21,9 @@ deleted without anyone reading or retyping a value:
 Each destination reports ``removable``: true only when, after the run, its
 record is connected and holds exactly the env values (a fresh import, or an
 earlier record that already matches). Only those env names are safe to delete
-from ``.env``; the report lists them in ``remove_names``. Output carries env
+from ``.env``; the report lists them in ``remove_names``. ``--check`` writes
+nothing, so there it lists only names an existing record already matches,
+never a ``would_import`` one. Output carries env
 names, destinations and outcome codes, never values or hashes.
 
 There is no ledger, unlike :mod:`llm_bawt.vault_import`. The env line is
@@ -225,7 +227,8 @@ class EnvImporter:
             if problem:
                 return Outcome(spec.destination, present, FAILED, problem)
             if check:
-                return Outcome(spec.destination, present, WOULD_IMPORT, removable=True)
+                # Nothing was written: the env line is still the only copy.
+                return Outcome(spec.destination, present, WOULD_IMPORT)
             with store._store.engine.begin() as conn:
                 if not store.create_if_absent(record, conn=conn):
                     raise LookupError("created_concurrently")
