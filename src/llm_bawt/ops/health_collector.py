@@ -6,22 +6,67 @@ and HTTP remains available. No health path calls preflight or reconciliation.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 
 from sqlalchemy import text
 
 from .executor import DockerExecutor
-from .health_state import MAX_CONTAINERS, ContainerObservation, HealthSample
+from .health_state import (
+    MAX_CONTAINERS,
+    CatalogSample,
+    ContainerObservation,
+    HealthSample,
+    ServiceCapability,
+    ServiceTarget,
+)
+from .service_identity import PROJECT_LABEL, SERVICE_LABEL, ComposeServiceRef
 
 COLLECTION_BUDGET_SECONDS = 15.0
 DOCKER_TIMEOUT_SECONDS = 2
 CONTAINER_STATES = frozenset({"created", "running", "paused", "restarting", "removing", "exited", "dead"})
 CONTAINER_HEALTH = frozenset({"healthy", "unhealthy", "starting"})
+# Catalog bounds (S1c): an oversized catalog fails the whole sample closed
+# rather than publishing a truncated service set. 512 capabilities keep the
+# largest /v1/health/services body under the consumers' 512 KiB limit next
+# to a full 1000-container inventory.
+MAX_OPERATIONS = 500
+MAX_SERVICES = 256
+MAX_CAPABILITIES = 512
+MAX_ENUM_VALUES = 64
+OPERATION_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+ACTION_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+CATALOG_QUERY = text(
+    "SELECT slug, command_script, args_schema_json FROM ops_operations "
+    "WHERE enabled IS TRUE AND soft_deleted_at IS NULL ORDER BY slug LIMIT :limit")
+
+
+def _compose_identity(attrs):
+    """(project, service) from the Compose labels, or (None, None). Only the
+    two label values are read; the labels dict itself is never kept."""
+    labels = (attrs.get("Config") or {}).get("Labels") or {}
+    if not isinstance(labels, dict):
+        return None, None
+    try:
+        ref = ComposeServiceRef(labels.get(PROJECT_LABEL), labels.get(SERVICE_LABEL))
+    except ValueError:
+        return None, None
+    return ref.project, ref.service
+
+
+def instance_id(container_id):
+    """Opaque, stable per container: sha256(Docker Id)[:16]. A recreate gets a
+    new Id, so consumers see a replacement as an instance_id change."""
+    if not isinstance(container_id, str) or not 0 < len(container_id) <= 128:
+        raise ValueError("invalid container id")
+    return hashlib.sha256(container_id.encode()).hexdigest()[:16]
 
 
 def observe_container(attrs):
-    """Allowlist projection: no IDs, labels, logs, env, images, ports or mounts."""
+    """Allowlist projection: no raw IDs, label dicts, logs, env, images,
+    ports or mounts. Compose project/service are typed values."""
     name = attrs["Name"].removeprefix("/")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}", name):
         raise ValueError("invalid container name")
@@ -40,7 +85,71 @@ def observe_container(attrs):
         if parsed.tzinfo is None:
             raise ValueError("container start time lacks timezone")
         started = None if parsed.year == 1 else parsed.isoformat()
-    return ContainerObservation(name, status, health, started)
+    project, service = _compose_identity(attrs)
+    return ContainerObservation(name, status, health, started, project, service,
+                                instance_id(attrs.get("Id")))
+
+
+def _operation_capabilities(slug, command_script, args_schema_json):
+    """(ComposeServiceRef, ServiceCapability) pairs one enabled op contributes.
+
+    A fixed ``compose_service`` gives one pair. ``compose_service_from_arg``
+    gives one pair per value of that argument's bounded ``enum``; without a
+    bounded enum it contributes nothing (never "all services"). Any malformed
+    op contributes nothing and does not affect the others.
+    """
+    if not isinstance(slug, str) or not OPERATION_SLUG.fullmatch(slug):
+        return []
+    try:
+        spec = json.loads(command_script)
+        schema = json.loads(args_schema_json) if isinstance(args_schema_json, str) else args_schema_json
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(spec, dict):
+        return []
+    action = spec.get("action")
+    if not isinstance(action, str) or not ACTION_NAME.fullmatch(action):
+        return []
+    if "compose_service" in spec and "compose_service_from_arg" not in spec:
+        selectors = [(spec["compose_service"], ())]
+    elif "compose_service_from_arg" in spec and "compose_service" not in spec:
+        arg = spec["compose_service_from_arg"]
+        prop = ((schema or {}).get("properties") or {}).get(arg) if isinstance(schema, dict) else None
+        enum = prop.get("enum") if isinstance(prop, dict) else None
+        if (not isinstance(arg, str) or not isinstance(enum, list)
+                or not 0 < len(enum) <= MAX_ENUM_VALUES
+                or not all(isinstance(v, str) for v in enum)):
+            return []
+        selectors = [(value, ((arg, value),)) for value in dict.fromkeys(enum)]
+    else:
+        return []
+    pairs = []
+    for service, args in selectors:
+        try:
+            ref = ComposeServiceRef(spec.get("compose_project"), service)
+        except ValueError:
+            continue
+        pairs.append((ref, ServiceCapability(slug, action, args)))
+    return pairs
+
+
+def catalog_targets(rows):
+    """Service targets from enabled-op rows ``(slug, command_script,
+    args_schema_json)``, sorted by service id. Raises past any bound."""
+    if len(rows) > MAX_OPERATIONS:
+        raise ValueError("catalog exceeds bounded snapshot")
+    by_service: dict[ComposeServiceRef, list[ServiceCapability]] = {}
+    total = 0
+    for slug, command_script, args_schema_json in rows:
+        for ref, capability in _operation_capabilities(slug, command_script, args_schema_json):
+            by_service.setdefault(ref, []).append(capability)
+            total += 1
+    if total > MAX_CAPABILITIES or len(by_service) > MAX_SERVICES:
+        raise ValueError("catalog exceeds bounded snapshot")
+    return tuple(
+        ServiceTarget(ref.project, ref.service,
+                      tuple(sorted(caps, key=lambda c: (c.operation, c.args))))
+        for ref, caps in sorted(by_service.items(), key=lambda item: item[0].service_id))
 
 
 def docker_client():
@@ -72,6 +181,32 @@ class OpsHealthCollector:
             # Never leak DSNs, passwords, queries or connection exception text.
             sample = HealthSample(sampled, "down", "database probe unavailable")
         self.state.publish("database", sample)
+
+    def collect_catalog(self):
+        """Read-only snapshot of the services enabled catalog ops target."""
+        sampled = self.state.sample_time()
+        try:
+            engine = self.engine_factory()
+            if engine is None:
+                raise RuntimeError("database not configured")
+            with engine.connect() as conn:
+                if engine.dialect.name == "postgresql":
+                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                    conn.execute(text("SET LOCAL statement_timeout = '2000ms'"))
+                    conn.execute(text("SET LOCAL lock_timeout = '2000ms'"))
+                rows = [tuple(row) for row in
+                        conn.execute(CATALOG_QUERY, {"limit": MAX_OPERATIONS + 1}).all()]
+            self._budget(sampled)
+            sample = CatalogSample(sampled, "ok", services=catalog_targets(rows))
+        except Exception:
+            # Same sanitization as the database probe: no DSN or query text.
+            sample = CatalogSample(sampled, "down", "operation catalog unavailable")
+        self.state.publish_catalog(sample)
+
+    def collect_storage(self):
+        """The database worker's tick: liveness probe, then catalog snapshot."""
+        self.collect_database()
+        self.collect_catalog()
 
     def collect_docker(self):
         sampled = self.state.sample_time()

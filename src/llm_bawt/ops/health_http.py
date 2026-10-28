@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 import json
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
+
+from .service_identity import PROJECT_PATTERN, SERVICE_PATTERN
+
+# Exact path only: no query string, no encoding, the id grammar of S1b.
+SERVICE_PATH = re.compile(rf"/v1/health/services/({PROJECT_PATTERN}\.{SERVICE_PATTERN})")
 
 
 class _HealthServer(HTTPServer):
@@ -44,6 +50,10 @@ class OpsHealthServer:
                     self.reply(*state.ready())
                 elif self.path == "/v1/health/containers":
                     self.reply(*state.containers())
+                elif self.path == "/v1/health/services":
+                    self.reply(*state.services())
+                elif match := SERVICE_PATH.fullmatch(self.path):
+                    self.reply(*state.services(match.group(1)))
                 else:
                     self.reply(404, {"error": "not found"})
 

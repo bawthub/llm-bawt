@@ -265,7 +265,7 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
     def block(*_args):
         _stall(entered, release)
 
-    collectors = SimpleNamespace(run=OpsHealthCollector.run, collect_database=block, collect_docker=block)
+    collectors = SimpleNamespace(run=OpsHealthCollector.run, collect_storage=block, collect_docker=block)
     runtime = OpsHealthRuntime(state=state, collector=collectors,
                               reconciler_factory=lambda _: SimpleNamespace(run=block),
                               address=("127.0.0.1", 0))
@@ -277,6 +277,7 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
         assert request(runtime.http, "/health/live") == (200, {"status": "ok"})
         assert request(runtime.http, "/health/ready")[0] == 503
         assert request(runtime.http, "/v1/health/containers")[0] == 503
+        assert request(runtime.http, "/v1/health/services")[0] == 503
         # timing-ok: real HTTP requests answer from cached state; waiting on the stalled collectors takes 10s
         assert time.monotonic() - before < 1
         before = time.monotonic()
@@ -366,7 +367,7 @@ def test_bootstrap_failure_recovers_without_restarting_http():
         _until_stopped(stop)
 
     collectors = SimpleNamespace(run=lambda _collect, stop: _until_stopped(stop),
-                                 collect_database=None, collect_docker=None)
+                                 collect_storage=None, collect_docker=None)
     runtime = OpsHealthRuntime(state=state, collector=collectors, interval=0.01,
                               reconciler_factory=build, address=("127.0.0.1", 0))
     runtime.start()

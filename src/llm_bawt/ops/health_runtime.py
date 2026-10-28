@@ -65,7 +65,7 @@ class OpsHealthRuntime:
         # No database/Docker initialization on the HTTP thread or before listen.
         self.http.start()
         for name, target in (
-            ("ops-health-database", lambda: self.collector.run(self.collector.collect_database, self.stop)),
+            ("ops-health-database", lambda: self.collector.run(self.collector.collect_storage, self.stop)),
             ("ops-health-docker", lambda: self.collector.run(self.collector.collect_docker, self.stop)),
             ("ops-reconciler", self._reconcile),
         ):

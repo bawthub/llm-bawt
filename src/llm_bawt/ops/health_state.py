@@ -27,10 +27,20 @@ class ContainerObservation:
     state: str
     health: str | None
     started_at: str | None
+    # TASK-1169 S1c: typed Compose identity (None when the container has no
+    # valid project/service labels) and an opaque instance id derived from
+    # the Docker Id. The raw Id and the labels dict are never kept.
+    project: str | None = None
+    service: str | None = None
+    instance_id: str | None = None
 
     def to_api(self):
+        """The /v1/health/containers row; its shape is frozen for consumers."""
         return {"name": self.name, "state": self.state, "health": self.health,
                 "startedAt": self.started_at}
+
+    def instance_api(self):
+        return {"instanceId": self.instance_id, **self.to_api()}
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,40 @@ class HealthSample:
     containers: tuple[ContainerObservation, ...] = ()
 
 
+@dataclass(frozen=True)
+class ServiceCapability:
+    """One enabled catalog operation that targets a service. ``args`` is the
+    selector argument (name, value) for an enum-selected op, else empty."""
+
+    operation: str
+    action: str
+    args: tuple[tuple[str, str], ...] = ()
+
+    def to_api(self):
+        return {"operation": self.operation, "action": self.action, "args": dict(self.args)}
+
+
+@dataclass(frozen=True)
+class ServiceTarget:
+    project: str
+    service: str
+    capabilities: tuple[ServiceCapability, ...]
+
+    @property
+    def service_id(self):
+        return f"{self.project}.{self.service}"
+
+
+@dataclass(frozen=True)
+class CatalogSample:
+    """Services that enabled catalog ops target, read by the database worker."""
+
+    sampled: SampleTime
+    status: str
+    reason: str | None = None
+    services: tuple[ServiceTarget, ...] = ()
+
+
 class OpsHealthState:
     """Locks protect pointer swaps only, never probing or serialization."""
 
@@ -49,6 +93,8 @@ class OpsHealthState:
         self._lock = Lock()
         initial = HealthSample(self.sample_time(), "down", "not yet collected")
         self._samples = dict.fromkeys(("database", "docker", "ops.executor", "reconciler.loop"), initial)
+        # Not a readiness check: /health/ready keeps its four checks.
+        self._catalog = CatalogSample(initial.sampled, "down", "not yet collected")
         self._stopping = False
 
     def sample_time(self):
@@ -61,6 +107,11 @@ class OpsHealthState:
             if not self._stopping:
                 self._samples[name] = sample
 
+    def publish_catalog(self, sample: CatalogSample):
+        with self._lock:
+            if not self._stopping:
+                self._catalog = sample
+
     def stop(self):
         with self._lock:
             self._stopping = True
@@ -68,6 +119,10 @@ class OpsHealthState:
     def _read(self):
         with self._lock:
             return self._samples.copy(), self._stopping
+
+    def _read_services(self):
+        with self._lock:
+            return self._samples["docker"], self._catalog, self._stopping
 
     def _unavailable_reason(self, sample, now, stopping):
         if stopping:
@@ -104,3 +159,57 @@ class OpsHealthState:
             "status": "ok" if ok else "down", "reason": reason,
             "containers": [c.to_api() for c in sample.containers] if ok else [],
         }
+
+    def services(self, service_id: str | None = None):
+        """TASK-1169 S1c: ``/v1/health/services[/{id}]``.
+
+        The service set is exactly what enabled catalog ops target. A fresh
+        response (200) needs both a fresh inventory and a fresh catalog;
+        otherwise 503. ``instances`` is ``null`` when the inventory is not
+        fresh and ``[]`` when no container carries the service's labels, so a
+        consumer can tell "unknown" from "none". Containers without valid
+        Compose labels are counted in ``unlabeledCount``, never listed.
+        """
+        inventory, catalog, stopping = self._read_services()
+        now = self.sample_time()
+
+        def unavailable(sample):
+            return self._unavailable_reason(sample, now, stopping) or (
+                None if sample.status == "ok" else sample.reason)
+
+        inventory_reason, catalog_reason = unavailable(inventory), unavailable(catalog)
+        inventory_ok, catalog_ok = inventory_reason is None, catalog_reason is None
+        instances: dict[tuple[str, str], list[ContainerObservation]] = {}
+        unlabeled = 0
+        for container in inventory.containers if inventory_ok else ():
+            if container.project is None or container.service is None:
+                unlabeled += 1
+            else:
+                instances.setdefault((container.project, container.service), []).append(container)
+
+        def render(target):
+            found = instances.get((target.project, target.service), [])
+            return {"id": target.service_id, "project": target.project, "service": target.service,
+                    "instances": [c.instance_api() for c in found] if inventory_ok else None,
+                    "capabilities": [c.to_api() for c in target.capabilities]}
+
+        fresh = inventory_ok and catalog_ok
+        body = {
+            "schemaVersion": 1,
+            "observedAt": min(inventory.sampled.wall, catalog.sampled.wall).isoformat(),
+            "fresh": fresh,
+            "reason": inventory_reason or catalog_reason,
+            "unlabeledCount": unlabeled if inventory_ok else None,
+        }
+        code = 200 if fresh else 503
+        if service_id is None:
+            body["services"] = [render(t) for t in catalog.services] if catalog_ok else None
+            return code, body
+        if not catalog_ok:
+            body["service"] = None  # unknown whether the id is catalogued
+            return code, body
+        target = next((t for t in catalog.services if t.service_id == service_id), None)
+        if target is None:
+            return 404, {"error": "not found"}
+        body["service"] = render(target)
+        return code, body

@@ -393,6 +393,38 @@ The fixed GET-only contract (`ops/health_http.py`):
   unavailable/malformed/over-budget/stale inventory gets 503/`down`, a fixed
   reason, and an empty list. An unsuccessful empty list is **not** evidence a
   configured target is absent. No partial inventory is advertised as complete.
+  Kept as-is for existing consumers until TASK-1170 moves them to services.
+* `GET /v1/health/services` and `GET /v1/health/services/{project}.{service}`
+  (TASK-1169 S1c) → `{schemaVersion:1,observedAt,fresh,reason,unlabeledCount,
+  services}` (the single form has `service` instead of `services`). The service
+  set is exactly what **enabled** catalog operations target: a fixed
+  `compose_project`+`compose_service`, or one entry per value of the bounded
+  `enum` on the argument a `compose_service_from_arg` op names. A dynamic
+  selector without a bounded enum contributes nothing, never "all services";
+  name-only (`container_name`) and release ops contribute nothing. Each service
+  is `{id,project,service,instances,capabilities}`:
+  * `instances` lists `{instanceId,name,state,health,startedAt}` for the
+    containers whose Compose labels match. `instanceId` is
+    `sha256(Docker Id)[:16]`; a recreate changes it, so a consumer treats a
+    changed id as replacement. `[]` means observed and none present; `null`
+    means the inventory is not fresh (unknown). Raw IDs and label maps are
+    never returned. Zero, many or `null` instances are the consumer's
+    refusal cases, not something this route resolves.
+  * `capabilities` lists `{operation,action,args}`; `args` holds the enum
+    selector (`{"service":"crawl4ai"}`) or is `{}`.
+
+  `fresh` (and HTTP 200) needs a fresh inventory **and** a fresh catalog
+  snapshot; otherwise 503 with `reason`. A stale catalog makes `services` (or
+  `service`) `null`; a stale inventory keeps the catalogued services with
+  `instances:null` and `unlabeledCount:null`. Containers without valid Compose
+  labels are not listed, only counted in `unlabeledCount`. An id outside the
+  catalogued set is 404 `{"error":"not found"}`; only the exact
+  `<project>.<service>` grammar of `ops/service_identity.py` routes, with no
+  query string. `observedAt` is the older of the two sample starts. The
+  catalog is read by the database worker each tick (read-only, 2s statement
+  timeout; at most 500 enabled ops, 256 services and 512 capabilities, else the
+  whole catalog sample fails closed). It is not a readiness check:
+  `/health/ready` keeps its four checks.
 
 `checkedAt` is the collection **start**, not HTTP request time or completion.
 Readiness uses the oldest contributing sample. The first startup snapshot is
