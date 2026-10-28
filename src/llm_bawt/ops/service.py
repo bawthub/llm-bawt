@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -49,6 +50,20 @@ class OpsDispatchError(RuntimeError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+PREFLIGHT_DEADLINE_ENV = "LLM_BAWT_OPS_PREFLIGHT_DEADLINE_SECONDS"
+DEFAULT_PREFLIGHT_DEADLINE_SECONDS = 300
+
+
+def preflight_deadline_seconds() -> int:
+    """How long a queued job may keep failing preflight before it fails
+    (TASK-1169 S1e). A missing, non-integer or non-positive value is the default."""
+    try:
+        value = int(os.environ.get(PREFLIGHT_DEADLINE_ENV, ""))
+    except ValueError:
+        return DEFAULT_PREFLIGHT_DEADLINE_SECONDS
+    return value if value > 0 else DEFAULT_PREFLIGHT_DEADLINE_SECONDS
 
 
 def display_args(args, schema_json):
@@ -402,9 +417,12 @@ class OpsService:
         try:
             executor.preflight(snapshot)
         except ExecutorError as exc:
-            # No side effect can have been submitted by preflight. Keep QUEUED
-            # for an operator fixing prerequisites, with a visible reason.
+            # No target action can have been submitted before the claim. Keep
+            # QUEUED for an operator fixing prerequisites, with a visible reason,
+            # until the preflight deadline fails it (TASK-1169 S1e).
             self.store.note_queued_error(job.id, str(exc))
+            delay = int(snapshot["execution"].get("start_delay_seconds") or 0)
+            self.store.fail_stale_queued(job.id, deadline_seconds=preflight_deadline_seconds() + delay)
             return
         if not self.store.claim_job(job.id, max_concurrent=snapshot["execution"].get("max_concurrent")):
             return

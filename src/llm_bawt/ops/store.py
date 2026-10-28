@@ -22,13 +22,16 @@ from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
 from .executor import validate_spec
 from .release_spec import is_release_spec
-from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUEUED,
+from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
 from .validation import canonical_json, validate_catalog
 
 logger = logging.getLogger(__name__)
+
+# error_text prefix of a job failed for preflight past its deadline (TASK-1169 S1e).
+PREFLIGHT_FAILED = "preflight_failed"
 
 
 def _utcnow():
@@ -440,6 +443,34 @@ class OpsStore:
 
     def note_queued_error(self, job_id, error):
         return self._transition(job_id, (JOB_QUEUED,), {"error_text": error})
+
+    def fail_stale_queued(self, job_id, *, deadline_seconds, code=PREFLIGHT_FAILED):
+        """QUEUED -> FAILED once preflight has kept failing past the deadline
+        (TASK-1169 S1e). One atomic CAS on persisted state and the DB clock:
+
+        - ``state='queued' AND dispatched_at IS NULL`` races ``claim_job``'s own
+          QUEUED CAS; whichever commits first wins, so a claimed job never fails
+          here, and nothing is submitted before a claim.
+        - ``error_text IS NOT NULL`` limits it to a job whose latest preflight
+          failed (``claim_job`` clears it): one waiting on a slot never expires.
+        - ``submitted_at`` is the start; the caller folds the snapshot's start
+          delay into ``deadline_seconds``.
+
+        PostgreSQL only (``now()``/``make_interval``), which is every deployment;
+        any other engine keeps the job QUEUED, as before. True when it failed it.
+        """
+        self._require()
+        if self.engine.dialect.name != "postgresql":
+            return False
+        with self.engine.begin() as conn:
+            result = conn.execute(text(
+                "UPDATE ops_jobs SET state = :failed, finished_at = now(),"
+                " error_text = :prefix || error_text"
+                " WHERE id = :id AND state = :queued AND dispatched_at IS NULL AND error_text IS NOT NULL"
+                " AND submitted_at + make_interval(secs => :deadline) < now()"),
+                {"failed": JOB_FAILED, "queued": JOB_QUEUED, "id": job_id,
+                 "prefix": f"{code}: ", "deadline": float(deadline_seconds)})
+        return result.rowcount == 1
 
     def touch_reconcile(self, job_id):
         self._transition(job_id, _OPEN_STATES, {"last_reconcile_at": _utcnow()})
