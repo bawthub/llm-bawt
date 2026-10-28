@@ -185,7 +185,8 @@ class OpsHealthState:
         service the inventory observes (S2a); a service no enabled op targets
         has ``capabilities: []``. 200 needs a fresh inventory and a fresh
         catalog; otherwise 503 with ``inventoryFresh``/``catalogFresh``
-        saying which half is usable:
+        saying which half is usable. ``observedAt`` is the older sample start;
+        ``inventoryObservedAt``/``catalogObservedAt`` date each half:
 
         * stale catalog: the observed services are listed with real
           ``instances`` and ``capabilities: null`` (actions unknown);
@@ -239,6 +240,10 @@ class OpsHealthState:
         body = {
             "schemaVersion": 1,
             "observedAt": min(inventory.sampled.wall, catalog.sampled.wall).isoformat(),
+            # Per-half sample starts: a consumer judges each half's age on its
+            # own, so a fresh inventory is never dated by an aged catalog.
+            "inventoryObservedAt": inventory.sampled.wall.isoformat(),
+            "catalogObservedAt": catalog.sampled.wall.isoformat(),
             "fresh": fresh,
             "inventoryFresh": inventory_ok,
             "catalogFresh": catalog_ok,

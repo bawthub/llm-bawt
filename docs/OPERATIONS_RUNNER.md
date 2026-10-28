@@ -439,8 +439,8 @@ The fixed GET-only contract (`ops/health_http.py`):
   configured target is absent. No partial inventory is advertised as complete.
   Kept as-is for existing consumers until TASK-1170 moves them to services.
 * `GET /v1/health/services` and `GET /v1/health/services/{project}.{service}`
-  (TASK-1169 S1c/S2a) → `{schemaVersion:1,observedAt,fresh,inventoryFresh,
-  catalogFresh,reason,unlabeledCount,services}` (the single form has `service`
+  (TASK-1169 S1c/S2a) → `{schemaVersion:1,observedAt,inventoryObservedAt,catalogObservedAt,fresh,
+  inventoryFresh,catalogFresh,reason,unlabeledCount,services}` (the single form has `service`
   instead of `services`). The service set is every service **enabled** catalog
   operations target together with every Compose service the inventory
   observes (S2a). An op targets a fixed `compose_project`+`compose_service`,
@@ -474,7 +474,10 @@ The fixed GET-only contract (`ops/health_http.py`):
   an id in neither set is 404 `{"error":"not found"}`; when not fresh, an id
   missing from the usable half is unknown, so 503 with `service:null`. Only the
   exact `<project>.<service>` grammar of `ops/service_identity.py` routes,
-  with no query string. `observedAt` is the older of the two sample starts.
+  with no query string. `observedAt` is the older of the two sample starts;
+  `inventoryObservedAt` and `catalogObservedAt` are each half's own sample
+  start. A consumer that trusts instances judges age by `inventoryObservedAt`,
+  so an aged catalog never discards a fresh inventory (S2a r1 B1).
   The catalog is read by the database worker each tick (read-only, 2s
   statement timeout; at most 500 enabled ops, 256 services, 512 capabilities
   and 120 KiB of rendered catalog, else the whole catalog sample fails

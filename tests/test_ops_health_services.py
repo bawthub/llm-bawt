@@ -328,6 +328,22 @@ def test_unavailable_catalog_keeps_observed_services_with_unknown_capabilities(w
         assert state.services(unknown) == (503, {**body, "service": None})
 
 
+def test_aged_catalog_does_not_date_a_fresh_inventory(world):
+    # Codex S2a r1 B1: catalog 31s old, inventory resampled now. The inventory
+    # half is usable and carries its own fresh timestamp; observedAt alone
+    # (the older start) would make a consumer discard real instances.
+    clock, state, _, _, probe = world
+    start = clock.wall
+    clock.advance(31)
+    probe.collect_docker()
+    code, body = state.services()
+    assert code == 503 and (body["inventoryFresh"], body["catalogFresh"]) == (True, False)
+    assert body["inventoryObservedAt"] == clock.wall.isoformat()
+    assert body["catalogObservedAt"] == start.isoformat()
+    assert body["observedAt"] == start.isoformat()
+    assert [i["name"] for i in body["services"][0]["instances"]] == ["bawthub-tts-1"]
+
+
 def test_both_halves_unavailable_null_services(world):
     clock, state, _, _, _ = world
     clock.advance(31)
@@ -354,8 +370,8 @@ def test_single_service_and_unknown_id(world):
     _, state, _, _, _ = world
     code, body = state.services("llm-bawt.crawl4ai")
     assert code == 200 and body["service"]["capabilities"][0]["args"] == {"service": "crawl4ai"}
-    assert set(body) == {"schemaVersion", "observedAt", "fresh", "inventoryFresh", "catalogFresh",
-                         "reason", "unlabeledCount", "service"}
+    assert set(body) == {"schemaVersion", "observedAt", "inventoryObservedAt", "catalogObservedAt",
+                         "fresh", "inventoryFresh", "catalogFresh", "reason", "unlabeledCount", "service"}
     assert state.services("bawthub.frontend") == (404, {"error": "not found"})
 
 
