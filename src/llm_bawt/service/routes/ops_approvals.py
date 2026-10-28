@@ -4,6 +4,8 @@ A bot holding the ``approve_ops`` grant tag resolves another bot's pending
 ``ops_run`` approval card, the same card a person resolves in chat.
 
 * ``GET /v1/ops-approvals``: the cards the caller may resolve.
+* ``GET /v1/ops-approvals/{request_id}``: one card by ID, pending or resolved
+  (TASK-1661), so a card past the listing cap stays reachable.
 * ``POST /v1/ops-approvals/{request_id}/resolve``: ``{decision, reason}``.
 
 The only caller is a bot's signed turn capability
@@ -31,15 +33,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...approval_models import (
-    BOT_RESOLVER_PREFIX,
-    KIND_MCP,
-    OPS_RUN_TOOL,
-    REQ_PENDING,
-    RESOLVED_VIA_BOT_GRANT,
-)
-from ...bot_tags import BehaviorTag, grants
-from ...bot_tags.facade import BotTags
+from ...approval_models import BOT_RESOLVER_PREFIX, REQ_PENDING, RESOLVED_VIA_BOT_GRANT
 from ...ops.service import display_args
 from ...task_turn_context import (
     TASK_TURN_CONTEXT_HEADER,
@@ -47,6 +41,7 @@ from ...task_turn_context import (
     TaskTurnContextError,
     open_task_turn_context,
 )
+from ..approver_eligibility import approver_eligible, card_visible, holder_and_tags, is_ops_card
 from .approval_policies import _store, resolve_mcp_card
 from .bot_tags import bot_tag_store
 from .service_auth import NO_STORE, read_body
@@ -79,6 +74,14 @@ class OpsApprovalList(BaseModel):
     data: list[OpsApprovalCard]
 
 
+class OpsApprovalDetail(OpsApprovalCard):
+    """One card by ID. The resolver's reason is shown only to the resolver."""
+    status: str
+    resolved_by_bot: str | None = None
+    resolved_at: datetime | None = None
+    reason: str | None = None
+
+
 class OpsApprovalResult(BaseModel):
     request_id: str
     status: str
@@ -107,17 +110,12 @@ def _caller(request: Request) -> TaskTurnContext:
 def _holder_and_tags(bot: str):
     """Whether ``bot`` holds ``approve_ops`` now, and the tag snapshot to judge cards by."""
     with bot_tag_store().engine.connect() as conn:
-        return grants.holds_grant(conn, bot, BehaviorTag.APPROVE_OPS), BotTags().snapshot(conn)
+        return holder_and_tags(conn, bot)
 
 
 def _visible(row, caller: TaskTurnContext, tags) -> bool:
     """The caller's user's card, from a non-private requester; fails closed."""
-    return (row is not None and row.user_id == caller.user_id and tags.available
-            and not tags.has(row.bot_id, BehaviorTag.PRIVATE))
-
-
-def _is_ops_card(row) -> bool:
-    return row.request_kind == KIND_MCP and row.tool_name == OPS_RUN_TOOL
+    return card_visible(row, user_id=caller.user_id, tags=tags)
 
 
 def _card(row) -> OpsApprovalCard | None:
@@ -168,6 +166,25 @@ async def list_ops_approvals(request: Request):
     return OpsApprovalList(data=[card for card in cards if card is not None])
 
 
+@router.get("/v1/ops-approvals/{request_id}", response_model=OpsApprovalDetail)
+async def get_ops_approval(request_id: str, request: Request):
+    """One ops card the calling grant holder may decide, by ID, pending or resolved."""
+    caller = _caller(request)
+    tags = await asyncio.to_thread(_require_holder, caller)
+    row = await asyncio.to_thread(_store().get_request, request_id)
+    card = None
+    if approver_eligible(holds=True, tags=tags, row=row, approver=caller.bot_id,
+                         user_id=caller.user_id):
+        card = _card(row)
+    if card is None:
+        raise _refuse(404, "not_found", "no such approval request")
+    own_decision = row.resolved_by_bot == caller.bot_id
+    return OpsApprovalDetail(
+        **card.model_dump(), status=row.status, resolved_by_bot=row.resolved_by_bot,
+        resolved_at=row.resolved_at,
+        reason=(row.resolution_message or "") if own_decision else None)
+
+
 @router.post("/v1/ops-approvals/{request_id}/resolve", response_model=OpsApprovalResult)
 async def resolve_ops_approval(request_id: str, request: Request):
     """Approve or deny another bot's pending ops card as the calling grant holder."""
@@ -178,7 +195,7 @@ async def resolve_ops_approval(request_id: str, request: Request):
     row = await asyncio.to_thread(store.get_request, request_id)
     if not _visible(row, caller, tags):
         raise _refuse(404, "not_found", "no such approval request")
-    if not _is_ops_card(row):
+    if not is_ops_card(row):
         raise _refuse(409, "not_ops_card", "only ops_run approvals can be resolved here")
     if row.bot_id == caller.bot_id:
         raise _refuse(403, "self_approval_refused", "a bot can't approve its own request")

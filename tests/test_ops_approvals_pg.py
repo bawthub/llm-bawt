@@ -368,3 +368,49 @@ def test_older_cards_the_caller_cannot_see_do_not_fill_the_page(ops, monkeypatch
 
     assert response.status_code == 200, response.text
     assert [c["request_id"] for c in response.json()["data"]] == [shown]
+
+
+# --- exact-ID read (TASK-1661) ------------------------------------------------
+
+
+def _get(ops, bot, request_id):
+    return ops.api.client.get(f"/v1/ops-approvals/{request_id}",
+                              headers={TASK_TURN_CONTEXT_HEADER: f"turn:{bot}"})
+
+
+def test_a_card_past_the_listing_cap_is_readable_by_id(ops, monkeypatch):
+    monkeypatch.setattr(routes, "LIST_LIMIT", 1)
+    ops.card()
+    newest = ops.card()
+    assert newest not in ops.listing(HOLDER).text
+
+    response = _get(ops, HOLDER, newest)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["request_id"], body["status"], body["requested_by"]) == (newest, REQ_PENDING, REQUESTER)
+    assert body["args"] == {"service": "fixture-svc", "token": "***"} and body["reason"] is None
+    assert SECRET not in response.text
+
+
+def test_an_ineligible_read_by_id_is_not_found(ops):
+    other_user = ops.card(user="fixture-other-user")
+    hidden = ops.card(bot=BYSTANDER)
+    own = ops.card(bot=HOLDER)
+    not_ops = ops.card(tool="tasks_create", snapshot=None)
+    _private(ops, BYSTANDER)
+    for request_id in (other_user, hidden, own, not_ops, "req-missing"):
+        response = _get(ops, HOLDER, request_id)
+        assert response.status_code == 404 and _code(response) == "not_found", request_id
+    assert _get(ops, REQUESTER, ops.card()).status_code == 403   # no grant
+
+
+def test_only_the_resolver_reads_its_reason(ops):
+    request_id = ops.card()
+    assert ops.resolve(HOLDER, request_id, reason="holder reason").status_code == 200
+    assert ops.api.as_person(BYSTANDER).status_code == 200
+
+    mine, theirs = _get(ops, HOLDER, request_id).json(), _get(ops, BYSTANDER, request_id).json()
+
+    assert (mine["status"], mine["resolved_by_bot"], mine["reason"]) == (REQ_APPROVED, HOLDER, "holder reason")
+    assert (theirs["status"], theirs["resolved_by_bot"], theirs["reason"]) == (REQ_APPROVED, HOLDER, None)

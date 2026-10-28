@@ -168,7 +168,9 @@ async def test_catalog_token_budgets():
     # finding; the three resolutions in-band): 4,367 (+37).
     # TASK-1659: browser_check_session (bots' only way into a sign-in-on
     # BawtHub browser; the bearer warning in-band): 4,403 (+36).
-    assert sum(descriptions) <= 4403, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1661: ops_approvals_get (an approval notice names a request id the
+    # capped listing may not reach; the reason-privacy rule in-band): 4,439 (+36).
+    assert sum(descriptions) <= 4439, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -253,7 +255,8 @@ async def test_catalog_token_budgets():
     # TASK-1657: tasks_create gains agent_bot_id: 16,224 (+21). Without it
     # create silently dropped the owner a bot asked for.
     # TASK-1659: browser_check_session, no arguments: 16,288 (+64).
-    assert total <= 16288, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1661: ops_approvals_get (request_id): 16,366 (+78).
+    assert total <= 16366, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

@@ -35,7 +35,7 @@ NON_HISTORY_TOOLS = frozenset({
     "home_audio_devices", "home_audio_enqueue", "home_audio_status", "home_audio_cancel",
     "notify_user",
     "x_search", "x_counts", "web_search", "bots_list_available",
-    "ops_approvals_list", "ops_approval_resolve", "browser_check_session",
+    "ops_approvals_list", "ops_approvals_get", "ops_approval_resolve", "browser_check_session",
 })
 # ops_approvals_* (TASK-1609) read and decide approval cards, not history; the
 # route hides private requesters' and other users' cards itself.

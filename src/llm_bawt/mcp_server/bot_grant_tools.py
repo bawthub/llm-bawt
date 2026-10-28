@@ -1,8 +1,9 @@
 """Grant tag tools (TASK-1609).
 
 * ``bots_grant_set``: a grant manager grants or revokes a grant tag.
-* ``ops_approvals_list`` / ``ops_approval_resolve``: a bot holding
-  ``approve_ops`` lists and decides other bots' pending ops approvals.
+* ``ops_approvals_list`` / ``ops_approvals_get`` / ``ops_approval_resolve``:
+  a bot holding ``approve_ops`` lists, reads by ID and decides other bots'
+  ops approvals.
 
 Thin forwarders of the signed turn capability: the app's
 ``PUT /v1/bot-grants/{tag}/bots/{slug}`` (``bot_tags.grants``) and
@@ -102,6 +103,22 @@ async def ops_approvals_list() -> str:
     """
     return await _forward("GET", "/v1/ops-approvals", None,
                           unknown="the approvals list is unavailable; try again")
+
+
+@mcp.tool(name="ops_approvals_get")
+async def ops_approvals_get(request_id: str) -> str:
+    """Read one ops approval you may decide by ID, pending or resolved (approve_ops holders).
+
+    Use it for a request named in an approval notice. Sensitive args are masked;
+    the resolver's reason is shown only if you resolved it.
+
+    Args:
+        request_id: The approval request id.
+    """
+    if not _all_text(request_id):
+        return _error("invalid_request", "request_id is required")
+    return await _forward("GET", f"/v1/ops-approvals/{quote(request_id.strip(), safe='')}", None,
+                          unknown="the approval is unavailable; try again")
 
 
 @mcp.tool(name="ops_approval_resolve")
