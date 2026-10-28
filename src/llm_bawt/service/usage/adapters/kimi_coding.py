@@ -207,6 +207,16 @@ class KimiCodingUsageAdapter(UsageAdapter):
                 raw=payload,
             )
 
+        if payload == {}:
+            # Live answer for a valid key with no Kimi coding subscription:
+            # HTTP 200 with an empty object, so there is no shape to parse.
+            return self._base(
+                available=False,
+                status=STATUS_OK,
+                error="No Kimi coding plan limits on this key.",
+                raw=payload,
+            )
+
         limits = _parse_limits(payload)
         if not limits:
             return self._base(

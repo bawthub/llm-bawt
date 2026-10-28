@@ -75,7 +75,7 @@ async def get_usage_endpoint(
     if provider is not None:
         return await _provider_report(provider, force=force)
 
-    return await get_all(force=force)
+    return await get_all(force=force, catalog=get_service().config.ensure_model_catalog())
 
 
 async def _provider_report(provider: str, *, force: bool = False) -> ProviderUsage:

@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Any
 
 from .balance import BALANCE_ANCHOR
 from .base import UsageAdapter
@@ -217,9 +218,26 @@ async def _report(adapter: UsageAdapter, *, force: bool) -> ProviderUsage:
         return snap
 
 
-async def get_all(*, force: bool = False) -> AllUsage:
-    """Fetch every registered provider concurrently (the all-backends view)."""
-    providers = list_providers()
+def providers_with_models(catalog: Any) -> list[str]:
+    """Registered providers whose access paths serve at least one catalog model.
+
+    The catalog is the live one the service installs at startup and after
+    every model change, so adding a model shows its provider's card and
+    removing the last one hides it. No catalog means no models.
+    """
+    if catalog is None:
+        return []
+    served = {normalize_access_path(e.access_path.key) for e in catalog.endpoints()}
+    return [
+        provider
+        for provider, adapter in _REGISTRY.items()
+        if served.intersection(normalize_access_path(k) for k in adapter.access_path_keys)
+    ]
+
+
+async def get_all(*, force: bool = False, catalog: Any = None) -> AllUsage:
+    """Fetch every provider with a catalog model concurrently (the all-backends view)."""
+    providers = providers_with_models(catalog)
     results = await asyncio.gather(
         *(get_usage(p, force=force) for p in providers),
         return_exceptions=False,
@@ -245,6 +263,7 @@ __all__ = [
     "has_provider",
     "get_usage",
     "get_all",
+    "providers_with_models",
 ]
 
 from .canonical import UsageLimit  # noqa: E402  (re-export for convenience)

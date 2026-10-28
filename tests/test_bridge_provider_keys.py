@@ -264,6 +264,8 @@ _ZAI_PLAN = {"code": 200, "msg": "Operation successful", "success": True,
                  {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 12,
                   "nextResetTime": 1_900_000_000_000}]}}
 _ZAI_PAYG = {"code": 200, "msg": "Operation successful", "success": True, "data": {"limits": []}}
+# Live answer for a valid key with no GLM Coding Plan ("current user has no coding plan").
+_ZAI_NO_PLAN = {"code": 500, "msg": "当前用户不存在coding plan", "success": False}
 
 
 def _zai_response(payload):
@@ -295,6 +297,7 @@ def test_zai_key_check_reads_the_body_of_a_200(monkeypatch, payload, error):
     [
         (_ZAI_REJECTED, "unauthorized"),
         ({"code": 500, "msg": "busy", "success": False}, "error"),
+        (_ZAI_NO_PLAN, "ok"),
         (_ZAI_PLAN, "ok"),
         (_ZAI_PAYG, "ok"),
     ],
@@ -462,3 +465,83 @@ def test_bridge_reads_the_key_off_the_event_loop(monkeypatch, cls, module, provi
 
     assert key == "stored-key"
     assert threads and threads[0] != loop_thread
+
+
+class _UsageClient:
+    """An httpx.AsyncClient stand-in that answers every GET with ``payload``."""
+
+    payload: object = None
+
+    def __init__(self, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def get(self, _url, *, headers):
+        return _zai_response(self.payload)
+
+
+def _zai_usage(monkeypatch, payload):
+    stub_stored_keys(monkeypatch, {"zai": "stored-key"})
+    monkeypatch.setattr(zai_usage.httpx, "AsyncClient",
+                        type("_C", (_UsageClient,), {"payload": payload}))
+    return asyncio.run(ZaiUsageAdapter().fetch())
+
+
+def test_zai_usage_reports_no_coding_plan_as_a_plan_state(monkeypatch):
+    """TASK-1571: z.ai's no-plan envelope is the pay-as-you-go note, not an outage."""
+    snap = _zai_usage(monkeypatch, dict(_ZAI_NO_PLAN))
+    assert (snap.status, snap.available) == ("ok", False)
+    assert snap.error == "No GLM Coding Plan limits on this key (pay-as-you-go)."
+    assert "当前" not in snap.error
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"code": 500, "msg": "system busy", "success": False}, id="other-500"),
+        pytest.param({"code": 1001, "msg": "no coding plan", "success": False}, id="other-code"),
+        pytest.param({"code": 500, "success": False}, id="no-msg"),
+        pytest.param({"code": 500, "msg": ["coding plan"], "success": False}, id="msg-not-text"),
+        pytest.param({"code": "500", "msg": "coding plan", "success": False}, id="string-code"),
+        pytest.param({"code": 500, "msg": "coding plan", "success": True}, id="not-failed"),
+        pytest.param({"code": 500, "msg": "coding plan", "success": False, "data": {}}, id="has-data"),
+    ],
+)
+def test_zai_usage_other_envelope_failures_stay_errors(monkeypatch, payload):
+    snap = _zai_usage(monkeypatch, payload)
+    assert snap.status == "error"
+    assert snap.available is False
+    assert "coding plan" not in (snap.error or "")
+
+
+def _kimi_usage(monkeypatch, payload):
+    from llm_bawt.service.usage.adapters import kimi_coding as kimi_usage
+
+    stub_stored_keys(monkeypatch, {"kimi-coding": "stored-key"})
+    monkeypatch.setattr(kimi_usage.httpx, "AsyncClient",
+                        type("_C", (_UsageClient,), {"payload": payload}))
+    return asyncio.run(KimiCodingUsageAdapter().fetch())
+
+
+def test_kimi_usage_reports_an_empty_object_as_no_coding_plan(monkeypatch):
+    """TASK-1571: Kimi answers a key with no coding subscription with ``{}``."""
+    snap = _kimi_usage(monkeypatch, {})
+    assert (snap.status, snap.available) == ("ok", False)
+    assert snap.error == "No Kimi coding plan limits on this key."
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"limits": []}, id="empty-limits"),
+        pytest.param({"usage": "x"}, id="unparseable"),
+    ],
+)
+def test_kimi_usage_without_parseable_limits_stays_an_error(monkeypatch, payload):
+    snap = _kimi_usage(monkeypatch, payload)
+    assert snap.status == "error"

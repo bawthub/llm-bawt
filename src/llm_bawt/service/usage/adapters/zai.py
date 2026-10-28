@@ -43,6 +43,28 @@ logger = logging.getLogger(__name__)
 
 QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 _PLAN_LABEL = {"lite": "Lite", "pro": "Pro", "max": "Max"}
+_NO_PLAN_NOTE = "No GLM Coding Plan limits on this key (pay-as-you-go)."
+
+
+def _is_no_plan_envelope(payload: object) -> bool:
+    """z.ai's answer for a valid key with no Coding Plan.
+
+    Live shape: HTTP 200 ``{"code": 500, "msg": "当前用户不存在coding plan",
+    "success": false}`` with no ``data``. Matched narrowly (code 500, no data,
+    msg naming the coding plan) so every other envelope failure stays an
+    error. The msg is only matched, never shown.
+    """
+    if not isinstance(payload, dict) or payload.get("data") is not None:
+        return False
+    code = payload.get("code")
+    msg = payload.get("msg")
+    return (
+        code == 500
+        and not isinstance(code, bool)
+        and payload.get("success") is False
+        and isinstance(msg, str)
+        and "coding plan" in msg.lower()
+    )
 
 
 def _reset_ms(value) -> int | None:
@@ -174,6 +196,11 @@ class ZaiUsageAdapter(UsageAdapter):
                 raw={"text": (resp.text or "")[:500]},
             )
 
+        if _is_no_plan_envelope(payload):
+            return self._base(
+                available=False, status=STATUS_OK, error=_NO_PLAN_NOTE, raw=payload
+            )
+
         # z.ai reports a bad or expired key as HTTP 200 with code 401 in the body.
         failure = ZaiEnvelopeError.from_payload(payload)
         if failure is not None:
@@ -218,7 +245,7 @@ class ZaiUsageAdapter(UsageAdapter):
             return self._base(
                 available=False,
                 status=STATUS_OK,
-                error="No GLM Coding Plan limits on this key (pay-as-you-go).",
+                error=_NO_PLAN_NOTE,
                 raw=raw,
             )
 
