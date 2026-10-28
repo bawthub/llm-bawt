@@ -101,7 +101,9 @@ never used. The DELETE is `force=false&v=false&link=false`, so Docker itself
 returns 409 (`target_running`, known) for a container started in between; a
 lost reply is `lost`. The GPU voice guard leaves it ungated (it starts
 nothing). Needs a worker image labelled `llm-bawt.ops.container-remove="1"`;
-without it the job is refused before any approval card.
+without it the job is refused before any approval card. A removal never pulls an
+image: if the pinned renderer is not already on the daemon, approval and
+preflight refuse with `renderer_image_missing`.
 
 ## Quiesce start fence: worker rollout (TASK-1233)
 

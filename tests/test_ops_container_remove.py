@@ -365,12 +365,19 @@ class _NotFound(Exception):
     status_code = 404
 
 
-def _executor(api, *, worker_labels=None):
+def _executor(api, *, worker_labels=None, renderer_present=True, pulls=None):
     def get_image(ref):
         if ref == WORKER:
             labels = {WORKER_CAPABILITY_LABEL: "1"} if worker_labels is None else worker_labels
             return SimpleNamespace(attrs={"Config": {"Labels": labels}})
+        if ref == RENDERER and not renderer_present:
+            raise _NotFound(ref)
         return SimpleNamespace(attrs=api._find_image(ref))
+
+    def pull(ref, *args, **kwargs):
+        if pulls is None:
+            raise AssertionError("a removal must never pull an image")
+        pulls.append(ref)
 
     def get_container(name):
         try:
@@ -378,7 +385,7 @@ def _executor(api, *, worker_labels=None):
         except RuntimeError:
             raise _NotFound(name) from None
 
-    client = SimpleNamespace(images=SimpleNamespace(get=get_image, pull=lambda *a, **k: None),
+    client = SimpleNamespace(images=SimpleNamespace(get=get_image, pull=pull),
                              containers=SimpleNamespace(get=get_container), ping=lambda: True)
     executor = DockerExecutor(client_factory=lambda: client, worker_image=WORKER, receipt_volume="receipts",
                               receipt_root="/receipts", render_api_factory=lambda: api)
@@ -401,6 +408,20 @@ def test_executor_refusals_carry_fixed_codes():
     with pytest.raises(ConfigCheckError) as caught:
         _executor(api).remove_approval(SPEC, ARGS)
     assert caught.value.code == "not_found"
+
+
+@pytest.mark.parametrize("state", ["exited", "running"])
+def test_a_missing_renderer_refuses_without_pulling(state):
+    """r1 B1: neither approval nor preflight may pull an image for a removal."""
+    api = RemoveDocker(state=state)
+    pulls = []
+    executor = _executor(api, renderer_present=False, pulls=pulls)
+    for call in (lambda: executor.remove_approval(SPEC, ARGS),
+                 lambda: executor.preflight({"spec": SPEC, "execution": executor.execution_settings()})):
+        with pytest.raises(ConfigCheckError) as caught:
+            call()
+        assert caught.value.code == "renderer_image_missing"
+    assert pulls == [] and not api.render_bodies and not api.deletes
 
 
 def test_an_old_worker_without_the_capability_is_refused_before_any_render():

@@ -379,6 +379,20 @@ class DockerExecutor(Executor):
             raise ConfigCheckError("renderer_image_missing",
                                    f"renderer_image_missing: pinned Compose renderer pull failed: {exc}") from exc
 
+    def require_renderer_image(self, spec):
+        """Inspect-only: the renderer must already be on the daemon. A removal
+        never causes an image pull (TASK-1439 T2c r1 B1); an operator or a
+        deploy/config check that pulls the same digest puts it there."""
+        ref = spec["compose_config"]["renderer_image"]
+        try:
+            self.client.images.get(ref)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                raise ConfigCheckError("renderer_image_missing",
+                                       "renderer_image_missing: the pinned Compose renderer is not on the "
+                                       "daemon; removal never pulls it") from None
+            raise ExecutorError(f"cannot inspect the Compose renderer image: {exc}") from exc
+
     def _config_inputs(self, spec):
         """(renderer, container attrs, image attrs) after every prerequisite."""
         settings = self.execution_settings(spec)
@@ -471,7 +485,7 @@ class DockerExecutor(Executor):
         settings = self.execution_settings(spec)
         self._check_prerequisites(settings)
         self._check_remove_worker(settings)
-        self.ensure_renderer_image(spec)
+        self.require_renderer_image(spec)
         try:
             name = target_name(spec, args)
             try:
@@ -540,7 +554,7 @@ class DockerExecutor(Executor):
         if snapshot["spec"].get("action") == REMOVE_ACTION:
             # The worker re-renders and re-checks every refusal under the lock.
             self._check_remove_worker(snapshot["execution"])
-            self.ensure_renderer_image(snapshot["spec"])
+            self.require_renderer_image(snapshot["spec"])
         if snapshot["spec"].get("action") in CONFIG_CHECKED_ACTIONS:
             # Cheap prerequisites only. The worker re-renders and compares under
             # the target lock; rendering here would churn renderer containers on
