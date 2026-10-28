@@ -504,6 +504,11 @@ def test_zai_usage_reports_no_coding_plan_as_a_plan_state(monkeypatch):
     "payload",
     [
         pytest.param({"code": 500, "msg": "system busy", "success": False}, id="other-500"),
+        # Codex r1 Blocker: naming the coding plan is not enough.
+        pytest.param({"code": 500, "msg": "coding plan service unavailable", "success": False},
+                     id="coding-plan-outage"),
+        pytest.param({"code": 500, "msg": "coding plan 查询失败", "success": False},
+                     id="coding-plan-lookup-failed"),
         pytest.param({"code": 1001, "msg": "no coding plan", "success": False}, id="other-code"),
         pytest.param({"code": 500, "success": False}, id="no-msg"),
         pytest.param({"code": 500, "msg": ["coding plan"], "success": False}, id="msg-not-text"),

@@ -43,16 +43,18 @@ logger = logging.getLogger(__name__)
 
 QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 _PLAN_LABEL = {"lite": "Lite", "pro": "Pro", "max": "Max"}
-_NO_PLAN_NOTE = "No GLM Coding Plan limits on this key (pay-as-you-go)."
+_NO_PLAN_MSG = "当前用户不存在coding plan"  # z.ai's no-plan answer, observed live
+_NO_PLAN_NOTE ="No GLM Coding Plan limits on this key (pay-as-you-go)."
 
 
 def _is_no_plan_envelope(payload: object) -> bool:
     """z.ai's answer for a valid key with no Coding Plan.
 
     Live shape: HTTP 200 ``{"code": 500, "msg": "当前用户不存在coding plan",
-    "success": false}`` with no ``data``. Matched narrowly (code 500, no data,
-    msg naming the coding plan) so every other envelope failure stays an
-    error. The msg is only matched, never shown.
+    "success": false}`` with no ``data``. Matched to that exact message
+    ("the current user has no coding plan"), so any other failure that
+    mentions the coding plan, such as an outage, stays an error. The msg is
+    only matched, never shown.
     """
     if not isinstance(payload, dict) or payload.get("data") is not None:
         return False
@@ -63,7 +65,7 @@ def _is_no_plan_envelope(payload: object) -> bool:
         and not isinstance(code, bool)
         and payload.get("success") is False
         and isinstance(msg, str)
-        and "coding plan" in msg.lower()
+        and msg.strip().lower() == _NO_PLAN_MSG
     )
 
 
