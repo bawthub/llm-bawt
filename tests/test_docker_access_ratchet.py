@@ -44,8 +44,9 @@ ENGINE_API = re.compile(
 #: A shell command line that runs the docker CLI.
 SHELL_DOCKER = re.compile(r"(^|[;&|(]|\$\()\s*(sudo\s+)?(\S*/)?docker(-compose)?(\s|$)")
 SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
-#: Files that can hold any access kind spell one of these; skip parsing the rest.
-PREFILTER = re.compile(r"docker|:237[56]|/containers/", re.IGNORECASE)
+#: A file skipped here cannot hold any finding: every access kind needs
+#: "docker" (any case) or an ENGINE_API match, so this is built from them.
+PREFILTER = re.compile(r"docker|" + ENGINE_API.pattern, re.IGNORECASE)
 #: Mounting a socket's parent directory exposes the socket too.
 SOCKET_PARENTS = frozenset({"/run", "/var/run", "/var/run/docker", "/run/docker"})
 DOCKER_MODULES = frozenset({"docker", "aiodocker"})
@@ -169,15 +170,17 @@ def scan_source(tree):
     return found
 
 
+def scan_text(text, filename="<src>"):
+    """A file's findings: the prefilter, then the AST scan. Self-tests use this too."""
+    return scan_source(ast.parse(text, filename=filename)) if PREFILTER.search(text) else set()
+
+
 @cache
 def _source_findings():
     found = []
     for path in sorted(SRC.rglob("*.py")):
-        text = path.read_text()
-        if not PREFILTER.search(text):
-            continue
         rel = path.relative_to(SRC).as_posix()
-        found.extend((rel, kind) for kind in sorted(scan_source(ast.parse(text, filename=str(path)))))
+        found.extend((rel, kind) for kind in sorted(scan_text(path.read_text(), str(path))))
     return tuple(found)
 
 
@@ -233,7 +236,7 @@ def test_every_offender_names_its_owning_task():
 
 
 def _parse(code):
-    return scan_source(ast.parse(code))
+    return scan_text(code)
 
 
 def test_scanner_detects_each_access_kind():
@@ -255,6 +258,10 @@ def test_scanner_detects_each_access_kind():
     assert _parse("import httpx\nhttpx.post(f'{base}/v1.43/containers/{cid}/restart')") == {"engine api"}
     assert _parse("s = 'http+docker://localhost/info'") == {"engine api"}
     assert _parse("api.request('POST', f'/containers/{cid}/restart')") == {"engine api"}
+    # r2: the file-level prefilter must admit every Engine API form.
+    assert _parse("import httpx\nhttpx.get(f'{engine_url}/v1.43/images/json')") == {"engine api"}
+    assert _parse("import httpx\nhttpx.post(f'{u}/v1.43/networks/create')") == {"engine api"}
+    assert _parse("import httpx\nhttpx.get(u + '/v1.43/volumes')") == {"engine api"}
 
 
 def test_scanner_ignores_docstrings_and_lookalikes():
