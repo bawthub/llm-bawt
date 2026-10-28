@@ -25,6 +25,7 @@ from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL 
                                config_binding, validate_compose_config, validate_config_spec)
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec, validate_release_spec
+from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
 from .source_state import SourceChecker
@@ -135,8 +136,7 @@ class Executor(ABC):
 
 _IMAGE_SPEC_PATTERNS = {
     "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
-    "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
-    "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
+    **COMPOSE_SPEC_PATTERNS,
     "image_repository": r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*",
     "github_repository": r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
     "workflow_path": r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml",

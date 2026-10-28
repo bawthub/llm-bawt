@@ -8,7 +8,7 @@ FROM ${OPS_PYTHON_BASE}
 COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/ops/routing_reconcile.py \
      src/llm_bawt/ops/compose_render.py src/llm_bawt/ops/compose_config.py src/llm_bawt/ops/config_reconcile.py \
      src/llm_bawt/ops/app_config_reconcile.py src/llm_bawt/ops/sealed_container.py \
-     src/llm_bawt/ops/source_state.py /ops/
+     src/llm_bawt/ops/source_state.py src/llm_bawt/ops/service_identity.py /ops/
 LABEL llm-bawt.ops.routing-reconcile="1"
 # TASK-1518: this worker renders the target's Compose service, reconciles its
 # configuration and refuses a deploy over configuration drift.
