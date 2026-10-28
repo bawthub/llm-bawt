@@ -414,18 +414,24 @@ class OpsService:
             self.store.mark_terminal(job.id, state=JOB_FAILED, error_text="operation disabled before claim; no action submitted")
             return
         executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
-        try:
-            executor.preflight(snapshot)
-        except ExecutorError as exc:
-            # No target action can have been submitted before the claim. Keep
-            # QUEUED for an operator fixing prerequisites, with a visible reason,
-            # until the preflight deadline fails it (TASK-1169 S1e).
-            self.store.note_queued_error(job.id, str(exc))
-            delay = int(snapshot["execution"].get("start_delay_seconds") or 0)
-            self.store.fail_stale_queued(job.id, deadline_seconds=preflight_deadline_seconds() + delay)
-            return
-        if not self.store.claim_job(job.id, max_concurrent=snapshot["execution"].get("max_concurrent")):
-            return
+        # One preflight outcome at a time per job: the latest pass's result is
+        # the one noted, expired or claimed on (TASK-1169 S1e r1).
+        with self.store.preflight_lock(job.id) as owned:
+            current = self.store.get_job(job.id) if owned else None
+            if current is None or current.state != JOB_QUEUED:
+                return  # Another pass is preflighting it, or one already claimed it.
+            try:
+                executor.preflight(snapshot)
+            except ExecutorError as exc:
+                # No target action can have been submitted before the claim. Keep
+                # QUEUED for an operator fixing prerequisites, with a visible reason,
+                # until the preflight deadline fails it (TASK-1169 S1e).
+                self.store.note_queued_error(job.id, str(exc))
+                delay = int(snapshot["execution"].get("start_delay_seconds") or 0)
+                self.store.fail_stale_queued(job.id, deadline_seconds=preflight_deadline_seconds() + delay)
+                return
+            if not self.store.claim_job(job.id, max_concurrent=snapshot["execution"].get("max_concurrent")):
+                return
         self._submit(job, snapshot, executor)
 
     def _submit(self, job, snapshot, executor, fence=None):

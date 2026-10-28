@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -443,6 +444,38 @@ class OpsStore:
 
     def note_queued_error(self, job_id, error):
         return self._transition(job_id, (JOB_QUEUED,), {"error_text": error})
+
+    @contextmanager
+    def preflight_lock(self, job_id):
+        """Serialize preflight passes on one queued job (TASK-1169 S1e r1).
+
+        Yields True when this pass owns the job's preflight, False when another
+        pass (another process, or a concurrent read) is preflighting it now.
+        Without it, an older failing pass could note its error and expire the
+        job after a newer pass had found preflight passing. A session-level
+        PostgreSQL advisory try-lock on its own connection: never waits, and a
+        dead process's lock ends with its connection. Other engines run
+        single-process and always own it.
+        """
+        self._require()
+        if self.engine.dialect.name != "postgresql":
+            yield True
+            return
+        key = {"k": f"ops-preflight:{job_id}"}
+        conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        try:
+            owned = bool(conn.execute(text("SELECT pg_try_advisory_lock(hashtextextended(:k, 0))"), key).scalar_one())
+            try:
+                yield owned
+            finally:
+                if owned:
+                    try:
+                        conn.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), key)
+                    except Exception:
+                        conn.invalidate()  # Never pool a connection that may still hold it.
+                        raise
+        finally:
+            conn.close()
 
     def fail_stale_queued(self, job_id, *, deadline_seconds, code=PREFLIGHT_FAILED):
         """QUEUED -> FAILED once preflight has kept failing past the deadline
