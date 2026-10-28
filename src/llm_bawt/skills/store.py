@@ -5,7 +5,7 @@ transaction holding a transaction-scoped advisory lock, so the cap check a
 caller makes on the rows it read there cannot race another write.
 
 Rows are exceptions to "every skill enabled": ``enable | disable | inject``
-at bot or tag scope. The adopt-era schema (``off | available | injected``,
+at bot, tag or global (every bot; ``scope_id = '*'``) scope. The adopt-era schema (``off | available | injected``,
 ``off`` bot-only, a ``skill_managed_bots`` table) is migrated in place by
 :meth:`SkillAssignmentStore.migrate`, once, with rows the service computes
 (:func:`.resolver.legacy_rows`), because the conversion needs the skill
@@ -19,15 +19,20 @@ from contextlib import contextmanager
 from sqlalchemy import text
 
 from ..utils.schema import SchemaBootstrapGuard, ensure_relations
-from .resolver import LEGACY_MODES, MODES, Assignment
+from .resolver import GLOBAL, GLOBAL_ID, LEGACY_MODES, MODES, SCOPES, Assignment
 
 _ALL_MODES = ", ".join(f"'{m}'" for m in (*MODES, *LEGACY_MODES))
 _MODE_CHECK = "skill_assignments_mode_vocab"
+_SCOPE_CHECK = "skill_assignments_scope_vocab"
+_SCOPE_EXPR = (f"scope_type IN ({', '.join(repr(s) for s in SCOPES)})"
+               f" AND (scope_type <> '{GLOBAL}' OR scope_id = '{GLOBAL_ID}')")
+#: The unnamed bot/tag-only CHECK the table was first created with.
+_OLD_SCOPE_CHECK = "skill_assignments_scope_type_check"
 
 _RELATIONS = {
     "skill_assignments": f"""
         CREATE TABLE IF NOT EXISTS skill_assignments (
-            scope_type TEXT NOT NULL CHECK (scope_type IN ('bot', 'tag')),
+            scope_type TEXT NOT NULL CONSTRAINT {_SCOPE_CHECK} CHECK ({_SCOPE_EXPR}),
             scope_id TEXT NOT NULL,
             skill_ref TEXT NOT NULL,
             mode TEXT NOT NULL CONSTRAINT {_MODE_CHECK} CHECK (mode IN ({_ALL_MODES})),
@@ -47,6 +52,17 @@ _LEGACY_CHECKS = ("skill_assignments_mode_check", "skill_assignments_off_is_bot_
 
 def _bootstrap(conn) -> None:
     ensure_relations(conn, _RELATIONS)
+    # Widen a pre-global table to the global scope. One catalog read decides,
+    # so an already-widened table takes no ACCESS EXCLUSIVE lock.
+    widened = conn.execute(text(
+        "SELECT count(*) FROM pg_constraint"
+        " WHERE conrelid = 'skill_assignments'::regclass AND conname = :name"),
+        {"name": _SCOPE_CHECK}).scalar_one()
+    if not widened:
+        conn.execute(text(f"""
+            ALTER TABLE skill_assignments
+                DROP CONSTRAINT IF EXISTS {_OLD_SCOPE_CHECK},
+                ADD CONSTRAINT {_SCOPE_CHECK} CHECK ({_SCOPE_EXPR})"""))
 
 
 class SkillAssignmentStore:

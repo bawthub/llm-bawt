@@ -91,6 +91,52 @@ def test_an_enable_with_no_disable_under_it_is_marked_no_effect():
         "a": (True, NO_EFFECT), "b": (True, NO_EFFECT)}
 
 
+def _global(ref, mode, position=0):
+    return Assignment("global", "*", ref, mode, position)
+
+
+def test_the_global_row_reaches_every_bot_below_bot_and_tag_rows():
+    rows = [_global("a", "disable"), _global("b", "disable"), _tag("coder", "b", "enable"),
+            _global("c", "disable"), _bot("c", "enable"), _global("d", "inject"),
+            _tag("coder", "d", "disable"), _global("e", "disable"), _bot("e", "disable"),
+            Assignment("global", "elsewhere", "f", "disable")]
+    source = _Source({r: 10 for r in "abcdef"})
+    got = _by_ref(resolve(_facts(), rows, source, CAPS))
+    assert {r: (e.mode, e.origin, e.applied, e.reason) for r, e in got.items()} == {
+        "a": ("disable", "global", True, None),
+        # An enable over a global disable is an override, from a tag or a bot.
+        "b": ("enable", "tag:coder", True, None),
+        "c": ("enable", "bot", True, None),
+        "d": ("disable", "tag:coder", True, None),
+        "e": ("disable", "bot", True, None),
+    }
+    # A bot with none of those tags still gets every global row ("f" has no
+    # valid global scope_id, so it applies nowhere).
+    plain = _by_ref(resolve(_facts(slug="fixture-two", tags=frozenset()), rows, source, CAPS))
+    assert {r: (e.mode, e.origin) for r, e in plain.items()} == {
+        "a": ("disable", "global"), "b": ("disable", "global"), "c": ("disable", "global"),
+        "d": ("inject", "global"), "e": ("disable", "global")}
+    # Private bots and unsupported harnesses still get nothing from it.
+    assert not resolve(_facts(private=True), rows, source, CAPS).applied
+    assert resolve(_facts(harness="local"), rows, source, CAPS).manifest() is None
+
+
+def test_a_global_enable_over_nothing_is_no_effect():
+    got = _by_ref(resolve(_facts(), [_global("a", "enable")], _Source({"a": 1}), CAPS))
+    assert (got["a"].applied, got["a"].reason) == (True, NO_EFFECT)
+
+
+def test_legacy_rows_keep_global_rows_and_change_nothing_without_them():
+    from llm_bawt.skills.resolver import legacy_rows
+
+    facts = [_facts(), _facts(slug="fixture-two", tags=frozenset())]
+    legacy = [_tag("coder", "a", "injected"), _bot("b", "off")]
+    converted = legacy_rows(legacy, frozenset({"fixture-one"}), facts, ("a", "b", "c"))
+    assert all(r.scope_type != "global" for r in converted)
+    assert legacy_rows([*legacy, _global("c", "disable")], frozenset({"fixture-one"}), facts,
+                       ("a", "b", "c")) == [*converted[:1], _global("c", "disable"), *converted[1:]]
+
+
 def test_legacy_mode_names_resolve_like_the_new_ones():
     assert [canonical_mode(m) for m in ("available", "off", "injected", "enable", "bogus")] == [
         "enable", "disable", "inject", "enable", None]

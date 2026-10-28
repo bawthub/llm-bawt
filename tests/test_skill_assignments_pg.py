@@ -269,6 +269,13 @@ def test_the_migration_keeps_every_bots_effective_skills(world):
                           " VALUES ('bot', 'fixture-two', 'alpha', 'available')"))
     alpha = _entries(world, "fixture-two")["alpha"]
     assert (alpha["mode"], alpha["origin"]) == ("enable", "bot")
+    # A global row changes every bot it reaches; removing it restores the
+    # set every bot had exactly.
+    before = {slug: _effective_set(world.service, slug) for slug in _ADOPT_ERA_EFFECTIVE}
+    world.service.put("global", "*", "beta", "disable", 0, None)
+    assert _effective_set(world.service, "fixture-three")[0] == {"alpha", "gamma"}
+    world.service.remove("global", "*", "beta")
+    assert {slug: _effective_set(world.service, slug) for slug in _ADOPT_ERA_EFFECTIVE} == before
 
 
 def test_a_deferred_migration_writes_nothing_and_resolves_as_before(world, monkeypatch):
@@ -291,6 +298,71 @@ def test_a_deferred_migration_writes_nothing_and_resolves_as_before(world, monke
     assert world.service.migrate() is True
     assert {slug: _effective_set(world.service, slug)
             for slug in _ADOPT_ERA_EFFECTIVE} == _ADOPT_ERA_EFFECTIVE
+
+
+def test_a_global_row_reaches_every_bot_without_per_bot_rows(world):
+    world.service.put("global", "*", "gamma", "disable", 0, "fixture-actor")
+
+    assert _rows(world) == {("global", "*", "gamma"): "disable"}
+    for slug in ("fixture-one", "fixture-two", "fixture-three"):
+        gamma = _entries(world, slug)["gamma"]
+        assert (gamma["mode"], gamma["origin"], gamma["applied"]) == ("disable", "global", True)
+        assert _effective_set(world.service, slug) == ({"alpha", "beta"}, [])
+    assert [c["global_mode"] for c in world.service.catalog()] == [None, None, "disable"]
+    # A tag or bot row still wins over it.
+    world.service.put("tag", ROLE, "gamma", "enable", 0, None)
+    world.service.put("bot", "fixture-three", "gamma", "enable", 0, None)
+    assert _entries(world, "fixture-one")["gamma"]["origin"] == f"tag:{ROLE}"
+    assert _effective_set(world.service, "fixture-three") == ({"alpha", "beta", "gamma"}, [])
+    world.service.remove("global", "*", "gamma")
+    assert world.service.resolve_bot("fixture-three").manifest() is None
+
+
+def test_global_scope_needs_the_star_id_in_the_service_and_the_schema(world):
+    assert _status(world.service.put, "global", "fixture-one", "alpha", "disable", 0,
+                   None)[0] == 422
+    with pytest.raises(IntegrityError):
+        with world.rig.engine.begin() as conn:
+            conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
+                              " VALUES ('global', 'fixture-one', 'alpha', 'disable')"))
+
+
+def test_a_global_inject_that_pushes_any_bot_over_the_cap_names_it_and_rolls_back(world):
+    world.service.put("bot", "fixture-two", "alpha", "inject", 0, None)
+    world.service.put("bot", "fixture-two", "beta", "inject", 1, None)
+    world.service.put("global", "*", "alpha", "inject", 0, None)  # fits everyone
+
+    status, detail = _status(world.service.put, "global", "*", "gamma", "inject", 5, None)
+
+    assert status == 409 and detail["code"] == "over_cap"
+    # fixture-two is over for certain; the others carry only alpha plus gamma.
+    assert "fixture-two" in [b["bot"] for b in detail["bots"]]
+    assert ("global", "*", "gamma") not in _rows(world)
+
+
+def test_a_pre_global_table_is_widened_in_place(world):
+    with world.rig.engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE skill_assignments (
+                scope_type TEXT NOT NULL CHECK (scope_type IN ('bot', 'tag')),
+                scope_id TEXT NOT NULL, skill_ref TEXT NOT NULL,
+                mode TEXT NOT NULL CONSTRAINT skill_assignments_mode_vocab
+                    CHECK (mode IN ('enable', 'disable', 'inject', 'available', 'off', 'injected')),
+                position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+                updated_by TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (scope_type, scope_id, skill_ref))"""))
+        conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
+                          " VALUES ('bot', 'fixture-one', 'beta', 'disable')"))
+
+    world.service.put("global", "*", "gamma", "disable", 0, None)
+
+    assert _rows(world) == {("bot", "fixture-one", "beta"): "disable",
+                            ("global", "*", "gamma"): "disable"}
+    with world.rig.engine.connect() as conn:
+        assert set(conn.execute(text(
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'skill_assignments'::regclass"
+            " AND conname LIKE 'skill_assignments_scope%'")).scalars()) == {
+                "skill_assignments_scope_vocab"}
 
 
 def test_removing_a_missing_row_is_404_and_changes_nothing(world):

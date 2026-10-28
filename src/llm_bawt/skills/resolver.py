@@ -5,8 +5,8 @@ API and the prompt section all resolve through :func:`resolve`, so the rules
 below exist once:
 
 - every skill in the catalog is enabled by default; rows are exceptions;
-- a bot row beats tag rows; among the tag rows a bot carries,
-  ``disable`` > ``inject`` > ``enable``;
+- a bot row beats tag rows, which beat the global ("all bots") row; among
+  the tag rows a bot carries, ``disable`` > ``inject`` > ``enable``;
 - a private bot gets nothing, whatever its rows say;
 - only agent bots on a supported harness apply skills;
 - a bundle bot's skills come from its bundle, not this source;
@@ -31,6 +31,12 @@ from .harness import capabilities_for
 
 ENABLE, DISABLE, INJECT = "enable", "disable", "inject"
 MODES = (ENABLE, DISABLE, INJECT)
+BOT, TAG, GLOBAL = "bot", "tag", "global"
+SCOPES = (BOT, TAG, GLOBAL)
+#: The one scope_id a global row carries.
+GLOBAL_ID = "*"
+#: Scope precedence: a lower number wins.
+_SCOPE_RANK = {BOT: 0, TAG: 1, GLOBAL: 2}
 #: The adopt-era vocabulary, still accepted on read for one release so rows an
 #: older process writes during a rolling restart resolve the same way.
 LEGACY_MODES = {"available": ENABLE, "off": DISABLE, "injected": INJECT}
@@ -66,7 +72,7 @@ class BotFacts:
 
 @dataclass(frozen=True)
 class Assignment:
-    scope_type: str  # "bot" | "tag"
+    scope_type: str  # "bot" | "tag" | "global" (scope_id "*")
     scope_id: str
     skill_ref: str
     mode: str
@@ -84,7 +90,7 @@ class Caps:
 class ResolvedSkill:
     ref: str
     mode: str
-    origin: str  # "bot" or "tag:<slug>"
+    origin: str  # "bot", "tag:<slug>" or "global"
     position: int
     source: str
     applied: bool
@@ -163,25 +169,37 @@ class SkillResolution:
 
 
 def _effective_rows(facts: BotFacts, rows: Iterable[Assignment]
-                    ) -> tuple[dict[str, Assignment], frozenset[str]]:
-    """One winning row per ref for this bot, and the refs a tag disables."""
-    bot_rows: dict[str, Assignment] = {}
-    tag_rows: dict[str, Assignment] = {}
+                    ) -> tuple[dict[str, Assignment], dict[str, int]]:
+    """One winning row per ref for this bot (bot > tag > global), and for each
+    ref a lower layer disables, the rank of the lowest such layer."""
+    layers: dict[str, dict[str, Assignment]] = {BOT: {}, TAG: {}, GLOBAL: {}}
     for raw in rows:
         mode = canonical_mode(raw.mode)
         if mode is None:
             continue
         row = raw if mode == raw.mode else Assignment(
             raw.scope_type, raw.scope_id, raw.skill_ref, mode, raw.position, raw.updated_by)
-        if row.scope_type == "bot" and row.scope_id == facts.slug:
-            bot_rows[row.skill_ref] = row
-        elif row.scope_type == "tag" and row.scope_id in facts.tags:
-            held = tag_rows.get(row.skill_ref)
+        if row.scope_type == BOT and row.scope_id == facts.slug:
+            layers[BOT][row.skill_ref] = row
+        elif row.scope_type == GLOBAL and row.scope_id == GLOBAL_ID:
+            layers[GLOBAL][row.skill_ref] = row
+        elif row.scope_type == TAG and row.scope_id in facts.tags:
+            held = layers[TAG].get(row.skill_ref)
             key = (_TAG_RANK[row.mode], row.position, row.scope_id)
             if held is None or key < (_TAG_RANK[held.mode], held.position, held.scope_id):
-                tag_rows[row.skill_ref] = row
-    tag_disabled = frozenset(r for r, row in tag_rows.items() if row.mode == DISABLE)
-    return {**tag_rows, **bot_rows}, tag_disabled
+                layers[TAG][row.skill_ref] = row
+    disabled_rank: dict[str, int] = {}
+    for scope in (BOT, TAG, GLOBAL):  # ascending rank, so the last write is the lowest layer
+        for ref, row in layers[scope].items():
+            if row.mode == DISABLE:
+                disabled_rank[ref] = _SCOPE_RANK[scope]
+    return {**layers[GLOBAL], **layers[TAG], **layers[BOT]}, disabled_rank
+
+
+def origin_of(row: Assignment) -> str:
+    if row.scope_type == TAG:
+        return f"tag:{row.scope_id}"
+    return row.scope_type
 
 
 def _skip_reason(facts: BotFacts) -> str | None:
@@ -196,7 +214,7 @@ def _skip_reason(facts: BotFacts) -> str | None:
 
 def resolve(facts: BotFacts, rows: Iterable[Assignment], source: SkillSource,
             caps: Caps) -> SkillResolution:
-    winners, tag_disabled = _effective_rows(facts, rows)
+    winners, disabled_rank = _effective_rows(facts, rows)
     blanket = _skip_reason(facts)
     order = sorted(winners.values(), key=lambda r: (r.position, r.skill_ref))
     needs_catalog = blanket is None and any(r.mode == DISABLE for r in order)
@@ -207,8 +225,7 @@ def resolve(facts: BotFacts, rows: Iterable[Assignment], source: SkillSource,
     entries: list[ResolvedSkill] = []
     total = 0
     for row in order:
-        origin = "bot" if row.scope_type == "bot" else f"tag:{row.scope_id}"
-        base = dict(ref=row.skill_ref, mode=row.mode, origin=origin,
+        base = dict(ref=row.skill_ref, mode=row.mode, origin=origin_of(row),
                     position=row.position, source=source.kind)
         if blanket is not None:
             entries.append(ResolvedSkill(**base, applied=False, reason=blanket))
@@ -223,7 +240,8 @@ def resolve(facts: BotFacts, rows: Iterable[Assignment], source: SkillSource,
             continue
         if row.mode == ENABLE:
             present = source.get(row.skill_ref) is not None
-            overrides = row.scope_type == "bot" and row.skill_ref in tag_disabled
+            # Applies only over a disable from a lower-precedence layer.
+            overrides = disabled_rank.get(row.skill_ref, -1) > _SCOPE_RANK[row.scope_type]
             reason = SOURCE_MISSING if not present else (None if overrides else NO_EFFECT)
             entries.append(ResolvedSkill(**base, applied=present, reason=reason))
             continue
@@ -272,7 +290,8 @@ def legacy_rows(rows: Iterable[Assignment], managed: frozenset[str],
                for r in rows]
     tag_rows = [r for r in renamed if r.scope_type == "tag"]
     facts = {f.slug: f for f in bots}
-    out = list(tag_rows)
+    # Global rows postdate the adopt era (its CHECK refused them); kept as-is.
+    out = list(tag_rows) + [r for r in renamed if r.scope_type == GLOBAL]
     for r in renamed:
         bot = facts.get(r.scope_id) if r.scope_type == "bot" else None
         if r.scope_type != "bot" or bot is None or bot.private:

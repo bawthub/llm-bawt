@@ -22,7 +22,10 @@ from ..bot_tags.facade import BotTags, TagSnapshot
 from ..bot_tags.vocabulary import BehaviorTag
 from .harness import capabilities_for
 from .resolver import (
+    GLOBAL,
+    GLOBAL_ID,
     MODES,
+    TAG,
     Assignment,
     BotFacts,
     Caps,
@@ -163,7 +166,11 @@ class SkillService:
         with self.store.read() as conn:
             rows = self.store.rows(conn)
         counts: dict[str, dict[str, int]] = {}
+        global_mode: dict[str, str] = {}
         for row in rows:
+            if row.scope_type == GLOBAL:
+                global_mode[row.skill_ref] = canonical_mode(row.mode) or row.mode
+                continue
             bucket = counts.setdefault(row.skill_ref, {"bot": 0, "tag": 0})
             bucket[row.scope_type] += 1
         out = []
@@ -175,6 +182,8 @@ class SkillService:
                 "content_sha": body.content_sha if body else None,
                 "file_count": len(self.source.tree(entry.ref)),
                 "assignments": counts.get(entry.ref, {"bot": 0, "tag": 0}),
+                # The "all bots" row's mode, or None when there is none.
+                "global_mode": global_mode.get(entry.ref),
             })
         return out
 
@@ -299,8 +308,13 @@ class SkillService:
         if scope_type == "bot":
             self._writable_bot(world, scope_id)
             return [scope_id]
-        if scope_type != "tag":
-            raise SkillServiceError(422, "scope_type must be 'bot' or 'tag'")
+        if scope_type == GLOBAL:
+            if scope_id != GLOBAL_ID:
+                raise SkillServiceError(422, f"a global row's scope_id must be {GLOBAL_ID!r}")
+            # Every bot, so the cap check covers each one a global inject reaches.
+            return sorted(world.bots)
+        if scope_type != TAG:
+            raise SkillServiceError(422, "scope_type must be 'bot', 'tag' or 'global'")
         if scope_id not in world.snapshot.catalog:
             raise SkillServiceError(422, f"unknown tag {scope_id!r}")
         return sorted(s for s in world.bots if scope_id in world.snapshot.tags.get(s, ()))
