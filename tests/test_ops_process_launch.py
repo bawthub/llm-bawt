@@ -427,6 +427,8 @@ def test_a_respawn_is_revalidated_first_and_a_refusal_propagates_as_after_a_prio
     # The earlier spawn's child may have outlived its dispatcher: nothing is certain.
     assert caught.value.prior_attempt is True and isinstance(caught.value.cause, SelfTargetError)
     assert checks == ["checked"] and JOB not in launcher._children
+    # The fence is published before the refusal is raised.
+    assert (directory / "abandoned.json").exists()
     assert json.loads((directory / "spawn-intent.json").read_text())["attempt"] == 1
     # Observing a finished job never revalidates (terminal receipt reads stay intact).
     (directory / "receipt.json").write_text(json.dumps({"state": "succeeded", "started_at": "t"}))
@@ -456,11 +458,11 @@ def test_a_respawn_refused_by_the_self_check_ends_lost_and_is_never_retried(rig,
     assert result.state == "lost" and result.error.startswith("recovery start refused: " + SELF_REQUIRES_ISOLATED)
     assert "side effects unknown" in result.error and JOB not in launcher._children
     assert not (directory / "receipt.json").exists() and (directory / "abandoned.json").exists()
-    # Lost from now on: no second check, no start, even once the check would pass.
+    assert "not replayed" in result.error and "import" not in result.error
+    # Fenced from now on: no second check, no start, even once the check would pass.
     monkeypatch.setattr(executor, "self_target", lambda _snapshot: checks.append("again"))
     again = executor.reconcile(job_id=JOB, snapshot=snapshot, output_tail_bytes=4096)
-    assert (again.state, again.error) == ("lost", result.error) and checks == ["checked"]
-    assert JOB not in launcher._children
+    assert again.state == "lost" and checks == ["checked"] and JOB not in launcher._children
 
 
 def test_a_failed_respawn_is_unconfirmed(rig):
@@ -513,3 +515,16 @@ def test_the_docker_executor_runs_process_mode_in_the_process_launcher():
     snapshot = {"execution": {"execution_mode": "process"}, "operation": {"execution_mode": "process"}}
     assert isinstance(executor._launcher_for(snapshot), ProcessLauncher)
     assert executor.supported_execution_modes() == {"process", "isolated"}
+
+
+def test_the_abandoned_fence_alone_stops_a_respawn_without_revalidating(rig):
+    # Crash after the fence was published, before anything else was written.
+    launcher, settings, root = _fresh(rig)
+    directory, digest = _job(root, "ok")
+    (directory / "spawn-intent.json").write_text(json.dumps({"attempt": 1}))
+    (directory / "abandoned.json").write_text(json.dumps({"reason": "recovery start refused: x"}))
+    checks = []
+    assert launcher.probe(job_id=JOB, directory=directory, digest=digest, settings=settings,
+                          revalidate=lambda: checks.append("checked")) is Liveness.START_UNCONFIRMED
+    assert checks == [] and JOB not in launcher._children
+    assert json.loads((directory / "spawn-intent.json").read_text())["attempt"] == 1

@@ -6,9 +6,10 @@ import uuid
 import pytest
 
 from llm_bawt.ops import JOB_ACCEPTED, JOB_QUEUED, OpsDispatchError, OpsService
+from llm_bawt.ops.models import JOB_LOST
 from llm_bawt.ops.execution_mode import SELF_TARGET_CARD_LINE, with_card_lines
 from llm_bawt.ops.config_reconcile import ACTION as CONFIG_ACTION
-from llm_bawt.ops.executor import ExecutorError
+from llm_bawt.ops.executor import ExecutorError, ReconcileResult
 from llm_bawt.ops.image_deploy import DEPLOY_ACTION, ROLLBACK_ACTION
 from llm_bawt.ops.plan_reconcile import ACTION as PLAN_ACTION
 from llm_bawt.ops.self_target import (SELF_IDENTITY_UNKNOWN, SELF_REQUIRES_ISOLATED, SELF_STOP_UNRECOVERABLE,
@@ -292,3 +293,41 @@ def test_the_docker_executor_needs_its_own_full_id(tmp_path, monkeypatch):
     client.containers.rows["fake-app"].id = OWN_ID[:12]
     with pytest.raises(ExecutorError, match=SELF_IDENTITY_UNKNOWN):
         executor.self_target(snapshot)
+
+
+def test_the_abandoned_fence_alone_stops_a_created_worker_start_without_revalidating(tmp_path, monkeypatch):
+    executor, client, snapshot = docker_setup(tmp_path, monkeypatch)
+    original = client.containers.create
+
+    def create(*args, **kwargs):
+        original(*args, **kwargs)
+        raise TimeoutError("response lost")
+    client.containers.create = create
+    with pytest.raises(ExecutorError):
+        executor.dispatch(job_id=DOCKER_JOB, snapshot=snapshot)
+    worker = client.containers.rows[executor.worker_name(DOCKER_JOB)]
+    directory = tmp_path / DOCKER_JOB
+    assert not (directory / "start-attempt.json").exists()
+    (directory / "abandoned.json").write_text('{"reason": "recovery start refused: x"}')
+    checks = []
+    executor.self_target = lambda _snapshot: checks.append("checked")
+    result = executor.reconcile(job_id=DOCKER_JOB, snapshot=snapshot)
+    assert result.state == "lost" and checks == [] and worker.starts == 0
+
+
+def test_a_lost_refusal_is_terminal_for_the_service_and_a_late_receipt_is_not_imported():
+    # The contract a prior-attempt refusal relies on: lost is terminal, never reopened.
+    service, store, executor = _service("isolated", '{"action":"restart","container_name":"web"}')
+    job = service.dispatch_job(operation_slug="test.self", args={"target": "a"},
+                               idempotency_key=uuid.uuid4().hex)
+    executor.next_reconcile = ReconcileResult(
+        "lost", error="recovery start refused: x; an earlier start may still run; side effects unknown, not replayed")
+    service.get_job_status(job["id"])
+    assert store.get_job(job["id"]).state == JOB_LOST
+    calls = len(executor.reconcile_calls)
+    executor.next_reconcile = ReconcileResult("succeeded", 0, "", None, "t", "t")  # The earlier start's late receipt.
+    service.get_job_status(job["id"])
+    service.reconcile_active_jobs()
+    row = store.get_job(job["id"])
+    assert row.state == JOB_LOST and "not replayed" in row.error_text
+    assert len(executor.reconcile_calls) == calls

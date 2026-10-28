@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from .executor_types import ExecutorError
 from .worker import atomic_json, utcnow
-from .worker_launch import Liveness, WorkerLauncher, container_worker_name, refuse_recovery
+from .worker_launch import ABANDONED, Liveness, WorkerLauncher, container_worker_name, refuse_recovery
 
 #: The files ``docker/Dockerfile.ops-worker`` copies to ``/ops/`` (pinned by a test).
 WORKER_FILES = frozenset({
@@ -395,16 +395,16 @@ class ProcessLauncher(WorkerLauncher):
         if receipt and (receipt.get("state") in _TERMINAL or receipt.get("started_at")):
             if receipt.get("state") not in _TERMINAL:
                 # Execution began and the worker is gone: never replay it.
-                atomic_json(directory / "abandoned.json",
+                atomic_json(directory / ABANDONED,
                             {"reason": "worker process ended after execution began; side effects unknown"})
             return Liveness.EXITED
         intent = _read_json(directory / "spawn-intent.json") or {}
         attempt = int(intent.get("attempt") or 0)
-        if attempt >= 2 or settings is None or not directory.is_dir():
-            return Liveness.START_UNCONFIRMED
+        if attempt >= 2 or settings is None or not directory.is_dir() or (directory / ABANDONED).exists():
+            return Liveness.START_UNCONFIRMED  # Fenced or spent: never revalidated, never respawned.
         # A spawn was intended before, and its child may have outlived its
         # dispatcher (own session): a refusal leaves side effects unknown.
-        refuse_recovery(revalidate, prior_attempt=True)
+        refuse_recovery(revalidate, directory, prior_attempt=True)
         try:
             # Nothing began executing: one respawn of the SAME request. The
             # worker re-checks the start delay and the fence inside.

@@ -43,14 +43,11 @@ from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODE
 from .process_launch import ProcessLauncher
 from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
                           is_full_container_id, self_target as classify_self_target)
-from .worker_launch import ContainerLauncher, Liveness, RecoveryRefused, container_worker_name
+from .worker_launch import ABANDONED, ContainerLauncher, Liveness, RecoveryRefused, container_worker_name
 from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector, utcnow)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
-#: Written when a recovery start after an earlier start attempt is refused:
-#: the job is lost from then on, never probed or started again.
-REFUSED_RECOVERY = "recovery-refused.json"
 # Ops whose target configuration is compared with its Compose service (TASK-1518),
 # and the worker capability labels each needs (TASK-1474: the app reconcile and
 # its source guard; an app worker without the guard would swap unpublished source;
@@ -702,7 +699,7 @@ class DockerExecutor(Executor):
         directory.mkdir(mode=0o700, exist_ok=True)
         with (directory / "submission.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if (directory / "abandoned.json").exists():
+            if (directory / ABANDONED).exists():
                 raise ExecutorError("submission abandoned by recovery; never replay")
             return self._dispatch_locked(job_id=job_id, snapshot=snapshot, fence=fence)
 
@@ -761,22 +758,20 @@ class DockerExecutor(Executor):
                                           output_tail_bytes=output_tail_bytes, fence=fence)
 
     @staticmethod
-    def _refuse_recovery_start(directory, path, job_id, digest, exc: RecoveryRefused):
+    def _refuse_recovery_start(path, job_id, digest, exc: RecoveryRefused):
         """A recovery start refused by the self-target check, never retried.
 
         With no earlier start attempt nothing ran: the job ends failed, and the
         terminal receipt makes every later reconcile read that outcome. After an
-        earlier attempt that start may still run, so the job is lost with side
-        effects unknown: ``abandoned.json`` stops a replayed dispatch and
-        :data:`REFUSED_RECOVERY` stops every later reconcile from probing (and
-        so revalidating and starting) again, while a terminal receipt the
-        earlier start writes later is still imported."""
+        earlier attempt that start may still run: exactly an unconfirmed start,
+        the job ends lost with side effects unknown and is not replayed (the
+        launcher already published the :data:`ABANDONED` fence). As on every
+        lost path, a receipt that earlier start might write later is not
+        imported: lost is terminal for the service."""
         error = f"recovery start refused: {exc}"
         if exc.prior_attempt:
-            error = f"{error}; an earlier start may still run, side effects unknown"
-            atomic_json(directory / "abandoned.json", {"reason": error})
-            atomic_json(directory / REFUSED_RECOVERY, {"error": error})
-            return ReconcileResult("lost", error=error)
+            return ReconcileResult("lost", error=f"{error}; an earlier start may still run; "
+                                                 "side effects unknown, not replayed")
         finished = utcnow()
         atomic_json(path, {"job_id": job_id, "request_hash": digest, "state": "failed", "exit_code": None,
                            "accepted_at": None, "started_at": None, "finished_at": finished,
@@ -812,18 +807,15 @@ class DockerExecutor(Executor):
                     return ReconcileResult(state, receipt.get("exit_code"),
                         (receipt.get("output_tail") or "").encode()[-max(1, output_tail_bytes):].decode(errors="replace"),
                         receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"))
-            refused = directory / REFUSED_RECOVERY
-            if refused.exists():
-                return ReconcileResult("lost", error=(json.loads(refused.read_text()) or {}).get("error"))
             try:
                 # A recovery start is a dispatch: re-run the self-target check first.
                 liveness = self._launcher_for(snapshot).probe(
                     job_id=job_id, directory=directory, digest=digest, settings=snapshot["execution"],
                     revalidate=lambda: self.self_target(snapshot))
             except RecoveryRefused as exc:
-                return self._refuse_recovery_start(directory, path, job_id, digest, exc)
+                return self._refuse_recovery_start(path, job_id, digest, exc)
             if liveness is Liveness.MISSING:
-                atomic_json(directory / "abandoned.json", {"reason": "worker missing during reconciliation"})
+                atomic_json(directory / ABANDONED, {"reason": "worker missing during reconciliation"})
                 return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")
             if liveness is Liveness.START_UNCONFIRMED:
                 return ReconcileResult("lost", output_tail=self._diagnostics(snapshot, directory, output_tail_bytes),

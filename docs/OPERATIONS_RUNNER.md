@@ -378,6 +378,16 @@ or spawn:
 | `self_management_requires_isolated` | A process-mode job targets the ops service: the worker would die with it. Set the row to `isolated`. |
 | `self_stop_unrecoverable` | `stop` or `remove` of the ops service, in either mode: nothing would be left to import the receipt. |
 
+A recovery start (starting a never-started `created` worker container, or
+respawning an unconfirmed process spawn) is a dispatch and re-runs these
+checks first. Before any start attempt, a refusal is certain: the job ends
+`failed`, nothing ran. After an earlier attempt that start may still run, so
+a refusal ends the job `lost` (side effects unknown, not replayed), exactly like
+an unconfirmed start. As on every `lost` path, a receipt the earlier start
+writes later is not imported. `abandoned.json`, written in one atomic step and
+checked under the submission lock before every start, is the only
+never-start-again fence.
+
 An isolated restart, recreate, config reconcile or image deploy/rollback of
 the ops service is allowed. The worker container outlives the restart, and
 the new ops service imports its receipt. The approval card says "Target is

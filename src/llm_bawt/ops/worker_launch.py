@@ -62,25 +62,41 @@ class WorkerLauncher(ABC):
         return None
 
 
+#: The one never-start-again fence of a job (TASK-1169 S4c). Written in a
+#: single fsynced ``atomic_json`` and read under the job's ``submission.lock``
+#: (held by every dispatch and reconcile) before every start: dispatch, the
+#: created-container start and the process respawn.
+ABANDONED = "abandoned.json"
+
+
 class RecoveryRefused(ExecutorError):
     """``revalidate`` refused a recovery start (TASK-1169 S4c).
 
     ``prior_attempt`` says whether an earlier start of this job was already
     attempted. If so, that start may still be running, so side effects are
-    unknown. If not, nothing of this job ever ran."""
+    unknown and the job is fenced (:data:`ABANDONED`) before this is raised:
+    it ends lost like an unconfirmed start and is never started again. If
+    not, nothing of this job ever ran."""
 
     def __init__(self, cause: ExecutorError, *, prior_attempt: bool):
         super().__init__(str(cause))
         self.cause, self.prior_attempt = cause, prior_attempt
 
 
-def refuse_recovery(revalidate: Callable[[], None] | None, *, prior_attempt: bool) -> None:
-    """Run ``revalidate`` before a recovery start; a refusal says what is known."""
+def refuse_recovery(revalidate: Callable[[], None] | None, directory: Path, *, prior_attempt: bool) -> None:
+    """Run ``revalidate`` before a recovery start; a refusal says what is known.
+
+    The caller holds the job's ``submission.lock`` and has checked the fence.
+    After a prior attempt the fence is published before raising, so a crash
+    before it leaves the job unfenced (the next reconcile revalidates again)
+    and a crash after it forbids every start."""
     if revalidate is None:
         return
     try:
         revalidate()
     except ExecutorError as exc:
+        if prior_attempt:
+            atomic_json(directory / ABANDONED, {"reason": f"recovery start refused: {exc}"})
         raise RecoveryRefused(exc, prior_attempt=prior_attempt) from exc
 
 
@@ -162,10 +178,12 @@ class ContainerLauncher(WorkerLauncher):
             if worker.status != "created":
                 return True
             marker = directory / "start-attempt.json"
-            if marker.exists():
-                return False  # An earlier start may still complete: unconfirmed, never re-checked as certain.
+            if marker.exists() or (directory / ABANDONED).exists():
+                # An earlier start may still complete, or the job is fenced:
+                # unconfirmed, never revalidated, never started.
+                return False
             # No start was ever attempted, so a refusal here is certain: nothing ran.
-            refuse_recovery(revalidate, prior_attempt=False)
+            refuse_recovery(revalidate, directory, prior_attempt=False)
             atomic_json(marker, {"start_attempted": True})
             worker.start()
             return True
