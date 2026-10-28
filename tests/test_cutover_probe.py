@@ -234,6 +234,13 @@ def _client_error(status):
     (_client_error(404), (False, 404, "http_error")),
     (EndpointConnectionError(endpoint_url="http://s3.test"), (False, None, "unreachable")),
     (ConnectTimeoutError(endpoint_url="http://s3.test"), (False, None, "timeout")),
+    # A malformed "success" is not a pass (Codex, TASK-1476 s3 review).
+    ({}, (False, None, "http_error")),
+    (None, (False, None, "http_error")),
+    ({"ResponseMetadata": {}}, (False, None, "http_error")),
+    ({"ResponseMetadata": {"HTTPStatusCode": "200"}}, (False, None, "http_error")),
+    ({"ResponseMetadata": {"HTTPStatusCode": True}}, (False, None, "http_error")),
+    ({"ResponseMetadata": {"HTTPStatusCode": 301}}, (False, 301, "http_error")),
 ])
 def test_s3_head(outcome, expected):
     fake = FakeS3(outcome)

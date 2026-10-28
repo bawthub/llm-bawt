@@ -378,7 +378,12 @@ class S3HeadProbe(Probe):
         except EndpointConnectionError:
             return ProbeResult.failed(pc.UNREACHABLE)
         status = (response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
-        return ProbeResult.passed(status if isinstance(status, int) and not isinstance(status, bool) else None)
+        if not isinstance(status, int) or isinstance(status, bool):
+            # A HEAD that returned no status proves nothing about the bucket.
+            return ProbeResult.failed(pc.HTTP_ERROR)
+        if not 200 <= status < 300:
+            return ProbeResult.failed(pc.HTTP_ERROR, status)
+        return ProbeResult.passed(status)
 
 
 def record_sources() -> dict[str, str]:
