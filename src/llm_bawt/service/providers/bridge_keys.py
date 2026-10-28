@@ -51,6 +51,24 @@ def is_zai_no_plan_envelope(payload: object) -> bool:
     )
 
 
+def is_exact_zai_no_plan_body(status: int, payload: object) -> bool:
+    """The strict form a key check may accept as "valid key, no plan".
+
+    Exactly HTTP 200 and exactly ``{"code": 500, "msg": ZAI_NO_PLAN_MSG,
+    "success": false}``: no padding or case change in msg, and no ``data``
+    key at all (not even null). Verification gates use this; the usage
+    reader keeps the lenient :func:`is_zai_no_plan_envelope`.
+    """
+    return (
+        status == 200
+        and isinstance(payload, dict)
+        and set(payload) == {"code", "msg", "success"}
+        and _int_code(payload["code"]) == 500
+        and payload["success"] is False
+        and payload["msg"] == ZAI_NO_PLAN_MSG
+    )
+
+
 class ZaiEnvelopeError:
     """A z.ai failure carried inside an HTTP 200 body.
 
@@ -92,7 +110,7 @@ def _zai_body_error(resp: httpx.Response) -> str | None:
         payload = resp.json()
     except ValueError:
         return "Z.AI key check returned a non-JSON body"
-    if is_zai_no_plan_envelope(payload):
+    if is_exact_zai_no_plan_body(resp.status_code, payload):
         return None  # the key authenticated; it just has no Coding Plan
     failure = ZaiEnvelopeError.from_payload(payload)
     if failure is None:

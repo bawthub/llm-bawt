@@ -282,6 +282,8 @@ def _zai_response(payload):
         ({"code": 1001, "msg": "?"}, "Z.AI key check failed with code 1001"),
         (_ZAI_NO_PLAN, None),  # valid key without a Coding Plan is a plan state, not a bad key
         ({**_ZAI_NO_PLAN, "code": 401}, "Z.AI rejected the API key"),
+        ({**_ZAI_NO_PLAN, "data": None}, "Z.AI key check failed with code 500"),
+        ({**_ZAI_NO_PLAN, "msg": " 当前用户不存在CODING PLAN"}, "Z.AI key check failed with code 500"),
         (_ZAI_PLAN, None),
         (_ZAI_PAYG, None),
     ],

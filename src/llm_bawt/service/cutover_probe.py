@@ -196,7 +196,7 @@ class ZaiProbe(ApiKeyProbe):
     def accept(self, response: httpx.Response) -> str:
         from llm_bawt.service.providers.bridge_keys import (  # noqa: PLC0415
             ZaiEnvelopeError,
-            is_zai_no_plan_envelope,
+            is_exact_zai_no_plan_body,
         )
 
         # z.ai rejects a key inside an HTTP 200 body. "No Coding Plan" also
@@ -205,7 +205,7 @@ class ZaiProbe(ApiKeyProbe):
         # ``ok``: the probe line's ``ok`` is true exactly when code is ``ok``,
         # a contract the ops worker image enforces.
         payload = _json(response)
-        if is_zai_no_plan_envelope(payload):
+        if is_exact_zai_no_plan_body(response.status_code, payload):
             return pc.OK
         failure = ZaiEnvelopeError.from_payload(payload)
         if failure is None:
