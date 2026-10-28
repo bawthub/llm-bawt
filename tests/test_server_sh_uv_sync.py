@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -51,10 +52,18 @@ def run_start(tmp_path):
             ["bash", str(app / "server.sh"), "start", *args],
             env=env, check=True, capture_output=True, text=True, timeout=60,
         )
-        calls = log.read_text().splitlines()
-        assert any("llm-mcp-server" in c for c in calls)
-        assert any("llm-service" in c for c in calls)
-        return calls
+        # File mode backgrounds both services (`nohup uv run … &`) and returns
+        # without waiting, so the fake uv may not have logged yet. Wait for
+        # both role lines; the deadline only guards a hang.
+        deadline = time.monotonic() + 30
+        while True:
+            calls = log.read_text().splitlines() if log.exists() else []
+            if (any("llm-mcp-server" in c for c in calls)
+                    and any("llm-service" in c for c in calls)):
+                return calls
+            if time.monotonic() > deadline:
+                pytest.fail(f"fake uv never saw both services: {calls}")
+            time.sleep(0.02)
 
     run.marker = tmp_path / "dockerenv"  # type: ignore[attr-defined]
     return run
