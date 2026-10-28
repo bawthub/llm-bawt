@@ -25,7 +25,9 @@ depends_on, security_opt, healthcheck and tmpfs. Its ``build`` and
 or pulls; a declared ``image`` only names the tag the build carries
 (:func:`built_image_tag`). A third-party image run by a mutable tag
 (crawl4ai, TASK-1476) uses :data:`PINNED_PROCESS_PROFILE`: the pinned keys plus
-the process settings it declares.
+the process settings it declares. A Compose-built DEV service (the BawtHub
+hot-reload frontend, TASK-1649) uses :data:`DEV_PROFILE`: the built keys plus
+its memory cap (``mem_limit``/``memswap_limit``).
 
 Healthcheck, tmpfs and a declared entrypoint (TASK-1476) are stored in the
 desired configuration only when declared, so a service that declares none
@@ -118,6 +120,14 @@ BUILT_PROFILE = ServiceProfile("built", frozenset({
 PINNED_PROCESS_PROFILE = ServiceProfile("pinned-process", SERVICE_KEYS | {
     "container_name", "depends_on", "ports", "tmpfs"}, built=False, models_process=True,
     pull_policies=PULL_POLICIES)
+# TASK-1649: a Compose-built DEV service (the BawtHub hot-reload frontend). The
+# built keys plus its memory cap, which this profile owns: the desired
+# configuration always carries ``memory`` (0 = unlimited) and the recreate
+# sets it.
+MEMORY_KEYS = ("mem_limit", "memswap_limit")
+DEV_PROFILE = ServiceProfile("dev", BUILT_PROFILE.keys | set(MEMORY_KEYS), built=True, models_process=True,
+                             pull_policies=BUILT_PULL_POLICIES)
+_MAX_MEMORY = 1 << 50
 
 
 def built_image_tag(value) -> str:
@@ -281,6 +291,33 @@ def _health_state(value) -> dict | None:
             **{field: int(value.get(field) or 0) for _, field in _HEALTH_DURATIONS}}
 
 
+def _bytes(value, key: str) -> int:
+    """A rendered byte count (Compose renders ``4g`` as ``"4294967296"``)."""
+    if isinstance(value, str) and re.fullmatch(r"-?[0-9]{1,16}", value):
+        value = int(value)
+    if type(value) is not int:
+        raise ComposeError("unsupported_compose_key", [key])
+    return value
+
+
+def _memory(service: dict) -> dict:
+    """``HostConfig.Memory``/``MemorySwap`` (TASK-1649). Both or neither: a
+    lone ``mem_limit`` leaves the swap to Docker's default, which this module
+    does not model. ``memswap_limit`` is ``-1`` (unlimited) or at least the
+    limit."""
+    declared = [key for key in MEMORY_KEYS if service.get(key) is not None]
+    if not declared:
+        return {"Memory": 0, "MemorySwap": 0}
+    if len(declared) != len(MEMORY_KEYS):
+        raise ComposeError("unsupported_compose_key", [key for key in MEMORY_KEYS if key not in declared])
+    memory, swap = _bytes(service["mem_limit"], "mem_limit"), _bytes(service["memswap_limit"], "memswap_limit")
+    if not 0 < memory <= _MAX_MEMORY:
+        raise ComposeError("unsupported_compose_key", ["mem_limit"])
+    if swap != -1 and not memory <= swap <= _MAX_MEMORY:
+        raise ComposeError("unsupported_compose_key", ["memswap_limit"])
+    return {"Memory": memory, "MemorySwap": swap}
+
+
 def _tmpfs(value, mounts: dict) -> dict:
     """``HostConfig.Tmpfs``: ``{path: options}``. A path already mounted refuses."""
     if value is None:
@@ -395,6 +432,8 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
                "restart": [restart.group(1), int(restart.group(2) or 0)]}
     if profile.models_process:
         desired.update(_process(service, spec, mounts))
+    if "mem_limit" in profile.keys:
+        desired["memory"] = _memory(service)
     if built_tag is not None:
         desired["image"] = built_tag  # identity only: the swap uses the bound image ID
     return desired
@@ -437,7 +476,8 @@ def running(container: dict) -> dict:
             "stdin_open": bool(config.get("OpenStdin")), "tty": bool(config.get("Tty")),
             "security_opt": list(host.get("SecurityOpt") or []),
             "healthcheck": _health_state(config.get("Healthcheck")),
-            "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items()))}
+            "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items())),
+            "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)}}
 
 
 def normalized(state: dict, image: dict) -> dict:
@@ -497,6 +537,9 @@ def drift(desired: dict, actual: dict) -> list[str]:
         names += [f"tmpfs:+{k}" for k in want if k not in have]
         names += [f"tmpfs:-{k}" for k in have if k not in want]
         names += [f"tmpfs:~{k}" for k in want if k in have and want[k] != have[k]]
+    # TASK-1649: only a profile that owns the memory cap compares it.
+    if "memory" in desired and desired["memory"] != actual["memory"]:
+        names.append("memory:~")
     return sorted(names)
 
 
@@ -589,6 +632,8 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["PortBindings"] = json.loads(json.dumps(desired["ports"]))
         host["SecurityOpt"] = list(desired.get("security_opt", [])) or None
         host["Tmpfs"] = dict(desired.get("tmpfs", {})) or None
+    if "memory" in desired:
+        host["Memory"], host["MemorySwap"] = desired["memory"]["Memory"], desired["memory"]["MemorySwap"]
     if host.get("NetworkMode") not in desired["networks"]:
         host["NetworkMode"] = desired["networks"][0]
     current = body.get("NetworkingConfig", {}).get("EndpointsConfig") or {}

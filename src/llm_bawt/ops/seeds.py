@@ -567,6 +567,42 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "category": "configuration",
     "approval_prompt_prefix": "Reconcile BawtHub backend configuration with the same image (cuts voice sessions)",
 }, {
+    # TASK-1649: the BawtHub hot-reload DEV frontend, Compose-built and
+    # recreated at the same image. It serves its live working tree, so there is
+    # no source guard; it is never a production target.
+    "slug": "bawthub.reconcile-dev-frontend-config",
+    "title": "Reconcile BawtHub dev frontend configuration",
+    "description": (
+        "Recreate the BawtHub hot-reload dev frontend from its declared Compose service using the SAME "
+        "running image. No build or pull; the image is bound by ID, never by tag. Approval shows changed "
+        "names, mounts, ports and the memory cap only, never environment values. Verifies health and "
+        "restores the previous container on failure. Drops open dev-server connections; production is "
+        "untouched."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_dev_config", container_name="bawthub-frontend-1",
+        compose_project=_BAWTHUB_PROJECT, compose_service="frontend",
+        compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+        display_values={},
+        # Mode/owner of the service token by fixed argv, never its contents.
+        stat_paths=["/run/bawthub-service-token/token"],
+        stop_grace_seconds=10, health_timeout_seconds=180,
+        health_url="http://127.0.0.1:5173/api/health", health_field="status", health_value="healthy",
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_MEDIUM,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile the BawtHub dev frontend configuration with the same image (dev only)",
+}, {
     # TASK-1476: Crawl4AI runs a public image by tag; recreated at the SAME
     # local image (never pulled). A cutover plan target.
     "slug": "llm-bawt.reconcile-crawl4ai-config",

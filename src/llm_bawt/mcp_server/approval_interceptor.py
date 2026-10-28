@@ -362,9 +362,10 @@ class ApprovalAwareFastMCP(FastMCP):
 
                 approval_prompt = container_remove.approval_text(operations_snapshot["remove"], decision.prompt)
             if name == "ops_run" and operations_snapshot and operations_snapshot.get("config"):
-                from ..ops import (  # TASK-1518, TASK-1474, TASK-1476
+                from ..ops import (  # TASK-1518, TASK-1474, TASK-1476, TASK-1649
                     app_config_reconcile,
                     config_reconcile,
+                    dev_config_reconcile,
                     tagged_config_reconcile,
                 )
 
@@ -374,6 +375,10 @@ class ApprovalAwareFastMCP(FastMCP):
                     )
                 elif operations_snapshot["spec"].get("action") == tagged_config_reconcile.ACTION:
                     approval_prompt = tagged_config_reconcile.approval_text(
+                        operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
+                    )
+                elif operations_snapshot["spec"].get("action") == dev_config_reconcile.ACTION:
+                    approval_prompt = dev_config_reconcile.approval_text(
                         operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
                     )
                 else:

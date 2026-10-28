@@ -225,6 +225,7 @@ it needs (`CONFIG_WORKER_LABELS`, `ops/executor.py`):
 | `reconcile_app_config` | `app-config-reconcile`, `app-source-guard`, `built-profile-v2` |
 | `reconcile_tagged_config` | `config-reconcile`, `process-profile-v3` |
 | `reconcile_service_plan` | all of the above for app and tagged, plus `service-plan-reconcile` |
+| `reconcile_dev_config` | `config-reconcile`, `process-profile-v3`, `dev-config-reconcile` |
 
 All are `llm-bawt.ops.<name>="1"` in `docker/Dockerfile.ops-worker`. The image
 must also COPY `plan_reconcile.py` and `probe_contract.py`. The bridge and plan
@@ -241,3 +242,33 @@ Each step needs Nick's authorization.
 3. Install and preview the plan's `require_approval` policy, then enable the plan.
 4. In Nick's window, run it through `ops_run`, with `accept_loss` only for
    losses Nick has accepted by name.
+
+## Dev frontend kind (TASK-1649)
+
+`bawthub.reconcile-dev-frontend-config` (`reconcile_dev_config`,
+`ops/dev_config_reconcile.py`) recreates the BawtHub hot-reload dev frontend
+from its own Compose service at the **same running image**. It never builds or
+pulls, and it binds the image by ID, never by tag.
+
+- **Why it is its own kind.** The service is Compose-built like the app, but a
+  dev server serves its live bind-mounted working tree and HMR reloads every
+  edit without a recreate. The app kind's source guard could only refuse it.
+  The dev kind has no source check, and the card says so (`DEV target`).
+- **Profile** (`DEV_PROFILE`, `ops/compose_config.py`): the built profile plus
+  the memory cap. `mem_limit` and `memswap_limit` are both declared or both
+  absent. A lone one refuses (`unsupported_compose_key`) because Docker's
+  default swap is not modelled. The limit must be positive, and the swap must
+  be `-1` or at least the limit. A changed cap is the drift name `memory:~`, and
+  the recreate sets `HostConfig.Memory`/`MemorySwap`. No other profile accepts
+  either key.
+- **Card:** changed names, ports, mounts, tmpfs, `Memory after:` and the tag
+  note (`image_tag_moved`). It never shows environment values.
+- **Verify:** the declared Docker healthcheck, then the in-container
+  `/api/health` field `status == healthy`, then the stat paths (mode and owner
+  of the service token, never its contents). A failed verify restores the
+  previous container.
+- **Activation:** the row ships disabled. Rebuild and repin the worker so it
+  carries `dev-config-reconcile`, recreate app and ops-reconciler, insert the
+  row, enable it, then `ops_run`. The generic `ops_run` approval policy gates
+  the run. The target is dev only, so the approver is the coordinating arbiter,
+  not Nick.

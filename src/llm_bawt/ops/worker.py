@@ -26,6 +26,7 @@ if __package__:
     from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, AppConfigReconciler
     from .config_reconcile import ACTION as CONFIG_ACTION, ConfigReconciler
     from .container_remove import ACTION as REMOVE_ACTION, ContainerRemover
+    from .dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, DevConfigReconciler
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
     from .plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
@@ -37,6 +38,7 @@ else:  # pragma: no cover - standalone worker image
     from app_config_reconcile import ACTION as APP_CONFIG_ACTION, AppConfigReconciler
     from config_reconcile import ACTION as CONFIG_ACTION, ConfigReconciler
     from container_remove import ACTION as REMOVE_ACTION, ContainerRemover
+    from dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, DevConfigReconciler
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
     from plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
@@ -277,6 +279,9 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
             elif snapshot["spec"]["action"] == TAGGED_CONFIG_ACTION:
                 output = TaggedConfigReconciler(api, snapshot, job_id,
                                                 lock_root=request_path.parent.parent / ".target-locks").run()
+            elif snapshot["spec"]["action"] == DEV_CONFIG_ACTION:
+                output = DevConfigReconciler(api, snapshot, job_id,
+                                             lock_root=request_path.parent.parent / ".target-locks").run()
             elif snapshot["spec"]["action"] == PLAN_ACTION:
                 output = PlanReconciler(api, snapshot, job_id,
                                         lock_root=request_path.parent.parent / ".target-locks").run()

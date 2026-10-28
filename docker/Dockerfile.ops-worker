@@ -10,7 +10,8 @@ COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/op
      src/llm_bawt/ops/app_config_reconcile.py src/llm_bawt/ops/sealed_container.py \
      src/llm_bawt/ops/source_state.py src/llm_bawt/ops/service_identity.py \
      src/llm_bawt/ops/tagged_config_reconcile.py src/llm_bawt/ops/plan_reconcile.py \
-     src/llm_bawt/ops/probe_contract.py src/llm_bawt/ops/container_remove.py /ops/
+     src/llm_bawt/ops/probe_contract.py src/llm_bawt/ops/container_remove.py \
+     src/llm_bawt/ops/dev_config_reconcile.py /ops/
 LABEL llm-bawt.ops.routing-reconcile="1"
 # TASK-1518: this worker renders the target's Compose service, reconciles its
 # configuration and refuses a deploy over configuration drift.
@@ -34,4 +35,7 @@ LABEL llm-bawt.ops.quiesce-fence="1"
 # TASK-1439 T2c: this worker removes ONE stopped Compose-orphan container
 # (container_remove.py).
 LABEL llm-bawt.ops.container-remove="1"
+# TASK-1649: ...and reconciles a Compose-built DEV target with its memory cap
+# (dev_config_reconcile.py, the BawtHub hot-reload frontend).
+LABEL llm-bawt.ops.dev-config-reconcile="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

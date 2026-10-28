@@ -20,6 +20,8 @@ from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LA
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
                                    app_config_binding, uses_process_profile, validate_app_spec)
 from .compose_config import evaluate
+from .dev_config_reconcile import (ACTION as DEV_CONFIG_ACTION, WORKER_CAPABILITY_LABEL as DEV_CONFIG_WORKER_LABEL,
+                                   dev_config_binding, validate_dev_spec)
 from .compose_render import ComposeError, ComposeRenderer
 from .container_remove import (ACTION as REMOVE_ACTION, WORKER_CAPABILITY_LABEL as REMOVE_WORKER_LABEL,
                                RemoveRefused, removal_binding, target_name, validate_remove_spec)
@@ -47,7 +49,9 @@ SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 # target also needs once its desired configuration uses a v3 key).
 CONFIG_WORKER_LABELS = {CONFIG_ACTION: (CONFIG_WORKER_LABEL,), DEPLOY_ACTION: (CONFIG_WORKER_LABEL,),
                         APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL, BUILT_PROFILE_LABEL),
-                        TAGGED_CONFIG_ACTION: (CONFIG_WORKER_LABEL, PROCESS_PROFILE_LABEL)}
+                        TAGGED_CONFIG_ACTION: (CONFIG_WORKER_LABEL, PROCESS_PROFILE_LABEL),
+                        # TASK-1649: the dev kind and its memory profile.
+                        DEV_CONFIG_ACTION: (CONFIG_WORKER_LABEL, PROCESS_PROFILE_LABEL, DEV_CONFIG_WORKER_LABEL)}
 # A service plan runs every kind it orders, plus its own module and probe contract.
 CONFIG_WORKER_LABELS[PLAN_ACTION] = (*dict.fromkeys((*CONFIG_WORKER_LABELS[APP_CONFIG_ACTION],
                                                      *CONFIG_WORKER_LABELS[TAGGED_CONFIG_ACTION])),
@@ -229,6 +233,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_app_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == TAGGED_CONFIG_ACTION:
         return validate_tagged_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == DEV_CONFIG_ACTION:
+        return validate_dev_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == PLAN_ACTION:
         return validate_plan_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
@@ -440,6 +446,9 @@ class DockerExecutor(Executor):
             if spec["action"] == TAGGED_CONFIG_ACTION:
                 return (*tagged_config_binding(spec, container, image, renderer,
                                                tag_moved=lambda tag: self._image_tag_moved(tag, image)), container)
+            if spec["action"] == DEV_CONFIG_ACTION:
+                return (*dev_config_binding(spec, container, image, renderer,
+                                            tag_moved=lambda tag: self._image_tag_moved(tag, image)), container)
             return (*config_binding(spec, container, image, renderer), container)
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc

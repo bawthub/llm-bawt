@@ -131,7 +131,7 @@ def image_tag(spec: dict, desired: dict | None = None) -> str:
     return f"{spec['compose_project']}-{spec['compose_service']}"
 
 
-def _image_refs(tag: str) -> set:
+def image_refs(tag: str) -> set:
     """The ``Config.Image`` forms Compose may have created the container with."""
     return {tag, tag.removesuffix(":latest")}
 
@@ -153,7 +153,7 @@ def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
     result = evaluate(spec, container, image, renderer, ref, BUILT_PROFILE)
     desired = result["desired"]
     tag = image_tag(spec, desired)
-    if ref != image["Id"] and ref not in _image_refs(tag):
+    if ref != image["Id"] and ref not in image_refs(tag):
         raise ValueError("app config target must run its own Compose-built image")
     plan = source_plan(spec, result["source"], container, image, desired)
     head = source_checker.check(result["source"]["project_dir"], plan)
@@ -169,7 +169,7 @@ def app_config_binding(spec: dict, container: dict, image: dict, renderer, *,
     return binding, desired
 
 
-def _valid_image_tag(spec: dict, tag) -> bool:
+def valid_image_tag(spec: dict, tag) -> bool:
     if tag == image_tag(spec):
         return True
     try:
@@ -214,9 +214,9 @@ def valid_app_binding(snapshot: dict) -> bool:
         lists = (binding["drift"] + binding["mounts"] + binding["ports"] + binding["depends_on"]
                  + binding["security_opt"])
         return (valid_hashes(binding)
-                and _valid_image_tag(spec, binding["image_tag"])
+                and valid_image_tag(spec, binding["image_tag"])
                 and (binding["image_ref"] == binding["image_id"]
-                     or binding["image_ref"] in _image_refs(binding["image_tag"]))
+                     or binding["image_ref"] in image_refs(binding["image_tag"]))
                 and type(binding["image_tag_moved"]) is bool
                 and set(source) == {"project_dir", "compose_files"}
                 and bool(SAFE_PATH.fullmatch(source["project_dir"]))
@@ -403,6 +403,7 @@ __all__ = ["ACTION", "BUILT_PROFILE_LABEL", "HEALTH_PATTERNS", "PROCESS_PROFILE_
            "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL",
            "AppConfigReconciler", "ServiceConfigReconciler",
            "app_config_binding",
-           "approval_text", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
-           "uses_process_profile", "valid_app_binding", "validate_app_spec", "validate_health_value",
+           "approval_text", "image_refs", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
+           "uses_process_profile", "valid_app_binding", "valid_image_tag", "validate_app_spec",
+           "validate_health_value",
            "validate_label_compose_config"]

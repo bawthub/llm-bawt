@@ -11,6 +11,7 @@ from typing import Any
 
 from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
+from .dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, valid_dev_binding
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagged_binding
 from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
@@ -63,6 +64,8 @@ def _valid_config_snapshot(snapshot: dict) -> bool:
         return valid_app_binding(snapshot)
     if action == TAGGED_CONFIG_ACTION:
         return valid_tagged_binding(snapshot)
+    if action == DEV_CONFIG_ACTION:
+        return valid_dev_binding(snapshot)
     return valid_config_binding(snapshot)
 
 
@@ -255,11 +258,11 @@ class OpsService:
                 snapshot["routing"] = executor.routing_approval(spec)
             except (ValueError, ExecutorError) as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
-        elif spec["action"] in (CONFIG_ACTION, APP_CONFIG_ACTION, TAGGED_CONFIG_ACTION):
+        elif spec["action"] in (CONFIG_ACTION, APP_CONFIG_ACTION, TAGGED_CONFIG_ACTION, DEV_CONFIG_ACTION):
             # TASK-1518: the approver sees drift NAMES, mounts and closed-enum
             # values; the worker re-renders and compares under the target lock.
             # TASK-1474: the same for the Compose-built app; TASK-1476: and for
-            # a tagged public image.
+            # a tagged public image; TASK-1649: and for a Compose-built dev service.
             if merged:
                 raise OpsDispatchError("args_invalid", "config reconciliation accepts no arguments")
             try:
