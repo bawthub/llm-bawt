@@ -54,9 +54,7 @@ RUN uv sync --locked --no-dev --extra mcp --extra service --extra search
 # Runtime dirs
 RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt
 
-# The image owns dependencies: `uv run` must not re-sync at start (server.sh).
 ENV PATH="/app/.venv/bin:$PATH" \
-    UV_NO_SYNC=1 \
     TZ=America/New_York \
     PYTHONUNBUFFERED=1
 

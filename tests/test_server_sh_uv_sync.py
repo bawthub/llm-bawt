@@ -81,6 +81,8 @@ def test_host_checkout_still_syncs(run_start):
     assert calls and not any("--no-sync" in c for c in calls)
 
 
-def test_app_image_sets_uv_no_sync():
-    text = (REPO / "Dockerfile.app").read_text()
-    assert "UV_NO_SYNC=1" in text
+def test_app_image_leaves_sync_policy_to_server_sh():
+    # An image ENV would be merged into the ops source plan, where UV_NO_SYNC
+    # is unclassified (and the UV_ prefix is reserved), refusing the bind. The
+    # container marker already makes server.sh pass --no-sync.
+    assert "UV_NO_SYNC" not in (REPO / "Dockerfile.app").read_text()
