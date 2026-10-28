@@ -42,8 +42,15 @@ class WorkerLauncher(ABC):
         """Start (or adopt) the job's worker; return its stable handle name."""
 
     @abstractmethod
-    def probe(self, *, job_id: str, directory: Path, digest: str) -> Liveness:
+    def probe(self, *, job_id: str, directory: Path, digest: str, settings: dict | None = None) -> Liveness:
         """Observe the job's worker. May start a never-started worker exactly once."""
+
+    def execution_settings(self, settings: dict) -> dict:
+        """Extra snapshot pins this runtime needs at prepare; none by default."""
+        return {}
+
+    def preflight(self, settings: dict) -> None:
+        """Refuse before dispatch if the approved runtime pins no longer hold."""
 
 
 def container_worker_name(job_id: str) -> str:
@@ -96,7 +103,7 @@ class ContainerLauncher(WorkerLauncher):
         self._start_created_once(worker, directory)
         return name
 
-    def probe(self, *, job_id, directory, digest):
+    def probe(self, *, job_id, directory, digest, settings=None):
         worker = self._get_worker(container_worker_name(job_id))
         if worker is None:
             return Liveness.MISSING

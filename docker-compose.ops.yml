@@ -34,6 +34,9 @@ services:
       LLM_BAWT_OPS_WORKER_IMAGE: ${LLM_BAWT_OPS_WORKER_IMAGE:?Set immutable worker image ID or digest}
       LLM_BAWT_OPS_RECEIPT_VOLUME: ${LLM_BAWT_OPS_RECEIPT_VOLUME:?Set dedicated named volume name}
       LLM_BAWT_OPS_RECEIPT_ROOT: /var/lib/llm-bawt-ops
+      # TASK-1169 S4: process-mode jobs pin this interpreter identity (the
+      # reconciler's own immutable image) in their approved snapshot.
+      LLM_BAWT_OPS_RECONCILER_IMAGE: ${LLM_BAWT_OPS_RECONCILER_IMAGE:?Set existing app image ID or digest}
       POSTGRES_HOST:
       POSTGRES_PORT:
       POSTGRES_USER:

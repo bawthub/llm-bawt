@@ -208,6 +208,7 @@ def test_docker_runs_isolated_and_legacy_jobs_in_the_container_launcher():
 
 def test_docker_refuses_a_mode_it_has_no_launcher_for():
     executor = _docker()
+    executor._launchers.pop("process")
     with pytest.raises(ExecutorError, match="not available"):
         executor._launcher_for(_snap("docker", "process"))
 

@@ -39,7 +39,8 @@ from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABE
 from .source_state import SourceChecker
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, tagged_config_binding, validate_tagged_spec
 from .validation import canonical_json
-from .execution_mode import EXECUTION_ISOLATED, EXECUTOR_MODES, snapshot_execution_mode
+from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
+from .process_launch import ProcessLauncher
 from .worker_launch import ContainerLauncher, Liveness, container_worker_name
 from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
@@ -82,7 +83,8 @@ class Executor(ABC):
     @abstractmethod
     def reconcile(self, **kwargs) -> ReconcileResult: ...
 
-    def execution_settings(self, spec: dict | None = None) -> dict:
+    def execution_settings(self, spec: dict | None = None, execution_mode: str | None = None) -> dict:
+        """Executor pins for a snapshot; ``execution_mode`` selects runtime pins."""
         return {}
 
     def readiness(self) -> str | None:
@@ -261,11 +263,13 @@ class DockerExecutor(Executor):
         # DB-stored ghcr-pull credential; the worker never holds one.
         self._pull_auth = pull_auth or _stored_pull_auth
         # TASK-1169 S4: the worker runtime. Isolated mode is the container
-        # launcher; job-level request/receipt handling stays here.
-        # The ``process`` launcher is registered once it exists; until then a
-        # process-mode snapshot refuses at preflight.
-        self._launchers = {EXECUTION_ISOLATED: ContainerLauncher(
-            client=lambda: self.client, get_worker=lambda name: self._get_worker(name))}
+        # launcher; process mode runs the same pinned worker code as a bounded
+        # child of this service. Job-level request/receipt handling stays here.
+        self._launchers = {
+            EXECUTION_ISOLATED: ContainerLauncher(
+                client=lambda: self.client, get_worker=lambda name: self._get_worker(name)),
+            EXECUTION_PROCESS: ProcessLauncher(client=lambda: self.client),
+        }
 
     def supported_execution_modes(self):
         return frozenset(self._launchers)
@@ -293,9 +297,16 @@ class DockerExecutor(Executor):
                 self._client = docker.from_env(timeout=15)
         return self._client
 
-    def execution_settings(self, spec=None):
-        return {"worker_image": self.worker_image, "receipt_volume": self.receipt_volume,
-                "receipt_root": self.receipt_root}
+    def execution_settings(self, spec=None, execution_mode=None):
+        settings = {"worker_image": self.worker_image, "receipt_volume": self.receipt_volume,
+                    "receipt_root": self.receipt_root}
+        if execution_mode is None:
+            return settings
+        launcher = self._launchers.get(execution_mode)
+        if launcher is None:
+            raise ExecutorError(f"execution_mode {execution_mode!r} is not available on this executor")
+        self._check_prerequisites(settings)
+        return {**settings, **launcher.execution_settings(settings)}
 
     def inspect_target_image(self, spec):
         try:
@@ -553,8 +564,9 @@ class DockerExecutor(Executor):
     def preflight(self, snapshot):
         if is_release_spec(snapshot.get("spec")):
             raise ExecutorError("release orchestration specs run only on the release executor")
-        self._launcher_for(snapshot)
+        launcher = self._launcher_for(snapshot)
         self._check_prerequisites(snapshot["execution"])
+        launcher.preflight(snapshot["execution"])
         if snapshot["spec"].get("action") == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
         if snapshot["spec"].get("action") == REMOVE_ACTION:
@@ -726,7 +738,8 @@ class DockerExecutor(Executor):
                     return ReconcileResult(state, receipt.get("exit_code"),
                         (receipt.get("output_tail") or "").encode()[-max(1, output_tail_bytes):].decode(errors="replace"),
                         receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"))
-            liveness = self._launcher_for(snapshot).probe(job_id=job_id, directory=directory, digest=digest)
+            liveness = self._launcher_for(snapshot).probe(job_id=job_id, directory=directory, digest=digest,
+                                                          settings=snapshot["execution"])
             if liveness is Liveness.MISSING:
                 atomic_json(directory / "abandoned.json", {"reason": "worker missing during reconciliation"})
                 return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")

@@ -249,8 +249,12 @@ class OpsService:
         executor = self._resolve_executor(op.executor_kind)
         execution = {key: getattr(op, key) for key in ("executor_kind", "target_host", "run_as_user",
             "working_directory", "timeout_seconds", "start_delay_seconds", "max_output_bytes", "max_concurrent")}
-        execution.update(executor.execution_settings(spec))
-        # TASK-1169 S4: the row's mode, pinned with the approval like the rest.
+        try:
+            # TASK-1169 S4: the row's mode, pinned with the approval like the
+            # rest, together with whatever that runtime needs pinned.
+            execution.update(executor.execution_settings(spec, op.execution_mode))
+        except ExecutorError as exc:
+            raise OpsDispatchError("target_unavailable", str(exc)) from exc
         execution["execution_mode"] = op.execution_mode
         snapshot = {"snapshot_version": 1, "operation": op.to_api(), "spec": spec,
                     "schema": json.loads(op.args_schema_json), "defaults": json.loads(op.args_defaults_json),
