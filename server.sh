@@ -21,6 +21,22 @@ VERBOSE_FLAG=""
 DEBUG_FLAG=""
 DEV_MODE=false
 
+# A container's dependencies belong to its image (Dockerfile.app runs `uv sync`
+# at build time). A sync at start would rebuild the editable install and write
+# src/llm_bawt.egg-info into the bind-mounted source tree as root on every
+# start, which the ops source guards rightly refuse (TASK-1476). So `uv run`
+# never syncs in a container, under --dev, or when UV_NO_SYNC is set; a bare
+# host checkout still syncs. The marker path is overridable only for tests.
+CONTAINER_MARKER="${LLM_BAWT_CONTAINER_MARKER:-/.dockerenv}"
+
+uv_flags() {
+  if [[ "$DEV_MODE" == true || -n "${UV_NO_SYNC:-}" || -e "$CONTAINER_MARKER" ]]; then
+    echo "--quiet --no-sync"
+  else
+    echo "--quiet"
+  fi
+}
+
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
 is_running() {
@@ -40,11 +56,7 @@ start_mcp_server() {
   echo "[mcp] Starting on ${MCP_HOST}:${MCP_PORT}..."
 
   # --quiet suppresses uv's progress/build output
-  # In dev mode, use --no-sync to avoid rebuilding
-  UV_FLAGS="--quiet"
-  if [[ "$DEV_MODE" == true ]]; then
-    UV_FLAGS="--quiet --no-sync"
-  fi
+  UV_FLAGS="$(uv_flags)"
 
   if [[ "$LOG_MODE" == "stdout" ]]; then
     LLM_BAWT_LOG_PREFIX="mcp" \
@@ -70,10 +82,9 @@ start_llm_service() {
 
   # Set up dev mode flags early (needed for health check and service start)
   RELOAD_FLAG=""
-  UV_FLAGS="--quiet"
+  UV_FLAGS="$(uv_flags)"
   if [[ "$DEV_MODE" == true ]]; then
     RELOAD_FLAG="--reload"
-    UV_FLAGS="--quiet --no-sync"
   fi
 
   # Wait for MCP server to be ready before starting llm-service
