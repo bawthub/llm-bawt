@@ -42,7 +42,8 @@ logger = logging.getLogger(__name__)
 APPROVAL_REQUIRED = ("this operation runs only through an approval card: ask an agent to run it with ops_run "
                      "and approve the card. The Run button and direct dispatch cannot start it")
 # TASK-1476: a service plan recreates the app too, so the same rule holds.
-APPROVAL_ONLY_ACTIONS = frozenset({APP_CONFIG_ACTION, PLAN_ACTION})
+# TASK-1649: the dev kind runs no source check, so it never runs uncarded.
+APPROVAL_ONLY_ACTIONS = frozenset({APP_CONFIG_ACTION, PLAN_ACTION, DEV_CONFIG_ACTION})
 
 
 def _spec_action(operation) -> str | None:

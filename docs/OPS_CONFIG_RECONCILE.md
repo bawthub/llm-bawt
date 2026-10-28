@@ -254,6 +254,14 @@ pulls, and it binds the image by ID, never by tag.
   dev server serves its live bind-mounted working tree and HMR reloads every
   edit without a recreate. The app kind's source guard could only refuse it.
   The dev kind has no source check, and the card says so (`DEV target`).
+- **Confined to a declared dev target.** The target's own rendered Compose
+  service must carry the label `llm-bawt.ops.dev-target: "1"`. Otherwise it
+  refuses with `dev_target_unmarked`, both at approval and when the worker
+  re-binds before create. The marker lives in the reviewed Compose files, so a
+  catalog edit that repoints a production row at this action cannot bind it.
+  A marker that exists only on the running container is not enough. The action
+  is approval-only (`APPROVAL_ONLY_ACTIONS`): there is no Run button and no
+  direct dispatch.
 - **Profile** (`DEV_PROFILE`, `ops/compose_config.py`): the built profile plus
   the memory cap. `mem_limit` and `memswap_limit` are both declared or both
   absent. A lone one refuses (`unsupported_compose_key`) because Docker's
@@ -267,7 +275,8 @@ pulls, and it binds the image by ID, never by tag.
   `/api/health` field `status == healthy`, then the stat paths (mode and owner
   of the service token, never its contents). A failed verify restores the
   previous container.
-- **Activation:** the row ships disabled. Rebuild and repin the worker so it
+- **Activation:** the BawtHub `frontend` service declares the marker label.
+  The row ships disabled. Rebuild and repin the worker so it
   carries `dev-config-reconcile`, recreate app and ops-reconciler, insert the
   row, enable it, then `ops_run`. The generic `ops_run` approval policy gates
   the run. The target is dev only, so the approver is the coordinating arbiter,

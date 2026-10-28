@@ -16,8 +16,15 @@ So this kind binds the RUNNING image ID (never the tag, which a later build may
 move), renders the target's own Compose service with :data:`DEV_PROFILE`,
 checks ``depends_on`` as a precondition, waits for the declared Docker
 healthcheck and verifies the target's in-container JSON health URL
-(:class:`ServiceConfigReconciler`). It has no source check: it is for dev
-targets only, and the approval card says so.
+(:class:`ServiceConfigReconciler`). It has no source check, so it is confined
+to dev targets (Codex r1 Blocker), at approval and again in the worker:
+
+* the target's OWN rendered Compose service must declare the label
+  :data:`DEV_TARGET_LABEL` (``"1"``). The marker lives in the reviewed Compose
+  files, which a catalog edit cannot change; a production service never
+  carries it, so repointing a row's spec at this action refuses;
+* the action is approval-only (``OpsService.APPROVAL_ONLY_ACTIONS``): no
+  direct dispatch, and the card says ``DEV target`` and names the marker.
 """
 from __future__ import annotations
 
@@ -27,7 +34,7 @@ if __package__:
     from .app_config_reconcile import (HEALTH_PATTERNS, ServiceConfigReconciler, image_refs, image_tag,
                                        valid_image_tag, validate_health_value, validate_label_compose_config)
     from .compose_config import DEV_PROFILE, evaluate, port_list
-    from .compose_render import SAFE_PATH, label_files_valid
+    from .compose_render import SAFE_PATH, ComposeError, label_files_valid
     from .config_reconcile import (CONTAINER_NAME_PATTERN, check_compose_identity, current_config_hash,
                                    valid_hashes, validate_target_fields)
     from .service_identity import SPEC_PATTERNS
@@ -35,7 +42,7 @@ else:  # standalone immutable worker
     from app_config_reconcile import (HEALTH_PATTERNS, ServiceConfigReconciler, image_refs, image_tag,
                                       valid_image_tag, validate_health_value, validate_label_compose_config)
     from compose_config import DEV_PROFILE, evaluate, port_list
-    from compose_render import SAFE_PATH, label_files_valid
+    from compose_render import SAFE_PATH, ComposeError, label_files_valid
     from config_reconcile import (CONTAINER_NAME_PATTERN, check_compose_identity, current_config_hash,
                                   valid_hashes, validate_target_fields)
     from service_identity import SPEC_PATTERNS
@@ -45,6 +52,9 @@ SCHEMA = "llm-bawt.ops.dev-config-reconcile/v1"
 # Worker image label proving it carries this module and the memory profile.
 # Without it dispatch refuses first: an older worker rejects the action.
 WORKER_CAPABILITY_LABEL = "llm-bawt.ops.dev-config-reconcile"
+# The Compose label a service declares to be a dev target this kind may
+# recreate without a source check. A first-party contract name.
+DEV_TARGET_LABEL = "llm-bawt.ops.dev-target"
 _PATTERNS = {
     "container_name": CONTAINER_NAME_PATTERN,
     **SPEC_PATTERNS,
@@ -90,6 +100,10 @@ def dev_config_binding(spec: dict, container: dict, image: dict, renderer, *, ta
         raise ValueError("dev config target must run its own Compose-built image")
     result = evaluate(spec, container, image, renderer, ref, DEV_PROFILE)
     desired = result["desired"]
+    if desired["labels"].get(DEV_TARGET_LABEL) != "1":
+        # The worker re-binds through here too, so execution enforces it as well.
+        raise ComposeError("dev_target_unmarked", [DEV_TARGET_LABEL],
+                           detail="the target's Compose service does not declare it a dev target")
     tag = image_tag(spec, desired)
     if ref != image["Id"] and ref not in image_refs(tag):
         raise ValueError("dev config target must run its own Compose-built image")
@@ -146,7 +160,8 @@ def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
             f"Memory after: {binding['memory']}\n"
             f"Shown values: {shown}\n"
             f"Fingerprints: current {binding['current_config_hash'][:16]}, desired {binding['desired_hash'][:16]}\n"
-            "DEV target: it serves its live bind-mounted working tree, so no source check runs. "
+            f"DEV target (its Compose service declares {DEV_TARGET_LABEL}): it serves its live bind-mounted "
+            "working tree, so no source check runs. "
             "No build or pull. Environment values other than those shown are never displayed. "
             "Recreating it drops open dev-server connections; pages reconnect once it is healthy. "
             "Restores the previous container if health verification fails. "
@@ -168,5 +183,5 @@ class DevConfigReconciler(ServiceConfigReconciler):
                                   tag_moved=lambda _tag: binding["image_tag_moved"])
 
 
-__all__ = ["ACTION", "SCHEMA", "WORKER_CAPABILITY_LABEL", "DevConfigReconciler", "approval_text",
-           "dev_config_binding", "memory_text", "valid_dev_binding", "validate_dev_spec"]
+__all__ = ["ACTION", "DEV_TARGET_LABEL", "SCHEMA", "WORKER_CAPABILITY_LABEL", "DevConfigReconciler",
+           "approval_text", "dev_config_binding", "memory_text", "valid_dev_binding", "validate_dev_spec"]

@@ -13,17 +13,19 @@ from llm_bawt.ops.compose_config import BUILT_PROFILE, DEV_PROFILE, apply_desire
 from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer
 from llm_bawt.ops.config_reconcile import WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL, valid_config_binding
 from llm_bawt.ops.dev_config_reconcile import (
-    ACTION, SCHEMA, WORKER_CAPABILITY_LABEL as DEV_WORKER_LABEL, DevConfigReconciler, approval_text,
+    ACTION, DEV_TARGET_LABEL, SCHEMA, WORKER_CAPABILITY_LABEL as DEV_WORKER_LABEL, DevConfigReconciler,
+    approval_text,
     dev_config_binding, memory_text, valid_dev_binding,
 )
 from llm_bawt.ops.executor import ConfigCheckError, validate_spec
 from llm_bawt.ops.image_deploy import DeployFailed
 from llm_bawt.ops.seeds import SEEDS
-from llm_bawt.ops.service import _valid_config_snapshot
+from llm_bawt.ops.service import APPROVAL_ONLY_ACTIONS, OpsDispatchError, _valid_config_snapshot
 from llm_bawt.ops.tagged_config_reconcile import valid_tagged_binding
 from llm_bawt.ops.worker import run as worker_run
 from tests.test_ops_app_config_reconcile import (  # noqa: F401  (source: autouse stub of the sealed git check)
-    EXECUTION, REDIS, AppDocker, _executor, _image, _write_request, source,
+    APP_NAME, EXECUTION, HEAD, REDIS, SEED as APP_SEED, AppDocker, PublishedVerifier, _executor, _image,
+    _service, _write_request, source,
 )
 from tests.test_ops_image_deploy import JOB_ID, RENDERER, RENDERER_ID
 
@@ -53,6 +55,7 @@ def dev_compose(**service):
     """``docker compose config --format json frontend`` for a dev block: no drift by default."""
     body = {"build": {"context": DEV_DIR, "dockerfile": "Dockerfile.dev"}, "image": TAG, "pull_policy": "build",
             "command": ["pnpm", "dev"], "entrypoint": None, "environment": {"NODE_ENV": "development"},
+            "labels": {DEV_TARGET_LABEL: "1"},
             "healthcheck": dict(HEALTH), "mem_limit": str(GIB4), "memswap_limit": str(GIB4),
             "networks": {"default": None}, "restart": "unless-stopped",
             "volumes": [_bind(DEV_DIR, "/app"), _bind("/srv/dev", "/repos")]}
@@ -82,7 +85,8 @@ class DevDocker(AppDocker):
                        "Healthcheck": dict(DOCKER_HEALTH),
                        "Labels": {"com.docker.compose.project": "bawthub", "com.docker.compose.service": "frontend",
                                   "com.docker.compose.project.working_dir": DEV_DIR,
-                                  "com.docker.compose.project.config_files": ",".join(FILES)}},
+                                  "com.docker.compose.project.config_files": ",".join(FILES),
+                                  DEV_TARGET_LABEL: "1"}},
             "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}, "Memory": memory, "MemorySwap": swap,
                            "Binds": [f"{DEV_DIR}:/app:rw", "/srv/dev:/repos:rw"]},
             "NetworkSettings": {"Networks": {"bawthub_default": {"Aliases": [NAME, "frontend", old[:12]]}}},
@@ -229,6 +233,7 @@ def test_card_shows_names_memory_and_no_values():
     text = approval_text(SPEC, bound, SEED["approval_prompt_prefix"])
     assert SECRET not in json.dumps(bound) + text and "env:+REPOS_HOST_ROOT" in text
     assert f"Memory after: {GIB4} bytes, swap {GIB4} bytes" in text and "no source check runs" in text
+    assert f"DEV target (its Compose service declares {DEV_TARGET_LABEL})" in text
     assert text.startswith(SEED["approval_prompt_prefix"]) and "now names" not in text
     assert "now names a different local image" in approval_text(SPEC, {**bound, "image_tag_moved": True}, None)
 
@@ -265,6 +270,61 @@ def test_binding_shape_is_validated(tamper):
 def test_other_kinds_never_accept_a_dev_binding():
     snap = snapshot(DevDocker())
     assert not valid_config_binding(snap) and not valid_tagged_binding(snap)
+
+
+# ── confined to a declared dev target (Codex r1 Blocker) ──────────────────
+
+@pytest.mark.parametrize("labels", [None, {DEV_TARGET_LABEL: "0"}, {DEV_TARGET_LABEL: "true"}, {"other": "1"}])
+def test_an_unmarked_compose_service_refuses_at_approval(labels):
+    api = DevDocker(compose=dev_compose(labels=labels))
+    with pytest.raises(ComposeError) as caught:
+        binding(api)
+    assert caught.value.code == "dev_target_unmarked" and caught.value.names == [DEV_TARGET_LABEL]
+    with pytest.raises(ConfigCheckError) as caught:
+        _executor(api, worker_labels=DEV_WORKER).config_approval(SPEC)
+    assert caught.value.code == "dev_target_unmarked" and not api.create_bodies
+
+
+def test_a_marker_only_on_the_running_container_is_not_enough():
+    api = DevDocker(compose=dev_compose(labels=None))
+    assert api.by_name(NAME)["Config"]["Labels"][DEV_TARGET_LABEL] == "1"
+    with pytest.raises(ComposeError, match="dev_target_unmarked"):
+        binding(api)
+
+
+def test_the_worker_rechecks_the_marker_before_create(tmp_path):
+    # Approved while marked; the Compose file then drops the marker.
+    api = DevDocker(compose=_with_env(REPOS_HOST_ROOT=SECRET))
+    snap = snapshot(api)
+    api.compose = dev_compose(environment={"NODE_ENV": "development", "REPOS_HOST_ROOT": SECRET}, labels=None)
+    with pytest.raises(DeployFailed, match="dev_target_unmarked") as caught:
+        run(api, tmp_path, snap)
+    assert caught.value.outcome_known and not api.create_bodies
+
+
+def test_a_production_target_repointed_at_the_dev_action_refuses():
+    # A catalog edit swaps the app row's spec to this action: the app's own
+    # Compose service carries no marker, so it never binds.
+    app = AppDocker()
+    spec = {**SPEC, "container_name": APP_NAME, "compose_project": "llm-bawt", "compose_service": "app",
+            "health_url": "http://127.0.0.1:8642/health", "health_value": "ok"}
+    with pytest.raises(ConfigCheckError) as caught:
+        _executor(app, worker_labels=DEV_WORKER).config_approval(spec)
+    assert caught.value.code in ("dev_target_unmarked", "compose_image_mismatch") and not app.create_bodies
+
+
+def test_the_dev_action_is_approval_only():
+    assert ACTION in APPROVAL_ONLY_ACTIONS
+    service, store, _executor_ = _service(PublishedVerifier(HEAD))
+    store.create_operation({**SEED, "enabled": True})
+    with pytest.raises(OpsDispatchError) as caught:
+        service.dispatch_job(operation_slug=SEED["slug"], args={}, idempotency_key="run-button")
+    assert caught.value.code == "approval_required" and store.list_jobs() == []
+    # The Blocker's path: an enabled production row PATCHed to this action.
+    store.create_operation({**APP_SEED, "enabled": True, "command_script": SEED["command_script"]})
+    with pytest.raises(OpsDispatchError) as caught:
+        service.dispatch_job(operation_slug=APP_SEED["slug"], args={}, idempotency_key="patched")
+    assert caught.value.code == "approval_required" and store.list_jobs() == []
 
 
 # ── execution ──────────────────────────────────────────────────────────────
