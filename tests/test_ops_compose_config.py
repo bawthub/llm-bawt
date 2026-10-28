@@ -202,7 +202,13 @@ def test_compose_source_reads_the_target_labels():
     lambda c: c.update(interpolation_env={"PATH": "/bin"}),
     lambda c: c.update(interpolation_env={"lower": "x"}),
     lambda c: c.update(interpolation_env={c["image_variable"]: "x"}),
-    lambda c: c.update(interpolation_env={f"V{i}": "x" for i in range(9)}),
+    # Codex r1 Blocker: loader/CLI execution-control names never reach `env -i`.
+    lambda c: c.update(interpolation_env={"LD_PRELOAD": f"{PROJECT_DIR}/payload.so"}),
+    lambda c: c.update(interpolation_env={"LD_LIBRARY_PATH": PROJECT_DIR}),
+    lambda c: c.update(interpolation_env={"DOCKER_HOST": "tcp://evil:2375"}),
+    lambda c: c.update(interpolation_env={"DOCKER_CONFIG": PROJECT_DIR}),
+    lambda c: c.update(interpolation_env={"COMPOSE_FILE": "x.yml"}),
+    lambda c: c.update(interpolation_env={"APP_SECRET": "x"}),
     lambda c: c.update(interpolation_env=["HOME"]),
 ])
 def test_compose_config_validation(mutate):
@@ -339,10 +345,19 @@ def test_undeclared_home_refuses_instead_of_rendering_the_renderer_home():
     assert not api.renderers_left()
 
 
-def test_bogus_declared_home_refuses_before_any_container():
+@pytest.mark.parametrize("compose_config", [
+    {"interpolation_env": {"HOME": "home/op"}},
+    {"interpolation_env": {"LD_PRELOAD": f"{PROJECT_DIR}/payload.so"}},  # Codex r1 Blocker
+    {"image_variable": "LD_PRELOAD"},
+    {"image_variable": "DOCKER_HOST"},
+    {"image_variable": "HOME"},
+], ids=["relative-home", "ld-preload", "image-var-ld", "image-var-docker", "image-var-home"])
+def test_bogus_or_execution_control_env_refuses_before_any_container(compose_config):
     api = _home_api()
+    spec = _home_spec()
+    spec["compose_config"].update(compose_config)
     with pytest.raises(ValueError):
-        ComposeRenderer(api, _home_spec("home/op"), tag="t1").render(compose_source(SPEC, api.by_name(NAME)), REF)
+        ComposeRenderer(api, spec, tag="t1").render(compose_source(SPEC, api.by_name(NAME)), REF)
     assert not api.render_bodies
 
 

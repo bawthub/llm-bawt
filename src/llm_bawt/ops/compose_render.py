@@ -51,11 +51,18 @@ SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
 COMPOSE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.ya?ml")
 MAX_COMPOSE_FILES = 4
 RENDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-MAX_INTERPOLATION_ENV = 8
-_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 _ENV_VALUE = re.compile(r"[A-Za-z0-9._/:@-]{1,255}")
-# Path-valued names: a declared value must be a clean absolute path.
-_PATH_NAMES = frozenset({"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"})
+# A CLOSED allowlist (Codex r1 Blocker): the renderer executes docker with the
+# project bound, so a name like LD_PRELOAD, DOCKER_* or COMPOSE_* would let a
+# catalog row run project code or redirect the CLI before the source check.
+# Only process-environment identity Compose cannot read from the project
+# ``.env`` is declarable. Path-valued names must be clean absolute paths.
+_PATH_NAMES = frozenset({"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"})
+INTERPOLATION_NAMES = _PATH_NAMES | {"USER", "LOGNAME"}
+# The image variable carries only the bound image ref, but its NAME is catalog
+# data too: never one that steers the loader or the docker/compose CLI.
+_CONTROL_PREFIXES = ("LD_", "DOCKER_", "COMPOSE_", "BUILDKIT_", "GODEBUG", "GOTRACEBACK", "SSL_",
+                     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 _UNSET = re.compile(r'time="[^"]*" level=warning msg="The \\"([A-Za-z_][A-Za-z0-9_]{0,127})\\" '
                     r'variable is not set\. Defaulting to a blank string\."')
 
@@ -76,14 +83,14 @@ class ComposeError(ValueError):
 
 def validate_interpolation_env(config: dict) -> dict:
     """``compose_config.interpolation_env`` (optional): the only variables besides
-    the image variable Compose may interpolate. Names and plain values only."""
+    the image variable Compose may interpolate. Allowlisted names, plain values."""
     value = config.get("interpolation_env", {})
-    if not isinstance(value, dict) or len(value) > MAX_INTERPOLATION_ENV:
-        raise ValueError(f"compose_config.interpolation_env must map at most {MAX_INTERPOLATION_ENV} names")
+    if not isinstance(value, dict):
+        raise ValueError("compose_config.interpolation_env must be an object")
     for name, item in value.items():
-        if (not isinstance(name, str) or not _ENV_NAME.fullmatch(name) or name == "PATH"
-                or name == config.get("image_variable")):
-            raise ValueError("compose_config.interpolation_env has an invalid name")
+        if name not in INTERPOLATION_NAMES or name == config.get("image_variable"):
+            raise ValueError("compose_config.interpolation_env names must be one of "
+                             + ", ".join(sorted(INTERPOLATION_NAMES)))
         if not isinstance(item, str) or not _ENV_VALUE.fullmatch(item):
             raise ValueError(f"compose_config.interpolation_env.{name} is invalid")
         if name in _PATH_NAMES and not working_dir_valid(item):
@@ -96,6 +103,9 @@ def renderer_env(config: dict, image_ref: str) -> list[str]:
     image variable (if any) and the declared ``interpolation_env``."""
     declared = [f"{name}={value}" for name, value in sorted(validate_interpolation_env(config).items())]
     variable = config.get("image_variable")
+    if variable and (variable == "PATH" or variable in INTERPOLATION_NAMES
+                     or variable.startswith(_CONTROL_PREFIXES)):
+        raise ValueError("compose_config.image_variable must not be an execution-control name")
     return [f"PATH={RENDER_PATH}", *([f"{variable}={image_ref}"] if variable else []), *declared]
 
 
