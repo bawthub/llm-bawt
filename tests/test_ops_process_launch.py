@@ -329,7 +329,8 @@ def test_output_beyond_the_cap_is_drained_and_counted(rig):
 def test_the_deadline_kills_the_group_and_records_what_is_known(rig, behavior, state, unknown):
     launcher, settings, root, _ = rig
     directory, digest = _job(root, behavior)
-    launcher.launch(job_id=JOB, settings={**settings, "timeout_seconds": 1}, directory=directory, digest=digest)
+    # Half a second leaves the child time to boot and still fits the unit time budget.
+    launcher.launch(job_id=JOB, settings={**settings, "timeout_seconds": 0.5}, directory=directory, digest=digest)
     child = _wait(launcher)
     receipt = json.loads((directory / "receipt.json").read_text())
     assert child.popen.returncode < 0

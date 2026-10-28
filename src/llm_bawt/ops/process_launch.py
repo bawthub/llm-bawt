@@ -433,7 +433,7 @@ class ProcessLauncher(WorkerLauncher):
         child = _Child(popen, attempt)
         with self._lock:
             self._children[job_id] = child
-        deadline = (int(settings.get("start_delay_seconds") or 0) + int(settings["timeout_seconds"])
+        deadline = (float(settings.get("start_delay_seconds") or 0) + float(settings["timeout_seconds"])
                     + self._kill_grace)
         threading.Thread(target=self._supervise, daemon=True,
                          args=(job_id, child, directory, digest, deadline,
