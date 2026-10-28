@@ -40,10 +40,11 @@ PARTICIPANT_TOOLS = frozenset({"bots_delivery_get", "bots_deliveries_list"})
 # locks. Discovery filtering for availability/router candidates is a follow-up.
 UNSCOPED_MUTATION_TOOLS = frozenset({
     "bots_send_message", "bots_route_message", "agent_context_reset", "agent_context_compact",
-    "bots_delivery_cancel", "bots_profile_patch",
+    "bots_delivery_cancel", "bots_profile_patch", "bots_grant_set",
 })
 # bots_profile_patch (TASK-1521) resolves the policy itself and refuses private
-# and unknown targets alike, for every caller, owner included.
+# and unknown targets alike, for every caller, owner included. bots_grant_set
+# (TASK-1609) does the same in bot_tags.grants.authorize_bot_actor.
 # TASK-1323: resolves BotAccess per call and narrows its own scope. Outside
 # the guard on purpose: an excluded bot filter must not answer access_denied.
 SCOPED_RETRIEVAL_TOOLS = frozenset({"messages_find", "messages_context"})
