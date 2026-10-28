@@ -314,11 +314,16 @@ class ServiceConfigReconciler(ConfigReconciler):
         for service, condition in self._desired["depends_on"].items():
             self._check_dependency(service, condition)
 
+    # Container IDs a dependency lookup skips: a multi-target plan (TASK-1476)
+    # sets the stopped ``-prev`` containers of the targets it already swapped.
+    ignored_ids = frozenset()
+
     def _check_dependency(self, service, condition):
         # The rendered depends_on names already passed the Compose service grammar.
         filters = ComposeServiceRef(self.spec["compose_project"], service).label_filters()
         rows = self.api.request("GET", "/containers/json?" + urlencode({"all": "1", "filters": json.dumps(filters)}))
-        rows = [row for row in rows or [] if OPS_JOB_LABEL not in (row.get("Labels") or {})]
+        rows = [row for row in rows or [] if OPS_JOB_LABEL not in (row.get("Labels") or {})
+                and row.get("Id") not in self.ignored_ids]
         if len(rows) != 1:
             self._fail(f"dependency_unresolved: {service} matched {len(rows)} containers; nothing changed", known=True)
         state = self.api.request("GET", f"/containers/{rows[0]['Id']}/json").get("State") or {}

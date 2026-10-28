@@ -9,7 +9,8 @@ COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/op
      src/llm_bawt/ops/compose_render.py src/llm_bawt/ops/compose_config.py src/llm_bawt/ops/config_reconcile.py \
      src/llm_bawt/ops/app_config_reconcile.py src/llm_bawt/ops/sealed_container.py \
      src/llm_bawt/ops/source_state.py src/llm_bawt/ops/service_identity.py \
-     src/llm_bawt/ops/tagged_config_reconcile.py /ops/
+     src/llm_bawt/ops/tagged_config_reconcile.py src/llm_bawt/ops/plan_reconcile.py \
+     src/llm_bawt/ops/probe_contract.py /ops/
 LABEL llm-bawt.ops.routing-reconcile="1"
 # TASK-1518: this worker renders the target's Compose service, reconciles its
 # configuration and refuses a deploy over configuration drift.
@@ -25,6 +26,9 @@ LABEL llm-bawt.ops.built-profile-v2="1"
 # TASK-1476: ...and the v3 process profile (healthcheck, tmpfs, a declared
 # entrypoint) with the tagged-image kind (tagged_config_reconcile.py, crawl4ai).
 LABEL llm-bawt.ops.process-profile-v3="1"
+# TASK-1476: ...and runs an ordered multi-target service plan with the cutover
+# probe contract (plan_reconcile.py, probe_contract.py).
+LABEL llm-bawt.ops.service-plan-reconcile="1"
 # TASK-1233: this worker enforces the quiesce start fence (worker.fence_expired).
 LABEL llm-bawt.ops.quiesce-fence="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

@@ -376,6 +376,10 @@ class ApprovalAwareFastMCP(FastMCP):
                     approval_prompt = config_reconcile.approval_text(
                         operations_snapshot["spec"], operations_snapshot["config"], decision.prompt
                     )
+            if name == "ops_run" and operations_snapshot and operations_snapshot.get("plan"):
+                from ..ops import plan_approval  # TASK-1476
+
+                approval_prompt = plan_approval.approval_text(operations_snapshot, decision.prompt)
             row, created = store.record_mcp_request(
                 request_id=request_id,
                 tool_use_id=call_context.tool_use_id,

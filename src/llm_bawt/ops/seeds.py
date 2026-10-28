@@ -38,6 +38,7 @@ from .models import (
     RISK_LOW,
     RISK_MEDIUM,
 )
+from .probe_contract import DESTINATION_PROBES
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +565,150 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "risk_level": RISK_HIGH,
     "category": "configuration",
     "approval_prompt_prefix": "Reconcile BawtHub backend configuration with the same image (cuts voice sessions)",
+}, {
+    # TASK-1476: Crawl4AI runs a public image by tag; recreated at the SAME
+    # local image (never pulled). A cutover plan target.
+    "slug": "llm-bawt.reconcile-crawl4ai-config",
+    "title": "Reconcile Crawl4AI configuration",
+    "description": (
+        "Recreate Crawl4AI from its declared Compose service using the SAME local image the running "
+        "container uses. No pull; a moved tag is reported, never followed. Approval shows changed names, "
+        "mounts and dependencies only, never values. Verifies health and restores the previous container "
+        "on failure. Cuts in-flight page fetches."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_tagged_config", container_name="llm-bawt-crawl4ai",
+        compose_project=_LLM_BAWT_PROJECT, compose_service="crawl4ai", image_tag="unclecode/crawl4ai:latest",
+        compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+        display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=180,
+        health_url="http://127.0.0.1:11235/health", health_field="status", health_value="ok",
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_HIGH,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile Crawl4AI configuration with the same image (cuts page fetches)",
+}, *(
+    # TASK-1476: the agent bridges, Compose-built from the shared bridge image
+    # and recreated at the same image. Same refusals and trust block as the
+    # app row. The source guard binds the bridge's OWN source; the agents it
+    # hosts run code from the mounted workspace by design.
+    {
+        "slug": f"llm-bawt.reconcile-{bridge}-config",
+        "title": f"Reconcile {bridge} configuration",
+        "description": (
+            f"Recreate {bridge} from its declared Compose service using the SAME running image. No build "
+            "or pull; the image is bound by ID, never by tag. Approval shows changed names, mounts and "
+            "dependencies only, never environment values. Refuses unless the bind-mounted source is exactly "
+            "the published branch head. Verifies health and restores the previous container on failure. "
+            "KILLS every agent session the bridge hosts."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(
+            action="reconcile_app_config", container_name=f"llm-bawt-{bridge}",
+            compose_project=_LLM_BAWT_PROJECT, compose_service=bridge,
+            compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+            display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=180,
+            health_url=f"http://127.0.0.1:{port}/health", health_field="redis", health_value=True,
+            source_repository="bawthub/llm-bawt", source_branch="master", source_mounts=["/app/src"],
+            # Destinations are the product's own Compose files' container paths.
+            data_mounts=data_mounts,
+            # The bridge's own Compose environment names (never values): URLs,
+            # keys, log levels, token FILE paths and workspace paths it reads.
+            env_names=env_names,
+        ),
+        "args_schema_json": _schema({}),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 900,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_CRITICAL,
+        "category": "configuration",
+        "approval_prompt_prefix": f"Reconcile {bridge} configuration with the same image (KILLS ACTIVE AGENTS)",
+    }
+    for bridge, port, data_mounts, env_names in (
+        ("codex-bridge", 8682,
+         ["/app/.logs", "/home/bridge/dev", "/home/bridge/.codex/config.toml", "/home/bridge/.codex/sessions",
+          "/home/bridge/.ssh", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens"],
+         ["BRIDGE_BROKER_TOKEN_FILE", "BRIDGE_GIT_CREDENTIAL_TOKEN_FILE", "CODEX_BACKEND_NAME",
+          "CODEX_BAWTHUB_MCP_URL", "CODEX_BRIDGE_CWD", "CODEX_BRIDGE_HEALTH_PORT", "CODEX_BRIDGE_LOG_LEVEL",
+          "CODEX_BRIDGE_REQUEST_TIMEOUT", "CODEX_CRAWL4AI_MCP_URL", "CODEX_DEV_ROOT", "CODEX_HOME",
+          "CODEX_LOCAL_PLUGINS_ENABLED", "CODEX_LOCAL_PLUGINS_SRC", "CODEX_MODEL", "CRAWL4AI_API_TOKEN_FILE",
+          "LLM_BAWT_API_URL", "LLM_BAWT_SERVICE_HOST", "REDIS_URL"]),
+        ("claude-code-bridge", 8681,
+         ["/app/.logs", "/home/bridge/dev", "/home/bridge/.claude", "/home/bridge/.claude.json",
+          "/home/bridge/.ssh", "/etc/ssh/ssh_config", "/opt/agent-skills/bin", "/run/llm-bawt-bridge-tokens"],
+         ["ANTHROPIC_API_KEY", "BRIDGE_BROKER_TOKEN_FILE", "BRIDGE_GIT_CREDENTIAL_TOKEN_FILE",
+          "CLAUDE_CODE_BAWTHUB_MCP_URL", "CLAUDE_CODE_BRIDGE_LOG_LEVEL", "CLAUDE_CODE_CRAWL4AI_MCP_URL",
+          "CLAUDE_CODE_CWD", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_PERMISSION_MODE",
+          "CLAUDE_CODE_PLAYWRIGHT_MCP_URL", "CLAUDE_CODE_SESSION_PREFIXES", "CLAUDE_CODE_SKILLS_PATH",
+          "CRAWL4AI_API_TOKEN_FILE", "ENABLE_TOOL_SEARCH", "LLM_BAWT_API_URL", "LLM_BAWT_REDIS_URL",
+          "LLM_BAWT_SERVICE_HOST", "LLM_BAWT_XAI_API_KEY", "LOCAL_ANTHROPIC_API_KEY", "LOCAL_ANTHROPIC_BASE_URL",
+          "OPENAI_API_KEY", "REDIS_URL", "XAI_API_KEY"]),
+    )
+)]
+
+
+# The env_import destinations a plan may accept losing (closed list).
+_DESTINATIONS = sorted(DESTINATION_PROBES)
+
+# TASK-1476: the one-window cutover. Recreates each target in order, each
+# only after the previous one is verified, then probes every credential the
+# app had; any failure reverts every recreated target in reverse. Every
+# target is its own catalog row and must itself be enabled.
+_PLAN_SEEDS: list[dict[str, Any]] = [{
+    "slug": "llm-bawt.cutover-plan",
+    "title": "Cut over llm-bawt services to their declared configuration",
+    "description": (
+        "Recreate the app, Crawl4AI, the codex bridge and the claude-code bridge in that order, each at "
+        "its SAME image and each only after the previous one is verified. Approval shows every target's "
+        "own card plus how each stored credential is carried over (migrated, kept in env, unconfigured or "
+        "an accepted loss); a credential the app would lose without a stored record refuses unless named "
+        "in accept_loss. Probes run after the last target; any failure reverts every recreated target in "
+        "reverse. KILLS every agent session and cuts in-flight chat turns."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_service_plan",
+        targets=["llm-bawt.reconcile-app-config", "llm-bawt.reconcile-crawl4ai-config",
+                 "llm-bawt.reconcile-codex-bridge-config", "llm-bawt.reconcile-claude-code-bridge-config"],
+        records_target="llm-bawt.reconcile-app-config",
+        probes=[{"id": "crawl4ai_bearer", "target": "llm-bawt.reconcile-app-config"},
+                {"id": "web_fetch", "target": "llm-bawt.reconcile-app-config"},
+                {"id": "anthropic_models", "target": "llm-bawt.reconcile-app-config"},
+                {"id": "broker", "target": "llm-bawt.reconcile-claude-code-bridge-config"}],
+    ),
+    "args_schema_json": _schema({
+        "accept_loss": {"type": "array", "maxItems": len(_DESTINATIONS),
+                        "items": {"type": "string", "enum": _DESTINATIONS}},
+    }),
+    "args_defaults_json": _defaults({"accept_loss": []}),
+    "timeout_seconds": 1800,
+    "start_delay_seconds": 5,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_CRITICAL,
+    "category": "configuration",
+    "approval_prompt_prefix": "Cut over llm-bawt services (KILLS ACTIVE AGENTS, cuts chat turns)",
+    # Off until an operator enables it: holds every agent's turns first.
+    "quiesce_enabled": False,
+    "quiesce_timeout_seconds": 600,
+    "quiesce_scope_json": json.dumps({"all_agents": True}),
 }]
 
 
@@ -667,6 +812,7 @@ SEEDS: list[dict[str, Any]] = [
     *_IMAGE_SEEDS,
     *_ROUTING_SEEDS,
     *_CONFIG_SEEDS,
+    *_PLAN_SEEDS,
     *_RELEASE_SEEDS,
 ]
 

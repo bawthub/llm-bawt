@@ -206,6 +206,18 @@ class ConfigReconciler(ImageDeployer):
         """Last read-only check before production is touched."""
 
     def _perform(self):
+        old, image = self._prepare()
+        if self._verify_only(old):
+            return
+        self._before_swap()
+        binding = self.snapshot["config"]
+        self._replace(old, image, image, self._swap_ref(binding), self._release(binding))
+
+    def _prepare(self):
+        """Read-only: inspect, re-render and compare with the approved
+        binding; require a running healthy target. ``(old, image)``. A
+        multi-target plan (TASK-1476) runs this for every target before it
+        touches any, and again as each target's last read before its swap."""
         if not self._valid_binding():
             self._fail("invalid config approval binding", known=True)
         binding = self.snapshot["config"]
@@ -222,12 +234,16 @@ class ConfigReconciler(ImageDeployer):
         if not state.get("Running") or (state.get("Health") or {}).get("Status") != "healthy":
             self._fail("config reconcile requires a running healthy target", known=True)
         self.detail["config"] = {k: binding[k] for k in self.DETAIL_KEYS}
-        if not binding["drift"]:
-            self.detail["health"] = self._verify_release(old["Id"], self._release(binding))
-            self.detail["unchanged"] = True
-            return
-        self._before_swap()
-        self._replace(old, image, image, self._swap_ref(binding), self._release(binding))
+        return old, image
+
+    def _verify_only(self, old) -> bool:
+        """No drift: verify the running target in place and report True."""
+        binding = self.snapshot["config"]
+        if binding["drift"]:
+            return False
+        self.detail["health"] = self._verify_release(old["Id"], self._release(binding))
+        self.detail["unchanged"] = True
+        return True
 
     def _create_body(self, old, old_image, new_image, ref):
         body = super()._create_body(old, old_image, new_image, ref)

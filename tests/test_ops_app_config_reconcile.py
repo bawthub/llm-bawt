@@ -729,6 +729,10 @@ def test_anything_but_a_plain_variable_refuses(source, where, name, value, shown
     ("PATH", "/usr/bin:/app/src"), ("PATH", "/usr/bin::/bin"), ("PATH", "bin:/usr/bin"), ("PATH", ""),
     ("PATH", "/usr/../var/lib/llm-bawt-ops"),
     ("HF_HOME", f"{OPS_VOLUME}/hf"), ("HF_HOME", "/var/lib"), ("HF_HOME", "hf"), ("HF_HOME", "/app/src"),
+    # TASK-1476: an image-owned home, never a mount or under one; the codex binary likewise.
+    ("HOME", OPS_VOLUME), ("HOME", f"{OPS_VOLUME}/home"), ("HOME", "/app/src/x"), ("HOME", "rel/home"),
+    ("HOME", "/home/../app/src"), ("CODEX_BIN", f"{OPS_VOLUME}/codex"), ("CODEX_BIN", "rel/codex"),
+    ("CODEX_BIN", "/app/src/codex"),
     ("PYTHONUNBUFFERED", "1;x"), ("PYTHONDONTWRITEBYTECODE", "/x"), ("UV_HTTP_TIMEOUT", "6s"),
     ("LANG", ".."), ("LANG", "C/../x"), ("TZ", "../etc/x"), ("TZ", "/etc/x"),
     ("DEBIAN_FRONTEND", "a b"), ("GPG_KEY", "k/../x"), ("PYTHON_VERSION", "3.12;x"), ("PYTHON_SHA256", "a b"),
@@ -744,16 +748,42 @@ def test_product_variables_within_their_rules_pass(source):
     env = {"PATH": "/app/.venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin", "HF_HOME": "/root/.cache/hf-home",
            "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1", "UV_HTTP_TIMEOUT": "600", "LANG": "C.UTF-8",
            "TZ": "America/New_York", "DEBIAN_FRONTEND": "noninteractive", "GPG_KEY": "A035C8C19219BA821ECE",
-           "PYTHON_VERSION": "3.12.7", "PYTHON_SHA256": "ab" * 32, "PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache"}
+           "PYTHON_VERSION": "3.12.7", "PYTHON_SHA256": "ab" * 32, "PYTHONPYCACHEPREFIX": "/tmp/llm-bawt-pycache",
+           "HOME": "/var/lib", "CODEX_BIN": "/app/.venv/bin/codex"}
     bound = binding(_env_api("compose", env), checker=source)
     assert source.calls[-1][1]["bytecode_ok"] is True
     assert bound["classification"]["opaque_env"] == ["LLM_BAWT_SERVICE_PORT"]  # product names are not opaque
 
 
+def _ro_data_api(path):
+    """PATH ``path`` with the data volume mounted read-only."""
+    compose = _with_env(app_compose(), PATH=path)
+    compose["services"]["app"]["volumes"][2]["read_only"] = True
+    return AppDocker(compose=compose)
+
+
+def test_a_trailing_path_entry_may_be_a_read_only_data_mount(source):
+    # TASK-1476: an agent bridge's shared helper scripts, last on its PATH.
+    bound = binding(_ro_data_api(f"/usr/bin:{OPS_VOLUME}/bin"), checker=source)
+    assert bound["classification"]["data_mounts"] == [OPS_VOLUME]
+
+
+@pytest.mark.parametrize("path", [f"{OPS_VOLUME}/bin:/usr/bin", f"/usr/bin:{OPS_VOLUME}/bin:/bin",
+                                  f"/usr/bin:{OPS_VOLUME}/bin:/app/src"])
+def test_a_read_only_data_path_entry_before_any_other_refuses(source, path):
+    error = _refused(_ro_data_api(path), source)
+    assert error.code == "source_env_unsafe" and error.names == ["PATH"]
+
+
+def test_a_trailing_path_entry_on_a_writable_data_mount_refuses(source):
+    error = _refused(_env_api("compose", {"PATH": f"/usr/bin:{OPS_VOLUME}/bin"}), source)
+    assert error.code == "source_env_unsafe" and error.names == ["PATH"]
+
+
 @pytest.mark.parametrize("where", ["compose", "image"])
 @pytest.mark.parametrize("names", [
     ["PYTHONPATH"], ["PYTHONHOME"], ["PYTHONSTARTUP"], ["PYTHONWARNINGS"], ["LD_PRELOAD"], ["BASH_ENV"],
-    ["ENV"], ["PS4", "SHELLOPTS"], ["UV_PROJECT_ENVIRONMENT"], ["UV_CONFIG_FILE"], ["VIRTUAL_ENV"], ["HOME"],
+    ["ENV"], ["PS4", "SHELLOPTS"], ["UV_PROJECT_ENVIRONMENT"], ["UV_CONFIG_FILE"], ["VIRTUAL_ENV"], ["TMPDIR"],
     ["XDG_CONFIG_HOME"], ["GIT_DIR"], ["SSL_CERT_FILE"], ["HTTPS_PROXY"], ["CLAUDE_CODE_SKILLS_PATH"],
 ])
 def test_an_unlisted_name_refuses_whatever_its_value(source, where, names):

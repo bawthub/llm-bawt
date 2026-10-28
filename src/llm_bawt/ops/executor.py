@@ -24,6 +24,8 @@ from .compose_render import ComposeError, ComposeRenderer
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
                                config_binding, validate_compose_config, validate_config_spec)
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
+from .plan_reconcile import (ACTION as PLAN_ACTION, WORKER_CAPABILITY_LABEL as PLAN_WORKER_LABEL,
+                             validate_plan_spec)
 from .release_spec import is_release_spec, validate_release_spec
 from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
@@ -44,6 +46,10 @@ SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 CONFIG_WORKER_LABELS = {CONFIG_ACTION: (CONFIG_WORKER_LABEL,), DEPLOY_ACTION: (CONFIG_WORKER_LABEL,),
                         APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL, BUILT_PROFILE_LABEL),
                         TAGGED_CONFIG_ACTION: (CONFIG_WORKER_LABEL, PROCESS_PROFILE_LABEL)}
+# A service plan runs every kind it orders, plus its own module and probe contract.
+CONFIG_WORKER_LABELS[PLAN_ACTION] = (*dict.fromkeys((*CONFIG_WORKER_LABELS[APP_CONFIG_ACTION],
+                                                     *CONFIG_WORKER_LABELS[TAGGED_CONFIG_ACTION])),
+                                     PLAN_WORKER_LABEL)
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
 
 
@@ -129,6 +135,14 @@ class Executor(ABC):
         """Public config-reconcile binding (names, hashes, A1 values); read-only."""
         raise ExecutorError(f"{self.kind()} executor cannot reconcile Compose configuration")
 
+    def config_bind(self, spec: dict) -> tuple[dict, dict, dict]:
+        """``(binding, desired, container attrs)`` of a config target; read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot reconcile Compose configuration")
+
+    def probe(self, container_name: str, argv: list[str]) -> str:
+        """Stdout of a fixed cutover probe argv in a running target; read-only."""
+        raise ExecutorError(f"{self.kind()} executor cannot run cutover probes")
+
     def config_check(self, spec: dict, image_ref: str | None = None) -> None:
         """Refuse (ConfigCheckError) when the target's running configuration
         differs from its Compose service; read-only (TASK-1518)."""
@@ -208,6 +222,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_app_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == TAGGED_CONFIG_ACTION:
         return validate_tagged_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == PLAN_ACTION:
+        return validate_plan_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
     if is_release_spec(spec):
@@ -380,6 +396,12 @@ class DockerExecutor(Executor):
             raise ExecutorError(f"cannot inspect the Compose image tag {tag}") from exc
 
     def config_approval(self, spec):
+        return self.config_bind(spec)[0]
+
+    def config_bind(self, spec):
+        """``(binding, desired, container attrs)``. A service plan (TASK-1476)
+        also reads the desired env names and the running Config.Env, which
+        stay in this process: approval derives names from them, never values."""
         renderer, container, image = self._config_inputs(spec)
         try:
             if spec["action"] == APP_CONFIG_ACTION:
@@ -391,15 +413,24 @@ class DockerExecutor(Executor):
                     # TASK-1476: an older worker would refuse it mid-job; refuse first.
                     self._check_config_worker(self.execution_settings(spec), spec["action"],
                                               extra=(PROCESS_PROFILE_LABEL,))
-                return binding
+                return binding, desired, container
             if spec["action"] == TAGGED_CONFIG_ACTION:
-                return tagged_config_binding(spec, container, image, renderer,
-                                             tag_moved=lambda tag: self._image_tag_moved(tag, image))[0]
-            return config_binding(spec, container, image, renderer)[0]
+                return (*tagged_config_binding(spec, container, image, renderer,
+                                               tag_moved=lambda tag: self._image_tag_moved(tag, image)), container)
+            return (*config_binding(spec, container, image, renderer), container)
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc
         except (ValueError, KeyError) as exc:
             raise ExecutorError(f"config target cannot be bound: {exc}") from exc
+
+    def probe(self, container_name, argv):
+        """Stdout of a fixed probe argv run in a running target (TASK-1476).
+        The probe line carries booleans and closed codes only; stderr is dropped."""
+        try:
+            result = self.client.containers.get(container_name).exec_run(argv, stdout=True, stderr=False)
+        except Exception as exc:
+            raise ExecutorError(f"cannot run the probe in {container_name}: {type(exc).__name__}") from exc
+        return (result.output or b"").decode(errors="replace")
 
     def config_check(self, spec, image_ref=None):
         if not spec.get("compose_config"):
@@ -472,7 +503,8 @@ class DockerExecutor(Executor):
             # the target lock; rendering here would churn renderer containers on
             # every reconcile tick of a job queued behind a prerequisite.
             self._check_config_worker(snapshot["execution"], snapshot["spec"]["action"])
-            self.ensure_renderer_image(snapshot["spec"])
+            for target in (snapshot.get("plan") or {}).get("targets") or [snapshot]:
+                self.ensure_renderer_image(target["spec"])
         if snapshot.get("quiesce"):
             self.check_quiesce_fence(snapshot["execution"])
         if snapshot["spec"].get("action") == DEPLOY_ACTION:

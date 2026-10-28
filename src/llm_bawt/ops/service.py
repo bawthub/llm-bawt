@@ -12,6 +12,7 @@ from typing import Any
 from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagged_binding
+from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 # refused.
 APPROVAL_REQUIRED = ("this operation runs only through an approval card: ask an agent to run it with ops_run "
                      "and approve the card. The Run button and direct dispatch cannot start it")
+# TASK-1476: a service plan recreates the app too, so the same rule holds.
+APPROVAL_ONLY_ACTIONS = frozenset({APP_CONFIG_ACTION, PLAN_ACTION})
 
 
 def _spec_action(operation) -> str | None:
@@ -51,6 +54,10 @@ def _spec_action(operation) -> str | None:
 def _valid_config_snapshot(snapshot: dict) -> bool:
     """The config binding of a detached snapshot, by the kind that executes it."""
     action = snapshot["spec"].get("action")
+    if action == PLAN_ACTION:
+        return "config" not in snapshot and valid_plan_snapshot(snapshot)
+    if "plan" in snapshot:  # only a plan executes a plan block
+        return False
     if action == APP_CONFIG_ACTION:
         return valid_app_binding(snapshot)
     if action == TAGGED_CONFIG_ACTION:
@@ -256,6 +263,22 @@ class OpsService:
                 self._check_source_published(snapshot["config"]["source_commit"])
                 snapshot["newly_trusted"] = newly_trusted(snapshot["config"]["classification"],
                                                           self._last_classification(operation_slug))
+        elif spec["action"] == PLAN_ACTION:
+            # TASK-1476: every target bound as for its own approval, plus the
+            # credential classes from the running app's records and env names.
+            from .plan_approval import PlanError, bind_plan  # env_import: app-only, kept off the import path
+            try:
+                snapshot["plan"] = bind_plan(spec, merged.get("accept_loss"), executor=executor,
+                                             get_operation=self.store.get_operation_by_slug,
+                                             executor_kind=op.executor_kind,
+                                             check_source=self._check_source_published,
+                                             last_classification=self._last_classification)
+            except PlanError as exc:
+                raise OpsDispatchError(exc.code, str(exc)) from exc
+            if not valid_plan_snapshot(snapshot):
+                raise OpsDispatchError("plan_invalid", (
+                    "the service plan does not validate: targets must share one Compose project, distinct "
+                    "containers, depend only on earlier targets, and the records target must be the app"))
         elif spec["action"] in IMAGE_ACTIONS:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.
@@ -328,6 +351,13 @@ class OpsService:
                 raise ValueError("snapshot routing binding mismatch")
             if not _valid_config_snapshot(detached):
                 raise ValueError("snapshot config binding mismatch")
+            if detached["spec"].get("action") == PLAN_ACTION:
+                from .plan_approval import credential_names
+                if detached["plan"]["credential_names"] != credential_names():
+                    raise ValueError("snapshot credential names mismatch")
+                for target in detached["plan"]["targets"]:
+                    if target["spec"] != validate_spec(target["operation"]["command_script"]):
+                        raise ValueError("snapshot plan target spec mismatch")
             if not binding_matches_args(detached):
                 raise ValueError("snapshot release/rollback binding mismatch")
             if is_release_spec(detached["spec"]):
@@ -394,12 +424,12 @@ class OpsService:
                 release = self.releases.get_by_parent_job(existing.id)
                 result["release_id"] = release.id if release else None
             return result
-        if snapshot is None and _spec_action(self.store.get_operation_by_slug(operation_slug)) == APP_CONFIG_ACTION:
+        if snapshot is None and _spec_action(self.store.get_operation_by_slug(operation_slug)) in APPROVAL_ONLY_ACTIONS:
             # Refused before prepare_invocation, which would start the sealed
             # source check for a caller that can never run it.
             raise OpsDispatchError("approval_required", APPROVAL_REQUIRED)
         snapshot = snapshot or self.prepare_invocation(operation_slug, supplied)
-        if snapshot["spec"].get("action") == APP_CONFIG_ACTION and (
+        if snapshot["spec"].get("action") in APPROVAL_ONLY_ACTIONS and (
                 approved_snapshot is None or create_fence is None or not approval_request_id):
             # Keyed on what would EXECUTE, so a catalog edit between the check
             # above and the snapshot cannot slip past it (TASK-1474 C-b).
@@ -524,7 +554,7 @@ class OpsService:
             self.store.mark_terminal(job.id, state=JOB_LOST, error_text="legacy job has no immutable execution snapshot; not replayed")
             return
         snapshot = json.loads(job.invocation_snapshot_json)
-        if (snapshot.get("spec") or {}).get("action") == APP_CONFIG_ACTION and not job.approval_request_id:
+        if (snapshot.get("spec") or {}).get("action") in APPROVAL_ONLY_ACTIONS and not job.approval_request_id:
             # Defense in depth (TASK-1474 C-c): only an approved request creates one.
             self.store.mark_terminal(job.id, state=JOB_FAILED,
                 error_text=f"approval_required: {APPROVAL_REQUIRED}; no action submitted")

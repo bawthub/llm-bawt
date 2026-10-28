@@ -99,12 +99,28 @@ def _outside(path: str, mounts) -> bool:
 
 
 def _path_list(value: str, mounts) -> bool:
-    """A search path: every entry absolute, normalised and not under a mount.
-    An empty or relative entry means the working directory, so it refuses: a
-    data mount is writable and unchecked (``PATH=/app/storage/bin:…`` would
-    let server.sh's unqualified ``uv`` run anything, TASK-1474 r1 B2)."""
-    return all(_clean_path(entry) and not any(_within(entry, d) for d in mounts)
-               for entry in value.split(":"))
+    """A search path: every entry absolute and normalised. An empty or
+    relative entry means the working directory, so it refuses.
+
+    An entry under a mount is refused (``PATH=/app/storage/bin:…`` would let
+    server.sh's unqualified ``uv`` run anything, TASK-1474 r1 B2), with one
+    exception (TASK-1476): TRAILING entries under read-only data mounts, such
+    as an agent bridge's shared helper scripts. Last on the path they resolve
+    only names nothing before them provides, and the container cannot write
+    them. ``mounts`` maps each destination to whether it is a read-only data
+    mount."""
+    entries = value.split(":")
+    if not all(_clean_path(entry) for entry in entries):
+        return False
+    under = [[d for d in mounts if _within(entry, d)] for entry in entries]
+    first = next((i for i, found in enumerate(under) if found), len(entries))
+    return all(found and all(mounts[d] for d in found) for found in under[first:])
+
+
+def _home(value: str, mounts) -> bool:
+    """A home directory owned by the image: clean, and neither a mount nor
+    under one. Mounts below it are classified like any other mount."""
+    return _clean_path(value) and not any(_within(value, d) for d in mounts)
 
 
 def _locale(value: str, _mounts) -> bool:
@@ -115,8 +131,12 @@ def _locale(value: str, _mounts) -> bool:
 # files'. Nothing else may steer the runtime.
 PRODUCT_ENV = {
     "PATH": _path_list,
+    "HOME": _home,  # TASK-1476: the agent bridge image sets it
     PYCACHE_PREFIX: _outside,
     "HF_HOME": _outside,  # transformers adds $HF_HOME/modules to sys.path
+    # TASK-1476: the codex bridge EXECUTES this binary, so it is a runtime
+    # variable (never opaque data): the image's own file, outside every mount.
+    "CODEX_BIN": _outside,
     "PYTHONUNBUFFERED": lambda v, _m: bool(_FLAG.fullmatch(v)),
     "PYTHONDONTWRITEBYTECODE": lambda v, _m: bool(_FLAG.fullmatch(v)),
     "UV_HTTP_TIMEOUT": lambda v, _m: bool(_DIGITS.fullmatch(v)),
@@ -248,7 +268,9 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
         paths.append(rel)
     env = {**dict(e.partition("=")[::2] for e in (image.get("Config") or {}).get("Env") or []),
            **desired["env"]}
-    mounts = [d for d in destinations if d]
+    # destination -> is a read-only data mount after the recreate
+    mounts = {d: d in data and (desired["mounts"].get(d) or {}).get("read_only") is True
+              for d in destinations if d}
     opaque = _classify_env(env, mounts, set(spec["env_names"]))
     compose_files = [posixpath.relpath(f, project) for f in source["compose_files"]]
     return {"paths": sorted(paths), "compose_files": compose_files,
@@ -258,7 +280,7 @@ def source_plan(spec: dict, source: dict, container: dict, image: dict, desired:
                                "opaque_env": opaque}}
 
 
-def _classify_env(env: dict, mounts: list, opaque_names: set) -> list:
+def _classify_env(env: dict, mounts: dict, opaque_names: set) -> list:
     """The opaque names present, sorted; raises for anything unclassified or
     unsafe (see :data:`PRODUCT_ENV`). Names are reported, never values."""
     unsafe = sorted(name for name, value in env.items() if not ENV_NAME.fullmatch(name)
