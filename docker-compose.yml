@@ -63,6 +63,22 @@ services:
       # BAWTHUB_SERVICE_TOKEN[_FILE] in .env; the override is what gets exported.
       - BAWTHUB_SERVICE_TOKEN_EXPORT_FILE=/run/bawthub-service-token/token
       - BAWTHUB_SERVICE_TOKEN_EXPORT_UID=${BAWTHUB_SERVICE_TOKEN_EXPORT_UID:-1001}
+      # TASK-1604: the bridges' bearer tokens are derived from the master key
+      # too. At startup the app writes each one, 0600, into the shared
+      # bridge-tokens volume, owned by the agent-bridge image's user (uid 1000,
+      # `bridge` in Dockerfile.agent-bridge); the bridges mount it read-only and
+      # read each file on every call (agent_bridge/bridge_token.py).
+      - BRIDGE_TOKEN_EXPORT_UID=${BRIDGE_TOKEN_EXPORT_UID:-1000}
+      - BRIDGE_BROKER_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/broker
+      - BRIDGE_GIT_CREDENTIAL_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/git-credential
+      # The Crawl4AI bearer, derived the same way (crawl4ai_token_export.py):
+      # one copy for the bridges, one for the crawl4ai container (uid 999,
+      # `appuser` in the crawl4ai image), which reads it at boot. The app's own
+      # web_fetch reads the bridges' copy.
+      - CRAWL4AI_API_TOKEN_BRIDGE_EXPORT_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
+      - CRAWL4AI_API_TOKEN_EXPORT_FILE=/run/llm-bawt-crawl4ai-token/api_token
+      - CRAWL4AI_API_TOKEN_EXPORT_UID=${CRAWL4AI_API_TOKEN_EXPORT_UID:-999}
+      - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
       # TASK-1309: the skill catalog, the injected-skills prompt section and
       # the codex skill selection read the same skill tree the agent bridges
       # load, at the same path, so a rendered base_dir is the path the bridge
@@ -82,6 +98,10 @@ services:
       # TASK-1472: holds only the exported BawtHub service token. A directory
       # volume, not a single-file mount, so atomic replaces reach the reader.
       - bawthub-service-token:/run/bawthub-service-token
+      # TASK-1604: the exported bridge and Crawl4AI tokens (directory volumes,
+      # so atomic replaces reach the readers).
+      - bridge-tokens:/run/llm-bawt-bridge-tokens
+      - crawl4ai-token:/run/llm-bawt-crawl4ai-token
       # TASK-636: codex auth.json bind mount REMOVED — the app reads the
       # bundle from the encrypted DB store (usage probe calls codex_oauth
       # in-process; broker endpoint serves bridges).
@@ -198,6 +218,10 @@ services:
       - CLAUDE_CODE_BAWTHUB_MCP_URL=http://app:8001/mcp
       - CLAUDE_CODE_PLAYWRIGHT_MCP_URL=http://playwright-mcp:8931/mcp
       - CLAUDE_CODE_CRAWL4AI_MCP_URL=http://crawl4ai:11235/mcp/sse
+      # TASK-1604: derived bearers the app exported (bridge-tokens volume).
+      - BRIDGE_BROKER_TOKEN_FILE=/run/llm-bawt-bridge-tokens/broker
+      - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
+      - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "echo.lan.zenoran.com:${ECHO_LAN_HOST_IP:-10.0.0.101}"
@@ -221,11 +245,15 @@ services:
       # resolves tokens via the broker endpoint (DB-backed, encrypted at rest).
       # Shared agent scripts (bw-secret etc.) — live, no rebuild needed
       - ${HOME}/dev/agent-skills/scripts:/opt/agent-skills/bin:ro
+      # TASK-1604: the app's exported bridge tokens, read-only.
+      - bridge-tokens:/run/llm-bawt-bridge-tokens:ro
     depends_on:
       redis:
         condition: service_healthy
+      # Healthy, not just started: the app exports the tokens before it
+      # serves, and bootstrap writes the Crawl4AI MCP header once at startup.
       app:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8681/health"]
@@ -255,6 +283,10 @@ services:
       - CODEX_DEV_ROOT=${CODEX_DEV_ROOT:-/home/bridge/dev}
       - CODEX_BAWTHUB_MCP_URL=${CODEX_BAWTHUB_MCP_URL:-http://app:8001/mcp}
       - CODEX_CRAWL4AI_MCP_URL=${CODEX_CRAWL4AI_MCP_URL:-http://crawl4ai:11235/mcp/sse}
+      # TASK-1604: derived bearers the app exported (bridge-tokens volume).
+      - BRIDGE_BROKER_TOKEN_FILE=/run/llm-bawt-bridge-tokens/broker
+      - BRIDGE_GIT_CREDENTIAL_TOKEN_FILE=/run/llm-bawt-bridge-tokens/git-credential
+      - CRAWL4AI_API_TOKEN_FILE=/run/llm-bawt-bridge-tokens/crawl4ai
       # The openai-codex-sdk wheel ships without the codex Rust binary; use the
       # one baked into the image by openai-codex-cli-bin (Dockerfile.agent-bridge).
       # Never bind-mount the host's npm @openai/codex vendor dir: `codex` self-update
@@ -290,6 +322,8 @@ services:
       - ${BRIDGE_SSH_DIR:-${HOME}/.ssh}:/home/bridge/.ssh:ro
       # Shared agent scripts (bw-secret etc.) — live, no rebuild needed
       - ${HOME}/dev/agent-skills/scripts:/opt/agent-skills/bin:ro
+      # TASK-1604: the app's exported bridge tokens, read-only.
+      - bridge-tokens:/run/llm-bawt-bridge-tokens:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -440,8 +474,16 @@ services:
     container_name: llm-bawt-crawl4ai
     ports:
       - "${CRAWL4AI_PORT:-11235}:11235"
-    environment:
-      - CRAWL4AI_API_TOKEN=${CRAWL4AI_API_TOKEN:-}
+    # TASK-1604: no token in env. The app derives it and exports it to the
+    # crawl4ai-token volume, mounted where the image's entrypoint looks for a
+    # secret (/run/secrets/api_token); with a token it binds all interfaces,
+    # without one loopback only. The wrapper below refuses to start without
+    # the file, so the container restarts until the app has written it.
+    volumes:
+      - crawl4ai-token:/run/secrets:ro
+    depends_on:
+      app:
+        condition: service_healthy
     # The embedded Redis runs as appuser but /app is root-owned read-only,
     # so RDB snapshots fail with "Permission denied". Give it a writable tmpfs
     # and copy+patch configs to /tmp before launching.
@@ -451,6 +493,10 @@ services:
       - /bin/bash
       - -c
       - |
+        if [ ! -s /run/secrets/api_token ]; then
+          echo "crawl4ai: no exported API token at /run/secrets/api_token; refusing to start" >&2
+          exit 1
+        fi
         cp /app/supervisord.conf /tmp/supervisord.conf
         sed -i 's|command=/usr/bin/redis-server|command=/usr/bin/redis-server --dir /data|' /tmp/supervisord.conf
         cp /app/entrypoint.sh /tmp/entrypoint.sh
@@ -465,3 +511,7 @@ volumes:
   # as an external volume (bring `app` up first; it creates the volume).
   bawthub-service-token:
     name: llm-bawt-bawthub-service-token
+  # TASK-1604: the app writes the derived bridge and Crawl4AI bearers here;
+  # readers mount these read-only.
+  bridge-tokens:
+  crawl4ai-token:

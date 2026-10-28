@@ -57,7 +57,6 @@ PENDING_RETIREMENT: dict[str, str] = {
     "LLM_BAWT_S3_ACCESS_KEY": "TASK-1476: object-store connection is record-first",
     "LLM_BAWT_S3_SECRET_KEY": "TASK-1476: object-store connection is record-first",
     # Still env-only; each needs a DB home first.
-    "CRAWL4AI_API_TOKEN": "TASK-1476: the crawl4ai container needs it at boot",
     "LLM_BAWT_REDDIT_CLIENT_SECRET": "TASK-1476: Reddit search credentials have no connection yet",
     "LLM_BAWT_TALK_PROVISIONER_TOKEN": "TASK-1476: talk provisioner token has no connection yet",
     "HF_TOKEN": "TASK-1476: model downloads on GPU containers; not an app credential",
