@@ -47,7 +47,10 @@ SHELL_DOCKER = re.compile(r"(^|[;&|(]|\$\()\s*(sudo\s+)?(\S*/)?docker(-compose)?
 SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
 #: A file skipped here cannot hold any finding: every access kind needs
 #: "docker" (any case) or an ENGINE_API match, so this is built from them.
-PREFILTER = re.compile(r"docker|" + ENGINE_API.pattern, re.IGNORECASE)
+#: The AST scan matches ENGINE_API against an f-string's constant parts, so
+#: f"/containers/{quote(cid, safe='')}/exec" is a finding even though its raw
+#: source text is not an ENGINE_API match; "/containers/" admits that form.
+PREFILTER = re.compile(r"docker|/containers/|" + ENGINE_API.pattern, re.IGNORECASE)
 #: Mounting a socket's parent directory exposes the socket too.
 SOCKET_PARENTS = frozenset({"/run", "/var/run", "/var/run/docker", "/run/docker"})
 DOCKER_MODULES = frozenset({"docker", "aiodocker"})
@@ -265,6 +268,8 @@ def test_scanner_detects_each_access_kind():
     # Loopy r1: any versioned Engine endpoint, through the file prefilter.
     assert _parse("import httpx\nhttpx.get(f'{engine_url}/v1.43/info')") == {"engine api"}
     assert _parse("import httpx\nhttpx.post(f'{engine_url}/v1.43/build')") == {"engine api"}
+    # TASK-1476: a quoted placeholder hides the raw form; no "docker" in the file.
+    assert _parse("""api.request("POST", f"/containers/{quote(cid, safe='')}/exec")""") == {"engine api"}
     assert _parse("url = 'https://graph.microsoft.com/v1.0/me'") == set()
 
 
