@@ -12,7 +12,10 @@ Docker CLI image with:
 * exactly one read-only bind: the target's own Compose working directory, at
   the same path, so relative paths and the project ``.env`` resolve as they do
   for the operator. Both directory and files come from the target's Compose
-  labels and must match the catalog spec's file names;
+  labels and must match the catalog spec's file names. It may not equal, hold
+  or sit inside any path the CLI trusts (``RENDER_TRUSTED_ROOTS``);
+* an empty ``noexec`` tmpfs as the CLI's ``DOCKER_CONFIG``: no contexts,
+  credential helpers, aliases or user plugins from anywhere;
 * a fixed argv (``compose -p … -f … config``) run under ``env -i``: the
   renderer image's own environment (notably ``HOME=/root``) never reaches
   interpolation (TASK-1476). Compose sees only a fixed ``PATH``, the pinned
@@ -51,8 +54,20 @@ SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
 COMPOSE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.ya?ml")
 MAX_COMPOSE_FILES = 4
 RENDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# Absent in the sealed image (read-only root): no user config, no user plugins.
-RENDER_DOCKER_CONFIG = "/nonexistent/llm-bawt-render-docker-config"
+# The CLI's config dir (contexts, credential helpers, aliases, user plugins) is
+# an EMPTY noexec tmpfs the renderer container gets at create time: nothing the
+# image or the project ships can be there (TASK-1476, Loopy DESIGN cmvsde44e).
+RENDER_DOCKER_CONFIG = "/run/llm-bawt-render/docker"
+# Every path the docker CLI, its loader or its plugins resolve code or config
+# from, inventoried in the pinned renderer image (docker:28.5 / Alpine musl):
+# PATH dirs (/usr/local/{s,}bin, /usr/{s,}bin, /{s,}bin), the system plugin
+# dirs (/usr/local/libexec/docker/cli-plugins, /usr/{local/,}lib/docker/
+# cli-plugins, /usr/libexec/...), the musl loader and libs (/lib, /usr/lib,
+# /usr/local/lib), /etc, the config tmpfs under /run, the image HOME /root,
+# and kernel/devices. The project bind lands at its own path, so a project dir
+# equal to, above or below any of these would shadow it and is refused.
+RENDER_TRUSTED_ROOTS = ("/bin", "/sbin", "/lib", "/lib64", "/usr", "/etc", "/run", "/var", "/tmp", "/root",
+                        "/dev", "/proc", "/sys", RENDER_DOCKER_CONFIG)
 _ENV_VALUE = re.compile(r"[A-Za-z0-9._/:@-]{1,255}")
 # A CLOSED allowlist (Codex r1 Blocker): the renderer executes docker with the
 # project bound, so a name like LD_PRELOAD, DOCKER_* or COMPOSE_* would let a
@@ -100,17 +115,29 @@ def validate_interpolation_env(config: dict) -> dict:
     return value
 
 
+def _within(path: str, root: str) -> bool:
+    """``path`` is ``root`` or below it (both clean absolute paths)."""
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return _within(a, b) or _within(b, a)
+
+
 def renderer_env(config: dict, image_ref: str, project_dir: str) -> list[str]:
     """The renderer's whole environment, ``env -i`` arguments: a fixed PATH and
     DOCKER_CONFIG, the image variable (if any) and the declared ``interpolation_env``.
 
-    Codex r2: the docker CLI loads plugins from its config dir (``$HOME/.docker``
-    unless DOCKER_CONFIG is set) before the system ones, and the project is
-    bound executable. DOCKER_CONFIG is therefore pinned to a path absent from
-    the sealed image, and no declared path may be the bound project or under it."""
+    Codex r2 / Loopy r1: the docker CLI loads plugins from its config dir
+    (``$HOME/.docker`` unless DOCKER_CONFIG is set) before the system ones, and
+    the project is bound at its own path. DOCKER_CONFIG is therefore an empty
+    tmpfs, the project may not overlap any trusted path in either direction,
+    and no declared path may be the bound project or under it."""
+    if not working_dir_valid(project_dir) or any(_overlaps(project_dir, root) for root in RENDER_TRUSTED_ROOTS):
+        raise ValueError("Compose project directory overlaps a path the renderer trusts")
     interpolation = validate_interpolation_env(config)
     for name, value in interpolation.items():
-        if name in _PATH_NAMES and (value == project_dir or value.startswith(project_dir.rstrip("/") + "/")):
+        if name in _PATH_NAMES and _within(value, project_dir):
             raise ValueError(f"compose_config.interpolation_env.{name} must not be inside the Compose project")
     declared = [f"{name}={value}" for name, value in sorted(interpolation.items())]
     variable = config.get("image_variable")
@@ -218,7 +245,8 @@ class ComposeRenderer:
         try:
             # ``env -i``: Docker ``Env`` would only add to the image's own (HOME=/root).
             status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],
-                                     directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES)
+                                     directory=source["project_dir"], max_bytes=MAX_RENDER_BYTES,
+                                     empty_dirs=(RENDER_DOCKER_CONFIG,))
         except SealedRunError as exc:
             raise ComposeError(f"renderer_{exc.kind}") from None
         stdout, stderr = demux_streams(raw)

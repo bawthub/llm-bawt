@@ -290,6 +290,7 @@ def test_deploy_renders_the_target_compose_service_sealed_at_the_new_ref(tmp_pat
     assert host["Binds"] == [f"{PROJECT_DIR}:{PROJECT_DIR}:ro"] and host["NetworkMode"] == "none"
     assert host["ReadonlyRootfs"] and host["CapDrop"] == ["ALL"] and host["Privileged"] is False
     assert host["LogConfig"]["Type"] == "none"
+    assert host["Tmpfs"] == {RENDER_DOCKER_CONFIG: "rw,noexec,nosuid,nodev,size=1048576"}
     assert not api.renderers_left()
 
 

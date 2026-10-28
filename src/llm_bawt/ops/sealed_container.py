@@ -29,6 +29,7 @@ from urllib.parse import quote, urlencode
 # Same label the dispatcher puts on workers: Compose-target selection skips it.
 OPS_JOB_LABEL = "llm-bawt.ops.job"
 TMPFS_BYTES = 64 * 1024 * 1024
+EMPTY_DIR_BYTES = 1024 * 1024
 # A session's keepalive process. The longest a sequence of execs may take; the
 # container is removed as soon as the session ends, whatever happens.
 SESSION_SECONDS = 600
@@ -53,17 +54,22 @@ def demux_streams(raw: bytes) -> tuple[bytes, bytes]:
 
 
 def sealed_body(image: str, *, entrypoint: list[str], cmd: list[str], env: list[str], directory: str,
-                labels: dict, role: str, tmpfs: bool = False) -> dict:
+                labels: dict, role: str, tmpfs: bool = False, empty_dirs: tuple = ()) -> dict:
     """Create body of the hardened container. ``labels`` adds the caller's own
-    marker; ``role`` names it as the Compose service it pretends to be."""
+    marker; ``role`` names it as the Compose service it pretends to be.
+    ``empty_dirs`` are extra small ``noexec`` tmpfs mounts that start empty, so
+    nothing the image or the project ships can appear there (TASK-1476)."""
     host = {
         "NetworkMode": "none", "Binds": [f"{directory}:{directory}:ro"], "ReadonlyRootfs": True,
         "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"], "LogConfig": {"Type": "none", "Config": {}},
         "RestartPolicy": {"Name": "no"}, "AutoRemove": False, "Memory": 256 * 1024 * 1024, "PidsLimit": 64,
         "Privileged": False,
     }
+    mounts = {path: f"rw,noexec,nosuid,nodev,size={EMPTY_DIR_BYTES}" for path in empty_dirs}
     if tmpfs:
-        host["Tmpfs"] = {"/tmp": f"rw,noexec,nosuid,nodev,size={TMPFS_BYTES}"}
+        mounts["/tmp"] = f"rw,noexec,nosuid,nodev,size={TMPFS_BYTES}"
+    if mounts:
+        host["Tmpfs"] = mounts
     return {
         "Image": image, "Entrypoint": entrypoint, "Cmd": cmd, "Env": env, "WorkingDir": directory,
         "AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "OpenStdin": False, "Tty": False,
@@ -111,16 +117,16 @@ class SealedContainer:
         except Exception:  # noqa: BLE001 - the outcome stands; a leftover is labelled
             pass
 
-    def _body(self, *, entrypoint, cmd, env, directory, tmpfs) -> dict:
+    def _body(self, *, entrypoint, cmd, env, directory, tmpfs, empty_dirs=()) -> dict:
         return sealed_body(self.image, entrypoint=entrypoint, cmd=cmd, env=env, directory=directory,
-                           labels=self.labels, role=self.role, tmpfs=tmpfs)
+                           labels=self.labels, role=self.role, tmpfs=tmpfs, empty_dirs=empty_dirs)
 
     # ── one-shot: attach, start, wait ───────────────────────────────────
     def run(self, *, entrypoint: list[str], cmd: list[str], env: list[str], directory: str,
-            max_bytes: int) -> tuple[int | None, bytes]:
+            max_bytes: int, empty_dirs: tuple = ()) -> tuple[int | None, bytes]:
         """``(exit status, raw multiplexed output)``; the output is never longer than ``max_bytes``."""
         container_id = self._create(self._body(entrypoint=entrypoint, cmd=cmd, env=env,
-                                               directory=directory, tmpfs=False))
+                                               directory=directory, tmpfs=False, empty_dirs=empty_dirs))
         try:
             try:
                 stream = self.api.attach_stream(container_id)

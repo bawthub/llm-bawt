@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import posixpath
 
 import pytest
 
@@ -364,6 +365,64 @@ def test_bogus_or_execution_control_env_refuses_before_any_container(compose_con
     with pytest.raises(ValueError):
         ComposeRenderer(api, spec, tag="t1").render(compose_source(SPEC, api.by_name(NAME)), REF)
     assert not api.render_bodies
+
+
+# ── B (TASK-1476, Loopy DESIGN cmvsde44e): the renderer's trust boundary ───
+
+@pytest.mark.parametrize("project_dir", [
+    "/usr", "/usr/local", "/usr/local/libexec/docker/cli-plugins", "/lib", "/etc", "/bin",
+    "/run", "/run/llm-bawt-render", RENDER_DOCKER_CONFIG, f"{RENDER_DOCKER_CONFIG}/cli-plugins",
+    "/root", "/tmp/project",
+], ids=lambda p: p.strip("/").replace("/", "-") or "root")
+def test_a_project_overlapping_a_trusted_path_refuses_before_any_container(project_dir):
+    """Loopy r1 repro, generalised: the project bind lands at its own path, so a
+    project dir above, at or below a CLI/loader/plugin/config path would shadow it."""
+    api = FakeDocker()
+    with pytest.raises(ValueError, match="overlaps a path the renderer trusts"):
+        ComposeRenderer(api, SPEC, tag="t1").render({"project_dir": project_dir,
+                                                     "compose_files": [f"{project_dir}/docker-compose.yml"]}, REF)
+    assert not api.render_bodies
+
+
+def test_every_cli_path_in_the_pinned_image_is_a_trusted_root():
+    """The inventory behind RENDER_TRUSTED_ROOTS: PATH, plugin dirs, loader/libs."""
+    from llm_bawt.ops.compose_render import RENDER_TRUSTED_ROOTS, _within
+
+    cli_paths = RENDER_PATH.split(":") + [
+        "/usr/local/libexec/docker/cli-plugins", "/usr/libexec/docker/cli-plugins",
+        "/usr/local/lib/docker/cli-plugins", "/usr/lib/docker/cli-plugins",
+        "/lib/ld-musl-x86_64.so.1", "/usr/local/lib", "/etc/ld.so.preload", RENDER_DOCKER_CONFIG, "/root/.docker"]
+    for path in cli_paths:
+        assert any(_within(path, root) for root in RENDER_TRUSTED_ROOTS), path
+
+
+def test_loopy_repro_a_nonexistent_project_no_longer_holds_the_config_dir():
+    """b9345d1 pinned DOCKER_CONFIG under /nonexistent; a project there contained it.
+    Now the config dir is an empty tmpfs under /run, which no project may overlap."""
+    assert not RENDER_DOCKER_CONFIG.startswith("/nonexistent")
+    env = renderer_env(_home_spec()["compose_config"], REF, "/nonexistent")
+    assert f"DOCKER_CONFIG={RENDER_DOCKER_CONFIG}" in env
+
+
+def test_the_renderer_gets_an_empty_noexec_config_tmpfs_and_points_the_cli_at_it():
+    api = _home_api()
+    ComposeRenderer(api, _home_spec(OPERATOR_HOME), tag="t1").render(compose_source(SPEC, api.by_name(NAME)), REF)
+    body = api.render_bodies[0]
+    assert body["HostConfig"]["Tmpfs"] == {RENDER_DOCKER_CONFIG: "rw,noexec,nosuid,nodev,size=1048576"}
+    assert body["HostConfig"]["Binds"] == [f"{PROJECT_DIR}:{PROJECT_DIR}:ro"]
+    entry = body["Entrypoint"]
+    assert entry[:2] == ["env", "-i"] and entry[-1] == "docker" and body["Env"] == []
+    assert f"DOCKER_CONFIG={RENDER_DOCKER_CONFIG}" in entry and f"HOME={OPERATOR_HOME}" in entry
+    assert not [item for item in entry[2:-1] if item.startswith(("LD_", "COMPOSE_", "DOCKER_HOST"))]
+
+
+def test_codex_repro_home_as_the_project_dir_refuses():
+    """Codex r2: HOME=project put $HOME/.docker/cli-plugins in the bound project."""
+    with pytest.raises(ValueError, match="must not be inside the Compose project"):
+        renderer_env(_home_spec(PROJECT_DIR)["compose_config"], REF, PROJECT_DIR)
+    # An operator HOME that merely CONTAINS the project is the normal case.
+    assert f"HOME={posixpath.dirname(PROJECT_DIR)}" in renderer_env(
+        _home_spec(posixpath.dirname(PROJECT_DIR))["compose_config"], REF, PROJECT_DIR)
 
 
 def test_declared_home_renders_the_operator_sources():

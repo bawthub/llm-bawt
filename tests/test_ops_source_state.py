@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from llm_bawt.ops.compose_render import ComposeError, ComposeRenderer
+from llm_bawt.ops.compose_render import RENDER_DOCKER_CONFIG, ComposeError, ComposeRenderer
 from llm_bawt.ops.release import GitHubReleaseVerifier, ReleaseVerificationError
 from llm_bawt.ops.sealed_container import OPS_JOB_LABEL, SealedContainer, SealedRunError
 from llm_bawt.ops.source_state import (
@@ -384,7 +384,9 @@ def test_the_renderer_runs_in_the_shared_sealed_container():
                                                        "ghcr.io/bawthub/frontend@sha256:" + "a" * 64)
     body = api.render_bodies[0]
     assert body["HostConfig"]["NetworkMode"] == "none" and body["HostConfig"]["ReadonlyRootfs"] is True
-    assert "Tmpfs" not in body["HostConfig"] and body["Labels"]["com.docker.compose.service"] == "compose-render"
+    # Only the empty noexec DOCKER_CONFIG tmpfs (TASK-1476 B); no scratch /tmp.
+    assert body["HostConfig"]["Tmpfs"] == {RENDER_DOCKER_CONFIG: "rw,noexec,nosuid,nodev,size=1048576"}
+    assert body["Labels"]["com.docker.compose.service"] == "compose-render"
     assert body["Labels"][OPS_JOB_LABEL] == "r1" and not api.renderers_left()
     with pytest.raises(ValueError):
         SealedContainer(api, RENDERER, role="Bad Role", tag="r1", labels={})
