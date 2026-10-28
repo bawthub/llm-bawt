@@ -9,7 +9,7 @@ def test_gpu_status_reports_unavailable_bridge(monkeypatch):
     state = SimpleNamespace(owner="unknown", phase="recovery_required", generation=3,
                             target="video", actions=("stop_moshi_stt",), next_action=0,
                             pending_action="stop_moshi_stt", last_job_id="job1",
-                            last_error="Outcome uncertain")
+                            last_error="Outcome uncertain", tts_restart_key=None)
     monkeypatch.setattr(media, "get_service", lambda: SimpleNamespace(config=object()))
     monkeypatch.setattr(media, "get_shared_engine", lambda config: object())
     monkeypatch.setattr(media, "GpuHandoffStore", lambda engine: SimpleNamespace(

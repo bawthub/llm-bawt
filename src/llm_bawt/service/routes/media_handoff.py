@@ -11,14 +11,17 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...media.gpu_handoff import GpuHandoff
 from ...media.gpu_handoff_adapter import LocalHandoffAdapter
 from ...media.gpu_handoff_store import GpuHandoffStore, HandoffConflict
+from ...ops.service import OpsDispatchError
 from ...utils.db import get_shared_engine
 from ..dependencies import get_ops_service, get_service, get_tool_approval_policy_store
+from .ops import DISPATCH_ERROR_STATUS
+from .service_auth import NO_STORE, read_body, require_service_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/media/local-video/handoff", tags=["Media"])
@@ -53,12 +56,20 @@ async def _controller():
         yield GpuHandoff(store, adapter)
 
 
-async def _run(method, **kwargs):
+async def _run(method, *, coded=False, **kwargs):
+    """``coded`` answers a conflict as ``{code, message}`` (the TTS restart
+    contract); the older handoff routes keep their plain-string detail."""
     try:
         async with _controller() as controller:
             return await getattr(controller, method)(**kwargs)
     except HandoffConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not coded:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400 if exc.code == "args_invalid" else 409,
+                            detail={"code": exc.code, "message": str(exc)}, headers=NO_STORE) from exc
+    except OpsDispatchError as exc:
+        raise HTTPException(status_code=DISPATCH_ERROR_STATUS.get(exc.code, 500),
+                            detail={"code": exc.code, "message": str(exc)}) from exc
     except Exception as exc:
         logger.exception("GPU handoff %s unavailable", method)
         raise HTTPException(status_code=503, detail=(
@@ -147,3 +158,31 @@ async def restore_confirm(body: ConfirmRequest):
     _restores.add(task)
     task.add_done_callback(_restores.discard)
     return {"accepted": True, "generation": generation}
+
+
+# ── TTS restart (TASK-1171) ─────────────────────────────────────────────────
+# BawtHub's TTS admin restart. Service-bearer only: the restart takes the GPU
+# fence, so no bot reaches it; ``ops_run`` refuses the operation for anyone
+# but this controller.
+tts_router = APIRouter(prefix="/tts-restart", dependencies=[Depends(require_service_token)])
+
+
+class TtsRestartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    request_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+
+
+@tts_router.post("")
+async def tts_restart(request: Request):
+    """Restart TTS once while voice owns the GPU; a replayed ``request_id`` reads the same job."""
+    body = await read_body(request, TtsRestartRequest)
+    return await _run("tts_restart", coded=True, request_id=body.request_id)
+
+
+@tts_router.get("/{request_id}")
+async def tts_restart_status(request_id: str):
+    """``outcome``: in_progress | held | released | refused. Reading it is what releases the fence."""
+    return await _run("tts_restart_status", coded=True, request_id=request_id)
+
+
+router.include_router(tts_router)

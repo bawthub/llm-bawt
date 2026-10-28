@@ -63,6 +63,10 @@ def _compose_identity(attrs):
     return ref.project, ref.service
 
 
+#: Docker's RestartCount is an int32 counter; anything outside it is not one.
+MAX_RESTART_COUNT = 2**31 - 1
+
+
 def instance_id(container_id):
     """Opaque, stable per container: sha256(Docker Id)[:16]. A recreate gets a
     new Id, so consumers see a replacement as an instance_id change."""
@@ -92,9 +96,12 @@ def observe_container(attrs):
         if parsed.tzinfo is None:
             raise ValueError("container start time lacks timezone")
         started = None if parsed.year == 1 else parsed.isoformat()
+    restarts = attrs.get("RestartCount")
+    if restarts is not None and (type(restarts) is not int or not 0 <= restarts <= MAX_RESTART_COUNT):
+        raise ValueError("invalid container restart count")
     project, service = _compose_identity(attrs)
     return ContainerObservation(name, status, health, started, project, service,
-                                instance_id(attrs.get("Id")))
+                                instance_id(attrs.get("Id")), restarts)
 
 
 def _operation_capabilities(slug, command_script, args_schema_json):

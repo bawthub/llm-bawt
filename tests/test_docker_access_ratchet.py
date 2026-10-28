@@ -80,7 +80,6 @@ OPS_COMPOSE = {
 
 #: Current offenders outside the boundary, each with the task that removes it.
 OFFENDERS = {
-    ("src", "llm_bawt/media/gpu_handoff_adapter.py", "import docker"): "TASK-1171",
     ("compose", "docker-compose.yml", "app"): "TASK-1173",
 }
 

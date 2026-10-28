@@ -278,6 +278,15 @@ class Config(RuntimeTunables, BaseSettings):
         description="Redis URL for bridge command/event transport (e.g. redis://redis:6379/0)",
     )
 
+    # --- Ops health (TASK-1171) --- #
+    OPS_HEALTH_URL: str = Field(
+        default="http://ops-reconciler:8650",
+        description=(
+            "Base URL of the ops-reconciler's internal health API, the app's only view of "
+            "container state (Set via LLM_BAWT_OPS_HEALTH_URL)"
+        ),
+    )
+
     # --- Agent Task API Settings --- #
     TASK_API_URL: str = Field(
         default=DEFAULT_TASK_API_URL,

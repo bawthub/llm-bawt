@@ -34,6 +34,9 @@ class FakeExecutor(Executor):
     def reconcile(self, **kwargs):
         return self.result
 
+    def target_compose_identity(self, spec, args):
+        return ("test", "fake")  # not a GPU voice service (TASK-1171)
+
 
 @pytest.fixture
 def system(tmp_path):

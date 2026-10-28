@@ -33,6 +33,10 @@ class ContainerObservation:
     project: str | None = None
     service: str | None = None
     instance_id: str | None = None
+    # TASK-1171: Docker's RestartCount. An API start/restart resets it to 0
+    # and only a restart-policy restart increments it, so consumers can tell
+    # an operator restart from a crash recovery. None when not reported.
+    restart_count: int | None = None
 
     def to_api(self):
         """The /v1/health/containers row; its shape is frozen for consumers."""
@@ -40,7 +44,7 @@ class ContainerObservation:
                 "startedAt": self.started_at}
 
     def instance_api(self):
-        return {"instanceId": self.instance_id, **self.to_api()}
+        return {"instanceId": self.instance_id, **self.to_api(), "restartCount": self.restart_count}
 
 
 @dataclass(frozen=True)

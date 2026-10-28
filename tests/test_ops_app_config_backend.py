@@ -58,7 +58,6 @@ def backend_compose(**service):
                  "bind": {"create_host_path": True}},
                 {"type": "bind", "source": f"{BACKEND_DIR}/services/moshi-server/configs", "target": MOSHI,
                  "bind": {"create_host_path": True}},
-                {"type": "bind", "source": SOCK, "target": SOCK, "bind": {"create_host_path": True}},
                 {"type": "volume", "source": "llm-bawt-service-token", "target": TOKEN, "read_only": True,
                  "volume": {}}]}
     body.update(service)
@@ -96,8 +95,7 @@ class BackendDocker(AppDocker):
                                   "traefik.enable": "true"}},
             "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"},
                            "Binds": [f"{BACKEND_DIR}/bawthub:/app/bawthub:rw",
-                                     f"{BACKEND_DIR}/services/moshi-server/configs:{MOSHI}:rw",
-                                     f"{SOCK}:{SOCK}:rw"],
+                                     f"{BACKEND_DIR}/services/moshi-server/configs:{MOSHI}:rw"],
                            "Mounts": [{"Type": "volume", "Source": "llm-bawt-service-token", "Target": TOKEN,
                                        "ReadOnly": True}],
                            "ExtraHosts": ["host.docker.internal:host-gateway"],
@@ -150,7 +148,10 @@ def test_seed_is_disabled_validates_and_warns_it_cuts_voice_sessions():
     assert SPEC["health_field"] == "ok" and SPEC["health_value"] is True
     assert SPEC["stat_paths"] == [f"{TOKEN}/token"]
     assert SPEC["compose_config"] == APP_SPEC["compose_config"]
-    assert len(SPEC["env_names"]) == 21 and "BAWTHUB_TTS_RESTART_CMD" not in SPEC["env_names"]
+    assert len(SPEC["env_names"]) == 19 and "BAWTHUB_TTS_RESTART_CMD" not in SPEC["env_names"]
+    # TASK-1171: the backend no longer holds the Docker socket or the TTS container names.
+    assert SOCK not in SPEC["data_mounts"]
+    assert not {"BAWTHUB_TTS_DOCKER_CONTAINER", "BAWTHUB_COMPOSE_PROJECT"} & set(SPEC["env_names"])
     assert not any(reserved_env_name(n) for n in SPEC["env_names"])
 
 
@@ -455,7 +456,7 @@ def test_backend_reconcile_end_to_end(tmp_path):
     snap = snapshot(api)
     bound = snap["config"]
     assert bound["classification"] == {"source_mounts": ["/app/bawthub"],
-                                       "data_mounts": sorted([MOSHI, SOCK, TOKEN]),
+                                       "data_mounts": sorted([MOSHI, TOKEN]),
                                        "opaque_env": sorted(SPEC["env_names"])}
     assert bound["source_commit"]["repository"] == "bawthub/bawthub" and bound["source_commit"]["branch"] == "main"
     assert bound["ports"] == [] and bound["depends_on"] == []

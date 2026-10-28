@@ -259,6 +259,33 @@ _BAWTHUB_SEEDS: list[dict[str, Any]] = [
         "approval_prompt_prefix": "Restart bawthub backend",
     },
     {
+        # TASK-1171: the TTS admin page's restart. It must be dispatched only
+        # through the GPU handoff controller, under its fence. Seeded disabled;
+        # enable it only once that fence is deployed (TASK-1173).
+        "slug": "bawthub.restart-tts",
+        "title": "Restart bawthub TTS",
+        "description": (
+            "Restart the Moshi TTS container. Only the GPU handoff controller can dispatch it, "
+            "and only while voice owns the GPU."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(
+            action="restart",
+            compose_project=_BAWTHUB_PROJECT,
+            compose_service="tts",
+        ),
+        "args_schema_json": _no_args_schema(),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 120,
+        "start_delay_seconds": 0,
+        "risk_level": RISK_HIGH,
+        "category": "gpu-handoff",
+        "approval_prompt_prefix": "Restart bawthub TTS",
+    },
+    {
         "slug": "bawthub.restart-frontend",
         "title": "Restart bawthub frontend (HMR)",
         "description": "Restart the bawthub Vite/Hono HMR container.",
@@ -517,13 +544,13 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         # Destinations are the product's own Compose file's container paths.
         source_repository="bawthub/bawthub", source_branch="main",
         source_mounts=["/app/bawthub"],
-        data_mounts=["/app/services/moshi-server/configs", "/var/run/docker.sock", "/run/bawthub-service-token"],
+        data_mounts=["/app/services/moshi-server/configs", "/run/bawthub-service-token"],
         # The backend's own Compose environment names (never values): data it
         # reads (URLs, keys, ids, voice names); none is executed.
         env_names=["AZURE_SPEECH_ENDPOINT", "AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION", "AZURE_VOICE_FILTER",
-                   "BAWTHUB_COMPOSE_PROJECT", "BAWTHUB_LLM_MODEL", "BAWTHUB_LLM_URL",
+                   "BAWTHUB_LLM_MODEL", "BAWTHUB_LLM_URL",
                    "BAWTHUB_SERVICE_TOKEN_FILE", "BAWTHUB_STT_URL", "BAWTHUB_TTS_DEFAULT_PROVIDER",
-                   "BAWTHUB_TTS_DOCKER_CONTAINER", "BAWTHUB_TTS_URL", "DATABASE_URL", "GROK_TTS_DEFAULT_VOICE",
+                   "BAWTHUB_TTS_URL", "DATABASE_URL", "GROK_TTS_DEFAULT_VOICE",
                    "GROK_TTS_LANGUAGE", "GROK_TTS_LATENCY_MODE", "GROK_TTS_TEXT_NORMALIZATION",
                    "HOME_ASSISTANT_TOKEN", "HOME_ASSISTANT_URL", "HOME_ASSISTANT_WEATHER_ENTITY_ID",
                    "XAI_API_KEY"],

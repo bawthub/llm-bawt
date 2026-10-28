@@ -105,8 +105,22 @@ A readiness healthcheck exists in Compose source but has not been activated in t
 | Hono dev/prod | Docker list/sync/state/start/stop/restart helpers | TASK-1170 |
 | Hono repository browsing | `repos.ts` imports `getContainerMounts` for path discovery | Explicit deployment/repo-path configuration, TASK-1170 |
 | Voice backend | Bundled `restart_tts_container.sh` (fixed argv, no shell; `BAWTHUB_TTS_RESTART_CMD` retired, TASK-1606) directly restarts the label-verified TTS container through the socket | TASK-1171 |
-| GPU handoff in app | Direct Docker inspection of STT/TTS; mutations already use consented ops jobs | TASK-1171 |
+| GPU handoff in app | Reads STT/TTS from the reconciler's `/v1/health/services/bawthub.{stt,tts}` (`LLM_BAWT_OPS_HEALTH_URL`); refuses on anything but one fresh, typed instance. No Docker client. Mutations use consented ops jobs | Done in source, TASK-1171 |
 | Traefik | Docker provider watches labels through a socket mount | Deployment-owned routing, TASK-1172 |
+
+#### TASK-1171: source vs activation
+
+Source changes ship inert. Each row below needs its activation step before the live system matches source; TASK-1173 runs them and records the acceptance.
+
+| Change | In source | Activation (operator, TASK-1173) |
+| --- | --- | --- |
+| `bawthub.restart-tts` (typed `{restart, bawthub, tts}`, no args, high risk) | Seeded **disabled** | `POST /v1/ops/seed-defaults` inserts it; enable it only after the guard and fence rows below are live in both app and ops-reconciler. It needs no `ops_run` policy: the guard refuses it on every path but the handoff route |
+| GPU voice guard (`ops/gpu_guard.py`): every action but `stop`, `pull` and release orchestration that targets `bawthub` `stt`/`tts` needs a `GpuHandoffFence`, checked at job creation and again at dispatch against the live container's labels | In `OpsService.dispatch_job` and `_dispatch_queued`/quiesce preflight | app **and** ops-reconciler restart (the reconciler dispatches queued jobs) |
+| TTS restart fence: `POST`/`GET /v1/media/local-video/handoff/tts-restart[/{request_id}]` (service bearer). The fence (`phase=tts_restarting`) and the job commit in one transaction; only the status read releases it, on the job's outcome plus start evidence | Routes, `GpuHandoff.tts_restart`, `gpu_handoff_v6` column `tts_restart_key` | app restart (the column is added on first store construction) |
+| BawtHub TTS admin restart through that route, backend socket removed | BawtHub slice 2 | BawtHub deploy, then the backend recreate above |
+| `bawthub.reconcile-backend-config` drops `/var/run/docker.sock` and `BAWTHUB_TTS_DOCKER_CONTAINER`/`BAWTHUB_COMPOSE_PROJECT` | Seed row changed | Seeds never update existing rows: `PATCH` the live row, then recreate the backend without the socket |
+| GPU handoff observation via ops health | App has no Docker client for it | `LLM_BAWT_OPS_HEALTH_URL` only if the reconciler isn't at the default `http://ops-reconciler:8650`; app restart |
+| `restartCount` on `/v1/health/services` instances | Collector + schema | ops-reconciler restart |
 
 Production Hono has a socket mount but its non-root user lacks socket permission; dev Hono has effective access. A `:ro` socket mount, as used by Traefik, does not restrict Docker API methods. Agent bridges have no direct socket mount in the inspected deployment, but host SSH/operator privileges are a separate surface, not removed by this design.
 
@@ -240,7 +254,7 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `src/llm_bawt/approval_mcp_store.py`: approval execution claims, plus the shared awaiting-execution predicate used by the claim, app recovery and admission.
 - `src/llm_bawt/service/routes/approval_policies.py`, `service/approval_continuations.py`: approval decision recording and the continuation outbox, which reads ops results without reconciling them.
 - `src/llm_bawt/service/routes/ops.py`: existing app HTTP surface.
-- `src/llm_bawt/media/gpu_handoff_adapter.py`: direct GPU-service observation.
+- `src/llm_bawt/media/gpu_handoff_adapter.py`: GPU-service observation through the reconciler's `/v1/health/services` (TASK-1171).
 - `docker-compose.ops.yml`: ops deployment and source healthcheck configuration.
 - `bawthub/frontend/server/lib/dockerApi.ts`, `routes/docker-unraid.ts`, `routes/repos.ts`: direct frontend Docker consumers (route paths relative to `frontend/server/`).
 - `bawthub/bawthub/main_websocket.py`, `restart_tts_container.sh`: voice restart path (helper relative to `bawthub/bawthub/`).

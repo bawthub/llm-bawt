@@ -12,6 +12,7 @@ from typing import Any
 from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
 from .executor import ConfigCheckError, DockerExecutor, Executor, ExecutorError, validate_spec
+from .gpu_guard import GpuGuardUnverifiable, gpu_voice_target
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
 from .routing_reconcile import ACTION as ROUTING_ACTION, valid_routing_binding
@@ -349,6 +350,7 @@ class OpsService:
             raise OpsDispatchError("snapshot_invalid", "operation identity changed")
         op = OpsOperation(**{k: v for k, v in snapshot["operation"].items()
                              if k not in {"created_at", "updated_at", "soft_deleted_at"}})
+        self._require_gpu_handoff(snapshot, create_fence)
         quiesce = bool(snapshot.get("quiesce"))
         if quiesce and getattr(getattr(self.store.engine, "dialect", None), "name", None) != "postgresql":
             raise OpsDispatchError("quiesce_unavailable", "quiesce operations require the PostgreSQL ops store")
@@ -377,6 +379,39 @@ class OpsService:
             release = self.releases.get_by_parent_job(job.id)
             result["release_id"] = release.id if release else None
         return result
+
+    def _gpu_voice_target(self, snapshot, *, live):
+        executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
+        return gpu_voice_target(snapshot["spec"], snapshot["resolved_args"], executor, live=live)
+
+    def _require_gpu_handoff(self, snapshot, create_fence):
+        """Creation point of the GPU voice guard (TASK-1171): a job that would
+        start or recreate a GPU voice service is created only under a fence the
+        handoff controller built, in the job-insert transaction."""
+        from ..media.gpu_handoff_store import GpuHandoffFence
+
+        try:
+            service = self._gpu_voice_target(snapshot, live=False)
+        except GpuGuardUnverifiable as exc:
+            raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
+        if service is not None and not isinstance(create_fence, GpuHandoffFence):
+            raise OpsDispatchError("gpu_handoff_required", (
+                f"this operation starts or recreates the GPU voice service {service!r}; "
+                "only a GPU handoff can run it"))
+
+    def _check_gpu_handoff(self, job, snapshot):
+        """Dispatch point: re-run the guard against the live container and
+        require the handoff row to still admit this job. Raises ExecutorError,
+        so a refusal keeps the job queued with no worker, as any preflight."""
+        from ..media.gpu_handoff_store import GpuHandoffStore
+
+        try:
+            service = self._gpu_voice_target(snapshot, live=True)
+        except GpuGuardUnverifiable as exc:
+            raise ExecutorError(f"gpu_guard_unverifiable: {exc}") from exc
+        if service is not None and not GpuHandoffStore(self.store.engine).admits(
+                job.idempotency_key, job.operation_slug):
+            raise ExecutorError(f"gpu_handoff_required: no GPU handoff admits this {service!r} job")
 
     def _receipt_callback(self, snapshot, *, bot_id, user_id, session_id) -> str | None:
         """The receipt callback of a direct quiesce job whose scope covers its
@@ -422,6 +457,7 @@ class OpsService:
                 return  # Another pass is preflighting it, or one already claimed it.
             try:
                 executor.preflight(snapshot)
+                self._check_gpu_handoff(job, snapshot)
             except ExecutorError as exc:
                 # No target action can have been submitted before the claim. Keep
                 # QUEUED for an operator fixing prerequisites, with a visible reason,
@@ -462,6 +498,7 @@ class OpsService:
         if job.quiesce_gate_id is None:
             try:
                 executor.preflight(snapshot)
+                self._check_gpu_handoff(job, snapshot)
             except ExecutorError as exc:
                 # Before any hold: nothing is held while prerequisites are
                 # fixed, until the job's open deadline fails it.

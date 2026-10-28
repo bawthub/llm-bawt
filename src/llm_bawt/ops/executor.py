@@ -133,6 +133,12 @@ class Executor(ABC):
         """Approval-time, read-only: the spec's target exists where this executor
         acts. Raise ExecutorError so nobody approves a guaranteed failure."""
 
+    def target_compose_identity(self, spec: dict, args: dict) -> tuple[str | None, str | None]:
+        """Read-only: the ``(project, service)`` Compose labels of the container
+        the spec names. The GPU voice guard fails closed unless an executor
+        can read them (TASK-1171)."""
+        raise ExecutorError(f"{self.kind()} executor cannot inspect a target's Compose identity")
+
 
 _IMAGE_SPEC_PATTERNS = {
     "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
@@ -410,6 +416,19 @@ class DockerExecutor(Executor):
             raise ExecutorError(
                 f"compose selector {filters['label']} matched {len(matches)} containers on this "
                 "executor's Docker host, expected one")
+
+    def target_compose_identity(self, spec, args):
+        try:
+            name = spec.get("container_name") or target_selector(spec, args)[0]
+        except (KeyError, TypeError) as exc:
+            raise ExecutorError(f"cannot resolve the target container: {exc}") from exc
+        if not name:
+            raise ExecutorError("spec names no container to inspect")
+        try:
+            labels = self.client.containers.get(name).labels or {}
+        except Exception as exc:
+            raise ExecutorError(f"cannot inspect target container {name!r}: {exc}") from exc
+        return labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service")
 
     def available(self):
         return self.readiness() is None

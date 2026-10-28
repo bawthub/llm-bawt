@@ -61,7 +61,9 @@ class GpuPreflight:
         elif active_video_jobs:
             issues.append("Unresolved video render claims remain; inspect their outcomes before another video handoff"
                           if state.owner == "voice" else "Active video jobs or uncertain claims still hold the GPU")
-        if state.phase not in ("idle", "offered") or state.owner == "unknown":
+        if state.phase == "tts_restarting":
+            issues.append("A TTS restart holds the GPU for voice; wait for it to finish")
+        elif state.phase not in ("idle", "offered") or state.owner == "unknown":
             issues.append("GPU owner is unknown or needs reconciliation")
         if not isinstance(gpu, dict) or gpu.get("ready") is not True:
             issues.append("GPU driver telemetry unavailable")

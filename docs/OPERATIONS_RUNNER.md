@@ -305,6 +305,50 @@ freeze lifts on its own with nothing running. None of these routes is an
 admission edge, so a freeze never blocks its own status or thaw. Freezes are
 also listed in `GET /v1/ops/holds` (operator-owned, `job` null).
 
+## GPU voice guard and the fenced TTS restart (TASK-1171)
+
+Starting or recreating BawtHub's Moshi `stt`/`tts` while video owns the GPU
+puts two models on one card. `ops/gpu_guard.py` keeps every ops path from
+doing that:
+
+* **Deny by default on action.** Every action except `stop`, `pull` and
+  `release_orchestrate` is gated when its target is Compose project `bawthub`,
+  service `stt` or `tts`. A new action is gated until it is classified.
+* **Target identity.** `start`/`restart` resolve through `target_selector`:
+  the label form is read from the filters, the name forms from the container's
+  live labels (`Executor.target_compose_identity`; the base executor refuses).
+  Image and reconcile actions use their literal `compose_project`/
+  `compose_service`, and the dispatch re-check also reads the named
+  container's live labels. An identity that can't be read refuses with
+  `gpu_guard_unverifiable`.
+* **Creation.** `dispatch_job` refuses a gated job with
+  `gpu_handoff_required` unless `create_fence` is a `GpuHandoffFence`, which
+  only the handoff controller builds. No job row is written. This covers
+  `ops_run`, approved admission and `POST /v1/ops/jobs` alike (both codes
+  answer 409).
+* **Dispatch.** After `preflight`, `_check_gpu_handoff` re-runs the guard live
+  and requires the handoff row to still admit the job's idempotency key. A
+  refusal is a preflight error: the job stays queued, unsubmitted, until the
+  preflight deadline fails it.
+
+Two fences exist. `voice_start` is check-only: a restore's own Moshi start,
+key `gpu-handoff:{generation}:{slug}`, while that start is the pending action.
+`tts_restart` begins the fence: from voice-owned idle with no video claims it
+sets `phase=tts_restarting`, bumps the generation and records the key, in the
+job-insert transaction. A replay of the same key reads the existing job; any
+other key is refused (`tts_restart_in_progress`), as are handoff offers.
+
+`GET /v1/media/local-video/handoff/tts-restart/{request_id}` is the only
+releaser. `outcome` is `in_progress` (job not terminal), `held` (terminal,
+fence kept, with `reason`), `released` or `refused` (no job). It releases on:
+`failed` with `dispatched_at` null (never submitted); `succeeded` with exit 0
+and start evidence; or `lost`/`timed_out`/`cancelled`/`failed` after dispatch
+with start evidence. Start evidence is exactly one fresh, running, healthy
+`bawthub.tts` instance on `/v1/health/services` whose `startedAt` is after the
+job's `dispatched_at` and whose `restartCount` is 0 (an API start resets it; a
+restart-policy restart doesn't). No timeout releases the fence; an operator
+reads the job and the container.
+
 ## Deployment setup checklist (original TASK-861 setup; installed on echo)
 
 The base compose app mounts Docker's socket and `./.logs:/app/.logs`; the dev
@@ -403,8 +447,11 @@ The fixed GET-only contract (`ops/health_http.py`):
   selector without a bounded enum contributes nothing, never "all services";
   name-only (`container_name`) and release ops contribute nothing. Each service
   is `{id,project,service,instances,capabilities}`:
-  * `instances` lists `{instanceId,name,state,health,startedAt}` for the
-    containers whose Compose labels match. `instanceId` is
+  * `instances` lists `{instanceId,name,state,health,startedAt,restartCount}`
+    for the containers whose Compose labels match. `restartCount` is Docker's
+    `RestartCount`: restart-policy restarts since the last API start or
+    restart, which resets it to 0 (TASK-1171). An ill-typed value fails the
+    inventory closed; `/v1/health/containers` rows don't carry it. `instanceId` is
     `sha256(Docker Id)[:16]`; a recreate changes it, so a consumer treats a
     changed id as replacement. `[]` means observed and none present; `null`
     means the inventory is not fresh (unknown). Raw IDs and label maps are

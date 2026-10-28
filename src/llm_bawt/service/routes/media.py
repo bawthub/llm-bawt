@@ -24,7 +24,7 @@ from fastapi.responses import Response
 from ...media.clients import MediaClient, media_provider_registry
 from ...media.db import MediaGenerationStore
 from ...media.generation_service import MediaGenerationService
-from ...media.gpu_handoff_store import GpuHandoffStore
+from ...media.gpu_handoff_store import TTS_RESTART_KEY_PREFIX, GpuHandoffStore
 from ...media.gpu_preflight import GpuPreflight
 from ...media.object_store import BlobBackendUnavailable
 from ...media.schemas import (
@@ -345,6 +345,8 @@ async def local_video_gpu_status():
         "pending_target": state.target, "pending_actions": state.actions,
         "next_action": state.next_action, "pending_action": state.pending_action,
         "last_job_id": state.last_job_id, "last_error": state.last_error,
+        "tts_restart_request_id": (state.tts_restart_key.removeprefix(TTS_RESTART_KEY_PREFIX)
+                                   if state.tts_restart_key else None),
         "gpu": gpu, "model": model, "active_video_jobs": active_video_jobs, "video_claims": video_claims,
         "preflight": preflight,
         "handoff_available": True,

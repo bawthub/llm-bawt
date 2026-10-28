@@ -112,7 +112,7 @@ def test_observation_types_compose_identity_and_hashes_the_id():
     assert observed.instance_id == hashlib.sha256(("a" * 64).encode()).hexdigest()[:16]
     assert observed.instance_api() == {"instanceId": observed.instance_id, "name": "bawthub-tts-1",
                                        "state": "running", "health": None,
-                                       "startedAt": "2026-10-28T00:00:00+00:00"}
+                                       "startedAt": "2026-10-28T00:00:00+00:00", "restartCount": None}
     # The /containers row is unchanged: no identity fields leak into the compat shape.
     assert observed.to_api() == {"name": "bawthub-tts-1", "state": "running", "health": None,
                                  "startedAt": "2026-10-28T00:00:00+00:00"}
@@ -129,6 +129,22 @@ def test_missing_or_invalid_labels_leave_the_container_unlabeled(labels):
     observed = observe_container(container("x1", **labels))
     assert observed.project is None and observed.service is None
     assert observed.instance_id is not None
+
+
+@pytest.mark.parametrize("count", [0, 3, 2**31 - 1])
+def test_restart_count_is_reported_on_the_instance_only(count):
+    # TASK-1171: an API restart resets RestartCount to 0 and a policy restart
+    # increments it; the handoff uses it to tell the two apart.
+    row = {**container("bawthub-tts-1"), "RestartCount": count}
+    observed = observe_container(row)
+    assert observed.restart_count == count and observed.instance_api()["restartCount"] == count
+    assert "restartCount" not in observed.to_api()
+
+
+@pytest.mark.parametrize("bad", [True, False, -1, 2**31, 1.0, "1", [1]])
+def test_ill_typed_restart_count_fails_closed(bad):
+    with pytest.raises(ValueError):
+        observe_container({**container("bawthub-tts-1"), "RestartCount": bad})
 
 
 def test_non_dict_labels_are_unlabeled_and_bad_id_fails_closed():

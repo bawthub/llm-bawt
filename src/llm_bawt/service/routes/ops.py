@@ -297,6 +297,25 @@ def list_holds():
 # Direct dispatch (HTTP surface for the operator UI)
 # ---------------------------------------------------------------------------
 
+#: HTTP status per ``OpsDispatchError`` code, shared by every route that dispatches.
+DISPATCH_ERROR_STATUS = {
+    "operation_not_found": 404,
+    "operation_disabled": 409,
+    # TASK-1474: an approval-card-only operation; the operator Run button can't start it.
+    "approval_required": 409,
+    "args_invalid": 400,
+    "idempotency_conflict": 409,
+    "snapshot_invalid": 409,
+    "target_unavailable": 409,
+    # TASK-1171: only the GPU handoff may start or recreate a Moshi container.
+    "gpu_handoff_required": 409,
+    "gpu_guard_unverifiable": 409,
+    "executor_unavailable": 503,
+    "dispatch_failed": 502,
+    "executor_kind_unknown": 500,
+}
+
+
 @router.post("/v1/ops/jobs", tags=["Ops"], status_code=202)
 def dispatch_job(body: DispatchRequest):
     """Directly dispatch a job via HTTP.
@@ -324,18 +343,6 @@ def dispatch_job(body: DispatchRequest):
             caller_backend="http-operator",
         )
     except OpsDispatchError as exc:
-        status = {
-            "operation_not_found": 404,
-            "operation_disabled": 409,
-            # TASK-1474: an approval-card-only operation; the operator Run button can't start it.
-            "approval_required": 409,
-            "args_invalid": 400,
-            "idempotency_conflict": 409,
-            "snapshot_invalid": 409,
-            "target_unavailable": 409,
-            "executor_unavailable": 503,
-            "dispatch_failed": 502,
-            "executor_kind_unknown": 500,
-        }.get(exc.code, 500)
+        status = DISPATCH_ERROR_STATUS.get(exc.code, 500)
         raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
     return result

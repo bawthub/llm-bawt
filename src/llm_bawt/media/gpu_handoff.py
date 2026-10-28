@@ -16,14 +16,16 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 
-from .gpu_handoff_store import OPS_ACTIONS, GpuHandoffStore, HandoffConflict
+from .gpu_handoff_store import (OPS_ACTIONS, START_OPERATIONS, STOP_OPERATIONS, TTS_RESTART_KEY_PREFIX,
+                                 GpuHandoffStore, HandoffConflict)
 from .gpu_profile import CALIBRATION_PROFILE
 
-STOP_OPERATIONS = ("bawthub.stop-moshi-stt", "bawthub.stop-moshi-tts")
-START_OPERATIONS = ("bawthub.start-moshi-stt", "bawthub.start-moshi-tts")
 ACTIONS = ("park_voice", "stop_moshi_stt", "stop_moshi_tts", "verify_video_capacity")
 RESTORE_ACTIONS = ("reset_video_worker", "start_moshi_stt", "start_moshi_tts", "verify_voice", "unpark_voice")
 SERVICES = ("stt", "tts")
+#: Ops job states whose side effect is unknown: only start evidence releases them.
+_UNCERTAIN_STATES = frozenset({"lost", "timed_out", "cancelled", "failed"})
+_REQUEST_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,21 @@ class HandoffAdapter(ABC):
 
     @abstractmethod
     async def find_operation(self, *, generation: int, slug: str) -> dict | None: ...
+
+    @abstractmethod
+    async def observe_service(self, service: str) -> dict:
+        """One fresh instance of a voice service; HandoffConflict (with a code) otherwise."""
+
+    @abstractmethod
+    async def prepare_tts_restart(self) -> dict:
+        """The exact, policy-checked TTS restart snapshot; refuses anything else."""
+
+    @abstractmethod
+    async def dispatch_tts_restart(self, snapshot: dict, *, key: str) -> dict: ...
+
+    @abstractmethod
+    async def job_by_key(self, key: str) -> dict | None:
+        """The job's status, read without reconciling it."""
 
 
 class GpuHandoff:
@@ -114,6 +131,8 @@ class GpuHandoff:
         if calibration is not True:
             raise HandoffConflict("Ordinary video needs a measured profile; explicitly request first-render calibration")
         state = await asyncio.to_thread(self.store.status)
+        if state.phase == "tts_restarting":
+            raise HandoffConflict("A TTS restart holds the GPU for voice", code="tts_restart_in_progress")
         if state.owner not in ("unknown", "voice") or state.phase not in ("idle", "offered"):
             raise HandoffConflict("GPU ownership requires reconciliation")
         if await asyncio.to_thread(self.store.active_video_jobs):
@@ -347,6 +366,8 @@ class GpuHandoff:
 
     async def offer_restore(self, *, user: str, expected_generation: int) -> dict:
         state = await asyncio.to_thread(self.store.status)
+        if state.phase == "tts_restarting":
+            raise HandoffConflict("A TTS restart holds the GPU for voice", code="tts_restart_in_progress")
         if state.phase in ("transitioning", "draining"):
             raise HandoffConflict("A GPU switch is already running")
         observed = await self.adapter.observe()
@@ -484,6 +505,86 @@ class GpuHandoff:
                     await asyncio.sleep(self.poll_interval * 5)
         except TimeoutError as exc:
             raise HandoffConflict(f"Moshi did not become healthy within {int(self.health_timeout)}s") from exc
+
+
+    # ── TTS restart (TASK-1171) ─────────────────────────────────────────────
+    @staticmethod
+    def _restart_key(request_id: str) -> str:
+        if (not isinstance(request_id, str) or not 1 <= len(request_id) <= 64
+                or not set(request_id) <= _REQUEST_ID_CHARS):
+            raise HandoffConflict("request_id must be 1..64 URL-safe characters", code="args_invalid")
+        return TTS_RESTART_KEY_PREFIX + request_id
+
+    async def tts_restart(self, *, request_id: str) -> dict:
+        """Restart TTS once while voice owns the GPU. The fence and the job
+        commit together; a replay of ``request_id`` reads the same job."""
+        key = self._restart_key(request_id)
+        snapshot = await self.adapter.prepare_tts_restart()
+        await self.adapter.dispatch_tts_restart(snapshot, key=key)
+        return await self.tts_restart_status(request_id=request_id)
+
+    async def tts_restart_status(self, *, request_id: str) -> dict:
+        """Idempotent, and the only releaser of the TTS restart fence.
+
+        Releases only on the job's own outcome: success with start evidence, a
+        preflight refusal (never dispatched), or an uncertain end with start
+        evidence. Anything else holds; no timeout releases it.
+        """
+        key = self._restart_key(request_id)
+        job = await self.adapter.job_by_key(key)
+        state = await asyncio.to_thread(self.store.status)
+        held = state.phase == "tts_restarting" and state.tts_restart_key == key
+        restart = {"request_id": request_id, "job_id": None, "job_state": None, "dispatched_at": None,
+                   "observed_started_at": None, "observed_restart_count": None, "reason": None}
+        if job is None:
+            # The fence and the job commit atomically, so a held fence always has one.
+            restart["reason"] = "awaiting_job" if held else "no_job"
+            return {"outcome": "in_progress" if held else "refused", "restart": restart}
+        restart.update(job_id=job["id"], job_state=job["state"], dispatched_at=job["dispatched_at"])
+        if not held:
+            return {"outcome": "released" if job["terminal"] else "in_progress", "restart": restart}
+        if not job["terminal"]:
+            restart["reason"] = "awaiting_job"
+            return {"outcome": "in_progress", "restart": restart}
+        never_dispatched = job["state"] == "failed" and job["dispatched_at"] is None
+        if not never_dispatched:
+            if job["state"] == "succeeded" and job["exit_code"] != 0 or (
+                    job["state"] != "succeeded" and job["state"] not in _UNCERTAIN_STATES):
+                restart["reason"] = "awaiting_start_evidence"
+                return {"outcome": "held", "restart": restart}
+            restart["reason"] = await self._start_evidence(restart, job["dispatched_at"])
+            if restart["reason"] is not None:
+                return {"outcome": "held", "restart": restart}
+        try:
+            await asyncio.to_thread(self.store.release_tts_restart, key)
+        except HandoffConflict:
+            pass  # A concurrent status read released it first.
+        return {"outcome": "released", "restart": restart}
+
+    async def _start_evidence(self, restart: dict, dispatched_at: str) -> str | None:
+        """None when exactly one fresh TTS instance started after the job's
+        dispatch by an API start (restart count reset to 0); else the hold reason."""
+        try:
+            observed = await self.adapter.observe_service("tts")
+        except HandoffConflict as exc:
+            return "ambiguous_instances" if exc.code == "ambiguous_instances" else "observation_unavailable"
+        restart.update(observed_started_at=observed.get("started_at"),
+                       observed_restart_count=observed.get("restart_count"))
+        if observed.get("running") is not True or observed.get("health") != "healthy":
+            return "unhealthy"
+        count = observed.get("restart_count")
+        if type(count) is not int:
+            return "observation_unavailable"
+        if count != 0:
+            return "policy_restart_observed"
+        try:
+            started = datetime.fromisoformat(observed["started_at"])
+            dispatched = datetime.fromisoformat(dispatched_at)
+        except (KeyError, TypeError, ValueError):
+            return "awaiting_start_evidence"
+        if started.tzinfo is None or dispatched.tzinfo is None or started <= dispatched:
+            return "awaiting_start_evidence"
+        return None
 
 
 def _reason(exc: BaseException) -> str:

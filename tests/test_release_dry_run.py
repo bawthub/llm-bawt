@@ -76,6 +76,9 @@ class FakeDocker(Executor):
     def kind(self):
         return "docker"
 
+    def target_compose_identity(self, spec, args):
+        return ("test", "fake")  # not a GPU voice service (TASK-1171)
+
     def available(self):
         return True
 

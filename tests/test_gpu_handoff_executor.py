@@ -92,6 +92,19 @@ class FakeAdapter(HandoffAdapter):
     async def find_operation(self, *, generation, slug):
         return next((job for job in self.jobs.values() if job["operation"] == slug), None)
 
+    # TTS restart contract (TASK-1171): exercised in test_gpu_tts_restart.py.
+    async def observe_service(self, service):
+        return (await self.observe())["services"][service]
+
+    async def prepare_tts_restart(self):
+        raise AssertionError("a forward/restore handoff never prepares a TTS restart")
+
+    async def dispatch_tts_restart(self, snapshot, *, key):
+        raise AssertionError("a forward/restore handoff never dispatches a TTS restart")
+
+    async def job_by_key(self, key):
+        return None
+
 
 @pytest.fixture
 def setup(tmp_path):

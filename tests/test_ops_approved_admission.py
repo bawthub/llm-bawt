@@ -44,6 +44,9 @@ class FakeExecutor(Executor):
     def kind(self):
         return "docker"
 
+    def target_compose_identity(self, spec, args):
+        return ("test", "fake")  # not a GPU voice service (TASK-1171)
+
     def available(self):
         return True
 
@@ -335,6 +338,7 @@ _IMPORT_INVARIANT = textwrap.dedent('''
 
     class FakeExecutor(Executor):
         def kind(self): return "docker"
+        def target_compose_identity(self, spec, args): return ("test", "fake")
         def available(self): return True
         def dispatch(self, **kwargs): return DispatchResult("worker-" + kwargs["job_id"])
         def reconcile(self, **kwargs): return ReconcileResult(None)

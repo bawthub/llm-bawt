@@ -11,7 +11,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import Column, Float, Integer, MetaData, String, Table, Text, select, text
+from sqlalchemy import Column, Float, Integer, MetaData, String, Table, Text, inspect, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -23,6 +23,12 @@ _metadata = MetaData()
 OPS_ACTIONS = frozenset({
     "stop_moshi_stt", "stop_moshi_tts", "start_moshi_stt", "start_moshi_tts",
 })
+STOP_OPERATIONS = ("bawthub.stop-moshi-stt", "bawthub.stop-moshi-tts")
+START_OPERATIONS = ("bawthub.start-moshi-stt", "bawthub.start-moshi-tts")
+#: The one ops operation that restarts TTS while voice owns the GPU (TASK-1171).
+TTS_RESTART_OPERATION = "bawthub.restart-tts"
+TTS_RESTART_KEY_PREFIX = "tts-restart:"
+_START_ACTIONS = dict(zip(START_OPERATIONS, ("start_moshi_stt", "start_moshi_tts"), strict=True))
 _video_jobs = Table(
     "gpu_handoff_video_jobs", _metadata,
     Column("id", String(32), primary_key=True),
@@ -66,11 +72,17 @@ _state = Table(
     Column("pending_action", String(128)),
     Column("last_job_id", String(128)),
     Column("last_error", Text),
+    # The ops idempotency key of the one TTS restart this fence admits.
+    Column("tts_restart_key", String(160)),
 )
 
 
 class HandoffConflict(ValueError):
     """An offer, generation, or transition is no longer current."""
+
+    def __init__(self, message: str, *, code: str = "handoff_conflict"):
+        self.code = code
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,7 @@ class HandoffState:
     expires_at: float | None
     last_job_id: str | None
     last_error: str | None
+    tts_restart_key: str | None = None
 
 
 def _bootstrap_schema(conn) -> None:
@@ -93,6 +106,79 @@ def _bootstrap_schema(conn) -> None:
         # v3 created offer_target as varchar(16); "video_calibration" is 17 chars.
         # Widening is idempotent and create_all never alters existing columns.
         conn.execute(text("ALTER TABLE gpu_handoff_state ALTER COLUMN offer_target TYPE varchar(32)"))
+        # v6 (TASK-1171): the TTS restart fence. create_all never adds columns.
+        conn.execute(text("ALTER TABLE gpu_handoff_state ADD COLUMN IF NOT EXISTS tts_restart_key varchar(160)"))
+    elif "tts_restart_key" not in {c["name"] for c in inspect(conn).get_columns("gpu_handoff_state")}:
+        conn.execute(text("ALTER TABLE gpu_handoff_state ADD COLUMN tts_restart_key varchar(160)"))
+
+
+def _lock_state(conn):
+    """The single state row, write-locked for the rest of the transaction."""
+    stmt = select(_state).where(_state.c.id == 1)
+    if conn.dialect.name == "postgresql":
+        stmt = stmt.with_for_update()
+    elif conn.dialect.name == "sqlite":
+        # SQLite has no FOR UPDATE; obtain its writer lock before reading
+        # so concurrent confirmations cannot both consume the same offer.
+        conn.execute(_state.update().where(_state.c.id == 1).values(id=1))
+    return conn.execute(stmt).mappings().one()
+
+
+def _start_admitted(row, key: str, operation_slug: str) -> bool:
+    """A restore's own Moshi start: ``gpu-handoff:{generation}:{slug}``, while
+    that restore is transitioning with exactly that start pending."""
+    action = _START_ACTIONS.get(operation_slug)
+    return (action is not None and key == f"gpu-handoff:{row['generation']}:{operation_slug}"
+            and row["phase"] == "transitioning" and row["offer_target"] == "voice"
+            and row["pending_action"] == action)
+
+
+def _restart_admitted(row, key: str, operation_slug: str) -> bool:
+    return (operation_slug == TTS_RESTART_OPERATION and row["phase"] == "tts_restarting"
+            and row["tts_restart_key"] == key)
+
+
+class GpuHandoffFence:
+    """Creation fence for an ops job that starts or restarts a GPU voice service.
+
+    ``OpsStore.create_job`` runs it inside the job-insert transaction, so the
+    handoff row and the job commit together or not at all. Only the handoff
+    controller builds one; the ops guard refuses a gated job without it.
+    """
+
+    def __init__(self, kind: str, *, key: str, operation_slug: str):
+        if kind not in ("tts_restart", "voice_start"):
+            raise ValueError(f"unknown GPU handoff fence {kind!r}")
+        self.kind, self.key, self.operation_slug = kind, key, operation_slug
+
+    @classmethod
+    def tts_restart(cls, key: str) -> GpuHandoffFence:
+        return cls("tts_restart", key=key, operation_slug=TTS_RESTART_OPERATION)
+
+    @classmethod
+    def voice_start(cls, *, generation: int, operation_slug: str) -> GpuHandoffFence:
+        return cls("voice_start", key=f"gpu-handoff:{generation}:{operation_slug}",
+                   operation_slug=operation_slug)
+
+    def __call__(self, session) -> None:
+        conn = session.connection()
+        row = _lock_state(conn)
+        if self.kind == "voice_start":
+            # Check-only: the restore already recorded this start as pending.
+            if not _start_admitted(row, self.key, self.operation_slug):
+                raise HandoffConflict("Moshi start is no longer this restore's pending action",
+                                      code="gpu_handoff_stale")
+            return
+        if row["phase"] == "tts_restarting":
+            if row["tts_restart_key"] == self.key:
+                return  # Same request: the unique key replays the existing job.
+            raise HandoffConflict("A TTS restart is already in progress", code="tts_restart_in_progress")
+        if row["owner"] != "voice" or row["phase"] != "idle":
+            raise HandoffConflict("TTS restarts only while voice owns an idle GPU", code="gpu_not_voice")
+        if conn.execute(select(_video_jobs.c.id).limit(1)).first() is not None:
+            raise HandoffConflict("Video render claims are still open", code="active_video_claims")
+        conn.execute(_state.update().where(_state.c.id == 1).values(
+            phase="tts_restarting", generation=row["generation"] + 1, tts_restart_key=self.key))
 
 
 class GpuHandoffStore:
@@ -102,7 +188,7 @@ class GpuHandoffStore:
 
     def __init__(self, engine: Engine):
         self.engine = engine
-        self._guard.run(engine, "gpu-handoff-v5", _bootstrap_schema)
+        self._guard.run(engine, "gpu-handoff-v6", _bootstrap_schema)
         with engine.begin() as conn:
             # A deployment cannot infer ownership from running services. Reconcile
             # observations before offering a transition from unknown. Upsert so
@@ -121,18 +207,28 @@ class GpuHandoffStore:
             target=row["offer_target"], actions=tuple(json.loads(row["actions"] or "[]")),
             next_action=row["next_action"], pending_action=row["pending_action"],
             expires_at=row["offer_expires"], last_job_id=row["last_job_id"],
-            last_error=row["last_error"],
+            last_error=row["last_error"], tts_restart_key=row["tts_restart_key"],
         )
 
     def _locked(self, conn):
-        stmt = select(_state).where(_state.c.id == 1)
-        if conn.dialect.name == "postgresql":
-            stmt = stmt.with_for_update()
-        elif conn.dialect.name == "sqlite":
-            # SQLite has no FOR UPDATE; obtain its writer lock before reading
-            # so concurrent confirmations cannot both consume the same offer.
-            conn.execute(_state.update().where(_state.c.id == 1).values(id=1))
-        return conn.execute(stmt).mappings().one()
+        return _lock_state(conn)
+
+    def admits(self, key: str, operation_slug: str) -> bool:
+        """Dispatch-time re-check: the handoff row still names this gated job."""
+        with self.engine.begin() as conn:
+            row = _lock_state(conn)
+            return _start_admitted(row, key, operation_slug) or _restart_admitted(row, key, operation_slug)
+
+    def release_tts_restart(self, key: str) -> HandoffState:
+        """CAS the TTS restart fence back to idle voice. The caller proves the
+        job's outcome first; this only checks the fence is still that job's."""
+        with self.engine.begin() as conn:
+            row = _lock_state(conn)
+            if row["phase"] != "tts_restarting" or row["tts_restart_key"] != key:
+                raise HandoffConflict("TTS restart fence is no longer this request's", code="fence_changed")
+            conn.execute(_state.update().where(_state.c.id == 1).values(
+                phase="idle", generation=row["generation"] + 1, tts_restart_key=None))
+            return self._view(_lock_state(conn))
 
     def status(self) -> HandoffState:
         with self.engine.connect() as conn:
