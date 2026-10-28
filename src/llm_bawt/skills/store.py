@@ -1,8 +1,13 @@
-"""Skill assignment rows and the set of bots whose skills are managed (TASK-1309).
+"""Skill exception rows (TASK-1309).
 
 SQL only. Every write runs in :meth:`SkillAssignmentStore.write`, one
 transaction holding a transaction-scoped advisory lock, so the cap check a
 caller makes on the rows it read there cannot race another write.
+
+Rows are exceptions to "every skill enabled": ``enable | disable | inject``
+at bot or tag scope. The adopt-era schema (``off | available | injected``,
+``off`` bot-only, a ``skill_managed_bots`` table) is migrated in place by
+:func:`_migrate_exceptions_only`.
 """
 from __future__ import annotations
 
@@ -12,32 +17,69 @@ from contextlib import contextmanager
 from sqlalchemy import text
 
 from ..utils.schema import SchemaBootstrapGuard, ensure_relations
-from .resolver import Assignment
+from .resolver import LEGACY_MODES, MODES, Assignment
+
+_ALL_MODES = ", ".join(f"'{m}'" for m in (*MODES, *LEGACY_MODES))
+_MODE_CHECK = "skill_assignments_mode_vocab"
 
 _RELATIONS = {
-    "skill_assignments": """
+    "skill_assignments": f"""
         CREATE TABLE IF NOT EXISTS skill_assignments (
             scope_type TEXT NOT NULL CHECK (scope_type IN ('bot', 'tag')),
             scope_id TEXT NOT NULL,
             skill_ref TEXT NOT NULL,
-            mode TEXT NOT NULL CHECK (mode IN ('off', 'available', 'injected')),
+            mode TEXT NOT NULL CONSTRAINT {_MODE_CHECK} CHECK (mode IN ({_ALL_MODES})),
             position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
             updated_by TEXT,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (scope_type, scope_id, skill_ref),
-            CONSTRAINT skill_assignments_off_is_bot_only
-                CHECK (mode <> 'off' OR scope_type = 'bot')
-        )""",
-    "skill_managed_bots": """
-        CREATE TABLE IF NOT EXISTS skill_managed_bots (
-            bot_slug TEXT PRIMARY KEY,
-            adopted_by TEXT,
-            adopted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            PRIMARY KEY (scope_type, scope_id, skill_ref)
         )""",
 }
 
 _LOCK = "llm_bawt.skill_assignments"
 _schema_guard = SchemaBootstrapGuard()
+
+
+def _migrate_exceptions_only(conn) -> None:
+    """Bring an adopt-era table to the exceptions-only model; idempotent.
+
+    - The CHECK accepts both vocabularies for one release, so a process still
+      on the adopt-era code can keep writing during a rolling restart.
+    - Adopt seeded one ``available`` bot row per skill. Under the new default
+      those rows change nothing (``off`` was bot-only, so no tag disable sits
+      under them), so they are deleted rather than renamed.
+    - ``off``/``injected`` rows are renamed to ``disable``/``inject``.
+    - ``skill_managed_bots`` is emptied, not dropped: adopt-era code still
+      reads it, and with no rows it treats every bot as unmanaged (ambient).
+    """
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:name))"), {"name": _LOCK})
+    legacy_checks = conn.execute(text("""
+        SELECT count(*) FROM pg_constraint
+        WHERE conrelid = 'skill_assignments'::regclass
+          AND conname IN ('skill_assignments_mode_check', 'skill_assignments_off_is_bot_only')
+    """)).scalar_one()
+    has_vocab = conn.execute(text("""
+        SELECT count(*) FROM pg_constraint
+        WHERE conrelid = 'skill_assignments'::regclass AND conname = :name
+    """), {"name": _MODE_CHECK}).scalar_one()
+    if legacy_checks or not has_vocab:
+        conn.execute(text(f"""
+        ALTER TABLE skill_assignments
+            DROP CONSTRAINT IF EXISTS skill_assignments_mode_check,
+            DROP CONSTRAINT IF EXISTS skill_assignments_off_is_bot_only,
+            DROP CONSTRAINT IF EXISTS {_MODE_CHECK},
+            ADD CONSTRAINT {_MODE_CHECK} CHECK (mode IN ({_ALL_MODES}))"""))
+    conn.execute(text("DELETE FROM skill_assignments WHERE scope_type = 'bot' AND mode = 'available'"))
+    for old, new in LEGACY_MODES.items():
+        conn.execute(text("UPDATE skill_assignments SET mode = :new WHERE mode = :old"),
+                     {"old": old, "new": new})
+    if conn.execute(text("SELECT to_regclass('skill_managed_bots')")).scalar() is not None:
+        conn.execute(text("DELETE FROM skill_managed_bots"))
+
+
+def _bootstrap(conn) -> None:
+    ensure_relations(conn, _RELATIONS)
+    _migrate_exceptions_only(conn)
 
 
 class SkillAssignmentStore:
@@ -46,7 +88,7 @@ class SkillAssignmentStore:
 
     def ensure_schema(self) -> None:
         _schema_guard.run(self.engine, "skill-assignments",
-                          lambda conn: ensure_relations(conn, _RELATIONS))
+                          _bootstrap)
 
     @contextmanager
     def read(self) -> Iterator:
@@ -71,10 +113,6 @@ class SkillAssignmentStore:
             FROM skill_assignments ORDER BY scope_type, scope_id, position, skill_ref"""))
         return [Assignment(**row) for row in result.mappings()]
 
-    @staticmethod
-    def managed(conn) -> frozenset[str]:
-        return frozenset(conn.execute(text("SELECT bot_slug FROM skill_managed_bots")).scalars())
-
     # -- writes (inside :meth:`write`) -------------------------------------
 
     @staticmethod
@@ -95,25 +133,3 @@ class SkillAssignmentStore:
             DELETE FROM skill_assignments
             WHERE scope_type = :scope_type AND scope_id = :scope_id AND skill_ref = :skill_ref"""),
             {"scope_type": scope_type, "scope_id": scope_id, "skill_ref": skill_ref}).rowcount)
-
-    @staticmethod
-    def adopt(conn, bot: str, refs: list[str], actor: str | None) -> None:
-        """Mark ``bot`` managed and seed ``available`` for refs it has no row for."""
-        conn.execute(text("""
-            INSERT INTO skill_managed_bots (bot_slug, adopted_by) VALUES (:bot, :actor)
-            ON CONFLICT (bot_slug) DO NOTHING"""), {"bot": bot, "actor": actor})
-        conn.execute(text("""
-            INSERT INTO skill_assignments
-                (scope_type, scope_id, skill_ref, mode, position, updated_by)
-            SELECT 'bot', :bot, ref, 'available', 0, :actor
-            FROM unnest(CAST(:refs AS text[])) AS ref
-            ON CONFLICT (scope_type, scope_id, skill_ref) DO NOTHING"""),
-            {"bot": bot, "refs": refs, "actor": actor})
-
-    @staticmethod
-    def release(conn, bot: str) -> bool:
-        """Stop managing ``bot``: drop its rows; it returns to the ambient skills."""
-        conn.execute(text("DELETE FROM skill_assignments WHERE scope_type = 'bot' AND scope_id = :bot"),
-                     {"bot": bot})
-        return bool(conn.execute(text("DELETE FROM skill_managed_bots WHERE bot_slug = :bot"),
-                                 {"bot": bot}).rowcount)

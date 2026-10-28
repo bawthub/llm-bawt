@@ -684,7 +684,7 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         loader=load_injected_skills_preamble,
         metadata={"notes": (
             "Heading of the injected-skills section (TASK-1309), shown above the "
-            "skill bodies assigned to an agent bot in 'injected' mode. The section "
+            "skill bodies assigned to an agent bot in 'inject' mode. The section "
             "is omitted when the bot has no injected skills. Bot overrides supported."
         )},
     ),

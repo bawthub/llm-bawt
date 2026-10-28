@@ -1,8 +1,9 @@
-"""Skill catalog and assignment routes (TASK-1309).
+"""Skill catalog and exception routes (TASK-1309).
 
-Skill content is read-only here (it is authored in git); these routes read it
-and edit which bots get which skills, and how. Like the rest of ``/v1/*`` this
-surface is LAN-trusted. Every rule lives in ``llm_bawt.skills``.
+Skill content is read-only here (it is authored in git). These routes read it
+and edit the per-bot and per-tag exceptions to "every skill enabled". Like
+the rest of ``/v1/*`` this surface is LAN-trusted. Every rule lives in
+``llm_bawt.skills``.
 """
 from __future__ import annotations
 
@@ -24,10 +25,6 @@ class AssignmentRequest(BaseModel):
     mode: str
     position: int = Field(default=0)
     updated_by: str | None = None
-
-
-class AdoptRequest(BaseModel):
-    adopted_by: str | None = None
 
 
 def skill_service() -> SkillService:
@@ -92,7 +89,7 @@ async def delete_assignment(scope_type: str = Query(...), scope_id: str = Query(
 
 @router.get("/v1/skills/bots", tags=["Skills"])
 async def list_bot_skills():
-    """Per-bot summary: managed, locked, harness, injected total against the caps."""
+    """Per-bot summary: locked, harness, row and disable counts, injected total against the caps."""
     return await _run(skill_service().bots_summary)
 
 
@@ -100,17 +97,3 @@ async def list_bot_skills():
 async def bot_skills(slug: str):
     """One bot's effective skills, with why any assigned skill does not apply."""
     return await _run(skill_service().effective, slug)
-
-
-@router.post("/v1/skills/bots/{slug}/adopt", tags=["Skills"])
-async def adopt_bot(slug: str, request: AdoptRequest | None = None):
-    """Start managing a bot's skills; every current skill is seeded as available."""
-    service = skill_service()
-    return await _run(service.adopt, slug, request.adopted_by if request else None)
-
-
-@router.delete("/v1/skills/bots/{slug}/managed", tags=["Skills"])
-async def release_bot(slug: str):
-    """Stop managing a bot's skills and drop its rows; it returns to the ambient set."""
-    await _run(skill_service().release, slug)
-    return {"released": slug}

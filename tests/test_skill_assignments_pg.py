@@ -84,190 +84,181 @@ def _entries(world, slug):
     return {e["ref"]: e for e in world.service.effective(slug)["entries"]}
 
 
-def test_adopt_seeds_every_skill_as_available_and_release_drops_it(world):
+def test_a_bot_without_rows_keeps_discovery_and_one_disable_makes_an_allow_list(world):
     assert world.service.resolve_bot("fixture-one").manifest() is None
 
-    view = world.service.adopt("fixture-one", "fixture-actor")
+    world.service.put("bot", "fixture-one", "beta", "disable", 0, "fixture-actor")
 
-    assert view["managed"] is True
-    assert {ref: (e["mode"], e["origin"], e["applied"]) for ref, e in
-            {e["ref"]: e for e in view["entries"]}.items()} == {
-        ref: ("available", "bot", True) for ref in ("alpha", "beta", "gamma")}
-    assert world.service.resolve_bot("fixture-one").manifest()["injected"] == []
-    with world.rig.engine.connect() as conn:
-        assert conn.execute(text("SELECT adopted_by FROM skill_managed_bots WHERE bot_slug="
-                                 "'fixture-one'")).scalar_one() == "fixture-actor"
-
-    world.service.put("bot", "fixture-one", "alpha", "injected", 0, "fixture-actor")
-    world.service.adopt("fixture-one", "fixture-actor")  # re-adopt keeps existing rows
-    assert _rows(world)[("bot", "fixture-one", "alpha")] == "injected"
-
-    world.service.release("fixture-one")
-    assert _rows(world, "fixture-one") == {}
+    manifest = world.service.resolve_bot("fixture-one").manifest()
+    assert [e["ref"] for e in manifest["entries"]] == ["alpha", "gamma"]
+    # A skill added to the tree later is allowed with no row written.
+    (world.root / "delta").mkdir()
+    (world.root / "delta" / "SKILL.md").write_text("---\nname: delta\ndescription: d\n---\n# d\n")
+    fresh = SkillService(world.rig.engine, list_bots=world.service._list_bots,
+                         caps=world.service._caps, source=AmbientSource((world.root,)))
+    assert [e["ref"] for e in fresh.resolve_bot("fixture-one").manifest()["entries"]] == [
+        "alpha", "delta", "gamma"]
+    world.service.remove("bot", "fixture-one", "beta")
     assert world.service.resolve_bot("fixture-one").manifest() is None
-    assert _status(world.service.release, "fixture-one")[0] == 404
 
 
-@pytest.mark.parametrize(("slug", "status"), [
-    ("fixture-private", 403), ("fixture-bundle", 409), ("fixture-local", 422),
-    ("fixture-chat", 422), ("fixture-unknown", 404)])
-def test_adopt_refuses_bots_that_cannot_take_managed_skills(world, slug, status):
-    assert _status(world.service.adopt, slug, None)[0] == status
-    with world.rig.engine.connect() as conn:
-        assert conn.execute(text("SELECT count(*) FROM skill_managed_bots")).scalar_one() == 0
-
-
-def test_bot_rows_need_an_adopted_writable_bot_and_valid_values(world):
+def test_bot_rows_need_a_writable_bot_and_valid_values(world):
     put = world.service.put
-    assert _status(put, "bot", "fixture-one", "alpha", "injected", 0, None)[0] == 409
-    assert _status(put, "bot", "fixture-private", "alpha", "available", 0, None)[0] == 403
-    world.service.adopt("fixture-one", None)
+    assert _status(put, "bot", "fixture-private", "alpha", "enable", 0, None)[0] == 403
+    assert _status(put, "bot", "fixture-bundle", "alpha", "enable", 0, None)[0] == 409
+    assert _status(put, "bot", "fixture-unknown", "alpha", "enable", 0, None)[0] == 404
     for args in [("bot", "fixture-one", "alpha", "loud", 0, None),
-                 ("bot", "fixture-one", "alpha", "injected", -1, None),
-                 ("bot", "fixture-one", "alpha", "injected", 10_001, None),
-                 ("bot", "fixture-one", "alpha", "injected", True, None),
-                 ("bot", "fixture-one", "missing", "injected", 0, None),
-                 ("team", "fixture-one", "alpha", "injected", 0, None)]:
+                 ("bot", "fixture-one", "alpha", "inject", -1, None),
+                 ("bot", "fixture-one", "alpha", "inject", 10_001, None),
+                 ("bot", "fixture-one", "alpha", "inject", True, None),
+                 ("bot", "fixture-one", "missing", "inject", 0, None),
+                 ("team", "fixture-one", "alpha", "inject", 0, None)]:
         assert _status(put, *args)[0] == 422, args
-    put("bot", "fixture-one", "alpha", "off", 0, None)
-    assert _entries(world, "fixture-one")["alpha"]["applied"] is False
+    put("bot", "fixture-one", "alpha", "disable", 0, None)
+    assert _entries(world, "fixture-one")["alpha"]["applied"] is True
+    assert world.service.effective("fixture-one")["manifest"] is not None
+
+
+def test_a_legacy_mode_name_is_stored_under_its_new_name(world):
+    assert world.service.put("bot", "fixture-one", "alpha", "injected", 0, None)["mode"] == "inject"
+    assert _rows(world)[("bot", "fixture-one", "alpha")] == "inject"
 
 
 def test_an_over_cap_write_is_refused_and_rolled_back(world):
-    world.service.adopt("fixture-one", None)
-    world.service.put("bot", "fixture-one", "alpha", "injected", 0, None)
-    world.service.put("bot", "fixture-one", "beta", "injected", 1, None)
+    world.service.put("bot", "fixture-one", "alpha", "inject", 0, None)
+    world.service.put("bot", "fixture-one", "beta", "inject", 1, None)
 
-    status, detail = _status(world.service.put, "bot", "fixture-one", "gamma", "injected", 2, None)
+    status, detail = _status(world.service.put, "bot", "fixture-one", "gamma", "inject", 2, None)
 
     assert status == 409 and detail["code"] == "over_cap"
     assert detail["bots"] == [{
         "bot": "fixture-one", "refs": ["gamma"],
         "injected_tokens": world.sizes["alpha"] + world.sizes["beta"],
         "per_skill_cap": 10_000, "total_cap": world.caps["value"].total}]
-    assert _rows(world)[("bot", "fixture-one", "gamma")] == "available"
+    assert ("bot", "fixture-one", "gamma") not in _rows(world)
     resolution = world.service.resolve_bot("fixture-one")
     assert [e.ref for e in resolution.injected] == ["alpha", "beta"]
 
 
 def test_a_lowered_cap_does_not_block_unrelated_writes(world):
-    world.service.adopt("fixture-one", None)
-    world.service.put("bot", "fixture-one", "alpha", "injected", 0, None)
-    world.service.put("bot", "fixture-one", "beta", "injected", 1, None)
+    world.service.put("bot", "fixture-one", "alpha", "inject", 0, None)
+    world.service.put("bot", "fixture-one", "beta", "inject", 1, None)
     world.caps["value"] = Caps(per_skill=10_000, total=world.sizes["alpha"])
 
-    world.service.put("bot", "fixture-one", "gamma", "off", 2, None)
+    world.service.put("bot", "fixture-one", "gamma", "disable", 2, None)
 
     assert world.service.resolve_bot("fixture-one").over_cap == {"beta"}
 
 
-def test_tag_rows_reach_tagged_managed_bots_without_a_bot_row(world):
-    world.service.adopt("fixture-one", None)
-    world.service.remove("bot", "fixture-one", "gamma")
+def test_tag_rows_reach_every_tagged_bot_and_a_bot_row_overrides(world):
+    world.service.put("tag", ROLE, "gamma", "disable", 0, "fixture-actor")
 
-    world.service.put("tag", ROLE, "gamma", "injected", 0, "fixture-actor")
-
+    for slug in ("fixture-one", "fixture-two"):
+        gamma = _entries(world, slug)["gamma"]
+        assert (gamma["mode"], gamma["origin"], gamma["applied"]) == ("disable", f"tag:{ROLE}", True)
+    world.service.put("bot", "fixture-one", "gamma", "enable", 0, None)
     gamma = _entries(world, "fixture-one")["gamma"]
-    assert (gamma["mode"], gamma["origin"], gamma["applied"]) == ("injected", f"tag:{ROLE}", True)
-    # A bot row shadows the tag rule: alpha stays as adoption seeded it.
-    world.service.put("tag", ROLE, "alpha", "injected", 0, None)
-    assert _entries(world, "fixture-one")["alpha"]["mode"] == "available"
-    # The unmanaged tagged bot is untouched.
-    assert world.service.resolve_bot("fixture-two").entries == ()
+    assert (gamma["mode"], gamma["origin"], gamma["reason"]) == ("enable", "bot", None)
+    assert world.service.resolve_bot("fixture-one").manifest() is None
+    assert "gamma" not in [e["ref"] for e in
+                           world.service.resolve_bot("fixture-two").manifest()["entries"]]
 
 
 def test_a_tag_write_that_pushes_a_tagged_bot_over_the_cap_rolls_back(world):
-    world.service.adopt("fixture-one", None)
-    world.service.put("bot", "fixture-one", "alpha", "injected", 0, None)
-    world.service.put("bot", "fixture-one", "beta", "injected", 1, None)
-    world.service.remove("bot", "fixture-one", "gamma")
+    world.service.put("bot", "fixture-one", "alpha", "inject", 0, None)
+    world.service.put("bot", "fixture-one", "beta", "inject", 1, None)
 
-    status, detail = _status(world.service.put, "tag", ROLE, "gamma", "injected", 5, None)
+    status, detail = _status(world.service.put, "tag", ROLE, "gamma", "inject", 5, None)
 
     assert status == 409 and [b["bot"] for b in detail["bots"]] == ["fixture-one"]
     assert ("tag", ROLE, "gamma") not in _rows(world)
 
 
-@pytest.mark.parametrize(("args", "status"), [
-    (("tag", ROLE, "alpha", "off", 0, None), 422),
-    (("tag", "fixture_unknown_tag", "alpha", "available", 0, None), 422)])
-def test_tag_scope_refuses_off_and_unknown_tags(world, args, status):
-    assert _status(world.service.put, *args)[0] == status
+def test_tag_scope_refuses_unknown_tags(world):
+    assert _status(world.service.put, "tag", "fixture_unknown_tag", "alpha", "disable", 0,
+                   None)[0] == 422
 
 
-def test_the_schema_itself_refuses_off_at_tag_scope(world):
+def test_the_schema_refuses_an_unknown_mode(world):
     world.service.assignments()  # bootstraps the tables
     with pytest.raises(IntegrityError):
         with world.rig.engine.begin() as conn:
             conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
-                              f" VALUES ('tag', '{ROLE}', 'alpha', 'off')"))
+                              f" VALUES ('tag', '{ROLE}', 'alpha', 'loud')"))
+
+
+def test_the_migration_turns_an_adopt_era_table_into_exceptions(world):
+    from llm_bawt.skills import store as store_module
+
+    with world.rig.engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE skill_assignments (
+                scope_type TEXT NOT NULL CHECK (scope_type IN ('bot', 'tag')),
+                scope_id TEXT NOT NULL, skill_ref TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK (mode IN ('off', 'available', 'injected')),
+                position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+                updated_by TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (scope_type, scope_id, skill_ref),
+                CONSTRAINT skill_assignments_off_is_bot_only
+                    CHECK (mode <> 'off' OR scope_type = 'bot'))"""))
+        conn.execute(text("CREATE TABLE skill_managed_bots (bot_slug TEXT PRIMARY KEY,"
+                          " adopted_by TEXT, adopted_at TIMESTAMPTZ NOT NULL DEFAULT now())"))
+        conn.execute(text("INSERT INTO skill_managed_bots (bot_slug) VALUES ('fixture-one')"))
+        conn.execute(text(f"""
+            INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode) VALUES
+            ('bot', 'fixture-one', 'alpha', 'available'), ('bot', 'fixture-one', 'beta', 'off'),
+            ('bot', 'fixture-one', 'gamma', 'injected'), ('tag', '{ROLE}', 'alpha', 'available')"""))
+
+    for _ in range(2):  # idempotent: a second process start changes nothing
+        with world.rig.engine.begin() as conn:
+            store_module._bootstrap(conn)
+
+    assert _rows(world) == {("bot", "fixture-one", "beta"): "disable",
+                            ("bot", "fixture-one", "gamma"): "inject",
+                            ("tag", ROLE, "alpha"): "enable"}
+    with world.rig.engine.begin() as conn:
+        assert conn.execute(text("SELECT count(*) FROM skill_managed_bots")).scalar_one() == 0
+        # Both vocabularies are writable for one release (a rolling restart's old writer).
+        conn.execute(text(f"INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
+                          f" VALUES ('tag', '{ROLE}', 'beta', 'off')"))
+        names = set(conn.execute(text("SELECT conname FROM pg_constraint WHERE conrelid ="
+                                      " 'skill_assignments'::regclass")).scalars())
+    assert "skill_assignments_off_is_bot_only" not in names
+    assert "skill_assignments_mode_check" not in names
 
 
 def test_removing_a_missing_row_is_404_and_changes_nothing(world):
-    world.service.adopt("fixture-one", None)
+    world.service.put("bot", "fixture-one", "alpha", "disable", 0, None)
     before = _rows(world)
     assert _status(world.service.remove, "tag", ROLE, "alpha")[0] == 404
     assert _rows(world) == before
 
 
+def test_writes_fail_closed_when_tags_are_unavailable(world):
+    blind = SkillService(world.rig.engine, list_bots=world.service._list_bots,
+                         caps=world.service._caps, source=world.service.source,
+                         tags=SimpleNamespace(snapshot=lambda _conn: TagSnapshot.unavailable()))
+    assert _status(blind.put, "bot", "fixture-one", "alpha", "disable", 0, None)[0] == 503
+    assert _rows(world) == {}
+
+
 def test_private_bots_show_only_a_lock(world):
     world.service.assignments()  # bootstraps the tables
     with world.rig.engine.begin() as conn:
-        conn.execute(text("INSERT INTO skill_managed_bots (bot_slug) VALUES ('fixture-private')"))
         conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
-                          " VALUES ('bot', 'fixture-private', 'alpha', 'injected')"))
+                          " VALUES ('bot', 'fixture-private', 'alpha', 'inject')"))
 
     summary = {b["slug"]: b for b in world.service.bots_summary()["bots"]}
     view = world.service.effective("fixture-private")
 
-    assert summary["fixture-private"] == {"slug": "fixture-private", "locked": True, "managed": False}
-    assert (view["locked"], view["managed"], view["entries"], view["manifest"]) == (
-        True, False, [], None)
+    assert summary["fixture-private"] == {"slug": "fixture-private", "locked": True}
+    assert (view["locked"], view["entries"], view["manifest"]) == (True, [], None)
     assert world.service.resolve_bot("fixture-private").injected == ()
 
 
-def _plant_managed(world, slug):
-    world.service.assignments()  # bootstraps the tables
-    with world.rig.engine.begin() as conn:
-        conn.execute(text("INSERT INTO skill_managed_bots (bot_slug) VALUES (:s)"), {"s": slug})
-        conn.execute(text("INSERT INTO skill_assignments (scope_type, scope_id, skill_ref, mode)"
-                          " VALUES ('bot', :s, 'alpha', 'injected')"), {"s": slug})
-
-
-def _managed_rows(world):
-    with world.rig.engine.connect() as conn:
-        return (sorted(conn.execute(text("SELECT bot_slug FROM skill_managed_bots")).scalars()),
-                _rows(world))
-
-
-@pytest.mark.parametrize(("slug", "status"), [
-    ("fixture-private", 403), ("fixture-unknown", 404)])
-def test_release_refuses_protected_and_unknown_bots_and_keeps_their_rows(world, slug, status):
-    _plant_managed(world, slug)
-    before = _managed_rows(world)
-    assert _status(world.service.release, slug)[0] == status
-    assert _managed_rows(world) == before
-
-
-def test_release_fails_closed_when_tags_are_unavailable(world):
-    world.service.adopt("fixture-one", None)
-    before = _managed_rows(world)
-    blind = SkillService(world.rig.engine, list_bots=world.service._list_bots,
-                         caps=world.service._caps, source=world.service.source,
-                         tags=SimpleNamespace(snapshot=lambda _conn: TagSnapshot.unavailable()))
-    assert _status(blind.release, "fixture-one")[0] == 503
-    assert _managed_rows(world) == before
-
-
-def test_a_bundle_bot_can_still_be_released(world):
-    _plant_managed(world, "fixture-bundle")
-    world.service.release("fixture-bundle")
-    assert _managed_rows(world) == ([], {})
-
-
-def test_an_unmounted_source_serves_an_empty_catalog_and_injects_nothing(world, monkeypatch, tmp_path):
-    world.service.adopt("fixture-one", None)
-    world.service.put("bot", "fixture-one", "alpha", "injected", 0, None)
+def test_an_unmounted_source_applies_no_disable_and_says_so(world, monkeypatch, tmp_path):
+    world.service.put("bot", "fixture-one", "alpha", "inject", 0, None)
+    world.service.put("bot", "fixture-one", "beta", "disable", 1, None)
     unmounted = SkillService(world.rig.engine, list_bots=world.service._list_bots,
                              caps=world.service._caps,
                              source=AmbientSource((tmp_path / "not-mounted",)))
@@ -277,24 +268,11 @@ def test_an_unmounted_source_serves_an_empty_catalog_and_injects_nothing(world, 
     client = TestClient(app)
 
     assert client.get("/v1/skills").json() == {"data": []}
-    view = client.get("/v1/skills/bots/fixture-one")
-    assert view.status_code == 200 and view.json()["injected_tokens"] == 0
-    resolution = unmounted.resolve_bot("fixture-one")
-    assert resolution.injected == () and resolution.manifest()["entries"] == []
-
-
-def test_adopt_refuses_when_the_source_offers_no_skills(world, tmp_path):
-    unmounted = SkillService(world.rig.engine, list_bots=world.service._list_bots,
-                             caps=world.service._caps,
-                             source=AmbientSource((tmp_path / "not-mounted",)))
-
-    status, detail = _status(unmounted.adopt, "fixture-one", None)
-
-    assert status == 503 and "no skills" in detail
-    assert _status(unmounted.adopt, "fixture-private", None)[0] == 403  # protection checks first
-    with world.rig.engine.connect() as conn:
-        assert conn.execute(text("SELECT count(*) FROM skill_managed_bots")).scalar_one() == 0
-    assert unmounted.resolve_bot("fixture-one").manifest() is None
+    view = client.get("/v1/skills/bots/fixture-one").json()
+    assert view["injected_tokens"] == 0 and view["catalog_unreadable"] is True
+    assert view["manifest"] is None  # never an empty allow-list that hides every skill
+    summary = {b["slug"]: b for b in client.get("/v1/skills/bots").json()["bots"]}
+    assert summary["fixture-one"]["catalog_unreadable"] is True
 
 
 def test_routes_serve_the_service_over_http(world, monkeypatch):
@@ -316,14 +294,13 @@ def test_routes_serve_the_service_over_http(world, monkeypatch):
     assert client.get("/v1/skills/catalog/alpha/file",
                       params={"path": "../beta/SKILL.md"}).status_code == 400
 
-    assert client.post("/v1/skills/bots/fixture-one/adopt", json={}).status_code == 200
     put = client.put("/v1/skills/assignments", json={
         "scope_type": "bot", "scope_id": "fixture-one", "skill_ref": "alpha",
-        "mode": "injected", "position": 0, "updated_by": "fixture-actor"})
-    assert put.status_code == 200 and put.json()["mode"] == "injected"
+        "mode": "inject", "position": 0, "updated_by": "fixture-actor"})
+    assert put.status_code == 200 and put.json()["mode"] == "inject"
     over = [client.put("/v1/skills/assignments", json={
         "scope_type": "bot", "scope_id": "fixture-one", "skill_ref": ref,
-        "mode": "injected", "position": i + 1}) for i, ref in enumerate(("beta", "gamma"))]
+        "mode": "inject", "position": i + 1}) for i, ref in enumerate(("beta", "gamma"))]
     assert [r.status_code for r in over] == [200, 409]
     assert over[1].json()["detail"]["code"] == "over_cap"
     assert client.get("/v1/skills/bots/fixture-one").json()["injected_tokens"] == (
@@ -333,8 +310,9 @@ def test_routes_serve_the_service_over_http(world, monkeypatch):
     assert client.get("/v1/skills/assignments",
                       params={"scope_type": "bot", "scope_id": "fixture-one"}).status_code == 200
     assert client.get("/v1/skills/bots/fixture-private").json()["locked"] is True
-    assert client.delete("/v1/skills/bots/fixture-one/managed").status_code == 200
-    assert client.delete("/v1/skills/bots/fixture-one/managed").status_code == 404
+    # The adopt-era batch routes are gone.
+    assert client.post("/v1/skills/bots/fixture-one/adopt", json={}).status_code in (404, 405)
+    assert client.delete("/v1/skills/bots/fixture-one/managed").status_code in (404, 405)
 
 
 def test_routes_report_a_missing_database_as_503(monkeypatch):

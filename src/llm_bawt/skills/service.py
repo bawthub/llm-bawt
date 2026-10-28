@@ -4,12 +4,9 @@ The API routes and the prompt section both go through :class:`SkillService`,
 so bot facts, the tag snapshot and the cap check are assembled one way.
 
 Writes are refused when they would:
-- touch a private bot (403) or run with the tag snapshot unreadable (503),
-  releases included;
-- set ``off`` at tag scope, name an unknown skill or tag, or use a bad mode
-  or position (422);
-- add a bot row to an unmanaged or bundle bot (409);
-- adopt a bot while the source offers no skills (503);
+- touch a private bot (403) or run with the tag snapshot unreadable (503);
+- name an unknown skill or tag, or use a bad mode or position (422);
+- add a bot row to a bundle bot (409);
 - push any affected bot's injected skills over a cap that were not over it
   before (409, listing each bot, its refs, total and cap).
 """
@@ -26,11 +23,11 @@ from ..bot_tags.vocabulary import BehaviorTag
 from .harness import capabilities_for
 from .resolver import (
     MODES,
-    OFF,
     Assignment,
     BotFacts,
     Caps,
     SkillResolution,
+    canonical_mode,
     newly_over_cap,
     resolve,
 )
@@ -55,7 +52,6 @@ class _World:
     """Everything one resolution or write decision reads, from one connection."""
 
     rows: list[Assignment]
-    managed: frozenset[str]
     snapshot: TagSnapshot
     bots: dict[str, Any]
 
@@ -68,7 +64,6 @@ class _World:
             bundle=(bot.agent_backend_config or {}).get("skill_bundle"),
             tags=self.snapshot.tags.get(slug, frozenset()) if self.snapshot.available else frozenset(),
             private=self.snapshot.has(slug, BehaviorTag.PRIVATE),
-            managed=slug in self.managed,
         )
 
 
@@ -99,8 +94,7 @@ class SkillService:
     # -- shared reads ------------------------------------------------------
 
     def _world(self, conn) -> _World:
-        return _World(rows=self.store.rows(conn), managed=self.store.managed(conn),
-                      snapshot=self._tags.snapshot(conn),
+        return _World(rows=self.store.rows(conn), snapshot=self._tags.snapshot(conn),
                       bots={b.slug: b for b in self._list_bots()})
 
     def _resolve(self, world: _World, slug: str, caps: Caps) -> SkillResolution:
@@ -167,15 +161,17 @@ class SkillService:
         for slug in sorted(world.bots):
             facts = world.facts(slug)
             if facts.private:
-                bots.append({"slug": slug, "locked": True, "managed": False})
+                bots.append({"slug": slug, "locked": True})
                 continue
             resolution = self._resolve(world, slug, caps)
             bots.append({
-                "slug": slug, "locked": False, "managed": facts.managed,
+                "slug": slug, "locked": False,
                 "bot_type": facts.bot_type, "harness": facts.harness,
                 "supported": facts.bot_type == "agent" and capabilities_for(facts.harness).supported,
                 "bundle": facts.bundle,
-                "applied_count": len(resolution.applied),
+                "row_count": len(resolution.entries),
+                "disabled_count": len(resolution.disabled),
+                "catalog_unreadable": resolution.catalog_unreadable,
                 "injected_count": len(resolution.injected),
                 "injected_tokens": resolution.injected_tokens,
                 "over_cap": sorted(resolution.over_cap),
@@ -189,21 +185,26 @@ class SkillService:
         if slug not in world.bots:
             raise SkillServiceError(404, f"unknown bot {slug!r}")
         facts = world.facts(slug)
-        view = {"slug": slug, "locked": facts.private, "managed": facts.managed,
+        view = {"slug": slug, "locked": facts.private,
                 "harness": facts.harness, "bundle": facts.bundle,
                 "capabilities": capabilities_for(facts.harness).to_dict(), "caps": vars(caps)}
         if facts.private:
-            return {**view, "managed": False, "tags": [], "entries": [], "manifest": None}
+            return {**view, "tags": [], "entries": [], "manifest": None,
+                    "catalog_unreadable": False}
         resolution = self._resolve(world, slug, caps)
         return {**view, "tags": sorted(facts.tags),
                 "entries": [e.to_dict() for e in resolution.entries],
                 "injected_tokens": resolution.injected_tokens,
+                # Disables a missing catalog left unapplied; the card says so.
+                "catalog_unreadable": resolution.catalog_unreadable,
                 "manifest": resolution.manifest()}
 
     # -- writes ------------------------------------------------------------
 
     def put(self, scope_type: str, scope_id: str, ref: str, mode: str, position: int,
             actor: str | None) -> dict:
+        # Legacy names are accepted for one release (an older UI may still send them).
+        mode = canonical_mode(mode) or mode
         row = Assignment(scope_type, scope_id, ref, mode, position, actor)
 
         def validate(world: _World) -> list[str]:
@@ -213,7 +214,7 @@ class SkillService:
                 raise SkillServiceError(422, f"position must be an integer 0..{MAX_POSITION}")
             if self.source.get(ref) is None:
                 raise SkillServiceError(422, f"unknown skill {ref!r}")
-            return self._affected(world, scope_type, scope_id, mode=mode)
+            return self._affected(world, scope_type, scope_id)
 
         self._write(validate, lambda conn: self.store.upsert(conn, row))
         return vars(row)
@@ -227,32 +228,6 @@ class SkillService:
         self._write(lambda world: self._affected(world, scope_type, scope_id), apply)
         if not removed[0]:
             raise SkillServiceError(404, "no such assignment")
-
-    def adopt(self, slug: str, actor: str | None) -> dict:
-        def validate(world: _World) -> list[str]:
-            facts = self._writable_bot(world, slug)
-            if facts.bot_type != "agent" or not capabilities_for(facts.harness).supported:
-                raise SkillServiceError(422, f"{slug} runs on a harness that can't apply skills")
-            if not refs:
-                # Adoption seeds from the source; with none visible (e.g. the
-                # skill mount is absent) the bot would be managed with an
-                # empty allow-list and lose every skill at its next session.
-                raise SkillServiceError(503, "no skills are readable; adopting would hide them all")
-            return [slug]
-
-        refs = [entry.ref for entry in self.source.list()]
-        self._write(validate, lambda conn: self.store.adopt(conn, slug, refs, actor))
-        return self.effective(slug)
-
-    def release(self, slug: str) -> None:
-        """Stop managing ``slug``. Same lock and protection checks as every write."""
-        def validate(world: _World) -> list[str]:
-            # A bundle bot may still be released: release only removes management.
-            if not self._unprotected_bot(world, slug).managed:
-                raise SkillServiceError(404, f"{slug} is not managed")
-            return [slug]
-
-        self._write(validate, lambda conn: self.store.release(conn, slug))
 
     def _unprotected_bot(self, world: _World, slug: str) -> BotFacts:
         if slug not in world.bots:
@@ -268,17 +243,13 @@ class SkillService:
             raise SkillServiceError(409, f"{slug} takes its skills from bundle {facts.bundle!r}")
         return facts
 
-    def _affected(self, world: _World, scope_type: str, scope_id: str,
-                  mode: str | None = None) -> list[str]:
+    def _affected(self, world: _World, scope_type: str, scope_id: str) -> list[str]:
         """Bots a write at this scope can change; validates the scope itself."""
         if scope_type == "bot":
-            if not self._writable_bot(world, scope_id).managed:
-                raise SkillServiceError(409, f"{scope_id} is not managed; adopt it first")
+            self._writable_bot(world, scope_id)
             return [scope_id]
         if scope_type != "tag":
             raise SkillServiceError(422, "scope_type must be 'bot' or 'tag'")
-        if mode == OFF:
-            raise SkillServiceError(422, "'off' is a per-bot override; a tag can't set it")
         if scope_id not in world.snapshot.catalog:
             raise SkillServiceError(422, f"unknown tag {scope_id!r}")
         return sorted(s for s in world.bots if scope_id in world.snapshot.tags.get(s, ()))
@@ -292,8 +263,7 @@ class SkillService:
             affected = validate(before_world)
             before = {s: self._resolve(before_world, s, caps) for s in affected}
             apply(conn)
-            after_world = _World(self.store.rows(conn), self.store.managed(conn),
-                                 before_world.snapshot, before_world.bots)
+            after_world = _World(self.store.rows(conn), before_world.snapshot, before_world.bots)
             offenders = []
             for slug in affected:
                 after = self._resolve(after_world, slug, caps)

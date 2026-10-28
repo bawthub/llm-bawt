@@ -32,12 +32,12 @@ class _Source(SkillSource):
         return SkillBody(ref, f"Body {ref} {{literal}}", tokens, f"sha-{ref}")
 
 
-def _resolution(managed=True, rows=None):
-    facts = BotFacts("fixture-one", "agent", "claude-code", None, frozenset(), False, managed)
+def _resolution(rows=None, bot_type="agent"):
+    facts = BotFacts("fixture-one", bot_type, "claude-code", None, frozenset(), False)
     rows = rows if rows is not None else [
-        Assignment("bot", "fixture-one", "b", "injected", 1),
-        Assignment("bot", "fixture-one", "a", "injected", 0),
-        Assignment("bot", "fixture-one", "big", "injected", 2),
+        Assignment("bot", "fixture-one", "b", "inject", 1),
+        Assignment("bot", "fixture-one", "a", "inject", 0),
+        Assignment("bot", "fixture-one", "big", "inject", 2),
     ]
     return resolve(facts, rows, _Source(), Caps(per_skill=100, total=100))
 
@@ -99,11 +99,10 @@ def test_admitted_skills_render_in_position_order_with_metadata(world):
 
     assert section.content == ("## Pre\n\n### a (/skills/a)\nBody a {literal}"
                                "\n\n### b (/skills/b)\nBody b {literal}")
-    manifest = world["resolution"].manifest()
     assert section.metadata == {
         "source": "skills.resolve",
-        "gate": "agent_backend & managed skills with injected assignments",
-        "refs": ["a", "b"], "tokens": 10, "manifest_sha": manifest["manifest_sha"],
+        "gate": "agent_backend & inject exceptions",
+        "refs": ["a", "b"], "tokens": 10, "manifest_sha": None,
         "skipped": [{"ref": "big", "reason": "over_cap"}]}
     # The turn pins the manifest of the very resolution this section rendered.
     assert owner._skill_resolution is world["resolution"]
@@ -111,12 +110,12 @@ def test_admitted_skills_render_in_position_order_with_metadata(world):
     assert owner.resolves == [(PREAMBLE_KEY, "bot", "fixture-one"), (ENTRY_KEY, "bot", "fixture-one")]
 
 
-@pytest.mark.parametrize("resolution", [None, "unmanaged", "no_injected"])
+@pytest.mark.parametrize("resolution", [None, "not_agent", "no_injected"])
 def test_nothing_to_inject_reads_no_templates_and_adds_nothing(world, resolution):
     world["resolution"] = {
         None: None,
-        "unmanaged": _resolution(managed=False),
-        "no_injected": _resolution(rows=[Assignment("bot", "fixture-one", "a", "available")]),
+        "not_agent": _resolution(bot_type="chat"),
+        "no_injected": _resolution(rows=[Assignment("bot", "fixture-one", "a", "enable")]),
     }[resolution]
     owner = _Owner(_TEMPLATES)
     owner._skill_resolution = "stale from an earlier turn"
@@ -126,21 +125,21 @@ def test_nothing_to_inject_reads_no_templates_and_adds_nothing(world, resolution
 
 
 def test_an_unmounted_skill_source_injects_nothing(world, tmp_path):
-    # A managed bot with injected rows while the app can't see the skill
+    # A bot with inject rows while the app can't see the skill
     # checkout: every row is source_missing, nothing is injected or applied.
     from agent_bridge.skill_sources import AmbientSource
     from llm_bawt.skills.resolver import SOURCE_MISSING
 
-    facts = BotFacts("fixture-one", "agent", "claude-code", None, frozenset(), False, True)
-    rows = [Assignment("bot", "fixture-one", "a", "injected", 0),
-            Assignment("bot", "fixture-one", "b", "available", 1)]
+    facts = BotFacts("fixture-one", "agent", "claude-code", None, frozenset(), False)
+    rows = [Assignment("bot", "fixture-one", "a", "inject", 0),
+            Assignment("bot", "fixture-one", "b", "enable", 1)]
     world["resolution"] = resolve(facts, rows, AmbientSource((tmp_path / "not-mounted",)),
                                   Caps(per_skill=100, total=100))
     owner = _Owner(_TEMPLATES)
     assert _section(owner) is None and owner.resolves == []
     assert {(e.ref, e.applied, e.reason) for e in world["resolution"].entries} == {
         ("a", False, SOURCE_MISSING), ("b", False, SOURCE_MISSING)}
-    assert world["resolution"].manifest()["entries"] == []
+    assert world["resolution"].manifest() is None
 
 
 def test_a_resolution_failure_skips_the_section(world):
