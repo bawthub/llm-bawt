@@ -14,6 +14,7 @@ from __future__ import annotations
 from .container_remove import ACTION as REMOVE_ACTION
 from .executor import ExecutorError
 from .image_deploy import IMAGE_ACTIONS
+from .plan_reconcile import ACTION as PLAN_ACTION
 from .release_spec import RELEASE_ACTION
 from .worker import target_selector
 
@@ -56,16 +57,31 @@ def _inspect(executor, spec, args) -> tuple[str, str]:
     return identity
 
 
-def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = False) -> str | None:
+def gpu_voice_target(spec: dict, resolved_args: dict, executor, *, live: bool = False,
+                     plan_targets: list[dict] | None = None) -> str | None:
     """The gated voice service this spec would start or recreate, else None.
 
     ``live`` is the dispatch-time re-check: it also reads the labels of a
     literally named container, so a container renamed or relabelled after the
     job was created still gates. Raises :class:`GpuGuardUnverifiable` when the
     identity cannot be established.
+
+    A service plan (TASK-1476) names no container itself: it recreates each of
+    its bound targets, so it is gated exactly when one of them is.
+    ``plan_targets`` are those bound target specs; a plan without them refuses.
     """
     action = spec.get("action")
     if action in UNGATED_ACTIONS:
+        return None
+    if action == PLAN_ACTION:
+        if not plan_targets:
+            raise GpuGuardUnverifiable("a service plan's targets are not bound")
+        for target in plan_targets:
+            if target.get("action") == PLAN_ACTION:
+                raise GpuGuardUnverifiable("a service plan cannot target another plan")
+            service = gpu_voice_target(target, {}, executor, live=live)
+            if service is not None:
+                return service
         return None
     if action in SELECTOR_ACTIONS:
         try:

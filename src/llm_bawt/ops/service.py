@@ -103,6 +103,14 @@ def _timestamp(raw):
     return datetime.fromisoformat(raw.replace("Z", "+00:00")) if raw else None
 
 
+def _plan_target_specs(snapshot) -> list[dict] | None:
+    """A bound service plan's target specs, for the GPU voice guard (TASK-1476)."""
+    plan = snapshot.get("plan")
+    if not isinstance(plan, dict):
+        return None
+    return [target["spec"] for target in plan.get("targets", [])]
+
+
 class _NoTargetReads:
     """Stands in for an executor where no Docker read may happen: the GPU guard
     then resolves a target only from the spec itself (TASK-1169 S3b)."""
@@ -329,7 +337,8 @@ class OpsService:
         # TASK-1169 S3b: the GPU voice guard's creation check reads this, so the
         # process that creates the job needs no Docker read of its own.
         try:
-            snapshot["gpu_target"] = gpu_voice_target(spec, merged, executor, live=False)
+            snapshot["gpu_target"] = gpu_voice_target(spec, merged, executor, live=False,
+                                                      plan_targets=_plan_target_specs(snapshot))
         except GpuGuardUnverifiable as exc:
             raise OpsDispatchError("gpu_guard_unverifiable", str(exc)) from exc
         snapshot["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
@@ -488,7 +497,8 @@ class OpsService:
 
     def _gpu_voice_target(self, snapshot, *, live):
         executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
-        return gpu_voice_target(snapshot["spec"], snapshot["resolved_args"], executor, live=live)
+        return gpu_voice_target(snapshot["spec"], snapshot["resolved_args"], executor, live=live,
+                                plan_targets=_plan_target_specs(snapshot))
 
     def _creation_gpu_target(self, snapshot):
         """The GPU voice service a job would start or recreate, for the creation
@@ -498,7 +508,7 @@ class OpsService:
         refuses in a process without Docker, and reads it in the ops service."""
         try:
             from_spec = gpu_voice_target(snapshot["spec"], snapshot["resolved_args"], _NoTargetReads(),
-                                         live=False)
+                                         live=False, plan_targets=_plan_target_specs(snapshot))
             proven = True
         except GpuGuardUnverifiable:
             from_spec, proven = None, False

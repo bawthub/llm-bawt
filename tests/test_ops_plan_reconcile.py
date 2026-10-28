@@ -28,7 +28,8 @@ from llm_bawt.ops.plan_reconcile import (
 from llm_bawt.ops.probe_contract import DESTINATION_PROBES, RECORD_KEYS, RECORDS_PROBE, emit
 from llm_bawt.ops.quiesce_settings import validate_quiesce_settings
 from llm_bawt.ops.seeds import SEEDS
-from llm_bawt.ops.service import APPROVAL_ONLY_ACTIONS, _valid_config_snapshot
+from llm_bawt.ops.gpu_guard import gpu_voice_target
+from llm_bawt.ops.service import APPROVAL_ONLY_ACTIONS, _NoTargetReads, _plan_target_specs, _valid_config_snapshot
 from llm_bawt.ops.tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION
 from llm_bawt.ops.validation import ArgValidationError, validate_args, validate_catalog
 from tests.test_ops_app_config_reconcile import (
@@ -554,6 +555,16 @@ def test_a_bound_plan_is_a_valid_snapshot_and_its_card_lists_order_classes_and_p
     assert "Migrated to stored records (probed after): brave" in text and "Env kept: zai" in text
     assert "Probes after: brave_search@app" in text and "[1] app" in text
     assert SECRET not in json.dumps(plan) + text
+
+
+def test_a_bound_plan_clears_the_gpu_voice_guard_from_its_snapshot_alone():
+    # TASK-1476: prepare refused the cutover with gpu_guard_unverifiable
+    # because the guard read only the plan spec, which names no container.
+    snap = _snap(_bind())
+    service = gpu_voice_target(snap["spec"], snap["resolved_args"], _NoTargetReads(),
+                               plan_targets=_plan_target_specs(snap))
+    assert service is None
+    assert _plan_target_specs({"spec": APP_SPEC, "resolved_args": {}}) is None
 
 
 @pytest.mark.parametrize("op, code", [

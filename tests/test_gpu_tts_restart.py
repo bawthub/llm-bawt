@@ -27,6 +27,7 @@ from llm_bawt.ops.executor import (
 from llm_bawt.ops.gpu_guard import UNGATED_ACTIONS, GpuGuardUnverifiable, gpu_voice_target
 from llm_bawt.ops.image_deploy import IMAGE_ACTIONS
 from llm_bawt.ops.models import OpsJob
+from llm_bawt.ops.plan_reconcile import ACTION as PLAN_ACTION
 from llm_bawt.service.routes import media_handoff
 from llm_bawt.service.routes.ops import DISPATCH_ERROR_STATUS
 from llm_bawt.service.routes.service_auth import require_service_token
@@ -51,9 +52,12 @@ class Inspector:
 # ── The guard predicate ─────────────────────────────────────────────────────
 
 EVERY_ACTION = sorted(SUPPORTED_ACTIONS | IMAGE_ACTIONS | CONFIG_CHECKED_ACTIONS | {ROUTING_ACTION})
+#: Actions whose own spec names the target. A service plan is gated by its bound
+#: targets instead (see the plan tests below).
+LITERAL_ACTIONS = [action for action in EVERY_ACTION if action != PLAN_ACTION]
 
 
-@pytest.mark.parametrize("action", EVERY_ACTION)
+@pytest.mark.parametrize("action", LITERAL_ACTIONS)
 def test_every_action_but_stop_and_pull_is_gated_for_tts(action):
     spec = {"action": action, "compose_project": "bawthub", "compose_service": "tts",
             **({} if action in ("start", "restart", "stop", "pull") else {"container_name": "bawthub-tts-1"})}
@@ -68,7 +72,7 @@ def test_a_new_action_is_gated_until_classified():
     assert not UNGATED_ACTIONS & (IMAGE_ACTIONS | CONFIG_CHECKED_ACTIONS | {ROUTING_ACTION, "start", "restart"})
 
 
-@pytest.mark.parametrize("action", EVERY_ACTION)
+@pytest.mark.parametrize("action", LITERAL_ACTIONS)
 def test_other_services_are_not_gated(action):
     spec = {"action": action, "compose_project": "bawthub", "compose_service": "frontend",
             "container_name": "bawthub-frontend-1"}
@@ -79,6 +83,35 @@ def test_named_start_reads_the_live_labels():
     spec = {"action": "start", "container_name": "anything"}
     assert gpu_voice_target(spec, {}, Inspector(("bawthub", "tts"))) == "tts"
     assert gpu_voice_target(spec, {}, Inspector(("bawthub", "web"))) is None
+
+
+PLAN = {"action": PLAN_ACTION, "targets": ["a", "b"], "records_target": "a", "probes": []}
+
+
+def _target(service, action="reconcile_app_config"):
+    return {"action": action, "compose_project": "bawthub" if service in ("tts", "stt") else "llm-bawt",
+            "compose_service": service, "container_name": f"x-{service}"}
+
+
+def test_a_service_plan_is_gated_by_its_bound_targets():
+    # TASK-1476: a plan names no container; it recreates each bound target.
+    quiet = [_target("app"), _target("crawl4ai", "reconcile_tagged_config")]
+    assert gpu_voice_target(PLAN, {}, Inspector(), plan_targets=quiet) is None
+    assert gpu_voice_target(PLAN, {}, Inspector(), plan_targets=[*quiet, _target("tts")]) == "tts"
+    inspector = Inspector(("bawthub", "stt"))
+    named_only = {"action": "reconcile_tagged_config", "container_name": "renamed"}
+    assert gpu_voice_target(PLAN, {}, inspector, live=True, plan_targets=[named_only]) == "stt"
+
+
+@pytest.mark.parametrize("targets", [None, []])
+def test_an_unbound_service_plan_refuses(targets):
+    with pytest.raises(GpuGuardUnverifiable, match="not bound"):
+        gpu_voice_target(PLAN, {}, Inspector(), plan_targets=targets)
+
+
+def test_a_service_plan_cannot_hide_a_target_behind_a_nested_plan():
+    with pytest.raises(GpuGuardUnverifiable, match="another plan"):
+        gpu_voice_target(PLAN, {}, Inspector(), plan_targets=[PLAN])
 
 
 def test_name_from_arg_is_resolved_before_inspect():
