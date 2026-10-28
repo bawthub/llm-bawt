@@ -7,6 +7,7 @@ import asyncio
 import httpx
 import pytest
 
+from llm_bawt.bawthub_auth.service_token import BawtHubServiceAuth
 from llm_bawt.mcp_server import browser_check_tools as bc
 from llm_bawt.task_turn_context import TaskTurnContext
 
@@ -27,8 +28,15 @@ def rig(monkeypatch):
     monkeypatch.setenv("BAWTHUB_BROWSER_CHECK_INTERNAL_URL", "http://bawthub.test:3002/")
     monkeypatch.setenv("BAWTHUB_BROWSER_CHECK_ORIGIN", "https://ui.example.test")
 
+    class _Token:
+        def read(self):
+            return "fixture-service-token"
+
     def handle(request: httpx.Request) -> httpx.Response:
         state["requests"].append(request)
+        # Like BawtHub's internal port with sessions on: no service bearer, no mint.
+        if request.headers.get("authorization") != "Bearer fixture-service-token":
+            return httpx.Response(401, json={"error": "unauthorized"})
         if state["status"] != 201:
             return httpx.Response(state["status"], json={"error": "nope", "code": "x"})
         return httpx.Response(201, json=MINTED)
@@ -41,6 +49,7 @@ def rig(monkeypatch):
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(bc, "current_task_turn_context", context)
+    monkeypatch.setattr(bc, "service_auth", lambda: BawtHubServiceAuth(_Token()))
     monkeypatch.setattr(bc.httpx, "AsyncClient", lambda **kw: real_client(
         transport=httpx.MockTransport(handle), **kw))
     return state
@@ -56,6 +65,7 @@ def test_mints_for_the_trusted_bot_and_scopes_cookies_to_the_origin(rig):
     assert req.method == "POST"
     assert str(req.url) == "http://bawthub.test:3002/internal/auth/browser-check-session"
     assert req.headers["x-agent-bot-id"] == "fixture-bot"
+    assert req.headers["authorization"] == "Bearer fixture-service-token"
     assert res["entityId"] == "browser-check"
     assert res["origin"] == "https://ui.example.test"
     assert res["cookies"] == [{
