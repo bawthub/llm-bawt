@@ -13,7 +13,7 @@ from llm_bawt.ops.image_deploy import DEPLOY_ACTION, ROLLBACK_ACTION
 from llm_bawt.ops.plan_reconcile import ACTION as PLAN_ACTION
 from llm_bawt.ops.self_target import (SELF_IDENTITY_UNKNOWN, SELF_REQUIRES_ISOLATED, SELF_STOP_UNRECOVERABLE,
                                       SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError, self_target)
-from tests.test_ops_executor import setup as docker_setup
+from tests.test_ops_executor import JOB as DOCKER_JOB, setup as docker_setup
 from tests.test_ops_service import FakeExecutor, _op_data, _store
 
 OWN_ID = "f" * 64
@@ -223,3 +223,31 @@ def test_a_target_that_became_the_ops_service_after_prepare_is_refused_at_claim(
     executor.self_target = lambda snapshot: None  # Back to another container: it runs.
     service.get_job_status(job["id"])
     assert store.get_job(job["id"]).state == JOB_ACCEPTED
+
+
+def test_a_created_worker_is_not_started_by_recovery_once_its_target_is_refused(tmp_path, monkeypatch):
+    executor, client, snapshot = docker_setup(tmp_path, monkeypatch)
+    original = client.containers.create
+
+    def create(*args, **kwargs):
+        original(*args, **kwargs)
+        raise TimeoutError("response lost")
+    client.containers.create = create
+    with pytest.raises(ExecutorError):
+        executor.dispatch(job_id=DOCKER_JOB, snapshot=snapshot)
+    worker = client.containers.rows[executor.worker_name(DOCKER_JOB)]
+
+    def refuse(_snapshot):
+        raise SelfTargetError(SELF_STOP_UNRECOVERABLE, "now the ops service")
+    executor.self_target = refuse
+    result = executor.reconcile(job_id=DOCKER_JOB, snapshot=snapshot)
+    assert result.state == "failed" and SELF_STOP_UNRECOVERABLE in result.error
+    assert worker.starts == 0
+
+
+def test_an_inspected_target_without_a_full_id_fails_closed():
+    containers = dict(CONTAINERS, anonymous=ContainerIdentity(None, None, None))
+    snapshot = _snapshot({"action": "restart", "container_name": "anonymous"})
+    with pytest.raises(SelfTargetError) as caught:
+        self_target(snapshot, own=lambda: OWN, inspect=containers.__getitem__)
+    assert caught.value.code == SELF_TARGET_UNVERIFIABLE

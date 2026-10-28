@@ -42,8 +42,13 @@ class WorkerLauncher(ABC):
         """Start (or adopt) the job's worker; return its stable handle name."""
 
     @abstractmethod
-    def probe(self, *, job_id: str, directory: Path, digest: str, settings: dict | None = None) -> Liveness:
-        """Observe the job's worker. May start a never-started worker exactly once."""
+    def probe(self, *, job_id: str, directory: Path, digest: str, settings: dict | None = None,
+              revalidate: Callable[[], None] | None = None) -> Liveness:
+        """Observe the job's worker. May start a never-started worker exactly once.
+
+        ``revalidate`` runs immediately before any such recovery start and
+        refuses it by raising (the dispatch preflight's self-target check,
+        TASK-1169 S4c); observation and receipt reads never call it."""
 
     def execution_settings(self, settings: dict) -> dict:
         """Extra snapshot pins this runtime needs at prepare; none by default."""
@@ -107,7 +112,7 @@ class ContainerLauncher(WorkerLauncher):
         self._start_created_once(worker, directory)
         return name
 
-    def probe(self, *, job_id, directory, digest, settings=None):
+    def probe(self, *, job_id, directory, digest, settings=None, revalidate=None):
         worker = self._get_worker(container_worker_name(job_id))
         if worker is None:
             return Liveness.MISSING
@@ -116,7 +121,11 @@ class ContainerLauncher(WorkerLauncher):
         if worker.status == "created":
             # Creation succeeded but submitter died before start. Safe to
             # start this SAME never-run identity, never create a replacement.
-            if not directory.is_dir() or not self._start_created_once(worker, directory):
+            if not directory.is_dir():
+                return Liveness.START_UNCONFIRMED
+            if revalidate is not None:
+                revalidate()
+            if not self._start_created_once(worker, directory):
                 return Liveness.START_UNCONFIRMED
             return Liveness.STARTED
         if worker.status in ("exited", "dead", "removing"):

@@ -109,7 +109,12 @@ def _targets(spec: Mapping, args: Mapping, inspect: Callable[[str], ContainerIde
     except (KeyError, TypeError):
         name, filters = None, None
     if name is not None:
-        found.append(inspect(name))
+        inspected = inspect(name)
+        if not inspected.container_id:
+            # Without its full ID the target cannot be proven not to be the
+            # ops service (labels alone may be absent); fail closed.
+            raise SelfTargetError(SELF_TARGET_UNVERIFIABLE, f"target container {name!r} reports no ID")
+        found.append(inspected)
     elif filters is not None:
         # The worker selects exactly the containers carrying these labels.
         labels = dict(item.split("=", 1) for item in filters["label"])

@@ -45,7 +45,7 @@ from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, Conta
                           self_target as classify_self_target)
 from .worker_launch import ContainerLauncher, Liveness, container_worker_name
 from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
-                     target_selector)
+                     target_selector, utcnow)
 
 SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 # Ops whose target configuration is compared with its Compose service (TASK-1518),
@@ -757,6 +757,17 @@ class DockerExecutor(Executor):
             return self._reconcile_locked(job_id=job_id, snapshot=snapshot,
                                           output_tail_bytes=output_tail_bytes, fence=fence)
 
+    @staticmethod
+    def _refuse_recovery_start(path, job_id, digest, exc):
+        """A recovery start refused by the self-target check: nothing ran, so
+        the job ends failed with the reason. The terminal receipt makes every
+        later reconcile read that outcome instead of trying the start again."""
+        error, finished = f"recovery start refused: {exc}", utcnow()
+        atomic_json(path, {"job_id": job_id, "request_hash": digest, "state": "failed", "exit_code": None,
+                           "accepted_at": None, "started_at": None, "finished_at": finished,
+                           "side_effect_unknown": False, "output_tail": None, "error": error})
+        return ReconcileResult("failed", error=error, finished_at=finished)
+
     def _diagnostics(self, snapshot, directory, output_tail_bytes):
         """The launcher's own evidence for a worker with no terminal receipt, tail-capped."""
         text = self._launcher_for(snapshot).diagnostics(directory)
@@ -786,8 +797,13 @@ class DockerExecutor(Executor):
                     return ReconcileResult(state, receipt.get("exit_code"),
                         (receipt.get("output_tail") or "").encode()[-max(1, output_tail_bytes):].decode(errors="replace"),
                         receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"))
-            liveness = self._launcher_for(snapshot).probe(job_id=job_id, directory=directory, digest=digest,
-                                                          settings=snapshot["execution"])
+            try:
+                # A recovery start is a dispatch: re-run the self-target check first.
+                liveness = self._launcher_for(snapshot).probe(
+                    job_id=job_id, directory=directory, digest=digest, settings=snapshot["execution"],
+                    revalidate=lambda: self.self_target(snapshot))
+            except SelfTargetError as exc:
+                return self._refuse_recovery_start(path, job_id, digest, exc)
             if liveness is Liveness.MISSING:
                 atomic_json(directory / "abandoned.json", {"reason": "worker missing during reconciliation"})
                 return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")

@@ -24,6 +24,7 @@ from llm_bawt.ops import process_launch as pl
 from llm_bawt.ops.executor import DockerExecutor
 from llm_bawt.ops.process_launch import (BUNDLE_PACKAGE, LAUNCHER, LAUNCHER_DIGEST, WORKER_FILES,
                                          ProcessLauncher, WorkerLaunchError, bundle_from_export)
+from llm_bawt.ops.self_target import SELF_REQUIRES_ISOLATED, SelfTargetError
 from llm_bawt.ops.worker_launch import Liveness
 
 OPS_DIR = Path(ops_pkg.__file__).parent
@@ -409,6 +410,52 @@ def test_a_second_unconfirmed_spawn_is_not_retried(rig):
     assert launcher.probe(job_id=JOB, directory=directory, digest=digest,
                           settings=settings) is Liveness.START_UNCONFIRMED
     assert JOB not in launcher._children
+
+
+def test_a_respawn_is_revalidated_first_and_a_refusal_propagates(rig):
+    launcher, settings, root = _fresh(rig)
+    directory, digest = _job(root, "ok")
+    (directory / "spawn-intent.json").write_text(json.dumps({"attempt": 1}))
+    checks = []
+
+    def refuse():
+        checks.append("checked")
+        raise SelfTargetError(SELF_REQUIRES_ISOLATED, "now the ops service")
+    with pytest.raises(SelfTargetError):
+        launcher.probe(job_id=JOB, directory=directory, digest=digest, settings=settings, revalidate=refuse)
+    assert checks == ["checked"] and JOB not in launcher._children
+    assert json.loads((directory / "spawn-intent.json").read_text())["attempt"] == 1
+    # Observing a finished job never revalidates (terminal receipt reads stay intact).
+    (directory / "receipt.json").write_text(json.dumps({"state": "succeeded", "started_at": "t"}))
+    assert launcher.probe(job_id=JOB, directory=directory, digest=digest, settings=settings,
+                          revalidate=refuse) is Liveness.EXITED
+    assert checks == ["checked"]
+
+
+def test_a_recovery_start_refused_by_the_self_check_ends_failed_and_stays_failed(rig, monkeypatch):
+    launcher, _, root = _fresh(rig)
+    executor = DockerExecutor(client_factory=lambda: None, worker_image=IMAGE_ID,
+                              receipt_volume="v", receipt_root=str(root))
+    executor._launchers["process"] = launcher
+    snapshot = {"execution": {"execution_mode": "process", "receipt_root": str(root)},
+                "operation": {"execution_mode": "process"}}
+    directory = root / JOB
+    directory.mkdir()
+    (directory / "spawn-intent.json").write_text(json.dumps({"attempt": 1}))
+    checks = []
+
+    def refuse(_snapshot):
+        checks.append("checked")
+        raise SelfTargetError(SELF_REQUIRES_ISOLATED, "now the ops service")
+    monkeypatch.setattr(executor, "self_target", refuse)
+    result = executor.reconcile(job_id=JOB, snapshot=snapshot, output_tail_bytes=4096)
+    assert result.state == "failed" and result.error.startswith("recovery start refused: " + SELF_REQUIRES_ISOLATED)
+    assert result.finished_at and JOB not in launcher._children
+    receipt = json.loads((directory / "receipt.json").read_text())
+    assert receipt["state"] == "failed" and receipt["side_effect_unknown"] is False
+    # The terminal receipt is the outcome from now on: no second check, no start.
+    again = executor.reconcile(job_id=JOB, snapshot=snapshot, output_tail_bytes=4096)
+    assert (again.state, again.error) == ("failed", result.error) and checks == ["checked"]
 
 
 def test_a_failed_respawn_is_unconfirmed(rig):

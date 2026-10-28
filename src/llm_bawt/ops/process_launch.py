@@ -383,7 +383,7 @@ class ProcessLauncher(WorkerLauncher):
         self._spawn(job_id=job_id, settings=settings, directory=directory, digest=digest, attempt=1)
         return name
 
-    def probe(self, *, job_id, directory, digest, settings=None):
+    def probe(self, *, job_id, directory, digest, settings=None, revalidate=None):
         process_worker_name(job_id)
         with self._lock:
             child = self._children.get(job_id)
@@ -402,6 +402,8 @@ class ProcessLauncher(WorkerLauncher):
         attempt = int(intent.get("attempt") or 0)
         if attempt >= 2 or settings is None or not directory.is_dir():
             return Liveness.START_UNCONFIRMED
+        if revalidate is not None:
+            revalidate()  # A refusal propagates: the caller records it, not "unconfirmed".
         try:
             # Nothing began executing: one respawn of the SAME request. The
             # worker re-checks the start delay and the fence inside.
