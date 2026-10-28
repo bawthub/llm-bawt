@@ -227,9 +227,13 @@ def replace_assignments(conn, bot_slug: str, tags: object, by: str | None) -> bo
 
     Kept assignments keep their ``assigned_at``/``assigned_by``. The column is
     written as ``not private`` from the new set (BOT_TAGS.md §4.1). The caller
-    holds :func:`lock_bot`.
+    holds :func:`lock_bot`. A replace that would add or remove a grant tag is
+    refused (``grant_locked``): those move only through ``bot_tags.grants``.
     """
+    from .grants import check_grant_membership  # grants imports this module
+
     wanted = validate_assignment_set(conn, tags)
+    check_grant_membership(conn, bot_slug, wanted)
     conn.execute(text("""
         DELETE FROM bot_profile_tags
         WHERE bot_slug = :bot AND NOT (tag_slug = ANY(CAST(:tags AS text[])))

@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from ... import bot_profile_changes as profile_changes
 from ...bot_profile_changes import ProfileFieldsChanged, ProfileRowChanged
 from ...bot_tags import BehaviorTag
-from ...bot_tags.errors import BotTagError, TagSetChanged
+from ...bot_tags.errors import BotTagError, GrantLocked, TagSetChanged
 from ...bot_tags.store import BotTagStore
 from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
@@ -337,6 +337,9 @@ async def _persist_bot_profile(
     except TagSetChanged as stale:  # expected_tags no longer match; nothing written
         raise HTTPException(status_code=stale.status_code, detail={
             "code": stale.code, "message": str(stale), "current_tags": stale.current})
+    except GrantLocked as locked:  # a grant tag outside the grant route (TASK-1609)
+        raise HTTPException(status_code=locked.status_code, detail={
+            "code": locked.code, "message": str(locked), "tags": locked.tags})
     except BotTagError as refused:  # an unknown or malformed tag; nothing written
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except Exception as exc:  # surface DB constraint violations as 400s

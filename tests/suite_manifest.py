@@ -10,6 +10,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_bot_access_pg.py::",
     "test_bot_tags_pg.py::",
     "test_bot_tag_api_pg.py::",
+    "test_bot_grants_pg.py::",
     "test_skill_assignments_pg.py::",
     "test_bot_profile_patch_pg.py::",
     "test_notify_user_pg.py::",

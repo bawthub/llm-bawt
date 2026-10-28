@@ -22,6 +22,28 @@ class TagConflict(BotTagError):
     status_code = 409
 
 
+class GrantLocked(TagConflict):
+    """A tag writer other than the grant route tried to add or remove a grant tag."""
+
+    code = "grant_locked"
+
+    def __init__(self, bot: str, tags: list[str]):
+        super().__init__(f"{', '.join(tags)} on {bot} can be changed only through the "
+                         "bot-grants route; nothing was saved")
+        self.bot = bot
+        self.tags = tags
+
+
+class GrantRefused(BotTagError):
+    """The grant route refused this caller or target (``code`` says why)."""
+
+    status_code = 403
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 class TagSetChanged(TagConflict):
     """A tag replace named the set it expected, and the bot's tags have since changed.
 

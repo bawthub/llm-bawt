@@ -239,6 +239,22 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "assigned but is skipped as over_cap."
         ),
     ),
+    # TASK-1609: global only; read live by bot_tags.grants. No default: unset
+    # means only a signed-in person can grant or revoke a grant tag.
+    "ops_grant_manager_capability": SettingDefinition(
+        key="ops_grant_manager_capability",
+        type="str",
+        default=None,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Grant manager capability",
+        help=(
+            "Global only: a role-tag capability. Bots holding a role with it may "
+            "grant or revoke grant tags (such as approve_ops) on other bots, and "
+            "bots_profile_patch refuses to add or remove those roles. Unset: only "
+            "a signed-in person manages grants."
+        ),
+    ),
     "skills_total_token_cap": SettingDefinition(
         key="skills_total_token_cap",
         type="int",

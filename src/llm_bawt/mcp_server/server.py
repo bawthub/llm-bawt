@@ -837,6 +837,9 @@ from . import self_model_tools as _self_model_tools  # noqa: F401, E402
 # Bot-to-bot profile edits with CAS + audit (TASK-1521)
 from . import bot_profile_tools as _bot_profile_tools  # noqa: F401, E402
 
+# Grant tags (approve_ops) set by a grant manager bot, audited (TASK-1609)
+from . import bot_grant_tools as _bot_grant_tools  # noqa: F401, E402
+
 # ---------------------------------------------------------------------------
 # Ops tools (TASK-639 — DB-configured operations catalog)
 # ---------------------------------------------------------------------------

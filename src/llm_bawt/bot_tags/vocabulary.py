@@ -17,13 +17,20 @@ class BehaviorTag(StrEnum):
     NO_GLOBAL_SEARCH = "no_global_search"
     INACTIVE = "inactive"
     EXTERNAL = "external"
+    APPROVE_OPS = "approve_ops"
 
 
 # Behaviour tags that GRANT something instead of restricting it (TASK-1362).
 # Restricting tags fail closed by applying to every bot; an opt-in grant fails
 # closed by applying to none. A catalog that has not been seeded with one yet
 # means nobody has opted in, not that the whole snapshot is untrustworthy.
-OPT_IN_BEHAVIOR_TAGS: frozenset[BehaviorTag] = frozenset({BehaviorTag.EXTERNAL})
+OPT_IN_BEHAVIOR_TAGS: frozenset[BehaviorTag] = frozenset({
+    BehaviorTag.EXTERNAL, BehaviorTag.APPROVE_OPS})
+
+# Opt-in tags that authorize an action (TASK-1609). They are set only through
+# the grant route (``bot_tags.grants``), which records who granted them and
+# why; every other tag writer refuses to add or remove one (``grant_locked``).
+GRANT_TAGS: frozenset[BehaviorTag] = frozenset({BehaviorTag.APPROVE_OPS})
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,13 @@ BEHAVIOR_TAGS: tuple[TagDefinition, ...] = (
         BehaviorTag.EXTERNAL, "External",
         "Stands in for agents outside the family. Must also be inactive. Opt-in: "
         "today only the bots_send_message default sender honours it.",
+        "behavior",
+    ),
+    TagDefinition(
+        BehaviorTag.APPROVE_OPS, "Ops approver",
+        "May approve or deny another bot's pending ops_run approval for the same user, "
+        "with a reason. A grant: set only through the bot-grants route, which records "
+        "who granted it. A private bot's requests are never offered to it.",
         "behavior",
     ),
 )

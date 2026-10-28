@@ -17,7 +17,7 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from . import catalog
+from . import catalog, grants
 from .errors import TagConflict, TagNotFound, TagValidationError
 from .vocabulary import TAG_SLUG, BehaviorTag, is_canonical_bot_slug
 
@@ -335,6 +335,7 @@ class BotTagStore:
         RoleFields.slug(tag)
         if not is_canonical_bot_slug(bot):
             raise TagValidationError("bot must be a canonical bot slug (lower-case, trimmed)")
+        grants.refuse_grant_tag(bot, tag)  # revoked only through the grant route (TASK-1609)
         with self.engine.begin() as conn:
             catalog.lock_bot(conn, bot)
             removed = conn.execute(text("""

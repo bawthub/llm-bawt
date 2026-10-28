@@ -74,6 +74,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(tools, "current_task_turn_context", lambda: turn)
     monkeypatch.setattr(tools, "_resolve_access", resolve)
     monkeypatch.setattr(tools, "_app", app)
+    monkeypatch.setattr(tools, "_manager_roles", lambda: frozenset({"fixture-manager"}))
     return SimpleNamespace(app=app, access=access)
 
 
@@ -218,3 +219,37 @@ def test_a_caller_may_edit_its_own_other_fields(rig):
     result = _call(bot_id=CALLER, changes={"description": "new"})
 
     assert result["changed"] == {"description": {"before": "old", "after": "new"}}
+
+
+@pytest.mark.parametrize("held, wanted", [
+    (["inactive"], ["inactive", "fixture-manager"]),
+    (["inactive", "fixture-manager"], ["inactive"]),
+])
+def test_a_grant_manager_role_cannot_be_added_or_removed(rig, held, wanted):
+    """A bot that could hand out manager roles could ordain a peer that ordains it."""
+    rig.app.profile = _profile(tags=held)
+
+    result = _call(changes={"tags": wanted})
+
+    assert result["error"] == "tag_locked"
+    assert result["tags"] == ["fixture-manager"]
+    assert rig.app.writes == []
+
+
+def test_a_tag_write_that_keeps_a_held_manager_role_passes(rig):
+    rig.app.profile = _profile(tags=["inactive", "fixture-manager"])
+
+    result = _call(changes={"tags": ["fixture-manager", "no_global_search"]})
+
+    assert result["changed"]["tags"]["after"] == ["fixture-manager", "no_global_search"]
+
+
+def test_unreadable_manager_roles_fail_closed_for_a_tag_write(rig, monkeypatch):
+    def down():
+        raise RuntimeError("settings store down")
+
+    monkeypatch.setattr(tools, "_manager_roles", down)
+
+    assert _call(changes={"tags": ["no_global_search"]})["error"] == "unavailable"
+    assert rig.app.writes == []
+    assert _call(changes={"description": "new"})["changed"]

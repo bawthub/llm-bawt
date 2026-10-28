@@ -22,6 +22,7 @@ is open by design and BawtHub is the auth layer.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -79,6 +80,22 @@ async def _resolve_access():
     from llm_bawt.utils.config import Config
     from llm_bawt.utils.db import get_shared_engine
     return await BotPolicyResolver(get_shared_engine(Config())).resolve()
+
+
+def _manager_roles() -> frozenset[str]:
+    """Role tags carrying the configured grant-manager capability (TASK-1609)."""
+    from llm_bawt.bot_tags import grants
+    from llm_bawt.service.dependencies import get_runtime_settings_store
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+
+    config = Config()
+    capability = grants.manager_capability(
+        get_runtime_settings_store(config).get_scope_settings("global", "*"))
+    if capability is None:
+        return frozenset()
+    with get_shared_engine(config).connect() as conn:
+        return grants.manager_roles(conn, capability)
 
 
 async def _app(method: str, slug: str, body: dict[str, Any] | None = None):
@@ -161,6 +178,18 @@ async def bots_profile_patch(
         return _denied()
     if TAGS in changes and BehaviorTag.PRIVATE in changes[TAGS]:
         return _error("private_tag_locked", "the private tag can't be changed with this tool")
+    if TAGS in changes:
+        # A grant manager role here would let a bot ordain a peer that then
+        # ordains it (TASK-1609); a person assigns those roles.
+        try:
+            locked = await asyncio.to_thread(_manager_roles)
+        except Exception:
+            logger.exception("bots_profile_patch: grant manager roles unreadable")
+            return _error("unavailable", "bot tag policy unavailable")
+        moved = sorted(locked & (set(changes[TAGS]) ^ set(current_tags)))
+        if moved:
+            return _error("tag_locked", f"grant manager roles can't be changed with this tool: "
+                          f"{moved}", tags=moved)
 
     stale = {field: _current(profile, field) for field, value in expected.items()
              if not _same(field, value, _current(profile, field))}

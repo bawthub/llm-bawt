@@ -15,7 +15,7 @@ Semantics live in ``operator_freeze``.
 
 from __future__ import annotations
 
-from typing import Annotated, TypeVar
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import (
@@ -23,7 +23,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -47,6 +46,7 @@ from ..operator_freeze import (
 )
 from ..turn_gates import GateScope, GateScopeError
 from .service_auth import NO_STORE, require_service_token
+from .service_auth import read_body as _read
 
 PREFIX = "/v1/admin/gates"
 
@@ -112,20 +112,6 @@ class ThawRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     actor: Actor
     override: bool = False
-
-
-Body = TypeVar("Body", bound=BaseModel)
-
-
-async def _read(request: Request, model: type[Body]) -> Body:
-    # Parsed here, not as a declared body parameter: FastAPI decodes a declared
-    # body before router dependencies run, so a malformed body would answer
-    # 422 ahead of the bearer check.
-    try:
-        return model.model_validate_json(await request.body())
-    except ValidationError as error:
-        detail = error.errors(include_url=False, include_input=False, include_context=False)
-        raise HTTPException(422, detail, headers=NO_STORE) from None
 
 
 def _unavailable() -> HTTPException:

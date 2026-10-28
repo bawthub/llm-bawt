@@ -160,7 +160,9 @@ async def test_catalog_token_budgets():
     # TASK-1531: notify_user (the when-to-notify policy stated in-band, so a
     # bot sees it on the one schema it loads): 4,255 (+68).
     # TASK-1585: the turn-log digest tool was removed: 4,204 (-51).
-    assert sum(descriptions) <= 4204, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1609: bots_grant_set (who may grant and the own/private refusals
+    # in-band, so a coordinator ordains approvers without a raw route): 4,253 (+49).
+    assert sum(descriptions) <= 4253, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -229,7 +231,8 @@ async def test_catalog_token_budgets():
     # TASK-1531: notify_user (typed urgency enum, bounded message/title/link/
     # dedupe_key, and the summary above): 15,529 (+232).
     # TASK-1585: the turn-log digest tool was removed: 15,421 (-108).
-    assert total <= 15421, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1609: bots_grant_set (bot_id, tag, granted, bounded reason): 15,540 (+119).
+    assert total <= 15540, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 
