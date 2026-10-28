@@ -492,3 +492,57 @@ def test_an_old_worker_refuses_the_backend_row():
     with pytest.raises(ConfigCheckError) as caught:
         executor.config_approval(SPEC)
     assert caught.value.code == "config_reconcile_unavailable"
+
+
+# ── TASK-1476: every app mount the product's Compose files declare is classified ──
+
+def _split_volume(volume: str) -> list[str]:
+    """Split a short-form volume on ':' outside ${...} interpolations."""
+    depth, parts, cur = 0, [], ""
+    for ch in volume:
+        depth += (ch == "{") - (ch == "}")
+        if ch == ":" and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return [*parts, cur]
+
+
+def _compose_app_destinations() -> dict[str, str]:
+    """Container path -> first Compose file declaring it, for the ``app``
+    service across every product Compose file the seed targets (short or long
+    volume form). docker-compose.prod.yml is a separate image-baked stack with
+    no source bind mounts, which this source-guarded seed never reconciles."""
+    from pathlib import Path
+
+    import yaml
+
+    found: dict[str, str] = {}
+    root = Path(__file__).resolve().parents[1]
+    for path in sorted(p for p in root.glob("docker-compose*.yml") if p.name != "docker-compose.prod.yml"):
+        app = ((yaml.safe_load(path.read_text()) or {}).get("services") or {}).get("app") or {}
+        for volume in app.get("volumes") or ():
+            if isinstance(volume, dict):
+                dest = volume["target"]
+            else:
+                parts = _split_volume(volume)
+                dest = parts[1] if len(parts) > 1 else parts[0]
+            found.setdefault(dest, path.name)
+    return found
+
+
+def test_split_volume_keeps_nested_interpolation_whole():
+    assert _split_volume("${A:-${HOME}/x}:/dst:ro") == ["${A:-${HOME}/x}", "/dst", "ro"]
+
+
+def test_seed_classifies_every_app_mount_the_compose_files_declare():
+    # The worker refuses an unclassified mount (source_mount_unclassified), so a
+    # mount added to Compose without a seed entry blocks every app reconcile
+    # and the cutover plan at the approval card. Fail here instead.
+    spec = json.loads(next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-app-config")["command_script"])
+    classified = set(spec["source_mounts"]) | set(spec["data_mounts"])
+    destinations = _compose_app_destinations()
+    assert {"/app/src", "/run/bawthub-service-token"} <= set(destinations)  # parser reads the real files
+    missing = {d: f for d, f in destinations.items() if d not in classified}
+    assert not missing, f"app mounts missing from the reconcile-app-config seed: {missing}"
