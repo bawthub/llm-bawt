@@ -22,6 +22,7 @@ here's how."
 from __future__ import annotations
 
 import pytest
+from _pytest.runner import runtestprotocol
 
 from collections import defaultdict
 from tests import pg_connection_guard
@@ -30,6 +31,7 @@ from tests.suite_manifest import PG_ACCEPTANCE_SUITES
 
 _DURATIONS = defaultdict(float)
 _REAL_PROCESS: set[str] = set()  # nodeids marked real_process; judged on their own budget
+_RETIMED: dict[str, tuple[float, float]] = {}  # nodeid -> (first run, retry) after a slow first run
 
 # Root conftest is imported before nested conftests and test modules; a
 # pytest_configure hook would be too late for their import-time side effects.
@@ -64,6 +66,7 @@ def pytest_configure(config):
     config._task780_surviving_by_file = defaultdict(int)
     _DURATIONS.clear()
     _REAL_PROCESS.clear()
+    _RETIMED.clear()
     config._task1189_durations = _DURATIONS
 
 
@@ -95,12 +98,42 @@ def pytest_collection_finish(session):
             pytest.exit(f"PostgreSQL acceptance gate missing selected suites: {missing}", returncode=1)
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Run a case once more when it passed but breached its budget (TASK-1650).
+
+    Only the duration the budget judges changes: the first run's reports are
+    the ones logged, so a retry can't turn a failure into a pass.
+    """
+    config = item.config
+    budget = time_budget.case_budget(config.getoption("--unit-time-budget"),
+                                     config.getoption("--real-process-time-budget"),
+                                     item.get_closest_marker(time_budget.REAL_PROCESS) is not None)
+    if budget is None:
+        return None
+    ihook = item.ihook
+    ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+    reports = runtestprotocol(item, nextitem=nextitem, log=False)
+    if time_budget.needs_retime(reports, budget):
+        retry = runtestprotocol(item, nextitem=nextitem, log=False)
+        reports[-1].user_properties.append((time_budget.RETIME, time_budget.retimed_duration(retry)))
+    for report in reports:
+        ihook.pytest_runtest_logreport(report=report)
+    ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    return True
+
+
 def pytest_runtest_logreport(report):
     if report.when in {"setup", "call", "teardown"}:
         _DURATIONS[report.nodeid] += report.duration
         # keywords travel with an xdist report, so the controller sees the marker too.
         if time_budget.REAL_PROCESS in getattr(report, "keywords", {}):
             _REAL_PROCESS.add(report.nodeid)
+        for key, retry in getattr(report, "user_properties", ()):
+            if key == time_budget.RETIME:
+                first = _DURATIONS[report.nodeid]
+                _RETIMED[report.nodeid] = (first, retry)
+                _DURATIONS[report.nodeid] = min(first, retry)
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -127,6 +160,8 @@ def pytest_sessionfinish(session, exitstatus):
             if slowest is not None:
                 print(f"Slowest real_process case: {slowest[1]:.3f}s {slowest[0]} "
                       f"(budget {budget if process_budget is None else process_budget}s)")
+            for nodeid, (first, retry) in sorted(_RETIMED.items()):
+                print(f"Re-timed after a slow first run: {first:.3f}s then {retry:.3f}s {nodeid}")
             found = time_budget.breaches(config._task1189_durations, _REAL_PROCESS, budget, process_budget)
             if found:
                 session.exitstatus = pytest.ExitCode.TESTS_FAILED

@@ -42,7 +42,13 @@ are judged on their own budget, `LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS`:
 1.5 s by default (about twice the slowest such case on echo) and 7 s in CI
 (about twice the slowest seen there). It is enforced like the unit budget, and
 the failure names which budget tripped. Every gated run prints its slowest
-real_process case, so the CI value can be revisited from its own logs. Fixtures that need a file-backed SQLite engine use
+real_process case, so the CI value can be revisited from its own logs.
+A case that passes but breaches its budget (unit or real_process) is run once
+more and judged on the faster run (TASK-1650). A hang, a new sleep or a real
+slowdown repeats and still fails. A one-off runner stall doesn't (a launcher
+whose CI worst case is under 1.5 s once took 8.06 s). The retry never changes
+the outcome, only the duration the budget sees, and the log names each re-timed
+case with both durations. Fixtures that need a file-backed SQLite engine use
 `tests/sqlite_support.py::fast_sqlite_engine`, which turns off per-commit fsync
 (`PRAGMA synchronous = OFF`); that is the dominant cost of such fixtures on a
 virtual disk and no test relies on durability across a power loss.
