@@ -32,6 +32,8 @@ otherwise the CLI's unknown-model fallback compacts large-context models early.
 
 from __future__ import annotations
 
+from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
+
 #: Output reserve = window / OUTPUT_RESERVE_DIVISOR, clamped to the bounds.
 OUTPUT_RESERVE_DIVISOR = 8
 MIN_OUTPUT_TOKENS = 4_096
@@ -88,3 +90,14 @@ def compact_window_env(compact_threshold: int | None) -> dict[str, str]:
     if compact_threshold is None or compact_threshold <= 0:
         return {}
     return {AUTO_COMPACT_WINDOW_ENV: str(compact_threshold)}
+
+
+#: Prompt-cache lifetime knob; the bundled CLI accepts exactly "5m" and "1h"
+#: and lets it override the subscription/API-key default.
+PROMPT_CACHE_TTL_ENV = "CLAUDE_CODE_PROMPT_CACHE_TTL"
+
+
+def prompt_cache_ttl_env(prompt_cache_ttl: str | None) -> dict[str, str]:
+    """Prompt-cache TTL hint for a native turn, or ``{}`` when unset/invalid."""
+    ttl = normalize_prompt_cache_ttl(prompt_cache_ttl)
+    return {PROMPT_CACHE_TTL_ENV: ttl} if ttl else {}

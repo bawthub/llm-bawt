@@ -116,7 +116,7 @@ def test_agent_client_reset_action_is_request_local(stream):
     client = AgentBackendClient.__new__(AgentBackendClient)
     client._backend = Backend()
     client._bot_config = {"bot_id": "test"}
-    client._with_question_wait = lambda config: config
+    client._with_turn_settings = lambda config: config
     if stream:
         assert list(client.stream_raw(
             [Message(role="user", content="Do task")],

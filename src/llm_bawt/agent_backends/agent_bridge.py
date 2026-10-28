@@ -329,6 +329,7 @@ class AgentBridgeBackend(AgentBackend):
                                 if config.get("mcp_tool_timeout_ms") else None
                             ),
                             question_answer_wait_seconds=config.get("question_answer_wait_seconds"),
+                            prompt_cache_ttl=config.get("prompt_cache_ttl"),
                             thread_session_id=(
                                 str(config.get("thread_session_id") or "").strip()
                                 or None

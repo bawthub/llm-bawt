@@ -339,6 +339,7 @@ class ClaudeSendMixin(
                         skill_bundle=req.skill_bundle,
                         skill_selection=req.skill_selection,
                         native_route=native_route,
+                        prompt_cache_ttl=req.prompt_cache_ttl,
                     )
                     if mcp_tool_timeout_ms:
                         # TASK-618: DB-backed app policy, delivered per turn so

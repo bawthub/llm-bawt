@@ -63,6 +63,7 @@ class CommandPublisherMixin:
         codex_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
         question_answer_wait_seconds: int | None = None,
+        prompt_cache_ttl: str | None = None,
         thread_session_id: str | None = None,
         thread_resume_id: str | None = None,
         explicit_thread: bool = False,
@@ -132,6 +133,8 @@ class CommandPublisherMixin:
             fields["mcp_tool_timeout_ms"] = str(mcp_tool_timeout_ms)
         if question_answer_wait_seconds is not None:
             fields["question_answer_wait_seconds"] = str(question_answer_wait_seconds)
+        if prompt_cache_ttl:
+            fields["prompt_cache_ttl"] = str(prompt_cache_ttl)
         if disallowed_tools is not None:
             fields["disallowed_tools"] = json.dumps(
                 disallowed_tools, ensure_ascii=False

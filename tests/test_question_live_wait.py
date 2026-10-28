@@ -109,6 +109,10 @@ def test_setting_resolves_each_turn_and_zero_survives_payload(monkeypatch):
         "llm_bawt.runtime_setting_resolution.resolve_global_runtime_setting",
         lambda config, key: next(values),
     )
+    monkeypatch.setattr(
+        "llm_bawt.runtime_setting_resolution.resolve_bot_runtime_setting",
+        lambda config, bot_id, key: None,
+    )
     configs = []
 
     class Backend:

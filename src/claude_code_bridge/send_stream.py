@@ -39,7 +39,7 @@ from claude_agent_sdk.types import (
 
 from claude_code_bridge.tool_events import normalize_tool_result
 
-from .context_env import compact_window_env, proxy_context_window_env
+from .context_env import compact_window_env, prompt_cache_ttl_env, proxy_context_window_env
 from .native_auth import LegacyNativeRoute, NativeAuthRoute
 from .proxy.request_context import (
     ProxyRequestContext,
@@ -137,6 +137,7 @@ class ClaudeStreamMixin:
         skill_bundle: str | None = None,
         native_route: NativeAuthRoute | None = None,
         skill_selection: str | None = None,
+        prompt_cache_ttl: str | None = None,
     ) -> dict:
         """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``.
 
@@ -227,6 +228,9 @@ class ClaudeStreamMixin:
                     gateway_base_url=self._oauth_gateway_base_url(route),
                 )
             )
+            # Native only: proxy upstreams have their own (or no) prompt cache,
+            # so the TTL knob is not sent where it has no verified meaning.
+            sdk_env.update(prompt_cache_ttl_env(prompt_cache_ttl))
         # Both paths: the app-resolved compact threshold drives when the CLI
         # auto-compacts (the CLI caps it at the model's window).
         sdk_env.update(compact_window_env(compact_threshold))

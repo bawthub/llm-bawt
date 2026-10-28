@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass, field
 
 from agent_bridge.continuity import SEED_FRAMING_FIELD, SeedFraming
+from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
 from agent_bridge.skill_selection import SELECTION_FIELD
 
 from ._bridge_helpers import _bot_slug_from_session_key
@@ -63,6 +64,8 @@ class SendRequest:
     skill_selection: str | None = None
     # App-resolved Claude Code auto-compact window (None = CLI default).
     compact_threshold: int | None = None
+    # App-resolved prompt-cache TTL ("5m"/"1h"; None = CLI default).
+    prompt_cache_ttl: str | None = None
     bridge_reset_action: str | None = None
     # TASK-1579: app-resolved registry framing for a non-empty seed.
     inject_seed_framing: SeedFraming | None = None
@@ -198,6 +201,11 @@ class SendRequest:
             logger.warning("Invalid question_answer_wait_seconds in chat.send")
             question_answer_wait_seconds = 0
 
+        raw_ttl = (fields.get("prompt_cache_ttl") or "").strip()
+        prompt_cache_ttl = normalize_prompt_cache_ttl(raw_ttl)
+        if raw_ttl and prompt_cache_ttl is None:
+            logger.warning("Ignoring invalid prompt_cache_ttl=%r for %s", raw_ttl, bot_slug)
+
         # TASK-593: app-resolved, DB-managed base SDK tool policy. Keep the raw
         # field until proxy routing is known; the pure resolver below decodes it,
         # falls back safely, and adds proxy-only exclusions.
@@ -242,6 +250,7 @@ class SendRequest:
             subagent_model=subagent_model,
             bot_context_window=bot_context_window,
             compact_threshold=compact_threshold,
+            prompt_cache_ttl=prompt_cache_ttl,
             responses_transport=responses_transport,
             mcp_tool_timeout_ms=mcp_tool_timeout_ms,
             question_answer_wait_seconds=question_answer_wait_seconds,

@@ -245,7 +245,7 @@ class AgentBackendClient(LLMClient):
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
         # pass it through in the Redis command.
-        config = self._with_question_wait(dict(self._bot_config))
+        config = self._with_turn_settings(dict(self._bot_config))
         system_parts = []
         for msg in messages:
             if msg.role == "system":
@@ -350,17 +350,32 @@ class AgentBackendClient(LLMClient):
     # Internal
     # ------------------------------------------------------------------
 
-    def _with_question_wait(self, config: dict[str, Any]) -> dict[str, Any]:
-        """Apply the global setting to this Claude Code turn's private config."""
+    def _with_turn_settings(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Apply per-turn runtime settings to this Claude Code turn's private config.
+
+        Resolved every turn (5s resolver cache) so a DB change lands on the next
+        turn without a restart.
+        """
         if getattr(self, "_backend_name", None) != "claude-code":
             return config
-        from ..runtime_setting_resolution import resolve_global_runtime_setting
+        from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
 
+        from ..runtime_setting_resolution import (
+            resolve_bot_runtime_setting,
+            resolve_global_runtime_setting,
+        )
+
+        bot_id = str(config.get("bot_id") or "").strip() or None
+        raw_ttl = resolve_bot_runtime_setting(self.config, bot_id, "prompt_cache_ttl")
+        ttl = normalize_prompt_cache_ttl(raw_ttl)
+        if raw_ttl not in (None, "") and ttl is None:
+            logger.warning("Ignoring invalid prompt_cache_ttl %r for bot %s", raw_ttl, bot_id)
         return {
             **config,
             "question_answer_wait_seconds": int(resolve_global_runtime_setting(
                 self.config, "question_answer_wait_seconds",
             )),
+            "prompt_cache_ttl": ttl,
         }
 
     async def _chat_full(
@@ -399,7 +414,7 @@ class AgentBackendClient(LLMClient):
                 config["timeout_seconds"] = max(1, int(bridge_timeout_seconds))
             if bridge_event_callback is not None:
                 config["event_callback"] = bridge_event_callback
-        config = self._with_question_wait(config)
+        config = self._with_turn_settings(config)
         if hasattr(self._backend, "chat_full"):
             return await self._backend.chat_full(prompt, config)
         # Fallback for backends that only implement chat()

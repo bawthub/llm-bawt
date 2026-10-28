@@ -515,6 +515,22 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "(~33k early on Claude models, for the output reserve and buffer)."
         ),
     ),
+    # Constrained str (no registry enum type yet): agent_bridge.prompt_cache
+    # .PROMPT_CACHE_TTLS is the allowlist; anything else resolves to unset.
+    "prompt_cache_ttl": SettingDefinition(
+        key="prompt_cache_ttl",
+        type="str",
+        default=None,
+        applies_to=("agent",),
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Prompt cache TTL",
+        help=(
+            "Claude Code prompt-cache lifetime on the native Anthropic path: "
+            "'5m' or '1h'. Sent as CLAUDE_CODE_PROMPT_CACHE_TTL. Bot override "
+            "beats the global value; unset (or any other value) leaves the "
+            "CLI default. Read every turn, so a change applies on the next turn."
+        ),
+    ),
     "max_output_tokens": SettingDefinition(
         key="max_output_tokens",
         type="int",
