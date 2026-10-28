@@ -207,6 +207,8 @@ Stable DNS alone is not proof of replica load balancing or stale-endpoint recove
 
 Start an architecture ratchet in TASK-1169: list current offenders with owning task IDs, reject new ones immediately, and remove exceptions as migrations land. Cover SDK imports, direct HTTP/CLI/shell helpers, socket/TCP configuration and parent-directory mounts across Compose and tenant artifacts. Separate legitimate adapter code and operator test tooling from product dependencies.
 
+**Implemented (S1a):** `tests/test_docker_access_ratchet.py` scans `src/` and every `docker-compose*.yml`. `OPS_ADAPTER` and `OPS_COMPOSE` name the ops boundary; `OFFENDERS` lists each current offender with its owning task (`media/gpu_handoff_adapter.py` → TASK-1171, compose `app` socket mount → TASK-1173). A new offender fails, and so does an entry that no longer matches, so a migration deletes its own exception. BawtHub carries the twin for Hono, the voice backend and its compose files.
+
 Required evidence includes consumer tests with Docker unreachable; zero/one/many-instance contract fixtures; pure status reads; authorization/target-drift and duplicate dispatch tests; competing claims and crash recovery; blocked-execution health responsiveness; routing replacement; and proof that ordinary jobs no longer create per-job containers.
 
 Final acceptance requires actual runtime mounts/configuration and behavior, not just green unit tests or a healthy dashboard. Preserve old receipts and rollback assets. Any worker cleanup must be bounded and separately authorized, never daemon-wide pruning. No automatic bridge/Redis restart or production deployment is implied by these tasks.
