@@ -21,7 +21,7 @@ from llm_bawt.service.turn_gates import GATE_CHANGED_CHANNEL, GateScope, release
 from llm_bawt.service.user_stop_hold import hold_spec
 from tests.test_turn_gates_pg import _activate, _open, _spec, gated  # noqa: F401
 
-pytestmark = pytest.mark.usefixtures("private_app_pg")
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 HOLD = {"kind": "system_hold", "gate": "quiesce"}
 FREEZE = {"kind": "system_hold", "gate": "freeze"}
