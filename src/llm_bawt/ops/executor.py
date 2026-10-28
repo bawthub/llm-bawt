@@ -16,9 +16,9 @@ from pathlib import Path
 
 from ..service.providers.github_deploy import GhcrPullAdapter
 from ..utils.config import Config
-from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, SOURCE_GUARD_LABEL,
-                                   WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL, app_config_binding,
-                                   validate_app_spec)
+from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, PROCESS_PROFILE_LABEL,
+                                   SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
+                                   app_config_binding, uses_process_profile, validate_app_spec)
 from .compose_config import evaluate
 from .compose_render import ComposeError, ComposeRenderer
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
@@ -29,6 +29,7 @@ from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
 from .source_state import SourceChecker
+from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, tagged_config_binding, validate_tagged_spec
 from .validation import canonical_json
 from .worker import (OPS_JOB_LABEL, QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
@@ -37,9 +38,12 @@ SUPPORTED_ACTIONS = frozenset({"restart", "start", "stop", "pull"})
 # Ops whose target configuration is compared with its Compose service (TASK-1518),
 # and the worker capability labels each needs (TASK-1474: the app reconcile and
 # its source guard; an app worker without the guard would swap unpublished source;
-# and the v2 built profile, whose spec shape an older worker would refuse mid-job).
+# and the v2 built profile, whose spec shape an older worker would refuse mid-job;
+# TASK-1476: the tagged-image kind lives in the v3 process profile, which an app
+# target also needs once its desired configuration uses a v3 key).
 CONFIG_WORKER_LABELS = {CONFIG_ACTION: (CONFIG_WORKER_LABEL,), DEPLOY_ACTION: (CONFIG_WORKER_LABEL,),
-                        APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL, BUILT_PROFILE_LABEL)}
+                        APP_CONFIG_ACTION: (APP_CONFIG_WORKER_LABEL, SOURCE_GUARD_LABEL, BUILT_PROFILE_LABEL),
+                        TAGGED_CONFIG_ACTION: (CONFIG_WORKER_LABEL, PROCESS_PROFILE_LABEL)}
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
 
 
@@ -202,6 +206,8 @@ def validate_spec(command_script: str) -> dict:
         return validate_config_spec(spec)
     if isinstance(spec, dict) and spec.get("action") == APP_CONFIG_ACTION:
         return validate_app_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == TAGGED_CONFIG_ACTION:
+        return validate_tagged_spec(spec)
     if isinstance(spec, dict) and spec.get("action") in IMAGE_ACTIONS:
         return validate_image_spec(spec)
     if is_release_spec(spec):
@@ -319,11 +325,11 @@ class DockerExecutor(Executor):
         except Exception as exc:
             raise ExecutorError("cannot inspect routing target") from exc
 
-    def _check_config_worker(self, settings, action=CONFIG_ACTION):
+    def _check_config_worker(self, settings, action=CONFIG_ACTION, extra=()):
         """The worker image carries the renderer, the reconciler and the deploy
         drift guard. An older one would deploy without the guard."""
         try:
-            for label in CONFIG_WORKER_LABELS[action]:
+            for label in (*CONFIG_WORKER_LABELS[action], *extra):
                 self._require_worker_label(
                     settings, label,
                     missing=(f"configured immutable ops worker lacks {label}; "
@@ -364,7 +370,7 @@ class DockerExecutor(Executor):
         return renderer, target.attrs, image.attrs
 
     def _image_tag_moved(self, tag, image):
-        """TASK-1474: does the Compose tag still name the running build? Shown
+        """TASK-1474: does the Compose tag still name the running image? Shown
         to the approver only; the worker swaps by image ID either way."""
         try:
             return self.client.images.get(tag).attrs["Id"] != image["Id"]
@@ -379,8 +385,16 @@ class DockerExecutor(Executor):
             if spec["action"] == APP_CONFIG_ACTION:
                 checker = SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],
                                         tag="src" + os.urandom(4).hex())
-                return app_config_binding(spec, container, image, renderer, source_checker=checker,
-                                          tag_moved=lambda tag: self._image_tag_moved(tag, image))[0]
+                binding, desired = app_config_binding(spec, container, image, renderer, source_checker=checker,
+                                                      tag_moved=lambda tag: self._image_tag_moved(tag, image))
+                if uses_process_profile(desired):
+                    # TASK-1476: an older worker would refuse it mid-job; refuse first.
+                    self._check_config_worker(self.execution_settings(spec), spec["action"],
+                                              extra=(PROCESS_PROFILE_LABEL,))
+                return binding
+            if spec["action"] == TAGGED_CONFIG_ACTION:
+                return tagged_config_binding(spec, container, image, renderer,
+                                             tag_moved=lambda tag: self._image_tag_moved(tag, image))[0]
             return config_binding(spec, container, image, renderer)[0]
         except ComposeError as exc:  # fixed code and names only
             raise ConfigCheckError(exc.code, f"config target cannot be bound: {exc}") from exc

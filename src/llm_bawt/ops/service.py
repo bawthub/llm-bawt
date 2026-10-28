@@ -11,6 +11,7 @@ from typing import Any
 
 from .app_config_reconcile import ACTION as APP_CONFIG_ACTION, newly_trusted, valid_app_binding
 from .config_reconcile import ACTION as CONFIG_ACTION, valid_config_binding
+from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, valid_tagged_binding
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
@@ -46,6 +47,15 @@ def _spec_action(operation) -> str | None:
         return None
     return spec.get("action") if isinstance(spec, dict) else None
 
+
+def _valid_config_snapshot(snapshot: dict) -> bool:
+    """The config binding of a detached snapshot, by the kind that executes it."""
+    action = snapshot["spec"].get("action")
+    if action == APP_CONFIG_ACTION:
+        return valid_app_binding(snapshot)
+    if action == TAGGED_CONFIG_ACTION:
+        return valid_tagged_binding(snapshot)
+    return valid_config_binding(snapshot)
 
 
 class OpsDispatchError(RuntimeError):
@@ -229,10 +239,11 @@ class OpsService:
                 snapshot["routing"] = executor.routing_approval(spec)
             except (ValueError, ExecutorError) as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
-        elif spec["action"] in (CONFIG_ACTION, APP_CONFIG_ACTION):
+        elif spec["action"] in (CONFIG_ACTION, APP_CONFIG_ACTION, TAGGED_CONFIG_ACTION):
             # TASK-1518: the approver sees drift NAMES, mounts and closed-enum
             # values; the worker re-renders and compares under the target lock.
-            # TASK-1474: the same for the Compose-built app.
+            # TASK-1474: the same for the Compose-built app; TASK-1476: and for
+            # a tagged public image.
             if merged:
                 raise OpsDispatchError("args_invalid", "config reconciliation accepts no arguments")
             try:
@@ -315,8 +326,7 @@ class OpsService:
                 raise ValueError("snapshot quiesce binding mismatch")
             if not valid_routing_binding(detached):
                 raise ValueError("snapshot routing binding mismatch")
-            if not (valid_app_binding(detached) if detached["spec"].get("action") == APP_CONFIG_ACTION
-                    else valid_config_binding(detached)):
+            if not _valid_config_snapshot(detached):
                 raise ValueError("snapshot config binding mismatch")
             if not binding_matches_args(detached):
                 raise ValueError("snapshot release/rollback binding mismatch")

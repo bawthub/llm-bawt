@@ -359,13 +359,16 @@ def test_absent_command_is_the_image_default(tmp_path):
     assert "Cmd" not in api.create_bodies[0]
 
 
-def test_changed_command_is_applied_and_entrypoint_must_be_null(tmp_path):
+def test_changed_command_is_applied_and_string_forms_refuse(tmp_path):
     api = AppDocker(compose=app_compose(command=["llm-service", "--debug"]))
     snap = snapshot(api)
     assert snap["config"]["drift"] == ["command:~"]
     reconciler(api, tmp_path, snap).run()
     assert api.create_bodies[0]["Cmd"] == ["llm-service", "--debug"]
-    for service in ({"entrypoint": ["sh", "-c"]}, {"command": "llm-service --debug"}):
+    # TASK-1476: an argv entrypoint is modelled (drift, applied); more in
+    # test_ops_tagged_config_reconcile.py. Shell-string forms still refuse.
+    assert translate(app_compose(entrypoint=["sh", "-c"]), SPEC, TAG, BUILT_PROFILE)["entrypoint"] == ["sh", "-c"]
+    for service in ({"entrypoint": "sh -c"}, {"command": "llm-service --debug"}):
         with pytest.raises(ComposeError, match="unsupported_compose_key"):
             translate(app_compose(**service), SPEC, TAG, BUILT_PROFILE)
 

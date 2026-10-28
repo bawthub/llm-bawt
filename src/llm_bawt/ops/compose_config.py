@@ -18,11 +18,19 @@ running container exactly as a plain image deploy would.
 
 The allowlist is a frozen per-kind :class:`ServiceProfile` (TASK-1474). The
 pinned frontend models no process or port settings. A Compose-BUILT service
-(the llm-bawt app, the BawtHub backend) additionally models command/entrypoint,
-published ports, stdin_open/tty, container_name, depends_on and security_opt.
-Its ``build`` and ``pull_policy`` keys are accepted but inert, because a
-reconcile never builds or pulls; a declared ``image`` only names the tag the
-build carries (:func:`built_image_tag`).
+(the llm-bawt app, the BawtHub backend, the agent bridges) additionally models
+command/entrypoint, published ports, stdin_open/tty, container_name,
+depends_on, security_opt, healthcheck and tmpfs. Its ``build`` and
+``pull_policy`` keys are accepted but inert, because a reconcile never builds
+or pulls; a declared ``image`` only names the tag the build carries
+(:func:`built_image_tag`). A third-party image run by a mutable tag
+(crawl4ai, TASK-1476) uses :data:`PINNED_PROCESS_PROFILE`: the pinned keys plus
+the process settings it declares.
+
+Healthcheck, tmpfs and a declared entrypoint (TASK-1476) are stored in the
+desired configuration only when declared, so a service that declares none
+keeps the desired configuration, and its hash, it had before they were
+modelled. An undeclared healthcheck or entrypoint means the image's own.
 """
 from __future__ import annotations
 
@@ -32,9 +40,9 @@ import re
 from dataclasses import dataclass
 
 if __package__:
-    from .compose_render import ComposeError, compose_source
+    from .compose_render import SAFE_PATH, ComposeError, compose_source
 else:  # standalone immutable worker
-    from compose_render import ComposeError, compose_source
+    from compose_render import SAFE_PATH, ComposeError, compose_source
 
 BOOKKEEPING_PREFIXES = ("com.docker.compose.", "llm-bawt.ops.")
 CONFIG_HASH_LABEL = "com.docker.compose.config-hash"
@@ -63,6 +71,20 @@ DEPENDENCY_CONDITIONS = frozenset({"service_started", "service_healthy"})
 # Compared only by a profile that models the process (``models_process``).
 _PROCESS_FIELDS = (("cmd", "command"), ("entrypoint", "entrypoint"), ("stdin_open", "stdin_open"),
                    ("tty", "tty"))
+# ``healthcheck`` (TASK-1476): an explicit test plus Docker's timing fields.
+# ``disable`` refuses (``test: ["NONE"]`` says the same thing explicitly); an
+# absent test would inherit the image's, which this module does not model.
+_HEALTH_KEYS = frozenset({"test", "interval", "timeout", "retries", "start_period", "start_interval"})
+_HEALTH_DURATIONS = (("interval", "Interval"), ("timeout", "Timeout"), ("start_period", "StartPeriod"),
+                     ("start_interval", "StartInterval"))
+# Compose renders durations as Go duration strings ("15s", "1m30s"); Docker
+# stores nanoseconds. Integer parts only.
+_DURATION = re.compile(r"(?:[0-9]{1,9}(?:ms|us|µs|ns|h|m|s))+")
+_DURATION_PART = re.compile(r"([0-9]{1,9})(ms|us|µs|ns|h|m|s)")
+_DURATION_NS = {"h": 3_600_000_000_000, "m": 60_000_000_000, "s": 1_000_000_000, "ms": 1_000_000,
+                "us": 1_000, "µs": 1_000, "ns": 1}
+# ``tmpfs`` mount options, e.g. ``uid=999,gid=999,size=64m,mode=1777,noexec``.
+_TMPFS_OPTION = re.compile(r"[a-z][a-z0-9_-]{0,31}(?:=[A-Za-z0-9._-]{1,32})?")
 UNEXPECTED_VALUE = "<unexpected value>"
 UNSET_VALUE = "<unset>"
 
@@ -73,8 +95,9 @@ class ServiceProfile:
     ``build`` is required and inert and a declared ``image`` is only the build's
     local tag; otherwise the service interpolates the pinned ``image``.
     ``models_process``: command, entrypoint, ports, stdin_open/tty,
-    container_name, depends_on and security_opt. ``pull_policies``: the
-    accepted ``pull_policy`` values (absent is always accepted)."""
+    container_name, depends_on, security_opt, healthcheck and tmpfs (each
+    only as far as ``keys`` admits it). ``pull_policies``: the accepted
+    ``pull_policy`` values (absent is always accepted)."""
 
     name: str
     keys: frozenset
@@ -86,9 +109,15 @@ class ServiceProfile:
 PINNED_PROFILE = ServiceProfile("pinned", SERVICE_KEYS, built=False, models_process=False,
                                 pull_policies=PULL_POLICIES)
 BUILT_PROFILE = ServiceProfile("built", frozenset({
-    "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "image",
-    "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tty", "volumes"}),
-    built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+    "build", "command", "container_name", "depends_on", "entrypoint", "environment", "extra_hosts", "healthcheck",
+    "image", "labels", "networks", "ports", "pull_policy", "restart", "security_opt", "stdin_open", "tmpfs", "tty",
+    "volumes"}), built=True, models_process=True, pull_policies=BUILT_PULL_POLICIES)
+# TASK-1476: a third-party image run by a mutable tag (crawl4ai). The rendered
+# ``image`` must equal the declared tag; the reconcile swaps to the RUNNING
+# image ID, so the tag is never re-resolved. Its healthcheck is the image's.
+PINNED_PROCESS_PROFILE = ServiceProfile("pinned-process", SERVICE_KEYS | {
+    "container_name", "depends_on", "ports", "tmpfs"}, built=False, models_process=True,
+    pull_policies=PULL_POLICIES)
 
 
 def built_image_tag(value) -> str:
@@ -215,23 +244,83 @@ def _security_opt(value) -> list:
     return list(value)
 
 
-def _process(service: dict, spec: dict) -> dict:
-    if service.get("entrypoint") is not None:
-        raise ComposeError("unsupported_compose_key", ["entrypoint"])
+def _duration(value, key: str) -> int:
+    """A Compose (Go) duration string as Docker's nanoseconds; absent is 0."""
+    if value is None:
+        return 0
+    if not isinstance(value, str) or not _DURATION.fullmatch(value):
+        raise ComposeError("unsupported_compose_key", [key])
+    return sum(int(number) * _DURATION_NS[unit] for number, unit in _DURATION_PART.findall(value))
+
+
+def _healthcheck(value) -> dict | None:
+    """``Config.Healthcheck`` with every field present (0 = unset)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - _HEALTH_KEYS:
+        raise ComposeError("unsupported_compose_key", ["healthcheck"])
+    test = value.get("test")
+    if (not isinstance(test, list) or not test or not all(isinstance(t, str) and t for t in test)
+            or test[0] not in ("CMD", "CMD-SHELL", "NONE") or (test[0] == "NONE") != (len(test) == 1)
+            or (test[0] == "CMD-SHELL" and len(test) != 2)):
+        raise ComposeError("unsupported_compose_key", ["healthcheck.test"])
+    retries = value.get("retries", 0)
+    if type(retries) is not int or not 0 <= retries <= 1000:
+        raise ComposeError("unsupported_compose_key", ["healthcheck.retries"])
+    health = {"Test": list(test), "Retries": retries}
+    for key, field in _HEALTH_DURATIONS:
+        health[field] = _duration(value.get(key), f"healthcheck.{key}")
+    return health
+
+
+def _health_state(value) -> dict | None:
+    """A container's or image's ``Healthcheck`` on the same fields."""
+    if not isinstance(value, dict) or not value.get("Test"):
+        return None
+    return {"Test": list(value["Test"]), "Retries": int(value.get("Retries") or 0),
+            **{field: int(value.get(field) or 0) for _, field in _HEALTH_DURATIONS}}
+
+
+def _tmpfs(value, mounts: dict) -> dict:
+    """``HostConfig.Tmpfs``: ``{path: options}``. A path already mounted refuses."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise ComposeError("unsupported_compose_key", ["tmpfs"])
+    out = {}
+    for item in value:
+        path, _, options = item.partition(":") if isinstance(item, str) else ("", "", "")
+        if (not SAFE_PATH.fullmatch(path) or ".." in path.split("/") or path in out or path in mounts
+                or (options and not all(_TMPFS_OPTION.fullmatch(o) for o in options.split(",")))):
+            raise ComposeError("unsupported_compose_key", ["tmpfs"])
+        out[path] = options
+    return dict(sorted(out.items()))
+
+
+def _process(service: dict, spec: dict, mounts: dict) -> dict:
     # Undeclared, Compose names the (single) container <project>-<service>-1.
     declared = service.get("container_name") or f"{spec['compose_project']}-{spec['compose_service']}-1"
     if declared != spec["container_name"]:
         raise ComposeError("compose_container_name_mismatch")
-    process = {"cmd": _argv(service.get("command"), "command"), "entrypoint": None,
+    process = {"cmd": _argv(service.get("command"), "command"),
+               "entrypoint": _argv(service.get("entrypoint"), "entrypoint"),
                "ports": _ports(service.get("ports")),
                "stdin_open": _flag(service.get("stdin_open"), "stdin_open"),
                "tty": _flag(service.get("tty"), "tty"),
                "depends_on": _depends_on(service.get("depends_on"))}
     # Stored only when set, so a service that declares none keeps the desired
-    # (and its hash) it had before security_opt was modelled.
+    # (and its hash) it had before each of these was modelled.
     security = _security_opt(service.get("security_opt"))
     if security:
         process["security_opt"] = security
+    health = _healthcheck(service.get("healthcheck"))
+    if health is not None:
+        process["healthcheck"] = health
+    tmpfs = _tmpfs(service.get("tmpfs"), mounts)
+    if tmpfs:
+        process["tmpfs"] = tmpfs
     return process
 
 
@@ -305,7 +394,7 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
                "extra_hosts": sorted(_host_entry(h) for h in hosts),
                "restart": [restart.group(1), int(restart.group(2) or 0)]}
     if profile.models_process:
-        desired.update(_process(service, spec))
+        desired.update(_process(service, spec, mounts))
     if built_tag is not None:
         desired["image"] = built_tag  # identity only: the swap uses the bound image ID
     return desired
@@ -346,12 +435,16 @@ def running(container: dict) -> dict:
             "restart": [policy.get("Name") or "no", int(policy.get("MaximumRetryCount") or 0)],
             "cmd": config.get("Cmd"), "entrypoint": config.get("Entrypoint"), "ports": ports,
             "stdin_open": bool(config.get("OpenStdin")), "tty": bool(config.get("Tty")),
-            "security_opt": list(host.get("SecurityOpt") or [])}
+            "security_opt": list(host.get("SecurityOpt") or []),
+            "healthcheck": _health_state(config.get("Healthcheck")),
+            "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items()))}
 
 
 def normalized(state: dict, image: dict) -> dict:
     """Drop what the image supplies and Compose/ops bookkeeping (both sides).
-    An absent command/entrypoint means the image's own."""
+    An absent command/entrypoint means the image's own. A healthcheck's unset
+    (0) fields are the image's, as Docker merges them at create; one equal to
+    the image's own is the same as none declared."""
     image_config = image.get("Config") or {}
     image_env = dict(e.partition("=")[::2] for e in image_config.get("Env") or [])
     image_labels = image_config.get("Labels") or {}
@@ -359,9 +452,16 @@ def normalized(state: dict, image: dict) -> dict:
               "env": {k: v for k, v in state["env"].items() if image_env.get(k) != v},
               "labels": {k: v for k, v in state["labels"].items()
                          if not _bookkeeping(k) and image_labels.get(k) != v}}
-    for field, key in (("cmd", "Cmd"), ("entrypoint", "Entrypoint")):
-        if field in result and result[field] is None:
-            result[field] = image_config.get(key)
+    # Docker's create merge: an unset command is the image's only when the
+    # entrypoint is not overridden too (a declared entrypoint runs alone).
+    if "cmd" in result and result["cmd"] is None and result.get("entrypoint") is None:
+        result["cmd"] = image_config.get("Cmd")
+    if "entrypoint" in result and result["entrypoint"] is None:
+        result["entrypoint"] = image_config.get("Entrypoint")
+    health, image_health = result.get("healthcheck"), _health_state(image_config.get("Healthcheck"))
+    if health is not None and image_health is not None:
+        health = {k: v or image_health[k] for k, v in health.items()}
+        result["healthcheck"] = None if health == image_health else health
     return result
 
 
@@ -388,6 +488,15 @@ def drift(desired: dict, actual: dict) -> list[str]:
     # running container (it can weaken confinement) is drift and is removed.
     if "ports" in desired and desired.get("security_opt", []) != actual.get("security_opt", []):
         names.append("security_opt:~")
+    # ...and likewise its healthcheck (none declared = the image's own) and
+    # tmpfs mounts (an undeclared one is removed).
+    if "ports" in desired:
+        if desired.get("healthcheck") != actual.get("healthcheck"):
+            names.append("healthcheck:~")
+        want, have = desired.get("tmpfs", {}), actual.get("tmpfs", {})
+        names += [f"tmpfs:+{k}" for k in want if k not in have]
+        names += [f"tmpfs:-{k}" for k in have if k not in want]
+        names += [f"tmpfs:~{k}" for k in want if k in have and want[k] != have[k]]
     return sorted(names)
 
 
@@ -446,6 +555,10 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
                 body[key] = list(desired[field])
         body["OpenStdin"], body["Tty"] = desired["stdin_open"], desired["tty"]
         body["ExposedPorts"] = {**(image_config.get("ExposedPorts") or {}), **{k: {} for k in desired["ports"]}}
+        if desired.get("healthcheck") is None:
+            body.pop("Healthcheck", None)  # the image's own applies
+        else:
+            body["Healthcheck"] = dict(desired["healthcheck"])
     body["Env"] = [f"{k}={v}" for k, v in sorted(desired["env"].items())]
     labels = {k: v for k, v in body["Labels"].items() if _bookkeeping(k)}
     labels.update(desired["labels"])
@@ -460,6 +573,7 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
     if "ports" in desired:
         host["PortBindings"] = json.loads(json.dumps(desired["ports"]))
         host["SecurityOpt"] = list(desired.get("security_opt", [])) or None
+        host["Tmpfs"] = dict(desired.get("tmpfs", {})) or None
     if host.get("NetworkMode") not in desired["networks"]:
         host["NetworkMode"] = desired["networks"][0]
     current = body.get("NetworkingConfig", {}).get("EndpointsConfig") or {}

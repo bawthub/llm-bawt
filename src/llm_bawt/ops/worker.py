@@ -27,6 +27,7 @@ if __package__:
     from .config_reconcile import ACTION as CONFIG_ACTION, ConfigReconciler
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
+    from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
     # `python3 -I` drops the script directory from sys.path; re-add ONLY this
     # file's own image-owned, read-only directory.
@@ -35,6 +36,7 @@ else:  # pragma: no cover - standalone worker image
     from config_reconcile import ACTION as CONFIG_ACTION, ConfigReconciler
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
+    from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
 
 OPS_JOB_LABEL = "llm-bawt.ops.job"
@@ -268,6 +270,9 @@ def run(request_path: Path, expected_hash: str, *, api_factory=DockerAPI, sleep=
             elif snapshot["spec"]["action"] == APP_CONFIG_ACTION:
                 output = AppConfigReconciler(api, snapshot, job_id,
                                              lock_root=request_path.parent.parent / ".target-locks").run()
+            elif snapshot["spec"]["action"] == TAGGED_CONFIG_ACTION:
+                output = TaggedConfigReconciler(api, snapshot, job_id,
+                                                lock_root=request_path.parent.parent / ".target-locks").run()
             elif snapshot["spec"]["action"] == ROUTING_ACTION:
                 output = RoutingReconciler(api, snapshot, job_id,
                                            lock_root=request_path.parent.parent / ".target-locks").run()

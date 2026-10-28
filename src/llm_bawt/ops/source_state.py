@@ -204,11 +204,11 @@ def validate_source_spec(spec: dict) -> None:
 def _mount_destinations(container: dict, image: dict, desired: dict) -> set:
     """Every destination the RECREATED container has, plus the current one's.
 
-    The recreated container takes the desired Compose mounts, the image's own
-    ``VOLUME`` declarations and the cloned body's tmpfs mounts. The current
-    container's mounts are included so a stray mount fails before the swap."""
+    The recreated container takes the desired Compose mounts and tmpfs mounts
+    and the image's own ``VOLUME`` declarations. The current container's
+    mounts are included so a stray mount fails before the swap."""
     host = container.get("HostConfig") or {}
-    destinations = set(desired["mounts"])
+    destinations = set(desired["mounts"]) | set(desired.get("tmpfs") or {})
     destinations |= {m.get("Target") for m in host.get("Mounts") or []}
     destinations |= {raw.split(":")[1] for raw in host.get("Binds") or [] if raw.count(":") >= 1}
     destinations |= {m.get("Destination") for m in container.get("Mounts") or []}
