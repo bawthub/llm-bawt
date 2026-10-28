@@ -133,3 +133,111 @@ bridges or Redis.**
 5. Create `bawthub.reconcile-prod-config` disabled through the operator API,
    install and preview its `require_approval` policy, reload policies, and enable
    it only with approval. Run it through `ops_run` if a deploy reports drift.
+
+## Cutover service plan (TASK-1476)
+
+**Code only; not activated.** One approval-gated job that recreates several
+llm-bawt services in one window, each at its **same image**. Recreating them one
+at a time would leave the others reading configuration the first no longer
+serves.
+
+### Target kinds
+
+- **App kind** (`reconcile_app_config`, `ops/app_config_reconcile.py`): a
+  Compose-built service with a bind-mounted source checkout. The checkout must be
+  exactly the published branch head (source guard). The image is bound by ID,
+  never by tag. Rows: `llm-bawt.reconcile-app-config`,
+  `llm-bawt.reconcile-codex-bridge-config` and
+  `llm-bawt.reconcile-claude-code-bridge-config`. For a bridge, the source guard
+  binds only the bridge's own source. The agents it hosts run code from the
+  mounted workspace by design, so that workspace is not guarded.
+- **Tagged kind** (`reconcile_tagged_config`, `ops/tagged_config_reconcile.py`):
+  a service that runs a public image by moving tag (Crawl4AI,
+  `llm-bawt.reconcile-crawl4ai-config`). It binds and swaps to the **running
+  image ID** and never re-resolves the tag, so a reconcile is never an upgrade. A
+  tag that now names another local image shows on the card as `image_tag_moved`
+  and is not drift. It renders with the pinned process profile
+  (`container_name`, `depends_on`, `entrypoint`/`command`, published ports,
+  `tmpfs` added to the keys above) and inherits the image's own healthcheck.
+
+Both kinds check `depends_on` as a precondition and verify the target's own
+in-container health URL. A failed verify restores the previous container.
+
+### The plan (`llm-bawt.cutover-plan`, `ops/plan_reconcile.py`)
+
+The spec (`reconcile_service_plan`) is an ordered list of existing catalog
+rows plus a closed probe list. The rows stay the allowlist: their env names and
+data mounts remain DB-owned, and each target runs through its own reconciler
+(bind, compare, source guard, dependency check, swap, verify, restore). Nothing
+is forked. Seed order: app, Crawl4AI, codex bridge, claude-code bridge.
+
+- **Approval** (`ops/plan_approval.py` `bind_plan`): every target must be an
+  **enabled**, argument-free row on the same executor (`plan_target_unavailable`
+  or `plan_target_invalid` otherwise). Each one is bound exactly as for its own
+  approval. The app's `records` probe and its env **names**, now and as
+  declared, set the credential classes. The card shows each target's own card
+  plus the classes. Values never leave the containers.
+- **Credential classes:** `migrated` (stored record connected; its probe must
+  pass afterwards), `env_kept`, `unconfigured`, `accepted_loss`. A credential the
+  declared app would drop with no stored record refuses with
+  `credential_without_record:<destination>` unless the invocation names it in
+  `accept_loss` (a closed enum of `env_import` destinations). A dropped
+  non-secret name in the same destination also counts as a loss, which is
+  conservative.
+- **Worker order**, under every target's lock (taken in plan order, never
+  waiting):
+  1. Read-only preflight of every target, the credential re-check and the volume
+     check. Changed records, env names or classes refuse with
+     `*_changed_since_approval`, and nothing changes.
+  2. Missing project volumes are created with Compose's labels (the first
+     write), so a later `compose up` adopts them. A volume that another project
+     or volume key owns refuses.
+  3. Each target in order: the last-read recheck, then verify-only (no drift) or
+     swap. The previous container stays stopped as `<name>-prev-<job8>`. A later
+     target's dependency check ignores those `-prev` containers.
+  4. End checks: the new app reports the same records and carries exactly the
+     approved credential env names, and every plan probe passes. A probe line
+     that does not parse is `probe_unverifiable`, never a pass.
+  5. Commit: every `-prev` container is deleted.
+- **Revert all:** any failure at or after step 2 reverts every swapped target in
+  reverse order. It continues past a failed revert, and that makes the outcome
+  unknown. Only a full revert removes the volumes this job created. If any revert
+  failed, the volumes stay.
+- **Probes** (`ops/probe_contract.py`, standard library only): a fixed-argv exec
+  in the target prints one closed JSON line (`probe`, `ok`, `status`, `code`;
+  the `records` probe adds booleans only). The app runs
+  `python -m llm_bawt.service.cutover_probe <id>`; the claude-code bridge runs
+  `python -m claude_code_bridge.cutover_probe broker`.
+- **Card history:** plan runs do not feed `_last_classification`, so a target's
+  own card still shows FIRST RUN after a plan has run.
+- The plan ships disabled, critical and with quiesce off. It KILLS every agent
+  session (the claude-code bridge hosts the agents) and cuts in-flight chat
+  turns, so it runs only in a window Nick schedules.
+
+### Worker labels
+
+The app refuses an action unless the configured worker image carries each label
+it needs (`CONFIG_WORKER_LABELS`, `ops/executor.py`):
+
+| Action | Labels |
+|---|---|
+| `reconcile_frontend_config`, `deploy_image` | `config-reconcile` |
+| `reconcile_app_config` | `app-config-reconcile`, `app-source-guard`, `built-profile-v2` |
+| `reconcile_tagged_config` | `config-reconcile`, `process-profile-v3` |
+| `reconcile_service_plan` | all of the above for app and tagged, plus `service-plan-reconcile` |
+
+All are `llm-bawt.ops.<name>="1"` in `docker/Dockerfile.ops-worker`. The image
+must also COPY `plan_reconcile.py` and `probe_contract.py`. The bridge and plan
+rows need a rebuilt, repinned worker before they can run.
+
+### Activation
+
+Each step needs Nick's authorization.
+
+1. Rebuild and repin the ops worker (as in the activation order above), then
+   recreate app and ops-reconciler.
+2. Insert the target rows and the plan row disabled (seeds never update existing
+   rows), and enable each target row. A disabled target refuses the plan.
+3. Install and preview the plan's `require_approval` policy, then enable the plan.
+4. In Nick's window, run it through `ops_run`, with `accept_loss` only for
+   losses Nick has accepted by name.
