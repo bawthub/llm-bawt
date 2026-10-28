@@ -186,8 +186,8 @@ async def ops_job_status(
     job_id: str,
     output_tail_bytes: int | None = None,
 ) -> dict:
-    """Poll a job. Reconciles the host status file into the DB on the way
-    if the job is still active.
+    """Read a job's current status. A read only: the ops reconciler records
+    progress, so ``observed_at`` vs ``last_reconcile_at`` shows how fresh it is.
 
     Args:
         job_id: Job id from a prior ``ops_run`` call.
@@ -206,7 +206,7 @@ async def ops_job_status(
         ops.get_job_status,
         job_id,
         output_tail_bytes=output_tail_bytes,
-        reconcile_if_active=True,
+        reconcile_if_active=False,
     )
     if result is None:
         raise LookupError(f"no job with id {job_id!r}")

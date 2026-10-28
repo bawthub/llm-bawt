@@ -511,6 +511,9 @@ class OpsService:
                     self.store.touch_reconcile(job.id)
         fresh = self.store.get_job(job_id)
         result = attach_members(self.store.engine, [fresh.to_api(include_output=include_output)])[0]
+        # When this status was read (TASK-1169 S1d); last_reconcile_at is when
+        # the reconciler last looked at the job.
+        result["observed_at"] = datetime.now(timezone.utc).isoformat()
         if include_output and result.get("output_tail"):
             result["output_tail"] = result["output_tail"].encode()[-min(output_tail_bytes, 1048576):].decode(errors="replace")
         return result

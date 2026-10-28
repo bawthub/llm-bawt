@@ -243,11 +243,13 @@ def list_jobs(operation: str | None = None, state: str | None = None,
 
 @router.get("/v1/ops/jobs/{job_id}", tags=["Ops"])
 def get_job(job_id: str, output_tail_bytes: int | None = None):
+    # A read only (TASK-1169 S1d): the ops reconciler is the one writer of job
+    # state; observed_at and last_reconcile_at say how fresh this read is.
     ops = _service()
     result = ops.get_job_status(
         job_id,
         output_tail_bytes=output_tail_bytes,
-        reconcile_if_active=True,
+        reconcile_if_active=False,
     )
     if result is None:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")

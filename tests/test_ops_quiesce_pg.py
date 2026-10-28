@@ -411,7 +411,10 @@ def test_the_callers_own_turn_holds_until_it_exits_and_it_is_told_to_end_it(rig,
     assert (told["action"], told["held_bot"], told["result_delivery"]) == ("end_turn", rig.bot, "new_turn")
     assert "do not poll in this turn" in told["message"] and "poll_later" not in json.dumps(told)
 
-    status = asyncio.run(ops_tools.ops_job_status(job_id))  # the step that opens the hold
+    # The reconciler's step opens the hold; the agent's status read only reports
+    # it (TASK-1169 S1d).
+    rig.service.get_job_status(job_id)  # the reconciler's per-job pass
+    status = asyncio.run(ops_tools.ops_job_status(job_id))
     assert status["state"] == JOB_QUIESCING and status["caller_instruction"] == told
     roster = json.loads(rig.row(job_id)["quiesce_json"])["roster"]
     assert [m["turn_id"] for m in roster] == [turn_id]

@@ -24,8 +24,9 @@ catalog are executable.
 4. Docker accepting the worker means `accepted`, **not succeeded**. The worker
    persists `accepted`, owns the start delay, persists `running`, executes one
    Docker action, and atomically fsyncs `receipt.json` with the final result.
-5. Status reads and the independent reconciler import receipts into canonical DB
-   metadata. No success is inferred from submission, container existence, a
+5. The independent reconciler imports receipts into canonical DB metadata. HTTP
+   and MCP status reads only report it, with `observed_at` beside
+   `last_reconcile_at` (TASK-1169 S1d). No success is inferred from submission, container existence, a
    stopped worker, or an app-owned timer.
 
 A missing/abnormally exited worker without a terminal receipt is `lost`: the
