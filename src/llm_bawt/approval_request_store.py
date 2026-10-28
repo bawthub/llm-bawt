@@ -123,6 +123,23 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
         with Session(self.engine) as session:
             return session.get(ToolApprovalRequest, request_id)
 
+    def bot_resolutions(self, request_ids) -> dict[str, tuple[str, str]]:
+        """``{request_id: (bot, reason)}`` for the requests a grant-holding bot resolved (TASK-1609)."""
+        ids = sorted(set(request_ids))
+        if not ids:
+            return {}
+        if self.engine is None:
+            raise ApprovalStoreUnavailable("Approval database unavailable")
+        with Session(self.engine) as session:
+            rows = session.exec(
+                select(ToolApprovalRequest).where(
+                    ToolApprovalRequest.id.in_(ids),
+                    ToolApprovalRequest.resolved_via == RESOLVED_VIA_BOT_GRANT,
+                )
+            ).all()
+        return {row.id: (row.resolved_by_bot, row.resolution_message or "")
+                for row in rows if row.resolved_by_bot}
+
     def resolve_request(
         self,
         request_id: str,

@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from ..dependencies import get_service, get_turn_log_store
+from ..dependencies import get_service, get_tool_approval_policy_store, get_turn_log_store
 from ..context_trend import load_context_trend
 from ..schemas import (
     RecentBotTurn,
@@ -143,6 +143,29 @@ def _enrich_call_attachments(calls: list[dict]) -> None:
             call["attachments"] = []
 
 
+def _enrich_call_approvals(calls: list[dict]) -> None:
+    """Name the bot that resolved each gated call, in place (TASK-1609).
+
+    One batched read of the calls' approval requests. Only a resolution by an
+    ``approve_ops`` grant holder adds ``approval_resolved_by_bot`` and
+    ``approval_resolution_message``; a person's decision adds nothing. Any
+    failure leaves the cards without a resolver rather than failing the listing.
+    """
+    ids = {c["approval_request_id"] for c in calls
+           if c.get("approval_request_id") and c.get("approval_status")}
+    if not ids:
+        return
+    try:
+        resolutions = get_tool_approval_policy_store(get_service().config).bot_resolutions(ids)
+    except Exception as exc:
+        log.warning("Tool-call approval resolver enrichment failed: %s", exc)
+        return
+    for call in calls:
+        found = resolutions.get(call.get("approval_request_id"))
+        if found:
+            call["approval_resolved_by_bot"], call["approval_resolution_message"] = found
+
+
 def _live_tool_calls(store: TurnLogStore, turn_id: str) -> list[dict]:
     """Read tool-call rows from `tool_call_records` for a single turn.
 
@@ -165,6 +188,7 @@ def _live_tool_calls(store: TurnLogStore, turn_id: str) -> list[dict]:
     parent = store.get_turn(turn_id)
     calls = _records_to_calls(rows, turn_ended_at=parent.ended_at if parent else None)
     _enrich_call_attachments(calls)
+    _enrich_call_approvals(calls)
     return calls
 
 
@@ -723,6 +747,7 @@ def get_tool_call_events(
             break
 
     _enrich_call_attachments([call for event in events for call in event.tool_calls])
+    _enrich_call_approvals([call for event in events for call in event.tool_calls])
 
     events.sort(key=lambda event: event.created_at)
     return ToolCallEventsResponse(

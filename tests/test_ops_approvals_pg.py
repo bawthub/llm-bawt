@@ -26,6 +26,7 @@ from llm_bawt.approval_policies import ToolApprovalPolicyStore
 from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.service.routes import approval_policies as approval_routes
 from llm_bawt.service.routes import ops_approvals as routes
+from llm_bawt.service.routes import turn_logs as turn_log_routes
 from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError
 from tests.bot_tag_fixtures import tag
 from tests.test_approval_mcp_state import _mcp_req
@@ -304,6 +305,25 @@ def test_resolved_by_bot_comes_only_from_a_bot_grant_resolution(ops):
     row = ops.store.get_request(request_id)
     assert row.resolved_via == RESOLVED_VIA_USER and row.resolved_by_bot is None
     assert row.to_api()["resolved_by_bot"] is None and row.to_api()["resolved_via"] == RESOLVED_VIA_USER
+
+
+def test_history_tool_cards_name_the_bot_that_resolved_them(ops, monkeypatch):
+    by_bot = ops.card()
+    assert ops.resolve(HOLDER, by_bot, reason="fixture: safe restart").status_code == 200
+    by_person = ops.card()
+    ops.store.resolve_request(by_person, status=REQ_APPROVED, resolved_by="bot:fixture-target",
+                              continuation_owner="server")
+    monkeypatch.setattr(turn_log_routes, "get_tool_approval_policy_store", lambda _config: ops.store)
+    monkeypatch.setattr(turn_log_routes, "get_service", lambda: SimpleNamespace(config=None))
+    calls = [{"approval_request_id": rid, "approval_status": "approved"} for rid in (by_bot, by_person)]
+    calls.append({"approval_request_id": None, "approval_status": None})
+
+    turn_log_routes._enrich_call_approvals(calls)
+
+    assert calls[0] == {"approval_request_id": by_bot, "approval_status": "approved",
+                        "approval_resolved_by_bot": HOLDER,
+                        "approval_resolution_message": "fixture: safe restart"}
+    assert "approval_resolved_by_bot" not in calls[1] and "approval_resolved_by_bot" not in calls[2]
 
 
 # --- list -----------------------------------------------------------------------
