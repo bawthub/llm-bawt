@@ -121,19 +121,31 @@ def manager_capability(global_settings: Mapping[str, object]) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def manager_roles(conn, capability: str | None) -> frozenset[str]:
-    """Role tags whose capabilities include ``capability`` (none when unset)."""
+def manager_roles(conn, capability: str | None, *, lock: bool = False) -> frozenset[str]:
+    """Role tags whose capabilities include ``capability`` (none when unset).
+
+    ``lock`` holds the matching catalog rows ``FOR SHARE`` until the caller's
+    transaction ends. Every role edit (update, rename, delete) takes its row
+    ``FOR UPDATE`` first, so none can take the capability away between this
+    check and the caller's commit. A row whose edit committed while this waited
+    is re-read, and no longer matches if the capability is gone.
+    """
     if not isinstance(capability, str) or not capability.strip():
         return frozenset()
-    return frozenset(conn.execute(text("""
+    return frozenset(conn.execute(text(f"""
         SELECT slug FROM bot_tag_catalog
         WHERE kind = 'role' AND capabilities @> jsonb_build_array(CAST(:capability AS text))
+        {"FOR SHARE" if lock else ""}
     """), {"capability": capability.strip()}).scalars())
 
 
-def is_grant_manager(conn, bot_slug: str, capability: str | None) -> bool:
-    """Whether a non-private bot holds a role carrying the manager capability."""
-    roles = manager_roles(conn, capability)
+def is_grant_manager(conn, bot_slug: str, capability: str | None, *, lock: bool = False) -> bool:
+    """Whether a non-private bot holds a role carrying the manager capability.
+
+    With ``lock`` the answer holds until the caller commits (see :func:`manager_roles`);
+    the caller holds the bot's tag lock, which serializes its role assignments.
+    """
+    roles = manager_roles(conn, capability, lock=lock)
     if not roles:
         return False
     snapshot = BotTags().snapshot(conn)
@@ -150,7 +162,7 @@ def authorize_bot_actor(conn, caller: str, target: str, capability: str | None) 
     """The audit actor for a bot's grant write, or :class:`GrantRefused`."""
     if caller == target:
         raise GrantRefused("self_grant_refused", "a bot can't change its own grants")
-    if not is_grant_manager(conn, caller, capability):
+    if not is_grant_manager(conn, caller, capability, lock=True):
         raise GrantRefused("not_grant_manager", "this bot can't manage grants")
     snapshot = BotTags().snapshot(conn)
     if (not snapshot.available or target not in snapshot.known_bots
@@ -182,8 +194,8 @@ def write_grant(conn, tag: object, bot: object, *, granted: bool, reason: object
     """Authorize ``actor`` and grant or revoke one grant tag, in one transaction.
 
     A bot actor's manager role and the target's privacy are read under both
-    bots' tag locks (taken in slug order), so neither can change between the
-    check and the write.
+    bots' tag locks (taken in slug order), and the manager role rows are held
+    ``FOR SHARE``, so none of them can change between the check and the commit.
     """
     slug = str(grant_tag(tag))
     if not is_canonical_bot_slug(bot):

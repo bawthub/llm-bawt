@@ -8,6 +8,7 @@ capability and the runtime settings store are stand-ins. Fixture bots only.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,8 @@ from llm_bawt.bot_tags import BehaviorTag, grants
 from llm_bawt.service.routes import bot_grants as grant_routes
 from llm_bawt.task_turn_context import TASK_TURN_CONTEXT_HEADER, TaskTurnContextError
 from tests.bot_tag_fixtures import tag
-from tests.test_bot_tag_api_pg import api  # noqa: F401
+from tests.pg_lock_wait import wait_blocked_by
+from tests.test_bot_tag_api_pg import _backend_pid, api  # noqa: F401
 from tests.test_bot_tags_pg import rig, upsert  # noqa: F401
 
 pytestmark = pytest.mark.integration
@@ -220,6 +222,55 @@ def test_a_grant_needs_a_profile(grant_api):
 
     assert response.status_code == 404
     assert grant_api.rig.tags("fixture-gone") == []
+
+
+# --- a role edit and a bot's grant write serialize -----------------------------
+
+
+def _strip_capability(conn) -> None:
+    """What ``update_role`` does to the row: lock it, then take the capability off."""
+    conn.execute(text("SELECT 1 FROM bot_tag_catalog WHERE slug = :s FOR UPDATE"), {"s": ROLE})
+    conn.execute(text("UPDATE bot_tag_catalog SET capabilities = '[]'::jsonb WHERE slug = :s"),
+                 {"s": ROLE})
+
+
+def test_a_capability_removed_before_the_grant_commits_refuses_it(grant_api):
+    """The manager check waits for an in-flight role edit and reads its result."""
+    engine = grant_api.rig.engine
+    with ThreadPoolExecutor(max_workers=1) as pool, engine.connect() as holder:
+        holder.begin()
+        _strip_capability(holder)
+        racer = pool.submit(grant_api.as_bot, MANAGER, "fixture-target")
+        wait_blocked_by(engine, _backend_pid(holder), racer, timeout=10)
+        holder.commit()
+        refused = racer.result(timeout=10)
+
+    assert refused.status_code == 403, refused.text
+    assert _code(refused) == "not_grant_manager"
+    assert grant_api.rig.tags("fixture-target") == []
+    assert grant_api.changes("fixture-target") == []
+
+
+def test_a_role_edit_waits_for_a_grant_authorized_under_it(grant_api):
+    """The real role PATCH can't take the capability away mid-grant; it runs after."""
+    engine = grant_api.rig.engine
+    with ThreadPoolExecutor(max_workers=1) as pool, engine.connect() as holder:
+        holder.begin()
+        record = grants.write_grant(holder, str(GRANT), "fixture-target", granted=True,
+                                    reason="fixture reason", capability=CAPABILITY,
+                                    actor=grants.GrantActor.for_bot(MANAGER))
+        racer = pool.submit(grant_api.client.patch, f"/v1/bot-tags/{ROLE}",
+                            json={"capabilities": []})
+        wait_blocked_by(engine, _backend_pid(holder), racer, timeout=10)
+        holder.commit()
+        edited = racer.result(timeout=10)
+
+    assert record.changed and record.assigned_by == f"bot:{MANAGER}"
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["capabilities"] == []
+    assert grant_api.rig.tags("fixture-target") == [str(GRANT)]
+    # The edit landed, so the next grant write is refused.
+    assert _code(grant_api.as_bot(MANAGER, "fixture-peer")) == "not_grant_manager"
 
 
 # --- every other tag writer refuses to move a grant tag ------------------------
