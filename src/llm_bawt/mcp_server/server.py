@@ -810,6 +810,7 @@ from . import initiative_tools as _initiative_tools  # noqa: F401, E402
 from . import project_tools as _project_tools  # noqa: F401, E402
 from . import step_tools as _step_tools  # noqa: F401, E402
 from . import task_tools as _task_tools  # noqa: F401, E402
+from . import task_review_tools as _task_review_tools  # noqa: F401, E402
 
 # ---------------------------------------------------------------------------
 # Media library tools (Sonarr / Radarr / SABnzbd)

@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 
 from llm_bawt import task_turn_context as codec
 from llm_bawt.mcp_server import review_provenance as provenance
-from llm_bawt.mcp_server import task_association, task_tools
+from llm_bawt.mcp_server import task_association, task_review_tools
 from llm_bawt.task_turn_context import mint_task_turn_context
 
 REVIEWER = "fixture-reviewer"
@@ -73,15 +73,15 @@ def world(monkeypatch):
     monkeypatch.setattr(provenance, "turn_model", turn_model)
     monkeypatch.setattr(provenance, "requesting_deliveries", deliveries)
     monkeypatch.setattr(provenance, "provider_of", provider_of)
-    monkeypatch.setattr(task_tools, "_api_get", fake_get)
-    monkeypatch.setattr(task_tools, "_api_post", fake_post)
+    monkeypatch.setattr(task_review_tools, "_api_get", fake_get)
+    monkeypatch.setattr(task_review_tools, "_api_post", fake_post)
     return state
 
 
 def _review(capability=None, *, bot_id=REVIEWER, body="Reviewed on model-x@path-x."):
     binding = task_association.set_current_task_turn_capability(capability) if capability else None
     try:
-        return asyncio.run(task_tools.add_task_review(
+        return asyncio.run(task_review_tools.add_task_review(
             "TASK-7", "IMPLEMENTATION", "APPROVE", body, bot_id, idempotency_key="TASK-7:r1",
         ))
     finally:
