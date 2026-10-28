@@ -194,10 +194,20 @@ class ZaiProbe(ApiKeyProbe):
         return ZaiKeyAdapter
 
     def accept(self, response: httpx.Response) -> str:
-        from llm_bawt.service.providers.bridge_keys import ZaiEnvelopeError  # noqa: PLC0415
+        from llm_bawt.service.providers.bridge_keys import (  # noqa: PLC0415
+            ZaiEnvelopeError,
+            is_zai_no_plan_envelope,
+        )
 
-        # z.ai rejects a key inside an HTTP 200 body.
-        failure = ZaiEnvelopeError.from_payload(_json(response))
+        # z.ai rejects a key inside an HTTP 200 body. "No Coding Plan" also
+        # arrives as a 200 failure envelope, but it proves the stored key
+        # authenticated, which is all this probe exists to show. It stays
+        # ``ok``: the probe line's ``ok`` is true exactly when code is ``ok``,
+        # a contract the ops worker image enforces.
+        payload = _json(response)
+        if is_zai_no_plan_envelope(payload):
+            return pc.OK
+        failure = ZaiEnvelopeError.from_payload(payload)
         if failure is None:
             return pc.OK
         return pc.UNAUTHORIZED if failure.unauthorized else pc.UNEXPECTED_RESPONSE

@@ -22,8 +22,33 @@ _AUTH_CODES = (401, 403)
 _MAX_REPORTED_CODE = 99_999
 
 
+#: z.ai's monitor answer for a valid key with no GLM Coding Plan ("the current
+#: user has no coding plan"), observed live. z.ai has no dedicated code for it
+#: (the envelope says 500), so this exact message is the only signal.
+ZAI_NO_PLAN_MSG = "当前用户不存在coding plan"
+
+
 def _int_code(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def is_zai_no_plan_envelope(payload: object) -> bool:
+    """z.ai's answer for a valid key with no Coding Plan: a plan state, not a key failure.
+
+    Live shape: HTTP 200 ``{"code": 500, "msg": ZAI_NO_PLAN_MSG, "success": false}``
+    with no ``data``. Matched to that exact message, so any other failure that
+    mentions the coding plan, such as an outage, stays an error. The msg is
+    only matched, never shown.
+    """
+    if not isinstance(payload, dict) or payload.get("data") is not None:
+        return False
+    msg = payload.get("msg")
+    return (
+        _int_code(payload.get("code")) == 500
+        and payload.get("success") is False
+        and isinstance(msg, str)
+        and msg.strip().lower() == ZAI_NO_PLAN_MSG
+    )
 
 
 class ZaiEnvelopeError:
@@ -67,6 +92,8 @@ def _zai_body_error(resp: httpx.Response) -> str | None:
         payload = resp.json()
     except ValueError:
         return "Z.AI key check returned a non-JSON body"
+    if is_zai_no_plan_envelope(payload):
+        return None  # the key authenticated; it just has no Coding Plan
     failure = ZaiEnvelopeError.from_payload(payload)
     if failure is None:
         return None

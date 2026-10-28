@@ -27,7 +27,7 @@ import time
 
 import httpx
 
-from ...providers.bridge_keys import ZaiEnvelopeError, ZaiKeyAdapter
+from ...providers.bridge_keys import ZaiEnvelopeError, ZaiKeyAdapter, is_zai_no_plan_envelope
 from ..base import UsageAdapter
 from .stored_key import stored_api_key
 from ..canonical import (
@@ -43,30 +43,7 @@ logger = logging.getLogger(__name__)
 
 QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
 _PLAN_LABEL = {"lite": "Lite", "pro": "Pro", "max": "Max"}
-_NO_PLAN_MSG = "当前用户不存在coding plan"  # z.ai's no-plan answer, observed live
 _NO_PLAN_NOTE ="No GLM Coding Plan limits on this key (pay-as-you-go)."
-
-
-def _is_no_plan_envelope(payload: object) -> bool:
-    """z.ai's answer for a valid key with no Coding Plan.
-
-    Live shape: HTTP 200 ``{"code": 500, "msg": "当前用户不存在coding plan",
-    "success": false}`` with no ``data``. Matched to that exact message
-    ("the current user has no coding plan"), so any other failure that
-    mentions the coding plan, such as an outage, stays an error. The msg is
-    only matched, never shown.
-    """
-    if not isinstance(payload, dict) or payload.get("data") is not None:
-        return False
-    code = payload.get("code")
-    msg = payload.get("msg")
-    return (
-        code == 500
-        and not isinstance(code, bool)
-        and payload.get("success") is False
-        and isinstance(msg, str)
-        and msg.strip().lower() == _NO_PLAN_MSG
-    )
 
 
 def _reset_ms(value) -> int | None:
@@ -198,7 +175,7 @@ class ZaiUsageAdapter(UsageAdapter):
                 raw={"text": (resp.text or "")[:500]},
             )
 
-        if _is_no_plan_envelope(payload):
+        if is_zai_no_plan_envelope(payload):
             return self._base(
                 available=False, status=STATUS_OK, error=_NO_PLAN_NOTE, raw=payload
             )

@@ -104,6 +104,19 @@ def test_anthropic_models(answer, expected):
     (_json(200, {"code": 200, "success": True, "data": {}}), (True, 200, "ok")),
     (_json(200, {"code": 401, "success": False}), (False, 200, "unauthorized")),
     (_json(200, {"code": 500, "success": False}), (False, 200, "unexpected_response")),
+    # Valid key, no GLM Coding Plan: the key authenticated, so the probe passes.
+    # z.ai has no dedicated code for this; the exact msg is the only signal.
+    (_json(200, {"code": 500, "msg": "当前用户不存在coding plan", "success": False}),
+     (True, 200, "ok")),
+    # Mutants: the no-plan msg never masks a rejected key, another msg, or data.
+    (_json(200, {"code": 401, "msg": "当前用户不存在coding plan", "success": False}),
+     (False, 200, "unauthorized")),
+    (_json(200, {"code": 500, "msg": "coding plan service unavailable", "success": False}),
+     (False, 200, "unexpected_response")),
+    (_json(200, {"code": 500, "msg": "当前用户不存在coding plan", "success": False, "data": {}}),
+     (False, 200, "unexpected_response")),
+    (_json(401, {"code": 500, "msg": "当前用户不存在coding plan", "success": False}),
+     (False, 401, "unauthorized")),
     (httpx.Response(200, text="not json"), (False, 200, "unexpected_response")),
     (_json(400, {}), (False, 400, "unauthorized")),
     (_json(403, {}), (False, 403, "unauthorized")),
