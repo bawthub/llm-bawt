@@ -14,7 +14,8 @@ moves it forward one bounded step at a time:
    submitted); a job still unopened ``quiesce_timeout_seconds`` after
    submission fails ``quiesce_timeout`` (a preflight that keeps failing, noted
    by :meth:`QuiesceDriver.note_unopened`, or a slot that never frees); a
-   reached concurrency cap waits with a visible note; otherwise
+   reached concurrency cap, or a process-mode job finding no free worker slot
+   (:mod:`.worker_slots`), waits with a visible note; otherwise
    ``activate_hold`` opens a job-owned hold gate (id = generation) and the
    quiesce deadline starts on the DB clock.
 3. **Hold.** Each step renews the gate. A gate that lapsed (the driver was
@@ -57,6 +58,7 @@ from ..service.turn_gates import (GateScope, GateSpec, _LIVE, ensure_gate_schema
 from .models import (JOB_CANCELLED, JOB_DISPATCHING, JOB_FAILED, JOB_QUIESCING, JOB_TERMINAL_STATES)
 from .quiesce_prompts import END_TURN_NEW_TURN_KEY, END_TURN_NO_RECEIPT_KEY, resolve
 from .store import slot_cap_reached, slot_holders
+from .worker_slots import WAITING_WORKER_SLOT, worker_slot_free
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +413,17 @@ class QuiesceDriver:
             self._write(conn, job["id"], {"error_text": "waiting for a concurrency slot before quiescing",
                                           "quiesce_json": json.dumps(receipt)})
             return StepResult("waiting_slot")
+        worker_slot = worker_slot_free(conn, snapshot, job_id=job["id"])
+        if worker_slot is False:
+            # TASK-1169 S4b: before any hold, so nothing is held while it waits.
+            receipt = self._receipt(job)
+            self._phase(job, receipt, "waiting_slot", detail=WAITING_WORKER_SLOT)
+            self._write(conn, job["id"], {"error_text": f"{WAITING_WORKER_SLOT} before quiescing",
+                                          "quiesce_json": json.dumps(receipt)})
+            return StepResult("waiting_slot")
+        if worker_slot:
+            conn.execute(text("UPDATE ops_jobs SET worker_slot_at=COALESCE(worker_slot_at, now()) WHERE id=:id"),
+                         {"id": job["id"]})
         activated = self.gates.activate(conn, self._spec(job, snapshot), None)
         receipt = self._receipt(job)
         receipt["generations"].append(activated.gate.id)

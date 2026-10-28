@@ -26,11 +26,12 @@ from llm_bawt.ops import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, J
 from llm_bawt.ops.executor import DockerExecutor, worker_request
 from llm_bawt.ops.store import OpsStore, slot_holders
 from llm_bawt.ops.worker import atomic_json
+from llm_bawt.ops.worker_slots import WORKER_CONCURRENCY_ENV, WORKER_SLOT_LOCK, live_worker_slots
 from llm_bawt.ops.validation import canonical_json
 from tests.pg_lock_wait import wait_blocked_by
 from tests.test_ops_executor import IMAGE, FakeContainer, setup as docker_setup
 from tests.test_ops_quiesce_pg import _admission
-from tests.test_ops_service import _op_data
+from tests.test_ops_service import FakeExecutor, _op_data
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
@@ -203,6 +204,47 @@ def test_competing_dispatchers_never_exceed_the_concurrency_cap(rig):
     # Each admitted job reached Docker at most once: one create per worker name.
     names = [config["name"] for _image, config in rig.client.containers.creates]
     assert len(names) == len(set(names))
+
+
+# ── 2b. The process worker slot bound (TASK-1169 S4b) ──────────────────────
+
+def test_two_dispatchers_racing_for_the_last_worker_slot_let_exactly_one_win(rig, monkeypatch):
+    """Two process-mode jobs of DIFFERENT operations, so no operation-row lock
+    orders them: only the worker-slot advisory lock does. Both claims queue
+    behind it; the second then counts the first's committed slot and waits.
+    Without that lock neither claim waits and both would take the last slot."""
+    with rig.stores[0].engine.begin() as conn:
+        monkeypatch.setenv(WORKER_CONCURRENCY_ENV, str(live_worker_slots(conn) + 1))
+    preparer = OpsService(rig.stores[0], executor=FakeExecutor())
+    app = OpsService(rig.stores[1], admission_only=True,
+                     preparer=SimpleNamespace(prepare=preparer.prepare_invocation))
+    jobs = [app.dispatch_job(operation_slug=rig.operation(execution_mode="process"), args={"target": "a"},
+                             idempotency_key=uuid.uuid4().hex)["id"] for _ in range(2)]
+    holder = rig.stores[0].engine.connect()
+    tx = holder.begin()
+    pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+    holder.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": WORKER_SLOT_LOCK})
+    with ThreadPoolExecutor(2) as pool:
+        claims = [pool.submit(store.claim_job, job_id) for store, job_id in zip(rig.stores, jobs)]
+        try:
+            wait_blocked_by(rig.stores[0].engine, pid, claims[0])
+        finally:
+            tx.commit()
+            holder.close()
+        results = [claim.result(timeout=HANG_GUARD_S) for claim in claims]
+    assert sorted(results) == [False, True]
+    winner, loser = (rig.job(job_id) for job_id in (jobs if results[0] else jobs[::-1]))
+    assert (winner.state, winner.worker_slot_at is not None) == (JOB_DISPATCHING, True)
+    assert (loser.state, loser.error_text, loser.dispatched_at, loser.worker_slot_at) == (JOB_QUEUED, None, None, None)
+
+
+def test_isolated_jobs_take_no_worker_slot(rig, monkeypatch):
+    with rig.stores[0].engine.begin() as conn:
+        monkeypatch.setenv(WORKER_CONCURRENCY_ENV, str(live_worker_slots(conn) + 1))
+    slug = rig.operation()  # isolated
+    jobs = [rig.admit(slug) for _ in range(2)]
+    assert [rig.stores[i].claim_job(job_id) for i, job_id in enumerate(jobs)] == [True, True]
+    assert [rig.job(job_id).worker_slot_at for job_id in jobs] == [None, None]
 
 
 # ── 3. Crash after the claim, before any submission ─────────────────────────

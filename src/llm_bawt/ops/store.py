@@ -30,6 +30,7 @@ from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPAT
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
 from .validation import canonical_json, validate_catalog
+from .worker_slots import worker_slot_free
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ _JOB_QUIESCE_COLUMNS = (
     ("quiesce_fence_json", "TEXT"), ("quiesce_json", "TEXT"),
     ("receipt_callback_json", "TEXT"), ("receipt_callback_delivery_id", "VARCHAR(128)"),
 )
+_JOB_WORKER_SLOT_COLUMNS = (("worker_slot_at", "TIMESTAMP WITH TIME ZONE"),)  # TASK-1169 S4b
 _OP_QUIESCE_COLUMNS = (
     ("quiesce_enabled", "BOOLEAN NOT NULL DEFAULT false"),
     ("quiesce_timeout_seconds", "INTEGER NOT NULL DEFAULT 600"),
@@ -152,7 +154,8 @@ class OpsStore:
         clause = " IF NOT EXISTS" if conn.dialect.name == "postgresql" else ""
         for table, columns in (
             ("ops_jobs", (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"),
-                          ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS)),
+                          ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS,
+                          *_JOB_WORKER_SLOT_COLUMNS)),
             ("ops_operations", _OP_QUIESCE_COLUMNS),
         ):
             existing = {c["name"] for c in inspect(conn).get_columns(table)}
@@ -422,7 +425,8 @@ class OpsStore:
             return session.exec(select(func.count()).select_from(OpsJob).where(*self._job_filters(operation_slug, state))).one()
 
     def claim_job(self, job_id, *, max_concurrent=None):
-        """QUEUED -> DISPATCHING atomically, reserving a per-operation slot.
+        """QUEUED -> DISPATCHING atomically, reserving a per-operation slot
+        and, for a process-mode job, a worker slot (TASK-1169 S4b).
 
         Never for a quiesce snapshot (TASK-1233 C5): only the quiesce driver
         may dispatch one, after its drain, through its own fenced CAS.
@@ -435,11 +439,18 @@ class OpsStore:
             op = self._lock_operation(session, job.operation_slug)
             if op is None or not op.enabled or op.soft_deleted_at is not None:
                 return False
-            if slot_cap_reached(slot_holders(session.connection(), job.operation_slug), max_concurrent):
+            conn = session.connection()
+            if slot_cap_reached(slot_holders(conn, job.operation_slug), max_concurrent):
                 return False
+            values = dict(state=JOB_DISPATCHING, dispatched_at=_utcnow(), host_unit_name=f"llm-bawt-ops-{job_id}", error_text=None)
+            worker_slot = worker_slot_free(conn, json.loads(job.invocation_snapshot_json), job_id=job_id) \
+                if job.invocation_snapshot_json else None
+            if worker_slot is False:
+                return False  # Waiting on a slot only: no error_text, so the S1e deadline never runs.
+            if worker_slot:
+                values["worker_slot_at"] = values["dispatched_at"]
             result = session.execute(update(OpsJob).where(OpsJob.id == job_id, OpsJob.state == JOB_QUEUED)
-                .values(state=JOB_DISPATCHING, dispatched_at=_utcnow(), host_unit_name=f"llm-bawt-ops-{job_id}", error_text=None)
-                .execution_options(synchronize_session=False))
+                .values(**values).execution_options(synchronize_session=False))
             session.commit()
             return result.rowcount == 1
 

@@ -26,6 +26,7 @@ from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 from llm_bawt.ops.quiesce import MARGIN_SECONDS, QuiesceDriver, TurnGates, caller_instruction, record_ack
 from llm_bawt.ops.receipt_callback import QuiesceReceiptSender
 from llm_bawt.service.turn_admission import lock_target
+from llm_bawt.ops.worker_slots import WORKER_CONCURRENCY_ENV, live_worker_slots
 from llm_bawt.service.turn_gates import EXECUTION_EXIT_KEY, EXIT_SOURCES, GateActor, gate_blocks
 from tests.test_ops_service import FakeExecutor, _op_data
 
@@ -287,6 +288,57 @@ def test_a_dispatching_quiesce_job_holds_the_slot(rig):
     assert rig.row(first)["state"] == JOB_DISPATCHING
     second = rig.job()
     assert rig.driver.step(second).outcome == "waiting_slot"
+
+
+# ── TASK-1169 S4b: the process worker slot bound ───────────────────────────
+
+@pytest.fixture
+def worker_bound(rig, monkeypatch):
+    """Leave exactly one free worker slot; ``fill()`` takes it with a claimed
+    job of another process-mode operation and returns that job."""
+    with rig.engine.begin() as conn:
+        monkeypatch.setenv(WORKER_CONCURRENCY_ENV, str(live_worker_slots(conn) + 1))
+    other = f"{rig.slug}-other"
+    rig.store.create_operation(_op_data(slug=other))  # process mode by default; no quiesce
+
+    def dispatch():
+        return rig.service.dispatch_job(operation_slug=other, args={"target": "a"},
+                                        idempotency_key=uuid.uuid4().hex)["id"]
+
+    yield SimpleNamespace(dispatch=dispatch)
+    for statement in ("DELETE FROM ops_jobs WHERE operation_slug=:s",
+                      "DELETE FROM ops_operation_revisions WHERE operation_slug=:s",
+                      "DELETE FROM ops_operations WHERE slug=:s"):
+        rig.sql(statement, s=other)
+
+
+def test_a_full_worker_bound_waits_before_any_hold_then_takes_the_freed_slot(rig, worker_bound):
+    holder = worker_bound.dispatch()
+    assert rig.row(holder)["worker_slot_at"] is not None
+    rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "waiting_slot"
+    row = rig.row(job_id)
+    assert row["state"] == JOB_QUIESCING and "process worker slot" in row["error_text"]
+    assert row["worker_slot_at"] is None and json.loads(row["quiesce_json"])["phase"]["name"] == "waiting_slot"
+    assert rig.gates_of(job_id) == [] and not rig.held()
+    rig.store.mark_terminal(holder, state=JOB_SUCCEEDED, exit_code=0)
+    assert rig.driver.step(job_id).outcome == "opened"
+    assert rig.row(job_id)["worker_slot_at"] is not None and rig.held()
+
+
+def test_a_quiesce_job_keeps_its_worker_slot_and_a_claim_waits_without_an_error(rig, worker_bound):
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    taken = rig.row(job_id)["worker_slot_at"]
+    assert taken is not None
+    queued = worker_bound.dispatch()
+    row = rig.row(queued)
+    assert (row["state"], row["error_text"], row["worker_slot_at"]) == ("queued", None, None)
+    assert rig.driver.step(job_id).outcome == "dispatched"
+    assert rig.row(job_id)["worker_slot_at"] == taken  # Dispatch reuses the slot it opened with.
+    rig.service.get_job_status(queued)
+    assert rig.row(queued)["state"] == "queued"
 
 
 def test_ack_lands_only_on_a_live_member(rig):

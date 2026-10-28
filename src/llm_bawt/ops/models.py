@@ -448,6 +448,11 @@ class OpsJob(SQLModel, table=True):
     receipt_callback_delivery_id: str | None = Field(
         default=None, sa_column=Column(String(128), nullable=True)
     )
+    # When a process-mode job took one of the ops service's worker slots
+    # (TASK-1169 S4b); it holds the slot until terminal.
+    worker_slot_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
 
     def to_api(self, *, include_output: bool = False) -> dict[str, Any]:
         import json
