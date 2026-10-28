@@ -24,6 +24,7 @@ from ..utils.schema import SchemaBootstrapGuard
 from .container_remove import ACTION as REMOVE_ACTION, validate_remove_schema  # TASK-1439 T2c
 from .executor import validate_spec
 from .release_spec import is_release_spec
+from .execution_mode import DEFAULT_EXECUTION_MODE, legacy_execution_mode, validate_execution_mode
 from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
@@ -52,7 +53,8 @@ _OP_WRITABLE = {"slug", "title", "description", "enabled", "executor_kind", "tar
                 "run_as_user", "working_directory", "command_script", "args_schema_json",
                 "args_defaults_json", "timeout_seconds", "start_delay_seconds", "max_output_bytes",
                 "max_concurrent", "risk_level", "category", "approval_prompt_prefix",
-                "quiesce_enabled", "quiesce_timeout_seconds", "quiesce_scope_json"}
+                "quiesce_enabled", "quiesce_timeout_seconds", "quiesce_scope_json",
+                "execution_mode"}
 _ACTIVE_CLAIMED = (JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING)
 # Non-terminal states a terminal write may leave (QUIESCING: TASK-1233).
 _OPEN_STATES = (JOB_QUEUED, JOB_QUIESCING, *_ACTIVE_CLAIMED)
@@ -157,6 +159,26 @@ class OpsStore:
             for name, kind in columns:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN{clause} {name} {kind}"))
+        self._migrate_execution_mode(conn, clause)
+
+    @staticmethod
+    def _migrate_execution_mode(conn, clause):
+        """TASK-1169 S4: backfill existing rows to what they already do.
+
+        Existing Docker operations ran in an isolated worker container, so they
+        get ``isolated``. Release rows never start a worker; they get the inert
+        default. New rows default to ``process``. Runs only when the column is
+        added, so an admin's later choice is never rewritten.
+        """
+        if "execution_mode" in {c["name"] for c in inspect(conn).get_columns("ops_operations")}:
+            return
+        conn.execute(text(f"ALTER TABLE ops_operations ADD COLUMN{clause} execution_mode"
+                          f" VARCHAR(16) NOT NULL DEFAULT '{legacy_execution_mode(EXECUTOR_DOCKER)}'"))
+        conn.execute(text("UPDATE ops_operations SET execution_mode=:mode WHERE executor_kind=:release"),
+                     {"mode": legacy_execution_mode(EXECUTOR_RELEASE), "release": EXECUTOR_RELEASE})
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"ALTER TABLE ops_operations ALTER COLUMN execution_mode"
+                              f" SET DEFAULT '{DEFAULT_EXECUTION_MODE}'"))
 
     def _require(self):
         if self.engine is None:
@@ -221,6 +243,7 @@ class OpsStore:
         schema, _ = validate_catalog(op.args_schema_json, op.args_defaults_json)
         if op.executor_kind not in (EXECUTOR_DOCKER, EXECUTOR_RELEASE):
             raise ValueError("executor_kind must be 'docker' or 'release'")
+        validate_execution_mode(op.execution_mode, op.executor_kind)
         if op.target_host or op.run_as_user or op.working_directory:
             raise ValueError("Operations do not support target_host/run_as_user/working_directory; no SSH or shell runner")
         spec = validate_spec(op.command_script)

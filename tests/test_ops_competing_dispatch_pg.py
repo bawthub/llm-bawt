@@ -71,7 +71,8 @@ def rig(private_app_pg, tmp_path, monkeypatch):
 
     def operation(**over):
         slug = f"test.compete-{uuid.uuid4().hex[:12]}"
-        stores[0].create_operation(_op_data(slug=slug, **over))
+        # The real DockerExecutor here runs the container launcher (TASK-1169 S4).
+        stores[0].create_operation(_op_data(slug=slug, **{"execution_mode": "isolated", **over}))
         slugs.append(slug)
         return slug
 

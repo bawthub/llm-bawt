@@ -66,6 +66,8 @@ class OperationUpsert(BaseModel):
     quiesce_enabled: bool | None = None
     quiesce_timeout_seconds: int | None = None
     quiesce_scope_json: str | None = None
+    # TASK-1169 S4: where the worker runs; the store validates it per executor.
+    execution_mode: str | None = None
 
     actor: str | None = Field(default=None, max_length=128)
 

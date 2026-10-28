@@ -17,6 +17,7 @@ from .plan_reconcile import ACTION as PLAN_ACTION, valid_plan_snapshot
 from .container_remove import ACTION as REMOVE_ACTION, valid_remove_binding  # TASK-1439 T2c
 from .executor import (ConfigCheckError, DockerExecutor, Executor, ExecutorError, QuiesceFenceUnsupported,
                        validate_spec)
+from .execution_mode import is_legacy_snapshot, snapshot_execution_mode
 from .gpu_guard import GPU_VOICE_SERVICES, GpuGuardUnverifiable, gpu_voice_target
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
@@ -249,6 +250,8 @@ class OpsService:
         execution = {key: getattr(op, key) for key in ("executor_kind", "target_host", "run_as_user",
             "working_directory", "timeout_seconds", "start_delay_seconds", "max_output_bytes", "max_concurrent")}
         execution.update(executor.execution_settings(spec))
+        # TASK-1169 S4: the row's mode, pinned with the approval like the rest.
+        execution["execution_mode"] = op.execution_mode
         snapshot = {"snapshot_version": 1, "operation": op.to_api(), "spec": spec,
                     "schema": json.loads(op.args_schema_json), "defaults": json.loads(op.args_defaults_json),
                     "input_args": {} if args is None else args, "resolved_args": merged, "execution": execution}
@@ -368,6 +371,7 @@ class OpsService:
                         "start_delay_seconds", "max_output_bytes", "max_concurrent"):
                 if detached["execution"][key] != op[key]:
                     raise ValueError(f"snapshot execution {key} mismatch")
+            snapshot_execution_mode(detached)  # legacy, or coherent in both copies
             if detached.get("quiesce") != quiesce_binding(op, detached["resolved_args"]):
                 raise ValueError("snapshot quiesce binding mismatch")
             if not valid_routing_binding(detached):
@@ -464,6 +468,11 @@ class OpsService:
             raise OpsDispatchError("operation_disabled", "operation is currently disabled or deleted")
         if current.id != snapshot["operation"]["id"]:
             raise OpsDispatchError("snapshot_invalid", "operation identity changed")
+        if is_legacy_snapshot(snapshot) and current.execution_mode != snapshot_execution_mode(snapshot):
+            # A pre-S4 approval runs as it was approved (a Docker job isolated),
+            # but only while the row still says so. An admin move to another
+            # mode needs a new approval.
+            raise OpsDispatchError("snapshot_invalid", "snapshot execution execution_mode mismatch")
         op = OpsOperation(**{k: v for k, v in snapshot["operation"].items()
                              if k not in {"created_at", "updated_at", "soft_deleted_at"}})
         self._require_gpu_handoff(snapshot, create_fence)

@@ -39,6 +39,7 @@ from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABE
 from .source_state import SourceChecker
 from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, tagged_config_binding, validate_tagged_spec
 from .validation import canonical_json
+from .execution_mode import EXECUTION_ISOLATED, EXECUTOR_MODES, snapshot_execution_mode
 from .worker_launch import ContainerLauncher, Liveness, container_worker_name
 from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector)
@@ -62,6 +63,15 @@ CONFIG_WORKER_LABELS[PLAN_ACTION] = (*dict.fromkeys((*CONFIG_WORKER_LABELS[APP_C
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
 
 
+def _require_supported_mode(executor, snapshot):
+    try:
+        mode = snapshot_execution_mode(snapshot, executor.kind())
+    except ValueError as exc:
+        raise ExecutorError(str(exc)) from exc
+    if mode not in executor.supported_execution_modes():
+        raise ExecutorError(f"execution_mode {mode!r} is not available on the {executor.kind()} executor")
+
+
 class Executor(ABC):
     @abstractmethod
     def kind(self) -> str: ...
@@ -83,10 +93,15 @@ class Executor(ABC):
         """
         return None if self.available() else "executor not available"
 
+    def supported_execution_modes(self) -> frozenset[str]:
+        """The ``execution_mode`` values this executor can run (TASK-1169 S4)."""
+        return EXECUTOR_MODES.get(self.kind(), frozenset())
+
     def preflight(self, snapshot: dict) -> None:
         """Read-only prerequisite validation; no worker may be created here."""
         if not self.available():
             raise ExecutorError("executor not available")
+        _require_supported_mode(self, snapshot)
 
     def inspect_target_image(self, spec: dict) -> str:
         """Image ID the fixed image-action target runs now (approval-time CAS)."""
@@ -247,8 +262,23 @@ class DockerExecutor(Executor):
         self._pull_auth = pull_auth or _stored_pull_auth
         # TASK-1169 S4: the worker runtime. Isolated mode is the container
         # launcher; job-level request/receipt handling stays here.
-        self._launcher = ContainerLauncher(client=lambda: self.client,
-                                           get_worker=lambda name: self._get_worker(name))
+        # The ``process`` launcher is registered once it exists; until then a
+        # process-mode snapshot refuses at preflight.
+        self._launchers = {EXECUTION_ISOLATED: ContainerLauncher(
+            client=lambda: self.client, get_worker=lambda name: self._get_worker(name))}
+
+    def supported_execution_modes(self):
+        return frozenset(self._launchers)
+
+    def _launcher_for(self, snapshot):
+        try:
+            mode = snapshot_execution_mode(snapshot, self.kind())
+        except ValueError as exc:
+            raise ExecutorError(str(exc)) from exc
+        launcher = self._launchers.get(mode)
+        if launcher is None:
+            raise ExecutorError(f"execution_mode {mode!r} is not available on this executor")
+        return launcher
 
     def kind(self):
         return "docker"
@@ -523,6 +553,7 @@ class DockerExecutor(Executor):
     def preflight(self, snapshot):
         if is_release_spec(snapshot.get("spec")):
             raise ExecutorError("release orchestration specs run only on the release executor")
+        self._launcher_for(snapshot)
         self._check_prerequisites(snapshot["execution"])
         if snapshot["spec"].get("action") == ROUTING_ACTION:
             self._check_routing_worker(snapshot["execution"])
@@ -648,7 +679,7 @@ class DockerExecutor(Executor):
             if path.read_bytes() != raw:
                 raise ExecutorError("immutable request conflict")
             digest = hashlib.sha256(raw).hexdigest()
-            name = self._launcher.launch(job_id=job_id, settings=settings, directory=directory, digest=digest)
+            name = self._launcher_for(snapshot).launch(job_id=job_id, settings=settings, directory=directory, digest=digest)
             return DispatchResult(name, str(directory / "receipt.json"))
         except ExecutorError:
             raise
@@ -695,7 +726,7 @@ class DockerExecutor(Executor):
                     return ReconcileResult(state, receipt.get("exit_code"),
                         (receipt.get("output_tail") or "").encode()[-max(1, output_tail_bytes):].decode(errors="replace"),
                         receipt.get("error"), receipt.get("started_at"), receipt.get("finished_at"))
-            liveness = self._launcher.probe(job_id=job_id, directory=directory, digest=digest)
+            liveness = self._launcher_for(snapshot).probe(job_id=job_id, directory=directory, digest=digest)
             if liveness is Liveness.MISSING:
                 atomic_json(directory / "abandoned.json", {"reason": "worker missing during reconciliation"})
                 return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")

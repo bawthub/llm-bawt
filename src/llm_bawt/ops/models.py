@@ -233,6 +233,12 @@ class OpsOperation(SQLModel, table=True):
     quiesce_scope_json: str | None = Field(
         default=None, sa_column=Column(Text, nullable=True)
     )
+    # TASK-1169 S4: where the worker runs (:mod:`.execution_mode`). New rows
+    # default to a child process; the migration backfilled older rows isolated.
+    execution_mode: str = Field(
+        default="process",
+        sa_column=Column(String(16), nullable=False, server_default="process"),
+    )
 
     def to_api(self, *, include_script: bool = True) -> dict[str, Any]:
         return {
@@ -267,6 +273,7 @@ class OpsOperation(SQLModel, table=True):
             "quiesce_enabled": bool(self.quiesce_enabled),
             "quiesce_timeout_seconds": int(self.quiesce_timeout_seconds or 0),
             "quiesce_scope_json": self.quiesce_scope_json,
+            "execution_mode": self.execution_mode,
         }
 
     def to_agent_summary(self) -> dict[str, Any]:
