@@ -28,15 +28,19 @@ import json
 import re
 import struct
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
 if __package__:
     from .compose_config import CONFIG_HASH_LABEL, evaluate
     from .compose_render import ComposeRenderer
+    from .service_identity import ComposeServiceRef
 else:  # standalone immutable worker
     from compose_config import CONFIG_HASH_LABEL, evaluate
     from compose_render import ComposeRenderer
+    from service_identity import ComposeServiceRef
 
 DEPLOY_SCHEMA = "llm-bawt.ops.image-deploy/v1"
 DEPLOY_ACTION = "deploy_image"
@@ -103,6 +107,16 @@ class DeployFailed(RuntimeError):
         return json.dumps(self.detail, sort_keys=True)
 
 
+@dataclass(frozen=True)
+class Swap:
+    """One completed swap: the stopped previous container (renamed
+    ``prev``) and the new container now under the canonical name."""
+
+    old_id: str
+    new_id: str
+    prev: str
+
+
 class ImageDeployer:
     def __init__(self, api, snapshot: dict, job_id: str, *, lock_root: Path,
                  sleep=time.sleep, clock=time.monotonic, renderer=None):
@@ -124,12 +138,7 @@ class ImageDeployer:
 
     # ── entry ────────────────────────────────────────────────────────────
     def run(self) -> str:
-        self.lock_root.mkdir(mode=0o700, exist_ok=True)
-        with (self.lock_root / f"{self.name}.lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                self._fail("another deploy/rollback holds this target", known=True)
+        with self._target_lock():
             try:
                 self._perform()
             except (DeployFailed, TimeoutError):
@@ -139,6 +148,19 @@ class ImageDeployer:
                            known=not getattr(self.api, "side_effect_started", False))
         self.detail["phase"] = "done"
         return json.dumps(self.detail, sort_keys=True)
+
+    @contextmanager
+    def _target_lock(self):
+        """Hold this target's lock, non-blocking: a busy lock fails known with
+        nothing changed. A multi-target plan (TASK-1476) takes each target's
+        lock in plan order through this same method."""
+        self.lock_root.mkdir(mode=0o700, exist_ok=True)
+        with (self.lock_root / f"{self.name}.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self._fail("another deploy/rollback holds this target", known=True)
+            yield
 
     def _perform(self):
         if self.spec["action"] == DEPLOY_ACTION:
@@ -235,9 +257,7 @@ class ImageDeployer:
     def _target(self, *, expected_image_id: str):
         self._phase("inspect")
         old = self.api.request("GET", f"/containers/{quote(self.name, safe='')}/json")
-        labels = old["Config"].get("Labels") or {}
-        if (labels.get("com.docker.compose.project") != self.spec["compose_project"]
-                or labels.get("com.docker.compose.service") != self.spec["compose_service"]):
+        if not ComposeServiceRef.from_spec(self.spec).matches(old["Config"].get("Labels")):
             self._fail("target container does not carry the expected Compose identity", known=True)
         if old["Image"] != expected_image_id:
             self._fail("target image changed since approval; refusing a stale deploy/rollback", known=True)
@@ -248,6 +268,13 @@ class ImageDeployer:
         return old, old_image
 
     def _replace(self, old, old_image, new_image, ref, expect_release):
+        self._commit_swap(self._swap(old, old_image, new_image, ref, expect_release))
+
+    def _swap(self, old, old_image, new_image, ref, expect_release) -> "Swap":
+        """Create, stop, rename to -prev, rename, start, health and verify.
+        Restores the previous container on any failure. On success the old
+        container stays stopped as ``<name>-prev-<job8>`` until
+        :meth:`_commit_swap` or :meth:`_revert`."""
         job8 = self.job_id[:8]
         temp, prev = f"{self.name}-next-{job8}", f"{self.name}-prev-{job8}"
         self._phase("create")
@@ -273,34 +300,47 @@ class ImageDeployer:
             self._phase("verify-release")
             self.detail["health"] = self._verify_release(new_id, expect_release)
         except Exception as exc:  # noqa: BLE001 - every failure must attempt restore
-            self._restore(old["Id"], new_id, prev, safe_error(exc))
+            self._restore(Swap(old["Id"], new_id, prev), safe_error(exc))
+        return Swap(old["Id"], new_id, prev)
+
+    def _commit_swap(self, swap: "Swap"):
+        """Delete the stopped previous container. Deployed and verified, so a
+        failure here is only a warning."""
         self._phase("cleanup")
         try:
-            self.api.request("DELETE", f"/containers/{old['Id']}?v=0")
+            self.api.request("DELETE", f"/containers/{swap.old_id}?v=0")
         except Exception as exc:  # noqa: BLE001 - deployed and verified; report only
-            self.detail["warnings"].append(f"previous container {prev} not removed: {safe_error(exc)}")
+            self.detail["warnings"].append(f"previous container {swap.prev} not removed: {safe_error(exc)}")
 
-    def _restore(self, old_id, new_id, prev, reason):
+    def _restore(self, swap: "Swap", reason):
         failed_phase = self.detail["phase"]
         self.detail["failed_phase"] = failed_phase
         self._phase("restore")
         try:
-            for step in (lambda: self.api.request("POST", f"/containers/{new_id}/stop?t=5"),
-                         lambda: self._rename(new_id, f"{self.name}-failed-{self.job_id[:8]}")):
-                try:
-                    step()
-                except Exception:  # noqa: BLE001 - best effort; verified below
-                    pass
-            current = self.api.request("GET", f"/containers/{old_id}/json")
-            if current["Name"].lstrip("/") != self.name:
-                self._rename(old_id, self.name)
-            self.api.request("POST", f"/containers/{old_id}/start")
-            self._wait_healthy(old_id)
-            self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
+            self._revert(swap)
         except Exception as exc:  # noqa: BLE001
             self._fail(f"{failed_phase} failed ({reason}); RESTORE FAILED ({safe_error(exc)}); production state unknown", known=False)
         self.detail["restored"] = True
         self._fail(f"{failed_phase} failed ({reason}); previous container restored and healthy", known=True)
+
+    def _revert(self, swap: "Swap"):
+        """Put the previous container back: stop the new one and rename it
+        ``-failed-<job8>``, rename the previous one to the canonical name,
+        start it, wait for health, then delete the new one. Raises if the
+        previous container is not back and healthy."""
+        old_id, new_id = swap.old_id, swap.new_id
+        for step in (lambda: self.api.request("POST", f"/containers/{new_id}/stop?t=5"),
+                     lambda: self._rename(new_id, f"{self.name}-failed-{self.job_id[:8]}")):
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - best effort; verified below
+                pass
+        current = self.api.request("GET", f"/containers/{old_id}/json")
+        if current["Name"].lstrip("/") != self.name:
+            self._rename(old_id, self.name)
+        self.api.request("POST", f"/containers/{old_id}/start")
+        self._wait_healthy(old_id)
+        self.api.request("DELETE", f"/containers/{new_id}?force=1&v=0")
 
     # ── Docker helpers ───────────────────────────────────────────────────
     def _image(self, ref: str):

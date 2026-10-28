@@ -13,8 +13,10 @@ from urllib.parse import quote
 
 if __package__:
     from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
+    from .service_identity import SPEC_PATTERNS, ComposeServiceRef
 else:  # standalone immutable worker
     from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
+    from service_identity import SPEC_PATTERNS, ComposeServiceRef
 
 ACTION = "reconcile_frontend_routing"
 SCHEMA = "llm-bawt.ops.routing-reconcile/v1"
@@ -27,8 +29,7 @@ _RULE = re.compile(rf"\((?P<hosts>{_HOST}(?: \|\| {_HOST})*)\) && \((?P<paths>{_
 def validate_routing_spec(spec: dict) -> dict:
     patterns = {
         "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
-        "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
-        "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
+        **SPEC_PATTERNS,
         "image_repository": r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*",
         "router_name": r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}",
         "route_service": r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}",
@@ -65,8 +66,7 @@ def routing_binding(spec: dict, container: dict, image: dict) -> dict:
     config = container["Config"]
     labels = config.get("Labels") or {}
     if (container["Name"] != "/" + spec["container_name"]
-            or labels.get("com.docker.compose.project") != spec["compose_project"]
-            or labels.get("com.docker.compose.service") != spec["compose_service"]):
+            or not ComposeServiceRef.from_spec(spec).matches(labels)):
         raise ValueError("routing target Compose identity mismatch")
     ref = config.get("Image", "")
     if (not re.fullmatch(re.escape(spec["image_repository"]) + r"@sha256:[0-9a-f]{64}", ref)

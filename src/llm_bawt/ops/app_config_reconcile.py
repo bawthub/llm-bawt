@@ -34,17 +34,21 @@ from urllib.parse import urlencode
 if __package__:
     from .compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
     from .compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
-    from .config_reconcile import (ConfigReconciler, check_compose_identity, current_config_hash,
-                                   valid_hashes, validate_renderer_image, validate_target_fields)
+    from .config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
+                                   current_config_hash, valid_hashes, validate_renderer_image,
+                                   validate_target_fields)
     from .image_deploy import StepError
+    from .service_identity import SPEC_PATTERNS, ComposeServiceRef
     from .source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
                                valid_classification, valid_source_commit, validate_source_spec)
 else:  # standalone immutable worker
     from compose_config import BUILT_PROFILE, built_image_tag, evaluate, port_list
     from compose_render import OPS_JOB_LABEL, SAFE_PATH, label_files_valid
-    from config_reconcile import (ConfigReconciler, check_compose_identity, current_config_hash,
-                                  valid_hashes, validate_renderer_image, validate_target_fields)
+    from config_reconcile import (CONTAINER_NAME_PATTERN, ConfigReconciler, check_compose_identity,
+                                  current_config_hash, valid_hashes, validate_renderer_image,
+                                  validate_target_fields)
     from image_deploy import StepError
+    from service_identity import SPEC_PATTERNS, ComposeServiceRef
     from source_state import (SOURCE_FIELDS, SourceChecker, SourceStateError, source_commit, source_plan,
                               valid_classification, valid_source_commit, validate_source_spec)
 
@@ -60,9 +64,8 @@ SOURCE_GUARD_LABEL = "llm-bawt.ops.app-source-guard"
 # this label required, dispatch refuses first with config_reconcile_unavailable.
 BUILT_PROFILE_LABEL = "llm-bawt.ops.built-profile-v2"
 _PATTERNS = {
-    "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
-    "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
-    "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
+    "container_name": CONTAINER_NAME_PATTERN,
+    **SPEC_PATTERNS,
     "health_url": r"http://127\.0\.0\.1:[1-9][0-9]{0,4}/[A-Za-z0-9._/-]{0,128}",
     "health_field": r"[a-z_]{1,32}",
 }
@@ -325,8 +328,8 @@ class AppConfigReconciler(ConfigReconciler):
             self._fail("source_moved_since_approval; nothing changed", known=True)
 
     def _check_dependency(self, service, condition):
-        filters = {"label": [f"com.docker.compose.project={self.spec['compose_project']}",
-                             f"com.docker.compose.service={service}"]}
+        # The rendered depends_on names already passed the Compose service grammar.
+        filters = ComposeServiceRef(self.spec["compose_project"], service).label_filters()
         rows = self.api.request("GET", "/containers/json?" + urlencode({"all": "1", "filters": json.dumps(filters)}))
         rows = [row for row in rows or [] if OPS_JOB_LABEL not in (row.get("Labels") or {})]
         if len(rows) != 1:

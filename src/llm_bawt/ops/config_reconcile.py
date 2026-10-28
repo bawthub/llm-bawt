@@ -18,20 +18,22 @@ if __package__:
     from .compose_config import apply_desired, canonical_hash, evaluate
     from .compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH
     from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
+    from .service_identity import SPEC_PATTERNS, ComposeServiceRef
 else:  # standalone immutable worker
     from compose_config import apply_desired, canonical_hash, evaluate
     from compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH
     from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
+    from service_identity import SPEC_PATTERNS, ComposeServiceRef
 
 ACTION = "reconcile_frontend_config"
 SCHEMA = "llm-bawt.ops.config-reconcile/v1"
 # Worker image label proving it carries the Compose renderer, the config
 # reconciler AND the deploy drift guard. Without it both ops refuse.
 WORKER_CAPABILITY_LABEL = "llm-bawt.ops.config-reconcile"
+CONTAINER_NAME_PATTERN = r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}"
 _PATTERNS = {
-    "container_name": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",
-    "compose_project": r"[a-z0-9][a-z0-9_-]{0,62}",
-    "compose_service": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}",
+    "container_name": CONTAINER_NAME_PATTERN,
+    **SPEC_PATTERNS,
     "image_repository": r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*",
 }
 _RENDERER_IMAGE = r"(?:[a-z0-9.-]+(?::[0-9]{1,5})?/)?[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}"
@@ -101,10 +103,8 @@ def current_config_hash(container: dict, image: dict) -> str:
 
 
 def check_compose_identity(spec: dict, container: dict) -> None:
-    labels = container["Config"].get("Labels") or {}
     if (container["Name"] != "/" + spec["container_name"]
-            or labels.get("com.docker.compose.project") != spec["compose_project"]
-            or labels.get("com.docker.compose.service") != spec["compose_service"]):
+            or not ComposeServiceRef.from_spec(spec).matches(container["Config"].get("Labels"))):
         raise ValueError("config target Compose identity mismatch")
 
 
