@@ -89,6 +89,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_working_memory_rotation_mode_pg.py::",
     "test_bawthub_auth_secrets_pg.py::",
     "test_vault_import_pg.py::",
+    "test_env_import_pg.py::",
     "test_operator_freeze_pg.py::",
     "test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB::",
 )
