@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 import httpx
 from pydantic import Field
@@ -367,6 +367,25 @@ async def _review_task_refs(task_id: str) -> list[str]:
     return [ref for ref in (task.get("id"), task.get("shortId")) if isinstance(ref, str) and ref]
 
 
+class ReviewFindingInput(TypedDict):
+    # One structured review finding (TASK-1615). A comment, not a docstring:
+    # a docstring would ship in every catalog read as a schema description.
+    severity: Literal["BLOCKER", "SHOULD_FIX", "NIT", "QUESTION", "PRE_EXISTING"]
+    title: str
+    detail: str
+    file: NotRequired[str]
+    line: NotRequired[int]
+    failure_scenario: NotRequired[str]
+
+
+def _finding_payload(finding: ReviewFindingInput) -> dict:
+    """BawtHub's wire shape. Validation stays in BawtHub, the one source of truth."""
+    out = dict(finding)
+    if "failure_scenario" in out:
+        out["failureScenario"] = out.pop("failure_scenario")
+    return out
+
+
 @mcp.tool(name="tasks_reviews_add")
 async def add_task_review(
     task_id: str,
@@ -376,6 +395,7 @@ async def add_task_review(
     bot_id: str,
     target_revision: str | None = None,
     idempotency_key: str | None = None,
+    findings: list[ReviewFindingInput] | None = None,
 ) -> dict:
     """Append a review decision or comment without overwriting the executor response.
 
@@ -387,6 +407,8 @@ async def add_task_review(
         bot_id: Your own bot ID, sent as actor context, not as a review author field.
         target_revision: Optional description digest or commit/revision reference.
         idempotency_key: Stable key to safely retry the same submission.
+        findings: Optional, in order (max 40). BLOCKER needs REQUEST_CHANGES
+            and failure_scenario; line needs file.
 
     Returns:
         The review receipt as returned by BawtHub, or an error dict. This does
@@ -399,14 +421,19 @@ async def add_task_review(
         payload["targetRevision"] = target_revision
     if idempotency_key is not None:
         payload["idempotencyKey"] = idempotency_key
+    signed_arguments = {
+        "task_id": task_id, "stage": stage, "verdict": verdict, "body": body,
+        "bot_id": bot_id, "target_revision": target_revision,
+        "idempotency_key": idempotency_key,
+    }
+    if findings is not None:
+        payload["findings"] = [_finding_payload(finding) for finding in findings]
+        # Named only when sent, so existing callers' invocation hash is unchanged.
+        signed_arguments["findings"] = findings
     # TASK-1249: models come from the caller's signed turn, never from
     # arguments or the body. A bad or foreign credential is refused.
     try:
-        turn = signed_review_turn(bot_id, {
-            "task_id": task_id, "stage": stage, "verdict": verdict, "body": body,
-            "bot_id": bot_id, "target_revision": target_revision,
-            "idempotency_key": idempotency_key,
-        })
+        turn = signed_review_turn(bot_id, signed_arguments)
     except BotAccessError as error:
         return {"error": error.code}
     task_refs = await _review_task_refs(task_id) if turn is not None else []

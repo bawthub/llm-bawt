@@ -236,7 +236,10 @@ async def test_catalog_token_budgets():
     # TASK-1609: bots_grant_set (bot_id, tag, granted, bounded reason): 15,540 (+119).
     # TASK-1609: ops_approvals_list, ops_approval_resolve (request_id,
     # decision, bounded reason): 15,707 (+167).
-    assert total <= 15707, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1615: typed findings on tasks_reviews_add (severity enum, title,
+    # detail, optional file/line/failure_scenario): 15,828 (+121). Review
+    # findings become rows BawtHub groups by severity, not prose to re-parse.
+    assert total <= 15828, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

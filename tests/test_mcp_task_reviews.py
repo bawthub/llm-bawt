@@ -124,3 +124,46 @@ async def test_review_tool_discovery_requires_typed_stage_verdict_and_actor():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+def test_reviews_add_forwards_findings_in_order_with_wire_keys(monkeypatch):
+    """TASK-1615: findings keep their order, failure_scenario maps to BawtHub's key,
+    and a call without findings sends no findings field at all."""
+    calls = []
+
+    async def fake_post(path, json, headers=None):
+        calls.append(json)
+        return {"id": "review-3"}
+
+    monkeypatch.setattr(task_tools, "_api_post", fake_post)
+    findings = [
+        {"severity": "BLOCKER", "title": "Forged r2", "detail": "Public POST accepts it.",
+         "file": "server/routes/task-reviews.ts", "line": 42,
+         "failure_scenario": "Same actor posts r2 and clears r1."},
+        {"severity": "NIT", "title": "Wording", "detail": "Tighten the label."},
+    ]
+    run(task_tools.add_task_review(
+        "TASK-1615", "IMPLEMENTATION", "REQUEST_CHANGES", "Two findings", "loopy",
+        findings=findings,
+    ))
+    assert calls[0]["findings"] == [
+        {"severity": "BLOCKER", "title": "Forged r2", "detail": "Public POST accepts it.",
+         "file": "server/routes/task-reviews.ts", "line": 42,
+         "failureScenario": "Same actor posts r2 and clears r1."},
+        {"severity": "NIT", "title": "Wording", "detail": "Tighten the label."},
+    ]
+    assert findings[0]["failure_scenario"], "the caller's list is not mutated"
+    run(task_tools.add_task_review("TASK-1615", "DESIGN", "COMMENT", "note", "loopy"))
+    assert "findings" not in calls[1]
+
+
+@pytest.mark.anyio
+async def test_review_tool_discovery_types_findings():
+    tools = {tool.name: tool for tool in await FastMCP.list_tools(mcp)}
+    add = tools["tasks_reviews_add"].inputSchema
+    assert "findings" in add["properties"] and "findings" not in add["required"]
+    item = next(iter(add["$defs"].values()))
+    assert item["properties"]["severity"]["enum"] == [
+        "BLOCKER", "SHOULD_FIX", "NIT", "QUESTION", "PRE_EXISTING",
+    ]
+    assert set(item["required"]) == {"severity", "title", "detail"}
