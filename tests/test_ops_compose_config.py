@@ -12,7 +12,7 @@ from llm_bawt.ops.compose_config import (
     mount_source_changes, normalized, running, translate,
 )
 from llm_bawt.ops.compose_render import (
-    RENDER_PATH, ComposeError, ComposeRenderer, compose_source, demux_streams, renderer_env,
+    RENDER_DOCKER_CONFIG, RENDER_PATH, ComposeError, ComposeRenderer, compose_source, demux_streams, renderer_env,
 )
 from llm_bawt.ops.config_reconcile import validate_compose_config
 from tests.test_ops_image_deploy import (
@@ -319,10 +319,10 @@ def _home_api(running_source=f"{OPERATOR_HOME}/.codex"):
 
 
 def test_renderer_env_is_clean_with_only_declared_values():
-    assert renderer_env(_home_spec()["compose_config"], REF) == [
-        f"PATH={RENDER_PATH}", f"BAWTHUB_FRONTEND_IMAGE={REF}"]
-    assert renderer_env(_home_spec(OPERATOR_HOME)["compose_config"], REF) == [
-        f"PATH={RENDER_PATH}", f"BAWTHUB_FRONTEND_IMAGE={REF}", f"HOME={OPERATOR_HOME}"]
+    fixed = [f"PATH={RENDER_PATH}", f"DOCKER_CONFIG={RENDER_DOCKER_CONFIG}", f"BAWTHUB_FRONTEND_IMAGE={REF}"]
+    assert renderer_env(_home_spec()["compose_config"], REF, PROJECT_DIR) == fixed
+    assert renderer_env(_home_spec(OPERATOR_HOME)["compose_config"], REF, PROJECT_DIR) == [
+        *fixed, f"HOME={OPERATOR_HOME}"]
 
 
 def test_regression_the_image_home_was_rendered_into_home_binds():
@@ -351,7 +351,12 @@ def test_undeclared_home_refuses_instead_of_rendering_the_renderer_home():
     {"image_variable": "LD_PRELOAD"},
     {"image_variable": "DOCKER_HOST"},
     {"image_variable": "HOME"},
-], ids=["relative-home", "ld-preload", "image-var-ld", "image-var-docker", "image-var-home"])
+    # Codex r2: $HOME/.docker/cli-plugins inside the executable project bind.
+    {"interpolation_env": {"HOME": PROJECT_DIR}},
+    {"interpolation_env": {"HOME": f"{PROJECT_DIR}/sub"}},
+    {"interpolation_env": {"XDG_CONFIG_HOME": f"{PROJECT_DIR}/cfg"}},
+], ids=["relative-home", "ld-preload", "image-var-ld", "image-var-docker", "image-var-home",
+        "home-is-project", "home-under-project", "xdg-under-project"])
 def test_bogus_or_execution_control_env_refuses_before_any_container(compose_config):
     api = _home_api()
     spec = _home_spec()

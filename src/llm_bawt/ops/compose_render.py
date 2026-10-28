@@ -51,6 +51,8 @@ SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]{1,255}")
 COMPOSE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.ya?ml")
 MAX_COMPOSE_FILES = 4
 RENDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Absent in the sealed image (read-only root): no user config, no user plugins.
+RENDER_DOCKER_CONFIG = "/nonexistent/llm-bawt-render-docker-config"
 _ENV_VALUE = re.compile(r"[A-Za-z0-9._/:@-]{1,255}")
 # A CLOSED allowlist (Codex r1 Blocker): the renderer executes docker with the
 # project bound, so a name like LD_PRELOAD, DOCKER_* or COMPOSE_* would let a
@@ -98,15 +100,25 @@ def validate_interpolation_env(config: dict) -> dict:
     return value
 
 
-def renderer_env(config: dict, image_ref: str) -> list[str]:
-    """The renderer's whole environment, ``env -i`` arguments: a fixed PATH, the
-    image variable (if any) and the declared ``interpolation_env``."""
-    declared = [f"{name}={value}" for name, value in sorted(validate_interpolation_env(config).items())]
+def renderer_env(config: dict, image_ref: str, project_dir: str) -> list[str]:
+    """The renderer's whole environment, ``env -i`` arguments: a fixed PATH and
+    DOCKER_CONFIG, the image variable (if any) and the declared ``interpolation_env``.
+
+    Codex r2: the docker CLI loads plugins from its config dir (``$HOME/.docker``
+    unless DOCKER_CONFIG is set) before the system ones, and the project is
+    bound executable. DOCKER_CONFIG is therefore pinned to a path absent from
+    the sealed image, and no declared path may be the bound project or under it."""
+    interpolation = validate_interpolation_env(config)
+    for name, value in interpolation.items():
+        if name in _PATH_NAMES and (value == project_dir or value.startswith(project_dir.rstrip("/") + "/")):
+            raise ValueError(f"compose_config.interpolation_env.{name} must not be inside the Compose project")
+    declared = [f"{name}={value}" for name, value in sorted(interpolation.items())]
     variable = config.get("image_variable")
     if variable and (variable == "PATH" or variable in INTERPOLATION_NAMES
                      or variable.startswith(_CONTROL_PREFIXES)):
         raise ValueError("compose_config.image_variable must not be an execution-control name")
-    return [f"PATH={RENDER_PATH}", *([f"{variable}={image_ref}"] if variable else []), *declared]
+    return [f"PATH={RENDER_PATH}", f"DOCKER_CONFIG={RENDER_DOCKER_CONFIG}",
+            *([f"{variable}={image_ref}"] if variable else []), *declared]
 
 
 def compose_source(spec: dict, container: dict) -> dict:
@@ -202,7 +214,7 @@ class ComposeRenderer:
         sealed = SealedContainer(self.api, self.spec["compose_config"]["renderer_image"], role=RENDER_ROLE,
                                  tag=self.tag, labels={RENDER_LABEL: "1"})
         # A Compose-built target (TASK-1474) has no image overlay to inject.
-        env = renderer_env(self.spec["compose_config"], image_ref)
+        env = renderer_env(self.spec["compose_config"], image_ref, source["project_dir"])
         try:
             # ``env -i``: Docker ``Env`` would only add to the image's own (HOME=/root).
             status, raw = sealed.run(entrypoint=["env", "-i", *env, "docker"], cmd=argv, env=[],

@@ -23,7 +23,7 @@ from sqlmodel import Session, create_engine
 from llm_bawt.ops.release_models import RELEASE_AWAITING_DEPLOY_APPROVAL, ReleaseRun
 
 from llm_bawt.ops import OpsDispatchError, OpsService, OpsStore
-from llm_bawt.ops.compose_render import RENDER_LABEL, RENDER_PATH
+from llm_bawt.ops.compose_render import RENDER_DOCKER_CONFIG, RENDER_LABEL, RENDER_PATH
 from llm_bawt.ops.executor import (ConfigCheckError, DispatchResult, DockerExecutor, Executor, ExecutorError,
                                    ReconcileResult, validate_spec)
 from llm_bawt.ops.image_deploy import (DEPLOY_SCHEMA, DeployFailed, ImageDeployer,
@@ -280,7 +280,8 @@ def test_deploy_renders_the_target_compose_service_sealed_at_the_new_ref(tmp_pat
     assert len(api.render_bodies) == 2  # the JSON config, then Compose's config hash
     body = api.render_bodies[0]
     assert body["Image"] == RENDERER and body["Entrypoint"] == [
-        "env", "-i", f"PATH={RENDER_PATH}", f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}", "docker"]
+        "env", "-i", f"PATH={RENDER_PATH}", f"DOCKER_CONFIG={RENDER_DOCKER_CONFIG}",
+        f"BAWTHUB_FRONTEND_IMAGE={REPO}@{DIGEST}", "docker"]
     assert body["Cmd"] == ["compose", "-p", "bawthub", "-f", COMPOSE_FILES[0], "-f", COMPOSE_FILES[1],
                            "config", "--format", "json", "frontend-prod"]
     assert api.render_bodies[1]["Cmd"][-3:] == ["config", "--hash", "frontend-prod"]
