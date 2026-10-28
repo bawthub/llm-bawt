@@ -806,6 +806,7 @@ async def create_task(
     status: str = "QUEUED",
     steps: list[TaskStepInput] | None = None,
     bot_id: str | None = None,
+    agent_bot_id: str | None = None,
     associate_current_turn: bool = False,
     blocked_reason: str | None = None,
     image_urls: list[str] | None = None,
@@ -834,6 +835,8 @@ async def create_task(
                and optional "type": PLAN, READ_FILE, EDIT_FILE, CREATE_FILE,
                DELETE_FILE, RUN_COMMAND, SEARCH, ASK_USER, or REVIEW.
         bot_id: Your bot ID for activity attribution.
+        agent_bot_id: Assign the new task to this bot. Omit to leave it
+                      unassigned (bot_id alone does not assign it).
         associate_current_turn: Link the newly created task to this trusted
                 current chat session and exact turn immediately after creation.
                 The server supplies all correlation IDs.
@@ -862,6 +865,8 @@ async def create_task(
         body["projectId"] = project_id
     if blocked_reason is not None:
         body["blockedReason"] = blocked_reason
+    if agent_bot_id:
+        body["agentBotId"] = agent_bot_id
     if steps is not None:
         validation_error = validate_step_inputs(steps)
         if validation_error:

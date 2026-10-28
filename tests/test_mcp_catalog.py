@@ -248,7 +248,9 @@ async def test_catalog_token_budgets():
     # TASK-1615 follow-up: optional finding/resolution entry fields accept
     # null: 16,203 (+56). Strict-schema clients (Codex) send every key, and
     # a forced task="" made BawtHub refuse a FIXED resolution.
-    assert total <= 16203, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1657: tasks_create gains agent_bot_id: 16,224 (+21). Without it
+    # create silently dropped the owner a bot asked for.
+    assert total <= 16224, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

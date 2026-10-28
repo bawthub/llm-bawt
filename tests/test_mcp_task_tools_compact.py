@@ -476,3 +476,47 @@ def test_check_links_pass_through_and_compact_shows_them_in_review(monkeypatch: 
     assert "checkLinks" not in task_tools._compact_task({**_full_task(), "status": "IN_PROGRESS", "checkLinks": links})
     assert "check_links" in (task_tools.update_task.__doc__ or "")
     assert "{check_links_doc}" not in (task_tools.update_task.__doc__ or "")
+
+
+def _capture_post(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_post(
+        path: str, json: dict[str, Any], headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        calls.append({"path": path, "json": json, "headers": headers})
+        return {"shortId": "TASK-1", "agentBotId": json.get("agentBotId")}
+
+    monkeypatch.setattr(task_tools, "_api_post", fake_post)
+    return calls
+
+
+def test_create_sends_agent_bot_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TASK-1657: tasks_create had no agent_bot_id, so the owner was dropped."""
+    calls = _capture_post(monkeypatch)
+
+    result = _run(task_tools.create_task("t", agent_bot_id="vex", bot_id="byte"))
+
+    assert calls[0]["path"] == "/tasks"
+    assert calls[0]["json"]["agentBotId"] == "vex"
+    assert calls[0]["headers"] == {"X-Agent-Bot-Id": "byte"}
+    assert result["agentBotId"] == "vex"
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_create_without_agent_bot_id_leaves_unassigned(
+    monkeypatch: pytest.MonkeyPatch, value: str | None,
+) -> None:
+    # bot_id is attribution only; it never assigns a new task.
+    calls = _capture_post(monkeypatch)
+
+    _run(task_tools.create_task("t", agent_bot_id=value, bot_id="byte"))
+
+    assert "agentBotId" not in calls[0]["json"]
+
+
+def test_create_tool_schema_exposes_agent_bot_id() -> None:
+    from llm_bawt.mcp_server.server import mcp
+
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    assert "agent_bot_id" in tools["tasks_create"].inputSchema["properties"]
