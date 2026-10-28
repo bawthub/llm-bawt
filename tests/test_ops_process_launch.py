@@ -147,6 +147,9 @@ def test_the_bundle_is_deterministic():
     ("ops/pipe", "fifo", None),
     ("ops/sub/x.py", "file", b"x"),
     ("ops/sub", "dir", None),
+    ("ops/sub/../worker.py", "file", b"x"),  # normalizes to ops/worker.py
+    ("x/../ops/worker.py", "file", b"x"),
+    ("ops/../ops/worker.py", "file", b"x"),
 ])
 def test_unsafe_ops_entries_are_refused(entry):
     with pytest.raises(WorkerLaunchError) as exc:
@@ -225,8 +228,12 @@ def run(request_path, sha):
         _receipt(directory, state="running", **{**base, "started_at": _now()})
         time.sleep(3600)
     if behavior == "spam":
-        sys.stdout.write("x" * request["spam"])
+        sys.stdout.write("x" * (request["spam"] - 3) + "END")
         sys.stdout.flush()
+    if behavior == "crash":
+        sys.stderr.write("early noise " * 20 + "Traceback: boom")
+        sys.stderr.flush()
+        sys.exit(3)
     _receipt(directory, state="succeeded", exit_code=0, finished_at=_now(), **{**base, "started_at": _now()})
     return 0
 '''
@@ -311,7 +318,8 @@ def test_output_beyond_the_cap_is_drained_and_counted(rig):
     launcher.launch(job_id=JOB, settings=settings, directory=directory, digest=digest)
     child = _wait(launcher)
     out = json.loads((directory / f"process-output.{child.attempt}.json").read_text())
-    assert len(out["stdout"]["tail"]) <= settings["max_output_bytes"]
+    # The LAST bytes are kept: the end of the output is what explains a failure.
+    assert len(out["stdout"]["tail"]) == settings["max_output_bytes"] and out["stdout"]["tail"].endswith("END")
     assert out["stdout"]["truncated"] and out["stdout"]["dropped_bytes"] == 640 - 64
     assert json.loads((directory / "receipt.json").read_text())["state"] == "succeeded"
 
@@ -326,6 +334,36 @@ def test_the_deadline_kills_the_group_and_records_what_is_known(rig, behavior, s
     receipt = json.loads((directory / "receipt.json").read_text())
     assert child.popen.returncode < 0
     assert (receipt["state"], receipt["side_effect_unknown"]) == (state, unknown)
+    assert receipt["output_tail"].startswith(f"process worker exit code {child.popen.returncode}")
+
+
+def test_a_worker_that_dies_without_a_receipt_leaves_its_exit_code_and_stderr_tail(rig):
+    launcher, settings, root, _ = rig
+    directory, digest = _job(root, "crash")
+    launcher.launch(job_id=JOB, settings=settings, directory=directory, digest=digest)
+    _wait(launcher)
+    assert not (directory / "receipt.json").exists()
+    diagnostic = launcher.diagnostics(directory)
+    assert diagnostic.startswith("process worker exit code 3")
+    assert "earlier bytes dropped" in diagnostic and diagnostic.endswith("Traceback: boom")
+
+
+def test_a_lost_process_job_carries_the_launcher_diagnostics(rig):
+    launcher, settings, root, _ = rig
+    executor = DockerExecutor(client_factory=lambda: None, worker_image=IMAGE_ID,
+                              receipt_volume="v", receipt_root=str(root))
+    executor._launchers["process"] = launcher
+    snapshot = {"execution": {"execution_mode": "process", "receipt_root": str(root)},
+                "operation": {"execution_mode": "process"}}
+    directory = root / JOB
+    directory.mkdir()
+    (directory / "spawn-intent.json").write_text(json.dumps({"attempt": 2}))
+    for attempt, code in ((1, 3), (2, 97)):
+        (directory / f"process-output.{attempt}.json").write_text(json.dumps(
+            {"exit_code": code, "stdout": {"tail": ""}, "stderr": {"tail": f"attempt {attempt}"}}))
+    result = executor.reconcile(job_id=JOB, snapshot=snapshot, output_tail_bytes=4096)
+    assert result.state == "lost"
+    assert result.output_tail == "process worker exit code 97\n--- stderr ---\nattempt 2"
 
 
 # ---- crash table (no child of ours: a fresh reconciler) ---------------------------

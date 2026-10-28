@@ -166,7 +166,12 @@ def bundle_from_export(stream) -> bytes:
 
 
 def _apply(files, member, inner):
-    name = posixpath.normpath(member.name.lstrip("/"))
+    raw = member.name.lstrip("/")
+    name = posixpath.normpath(raw)
+    # Before normalizing hides it: ops/sub/../worker.py would become ops/worker.py.
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if ".." in parts and (parts[0] == "ops" or name == "ops" or name.startswith("ops/")):
+        raise WorkerLaunchError("worker_unavailable", "worker image /ops entry escapes its directory")
     if name.startswith("./"):
         name = name[2:]
     parent, base = posixpath.split(name)
@@ -236,7 +241,7 @@ def publish_once(path: Path, raw: bytes) -> None:
 # ---- child supervision --------------------------------------------------------
 
 class _Capped:
-    """Drains one pipe into a buffer capped at ``limit``; the rest is discarded."""
+    """Drains one pipe, keeping only its last ``limit`` bytes; the rest is counted."""
 
     def __init__(self, pipe, limit: int):
         self.buffer = bytearray()
@@ -248,9 +253,11 @@ class _Capped:
     def _drain(self):
         with self._pipe:
             for chunk in iter(lambda: self._pipe.read(65536), b""):
-                room = self._limit - len(self.buffer)
-                self.buffer += chunk[:max(0, room)]
-                self.dropped += max(0, len(chunk) - max(0, room))
+                self.buffer += chunk
+                excess = len(self.buffer) - self._limit
+                if excess > 0:
+                    del self.buffer[:excess]
+                    self.dropped += excess
 
     def record(self) -> dict:
         return {"tail": self.buffer.decode(errors="replace"), "truncated": self.dropped > 0,
@@ -434,21 +441,44 @@ class ProcessLauncher(WorkerLauncher):
 
     def _supervise(self, job_id, child, directory, digest, deadline, limit):
         streams = {"stdout": _Capped(child.popen.stdout, limit), "stderr": _Capped(child.popen.stderr, limit)}
+        killed = False
         try:
             child.popen.wait(timeout=deadline)
         except subprocess.TimeoutExpired:
+            killed = True
             try:
                 os.killpg(child.popen.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             child.popen.wait()
-            _write_kill_receipt(directory, job_id, digest)
         for stream in streams.values():
             stream.thread.join()
-        atomic_json(directory / f"process-output.{child.attempt}.json",
-                    {"exit_code": child.popen.returncode,
-                     **{name: stream.record() for name, stream in streams.items()}})
+        record = {"exit_code": child.popen.returncode, **{name: stream.record() for name, stream in streams.items()}}
+        atomic_json(directory / f"process-output.{child.attempt}.json", record)
+        if killed:
+            _write_kill_receipt(directory, job_id, digest, output_tail=diagnostic_tail(record))
         child.done.set()
+
+    def diagnostics(self, directory):
+        """The latest attempt's exit code and capped output, for a job that ended
+        without a terminal receipt of its own (a crash, drift exit, traceback)."""
+        attempts = sorted((int(p.name.split(".")[1]), p) for p in directory.glob("process-output.*.json")
+                          if p.name.split(".")[1].isdigit())
+        if not attempts:
+            return None
+        record = _read_json(attempts[-1][1])
+        return diagnostic_tail(record) if isinstance(record, dict) else None
+
+
+def diagnostic_tail(record: dict) -> str:
+    """One bounded text: the exit code, then each stream's retained tail."""
+    parts = [f"process worker exit code {record.get('exit_code')}"]
+    for name in ("stderr", "stdout"):
+        stream = record.get(name) or {}
+        if stream.get("tail"):
+            dropped = f" ({stream.get('dropped_bytes')} earlier bytes dropped)" if stream.get("truncated") else ""
+            parts.append(f"--- {name}{dropped} ---\n{stream['tail']}")
+    return "\n".join(parts)
 
 
 def _lock_held(path: Path) -> bool:
@@ -472,7 +502,7 @@ def _read_json(path: Path):
         return None
 
 
-def _write_kill_receipt(directory: Path, job_id: str, digest: str) -> None:
+def _write_kill_receipt(directory: Path, job_id: str, digest: str, *, output_tail: str | None = None) -> None:
     """The deadline killed the worker: write its terminal state unless it did."""
     path = directory / "receipt.json"
     receipt = _read_json(path) or {"job_id": job_id, "request_hash": digest, "accepted_at": None,
@@ -482,12 +512,12 @@ def _write_kill_receipt(directory: Path, job_id: str, digest: str) -> None:
     started = bool(receipt.get("started_at"))
     receipt.update(
         state="timed_out" if started else "failed", exit_code=None, side_effect_unknown=started,
-        finished_at=utcnow(),
+        finished_at=utcnow(), output_tail=output_tail,
         error=("worker killed at its deadline after execution began; side effects unknown" if started
                else "worker killed at its deadline before execution began; no action submitted"))
     atomic_json(path, receipt)
 
 
 __all__ = ["BUNDLE_MAX_BYTES", "BUNDLE_PACKAGE", "LAUNCHER", "LAUNCHER_DIGEST", "ProcessLauncher", "WORKER_FILES",
-           "WorkerLaunchError", "bundle_from_export", "deterministic_zip", "process_worker_name",
+           "WorkerLaunchError", "bundle_from_export", "deterministic_zip", "diagnostic_tail", "process_worker_name",
            "publish_once"]

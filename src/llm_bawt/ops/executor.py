@@ -714,6 +714,11 @@ class DockerExecutor(Executor):
             return self._reconcile_locked(job_id=job_id, snapshot=snapshot,
                                           output_tail_bytes=output_tail_bytes, fence=fence)
 
+    def _diagnostics(self, snapshot, directory, output_tail_bytes):
+        """The launcher's own evidence for a worker with no terminal receipt, tail-capped."""
+        text = self._launcher_for(snapshot).diagnostics(directory)
+        return text.encode()[-max(1, output_tail_bytes):].decode(errors="replace") if text else None
+
     def _reconcile_locked(self, *, job_id: str, snapshot: dict, output_tail_bytes=4096,
                           fence: dict | None = None):
         directory = Path(snapshot["execution"]["receipt_root"]) / job_id
@@ -744,7 +749,8 @@ class DockerExecutor(Executor):
                 atomic_json(directory / "abandoned.json", {"reason": "worker missing during reconciliation"})
                 return ReconcileResult("lost", error="worker missing; side effects unknown, not replayed")
             if liveness is Liveness.START_UNCONFIRMED:
-                return ReconcileResult("lost", error="worker start previously attempted without confirmation; not replayed")
+                return ReconcileResult("lost", output_tail=self._diagnostics(snapshot, directory, output_tail_bytes),
+                                       error="worker start previously attempted without confirmation; not replayed")
             if liveness is Liveness.STARTED:
                 return ReconcileResult("accepted")
             if liveness is Liveness.EXITED:
@@ -757,7 +763,8 @@ class DockerExecutor(Executor):
                     if final.get("state") in {"succeeded", "failed", "lost", "timed_out"}:
                         return self._reconcile_locked(job_id=job_id, snapshot=snapshot,
                                                       output_tail_bytes=output_tail_bytes, fence=fence)
-                return ReconcileResult("lost", error="worker exited without terminal receipt; side effects unknown")
+                return ReconcileResult("lost", output_tail=self._diagnostics(snapshot, directory, output_tail_bytes),
+                                       error="worker exited without terminal receipt; side effects unknown")
             if receipt and receipt.get("state") == "running":
                 return ReconcileResult("running", started_at=receipt.get("started_at"))
             return ReconcileResult("accepted")

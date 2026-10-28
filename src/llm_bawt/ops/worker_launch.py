@@ -52,6 +52,10 @@ class WorkerLauncher(ABC):
     def preflight(self, settings: dict) -> None:
         """Refuse before dispatch if the approved runtime pins no longer hold."""
 
+    def diagnostics(self, directory: Path) -> str | None:
+        """Bounded evidence for a worker that ended without a terminal receipt."""
+        return None
+
 
 def container_worker_name(job_id: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
