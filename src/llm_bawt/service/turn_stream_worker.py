@@ -454,11 +454,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                         "delta": s,
                         "ts": time.time(),
                     })
-                    # Voice-optimized turns: feed the SAME raw text through the
-                    # block-boundary scrubber and emit any completed, scrubbed
-                    # block(s) as `tts_delta`. The raw text_delta above still
-                    # carries markdown for the visual stream; only the audio
-                    # path consumes tts_delta. (No-op for non-voice bots.)
+                    # Every turn may be spoken. Feed the SAME raw text through
+                    # the block-boundary scrubber for audio; text_delta above
+                    # keeps the original markdown for the visual stream.
                     if tts_scrubber is not None:
                         _tts_block = tts_scrubber.feed(s)
                         if _tts_block:

@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ..bots import scrub_for_tts
 from .chat_stream_worker import put_queue_item_threadsafe
 from .logging import get_service_logger
 from .turn_stream_context import TurnStreamContext
@@ -451,6 +452,13 @@ class TurnStreamFinalizer:
             "changed_files": changed_files,
             "attachments": completed_attachments,
             "response_text": _response_text,
+            # Terminal recovery when the separate tts_delta stream is lost.
+            # Never require an audio consumer to synthesize raw text_delta.
+            "tts_text": (
+                scrub_for_tts(_response_text)
+                if ctx.tts_scrubber is not None and _response_text is not None
+                else None
+            ),
             "balance_update": balance_update,
             "model": ctx.model_alias,
             "ts": time.time(),

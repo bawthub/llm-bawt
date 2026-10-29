@@ -583,8 +583,8 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         # _await_handled guards the async-gen path from double-handling.
 
         try:
-            # Visual-stream emote filtering shares the SAME decision as TTS
-            # scrubbing (should_scrub_for_tts), computed once above as tts_scrub.
+            # Visual emote filtering belongs only to voice-optimized non-agent
+            # bots. Unlike audio scrubbing, it changes the displayed text.
             # NEVER for agent backends (TASK-799): their asterisks are markdown
             # (**bold** / *italic*), not roleplay emotes — the filter mangled
             # them AND removed wire chars that _text_chars/text_offset had
@@ -594,7 +594,9 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             # onto an unfiltered wire. TTS scrubbing (tts_scrubber → tts_delta
             # in the worker) is a separate path and stays on.
             emote_filter = (
-                StreamingEmoteFilter() if (tts_scrub and not is_agent_backend) else None
+                StreamingEmoteFilter()
+                if getattr(llm_bawt.bot, "voice_optimized", False) and not is_agent_backend
+                else None
             )
             agent_tool_call_index = 0  # agent backend tool call index
 

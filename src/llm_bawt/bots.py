@@ -732,8 +732,9 @@ def should_scrub_for_tts(bot, request=None) -> bool:
 
     Consolidates every "is this a voice/TTS-scrubbed turn" decision into one
     place so the answer is computed once, shared, and tracked on the turn.
-    Currently keys off the bot's ``voice_optimized`` profile flag; if per-request
-    overrides are added, extend them HERE — never at the call sites.
+    Any chat turn can be spoken: the UI selects a bot voice, a global voice,
+    or a per-user override independently of the chat request. ``voice_optimized``
+    controls prompt/style and visual emote filtering, not audio hygiene.
 
     Args:
         bot: The resolved Bot for this turn (may be None).
@@ -742,7 +743,7 @@ def should_scrub_for_tts(bot, request=None) -> bool:
     Returns:
         True if this turn's output should be scrubbed for TTS.
     """
-    return bool(getattr(bot, "voice_optimized", False))
+    return True
 
 
 class StreamingTTSScrubber:

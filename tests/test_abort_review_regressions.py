@@ -320,6 +320,24 @@ def _real_native_worker(store, monkeypatch, stream):
     return TurnStreamWorker(ctx), ctx, owner, chunks, events
 
 
+def test_non_voice_optimized_worker_keeps_visual_markdown_and_emits_clean_audio(store, monkeypatch):
+    from llm_bawt.bots import StreamingTTSScrubber, should_scrub_for_tts
+
+    raw = "## **Hello**\n\nSee [docs](https://example.com)."
+    def stream(*args, **kwargs):
+        yield raw
+    worker, ctx, _, chunks, events = _real_native_worker(store, monkeypatch, stream)
+    ctx.llm_bawt.bot.voice_optimized = False
+    ctx.tts_scrub = should_scrub_for_tts(ctx.llm_bawt.bot)
+    ctx.tts_scrubber = StreamingTTSScrubber() if ctx.tts_scrub else None
+    worker._stream_to_queue()
+    assert "".join(event["delta"] for event in events if event["_type"] == "text_delta") == raw
+    assert "".join(event["delta"] for event in events if event["_type"] == "tts_delta") == "Hello\nSee docs."
+    assert events[-1]["_type"] == "turn_complete"
+    assert events[-1]["tts_text"] == "Hello\n\nSee docs."
+    assert chunks[-1] is None
+
+
 def _assert_worker_closed_with_partial(store, ctx, closed, chunks, events):
     assert closed == [True]
     row = store.get_turn("A")

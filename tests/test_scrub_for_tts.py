@@ -1,16 +1,26 @@
 """Tests for scrub_for_tts — the single source of truth for TTS-safe text.
 
-Voice-optimized bots (e.g. Nova) route their FINALIZED response through
-``scrub_for_tts`` before it reaches the TTS engine. Markdown can't be scrubbed
-mid-stream, so this runs once on the complete text. These tests lock the
-"no markdown survives" contract.
+Every bot's chat stream is scrubbed at complete block boundaries before speech,
+regardless of voice-optimized prompt style. Markdown can't be scrubbed per token;
+these tests lock the "no markdown survives" audio contract.
 """
 
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
-from llm_bawt.bots import StreamingTTSScrubber, scrub_for_tts
+from llm_bawt.bots import StreamingTTSScrubber, scrub_for_tts, should_scrub_for_tts
+
+
+def test_tts_scrubbing_is_independent_of_prompt_style_and_voice_selection():
+    # Chat voice is selected in the client, including a global fallback or
+    # per-user override that the chat request never carries to llm-bawt.
+    for optimized in (False, True):
+        for voice in (None, "test-voice"):
+            bot = SimpleNamespace(voice_optimized=optimized, default_voice=voice)
+            assert should_scrub_for_tts(bot)
+    assert should_scrub_for_tts(None)
 
 
 def _assert_no_markdown(out: str) -> None:
