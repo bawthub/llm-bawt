@@ -90,7 +90,7 @@ It is **not currently a FastAPI operations control service**. Its HTTP interface
 | Current route | Meaning |
 | --- | --- |
 | `/health/live` | The HTTP server answers; not proof the reconciliation loop progresses. |
-| `/health/ready` | Database, Docker, executor prerequisites and actual loop progress are fresh/ready. |
+| `/health/ready` | Four gating checks (database, Docker, shared executor prerequisites, loop progress) remain fresh/ready; the `ops.executor.modes` object is **non-gating** per-mode diagnostics. A 200 does not mean every enabled operation can run: process mode may lack its immutable interpreter image pin, or an isolated operation may lack a capability label. Admission/preflight still refuses those jobs explicitly. The process-mode sample comes from the actual reconciler's child table (live count, DB slot bound, oldest running age); isolated mode reports pinned worker image availability and first-party capability label booleans. Unknown/stale samples show null metrics, never cached live counts. |
 | `/v1/health/containers` | Versioned, sanitized inventory keyed by exact Docker names. |
 | `/v1/health/services[/{id}]` | Every observed Compose service plus every service enabled catalog ops target, by `<project>.<service>`, with opaque instance ids and capabilities (`[]` when no op targets it, `null` when the catalog is stale) (TASK-1169 S1c/S2a; contract in `OPERATIONS_RUNNER.md`). |
 

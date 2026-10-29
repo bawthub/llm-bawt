@@ -268,6 +268,25 @@ def _wait(launcher):
     return child
 
 
+def test_process_health_prunes_completed_children_but_probes_receipts(rig):
+    launcher, settings, root, _ = rig
+    assert launcher.interpreter_pinned()
+    directory, digest = _job(root, "ok")
+    launcher.launch(job_id=JOB, settings=settings, directory=directory, digest=digest)
+    child = _wait(launcher)
+    assert child.popen.returncode == 0
+    assert launcher.child_stats() == (0, None)
+    assert JOB not in launcher._children
+    assert launcher.probe(job_id=JOB, directory=directory, digest=digest, settings=settings) is Liveness.EXITED
+    # A long-running reconciler cannot accumulate completed jobs between samples.
+    for index in range(100):
+        expired = pl._Child(object(), 1)
+        expired.done.set()
+        launcher._children[str(index)] = expired
+    assert launcher.child_stats() == (0, None)
+    assert not launcher._children
+
+
 def test_prepare_pins_the_bundle_launcher_and_interpreter(rig):
     launcher, settings, root, _ = rig
     assert settings["launcher_digest"] == LAUNCHER_DIGEST

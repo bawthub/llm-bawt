@@ -24,7 +24,7 @@ import time
 from threading import Event
 
 from .approved_admission import ApprovedOpsAdmission
-from .health_state import HealthSample
+from .health_state import ExecutorModeSample, HealthSample
 from .service import OpsService
 from .store import JOB_CREATED_CHANNEL
 
@@ -140,6 +140,21 @@ class OpsReconciler:
             raise failure
         return count
 
+    def _publish_process_health(self, health, sampled):
+        """Only this pump owns the live child table; collectors do not."""
+        try:
+            executor = self.service.executors().get("docker")
+            if executor is None:
+                return
+            live, bound, oldest, pinned = executor.process_health()
+            health.publish_mode("process", ExecutorModeSample(
+                sampled, "ok" if pinned else "down",
+                None if pinned else "process interpreter image is not pinned",
+                live_children=live, bound=bound, oldest_started=oldest))
+        except Exception:
+            health.publish_mode("process", ExecutorModeSample(
+                sampled, "down", "process worker observation unavailable"))
+
     def run(self, stop=None, health=None):
         stop = stop or Event()
         try:
@@ -154,6 +169,9 @@ class OpsReconciler:
                     if health:
                         health.publish("reconciler.loop",
                                        HealthSample(sampled, "degraded", "reconciliation cycle failed"))
+                finally:
+                    if health:
+                        self._publish_process_health(health, sampled)
                 self.waiter.wait(stop, self.interval)
         finally:
             self.waiter.close()

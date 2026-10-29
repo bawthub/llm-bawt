@@ -13,20 +13,40 @@ from datetime import datetime
 
 from sqlalchemy import text
 
+from .app_config_reconcile import (BUILT_PROFILE_LABEL, PROCESS_PROFILE_LABEL, SOURCE_GUARD_LABEL,
+                                   WORKER_CAPABILITY_LABEL as APP_CONFIG_LABEL)
+from .config_reconcile import WORKER_CAPABILITY_LABEL as CONFIG_LABEL
+from .container_remove import WORKER_CAPABILITY_LABEL as REMOVE_LABEL
+from .dev_config_reconcile import WORKER_CAPABILITY_LABEL as DEV_CONFIG_LABEL
 from .executor import DockerExecutor
 from .health_state import (
     MAX_CONTAINERS,
     MAX_SERVICES,
     CatalogSample,
     ContainerObservation,
+    ExecutorModeSample,
     HealthSample,
     ServiceCapability,
     ServiceTarget,
 )
+from .plan_reconcile import WORKER_CAPABILITY_LABEL as PLAN_LABEL
+from .routing_reconcile import WORKER_CAPABILITY_LABEL as ROUTING_LABEL
+from .restart_health import WORKER_CAPABILITY_LABEL as RESTART_HEALTH_LABEL
 from .service_identity import PROJECT_LABEL, SERVICE_LABEL, ComposeServiceRef
+from .worker import QUIESCE_FENCE_LABEL
 
 COLLECTION_BUDGET_SECONDS = 15.0
 DOCKER_TIMEOUT_SECONDS = 2
+# Fixed first-party names and availability only; never expose the raw image
+# label map. Missing optional labels block only operations that require them.
+ISOLATED_CAPABILITIES = (
+    ("appConfig", APP_CONFIG_LABEL), ("builtProfile", BUILT_PROFILE_LABEL),
+    ("config", CONFIG_LABEL), ("containerRemove", REMOVE_LABEL),
+    ("devConfig", DEV_CONFIG_LABEL), ("plan", PLAN_LABEL),
+    ("processProfile", PROCESS_PROFILE_LABEL), ("quiesceFence", QUIESCE_FENCE_LABEL),
+    ("restartHealth", RESTART_HEALTH_LABEL), ("routing", ROUTING_LABEL),
+    ("sourceGuard", SOURCE_GUARD_LABEL),
+)
 CONTAINER_STATES = frozenset({"created", "running", "paused", "restarting", "removing", "exited", "dead"})
 CONTAINER_HEALTH = frozenset({"healthy", "unhealthy", "starting"})
 # Catalog bounds (S1c): an oversized catalog fails the whole sample closed
@@ -258,6 +278,8 @@ class OpsHealthCollector:
         self.state.publish("docker", sample)
         # Inventory stays independently usable if prerequisites fail/block.
         prerequisite_start = self.state.sample_time()
+        executor = None
+        reason = "Docker unavailable"
         try:
             if client is None:
                 raise RuntimeError("Docker unavailable")
@@ -268,6 +290,23 @@ class OpsHealthCollector:
         except Exception:
             ready = HealthSample(prerequisite_start, "down", "Docker executor prerequisites unavailable")
         self.state.publish("ops.executor", ready)
+        # The Docker collector inspects only the isolated worker image. The
+        # actual reconciler publishes process children from its own launcher.
+        try:
+            if client is None or executor is None or reason:
+                raise RuntimeError("worker prerequisites unavailable")
+            image = client.images.get(executor.worker_image)
+            labels = image.attrs.get("Config", {}).get("Labels") or {}
+            if not isinstance(labels, dict):
+                raise ValueError("invalid worker labels")
+            capabilities = tuple((name, labels.get(label) == "1") for name, label in ISOLATED_CAPABILITIES)
+            self._budget(prerequisite_start)
+            mode = ExecutorModeSample(prerequisite_start, "ok", worker_image_available=True,
+                                      capability_labels=capabilities)
+        except Exception:
+            mode = ExecutorModeSample(prerequisite_start, "down", "isolated worker image or labels unavailable",
+                                      worker_image_available=False)
+        self.state.publish_mode("isolated", mode)
         if client is not None:
             try:
                 client.close()

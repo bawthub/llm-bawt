@@ -31,6 +31,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -268,6 +269,7 @@ class _Capped:
 class _Child:
     popen: Any
     attempt: int
+    started_monotonic: float = 0.0
     done: threading.Event = field(default_factory=threading.Event)
 
 
@@ -276,7 +278,8 @@ class ProcessLauncher(WorkerLauncher):
 
     def __init__(self, *, client: Callable[[], Any], python: str | None = None,
                  python_image_id: str | None = None, popen=subprocess.Popen,
-                 kill_grace: float | None = None, boot_id: Callable[[], str] = _boot_id):
+                 kill_grace: float | None = None, boot_id: Callable[[], str] = _boot_id,
+                 clock: Callable[[], float] = time.monotonic):
         self._client = client
         self._python = python or sys.executable
         # The interpreter's identity: the reconciler's own immutable image.
@@ -286,15 +289,22 @@ class ProcessLauncher(WorkerLauncher):
         self._kill_grace = (kill_grace if kill_grace is not None
                             else float(os.getenv("LLM_BAWT_OPS_WORKER_KILL_GRACE", "10")))
         self._boot_id = boot_id
+        self._clock = clock
+        # Each health tick prunes completed children after their receipt and
+        # output are durable; probes then use the receipt and worker.lock.
         self._children: dict[str, _Child] = {}
         self._bundles: dict[tuple[str, str], str] = {}  # (receipt_root, image id) -> digest
         self._lock = threading.Lock()
 
     # -- prepare / preflight --------------------------------------------------
 
+    def interpreter_pinned(self) -> bool:
+        """Read-only prerequisite; no bundle export or Docker call."""
+        return bool(re.fullmatch(r"(?:sha256:|[^\s]+@sha256:)[0-9a-f]{64}", self._python_image_id or ""))
+
     def execution_settings(self, settings: dict) -> dict:
         """The process-mode pins for a snapshot: bundle, launcher and interpreter."""
-        if not re.fullmatch(r"(?:sha256:|[^\s]+@sha256:)[0-9a-f]{64}", self._python_image_id or ""):
+        if not self.interpreter_pinned():
             raise WorkerLaunchError("worker_runtime_incompatible",
                                     "configure LLM_BAWT_OPS_RECONCILER_IMAGE as immutable image ID or digest")
         image_id = self._image_id(settings["worker_image"])
@@ -415,8 +425,16 @@ class ProcessLauncher(WorkerLauncher):
         return Liveness.STARTED
 
     def live_children(self) -> int:
+        return self.child_stats()[0]
+
+    def child_stats(self) -> tuple[int, float | None]:
+        """Prune completed children each tick; preserve receipt-based probes."""
         with self._lock:
-            return sum(1 for child in self._children.values() if not child.done.is_set())
+            for job_id, child in list(self._children.items()):
+                if child.done.is_set():
+                    del self._children[job_id]
+            starts = [child.started_monotonic for child in self._children.values()]
+        return len(starts), min(starts) if starts else None
 
     def _spawn(self, *, job_id, settings, directory, digest, attempt):
         self.preflight(settings)
@@ -433,7 +451,7 @@ class ProcessLauncher(WorkerLauncher):
         except Exception as exc:
             raise WorkerLaunchError("worker_unavailable", f"worker spawn failed: {type(exc).__name__}") from exc
         atomic_json(directory / "spawn.json", {"attempt": attempt, "pid": popen.pid, "pgid": popen.pid})
-        child = _Child(popen, attempt)
+        child = _Child(popen, attempt, started_monotonic=self._clock())
         with self._lock:
             self._children[job_id] = child
         deadline = (float(settings.get("start_delay_seconds") or 0) + float(settings["timeout_seconds"])

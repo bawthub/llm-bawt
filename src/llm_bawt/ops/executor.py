@@ -46,6 +46,7 @@ from .process_launch import ProcessLauncher
 from .self_target import (SELF_IDENTITY_UNKNOWN, SELF_TARGET_UNVERIFIABLE, ContainerIdentity, SelfTargetError,
                           is_full_container_id, self_target as classify_self_target)
 from .worker_launch import ABANDONED, ContainerLauncher, Liveness, RecoveryRefused, container_worker_name
+from .worker_slots import worker_concurrency
 from .worker import (QUIESCE_FENCE_LABEL, DockerAPI, atomic_json, is_ops_worker,
                      target_selector, utcnow)
 
@@ -288,6 +289,16 @@ class DockerExecutor(Executor):
 
     def supported_execution_modes(self):
         return frozenset(self._launchers)
+
+    def process_health(self) -> tuple[int, int, float | None, bool]:
+        """The reconciler's own live child count, slot cap and interpreter pin.
+
+        No Docker or DB reads; the health HTTP handler receives only the
+        sample published by the reconciliation loop.
+        """
+        launcher = self._launchers[EXECUTION_PROCESS]
+        live, oldest = launcher.child_stats()
+        return live, worker_concurrency(), oldest, launcher.interpreter_pinned()
 
     def _launcher_for(self, snapshot):
         try:

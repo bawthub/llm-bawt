@@ -13,10 +13,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from llm_bawt.ops.health_collector import OpsHealthCollector, observe_container
+from llm_bawt.ops.health_collector import ISOLATED_CAPABILITIES, OpsHealthCollector, observe_container
 from llm_bawt.ops.health_http import OpsHealthServer
 from llm_bawt.ops.health_runtime import OpsHealthRuntime
-from llm_bawt.ops.health_state import HealthSample, OpsHealthState
+from llm_bawt.ops.health_state import ExecutorModeSample, HealthSample, OpsHealthState
 from llm_bawt.ops.reconciler import OpsReconciler
 
 HANG_GUARD_S = 10.0  # thread handshakes; only reached if one hangs
@@ -65,8 +65,9 @@ def docker(rows=None, *, error=None):
         containers=Mock(return_value=[{"Id": str(i)} for i in range(len(rows))]),
         inspect_container=Mock(side_effect=error or (lambda i: rows[int(i)])),
     )
-    return SimpleNamespace(api=api, close=Mock(),
-                           create=Mock(side_effect=AssertionError("no mutation")))
+    image = SimpleNamespace(attrs={"Config": {"Labels": {label: "1" for _, label in ISOLATED_CAPABILITIES}}})
+    return SimpleNamespace(api=api, close=Mock(), images=SimpleNamespace(get=Mock(return_value=image)),
+                            create=Mock(side_effect=AssertionError("no mutation")))
 
 
 @pytest.fixture
@@ -166,6 +167,75 @@ def test_inventory_remains_fresh_despite_failed_readiness(collector):
     assert code == 503
     assert "private" not in json.dumps(body)
     assert next(c for c in body["checks"] if c["name"] == "ops.executor")["status"] == "down"
+
+
+def test_isolated_mode_reports_only_first_party_capabilities(collector):
+    _, state, client, probe, _ = collector
+    probe.collect_docker()
+    modes = next(check["modes"] for check in state.ready()[1]["checks"]
+                 if check["name"] == "ops.executor")
+    assert modes["isolated"] == {
+        "runtime": "isolated", "status": "ok", "reason": None,
+        "workerImageAvailable": True,
+        "capabilityLabels": {name: True for name, _ in ISOLATED_CAPABILITIES},
+    }
+    assert modes["process"]["status"] == "down"  # pump has not published yet
+    assert client.images.get.call_count == 1
+    client.images.get.return_value.attrs["Config"]["Labels"] = {"private": "secret value"}
+    probe.collect_docker()
+    available = next(check["modes"]["isolated"] for check in state.ready()[1]["checks"]
+                     if check["name"] == "ops.executor")
+    assert available["status"] == "ok" and not any(available["capabilityLabels"].values())
+    assert "private" not in json.dumps(available)
+    client.images.get.side_effect = RuntimeError("secret image identifier")
+    probe.collect_docker()
+    isolated = next(check["modes"]["isolated"] for check in state.ready()[1]["checks"]
+                    if check["name"] == "ops.executor")
+    assert isolated["status"] == "down" and isolated["capabilityLabels"] is None
+    assert "secret" not in json.dumps(isolated)
+
+
+def test_mode_diagnostics_are_non_gating_and_stale_counters_are_hidden():
+    clock = Clock()
+    state = clock.state()
+    seed(state)
+    state.publish_mode("process", ExecutorModeSample(state.sample_time(), "ok", live_children=2,
+                                                     bound=2, oldest_started=clock.elapsed - 6))
+    code, body = state.ready()
+    assert code == 200 and body["status"] == "ok"  # isolated was never collected
+    modes = next(check["modes"] for check in body["checks"] if check["name"] == "ops.executor")
+    assert modes["process"]["liveChildren"] == 2 and modes["process"]["bound"] == 2
+    assert modes["process"]["oldestAgeSeconds"] == 6
+    assert modes["isolated"]["status"] == "down"
+    clock.advance(31)
+    seed(state)  # fresh gates, but old mode sample cannot look live
+    code, body = state.ready()
+    assert code == 200
+    process = next(check["modes"]["process"] for check in body["checks"]
+                   if check["name"] == "ops.executor")
+    assert process["status"] == "down" and "stale" in process["reason"]
+    assert process["liveChildren"] is process["bound"] is process["oldestAgeSeconds"] is None
+
+
+def test_reconciler_publishes_its_own_process_launcher():
+    clock = Clock()
+    state = clock.state()
+    seed(state)
+    executor = SimpleNamespace(process_health=Mock(return_value=(2, 4, 94.0, True)))
+    service = SimpleNamespace(executors=lambda: {"docker": executor}, reconcile_active_jobs=Mock(return_value=0))
+    stop = SimpleNamespace(is_set=Mock(side_effect=[False, True]), wait=Mock())
+    OpsReconciler(service, interval=0).run(stop, state)
+    assert executor.process_health.call_count == 1
+    mode = next(check["modes"]["process"] for check in state.ready()[1]["checks"]
+                if check["name"] == "ops.executor")
+    assert (mode["liveChildren"], mode["bound"], mode["oldestAgeSeconds"]) == (2, 4, 6)
+    executor.process_health.return_value = (0, 4, None, False)
+    stop.is_set = Mock(side_effect=[False, True])
+    OpsReconciler(service, interval=0).run(stop, state)
+    mode = next(check["modes"]["process"] for check in state.ready()[1]["checks"]
+                if check["name"] == "ops.executor")
+    assert mode["status"] == "down" and mode["liveChildren"] == 0
+    assert state.ready()[0] == 200
 
 
 def test_database_collection_is_read_only_and_failure_is_sanitized():
@@ -307,8 +377,10 @@ def test_compose_has_internal_only_listener_and_readiness_healthcheck():
 
 def test_frozen_cross_stack_fixture_is_real_producer_output(collector):
     frozen = json.loads((Path(__file__).parent / "fixtures/ops_health_v1.json").read_text())
-    clock, state, client, probe, _ = collector
+    clock, _, client, probe, _ = collector
     clock.wall = datetime.fromisoformat(frozen["inventory"]["checkedAt"])
+    state = clock.state()
+    probe.state = state
     seed(state)
     rows = []
     for entry in frozen["inventory"]["containers"]:

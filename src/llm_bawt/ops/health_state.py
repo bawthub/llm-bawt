@@ -63,6 +63,39 @@ class HealthSample:
 
 
 @dataclass(frozen=True)
+class ExecutorModeSample:
+    """Optional diagnostics; never an independent /health/ready gate.
+
+    The oldest child start is monotonic. Labels contain only first-party
+    capability names and booleans, never Docker label values or worker IDs.
+    """
+
+    sampled: SampleTime
+    status: str
+    reason: str | None = None
+    live_children: int | None = None
+    bound: int | None = None
+    oldest_started: float | None = None
+    worker_image_available: bool | None = None
+    capability_labels: tuple[tuple[str, bool], ...] = ()
+
+    def to_api(self, mode: str, *, now: SampleTime, unavailable: str | None):
+        fresh = unavailable is None
+        body = {"status": self.status if fresh else "down", "reason": unavailable or self.reason,
+                "runtime": mode}
+        if mode == "process":
+            body.update({"liveChildren": self.live_children if fresh else None,
+                         "bound": self.bound if fresh else None,
+                         "oldestAgeSeconds": (max(0, round(now.monotonic - self.oldest_started, 3))
+                                              if fresh and self.oldest_started is not None else None)})
+        else:
+            body.update({"workerImageAvailable": self.worker_image_available if fresh else None,
+                         "capabilityLabels": (dict(self.capability_labels)
+                                              if fresh and self.status == "ok" else None)})
+        return body
+
+
+@dataclass(frozen=True)
 class ServiceCapability:
     """One enabled catalog operation that targets a service. ``args`` is the
     selector argument (name, value) for an enum-selected op, else empty."""
@@ -111,7 +144,9 @@ class OpsHealthState:
         self._lock = Lock()
         initial = HealthSample(self.sample_time(), "down", "not yet collected")
         self._samples = dict.fromkeys(("database", "docker", "ops.executor", "reconciler.loop"), initial)
-        # Not a readiness check: /health/ready keeps its four checks.
+        # A dormant mode may be unconfigured while the other mode can run.
+        self._modes = dict.fromkeys(("process", "isolated"),
+                                    ExecutorModeSample(initial.sampled, "down", "not yet collected"))
         self._catalog = CatalogSample(initial.sampled, "down", "not yet collected")
         self._stopping = False
 
@@ -125,6 +160,13 @@ class OpsHealthState:
             if not self._stopping:
                 self._samples[name] = sample
 
+    def publish_mode(self, mode: str, sample: ExecutorModeSample):
+        if mode not in ("process", "isolated"):
+            raise ValueError("unknown executor mode")
+        with self._lock:
+            if not self._stopping:
+                self._modes[mode] = sample
+
     def publish_catalog(self, sample: CatalogSample):
         with self._lock:
             if not self._stopping:
@@ -136,7 +178,7 @@ class OpsHealthState:
 
     def _read(self):
         with self._lock:
-            return self._samples.copy(), self._stopping
+            return self._samples.copy(), self._modes.copy(), self._stopping
 
     def _read_services(self):
         with self._lock:
@@ -154,13 +196,19 @@ class OpsHealthState:
         return None
 
     def ready(self):
-        samples, stopping = self._read()
+        samples, modes, stopping = self._read()
         now = self.sample_time()
         checks = []
         for name, sample in samples.items():
             unavailable = self._unavailable_reason(sample, now, stopping)
             status = "down" if unavailable else sample.status
-            checks.append({"name": name, "status": status, "reason": unavailable or sample.reason})
+            check = {"name": name, "status": status, "reason": unavailable or sample.reason}
+            if name == "ops.executor":
+                check["modes"] = {mode: modes[mode].to_api(
+                    mode, now=now, unavailable=self._unavailable_reason(modes[mode], now, stopping))
+                    for mode in ("process", "isolated")}
+            checks.append(check)
+        # Diagnostic modes never change the four existing readiness gates.
         status = max((c["status"] for c in checks), key={"ok": 0, "degraded": 1, "down": 2}.__getitem__)
         return (200 if status == "ok" else 503), {
             "status": status, "checkedAt": min(s.sampled.wall for s in samples.values()).isoformat(),
@@ -168,7 +216,7 @@ class OpsHealthState:
         }
 
     def containers(self):
-        samples, stopping = self._read()
+        samples, _, stopping = self._read()
         sample = samples["docker"]
         reason = self._unavailable_reason(sample, self.sample_time(), stopping) or sample.reason
         ok = sample.status == "ok" and reason is None

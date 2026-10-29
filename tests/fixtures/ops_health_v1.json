@@ -6,7 +6,11 @@
     "checks": [
       {"name": "database", "status": "ok", "reason": null},
       {"name": "docker", "status": "ok", "reason": null},
-      {"name": "ops.executor", "status": "ok", "reason": null},
+      {"name": "ops.executor", "status": "ok", "reason": null, "modes": {
+        "process": {"status": "down", "reason": "not yet collected", "runtime": "process", "liveChildren": null, "bound": null, "oldestAgeSeconds": null},
+        "isolated": {"status": "ok", "reason": null, "runtime": "isolated", "workerImageAvailable": true,
+                     "capabilityLabels": {"appConfig": true, "builtProfile": true, "config": true, "containerRemove": true, "devConfig": true, "plan": true, "processProfile": true, "quiesceFence": true, "restartHealth": true, "routing": true, "sourceGuard": true}}
+      }},
       {"name": "reconciler.loop", "status": "ok", "reason": null}
     ]
   },
