@@ -298,6 +298,9 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
         assert job["caller"]["user_id"] == "nick"
         response = client.get("/v1/ops/jobs?limit=1&offset=3").json()
         assert response == {"jobs": [], "total": 1, "limit": 1, "offset": 3}
+        live = client.get("/v1/ops/jobs/live")
+        assert live.status_code == 200
+        assert [row["id"] for row in live.json()["jobs"]] == [job["id"]]
         response = client.get("/v1/ops/operations?limit=1&offset=3").json()
         assert response == {"operations": [], "total": 1, "limit": 1, "offset": 3}
         conflict = client.post("/v1/ops/jobs", json={"operation": op.slug, "args": {"name": "other"}, "idempotency_key": "http"})

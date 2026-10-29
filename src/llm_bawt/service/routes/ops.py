@@ -12,6 +12,7 @@ path — no new frontend server prefix is required.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -241,6 +242,19 @@ def list_jobs(operation: str | None = None, state: str | None = None,
     jobs = attach_members(store.engine, [r.to_api(include_output=False) for r in rows])
     return {"jobs": jobs,
             "total": store.count_jobs(**filters), "limit": limit, "offset": offset}
+
+
+@router.get("/v1/ops/jobs/live", tags=["Ops"])
+def live_jobs():
+    """All nonterminal jobs plus fresh outcomes, in one unpaginated ledger read.
+
+    Global banners poll this while a job runs; recent outcomes make completion
+    visible without a per-job status fanout or stale page-1 assumptions.
+    """
+    store = _store()
+    since = datetime.now(timezone.utc) - timedelta(seconds=15)
+    rows = store.find_active_jobs(limit=None, recent_terminal_since=since)
+    return {"jobs": attach_members(store.engine, [r.to_api(include_output=False) for r in rows])}
 
 
 @router.get("/v1/ops/jobs/{job_id}", tags=["Ops"])

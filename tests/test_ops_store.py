@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Session, create_engine, select
 from sqlalchemy.pool import StaticPool
@@ -288,6 +289,20 @@ def test_find_active_jobs_excludes_terminal():
     store.mark_terminal(j2.id, state=JOB_CANCELLED)
     active = [j.id for j in store.find_active_jobs()]
     assert active == [j1.id]
+
+
+def test_live_jobs_include_old_active_and_only_fresh_outcomes():
+    store = _store()
+    op = store.create_operation(_op_data())
+    active = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="active")
+    fresh = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="fresh")
+    old = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="old")
+    now = datetime.now(timezone.utc)
+    store.mark_terminal(fresh.id, state=JOB_SUCCEEDED, finished_at=now)
+    store.mark_terminal(old.id, state=JOB_FAILED, finished_at=now - timedelta(minutes=1))
+    live = store.find_active_jobs(limit=None, recent_terminal_since=now - timedelta(seconds=15))
+    assert {row.id for row in live} == {active.id, fresh.id}
+    assert [row.id for row in store.find_active_jobs()] == [active.id]
 
 
 def test_list_jobs_filters():

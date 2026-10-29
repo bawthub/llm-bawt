@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, inspect, text, update
+from sqlalchemy import func, inspect, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
@@ -554,9 +554,20 @@ class OpsStore:
     def touch_reconcile(self, job_id):
         self._transition(job_id, _OPEN_STATES, {"last_reconcile_at": _utcnow()})
 
-    def find_active_jobs(self, *, limit=100, offset=0):
+    def find_active_jobs(self, *, limit=100, offset=0, recent_terminal_since=None):
+        """One ledger read for all active jobs, optionally with recent outcomes.
+
+        The global UI passes limit=None so older long-running jobs cannot fall
+        outside a recent-page window; other reconciler callers keep their cap.
+        """
         if self.engine is None:
             return []
+        where = OpsJob.state.notin_(JOB_TERMINAL_STATES)
+        if recent_terminal_since is not None:
+            where = or_(where, OpsJob.finished_at >= recent_terminal_since)
         with Session(self.engine) as session:
-            return list(session.exec(select(OpsJob).where(OpsJob.state.notin_(JOB_TERMINAL_STATES))
-                .order_by(OpsJob.submitted_at, OpsJob.id).offset(offset).limit(limit)).all())
+            ordering = (OpsJob.submitted_at.desc(), OpsJob.id.desc()) if recent_terminal_since is not None else (OpsJob.submitted_at, OpsJob.id)
+            query = select(OpsJob).where(where).order_by(*ordering).offset(offset)
+            if limit is not None:
+                query = query.limit(limit)
+            return list(session.exec(query).all())
