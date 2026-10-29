@@ -246,6 +246,23 @@ _GATE_RELATIONS = {
     "ix_gate_members_turn": """
         CREATE INDEX IF NOT EXISTS ix_gate_members_turn ON gate_members (turn_id)
     """,
+    # TASK-1749/1748: every steer let past or pushed through a live gate, one
+    # row per (gate, kind, subject) (``gate_steer_escalation``).
+    "gate_escalations": """
+        CREATE TABLE IF NOT EXISTS gate_escalations (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            gate_id BIGINT NOT NULL REFERENCES system_gates(id) ON DELETE CASCADE,
+            bot_id VARCHAR(128) NOT NULL,
+            kind VARCHAR(32) NOT NULL,
+            subject VARCHAR(128) NOT NULL,
+            actor VARCHAR(160) NOT NULL,
+            turn_id VARCHAR(128),
+            outcome TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (gate_id, kind, subject)
+        )
+    """,
 }
 
 # Every gate_members column added after the table shipped; ``ensure_columns``
@@ -338,7 +355,10 @@ def _block(row: Mapping[str, Any]) -> GateBlock:
     )
 
 
-def gate_blocks(conn, bot_id: str, actor: GateActor, *, exclude_owner_id: str | None = None) -> GateBlock | None:
+def gate_blocks(
+    conn, bot_id: str, actor: GateActor, *, exclude_owner_id: str | None = None,
+    exclude_gate_ids: frozenset[int] = frozenset(),
+) -> GateBlock | None:
     """The strictest live gate refusing ``actor`` on ``bot_id``, else None.
 
     Call after ``lock_target(conn, bot_id)`` in the admission's transaction.
@@ -350,11 +370,14 @@ def gate_blocks(conn, bot_id: str, actor: GateActor, *, exclude_owner_id: str | 
 
     ``exclude_owner_id`` drops that exact owner's gates BEFORE the strictest
     choice, so every other gate is still evaluated in full (the TASK-1327
-    user-Stop bypass asks "does anything else block?").
+    user-Stop bypass asks "does anything else block?"). ``exclude_gate_ids``
+    drops exact generations the same way (TASK-1749 Send now names the gates
+    the user forced past; a later generation still holds).
     """
     if not _is_postgres(conn):
         return None
-    gates = [row for row in _live_gates(conn) if row["owner_id"] != exclude_owner_id]
+    gates = [row for row in _live_gates(conn)
+             if row["owner_id"] != exclude_owner_id and int(row["id"]) not in exclude_gate_ids]
     if not gates:
         return None
     profile = _bot_profile(conn, bot_id)

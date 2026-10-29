@@ -40,19 +40,21 @@ def head_candidate(conn, target: str):
     """), {"target": target}).mappings().first()
 
 
-def user_bypass_candidate(conn, target: str):
+def user_bypass_candidate(conn, target: str, *, send_now: bool = False):
     """The ready user chat row a user-Stop hold would let run ahead, unlocked.
 
     PostgreSQL only (``clock_timestamp``); callers ask only under a live hold,
     which exists only there. See ``load_user_bypass`` for the rule.
+    ``send_now`` asks only for a row the user forced past a gate (TASK-1749).
     """
+    forced = "AND c.metadata_json->'send_now' IS NOT NULL" if send_now else ""
     return conn.execute(text(f"""
         SELECT c.* FROM inter_bot_deliveries c
         WHERE c.target_bot_id=:target AND c.status='QUEUED' AND c.lane='normal'
           AND c.author_entity_type='user'
           AND c.metadata_json->'ordinary_chat' IS NOT NULL
           AND c.metadata_json->'prompt_schedule' IS NULL
-          AND c.available_at <= clock_timestamp()
+          AND c.available_at <= clock_timestamp() {forced}
           AND NOT EXISTS (
               SELECT 1 FROM inter_bot_deliveries d
               WHERE d.target_bot_id=:target AND d.lane='normal'
@@ -63,7 +65,7 @@ def user_bypass_candidate(conn, target: str):
     """), {"target": target}).mappings().first()
 
 
-def load_user_bypass(conn, target: str, config):
+def load_user_bypass(conn, target: str, config, *, send_now: bool = False):
     """The user's own chat row a user-Stop hold lets through, locked; else None.
 
     TASK-1327: under a live ``user_stop:<target>`` gate (the caller checked it
@@ -71,9 +73,10 @@ def load_user_bypass(conn, target: str, config):
     ordinary chat may run ahead of the held backlog. Claimed work is never
     jumped: no bypass while any STEERING row or in-flight DISPATCHING row
     (``load_claim_head``'s own definition) exists for the target. The row gets
-    the same route veto a head gets.
+    the same route veto a head gets. ``send_now`` (TASK-1749) applies the same
+    rule to a row the user forced past a live system gate.
     """
-    candidate = user_bypass_candidate(conn, target)
+    candidate = user_bypass_candidate(conn, target, send_now=send_now)
     if not candidate:
         return None
     head = _lock_delivery(conn, candidate["id"])

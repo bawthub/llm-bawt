@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from ...message_authorship import AuthorReference
 from ...request_identity import AdmissionUnavailable, IdentityConflict, InvalidIdentity
 from ..dependencies import get_service
+from ..gate_steer_escalation import SendNow
 from ..logging import get_service_logger
 from ..schemas import ChatCompletionRequest
 
@@ -201,6 +202,7 @@ async def steer_active_turn(
     author: AuthorReference | None = None,
     wire_suffix: str | None = None,
     control: "DeliveryControlGrant | None" = None,
+    send_now_delivery_id: str | None = None,
 ) -> ChatSteerResponse:
     """Shared steer implementation for public chat and durable inter-bot work.
 
@@ -242,7 +244,6 @@ async def steer_active_turn(
         raise HTTPException(status_code=409, detail="Turn is no longer active")
     # A maintenance-time message above is an enqueue and asks the gate there.
     from ..system_gate_admission import check_steer
-
     engine = getattr(service._turn_log_store, "engine", None)
     target = None
     if control is not None:
@@ -250,7 +251,8 @@ async def steer_active_turn(
         session_key, backend_name = target.session_key, (target.backend or "").strip()
         caps = target.steer_caps
     else:
-        await asyncio.to_thread(check_steer, engine, bot_id, turn_id=turn.id)
+        forced = {"send_now": send_now_delivery_id} if send_now_delivery_id else {}
+        await asyncio.to_thread(check_steer, engine, bot_id, turn_id=turn.id, **forced)
         session_key, backend_name, caps = turn.agent_session_key, None, None
     if not session_key:
         # A deterministic delivery retry may inspect the original target after it
@@ -263,19 +265,18 @@ async def steer_active_turn(
 
     from ...agent_backends.agent_bridge import get_agent_subscriber
     from ...steer_capabilities import CANCEL_QUEUED, ESCALATE, steer_refusal
-
     # TASK-1243: the run's own pinned capabilities, never the bot's current backend.
     if caps is None:
         backend_name, caps = _run_steer_caps(service, turn)
+    request.priority = SendNow.priority_for(caps) if send_now_delivery_id else request.priority  # TASK-1749
     refusal = steer_refusal(caps, request.priority)
     if refusal is not None:
         raise HTTPException(status_code=409, detail=refusal)
 
     message = request.message.strip()
     wire_message = f"{message}\n\n{wire_suffix}" if wire_suffix else message
-    origin = "user" if steer_request_id is None else "system" if control else "bot"
+    origin = "user" if steer_request_id is None or send_now_delivery_id else "system" if control else "bot"
     from ...steer_prompts import SteerPromptUnavailable
-
     try:
         framing = await asyncio.to_thread(
             _steer_framing, wire_message, origin=origin, priority=request.priority,

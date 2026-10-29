@@ -518,14 +518,13 @@ class InterBotDeliveryDispatcher:
                     message_id=record.user_message_id,
                     bot_id=record.target_bot_id,
                     user_id=user_id,
-                    # Bot deliveries never kill the target's running tools
-                    # (TASK-934): queue for the next tool boundary.
+                    # Bot deliveries never kill running tools (TASK-934); only
+                    # the user's own Send now may (TASK-1749, decided per run).
                     priority="next",
                 ),
-                steer_request_id=steer.request_id,
-                author=record.author,
-                wire_suffix=wire_suffix,
-                control=control,
+                steer_request_id=steer.request_id, author=record.author,
+                wire_suffix=wire_suffix, control=control,
+                **({"send_now_delivery_id": record.id} if (record.metadata or {}).get("send_now") else {}),
             )
             if response.ok:
                 self.store.mark_transport_accepted(record.id, claim_token)

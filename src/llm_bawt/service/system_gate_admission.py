@@ -20,7 +20,8 @@ What a live gate does at each edge:
 * steer: any live gate refuses a steer into a running turn, except the gate
   owner's own stop request: a control-lane delivery's steer carrying a
   ``DeliveryControlGrant`` for its live claim and linking member (TASK-1431,
-  ``check_steer``).
+  ``check_steer``), and the user's own Send now row past the gates its stamp
+  names (TASK-1749, ``gate_steer_escalation``).
 """
 from __future__ import annotations
 
@@ -147,6 +148,7 @@ class ControlGrantRefused(HTTPException):
 def check_steer(
     engine, bot_id: str, *, turn_id: str,
     grant: "DeliveryControlGrant | None" = None,
+    send_now: str | None = None,
 ) -> ControlTarget | None:
     """Raise ``SteerGateRefused`` when a live gate covers ``bot_id``.
 
@@ -160,6 +162,10 @@ def check_steer(
     stop, and it is admitted only on its live delivery claim and linking
     member (``admit_delivery_grant``). The return value is the pinned run it
     may address; any mismatch raises ``ControlGrantRefused``.
+
+    ``send_now`` (TASK-1749) names the user's forced chat delivery. Its stamp
+    is re-read from the row under the lock and only the gates it names are
+    passed (``admit_send_now_steer``); any other live gate still refuses.
     """
     if grant is not None and (grant.bot_id != bot_id or grant.turn_id != turn_id):
         raise ControlGrantRefused(grant)
@@ -173,7 +179,12 @@ def check_steer(
             from ..inter_bot_control_lane import admit_delivery_grant
 
             return admit_delivery_grant(conn, grant)
-        block = gate_blocks(conn, bot_id, GateActor("steer", turn_id))
+        if send_now:
+            from .gate_steer_escalation import admit_send_now_steer
+
+            block = admit_send_now_steer(conn, bot_id, turn_id=turn_id, delivery_id=send_now)
+        else:
+            block = gate_blocks(conn, bot_id, GateActor("steer", turn_id))
     if block is not None:
         raise SteerGateRefused(block)
     return None

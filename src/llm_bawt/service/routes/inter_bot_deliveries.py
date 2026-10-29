@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from ...bot_types import durable_agent_backend
 from ...bots import BotManager
@@ -206,6 +207,28 @@ async def retry_delivery(delivery_id: str):
         await dispatcher._emit(record)
     dispatcher.wake(record.target_bot_id)
     return {**record.to_api(duplicate=duplicate), "retry_of_delivery_id": delivery_id}
+
+
+class SendNowRequest(BaseModel):
+    user_id: str
+
+
+@router.post("/v1/inter-bot-deliveries/{delivery_id}/send-now", tags=["Inter-Bot Deliveries"])
+async def send_now_delivery(delivery_id: str, body: SendNowRequest):
+    """Force the user's own system-held chat message past the hold (TASK-1749).
+
+    Only a QUEUED ordinary-chat row ``user_id`` authored, held by a live gate.
+    A busy bot takes it as a ``now`` steer; an idle bot starts a turn the gate
+    rosters, so a pending restart waits for it.
+    """
+    import asyncio
+
+    from ..gate_steer_escalation import stamp_send_now
+
+    dispatcher = _dispatcher()
+    result = await asyncio.to_thread(stamp_send_now, dispatcher.store.engine, delivery_id, body.user_id)
+    dispatcher.wake(result["bot_id"])
+    return result
 
 
 @router.post("/v1/inter-bot-deliveries/{delivery_id}/cancel", tags=["Inter-Bot Deliveries"])

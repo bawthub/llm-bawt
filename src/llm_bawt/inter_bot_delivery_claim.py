@@ -67,7 +67,13 @@ class DeliveryClaim:
                 head = load_user_bypass(conn, target, store.config)
                 exempt_owner = hold_owner(target) if head else None
             if head is None:
+                # TASK-1749: the user's Send now row passes the gates it names.
+                head = load_user_bypass(conn, target, store.config, send_now=True)
+            if head is None:
                 head = load_claim_head(conn, target, store.config)
+            from .service.gate_steer_escalation import roster_send_now_turn, send_now_exemption
+
+            forced = send_now_exemption(conn, head) if head else frozenset()
             if (
                 not head
                 or head["status"] != QUEUED
@@ -94,7 +100,7 @@ class DeliveryClaim:
                 """), {"id": head["id"], "reason": fenced})
                 return None
             if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"]),
-                           exclude_owner_id=exempt_owner) is not None:
+                           exclude_owner_id=exempt_owner, exclude_gate_ids=forced) is not None:
                 # A live system gate holds the head: it stays QUEUED with no
                 # attempt spent and nothing written, and the target's FIFO
                 # waits behind it. The first sweep after release claims it.
@@ -111,7 +117,8 @@ class DeliveryClaim:
                     return None
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
-            prefer_steer = bool(payload.get("prefer_steer", True))
+            # A forced chat row steers into a running turn instead of waiting for it.
+            prefer_steer = bool(payload.get("prefer_steer", True)) or bool(forced)
             steer_only = is_steer_only(payload)
             from .service.turn_admission import classify_target, write_reservation
             # Same classified view save_turn admits against (TASK-1082). Only an
@@ -231,6 +238,9 @@ class DeliveryClaim:
                     request_json=payload,
                     trigger_message_id=head["user_message_id"],
                 )
+                if forced:
+                    roster_send_now_turn(conn, bot_id=target, turn_id=head["turn_id"],
+                                         delivery_id=head["id"], gate_ids=forced)
             row = conn.execute(sa_text("""
                 UPDATE inter_bot_deliveries SET
                     status=:status, attempt_count=attempt_count+1,
