@@ -17,7 +17,6 @@ from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
 @pytest.mark.parametrize("kind", [
     "response.output_text.delta",
     "response.reasoning_summary_text.delta",
-    "response.function_call_arguments.delta",
 ])
 @pytest.mark.parametrize("ending", ["completed", "stalled"])
 def test_long_productive_response(monkeypatch, transport, kind, ending):

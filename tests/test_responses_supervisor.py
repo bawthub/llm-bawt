@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from claude_code_bridge.proxy.responses_supervisor import ResponsesSSEStream
-from claude_code_bridge.proxy.chatgpt_transport import ChatGPTEventTimeout
+from claude_code_bridge.proxy.chatgpt_transport import (
+    ChatGPTEventTimeout, DEFAULT_ARGUMENT_STREAM_TIMEOUT, DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
+)
 from claude_code_bridge.proxy.request_context import ProxyRequestContext
 from tests import virtual_clock
 
@@ -181,4 +183,95 @@ def test_cancellation_closes_http_without_replay():
         await stream.close()
         await stream.close()
         assert http.close.await_count == 1
+    virtual_clock.run_timing(run())
+
+
+def _adapter_call(streams, monkeypatch, *, model="gpt-6-sol"):
+    """Drive the real ChatGPT adapter over scripted upstream attempts."""
+    from claude_code_bridge.proxy.adapters.openai_chatgpt import OpenAIChatGPTAdapter
+    from claude_code_bridge.proxy import retry
+    monkeypatch.setattr(retry, "compute_backoff", lambda *a, **k: 0)
+
+    async def run():
+        create = AsyncMock(side_effect=streams)
+        request_client = NS(responses=NS(create=create))
+        request_client.with_options = lambda **kw: request_client
+        adapter = OpenAIChatGPTAdapter()
+        adapter._cached_account_id = "fixture-account"
+        adapter.authorize = AsyncMock(return_value=("test-token", "https://example.test"))
+        adapter._http_client = NS()
+        adapter._responses_client = NS(with_options=lambda **kw: request_client, close=AsyncMock())
+        statuses = []
+        context = ProxyRequestContext(request_id="test", provider="openai_chatgpt", conversation_id="test",
+                                      status_callback=lambda _, s: statuses.append(s))
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            output = b"".join([chunk async for chunk in adapter.call(
+                {"model": model, "max_tokens": 100, "messages": [{"role": "user", "content": "ping"}]},
+                model, context)])
+        finally:
+            await adapter.close()
+        return output, create.await_count, loop.time() - started, statuses
+    return virtual_clock.run_timing(run())
+
+
+@pytest.mark.parametrize("after_output", ["silent", "lifecycle_only"])
+def test_first_output_then_no_progress_is_a_stall_retried_once(monkeypatch, after_output):
+    """TASK-1511: output starts, then the upstream goes quiet or only chatters."""
+    async def stalled():
+        yield NS(type="response.reasoning_summary_text.delta", delta="thinking")
+        while True:
+            await asyncio.sleep(5 if after_output == "lifecycle_only" else 3600)
+            yield NS(type="response.in_progress")
+
+    output, attempts, elapsed, statuses = _adapter_call(
+        [HTTPStream(stalled()), HTTPStream(done())], monkeypatch)
+    assert attempts == 2
+    assert b"message_stop" in output
+    assert [s["state"] for s in statuses][:3] == ["waiting", "stalled", "retrying"]
+    # Detected on the 90s productive deadline, far inside the app's 600s watchdog.
+    assert elapsed == pytest.approx(DEFAULT_PRODUCTIVE_IDLE_TIMEOUT, abs=1)
+
+
+def test_tool_argument_runaway_fails_visibly_inside_app_watchdog(monkeypatch):
+    """TASK-1511 (Nova 2026-10-29): productive-looking tool-argument deltas are
+    invisible downstream, so the 90s productive timer never fires and the app's
+    600s no-event watchdog killed the turn silently. A committed tool call is
+    never replayed, so the bound must surface an error, not retry."""
+    async def runaway():
+        yield NS(type="response.output_item.added",
+                 item=NS(type="function_call", id="fc", call_id="call", name="Write"))
+        while True:
+            await asyncio.sleep(1)
+            yield NS(type="response.function_call_arguments.delta", delta="ab")
+
+    output, attempts, elapsed, _ = _adapter_call([HTTPStream(runaway())], monkeypatch)
+    assert attempts == 1
+    assert b'"type":"api_error"' in output
+    assert b"message_stop" not in output
+    # The argument clock starts at the first delta, one second in.
+    assert elapsed == pytest.approx(1 + DEFAULT_ARGUMENT_STREAM_TIMEOUT, abs=1)
+
+
+def test_argument_deadline_is_per_tool_call():
+    """Sequential tool calls each get the full argument budget."""
+    async def run():
+        async def calls():
+            for _ in range(3):
+                yield NS(type="response.output_item.added", item=NS(type="function_call"))
+                # Each call alone stays under the budget; together they exceed it.
+                for _ in range(int(DEFAULT_ARGUMENT_STREAM_TIMEOUT) - 40):
+                    await asyncio.sleep(1)
+                    yield NS(type="response.function_call_arguments.delta", delta="ab")
+                yield NS(type="response.output_item.done", item=NS(type="function_call"))
+            yield NS(type="response.completed", response=NS(usage=None, status="completed"))
+
+        stream = ResponsesSSEStream(AsyncMock(return_value=HTTPStream(calls())))
+        await stream.prepare()
+        try:
+            events = [event async for event in stream]
+        finally:
+            await stream.close()
+        assert events[-1].type == "response.completed"
     virtual_clock.run_timing(run())

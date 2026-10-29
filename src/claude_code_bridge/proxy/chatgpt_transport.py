@@ -50,6 +50,12 @@ DEFAULT_FIRST_OUTPUT_TIMEOUT = 60.0
 # Whitespace-only tool-argument deltas with no real content are a degenerate
 # generation loop (observed: 3.6k–7k chunks over 90s, several times a day).
 DEFAULT_WHITESPACE_RUNAWAY_TIMEOUT = 20.0
+# TASK-1511. Tool-argument deltas reach the CLI as input_json_delta, which the
+# bridge never publishes, so one tool call streaming arguments is invisible
+# downstream until the call completes. The app kills a run after 600s without
+# a bridge event; bound a single call's argument stream well inside that so a
+# non-whitespace argument runaway fails visibly instead of hanging the turn.
+DEFAULT_ARGUMENT_STREAM_TIMEOUT = 240.0
 # Report a live "stalled" status this long into a productive-idle stretch,
 # well before the retry decision, so the UI never sits silent.
 DEFAULT_STALL_NOTICE_AFTER = 30.0
@@ -140,6 +146,7 @@ class ChatGPTResponsesTransport:
                  productive_idle_timeout: float = DEFAULT_PRODUCTIVE_IDLE_TIMEOUT,
                  first_output_timeout: float = DEFAULT_FIRST_OUTPUT_TIMEOUT,
                  whitespace_runaway_timeout: float = DEFAULT_WHITESPACE_RUNAWAY_TIMEOUT,
+                 argument_stream_timeout: float = DEFAULT_ARGUMENT_STREAM_TIMEOUT,
                  stall_notice_after: float = DEFAULT_STALL_NOTICE_AFTER,
                  max_connections: int = 32, connector=connect):
         self.idle_timeout = idle_timeout
@@ -147,6 +154,7 @@ class ChatGPTResponsesTransport:
         self.productive_idle_timeout = productive_idle_timeout
         self.first_output_timeout = first_output_timeout
         self.whitespace_runaway_timeout = whitespace_runaway_timeout
+        self.argument_stream_timeout = argument_stream_timeout
         self.stall_notice_after = stall_notice_after
         self.keepalive = keepalive
         self.max_connections = max_connections
@@ -304,6 +312,7 @@ class ChatGPTStream:
         self.stall_noticed = False
         self.output_seen = False
         self.whitespace_since: float | None = None
+        self.arguments_since: float | None = None
         self.last_event_kind = "none"
         self.idle_event_counts: dict[str, int] = {}
 
@@ -393,6 +402,13 @@ class ChatGPTStream:
                 ),
                 "whitespace",
             ))
+        if self.arguments_since is not None:
+            candidates.append((
+                self.arguments_since + self._limit(
+                    "argument_stream_timeout", DEFAULT_ARGUMENT_STREAM_TIMEOUT,
+                ),
+                "arguments",
+            ))
         if not self.stall_noticed and self.context is not None:
             candidates.append((
                 self.last_productive_activity_at
@@ -429,6 +445,11 @@ class ChatGPTStream:
             if self.context is not None and getattr(self.context, "first_output_ms", None) is None:
                 self.context.first_output_ms = (now - self.started_at) * 1000
             self.output_seen = True
+            if kind == "response.output_item.done":
+                self.arguments_since = None
+        if kind in ARGUMENT_DELTAS and getattr(event, "delta", None):
+            if self.arguments_since is None:
+                self.arguments_since = now
         productive = self._is_productive(event)
         if productive:
             self.output_seen = True
