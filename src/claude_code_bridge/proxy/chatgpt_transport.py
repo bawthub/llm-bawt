@@ -312,7 +312,9 @@ class ChatGPTStream:
         self.stall_noticed = False
         self.output_seen = False
         self.whitespace_since: float | None = None
-        self.arguments_since: float | None = None
+        # Argument-stream start per tool call, keyed by output_index (parallel
+        # calls interleave; one call finishing must not renew another's budget).
+        self.arguments_since: dict = {}
         self.last_event_kind = "none"
         self.idle_event_counts: dict[str, int] = {}
 
@@ -402,9 +404,9 @@ class ChatGPTStream:
                 ),
                 "whitespace",
             ))
-        if self.arguments_since is not None:
+        if self.arguments_since:
             candidates.append((
-                self.arguments_since + self._limit(
+                min(self.arguments_since.values()) + self._limit(
                     "argument_stream_timeout", DEFAULT_ARGUMENT_STREAM_TIMEOUT,
                 ),
                 "arguments",
@@ -446,10 +448,9 @@ class ChatGPTStream:
                 self.context.first_output_ms = (now - self.started_at) * 1000
             self.output_seen = True
             if kind == "response.output_item.done":
-                self.arguments_since = None
+                self.arguments_since.pop(getattr(event, "output_index", None), None)
         if kind in ARGUMENT_DELTAS and getattr(event, "delta", None):
-            if self.arguments_since is None:
-                self.arguments_since = now
+            self.arguments_since.setdefault(getattr(event, "output_index", None), now)
         productive = self._is_productive(event)
         if productive:
             self.output_seen = True

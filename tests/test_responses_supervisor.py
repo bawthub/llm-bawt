@@ -275,3 +275,41 @@ def test_argument_deadline_is_per_tool_call():
             await stream.close()
         assert events[-1].type == "response.completed"
     virtual_clock.run_timing(run())
+
+
+def test_parallel_call_completion_does_not_renew_another_calls_budget():
+    """Codex r1: call 0 finishing must not reset call 1's argument clock."""
+    async def run():
+        async def calls():
+            for index in (0, 1):
+                yield NS(type="response.output_item.added", output_index=index,
+                         item=NS(type="function_call"))
+            for _ in range(200):
+                await asyncio.sleep(1)
+                for index in (0, 1):
+                    yield NS(type="response.function_call_arguments.delta",
+                             output_index=index, delta="ab")
+            yield NS(type="response.output_item.done", output_index=0,
+                     item=NS(type="function_call"))
+            while True:
+                await asyncio.sleep(1)
+                yield NS(type="response.function_call_arguments.delta",
+                         output_index=1, delta="ab")
+
+        stream = ResponsesSSEStream(AsyncMock(return_value=HTTPStream(calls())))
+        await stream.prepare()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(ChatGPTEventTimeout) as error:
+            await _drain(stream)
+        assert error.value.phase == "arguments"
+        # Call 1 began streaming one second in; its budget is not renewed at 200s.
+        assert loop.time() - started == pytest.approx(1 + DEFAULT_ARGUMENT_STREAM_TIMEOUT, abs=1)
+    virtual_clock.run_timing(run())
+
+
+async def _drain(stream):
+    try:
+        return [event async for event in stream]
+    finally:
+        await stream.close()
