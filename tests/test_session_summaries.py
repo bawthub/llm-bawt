@@ -154,10 +154,12 @@ class TestSummarizeThreadPolicy:
             SimpleNamespace(
                 id="u1", role="user", content="what is next",
                 timestamp=1.0, session_id="thread-short",
+                author_entity_type="user", author_entity_id="u",
             ),
             SimpleNamespace(
                 id="a1", role="assistant", content="TASK-702 is next",
                 timestamp=2.0, session_id="thread-short",
+                author_entity_type="bot", author_entity_id="b",
             ),
         ]
 

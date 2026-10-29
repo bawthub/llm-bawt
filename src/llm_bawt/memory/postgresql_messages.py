@@ -65,6 +65,8 @@ class PostgreSQLMessageMixin:
                     "content": row.content,
                     "timestamp": row.timestamp,
                     "session_id": row.session_id,
+                    "author_entity_type": row.author_entity_type,
+                    "author_entity_id": row.author_entity_id,
                 }
                 for row in rows
             ]
@@ -107,6 +109,8 @@ class PostgreSQLMessageMixin:
                     "content": row.content,
                     "timestamp": row.timestamp,
                     "session_id": row.session_id,
+                    "author_entity_type": row.author_entity_type,
+                    "author_entity_id": row.author_entity_id,
                 }
                 for row in rows
             ]

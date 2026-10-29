@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Protocol
 
+from ..speaker_attribution import extraction_input, human_user_turns_present
 from .prompts import (
     MEMORY_TAGS,
     get_fact_extraction_prompt,
@@ -124,9 +125,12 @@ class MemoryExtractionService:
         Returns:
             List of ExtractedFact objects
         """
-        if not messages:
+        # Bot-origin deliveries are another bot's speech, never user facts
+        # (TASK-1724). With no human turn left there is nothing to extract.
+        messages = extraction_input(messages or [])
+        if not human_user_turns_present(messages):
             return []
-        
+
         # Collect message IDs for source linking
         message_ids = [msg.get("id", str(uuid.uuid4())) for msg in messages]
         

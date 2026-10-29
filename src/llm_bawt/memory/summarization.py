@@ -22,6 +22,8 @@ from typing import Any, Callable, TYPE_CHECKING
 
 import httpx
 
+from .speaker_attribution import speaker_of, summary_label
+
 if TYPE_CHECKING:
     from .summarization import Session
 
@@ -616,17 +618,13 @@ def format_session_for_summarization(session: Session) -> str:
     """Format a session's messages as text for the summarization prompt."""
     lines = []
     for msg in session.messages:
-        role = msg.get("role", "user")
+        # Label by durable authorship, not role: bot deliveries are role=user
+        # but must never read as the user's words (TASK-1724).
+        speaker = speaker_of(msg)
+        if speaker.kind == "system":
+            continue  # Skip system messages in summarization
         content = msg.get("content", "").strip()
-        if role == "user":
-            lines.append(f"User: {content}")
-        elif role == "assistant":
-            lines.append(f"Assistant: {content}")
-        elif role == "system":
-            # Skip system messages in summarization
-            continue
-        else:
-            lines.append(f"{role}: {content}")
+        lines.append(f"{summary_label(speaker)}: {content}")
     return "\n".join(lines)
 
 
@@ -869,7 +867,7 @@ def summarize_session_heuristic(session: Session) -> str:
             return text
         return text[: limit - 3].rstrip() + "..."
 
-    user_messages = [clean(msg.get("content", "")) for msg in session.messages if msg.get("role") == "user"]
+    user_messages = [clean(msg.get("content", "")) for msg in session.messages if speaker_of(msg).is_human_user]
     assistant_messages = [clean(msg.get("content", "")) for msg in session.messages if msg.get("role") == "assistant"]
     user_messages = [m for m in user_messages if m]
     assistant_messages = [m for m in assistant_messages if m]
@@ -995,7 +993,8 @@ class HistorySummarizer:
         with self._backend.engine.connect() as conn:
             from sqlalchemy import text
             sql = text(f"""
-                SELECT id, role, content, timestamp, summarized, recalled_history, summary_metadata, session_id
+                SELECT id, role, content, timestamp, summarized, recalled_history, summary_metadata, session_id,
+                       author_entity_type, author_entity_id
                 FROM {self._backend._messages_table_name}
                 ORDER BY timestamp ASC
             """)
@@ -1010,6 +1009,8 @@ class HistorySummarizer:
                     "recalled_history": row.recalled_history,
                     "summary_metadata": row.summary_metadata,
                     "session_id": row.session_id,
+                    "author_entity_type": row.author_entity_type,
+                    "author_entity_id": row.author_entity_id,
                 }
                 for row in rows
             ]
@@ -1331,7 +1332,8 @@ class HistorySummarizer:
             with self._backend.engine.connect() as conn:
                 rows = conn.execute(
                     _sql_text(f"""
-                        SELECT id, role, content, timestamp, session_id
+                        SELECT id, role, content, timestamp, session_id,
+                               author_entity_type, author_entity_id
                         FROM {self._backend._messages_table_name}
                         WHERE session_id = :sid
                           AND role IN ('user', 'assistant')
@@ -1348,7 +1350,9 @@ class HistorySummarizer:
 
         msgs = [
             {"id": r.id, "role": r.role, "content": r.content,
-             "timestamp": r.timestamp, "session_id": r.session_id}
+             "timestamp": r.timestamp, "session_id": r.session_id,
+             "author_entity_type": r.author_entity_type,
+             "author_entity_id": r.author_entity_id}
             for r in rows
         ]
         if message_ids is not None:
@@ -1789,7 +1793,8 @@ class HistorySummarizer:
                 src = conn.execute(
                     text(
                         f"""
-                        SELECT id, role, content, timestamp, session_id
+                        SELECT id, role, content, timestamp, session_id,
+                               author_entity_type, author_entity_id
                         FROM {table}
                         WHERE id = ANY(:ids) AND role <> 'summary'
                         ORDER BY timestamp ASC
@@ -1808,7 +1813,9 @@ class HistorySummarizer:
                         start_timestamp=float(src[0].timestamp),
                         end_timestamp=float(src[-1].timestamp),
                         messages=[
-                            {"role": r.role, "content": r.content, "timestamp": r.timestamp}
+                            {"role": r.role, "content": r.content, "timestamp": r.timestamp,
+                             "author_entity_type": r.author_entity_type,
+                             "author_entity_id": r.author_entity_id}
                             for r in src
                         ],
                         message_ids=[r.id for r in src],

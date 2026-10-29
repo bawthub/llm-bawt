@@ -571,7 +571,9 @@ class BackgroundTasksMixin:
 
         # Build conversation chunks for extraction — group consecutive messages
         conversation = [
-            {"role": m["role"], "content": m["content"]}
+            {"id": m["id"], "role": m["role"], "content": m["content"],
+             "author_entity_type": m.get("author_entity_type"),
+             "author_entity_id": m.get("author_entity_id")}
             for m in unprocessed
             if m.get("role") in ("user", "assistant") and m.get("content")
         ]
@@ -624,7 +626,7 @@ class BackgroundTasksMixin:
                                     content=fact.content,
                                     tags=fact.tags,
                                     importance=fact.importance,
-                                    source_message_ids=message_ids[:5],
+                                    source_message_ids=fact.source_message_ids[:5],
                                 )
                                 total_stored += 1
                             elif action.action == "UPDATE" and action.target_memory_id:
