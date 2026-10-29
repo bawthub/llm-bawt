@@ -64,16 +64,24 @@ hint_source, state}` with **no TTL**: the record does not expire when the cooldo
 ends. `state` is `exhausted` → (cooldown passes, record stays) → only cleared by a
 successful probe. Every call reads the record: before `until` it goes to the backup;
 after `until` it must win the probe claim (`SET NX` on
-`maintenance:fallback:<provider>:probe`, TTL = probe call timeout + margin) to touch the
+`maintenance:fallback:<provider>:probe`, TTL = probe call timeout + margin, value = token) to touch the
 primary, and every loser still goes to the backup. So no call reaches the primary after
 cooldown except the one probe, however late the first post-cooldown call arrives (Loopy
 B1). A crashed probe's claim expires and the next call re-claims.
 
-Writes: the first exhaustion creates the record with `SET NX` (switched edge). A probe
-that hits `spending_limit` again re-arms the existing record with a Lua compare-and-set
-(match on `exhausted_since`, set new `until`, release the probe claim), not with
-`SET NX`, so the cooldown always resets (Loopy r2 cmvtiaov600x80mldsivzmelm). Survives app restarts
-and is shared across workers.
+Writes: the first exhaustion creates the record with `SET NX` (switched edge). After
+that, only the current probe holder may change the record, fenced by a **probe token**
+(Codex r1 cmvtitngc00xl0mld0w33cejg): `claim_probe` writes a fresh random token as the
+probe key's value (`SET NX EX`) and returns it. Both edge scripts take
+`(exhausted_since, token)` and act only if the record's `exhausted_since` matches **and**
+`GET probe == token`; otherwise they are a no-op:
+- re-arm (probe hit `spending_limit`): set new `until`, delete the probe key. The cooldown
+  always resets (Loopy r2 cmvtiaov600x80mldsivzmelm).
+- clear (probe succeeded): delete record and probe key, write the episode (Notifications).
+A probe whose lease expired has lost its token (expired, or replaced by a newer
+holder's, or deleted by a re-arm), so a late success or late spending_limit can never
+delete or extend a cooldown it no longer owns; it only affects its own call's result.
+Survives app restarts and is shared across workers.
 
 Redis unavailable → stateless per-call mode: every call tries the primary, and a
 `spending_limit` falls through to the backup in the same call (no "skip the primary"
@@ -85,30 +93,41 @@ Keyed by provider, not model: a spending limit is per provider account.
 
 ## Notifications (transitions only)
 
-The bell is **pull-based** (slice A): BawtHub polls `/v1/health/maintenance` and renders
-its `checks` rows. Nothing is pushed, so there is no send that can fail and no outbox.
-Notices are rows rendered on every poll from the durable Redis state:
-- **switched**: while `maintenance:fallback:<provider>` exists, row
-  `maintenance_fallback:<provider>` is `warning`: "<provider> spending limit since
-  <exhausted_since>: maintenance on backup <alias>".
-- **switched back**: a successful probe deletes the record (compare-and-delete Lua on
-  `exhausted_since`) and in the same script writes `maintenance:fallback:<provider>:recovered`
-  = `{recovered_at, exhausted_since}`. While that key exists and no record does, the same
-  row name is `ok`: "<provider> back on primary since <recovered_at>". A new exhaustion
-  replaces it (the record wins). The recovered key has a TTL (shown long enough to be seen,
-  e.g. 24h); expiry only drops an `ok` row.
+The bell is **pull-based** (slice A): BawtHub polls `/v1/health/maintenance` and shows
+every row whose status is not `ok` (`systemHealth.ts` maps non-ok children to a degraded
+parent; `ok` rows never reach the bell). Nothing is pushed, so there is no send that can
+fail and no outbox. Notices are non-ok rows rendered on every poll from durable Redis
+state, one row name per provider, `maintenance_fallback:<provider>`:
+- **switched** (record present): `degraded`, "<provider> spending limit since
+  <exhausted_since>: maintenance on backup <alias>; next probe after <until>".
+- **switched back** (no record, episode key present): `degraded`, "<provider> was on
+  backup from <first_since> to <recovered_at> (<n> episode(s)); back on primary". The
+  clear script writes the episode key `maintenance:fallback:<provider>:recovered` =
+  `{first_since, recovered_at, episodes}` in the same atomic step that deletes the record,
+  merging with an existing episode key (keeps the earliest `first_since`, increments
+  `episodes`), with TTL `RECOVERED_ROW_SECONDS` (24h, renewed on each clear). The row stays
+  non-ok for that window, then the key expires and the row disappears. The notice window
+  is a named constant, documented as a deliberate "you missed this" period.
 - **backup also failed**: loud, a slice A `down` row for the job naming both models and
   both error classes (type + status only, per slice A B2).
-No per-call notifications.
+No per-call notifications. A record wins over an episode key for the same provider (one
+row; a re-exhaustion shows as switched, and its later clear merges into the episode).
 
-Why this resolves Loopy B3 (cmvtiaov600x90mld616rhkvl): a notice can't be lost because it
-is not an event. It is the state itself, which has no TTL while exhausted and is re-read on
-every poll; an app crash or restart between edge and poll changes nothing. It can't repeat
-or flap: there is exactly one row per provider (keyed by name, deduped like slice A rows),
-its status is a pure function of the two keys, and the edges are atomic Lua writes, so
-consecutive polls with unchanged state render byte-identical rows. Concurrent callers
-crossing an edge produce one state, hence one row. Redis unavailable → one
-`maintenance_fallback_state` `down` row instead (see State).
+Why notices can't be lost (Codex r1 cmvtitngc00xm0mldzj0t1909, Loopy B3
+cmvtiaov600x90mld616rhkvl): every switch creates a record with no TTL, and the only way
+a record goes away is the clear script, which atomically writes the episode. So from the
+first switch until 24h after the last recovery, Redis always holds a key that renders a
+non-ok row. An episode that starts and ends between two polls is still shown (as the
+episode row) for 24h, far longer than any poll interval; an app crash or restart between
+edge and poll changes nothing because the row is re-derived from Redis on every poll.
+Why it can't repeat or flap: one row name per provider, status and text are a pure
+function of the two keys, edges are atomic and token-fenced (State), so polls with
+unchanged state render byte-identical rows, and concurrent callers crossing an edge
+produce one state, hence one row. Redis unavailable → one `maintenance_fallback_state`
+`down` row instead (see State); it is not silent.
+
+Accepted limit: the bell shows current state of the last 24h, not a full log. Several
+episodes inside the window collapse into one row with a count and the overall span.
 
 ## Attribution
 
@@ -146,9 +165,12 @@ warning chip if the chosen backup shares the maintenance model's provider.
 - Exhausted record outlives `until`: a first call long after cooldown plus N concurrent
   calls → exactly one primary call (the probe), the rest on backup.
 - Crashed probe: claim TTL expires, next call re-probes.
-- Poll rows: exhausted → one `warning` row, stable across repeated polls and a fresh
-  process; probe success → same row name `ok`; re-exhaustion → `warning` again; no
-  duplicate rows.
+- Poll rows: exhausted → one `degraded` row, stable across repeated polls and a fresh
+  process; probe success → same row name, still `degraded` (episode) for the window, then
+  gone; switch+recover between two polls → episode row visible; two episodes → one row,
+  count 2; never an `ok` row; no duplicates.
+- Fencing: probe lease expires mid-call, another call re-claims and re-arms; the late
+  first probe's success or spending_limit changes nothing (record and `until` intact).
 - Utility/summary responses and usage logs report the backup model when it served.
 - Explicit `request.model` + spending_limit → no backup, visible failure.
 - Concurrent calls crossing an edge → exactly one "switched" / one "switched back".
