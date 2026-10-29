@@ -127,7 +127,10 @@ episode row) for 24h, far longer than any poll interval; an app crash or restart
 edge and poll changes nothing because the row is re-derived from Redis on every poll.
 Each row carries `episode` = its edge number: a per-provider Redis counter
 (`maintenance:fallback:<provider>:edge`, no TTL) that the switch (`mark`) and the
-recovery (`clear`) each `INCR` inside their atomic script, so it never repeats.
+recovery (`clear`) each `INCR` inside their atomic script, so it never repeats. If
+Redis drops the counter (allkeys-lru eviction, restart without persistence), the next
+edge re-seeds it from Redis `TIME` in microseconds before incrementing, so it still only moves
+forward and never reuses an id already dismissed (Byte impl r1).
 BawtHub's incident id includes each non-ok child's `name:status:episode` (Loopy impl r1
 cmvtjiant00xs0mld9xzrrfjb: the row name alone made a re-switch equal to the first switch;
 Loopy impl r2 cmvtjw7vl00xw0mldrnlnaq64: a seconds-resolution edge time let switch,

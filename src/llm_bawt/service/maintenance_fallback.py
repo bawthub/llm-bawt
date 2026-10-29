@@ -47,8 +47,11 @@ STATE_JOB = "maintenance_fallback_state"
 _KEY = "maintenance:fallback:{provider}"
 _PROBE = "maintenance:fallback:{provider}:probe"
 _RECOVERED = "maintenance:fallback:{provider}:recovered"
-# Per-provider edge counter, never expires: every switch and recovery takes the
-# next value, so two edges can never share a bell incident id however fast.
+# Per-provider edge counter, no TTL: every switch and recovery takes the next
+# value, so two edges can never share a bell incident id however fast. Redis may
+# still drop it (allkeys-lru eviction, a restart without persistence), so a
+# missing counter is re-seeded from Redis TIME in us (_NEXT_EDGE): it only moves
+# forward and never reuses an id the user already dismissed.
 _EDGE = "maintenance:fallback:{provider}:edge"
 # A probe is one real call: its claim must outlive that call, not the cooldown,
 # so a crashed probe frees the primary quickly.
@@ -121,11 +124,25 @@ class ExhaustionStore(ABC):
     def episodes(self) -> list[Episode]: ...
 
 
+# Next edge number as a decimal string; a lost counter restarts at the current
+# microsecond, above any value it held, since edges are far rarer than one per
+# microsecond. Strings throughout: Lua's tostring and cjson keep only 14
+# significant digits and would round a 16-digit value.
+_NEXT_EDGE = """
+local function next_edge(key)
+  if redis.call('EXISTS', key) == 0 then
+    local t = redis.call('TIME')
+    redis.call('SET', key, t[1] .. string.format('%06d', tonumber(t[2])))
+  end
+  return string.format('%d', redis.call('INCR', key))
+end
+"""
+
 # Create the record only if absent, stamped with the next edge. KEYS: record, edge.
-_MARK = """
+_MARK = _NEXT_EDGE + """
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 local rec = cjson.decode(ARGV[1])
-rec['edge'] = redis.call('INCR', KEYS[2])
+rec['edge'] = next_edge(KEYS[2])
 redis.call('SET', KEYS[1], cjson.encode(rec))
 return 1
 """
@@ -143,14 +160,14 @@ redis.call('DEL', KEYS[2])
 return 1
 """
 
-_CLEAR = """
+_CLEAR = _NEXT_EDGE + """
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
 local rec = cjson.decode(raw)
 if string.format('%d', rec['since']) ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
 local ep = {first_since = rec['since'], recovered_at = tonumber(ARGV[3]), episodes = 1,
-            edge = redis.call('INCR', KEYS[4])}
+            edge = next_edge(KEYS[4])}
 local old = redis.call('GET', KEYS[3])
 if old then
   local prev = cjson.decode(old)
@@ -270,7 +287,8 @@ class MemoryExhaustionStore(ExhaustionStore):
         return record
 
     def _next_edge(self, provider: str) -> int:
-        self._edges[provider] = self._edges.get(provider, 0) + 1
+        # Same as _NEXT_EDGE: a lost counter restarts from the clock in microseconds.
+        self._edges[provider] = self._edges.get(provider, int(self._clock() * 1_000_000)) + 1
         return self._edges[provider]
 
     def get(self, provider: str) -> Exhaustion | None:

@@ -365,6 +365,23 @@ def test_edges_within_one_instant_still_get_distinct_episodes():
     assert len(set(seen)) == 4  # the clock never moved
 
 
+def test_lost_edge_counter_never_reuses_a_dismissed_episode():
+    """Byte r1: eviction or a data-less Redis restart must not restart ids at 1."""
+    rig = Rig()
+    store = rig.store
+    assert store.mark(Exhaustion(provider=PRIMARY_PROVIDER, since=rig.clock.now,
+                                 until=rig.clock.now, hint_source="hint"))
+    first = int(fallback_checks(store)[0]["episode"])
+    store._edges.clear()  # counter evicted
+    record = store.get(PRIMARY_PROVIDER)
+    assert store.clear(PRIMARY_PROVIDER, record.since, store.claim_probe(PRIMARY_PROVIDER, 30))
+    rig.clock.now += 1
+    store._edges.clear()
+    assert store.mark(Exhaustion(provider=PRIMARY_PROVIDER, since=rig.clock.now,
+                                 until=rig.clock.now, hint_source="hint"))
+    assert int(fallback_checks(store)[0]["episode"]) > first
+
+
 class _ClaimDownStore(MemoryExhaustionStore):
     def claim_probe(self, provider, ttl):
         raise mf.StateUnavailable("redis gone mid-call")
