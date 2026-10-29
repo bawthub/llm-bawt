@@ -210,6 +210,71 @@ def load_claim_head(conn, target: str, config):
         return head
 
 
+def load_steer_jumper(conn, held_head, config):
+    """The earliest later row that may steer past a held head, locked; else None.
+
+    TASK-1758: a QUEUED head that must wait for the target's running turn to
+    end (``prefer_steer`` false) must not hold back later rows that only ask
+    to steer into that run. A steer lands mid-turn, ahead of anything queued
+    for a turn, so letting it pass reorders nothing a sender relies on.
+    Wait-for-turn-end rows never pass each other: they keep FIFO order. Only
+    plain ready ``continue`` rows qualify (a prompt-schedule row or a reset is
+    a turn of its own); the caller runs every claim check on the result.
+    It never passes an earlier waiting row of its own author (a sender's
+    order holds), and no row passes while a steer or an unaccepted dispatch
+    is in flight, so one pass happens at a time.
+    """
+    candidate = conn.execute(text(f"""
+        SELECT d.* FROM inter_bot_deliveries d
+        WHERE d.target_bot_id=:target AND d.lane='normal' AND d.status='QUEUED'
+          AND d.ordinal > :ordinal AND d.available_at <= CURRENT_TIMESTAMP
+          AND COALESCE(d.session_policy, 'continue') = 'continue'
+          AND d.metadata_json->'prompt_schedule' IS NULL
+          AND COALESCE(d.payload_json->>'prefer_steer', 'true') <> 'false'
+          -- Causal boundary: never pass an earlier waiting row of the same author.
+          AND NOT EXISTS (
+              SELECT 1 FROM inter_bot_deliveries w
+              WHERE w.target_bot_id=d.target_bot_id AND w.lane='normal'
+                AND w.status='QUEUED' AND w.ordinal < d.ordinal
+                AND w.sender_bot_id = d.sender_bot_id
+                AND w.author_entity_type IS NOT DISTINCT FROM d.author_entity_type
+                AND w.author_entity_id IS NOT DISTINCT FROM d.author_entity_id
+          )
+          -- One pass at a time: no jump while claimed work is in flight.
+          AND NOT EXISTS (
+              SELECT 1 FROM inter_bot_deliveries f
+              WHERE f.target_bot_id=d.target_bot_id AND f.lane='normal'
+                AND f.status IN ('STEERING','DISPATCHING')
+                AND NOT ({_ACCEPTED_OPEN_DISPATCH.replace('d.', 'f.')})
+          )
+        ORDER BY d.ordinal ASC LIMIT 1
+    """), {"target": held_head["target_bot_id"], "ordinal": held_head["ordinal"]}).mappings().first()
+    if not candidate:
+        return None
+    head = _lock_delivery(conn, candidate["id"])
+    if not head or head["status"] != "QUEUED":
+        return None
+    meta = head.get("metadata_json") or {}
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    if meta.get("message_route"):
+        from .route_dispatch_gate import check_route_claim
+
+        return check_route_claim(conn, head, config)
+    return head
+
+
+# Visible on a held head while later steer rows pass it (TASK-1758).
+WAITING_FOR_TURN_END = "Waiting for the target's running turn to end; later steers may pass"
+
+
+def mark_waiting_for_turn_end(conn, head_id: str) -> None:
+    conn.execute(text("""
+        UPDATE inter_bot_deliveries SET last_error=:reason, updated_at=CURRENT_TIMESTAMP
+        WHERE id=:id AND status='QUEUED' AND last_error IS DISTINCT FROM :reason
+    """), {"id": head_id, "reason": WAITING_FOR_TURN_END})
+
+
 def _lock_delivery(conn, delivery_id):
     lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
     return conn.execute(text(
