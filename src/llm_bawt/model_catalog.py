@@ -107,7 +107,14 @@ class ProtocolCompatibility:
         "codex": "responses",
         "claude-code": "anthropic-messages",
         "claude-proxy": "anthropic-messages",
+        # TASK-1726: the app's own background (maintenance) clients. Served by
+        # ``service.background_clients``; never a subscription OAuth path.
+        "background": "chat-completions",
     }
+    BACKGROUND_PROTOCOLS = frozenset(
+        {"anthropic-messages", "chat-completions", "responses"}
+    )
+    BACKGROUND_AUTH = frozenset({"api-key", "none", "configured"})
     PROXY_TARGETS = frozenset(
         {"anthropic-messages", "chat-completions", "responses"}
     )
@@ -135,6 +142,11 @@ class ProtocolCompatibility:
             if access_path.vendor == "openai":
                 return access_path.key in {"openai-oauth", "openai-responses"}
             return access_path.protocol in cls.PROXY_TARGETS
+        if normalized == "background":
+            return (
+                access_path.protocol in cls.BACKGROUND_PROTOCOLS
+                and access_path.auth_mechanism in cls.BACKGROUND_AUTH
+            )
         if normalized == "codex":
             # The Codex bridge owns ChatGPT subscription OAuth. Standard
             # Responses providers (including OpenAI platform API keys) run
@@ -316,6 +328,9 @@ class ModelCatalog:
                 model_type = "grok"
             elif endpoint.access_path.vendor == "openai":
                 model_type = "openai"
+        elif normalized_harness == "background":
+            if endpoint.access_path.protocol == "anthropic-messages":
+                model_type = "anthropic-messages"
 
         config.update(
             {
@@ -324,6 +339,7 @@ class ModelCatalog:
                 "endpoint_id": endpoint.id,
                 "model_key": endpoint.model.key,
                 "access_path": endpoint.access_path.key,
+                "access_vendor": endpoint.access_path.vendor,
                 # TASK-1295: the bridge checks a proxy turn's model prefix
                 # against this, the same rule that built ``model_id``.
                 "access_path_provider": cls._provider_prefix(endpoint.access_path),

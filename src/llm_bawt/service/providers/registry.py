@@ -82,6 +82,12 @@ def _access_path_owners() -> dict[str, type[ProviderAdapter]]:
 _ACCESS_PATH_OWNERS = _access_path_owners()
 
 
+def access_path_adapter(config: Config, access_path_key: str | None) -> ProviderAdapter | None:
+    """The adapter whose credential authorizes ``access_path_key``; None if none does."""
+    cls = _ACCESS_PATH_OWNERS.get(str(access_path_key or ""))
+    return cls(config) if cls is not None else None
+
+
 def get_adapter(config: Config, provider_id: str) -> ProviderAdapter | None:
     cls = _ADAPTER_CLASSES.get(provider_id)
     if cls is None:

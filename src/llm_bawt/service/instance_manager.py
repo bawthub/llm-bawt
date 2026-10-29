@@ -530,9 +530,10 @@ class InstanceManagerMixin:
         if not model_alias:
             return None, None
         try:
-            model_def = resolve_model_config(self.config, model_alias, harness="chat", default=None) or {}
-            model_type = model_def.get("type")
-            provider = model_def.get("provider") or {"grok": "xai"}.get(model_type, model_type)
+            from .background_clients import provider_label, resolve_background_model
+
+            model_def = resolve_background_model(self.config, model_alias) or {}
+            provider = model_def.get("provider") or provider_label(self.config, model_def)
             if not provider:
                 return None, None
             from .providers.base import CredentialStore
@@ -547,7 +548,7 @@ class InstanceManagerMixin:
         This client is completely isolated from the main chat model lifecycle —
         it never triggers model switches or unloads the active chat model.
 
-        Only API-based models (openai/grok) are supported.
+        Which endpoints are servable: ``service.background_clients`` (TASK-1726).
 
         Returns:
             ``(client, model_alias)`` or ``(None, None)`` if unavailable.
@@ -563,20 +564,18 @@ class InstanceManagerMixin:
             log.warning("No background job model configured; falling back to heuristics.")
             return None, None
 
-        # TASK-857: background jobs are GLOBAL (TASK-522) — resolve the job
-        # model with no bot identity at all. This used to borrow nova's
-        # identity (``_resolve_request_model(bot_id="nova")`` + nova's
-        # harness); once every bot became an agent, nova's ``claude-proxy``
-        # harness stamped EVERY job model ``type="claude-code"`` and the
-        # openai/grok gate below rejected it, so summaries/extraction silently
-        # ran on heuristics for months. ``harness="chat"`` asks the catalog for
-        # the plain API/local client type of the endpoint itself.
+        # TASK-857: background jobs are GLOBAL (TASK-522), resolved with no bot
+        # identity. TASK-1726: the ``background`` harness (after ``chat``) also
+        # admits api-key/no-auth anthropic-messages and responses endpoints;
+        # ``background_clients`` picks the client by protocol, never by name.
+        from .background_clients import (
+            UnsupportedBackgroundModel, build_background_client, resolve_background_model,
+        )
+
         try:
-            model_def = resolve_model_config(
-                self.config, preferred, harness="chat", default=None,
-            )
+            model_def = resolve_background_model(self.config, preferred)
         except Exception as e:
-            log.error(f"Failed to resolve background model '{preferred}': {e}")
+            log.error(f"Background model '{preferred}' cannot serve background jobs: {e}")
             return None, None
         if not model_def:
             log.error(f"Background model '{preferred}' not found in catalog")
@@ -589,86 +588,24 @@ class InstanceManagerMixin:
         # canonical model key, not the raw preferred string. Lock-free read;
         # dict.get is atomic under the GIL.
         model_alias = str(model_def.get("model_key") or preferred)
-        cached = self._bg_client_cache.get(model_alias)
+        # One client per endpoint: the same model on two access paths (a
+        # primary and its backup) must not share a client.
+        cache_key = f"{model_alias}@{model_def['access_path']}" if model_def.get("access_path") else model_alias
+        cached = self._bg_client_cache.get(cache_key)
         if cached is not None:
             return cached, model_alias
 
-        model_type = model_def.get("type")
-
-        # TASK-276 follow-up: local GPU models (gguf/vllm) run in the standalone
-        # local_model_bridge process now, reached via AgentBackendClient over
-        # Redis — exactly like the chat path (core.py gguf/vllm branch). Before
-        # the bridge existed, background tasks couldn't safely run local CUDA
-        # work off the chat lifecycle, so this factory rejected non-API models;
-        # that quietly no-op'd the background summary/extraction jobs whenever
-        # SUMMARIZATION_MODEL/EXTRACTION_MODEL pointed at a local model (the
-        # default `dolphin-qwen-3b`). Now we route them through the bridge.
-        if model_type in ("gguf", "vllm"):
-            try:
-                from ..clients.agent_backend_client import AgentBackendClient
-
-                bridge_model_definition = {
-                    "type": "agent_backend",
-                    "backend": "local",
-                    # Carry the alias so the bridge resolves the same catalog
-                    # entry via GET /v1/models/definitions/{alias}.
-                    "model_id": model_alias,
-                    "local_model_definition": dict(model_def),
-                }
-                if model_def.get("context_window") is not None:
-                    bridge_model_definition["context_window"] = model_def["context_window"]
-                if model_def.get("max_tokens") is not None:
-                    bridge_model_definition["max_tokens"] = model_def["max_tokens"]
-
-                client = AgentBackendClient(
-                    backend_name="local",
-                    config=self.config,
-                    # Fixed, isolated identity — background work is stateless and
-                    # shared across bots; the model is fixed by model_id above.
-                    bot_config={"bot_id": "background", "user_id": "system"},
-                    model_definition=bridge_model_definition,
-                )
-                # Insert under the lock so two concurrent cold-start callers for
-                # the same model don't double-build; the loser reuses the winner.
-                with self._bg_client_lock:
-                    client = self._bg_client_cache.setdefault(model_alias, client)
-                log.info("Background client ready: %s (local bridge)", model_alias)
-                return client, model_alias
-            except Exception as e:
-                log.error(
-                    "Failed to create local background client for '%s': %s",
-                    model_alias, e,
-                )
-                return None, None
-
-        if model_type not in ("openai", "grok"):
-            if preferred:
-                log.warning(
-                    "Background model '%s' is type '%s' (only openai/grok supported). "
-                    "Falling back to heuristics.", preferred, model_type,
-                )
-            return None, None
-
-        # Create a standalone client — no model lifecycle involvement
         try:
-            from ..clients.openai_client import OpenAIClient
-            from ..clients.grok_client import GrokClient
-
-            model_id = model_def.get("model_id", model_alias)
-            if model_type == "grok":
-                client = GrokClient(
-                    model=model_id, config=self.config, model_definition=model_def,
-                )
-            else:
-                client = OpenAIClient(
-                    model=model_id, config=self.config, model_definition=model_def,
-                )
-
-            with self._bg_client_lock:
-                client = self._bg_client_cache.setdefault(model_alias, client)
-            log.info("Background client ready: %s (%s)", model_alias, model_type)
-            return client, model_alias
-
+            client, kind = build_background_client(self.config, model_def, model_alias)
+        except UnsupportedBackgroundModel as e:
+            log.warning("Background model '%s' is unsupported: %s", preferred, e)
+            return None, None
         except Exception as e:
             log.error("Failed to create background client for '%s': %s", model_alias, e)
             return None, None
+        # Insert under the lock so two concurrent cold-start callers for the
+        # same model don't double-build; the loser reuses the winner.
+        with self._bg_client_lock:
+            client = self._bg_client_cache.setdefault(cache_key, client)
+        log.info("Background client ready: %s (%s)", cache_key, kind)
+        return client, model_alias
