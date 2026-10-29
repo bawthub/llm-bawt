@@ -23,3 +23,15 @@ def test_render_hands_the_engine_unescaped_strings(monkeypatch):
     monkeypatch.setattr("llm_bawt.ops.compose_render.renderer_argv", lambda *_a, **_k: [])
     test = renderer.render({}, "img")["config"]["services"]["frontend"]["healthcheck"]["test"][1]
     assert "[ $? != 7 ]" in test and "$$" not in test
+
+
+def test_every_engine_bound_field_is_unescaped():
+    # Snark's audit ask: env values (secrets with `$`), command, entrypoint and
+    # labels ride the same rendered dict as the healthcheck.
+    svc = {"environment": {"PW": "a$$b$$$$c"}, "command": ["sh", "-c", "echo $$HOME"],
+           "entrypoint": ["/bin/sh", "-c", "x=$$1"], "labels": {"l": "p$$q"},
+           "healthcheck": {"test": ["CMD-SHELL", "[ $$? = 0 ]"]}}
+    assert unescape_dollars(svc) == {
+        "environment": {"PW": "a$b$$c"}, "command": ["sh", "-c", "echo $HOME"],
+        "entrypoint": ["/bin/sh", "-c", "x=$1"], "labels": {"l": "p$q"},
+        "healthcheck": {"test": ["CMD-SHELL", "[ $? = 0 ]"]}}
