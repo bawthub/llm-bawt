@@ -19,6 +19,11 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 
+def schedule_identifier(owner, idempotency_key):
+    """A schedule's id is derived from its owner and create key, never chosen."""
+    return str(uuid5(NAMESPACE_URL, f"prompt-schedule:{owner}:{idempotency_key}"))
+
+
 def run_view(occurrence, run):
     receipt = json.loads(run.result_json or "{}")
     return dict(id=occurrence.run_id, state=occurrence.state,
@@ -90,7 +95,7 @@ class PromptManagement:
     def create(self, owner, data):
         payload = data.model_dump(mode="json", exclude={"idempotency_key"})
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-        identifier = str(uuid5(NAMESPACE_URL, f"prompt-schedule:{owner}:{data.idempotency_key}"))
+        identifier = schedule_identifier(owner, data.idempotency_key)
         now = now_utc()
         with Session(self.engine) as session, session.begin():
             if self.engine.dialect.name == "postgresql":

@@ -14,6 +14,7 @@ the user's own hand-made schedules.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 _APP_BASE_URL = os.getenv("LLM_BAWT_APP_BASE_URL", "http://localhost:8642").rstrip("/")
 _TIMEOUT_S = 30.0
 _PREFIX = "wakeup:"
+_MISFIRE_GRACE_S = 604800
 _TASK_RE = re.compile(r"^TASK-\d+$")
 Identifier = Annotated[str, Field(min_length=1, max_length=64)]
 
@@ -101,11 +103,31 @@ async def _call(method: str, path: str, user: str, body: dict | None = None,
     return payload, None
 
 
+def _create_key(bot: str, nonce: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"schedule_wakeup:{bot}:{nonce}"))
+
+
 def _creator(schedule: dict) -> str | None:
+    """The bot that created this wake-up, or None if it isn't provably one.
+
+    The name is user-editable, so it only names a claim: ``wakeup:<bot>:<nonce>:``.
+    The schedule id is derived server-side from the owner and the create key,
+    and the key from that bot and nonce, so a renamed or hand-made schedule
+    can't match the id it claims.
+    """
+    from llm_bawt.service.prompt_schedule_management import schedule_identifier
+
     name = schedule.get("name") or ""
     if not name.startswith(_PREFIX):
         return None
-    return name[len(_PREFIX):].split(":", 1)[0] or None
+    parts = name[len(_PREFIX):].split(":", 2)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    creator, nonce = parts[0], parts[1]
+    owner = schedule.get("owner_user_id") or ""
+    if schedule.get("id") != schedule_identifier(owner, _create_key(creator, nonce)):
+        return None
+    return creator
 
 
 def _visible(schedule: dict, bot: str) -> bool:
@@ -154,7 +176,8 @@ async def schedule_wakeup(
 
     create: message plus one of at (ISO with offset), in_minutes or cron
     (recurring, in timezone). target_bot_id defaults to you. Runs in a fresh
-    context, no memory augment/extract; a missed run fires once on recovery.
+    context, no memory augment/extract; a run missed by up to 7 days fires
+    once on recovery. Reusing idempotency_key returns the original.
     list / cancel(schedule_id): wake-ups you created or that target you.
     """
     arguments = {"action": action, "message": message, "target_bot_id": target_bot_id, "at": at,
@@ -200,15 +223,28 @@ async def schedule_wakeup(
     timing, problem = _timing(at, in_minutes, cron, timezone)
     if problem:
         return _error("invalid_request", problem)
+    from llm_bawt.service.prompt_schedule_management import schedule_identifier
+
+    replayable = bool(idempotency_key and idempotency_key.strip())
+    nonce = (hashlib.sha256(idempotency_key.strip().encode()).hexdigest()[:16]
+             if replayable else uuid4().hex[:16])
+    key = _create_key(bot, nonce)
+    if replayable:
+        # A retry returns the original even when in_minutes moved once_at.
+        existing, _ = await _call("GET", f"/v1/prompt-schedules/{schedule_identifier(user, key)}", user,
+                                  unknown="")
+        if existing is not None:
+            return _dump({**_summary(existing), "duplicate": True})
     header = f"[Scheduled wake-up from {bot}" + (f", {task}" if task else "") + "]"
-    name = f"{_PREFIX}{bot}:{(label or task or 'wake-up').strip()}"[:120]
-    key = (uuid5(NAMESPACE_URL, f"schedule_wakeup:{bot}:{idempotency_key.strip()}")
-           if idempotency_key and idempotency_key.strip() else uuid4())
+    name = f"{_PREFIX}{bot}:{nonce}:{(label or task or 'wake-up').strip()}"[:120]
     body = {
         "name": name, "description": f"task_id={task}" if task else "",
         "prompt": f"{header}\n\n{message.strip()}", "bot_id": target, "target_mode": "specific",
         "timing": timing, "clear_context": True, "augment_memory": False, "extract_memory": False,
-        "missed_policy": "run_latest", "idempotency_key": str(key),
+        # A late wake-up beats none: missed runs fire on recovery for up to
+        # the API's maximum grace (7 days), not the 1h UI default.
+        "missed_policy": "run_latest", "misfire_grace_seconds": _MISFIRE_GRACE_S,
+        "idempotency_key": key,
     }
     payload, error = await _call("POST", "/v1/prompt-schedules", user, body,
                                  unknown="the create's outcome is unknown; check action=list")

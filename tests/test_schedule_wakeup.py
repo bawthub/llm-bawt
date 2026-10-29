@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +10,7 @@ import pytest
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.mcp_server import bot_access_identity, schedule_tools
+from llm_bawt.service.prompt_schedule_management import schedule_identifier
 
 NOW = datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc)
 
@@ -50,9 +51,13 @@ def rig(monkeypatch):
     async def request(method, path, user, body=None, params=None):
         state.calls.append((method, path, user, body, params))
         if method == "POST":
-            row = {"id": f"s{len(state.schedules) + 1}", "bot_id": body["bot_id"], "name": body["name"],
+            # The real API derives the id from owner + create key (PromptManagement.create).
+            row = {"id": schedule_identifier(user, body["idempotency_key"]), "owner_user_id": user,
+                   "bot_id": body["bot_id"], "name": body["name"],
                    "description": body["description"], "timing": body["timing"],
                    "next_run_at": "x", "lifecycle": "active"}
+            if row["id"] in state.schedules:
+                return Response(409, {"detail": "Idempotency key already used for another request"})
             state.schedules[row["id"]] = row
             return Response(201, row)
         if method == "GET" and path == "/v1/prompt-schedules":
@@ -88,25 +93,29 @@ async def test_unsigned_caller_is_refused_and_nothing_is_written(rig, caller):
 async def test_create_uses_signed_owner_and_callback_defaults(rig):
     out = result(await schedule_tools.schedule_wakeup(
         message="check the deploy", in_minutes=30, task_id="task-1713", idempotency_key="k1"))
-    method, path, user, body, _ = rig.calls[0]
+    method, path, user, body, _ = [c for c in rig.calls if c[0] == "POST"][0]
     assert (method, path, user) == ("POST", "/v1/prompt-schedules", "owner")
     assert body["bot_id"] == "byte" and body["target_mode"] == "specific"
     assert body["timing"] == {"kind": "once", "once_at": "2026-10-29T15:30:00+00:00", "timezone": "UTC"}
     assert (body["clear_context"], body["augment_memory"], body["extract_memory"],
             body["missed_policy"]) == (True, False, False, "run_latest")
-    assert body["name"] == "wakeup:byte:TASK-1713" and body["description"] == "task_id=TASK-1713"
+    # A wake-up missed by hours (outage, restart) still fires: the API max, not the 1h default.
+    assert body["misfire_grace_seconds"] == 604800
+    assert body["name"].startswith("wakeup:byte:") and body["name"].endswith(":TASK-1713")
+    assert body["description"] == "task_id=TASK-1713"
     assert body["prompt"].startswith("[Scheduled wake-up from byte, TASK-1713]\n\n")
-    assert out["id"] == "s1"
+    assert out["id"] in rig.schedules
 
 
 @pytest.mark.anyio
-async def test_idempotency_key_is_stable_per_creator(rig):
-    await schedule_tools.schedule_wakeup(message="a", in_minutes=5, idempotency_key="same")
-    await schedule_tools.schedule_wakeup(message="a", in_minutes=5, idempotency_key="same")
+async def test_retry_with_same_key_returns_original_even_when_time_moved(rig, monkeypatch):
+    first = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, idempotency_key="same"))
+    monkeypatch.setattr(schedule_tools, "_now", lambda: NOW + timedelta(seconds=40))
+    again = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, idempotency_key="same"))
+    assert again["id"] == first["id"] and again["duplicate"] is True and len(rig.schedules) == 1
     rig.caller = SimpleNamespace(bot_id="al", user_id="owner")
-    await schedule_tools.schedule_wakeup(message="a", in_minutes=5, idempotency_key="same")
-    keys = [call[3]["idempotency_key"] for call in rig.calls]
-    assert keys[0] == keys[1] != keys[2]
+    other = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, idempotency_key="same"))
+    assert other["id"] != first["id"] and len(rig.schedules) == 2
 
 
 @pytest.mark.anyio
@@ -153,17 +162,32 @@ async def test_private_bot_may_schedule_itself(rig):
 
 @pytest.mark.anyio
 async def test_list_and_cancel_see_only_own_or_targeting_wakeups(rig):
-    rig.schedules["hand"] = {"id": "hand", "bot_id": "byte", "name": "Morning digest", "lifecycle": "active"}
-    rig.schedules["other"] = {"id": "other", "bot_id": "al", "name": "wakeup:al:x", "lifecycle": "active"}
-    rig.schedules["for-me"] = {"id": "for-me", "bot_id": "byte", "name": "wakeup:snark:x", "lifecycle": "active"}
-    await schedule_tools.schedule_wakeup(message="a", in_minutes=5, target_bot_id="al")
-    listed = result(await schedule_tools.schedule_wakeup(action="list"))
-    assert sorted(w["id"] for w in listed["wakeups"]) == ["for-me", "s4"]
+    def hand(identifier, name, bot):
+        rig.schedules[identifier] = {"id": identifier, "owner_user_id": "owner", "bot_id": bot,
+                                     "name": name, "lifecycle": "active"}
 
-    for blocked in ("hand", "other"):
+    hand("hand", "Morning digest", "byte")
+    # The user renamed hand-made schedules to look like wake-ups (names are
+    # editable, ids are derived): a claimed name is not provenance.
+    hand("forged-own", "wakeup:byte:0123456789abcdef:x", "al")
+    hand("forged-target", "wakeup:snark:0123456789abcdef:x", "byte")
+    rig.caller = SimpleNamespace(bot_id="al", user_id="owner")
+    al_own = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5))["id"]
+    rig.caller = SimpleNamespace(bot_id="snark", user_id="owner")
+    for_me = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, target_bot_id="byte"))["id"]
+    rig.caller = SimpleNamespace(bot_id="byte", user_id="owner")
+    mine = result(await schedule_tools.schedule_wakeup(message="a", in_minutes=5, target_bot_id="al"))["id"]
+    listed = result(await schedule_tools.schedule_wakeup(action="list"))
+    assert sorted(w["id"] for w in listed["wakeups"]) == sorted([for_me, mine])
+
+    for blocked in ("hand", "forged-own", "forged-target", al_own):
         out = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id=blocked))
         assert out["error"] == "forbidden" and rig.schedules[blocked]["lifecycle"] == "active"
-    out = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id="s4"))
+    # Renaming a real wake-up doesn't move it to another creator either.
+    rig.schedules[mine]["name"] = rig.schedules[mine]["name"].replace("wakeup:byte:", "wakeup:al:")
+    assert result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id=mine))["error"] == "forbidden"
+    rig.schedules[mine]["name"] = rig.schedules[mine]["name"].replace("wakeup:al:", "wakeup:byte:")
+    out = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id=mine))
     assert out["lifecycle"] == "cancelled"
     missing = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id="nope"))
     assert missing["error"] == "rejected" and missing["status_code"] == 404
