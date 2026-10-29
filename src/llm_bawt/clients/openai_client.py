@@ -12,6 +12,7 @@ from typing import List, Iterator, Any
 from rich.json import JSON
 from rich.rule import Rule
 from ..clients.base import LLMClient
+from .usage_hook import report_usage
 from ..utils.config import Config
 from ..models.message import Message
 import logging
@@ -421,6 +422,7 @@ class OpenAIClient(LLMClient):
         # request is one transport-bounded call, without mutating a pooled client.
         bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
         completion = bounded.chat.completions.create(**payload)
+        report_usage(self, completion)
         return (completion.choices[0].message.content or "").strip()
 
     def query(self, messages: List[Message], plaintext_output: bool = False, stream: bool = True, stop: list[str] | str | None = None, **kwargs) -> str:
@@ -570,6 +572,7 @@ class OpenAIClient(LLMClient):
         try:
             payload['stream'] = False
             completion = self._chat_create_with_fallback(payload)
+            report_usage(self, completion)
             response_text = completion.choices[0].message.content or ""
             if self.config.VERBOSE:
                 usage = completion.usage

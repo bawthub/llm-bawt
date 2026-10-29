@@ -283,4 +283,8 @@ def build_background_client(config: Any, model_def: dict, alias: str) -> tuple[A
         raise UnsupportedBackgroundModel(
             f"no background client for type={model_def.get('type')!r} "
             f"protocol={model_def.get('protocol')!r}")
-    return factory.build(config, model_def, alias), factory.name
+    from .usage.background_spend import install_spend_recorder
+
+    # One hook for every factory: each billed call is priced into the balance
+    # ledger as maintenance spend (TASK-1733).
+    return install_spend_recorder(factory.build(config, model_def, alias), model_def), factory.name

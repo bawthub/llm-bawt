@@ -446,9 +446,10 @@ def test_reports_say_whether_a_manual_balance_is_accepted():
              for name in ("anthropic_api", "xai", "openai_api", "openrouter", "claude", "zai")}
     flags["moonshot"] = MoonshotUsageAdapter().capabilities()
     manual = {"balance_supported": True, "manual_balance_supported": True}
-    assert {name: flags[name] for name in ("anthropic_api", "xai", "openai_api", "openrouter")} == dict.fromkeys(
-        ("anthropic_api", "xai", "openai_api", "openrouter"), manual)
-    assert flags["moonshot"] == {"balance_supported": True, "manual_balance_supported": False}
+    assert {name: flags[name] for name in ("anthropic_api", "xai", "openai_api")} == dict.fromkeys(
+        ("anthropic_api", "xai", "openai_api"), manual)
+    native = {"balance_supported": True, "manual_balance_supported": False}
+    assert flags["moonshot"] == flags["openrouter"] == native
     assert flags["claude"] == flags["zai"] == {"balance_supported": False, "manual_balance_supported": False}
 
 
@@ -471,12 +472,11 @@ async def test_error_and_no_balance_reports_keep_the_capability_flags(monkeypatc
     monkeypatch.delitem(usage_registry._cache, adapter.provider, raising=False)
     failed = await usage_registry._report(adapter, force=True)
     assert failed.status == "error" and failed.provider == "openrouter"
-    assert failed.balance_supported and failed.manual_balance_supported
+    assert failed.balance_supported and not failed.manual_balance_supported
 
 
 @pytest.mark.parametrize("provider,paths", [
     ("openai_api", ("openai-api", "openai-responses")),
-    ("openrouter", ("openrouter-anthropic",)),
     ("xai", ("xai-chat", "xai-responses")),
     ("anthropic_api", ("anthropic-api",)),
 ])
@@ -496,19 +496,21 @@ async def test_api_key_report_follows_the_connected_credential(monkeypatch):
     from types import SimpleNamespace
 
     from llm_bawt.service.providers.base import STATUS_CONNECTED
-    from llm_bawt.service.usage.adapters import OpenAIApiUsageAdapter, OpenRouterUsageAdapter
+    from llm_bawt.service.usage.adapters import OpenAIApiUsageAdapter, XaiUsageAdapter
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")  # never another provider's key
-    openrouter = OpenRouterUsageAdapter()
-    monkeypatch.setattr(openrouter, "_connection", lambda: None)
-    missing = await openrouter.fetch()
+    for env in XaiUsageAdapter.key_env_vars:
+        monkeypatch.delenv(env, raising=False)
+    xai = XaiUsageAdapter()
+    monkeypatch.setattr(xai, "_connection", lambda: None)
+    missing = await xai.fetch()
     assert missing.status == "unauthorized" and not missing.available and missing.manual_balance_supported
 
     connected = SimpleNamespace(status=STATUS_CONNECTED, connected_at="2026-10-25T12:00:00Z")
-    monkeypatch.setattr(openrouter, "_connection", lambda: connected)
-    snap = await openrouter.fetch()
+    monkeypatch.setattr(xai, "_connection", lambda: connected)
+    snap = await xai.fetch()
     assert snap.status == "ok" and snap.available and snap.limits == []
-    assert openrouter.credential_connected_at() == datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+    assert xai.credential_connected_at() == datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
 
     openai = OpenAIApiUsageAdapter()
     monkeypatch.setattr(openai, "_connection", lambda: None)

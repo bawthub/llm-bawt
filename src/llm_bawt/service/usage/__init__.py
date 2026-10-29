@@ -146,6 +146,37 @@ def _with_anchored_balance(adapter: UsageAdapter, snap: ProviderUsage) -> Provid
     return out
 
 
+def _with_ledger_spend(adapter: UsageAdapter, snap: ProviderUsage) -> ProviderUsage:
+    """Live ledger spend: per-day chat vs maintenance, plus totals when no report.
+
+    Floored at the credential's connection time like the Anthropic ledger path:
+    before it, a path label is not proof this key paid. Never cached; a failed
+    read leaves the report as it was (no fabricated zero).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from .canonical import UsageSpend
+
+    out = snap.model_copy(deep=True)
+    try:
+        connected_at = adapter.credential_connected_at()
+        if connected_at is None:
+            return out
+        now = datetime.now(timezone.utc)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        store = _balance_store()
+        daily = store.daily_spend(adapter.provider, since=connected_at, start=today - timedelta(days=6))
+        if out.spend is None:
+            totals = store.spend(adapter.provider, since=connected_at,
+                                 starts=(today, today - timedelta(days=6), today.replace(day=1)))
+            out.spend = UsageSpend(today_usd=float(totals[0]), seven_day_usd=float(totals[1]),
+                                   month_usd=float(totals[2]), source="bawt_recorded_estimate")
+        out.spend.daily = daily
+    except Exception as exc:  # noqa: BLE001 — spend detail is optional
+        logger.warning("Ledger spend read failed for %s: %s", adapter.provider, type(exc).__name__)
+    return out
+
+
 def set_balance(provider: str, amount) -> None:
     """Anchor a user-entered balance as of now (``balance_mode == "anchor"`` only)."""
     _balance_store().set_anchor(provider, amount)
@@ -178,6 +209,8 @@ async def get_usage(provider: str, *, force: bool = False) -> ProviderUsage | No
     snap = await _report(adapter, force=force)
     if adapter.balance_mode == BALANCE_ANCHOR:
         snap = await asyncio.to_thread(_with_anchored_balance, adapter, snap)
+    if adapter.balance_mode:
+        snap = await asyncio.to_thread(_with_ledger_spend, adapter, snap)
     return snap
 
 

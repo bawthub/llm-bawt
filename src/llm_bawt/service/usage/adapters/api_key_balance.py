@@ -72,12 +72,3 @@ class OpenAIApiUsageAdapter(ApiKeyBalanceAdapter):
     connection_id = "openai-api"
     key_env_vars = ("OPENAI_API_KEY",)
 
-
-class OpenRouterUsageAdapter(ApiKeyBalanceAdapter):
-    # OpenRouter's account credit endpoint (GET /api/v1/credits) requires a
-    # management key; the connected key is an inference key, so it is anchored.
-    provider = "openrouter"
-    display_name = "OpenRouter"
-    backend = "claude-code"  # reached via the claude-code bridge proxy
-    access_path_keys = ("openrouter-anthropic",)
-    connection_id = "openrouter"

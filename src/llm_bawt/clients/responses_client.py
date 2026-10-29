@@ -13,6 +13,7 @@ from typing import Any, Iterator, List
 from openai import OpenAI, OpenAIError
 
 from .base import LLMClient
+from .usage_hook import report_usage
 from ..models.message import Message
 from ..utils.config import Config
 
@@ -398,6 +399,7 @@ class ResponsesClient(LLMClient):
         )
         bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
         response = bounded.responses.create(**payload)
+        report_usage(self, response)
         return self._response_text(response).strip()
 
     @staticmethod
@@ -438,6 +440,7 @@ class ResponsesClient(LLMClient):
             logger.error("Responses API error for model '%s': %s", self.model, e)
             return f"ERROR: Responses API Error - {e}"
 
+        report_usage(self, response)
         response_text = self._response_text(response)
 
         if not plaintext_output:

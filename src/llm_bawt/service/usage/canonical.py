@@ -46,6 +46,15 @@ class UsageLimit(BaseModel):
     model_scope: list[str] | None = None
 
 
+class UsageSpendDay(BaseModel):
+    """One UTC day of this app's ledgered spend, split by what paid for it (TASK-1733)."""
+
+    date: str  # UTC calendar day, YYYY-MM-DD
+    chat_usd: float
+    maintenance_usd: float
+    unpriced_calls: int = 0  # billed calls with no known cost (not in the USD figures)
+
+
 class UsageSpend(BaseModel):
     """USD spend, never confused with subscription quota percentages."""
 
@@ -53,6 +62,9 @@ class UsageSpend(BaseModel):
     seven_day_usd: float
     month_usd: float
     source: str  # anthropic_reported | bawt_recorded_estimate
+    # Always from this app's ledger (bawt_recorded_estimate), whatever ``source``
+    # is: the last 7 UTC days, oldest first, chat vs background maintenance.
+    daily: list[UsageSpendDay] | None = None
 
 
 class UsageBalance(BaseModel):

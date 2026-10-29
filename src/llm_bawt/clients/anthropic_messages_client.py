@@ -19,6 +19,7 @@ from typing import Any, List
 from anthropic import Anthropic, BadRequestError
 
 from .base import LLMClient
+from .usage_hook import report_usage
 from ..models.message import Message
 from ..utils.config import Config
 
@@ -171,4 +172,5 @@ class AnthropicMessagesClient(LLMClient):
                 logger.info("%s rejects %s; retrying without it", self.model, field)
                 self._rejected_fields.add(field)
                 sent.pop(field)
+        report_usage(self, response)
         return self._text(response)

@@ -35,13 +35,15 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .canonical import UsageBalance
+from .canonical import UsageBalance, UsageSpendDay
 
 logger = logging.getLogger(__name__)
 
 BALANCE_ANCHOR = "anchor"
 BALANCE_PROVIDER = "provider"
 _CENT_FRACTION = Decimal("0.00000001")  # NUMERIC(18,8): compare at stored precision
+SOURCE_CHAT = "chat"
+SOURCE_MAINTENANCE = "maintenance"
 
 
 def bootstrap_balance_schema(conn) -> None:
@@ -63,6 +65,13 @@ def bootstrap_balance_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_api_balance_ledger_provider_created"
         " ON api_balance_ledger (provider, turn_created_at)"
     ))
+    # TASK-1733: background (maintenance) calls share the ledger. ``source``
+    # splits chat from maintenance spend; ``usage_json`` keeps a background
+    # call's tokens (a chat turn's live in its turn log).
+    conn.execute(text(
+        "ALTER TABLE api_balance_ledger ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'chat'"
+    ))
+    conn.execute(text("ALTER TABLE api_balance_ledger ADD COLUMN IF NOT EXISTS usage_json TEXT"))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS api_balances (
             provider VARCHAR(64) PRIMARY KEY,
@@ -114,13 +123,15 @@ def _cost(usage: dict) -> Decimal | None:
 
 
 def _upsert_ledger(conn, *, turn_id: str, provider: str, path: str,
-                   created_at: datetime, cost: Decimal | None) -> None:
+                   created_at: datetime, cost: Decimal | None,
+                   source: str = SOURCE_CHAT, usage_json: str | None = None) -> None:
     conn.execute(text("""
-        INSERT INTO api_balance_ledger (turn_id, provider, access_path_key, turn_created_at, cost_usd, updated_at)
-        VALUES (:turn, :provider, :path, :created, :cost, :now)
+        INSERT INTO api_balance_ledger
+            (turn_id, provider, access_path_key, turn_created_at, cost_usd, updated_at, source, usage_json)
+        VALUES (:turn, :provider, :path, :created, :cost, :now, :source, :usage)
         ON CONFLICT (turn_id) DO UPDATE SET cost_usd = EXCLUDED.cost_usd, updated_at = EXCLUDED.updated_at
     """), {"turn": turn_id, "provider": provider, "path": path, "created": created_at,
-           "cost": cost, "now": datetime.now(timezone.utc)})
+           "cost": cost, "now": datetime.now(timezone.utc), "source": source, "usage": usage_json})
 
 
 def _lock_provider(conn, provider: str) -> None:
@@ -146,8 +157,22 @@ def record_turn_charge(conn, *, turn_id: str, created_at: datetime, token_usage_
     adapter = balance_adapter_for_path(path)
     if adapter is None:
         return
+    charge_ledger_entry(conn, entry_id=turn_id, adapter=adapter, path=path,
+                        created_at=created_at, cost=_cost(usage))
+
+
+def charge_ledger_entry(conn, *, entry_id: str, adapter: Any, path: str, created_at: datetime,
+                        cost: Decimal | None, source: str = SOURCE_CHAT,
+                        usage_json: str | None = None) -> None:
+    """Ledger one billed call and move its provider's counter by the change.
+
+    The one charge path for chat turns and background calls. ``entry_id`` is the
+    idempotency key: replaying the same entry charges nothing, and a revised
+    cost charges only the difference. The caller's transaction serializes
+    concurrent writes of the same entry (turn row lock, or a unique id).
+    """
     provider = adapter.provider
-    cost = _cost(usage)
+    turn_id = entry_id
 
     def prior_row():
         return conn.execute(text("SELECT cost_usd FROM api_balance_ledger WHERE turn_id=:t"),
@@ -165,7 +190,8 @@ def record_turn_charge(conn, *, turn_id: str, created_at: datetime, token_usage_
     prior = prior_row()
     if prior is not None and prior.cost_usd == cost:
         return
-    _upsert_ledger(conn, turn_id=turn_id, provider=provider, path=path, created_at=created_at, cost=cost)
+    _upsert_ledger(conn, turn_id=turn_id, provider=provider, path=path, created_at=created_at, cost=cost,
+                   source=source, usage_json=usage_json)
     if not counted:
         return
     prior_cost = prior.cost_usd if prior is not None else None
@@ -337,6 +363,21 @@ class ApiBalanceStore:
                 WHERE provider = :p AND turn_created_at > :since AND turn_created_at >= :floor
             """), params).one()
         return tuple(Decimal(value) for value in row)
+
+    def daily_spend(self, provider: str, *, since: datetime, start: datetime) -> list[UsageSpendDay]:
+        """Ledgered cost per UTC day from ``start``, chat vs maintenance (indexed scan)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT to_char(turn_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+                       COALESCE(SUM(cost_usd) FILTER (WHERE source = :maint), 0) AS maint,
+                       COALESCE(SUM(cost_usd) FILTER (WHERE source <> :maint), 0) AS chat,
+                       COUNT(*) FILTER (WHERE cost_usd IS NULL) AS unpriced
+                FROM api_balance_ledger
+                WHERE provider = :p AND turn_created_at > :since AND turn_created_at >= :start
+                GROUP BY 1 ORDER BY 1
+            """), {"p": provider, "since": since, "start": start, "maint": SOURCE_MAINTENANCE}).all()
+        return [UsageSpendDay(date=day, chat_usd=float(chat), maintenance_usd=float(maint),
+                              unpriced_calls=int(unpriced)) for day, maint, chat, unpriced in rows]
 
 
 def anchored_balance(row: BalanceRow | None, connected_at: datetime | None) -> tuple[UsageBalance | None, str | None]:
