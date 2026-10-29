@@ -482,6 +482,15 @@ class ClaudeActiveRun:
                     # A command that already started can have its content in
                     # the interrupted turn. Never replay it speculatively.
                     raise RuntimeError("escalation_not_cancelled")
+                if held.origin == "system" and swept_ids != {message_id}:
+                    # TASK-1748 (impl r1 B1): the CLI swept a command beyond the
+                    # quiesce control (one the bridge doesn't hold, or a late
+                    # arrival). Replaying only the control would silently drop
+                    # it, so the escalation fails visibly instead of succeeding.
+                    raise RuntimeError(
+                        "escalation_other_cancelled: "
+                        + self._describe(sorted(swept_ids - {message_id}))
+                    )
                 if survivors:
                     # A hosted CLI can retain in-flight sends. Do not add an
                     # identical turn while their delivery remains uncertain.

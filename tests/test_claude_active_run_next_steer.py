@@ -436,6 +436,25 @@ async def test_system_quiesce_steer_escalates_when_it_is_the_only_queued_command
 
 
 @pytest.mark.anyio
+async def test_system_quiesce_escalation_fails_when_cli_sweeps_another_command():
+    # TASK-1748 (Codex IMPL r1 B1): a receipt that also cancels a command the
+    # bridge doesn't hold must not replay the control alone and report success.
+    client = _FakeClient()
+    await client._query.frames.put(_INIT)
+    run = _run(client)
+    _, task = await _start(run)
+    await run.steer(DEFAULT_QUIESCE_REQUEST, priority="next", message_id=CMD, origin="system")
+    client._query.receipt = {"still_queued": [], "cancelled": [CMD, CMD2]}
+    await client._query.frames.put(_lifecycle(CMD, "cancelled"))
+    await client._query.frames.put(_lifecycle(CMD2, "cancelled"))
+    with pytest.raises(RuntimeError, match="escalation_other_cancelled"):
+        await run.escalate(CMD, interrupt_frame=FRAME)
+    assert client.replacements == []
+    await client._query.frames.put(_result("ended"))
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("other_origin", ["user", "bot"])
 async def test_system_quiesce_escalation_refuses_before_sweeping_another_command(other_origin):
     # TASK-1748 (Codex DESIGN r1 B2): the sweep would mark the other command
