@@ -111,6 +111,43 @@ def test_background_client_is_wrapped_with_job_labels(monkeypatch):
     assert _only(health) == [{"name": "profile_maintenance", "status": "ok", "reason": None}]
 
 
+def test_429_is_rate_limit_even_when_text_mentions_spending():
+    err = _StatusError(429, "Error code: 429 - {'code': 'team:spending-limit'} credit balance low")
+    assert classify_failure(err) == mh.RATE_LIMIT
+    assert classify_failure(_StatusError(400, "your credit balance is low")) == mh.UNKNOWN
+
+
+def test_raw_error_text_never_reaches_reason_or_log(caplog):
+    secret = "xai-SUPERSECRETKEY123"
+    health = MaintenanceHealth()
+    inner = MagicMock()
+    inner.query.side_effect = _StatusError(
+        401, f"Error code: 401 - {{'code': 'invalid_api_key', 'error': 'bad key {secret}'}}")
+    with pytest.raises(_StatusError):
+        _client(health, inner).query(messages=[])
+    reason = _only(health)[0]["reason"]
+    assert "HTTP 401" in reason and "code invalid_api_key" in reason
+    inner.query.side_effect = None
+    inner.query.return_value = f"ERROR: request echoed {secret}"
+    _client(health, inner).query(messages=[])
+    assert secret not in str(health.checks_payload()) and secret not in caplog.text
+
+
+def test_unset_model_is_a_recorded_failure(monkeypatch):
+    from fastapi import HTTPException
+    from llm_bawt.service import utility_completion as uc
+
+    health = MaintenanceHealth()
+    monkeypatch.setattr(mh, "_registry", health)
+    monkeypatch.setattr(uc, "get_service", lambda: SimpleNamespace(config=SimpleNamespace()))
+    monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda *_a, **_k: None)
+    with pytest.raises(HTTPException):
+        uc.complete_utility(SimpleNamespace(model=None))
+    row = _only(health)[0]
+    assert row["name"] == "utility_completion" and "unconfigured" in row["reason"]
+    assert "maintenance_model is not set" in row["reason"]
+
+
 def test_route_serves_aggregator_shape(monkeypatch):
     from llm_bawt.service.routes.health import get_maintenance_health
 

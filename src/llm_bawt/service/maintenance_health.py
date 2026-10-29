@@ -39,8 +39,12 @@ UNAVAILABLE = "unavailable"
 EMPTY_RESPONSE = "empty_response"
 UNKNOWN = "unknown"
 
-_SPENDING_CODE = re.compile(r"[\w-]*:spending-limit|spending[_ -]limit|insufficient[_ ]quota|credit balance", re.I)
+_SPENDING_CODE = re.compile(r"[\w-]*:spending-limit|insufficient_quota", re.I)
 _STATUS_IN_TEXT = re.compile(r"(?:error code|status(?: code)?|HTTP)[:\s]+(\d{3})", re.I)
+# A provider error code token, e.g. ``personal-team-blocked:spending-limit`` or
+# ``invalid_api_key``: read from a quoted ``code`` field only, so arbitrary
+# message text (which can echo request data or keys) never reaches a reason.
+_CODE_FIELD = re.compile(r"""['"]code['"]\s*:\s*['"]([A-Za-z0-9_.:-]{1,64})['"]""")
 
 
 def _status_of(error: Any) -> int | None:
@@ -64,10 +68,12 @@ def classify_failure(error: Any) -> str:
     """
     text = str(error)
     status = _status_of(error)
-    if _SPENDING_CODE.search(text) or status == 402:
-        return SPENDING_LIMIT
     if status == 429:
+        # Never spending_limit, whatever the message text says: failing over
+        # on a rate-limit blip would burn paid credit.
         return RATE_LIMIT
+    if status == 402 or (status in (None, 403) and _SPENDING_CODE.search(text)):
+        return SPENDING_LIMIT
     if status in (401, 403):
         return AUTH
     name = type(error).__name__.lower()
@@ -76,6 +82,24 @@ def classify_failure(error: Any) -> str:
     if (status is not None and status >= 500) or "connection" in name:
         return UNAVAILABLE
     return UNKNOWN
+
+
+def safe_detail(error: Any) -> str:
+    """Secret-free description: exception type, HTTP status, provider code.
+
+    Raw exception/reply text is never kept: provider errors can echo request
+    content or credentials, and this lands in a bell reason and a log line.
+    """
+    text = str(error)
+    kind = "error reply" if isinstance(error, str) else type(error).__name__
+    parts = [kind]
+    status = _status_of(error)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    code = _CODE_FIELD.search(text)
+    if code:
+        parts.append(f"code {code.group(1)}")
+    return ", ".join(parts)
 
 
 def _now() -> str:
@@ -148,6 +172,15 @@ class MaintenanceHealth:
         return {"checks": checks}
 
 
+UNCONFIGURED = "unconfigured"
+
+
+def record_unconfigured(job: str, setting: str) -> None:
+    """A job that can't run because its model setting is unset fails visibly too."""
+    _registry.record_failure(job, UNCONFIGURED, f"{setting} is not set",
+                             model=None, provider=None, credential=None)
+
+
 _registry = MaintenanceHealth()
 
 
@@ -180,11 +213,10 @@ class MonitoredClient:
         try:
             result = getattr(self._client, method)(*args, **kwargs)
         except Exception as error:
-            self._health.record_failure(self._job, classify_failure(error),
-                                        f"{type(error).__name__}: {error}", **self._labels)
+            self._health.record_failure(self._job, classify_failure(error), safe_detail(error), **self._labels)
             raise
         if isinstance(result, str) and result.lstrip().startswith("ERROR:"):
-            self._health.record_failure(self._job, classify_failure(result), result.strip(), **self._labels)
+            self._health.record_failure(self._job, classify_failure(result), safe_detail(result), **self._labels)
         elif isinstance(result, str) and not result.strip():
             self._health.record_failure(self._job, EMPTY_RESPONSE, "empty completion", **self._labels)
         else:

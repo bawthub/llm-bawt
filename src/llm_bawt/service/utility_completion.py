@@ -46,12 +46,12 @@ def complete_utility(
 
     service = get_service()
     requested_model = request.model or resolve_job_model(service.config, "maintenance_model")
+    job = "recall_completion" if timeout_seconds is not None else "utility_completion"
     if not requested_model:
+        from .maintenance_health import record_unconfigured
+        record_unconfigured(job, "maintenance_model")
         raise HTTPException(status_code=503, detail="No maintenance model configured")
-    client, model_alias = service._get_background_client(
-        model_override=requested_model,
-        job="recall_completion" if timeout_seconds is not None else "utility_completion",
-    )
+    client, model_alias = service._get_background_client(model_override=requested_model, job=job)
     if client is None or model_alias is None:
         raise HTTPException(status_code=422, detail="Configured model has no direct API client")
     if timeout_seconds is not None:

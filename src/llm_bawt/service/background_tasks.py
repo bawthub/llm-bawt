@@ -139,6 +139,8 @@ class BackgroundTasksMixin:
             or resolve_job_model(self.config, "maintenance_model")
         )
         if not requested_model:
+            from .maintenance_health import record_unconfigured
+            record_unconfigured("profile_maintenance", "maintenance_model")
             return {"error": "No model configured for profile maintenance"}
 
         # Job models are global, not bot models. Resolving through the task's
