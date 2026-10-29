@@ -89,6 +89,21 @@ def test_hydrate_rows_and_lifecycle_event_carry_the_reason(gated):
     assert event["wait_reason"] == HOLD
 
 
+def _await_notifies(listener, payload: str, count: int) -> list[str]:
+    """Read notifies until ``count`` carry ``payload``. A single poll() races the
+    second NOTIFY still in flight on the socket (CI run 40895186485)."""
+    import select
+
+    while True:
+        listener.poll()
+        payloads = [n.payload for n in listener.notifies]
+        if payloads.count(payload) >= count:
+            return payloads
+        # timing-ok: hang guard only; returning lets the caller's assert report the shortfall
+        if not select.select([listener], [], [], 10)[0]:
+            return payloads
+
+
 def test_gate_open_and_release_notify_and_republish(gated):
     bot = gated.bot()
     deliveries, record = _chat_row(gated, bot)
@@ -104,8 +119,7 @@ def test_gate_open_and_release_notify_and_republish(gated):
         assert next_expiry_wait(gated.store.engine) is not None
         with gated.store.engine.begin() as conn:
             release_gates(conn, owner_id=owner)
-        listener.poll()
-        payloads = [n.payload for n in listener.notifies]
+        payloads = _await_notifies(listener, str(gate.id), 2)
         assert payloads.count(str(gate.id)) == 2  # opened, then released
     finally:
         listener.close()
