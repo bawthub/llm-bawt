@@ -108,7 +108,8 @@ def test_summarize_with_client_happy_path(monkeypatch):
     client.query.return_value = "  Summary: a real summary.  "
     assert summarize_session_with_client(_session(), client, config=None) == "Summary: a real summary."
     kwargs = client.query.call_args.kwargs
-    assert kwargs["max_tokens"] == 320 and kwargs["stream"] is False
+    from llm_bawt.memory.summarization_limits import SUMMARY_MAX_OUTPUT_TOKENS
+    assert kwargs["max_tokens"] == SUMMARY_MAX_OUTPUT_TOKENS and kwargs["stream"] is False
     assert [m.role for m in kwargs["messages"]] == ["system", "user"]
 
 

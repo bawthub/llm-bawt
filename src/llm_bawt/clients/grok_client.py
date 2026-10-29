@@ -49,6 +49,13 @@ class GrokClient(ResponsesClient):
             model_definition=model_definition,
         )
 
+    def _cache_routing_fields(self, key: str) -> dict:
+        """xAI routes its prompt cache by the ``x-grok-conv-id`` header.
+
+        Measured TASK-1729: header 6/6 cache hits vs ``prompt_cache_key`` 4/6.
+        """
+        return {"extra_headers": {"x-grok-conv-id": key}}
+
     @staticmethod
     def _resolve_api_key(config: Config, explicit: str | None) -> str | None:
         """DB-first (CredentialStore via the `xai` adapter), env as legacy fallback."""

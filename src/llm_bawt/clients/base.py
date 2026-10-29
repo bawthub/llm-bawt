@@ -86,6 +86,16 @@ class LLMClient(ABC):
         """
         raise NotImplementedError("Client does not support bounded utility completion")
 
+    def job_request_options(self, job: str, *, reasoning_effort: str | None = None) -> dict[str, Any]:
+        """Provider-specific ``query`` kwargs for a background job (TASK-1729).
+
+        Capability hook: a client whose API supports prompt-cache routing or a
+        reasoning-effort knob returns the kwargs that express them; the default
+        supports neither and returns nothing. Request shaping lives on the
+        client hierarchy because ProviderAdapter only owns credentials.
+        """
+        return {}
+
     def supports_native_tools(self) -> bool:
         """Return True if the client supports native tool calling."""
         return False

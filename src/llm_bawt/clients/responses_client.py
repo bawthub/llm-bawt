@@ -212,7 +212,25 @@ class ResponsesClient(LLMClient):
             self.config.TEMPERATURE,
         )
 
+        effort = kwargs.get("reasoning_effort")
+        if effort:
+            payload["reasoning"] = {"effort": effort}
+        routing_key = kwargs.get("cache_routing_key")
+        if routing_key:
+            payload.update(self._cache_routing_fields(routing_key))
+
         return payload
+
+    def job_request_options(self, job: str, *, reasoning_effort: str | None = None) -> dict[str, Any]:
+        """Stable per-job cache routing key plus optional reasoning effort."""
+        options: dict[str, Any] = {"cache_routing_key": f"llm-bawt:{job}"}
+        if reasoning_effort:
+            options["reasoning_effort"] = reasoning_effort
+        return options
+
+    def _cache_routing_fields(self, key: str) -> dict[str, Any]:
+        """Payload fields that pin same-prefix requests to one prompt cache."""
+        return {"prompt_cache_key": key}
 
     # ------------------------------------------------------------------
     # Streaming

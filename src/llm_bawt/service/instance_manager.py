@@ -451,6 +451,13 @@ class InstanceManagerMixin:
             raise ValueError(f"Model '{model_alias}' has no botless background client")
         return client
 
+    def _maintenance_reasoning_effort(self) -> str | None:
+        """Global ``maintenance_reasoning_effort``, read per call (TASK-1729)."""
+        from ..runtime_setting_resolution import resolve_global_runtime_setting
+
+        value = resolve_global_runtime_setting(self.config, "maintenance_reasoning_effort")
+        return (str(value).strip() or None) if value else None
+
     def _get_background_client(
         self, model_override: str | None = None, *, job: str = "background",
         allow_fallback: bool = False,
@@ -475,7 +482,8 @@ class InstanceManagerMixin:
             )
             return None, None
         monitored = MonitoredClient(client, job=job, model=model_alias, provider=provider,
-                                    credential=credential)
+                                    credential=credential,
+                                    reasoning_effort=self._maintenance_reasoning_effort)
         if not allow_fallback or not provider:
             return monitored, model_alias
         return self._with_maintenance_fallback(monitored, job, model_alias, provider), model_alias
@@ -509,7 +517,8 @@ class InstanceManagerMixin:
                 incompatible(backup_alias, "must be on a different provider than the primary")
                 return None
             return Backup(client=MonitoredClient(client, job=job, model=backup_alias,
-                                                 provider=backup_provider, credential=credential),
+                                                 provider=backup_provider, credential=credential,
+                                                 reasoning_effort=self._maintenance_reasoning_effort),
                           model=backup_alias, provider=backup_provider)
 
         def cooldown() -> float:

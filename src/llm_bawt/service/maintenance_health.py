@@ -24,7 +24,7 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .logging import get_service_logger
 
@@ -188,8 +188,10 @@ class MonitoredClient:
     """
 
     def __init__(self, client: Any, *, job: str, model: str | None, provider: str | None,
-                 credential: str | None, health: MaintenanceHealth | None = None) -> None:
+                 credential: str | None, health: MaintenanceHealth | None = None,
+                 reasoning_effort: Callable[[], str | None] | None = None) -> None:
         self._client = client
+        self._reasoning_effort = reasoning_effort
         self._job = job
         self._labels = {"model": model, "provider": provider, "credential": credential}
         self._health = health or _registry
@@ -215,8 +217,23 @@ class MonitoredClient:
             self._health.record_success(self._job, **self._labels)
         return result
 
+    def _job_options(self) -> dict[str, Any]:
+        """Client capability kwargs for this job; resolved per call (TASK-1729)."""
+        hook = getattr(self._client, "job_request_options", None)
+        if not callable(hook):
+            return {}
+        effort = None
+        if self._reasoning_effort is not None:
+            try:
+                effort = self._reasoning_effort()
+            except Exception as error:  # a settings outage must not fail the job
+                log.warning("maintenance_reasoning_effort unreadable for %s; using provider default: %s",
+                            self._job, error)
+        options = hook(self._job, reasoning_effort=effort or None)
+        return options if isinstance(options, dict) else {}
+
     def query(self, *args: Any, **kwargs: Any) -> Any:
-        return self._call("query", *args, **kwargs)
+        return self._call("query", *args, **{**self._job_options(), **kwargs})
 
     def query_bounded(self, *args: Any, **kwargs: Any) -> Any:
         return self._call("query_bounded", *args, **kwargs)

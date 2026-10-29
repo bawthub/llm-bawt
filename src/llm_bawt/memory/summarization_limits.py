@@ -26,6 +26,10 @@ MAX_SUMMARIZATION_PROMPT_TOKENS = 512_000
 # an unknown model is assumed to be a local/short-context one.
 UNKNOWN_MODEL_LIMITS = (6000, 4000)
 
+# Output cap for one session summary. TASK-1729: 320 truncated ~1.5% of
+# summaries once background effort dropped to "none" (longer prose).
+SUMMARY_MAX_OUTPUT_TOKENS = 480
+
 # Reserve for the summary itself plus a proportional safety margin.
 _RESPONSE_BUDGET_TOKENS = 512
 _MIN_SAFETY_MARGIN_TOKENS = 2048

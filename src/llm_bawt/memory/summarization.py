@@ -23,6 +23,7 @@ from typing import Any, Callable, TYPE_CHECKING
 import httpx
 
 from .speaker_attribution import speaker_of, summary_label
+from .summarization_limits import SUMMARY_MAX_OUTPUT_TOKENS
 
 if TYPE_CHECKING:
     from .summarization import Session
@@ -740,7 +741,7 @@ def summarize_session_with_llm(
             json={
                 "prompt": prompt,
                 "system": "You are a helpful assistant that summarizes conversations concisely.",
-                "max_tokens": 320,
+                "max_tokens": SUMMARY_MAX_OUTPUT_TOKENS,
                 "temperature": 0.3,
             },
             timeout=timeout,
@@ -797,7 +798,7 @@ def summarize_session_with_client(
     client: Any,
     config: Any | None = None,
     *,
-    max_tokens: int = 320,
+    max_tokens: int = SUMMARY_MAX_OUTPUT_TOKENS,
     temperature: float = 0.3,
     max_prompt_tokens: int = 6000,
 ) -> str | None:

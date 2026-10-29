@@ -497,6 +497,18 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
              "Unset = no backup; the failure only raises an alert.",
         ui_widget="model",
     ),
+    "maintenance_reasoning_effort": SettingDefinition(
+        key="maintenance_reasoning_effort",
+        type="str",
+        default=None,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Background job reasoning effort",
+        help="Reasoning effort sent with background job calls (summaries, "
+             "memory extraction) on models that accept one, e.g. none, low, "
+             "medium, high. Unset = the provider's default. Other models "
+             "ignore it.",
+    ),
     "maintenance_fallback_cooldown_seconds": SettingDefinition(
         key="maintenance_fallback_cooldown_seconds",
         type="int",
