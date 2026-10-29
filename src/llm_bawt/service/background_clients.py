@@ -24,7 +24,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..model_catalog import IncompatibleModelError, resolve_model_config
+from ..model_catalog import IncompatibleModelError, ProtocolCompatibility, resolve_model_config
 
 log = logging.getLogger(__name__)
 
@@ -45,9 +45,18 @@ def resolve_background_model(config: Any, ref: str) -> dict | None:
     last_error: Exception | None = None
     for harness in _HARNESS_ORDER:
         try:
-            return resolve_model_config(config, ref, harness=harness, default=None)
+            model_def = resolve_model_config(config, ref, harness=harness, default=None)
         except IncompatibleModelError as error:
             last_error = error
+            continue
+        # The chat harness admits any auth; a subscription (OAuth) endpoint
+        # found there is not servable here, so the background harness decides.
+        auth = (model_def or {}).get("auth_mechanism")
+        if auth is not None and auth not in ProtocolCompatibility.BACKGROUND_AUTH:
+            last_error = IncompatibleModelError(
+                f"{ref!r} resolves to a {auth} access path; background jobs need an API key or no auth")
+            continue
+        return model_def
     assert last_error is not None
     raise last_error
 
@@ -56,19 +65,25 @@ class UnsupportedBackgroundModel(ValueError):
     """The endpoint resolved, but no background client can serve it."""
 
 
-def endpoint_api_key(config: Any, model_def: dict) -> str | None:
+#: Sent to endpoints that need no key. Never None: the generic clients treat a
+#: missing key as "use the platform default key", which would leak an unrelated
+#: provider's credential to this endpoint.
+NO_KEY = "not-needed"
+
+
+def endpoint_api_key(config: Any, model_def: dict) -> str:
     """API key for the endpoint's access path, from its owning provider connection.
 
     An explicit ``api_key`` on the definition wins (custom endpoints). An
     ``api-key`` path with no connected key raises, so the job fails visibly
-    instead of calling upstream unauthenticated.
+    instead of calling upstream unauthenticated. Other paths get :data:`NO_KEY`.
     """
     explicit = model_def.get("api_key")
     if explicit:
         return str(explicit)
     auth = model_def.get("auth_mechanism")
     if auth != "api-key":
-        return None
+        return NO_KEY
     from .providers.registry import access_path_adapter
 
     adapter = access_path_adapter(config, model_def.get("access_path"))

@@ -31,6 +31,8 @@ PATHS = [
     ("openrouter-anthropic", "openrouter", "anthropic-messages", "api-key", None, "https://r.example"),
     ("xai-chat", "xai", "chat-completions", "api-key", None, "https://x.example/v1"),
     ("xai-responses", "xai", "responses", "api-key", None, "https://x.example/v1"),
+    # A subscription chat-completions path: the chat harness admits it.
+    ("zai-oauth", "zai", "chat-completions", "oauth", None, "https://z.example/v1"),
 ]
 
 # access path -> factory that must serve it on the background harness (None = rejected)
@@ -48,6 +50,7 @@ EXPECTED = {
     "openrouter-anthropic": "anthropic-messages",
     "xai-chat": "xai",
     "xai-responses": "xai",
+    "zai-oauth": None,
 }
 
 
@@ -91,6 +94,23 @@ def test_chat_endpoint_keeps_priority_over_background_only_ones():
     cfg = _config(_catalog(models={"xai-chat": "shared", "xai-responses": "shared",
                                    "anthropic-api": "shared"}))
     assert bc.resolve_background_model(cfg, "shared")["access_path"] == "xai-chat"
+
+
+def test_oauth_chat_endpoint_falls_through_to_an_api_key_one():
+    cfg = _config(_catalog(models={"zai-oauth": "shared", "anthropic-api": "shared"}))
+    assert bc.resolve_background_model(cfg, "shared")["access_path"] == "anthropic-api"
+
+
+def test_no_auth_chat_endpoint_never_gets_the_platform_openai_key():
+    cfg = _config(_catalog(paths=[
+        ("local-oai", "local", "chat-completions", "none", None, "http://l.example:2/v1")]))
+    model_def = bc.resolve_background_model(cfg, "m-local-oai")
+    with patch("llm_bawt.service.providers.api_key.resolve_api_key",
+               return_value="sk-platform-openai") as platform, \
+         patch("llm_bawt.clients.openai_client.OpenAI") as sdk:
+        bc.build_background_client(cfg, model_def, "x")
+    platform.assert_not_called()
+    assert sdk.call_args.kwargs["api_key"] == bc.NO_KEY
 
 
 def test_every_factory_client_supports_both_maintenance_call_shapes():
@@ -197,18 +217,27 @@ class _SpendError(Exception):
         super().__init__("personal-team-blocked:spending-limit")
 
 
-def test_spending_limit_falls_back_to_a_non_xai_backup_end_to_end(monkeypatch):
+@pytest.mark.parametrize("backup_ref", [
+    "backup",
+    # The backup model also has a second endpoint, so only the endpoint ref is
+    # unambiguous; labeling must use the endpoint the client was built from.
+    "backup@anthropic-api",
+])
+def test_spending_limit_falls_back_to_a_non_xai_backup_end_to_end(monkeypatch, backup_ref):
     """Primary on xai-chat hits its spending limit; the call is replayed on an
     Anthropic-Messages backup and reported as served by the backup."""
     from llm_bawt.service import maintenance_fallback as mf
     from llm_bawt.service.instance_manager import InstanceManagerMixin
 
-    catalog = _catalog(models={"xai-chat": "primary", "anthropic-api": "backup"})
+    models = {"xai-chat": "primary", "anthropic-api": "backup"}
+    if "@" in backup_ref:
+        models["openrouter-anthropic"] = "backup"
+    catalog = _catalog(models=models)
     health = mh.MaintenanceHealth()
     monkeypatch.setattr(mh, "_registry", health)
     monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model",
                         lambda c, k: {"maintenance_model": "primary",
-                                      mf.FALLBACK_SETTING: "backup"}.get(k))
+                                      mf.FALLBACK_SETTING: backup_ref}.get(k))
     monkeypatch.setattr(mf, "default_store", lambda config: mf.MemoryExhaustionStore())
     resolver = MagicMock()
     resolver.return_value.resolve.return_value = 600

@@ -87,7 +87,7 @@ def test_background_client_without_usable_client_is_a_recorded_failure(monkeypat
     monkeypatch.setattr(mh, "_registry", health)
     svc = InstanceManagerMixin.__new__(InstanceManagerMixin)
     svc.config = SimpleNamespace()
-    with patch.object(InstanceManagerMixin, "_resolve_background_client", return_value=(None, None)), \
+    with patch.object(InstanceManagerMixin, "_resolve_background_endpoint", return_value=(None, None, None)), \
          patch.object(InstanceManagerMixin, "_background_credential_labels", return_value=(None, None)):
         assert svc._get_background_client("grok-4.3", job="memory_extraction") == (None, None)
     row = _only(health)[0]
@@ -103,7 +103,8 @@ def test_background_client_is_wrapped_with_job_labels(monkeypatch):
     svc = InstanceManagerMixin.__new__(InstanceManagerMixin)
     inner = MagicMock()
     inner.query.return_value = "ok"
-    with patch.object(InstanceManagerMixin, "_resolve_background_client", return_value=(inner, "grok-4.3")), \
+    with patch.object(InstanceManagerMixin, "_resolve_background_endpoint",
+                      return_value=(inner, "grok-4.3", {})), \
          patch.object(InstanceManagerMixin, "_background_credential_labels", return_value=("xai", "Default")):
         client, alias = svc._get_background_client(job="profile_maintenance")
     assert alias == "grok-4.3" and client.wrapped is inner

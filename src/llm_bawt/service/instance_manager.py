@@ -466,8 +466,8 @@ class InstanceManagerMixin:
         """
         from .maintenance_health import UNAVAILABLE, MonitoredClient, maintenance_health
 
-        client, model_alias = self._resolve_background_client(model_override)
-        provider, credential = self._background_credential_labels(model_alias)
+        client, model_alias, model_def = self._resolve_background_endpoint(model_override)
+        provider, credential = self._background_credential_labels(model_alias, model_def)
         if client is None:
             maintenance_health().record_failure(
                 job, UNAVAILABLE, "no usable background client for the configured job model",
@@ -500,11 +500,11 @@ class InstanceManagerMixin:
             if not alias:
                 incompatible(None, "not set")
                 return None
-            client, backup_alias = self._resolve_background_client(alias)
+            client, backup_alias, backup_def = self._resolve_background_endpoint(alias)
             if client is None or backup_alias is None:
                 incompatible(alias, "not in the catalog or no API client")
                 return None
-            backup_provider, credential = self._background_credential_labels(backup_alias)
+            backup_provider, credential = self._background_credential_labels(backup_alias, backup_def)
             if not backup_provider or backup_provider == primary_provider:
                 incompatible(backup_alias, "must be on a different provider than the primary")
                 return None
@@ -525,14 +525,21 @@ class InstanceManagerMixin:
                               cooldown_seconds=cooldown, state_health=default_state_health(),
                               on_incompatible=incompatible)
 
-    def _background_credential_labels(self, model_alias: str | None) -> tuple[str | None, str | None]:
-        """Provider id and stored credential *name* (never the secret) for a job model."""
+    def _background_credential_labels(
+        self, model_alias: str | None, model_def: dict | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Provider id and stored credential *name* (never the secret) for a job model.
+
+        Pass the ``model_def`` the client was built from: re-resolving a bare
+        model key can pick a different endpoint or fail as ambiguous.
+        """
         if not model_alias:
             return None, None
         try:
             from .background_clients import provider_label, resolve_background_model
 
-            model_def = resolve_background_model(self.config, model_alias) or {}
+            if model_def is None:
+                model_def = resolve_background_model(self.config, model_alias) or {}
             provider = model_def.get("provider") or provider_label(self.config, model_def)
             if not provider:
                 return None, None
@@ -553,6 +560,13 @@ class InstanceManagerMixin:
         Returns:
             ``(client, model_alias)`` or ``(None, None)`` if unavailable.
         """
+        client, model_alias, _ = self._resolve_background_endpoint(model_override)
+        return client, model_alias
+
+    def _resolve_background_endpoint(
+        self, model_override: str | None = None,
+    ) -> tuple[Any | None, str | None, dict | None]:
+        """:meth:`_resolve_background_client` plus the endpoint definition it built from."""
         from ..runtime_settings import resolve_job_model
 
         preferred = (
@@ -562,7 +576,7 @@ class InstanceManagerMixin:
         )
         if not preferred:
             log.warning("No background job model configured; falling back to heuristics.")
-            return None, None
+            return None, None, None
 
         # TASK-857: background jobs are GLOBAL (TASK-522), resolved with no bot
         # identity. TASK-1726: the ``background`` harness (after ``chat``) also
@@ -576,10 +590,10 @@ class InstanceManagerMixin:
             model_def = resolve_background_model(self.config, preferred)
         except Exception as e:
             log.error(f"Background model '{preferred}' cannot serve background jobs: {e}")
-            return None, None
+            return None, None, None
         if not model_def:
             log.error(f"Background model '{preferred}' not found in catalog")
-            return None, None
+            return None, None, None
 
         # Keyed pool: reuse this model's client if already built. Each resolved
         # model gets its own stable, reused client — created once, then only
@@ -593,19 +607,19 @@ class InstanceManagerMixin:
         cache_key = f"{model_alias}@{model_def['access_path']}" if model_def.get("access_path") else model_alias
         cached = self._bg_client_cache.get(cache_key)
         if cached is not None:
-            return cached, model_alias
+            return cached, model_alias, model_def
 
         try:
             client, kind = build_background_client(self.config, model_def, model_alias)
         except UnsupportedBackgroundModel as e:
             log.warning("Background model '%s' is unsupported: %s", preferred, e)
-            return None, None
+            return None, None, None
         except Exception as e:
             log.error("Failed to create background client for '%s': %s", model_alias, e)
-            return None, None
+            return None, None, None
         # Insert under the lock so two concurrent cold-start callers for the
         # same model don't double-build; the loser reuses the winner.
         with self._bg_client_lock:
             client = self._bg_client_cache.setdefault(cache_key, client)
         log.info("Background client ready: %s (%s)", cache_key, kind)
-        return client, model_alias
+        return client, model_alias, model_def
