@@ -135,3 +135,30 @@ def test_broken_override_falls_back_to_the_default(registry):
 def test_prompt_is_unchanged_without_a_cutoff(registry, engine):
     assert notice.with_cutoff_notice("m", engine=engine, bot_id="al",
                                      session_key="al:nick", request_id="r") == "m"
+
+
+@pytest.mark.parametrize("prompt, reset_action", [
+    ("/new start fresh", None),       # typed /new: the bridge must still see the command
+    ("  /new", None),
+    ("/clear", None),
+    ("/compact keep the plan", None),
+    ("hello", "reset_only"),          # structured reset: fresh session, nothing to explain
+    ("hello", "reset_retain_history"),
+])
+def test_cutoff_then_session_command_is_left_untouched(registry, prompt, reset_action):
+    from agent_bridge.maintenance import is_new_command
+
+    engine = _Engine(_row(status="aborted", request_json=SHUTDOWN))
+    out = notice.with_cutoff_notice(prompt, engine=engine, bot_id="al", session_key="al:nick",
+                                    request_id="r", reset_action=reset_action)
+    assert out == prompt
+    assert engine.params is None  # no lookup at all
+    if prompt.strip().startswith("/new"):
+        assert is_new_command(out)
+
+
+def test_newspaper_is_not_a_command(registry):
+    engine = _Engine(_row(status="aborted", request_json=SHUTDOWN))
+    out = notice.with_cutoff_notice("/newspaper idea", engine=engine, bot_id="al",
+                                    session_key="al:nick", request_id="r")
+    assert out.startswith("[System notice:")

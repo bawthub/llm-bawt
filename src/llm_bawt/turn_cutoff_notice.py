@@ -98,13 +98,28 @@ def render_notice(cutoff: TurnCutoff, bot_id: str | None) -> str:
     return definition.default_body().format(**variables)
 
 
+def is_session_command(prompt: str | None, reset_action: str | None) -> bool:
+    """A reset or a bridge command (/new, /clear, /compact) gets no notice.
+
+    The bridges parse those from the message's leading token, so a prefix
+    would turn the command into plain text; and a reset opens a fresh session
+    with no cut-off turn to explain.
+    """
+    from agent_bridge.maintenance import is_clear_command, is_compact_command, is_new_command
+
+    return bool(reset_action) or any(
+        check(prompt) for check in (is_new_command, is_clear_command, is_compact_command))
+
+
 def with_cutoff_notice(prompt: str, *, engine, bot_id: str | None, session_key: str,
-                       request_id: str) -> str:
+                       request_id: str, reset_action: str | None = None) -> str:
     """``prompt``, prefixed with the notice when the previous turn was cut off.
 
-    Never blocks a turn: a lookup failure sends the prompt unchanged.
+    Never blocks a turn: a lookup failure sends the prompt unchanged. The
+    turn after a reset or command has that turn as its previous one, so the
+    notice never carries into a fresh session.
     """
-    if engine is None or not bot_id or not session_key:
+    if engine is None or not bot_id or not session_key or is_session_command(prompt, reset_action):
         return prompt
     try:
         cutoff = previous_turn_cutoff(engine, bot_id=bot_id, session_key=session_key,

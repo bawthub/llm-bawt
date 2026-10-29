@@ -234,6 +234,7 @@ class AgentBridgeBackend(AgentBackend):
             prompt, engine=_turn_log_engine(),
             bot_id=str(config.get("bot_id") or "").strip() or None,
             session_key=session_key, request_id=request_id,
+            reset_action=config.get("bridge_reset_action"),
         )
 
         # TASK-1579: a non-empty seed carries its registry framing, resolved
