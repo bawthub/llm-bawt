@@ -446,12 +446,49 @@ class InstanceManagerMixin:
 
     def get_client(self, model_alias: str):
         """Get a botless extraction client, never a bot's cached chat client."""
-        client, resolved_alias = self._get_background_client(model_override=model_alias)
+        client, resolved_alias = self._get_background_client(model_override=model_alias, job="mcp_extraction")
         if client is None or resolved_alias is None:
             raise ValueError(f"Model '{model_alias}' has no botless background client")
         return client
 
-    def _get_background_client(self, model_override: str | None = None) -> tuple[Any | None, str | None]:
+    def _get_background_client(
+        self, model_override: str | None = None, *, job: str = "background",
+    ) -> tuple[Any | None, str | None]:
+        """Background client wrapped so every call's outcome is recorded for ``job``.
+
+        TASK-1704: a job with no usable client is recorded as a failure too, so
+        "fell back to heuristics" stops being silent. See ``maintenance_health``.
+        """
+        from .maintenance_health import UNAVAILABLE, MonitoredClient, maintenance_health
+
+        client, model_alias = self._resolve_background_client(model_override)
+        provider, credential = self._background_credential_labels(model_alias)
+        if client is None:
+            maintenance_health().record_failure(
+                job, UNAVAILABLE, "no usable background client for the configured job model",
+                model=model_alias or model_override, provider=provider, credential=credential,
+            )
+            return None, None
+        return MonitoredClient(client, job=job, model=model_alias, provider=provider,
+                               credential=credential), model_alias
+
+    def _background_credential_labels(self, model_alias: str | None) -> tuple[str | None, str | None]:
+        """Provider id and stored credential *name* (never the secret) for a job model."""
+        if not model_alias:
+            return None, None
+        try:
+            model_def = resolve_model_config(self.config, model_alias, harness="chat", default=None) or {}
+            model_type = model_def.get("type")
+            provider = model_def.get("provider") or {"grok": "xai"}.get(model_type, model_type)
+            if not provider:
+                return None, None
+            from .providers.base import CredentialStore
+            record = CredentialStore(self.config).load(str(provider))
+            return str(provider), (record.account or record.auth_method) if record else None
+        except Exception:  # noqa: BLE001 - labels are best-effort, never fail the job
+            return None, None
+
+    def _resolve_background_client(self, model_override: str | None = None) -> tuple[Any | None, str | None]:
         """Get or create an API client for background tasks (summarization, extraction).
 
         This client is completely isolated from the main chat model lifecycle —

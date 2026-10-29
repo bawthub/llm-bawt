@@ -39,7 +39,7 @@ def test_profile_rebuild_uses_global_job_model_without_agent_override(monkeypatc
         result = service._process_profile_maintenance(_task())
 
     service._resolve_request_model.assert_not_called()
-    service._get_background_client.assert_called_once_with(model_override="configured-model")
+    service._get_background_client.assert_called_once_with(model_override="configured-model", job="profile_maintenance")
     maintenance.return_value.run.assert_called_once_with("selected-profile", "bot", False)
     assert result["attributes_before"] == 3
     assert result["error"] is None
@@ -52,7 +52,7 @@ def test_profile_rebuild_reports_unusable_configured_model(monkeypatch):
     )
     service = _service(None)
     result = service._process_profile_maintenance(_task())
-    service._get_background_client.assert_called_once_with(model_override="unsupported-model")
+    service._get_background_client.assert_called_once_with(model_override="unsupported-model", job="profile_maintenance")
     assert "unsupported-model" in result["error"]
 
 
@@ -60,4 +60,4 @@ def test_profile_rebuild_preserves_explicit_model_override(monkeypatch):
     monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda *_: "configured-model")
     service = _service(None)
     service._process_profile_maintenance(_task("explicit-model"))
-    service._get_background_client.assert_called_once_with(model_override="explicit-model")
+    service._get_background_client.assert_called_once_with(model_override="explicit-model", job="profile_maintenance")

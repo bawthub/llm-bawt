@@ -383,7 +383,7 @@ class BridgeSessionResetMixin:
             # deployment that timed out every /new and the seed only ever got
             # the heuristic template. Time-bounding stays with the worker
             # thread join below.
-            bg_client, bg_alias = self._get_background_client()
+            bg_client, bg_alias = self._get_background_client(job="session_seed_summary")
             if bg_client is None:
                 log.warning(
                     "/new pre-seed summarize: no background job model client — "

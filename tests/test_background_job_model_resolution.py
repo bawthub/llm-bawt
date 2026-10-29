@@ -41,7 +41,7 @@ def test_resolves_with_chat_harness_and_no_bot(job_model):
     fake_client = MagicMock()
     with patch("llm_bawt.clients.grok_client.GrokClient", return_value=fake_client) as grok_cls, \
          patch("llm_bawt.service.instance_manager.BotManager") as bot_manager:
-        client, alias = svc._get_background_client()
+        client, alias = svc._resolve_background_client()
 
     assert client is fake_client
     assert alias == "grok-4.3"
@@ -57,8 +57,8 @@ def test_cached_by_canonical_model_key(job_model):
     svc = _make_service({"type": "openai", "model_id": "gpt-x", "model_key": "gpt-x"})
     fake_client = MagicMock()
     with patch("llm_bawt.clients.openai_client.OpenAIClient", return_value=fake_client) as cls:
-        first = svc._get_background_client()
-        second = svc._get_background_client()
+        first = svc._resolve_background_client()
+        second = svc._resolve_background_client()
     assert first == (fake_client, "gpt-x") == second
     assert cls.call_count == 1
 
@@ -66,18 +66,18 @@ def test_cached_by_canonical_model_key(job_model):
 def test_agent_only_endpoint_still_rejected(job_model):
     """A model whose chat-harness type is not a plain client still falls back."""
     svc = _make_service({"type": "claude-code", "model_id": "x", "model_key": "x"})
-    assert svc._get_background_client() == (None, None)
+    assert svc._resolve_background_client() == (None, None)
 
 
 def test_unknown_model_falls_back(job_model):
     svc = _make_service(None)
-    assert svc._get_background_client() == (None, None)
+    assert svc._resolve_background_client() == (None, None)
 
 
 def test_no_job_model_configured(monkeypatch):
     monkeypatch.setattr("llm_bawt.runtime_settings.resolve_job_model", lambda c, k: None)
     svc = _make_service({"type": "grok"})
-    assert svc._get_background_client() == (None, None)
+    assert svc._resolve_background_client() == (None, None)
     svc.config.resolve_model.assert_not_called()
 
 

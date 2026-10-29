@@ -144,7 +144,9 @@ class BackgroundTasksMixin:
         # Job models are global, not bot models. Resolving through the task's
         # agent bot overrides this setting with its chat endpoint; the background
         # factory instead resolves the requested model with the chat harness.
-        llm_client, model_to_use = self._get_background_client(model_override=requested_model)
+        llm_client, model_to_use = self._get_background_client(
+            model_override=requested_model, job="profile_maintenance",
+        )
         if not llm_client:
             return {"error": f"Profile maintenance model '{requested_model}' is unavailable as a background client"}
         log.info(f"🔧 Profile maintenance: {entity_type}/{entity_id} (model={model_to_use})")
@@ -191,7 +193,7 @@ class BackgroundTasksMixin:
         """
         from ..memory.extraction.service import MemoryExtractionService, MemoryAction
 
-        extraction_client, extraction_model = self._get_background_client()
+        extraction_client, extraction_model = self._get_background_client(job="summary_fact_extraction")
         use_llm = extraction_client is not None
 
         if not use_llm:
@@ -404,7 +406,9 @@ class BackgroundTasksMixin:
         max_tokens_per_chunk = int(task.payload.get("max_tokens_per_chunk", 4000))
 
         # Use isolated background client — never interferes with main chat model
-        client, model_alias = self._get_background_client(model_override=requested_model)
+        client, model_alias = self._get_background_client(
+            model_override=requested_model, job="history_summarization",
+        )
 
         # TASK-858: size the prompt off the job model's REAL context window.
         # This used to inherit summarize_session_with_client's conservative
@@ -549,7 +553,7 @@ class BackgroundTasksMixin:
 
         # Use isolated background client for LLM calls
         extraction_client, extraction_model = self._get_background_client(
-            model_override=task.payload.get("model"),
+            model_override=task.payload.get("model"), job="memory_extraction",
         )
         use_llm = extraction_client is not None
 

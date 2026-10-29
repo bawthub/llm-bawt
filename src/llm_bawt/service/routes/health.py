@@ -37,6 +37,19 @@ def get_health_checks():
     return collect(config, get_ops_store(config), get_ops_service(config), service=service)
 
 
+@router.get("/v1/health/maintenance", tags=["System"])
+def get_maintenance_health():
+    """Per-job outcome of botless maintenance/utility calls (TASK-1704).
+
+    Always 200: ``{"checks": [{name, status, reason}]}``, one row per job that
+    has run since start. A failing job is ``down`` with its error class,
+    provider, credential name and failure count; its next success clears it.
+    """
+    from ..maintenance_health import maintenance_health
+
+    return maintenance_health().checks_payload()
+
+
 @router.get("/v1/status", response_model=SystemStatusResponse, tags=["System"])
 def get_system_status():
     """Get full system status (config, service, memory, dependencies)."""

@@ -74,7 +74,7 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
         # API client, so every route-driven rebuild fell through to the
         # heuristic. ``_get_background_client`` is the one job-model resolver.
         client, model_alias = service._get_background_client(
-            model_override=requested_model,
+            model_override=requested_model, job="history_summary_rebuild",
         )
         if client is None:
             raise RuntimeError(
