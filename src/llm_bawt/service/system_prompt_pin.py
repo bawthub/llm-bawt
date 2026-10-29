@@ -19,7 +19,9 @@ only at a session boundary:
   binding a seed transcript that carries no prompt snapshot, so the next
   turn resumes a session whose first snapshot is that turn's bytes. The
   marker counts only once the resume id differs from the one the reset
-  turn saw, so a reset that never ran cannot pass as a boundary;
+  turn saw, so a reset that never ran cannot pass as a boundary. The reset
+  turn also stores its own render (TASK-1750) and the next turn pins those
+  bytes, so the /new receipt's skills are the ones that session gets;
 * the first turn after a successful *manual* ``/compact`` llm-bawt ran.
   Auto-compaction inside a turn is deliberately not a boundary: the CLI
   re-records that turn's bytes, which are already the pinned bytes;
@@ -78,6 +80,11 @@ INJECTED_SKILLS_KWARG = "injected_skills"
 #: for the skill bodies a reset turn's own render carried (TASK-1750); the
 #: app-authored /new receipt cites it. Absent means unknown, never zero.
 RESET_SKILLS_KEY = "reset_injected_skills"
+#: Backend kwarg carrying those facts to the bridge's /new acknowledgement.
+RESET_SKILLS_KWARG = "reset_skills"
+#: ``action`` of a bare reset turn's ``request_json[PIN_KEY]`` record: the
+#: render the next turn pins (TASK-1750). It is never a pin pointer target.
+RESET_RENDER = "reset_render"
 
 #: Pin-move reasons. Boundaries the harness itself observes are verified;
 #: fallbacks can disagree with the harness until its next boundary.
@@ -143,6 +150,17 @@ class PinDecision:
         if self.drift:
             record["rendered_sha256"] = self.rendered_sha256
         return record
+
+
+@dataclass(frozen=True)
+class ResetMark:
+    """What :meth:`SystemPromptPinStore.mark_reset_boundary` stored; truthy when marked."""
+
+    marked: bool
+    skills_recorded: bool = False
+
+    def __bool__(self) -> bool:
+        return self.marked
 
 
 def pin_move_reason(
@@ -291,6 +309,9 @@ def pin_backend_kwargs(ctx, decision: PinDecision | None, *, agent: bool) -> dic
     injected = held_injected_skills(decision, ctx)
     if injected:
         kwargs[INJECTED_SKILLS_KWARG] = list(injected)
+    reset_skills = getattr(ctx, "reset_skill_facts", None)
+    if reset_skills is not None and ctx.bridge_reset_action:
+        kwargs[RESET_SKILLS_KWARG] = dict(reset_skills)
     return kwargs
 
 
@@ -338,6 +359,18 @@ def _reset_boundary_applies(marker: Any, resume_id: str | None) -> bool:
     return resume_id is not None and resume_id != (marker.get("resume_id") or None)
 
 
+def _reset_render_applies(marker: Any, resume_id: str | None) -> bool:
+    """Whether a cold turn is the one a bare reset's stored render was for.
+
+    A resume id the reset turn did not see, or none at all (a clean reset
+    defers provider minting to this turn), means this turn opens the
+    session the reset installed.
+    """
+    if not isinstance(marker, Mapping) or not marker.get("turn_id") or not marker.get("sha256"):
+        return False
+    return resume_id is None or resume_id != (marker.get("resume_id") or None)
+
+
 def _iso(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -345,17 +378,57 @@ def _iso(value: Any) -> str | None:
 
 
 def _record_reset_skills(ctx, *, session_id: str, turn_id: str) -> None:
-    """Record the reset turn's injected skills for the /new receipt (TASK-1750)."""
+    """Record a reset follow-up's injected skills for the /new receipt (TASK-1750).
+
+    The follow-up is itself the new session's first model turn, so its
+    render is what the session gets. ``ctx.reset_skill_facts`` is set only
+    once the facts are stored, so the bridge ack and the receipt agree.
+    """
     facts = fresh_injected_skill_facts(ctx)
     if facts is None:
         return
     try:
-        SystemPromptPinStore(ctx.svc._turn_log_store.engine).record_reset_skills(
+        if SystemPromptPinStore(ctx.svc._turn_log_store.engine).record_reset_skills(
             session_id=session_id, facts={**facts, "turn_id": turn_id},
-        )
+        ):
+            ctx.reset_skill_facts = facts
     except Exception:
         logger.warning("reset skill facts not recorded for session %s turn %s",
                        session_id, turn_id, exc_info=True)
+
+
+def _mark_bare_reset(ctx, client, base: str, *, session_id: str, turn_id: str,
+                     resume_id: str | None, sections: Mapping[str, dict] | None) -> None:
+    """Leave the reset marker with the render the next turn will pin (TASK-1750).
+
+    The receipt names skills only when that render was stored: without the
+    bytes the next turn renders fresh, and its skills are unknown here.
+    """
+    render: dict | None = None
+    try:
+        render = {
+            "text": client.compose_system_prompt(base),
+            "sections": sections,
+            SKILL_MANIFEST_KEY: fresh_skill_manifest(ctx),
+            INJECTED_SKILLS_KEY: list(fresh_injected_skills(ctx)),
+        }
+    except Exception:
+        logger.warning("reset render not composed for session %s turn %s",
+                       session_id, turn_id, exc_info=True)
+    facts = fresh_injected_skill_facts(ctx) if render is not None else None
+    try:
+        mark = SystemPromptPinStore(ctx.svc._turn_log_store.engine).mark_reset_boundary(
+            session_id=session_id, turn_id=turn_id, resume_id=resume_id,
+            render=render, skills=facts,
+        )
+    except Exception:
+        logger.warning(
+            "system prompt pin reset marker failed for session %s turn %s",
+            session_id, turn_id, exc_info=True,
+        )
+        return
+    if isinstance(mark, ResetMark) and mark.skills_recorded:
+        ctx.reset_skill_facts = facts
 
 
 def apply_session_pin(
@@ -380,28 +453,21 @@ def apply_session_pin(
     binding = ctx.thread_binding or {}
     session_id = str(binding.get("thread_session_id") or "").strip()
     resume_id = _resume_id(binding)
-    if ctx.bridge_reset_action and session_id:
-        _record_reset_skills(ctx, session_id=session_id, turn_id=turn_id)
-    if ctx.bridge_reset_action == "reset_only":
-        if session_id:
-            try:
-                SystemPromptPinStore(ctx.svc._turn_log_store.engine).mark_reset_boundary(
-                    session_id=session_id, turn_id=turn_id, resume_id=resume_id,
-                )
-            except Exception:
-                logger.warning(
-                    "system prompt pin reset marker failed for session %s turn %s",
-                    session_id, turn_id, exc_info=True,
-                )
-        return messages, None
-    if not session_id:
-        return messages, None
-    from ..memory.postgresql import _sanitize_table_name
-
     base = "\n\n".join(
         m.content for m in messages
         if m.role == "system" and isinstance(m.content, str) and m.content
     )
+    if ctx.bridge_reset_action == "reset_only":
+        if session_id:
+            _mark_bare_reset(ctx, client, base, session_id=session_id, turn_id=turn_id,
+                             resume_id=resume_id, sections=sections)
+        return messages, None
+    if not session_id:
+        return messages, None
+    if ctx.bridge_reset_action:
+        _record_reset_skills(ctx, session_id=session_id, turn_id=turn_id)
+    from ..memory.postgresql import _sanitize_table_name
+
     try:
         decision = SystemPromptPinStore(ctx.svc._turn_log_store.engine).resolve(
             session_id=session_id,
@@ -416,6 +482,8 @@ def apply_session_pin(
             resume_id=resume_id,
             skill_manifest=fresh_skill_manifest(ctx),
             injected_skills=fresh_injected_skills(ctx),
+            # A reset follow-up pins its own render: that is what its receipt names.
+            use_reset_render=not ctx.bridge_reset_action,
         )
     except SkillSelectionError:
         raise  # a corrupt pinned skill selection is never swapped for the current one
@@ -537,6 +605,7 @@ class SystemPromptPinStore:
         resume_id: str | None = None,
         skill_manifest: Mapping | None = None,
         injected_skills: Sequence[str] = (),
+        use_reset_render: bool = True,
     ) -> PinDecision | None:
         """Decide this turn's prompt, stage a pin move if needed, record the audit.
 
@@ -570,6 +639,11 @@ class SystemPromptPinStore:
         ``injected_skills`` (TASK-1691) names the skills whose bodies this
         render carries; it is pinned the same way, and an older pin replays
         none.
+
+        ``use_reset_render`` (TASK-1750): a cold turn after a bare reset pins
+        the render the reset turn stored, with its sections and skills, so
+        the /new receipt is true; a fresh render that differs shows as
+        drift. A missing or corrupt stored render falls back to this render.
         """
         if self.engine is None or not session_id or not turn_id:
             return None
@@ -591,11 +665,15 @@ class SystemPromptPinStore:
             session_metadata = metadata[0] if isinstance(metadata[0], dict) else {}
             turn_request = turn_payload(turn[0])
             pin = _valid_pin(session_metadata.get(PIN_KEY))
+            reset_render: dict | None = None
             if BOUNDARY_KEY in session_metadata:
-                if _reset_boundary_applies(session_metadata[BOUNDARY_KEY], resume_id):
+                marker = session_metadata[BOUNDARY_KEY]
+                if _reset_boundary_applies(marker, resume_id):
                     cold_start = True
                 elif resume_id is not None:  # same SDK session: the reset never ran
                     self._drop_keys(conn, session_id, BOUNDARY_KEY)
+                if use_reset_render and cold_start and _reset_render_applies(marker, resume_id):
+                    reset_render = self._reset_render(conn, marker)
 
             pin_row_found = False
             pinned_text: str | None = None
@@ -625,10 +703,17 @@ class SystemPromptPinStore:
                 pinned_text=pinned_text, compacted_since_pin=compacted,
             )
             if reason is not None:
+                if reset_render is not None:  # reason is COLD_START
+                    pin_text, pin_sha = reset_render["text"], reset_render["sha256"]
+                    sections = _sections_value(reset_render.get("sections"))
+                    skill_manifest = _pinned_manifest(reset_render)
+                    injected_skills = _refs_value(reset_render.get(INJECTED_SKILLS_KEY))
+                else:
+                    pin_text, pin_sha = rendered, rendered_sha
                 held_sections = _held_sections(reason, sections, pin)
                 candidate_sections = _candidate_sections(reason, sections)
                 decision = PinDecision(
-                    text=rendered, pin_turn_id=turn_id, sha256=rendered_sha,
+                    text=pin_text, pin_turn_id=turn_id, sha256=pin_sha,
                     action="pinned", reason=reason, is_boundary=True,
                     rendered_sha256=rendered_sha,
                     snapshot_unverified=reason in UNVERIFIED_REASONS,
@@ -640,8 +725,8 @@ class SystemPromptPinStore:
                 new_pin = {
                     "v": PIN_VERSION,
                     "turn_id": turn_id,
-                    "sha256": rendered_sha,
-                    "chars": len(rendered),
+                    "sha256": pin_sha,
+                    "chars": len(pin_text),
                     "pinned_at": _iso(turn[1]),
                     "reason": reason,
                     "snapshot_unverified": decision.snapshot_unverified,
@@ -688,6 +773,8 @@ class SystemPromptPinStore:
             audit = decision.audit()
             if decision.is_boundary:
                 audit["pending"] = True
+            if reset_render is not None and decision.is_boundary:
+                audit["reset_turn_id"] = session_metadata[BOUNDARY_KEY]["turn_id"]
             if decision.pin_turn_id == turn_id:
                 audit["text"] = decision.text
                 if decision.skill_manifest is not None:
@@ -758,36 +845,100 @@ class SystemPromptPinStore:
             )
             return bool(result.rowcount)
 
-    def mark_reset_boundary(self, *, session_id: str, turn_id: str, resume_id: str | None) -> bool:
+    def mark_reset_boundary(
+        self, *, session_id: str, turn_id: str, resume_id: str | None,
+        render: Mapping[str, Any] | None = None, skills: Mapping[str, Any] | None = None,
+    ) -> ResetMark:
         """Record that a bare reset turn handed this session to a new SDK session.
 
-        The turn never reaches a model, so nothing is pinned or audited.
-        ``resume_id`` is the SDK session the reset turn saw; the next turn
-        counts as a cold start only once its resume id differs from it.
-        Returns False when the session row is missing.
+        The turn never reaches a model, so nothing is pinned. ``resume_id`` is
+        the SDK session the reset turn saw; the next turn counts as a cold
+        start only once its resume id differs from it.
+
+        ``render`` (TASK-1750) is the reset turn's composed prompt: ``text``,
+        ``sections``, :data:`SKILL_MANIFEST_KEY` and :data:`INJECTED_SKILLS_KEY`.
+        It is stored on the reset turn's audit as a :data:`RESET_RENDER`
+        record and the marker carries its sha, so the next turn pins exactly
+        it. ``skills`` (``{"refs", "tokens"}``) is stored as
+        :data:`RESET_SKILLS_KEY` only alongside a stored render; otherwise
+        any older facts are dropped, so the receipt never names skills the
+        next turn might not get.
+
+        Falsy when the session row is missing; ``skills_recorded`` says
+        whether the receipt can name the skills.
         """
         if self.engine is None or not session_id or not turn_id:
-            return False
-        marker = {"v": PIN_VERSION, "turn_id": turn_id, "resume_id": (resume_id or "").strip() or None}
+            return ResetMark(False)
+        marker: dict[str, Any] = {
+            "v": PIN_VERSION, "turn_id": turn_id, "resume_id": (resume_id or "").strip() or None,
+        }
         with self.engine.begin() as conn:
-            conn.execute(  # lock order: turn row, then session row
-                text("SELECT 1 FROM turn_logs WHERE id=:id FOR UPDATE"), {"id": turn_id},
-            )
+            turn = conn.execute(  # lock order: turn row, then session row
+                text("SELECT request_json FROM turn_logs WHERE id=:id FOR UPDATE"), {"id": turn_id},
+            ).first()
             found = conn.execute(
                 text("SELECT 1 FROM sessions WHERE id=:sid FOR UPDATE"), {"sid": session_id},
             ).first()
             if found is None:
-                return False
+                return ResetMark(False)
+            value = render.get("text") if isinstance(render, Mapping) else None
+            stored = turn is not None and isinstance(value, str)
+            if stored:
+                sha = prompt_sha256(value)
+                record: dict[str, Any] = {
+                    "v": PIN_VERSION, "action": RESET_RENDER, "sha256": sha,
+                    "chars": len(value), "text": value,
+                }
+                held = _sections_value(render.get("sections"))
+                if held is not None:
+                    record["sections"] = held
+                manifest = _manifest_value(render.get(SKILL_MANIFEST_KEY))
+                if manifest is not None:
+                    record[SKILL_MANIFEST_KEY] = manifest
+                refs = _refs_value(render.get(INJECTED_SKILLS_KEY))
+                if refs:
+                    record[INJECTED_SKILLS_KEY] = list(refs)
+                turn_request = turn_payload(turn[0])
+                turn_request[PIN_KEY] = record
+                conn.execute(
+                    text("UPDATE turn_logs SET request_json=:rj WHERE id=:id"),
+                    {"rj": dump_payload(turn_request), "id": turn_id},
+                )
+                marker["sha256"] = sha
             conn.execute(
                 text("""
                     UPDATE sessions SET session_metadata=jsonb_set(
-                        COALESCE(session_metadata, '{}'::jsonb),
+                        COALESCE(session_metadata, '{}'::jsonb) - 'reset_injected_skills',
                         '{system_prompt_pin_boundary}', CAST(:marker AS jsonb)
                     ) WHERE id=:sid
                 """),
                 {"marker": json.dumps(marker), "sid": session_id},
             )
-        return True
+            if not (stored and isinstance(skills, Mapping)):
+                return ResetMark(True)
+            conn.execute(
+                text("""
+                    UPDATE sessions SET session_metadata=jsonb_set(
+                        session_metadata, '{reset_injected_skills}', CAST(:facts AS jsonb)
+                    ) WHERE id=:sid
+                """),
+                {"facts": json.dumps({**skills, "turn_id": turn_id}), "sid": session_id},
+            )
+        return ResetMark(True, skills_recorded=True)
+
+    @staticmethod
+    def _reset_render(conn, marker: Mapping[str, Any]) -> dict | None:
+        """The render a bare reset stored for the next turn, verified by sha."""
+        row = conn.execute(
+            text("SELECT request_json FROM turn_logs WHERE id=:id"), {"id": marker["turn_id"]},
+        ).first()
+        record = turn_payload(row[0]).get(PIN_KEY) if row is not None else None
+        if not isinstance(record, dict) or record.get("action") != RESET_RENDER:
+            return None
+        value = record.get("text")
+        if not isinstance(value, str) or prompt_sha256(value) != marker.get("sha256"):
+            return None
+        return record
 
     @staticmethod
     def _drop_pending(conn, session_id: str) -> None:

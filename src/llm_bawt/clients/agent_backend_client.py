@@ -243,6 +243,8 @@ class AgentBackendClient(LLMClient):
         skill_selection = kwargs.pop("skill_selection", None)
         # TASK-1691: skills whose bodies that prompt carries, for the harness hooks.
         injected_skills = kwargs.pop("injected_skills", None)
+        # TASK-1750: a reset's skill facts, for the bridge's /new acknowledgement.
+        reset_skills = kwargs.pop("reset_skills", None)
 
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
@@ -264,6 +266,8 @@ class AgentBackendClient(LLMClient):
             config["request_id"] = bridge_request_id
         if bridge_reset_action:
             config["bridge_reset_action"] = bridge_reset_action
+            if reset_skills is not None:
+                config["reset_skills"] = reset_skills
         if system_prompt_pin is not None:
             config["system_prompt_pinned"] = True
             delivery = self._backend.system_prompt_delivery(system_prompt_pin.is_boundary)

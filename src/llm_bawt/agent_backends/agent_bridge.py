@@ -330,6 +330,7 @@ class AgentBridgeBackend(AgentBackend):
                             inject_messages=config.get("inject_messages"),
                             inject_seed_framing=seed_framing,
                             bridge_reset_action=config.get("bridge_reset_action"),
+                            reset_skills=config.get("reset_skills"),
                             context_window=(
                                 int(config.get("context_window"))
                                 if config.get("context_window") else None

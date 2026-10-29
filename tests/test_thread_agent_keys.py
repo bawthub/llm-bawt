@@ -175,7 +175,7 @@ class TestClaudeNewPreprocessing:
                 }
 
             @staticmethod
-            def _format_seed_ack(seed_stats):
+            def _format_seed_ack(seed_stats, skills=None):
                 return f"seeded:{seed_stats['session_id']}"
 
             def _publish_event(self, *args, **kwargs):

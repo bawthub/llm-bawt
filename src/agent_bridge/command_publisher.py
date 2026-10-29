@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 
-from .continuity import SEED_FRAMING_FIELD, SeedFraming
+from .continuity import RESET_SKILLS_FIELD, SEED_FRAMING_FIELD, SeedFraming, reset_skills_field
 from .publisher import COMMANDS_STREAM
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class CommandPublisherMixin:
         inject_messages: list | None = None,
         inject_seed_framing: SeedFraming | None = None,
         bridge_reset_action: str | None = None,
+        reset_skills: Mapping | None = None,
         context_window: int | None = None,
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
@@ -159,6 +160,10 @@ class CommandPublisherMixin:
             if not supported:
                 raise ValueError("Unsupported agent bridge reset action")
             fields["bridge_reset_action"] = bridge_reset_action
+            # TASK-1750: the skill facts the app receipt names, for the bridge ack.
+            skills_value = reset_skills_field(reset_skills)
+            if skills_value is not None:
+                fields[RESET_SKILLS_FIELD] = skills_value
         if thread_session_id:
             fields["thread_session_id"] = thread_session_id
             if thread_resume_id:

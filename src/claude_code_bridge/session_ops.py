@@ -126,6 +126,7 @@ class ClaudeSessionMixin:
         async_redis,
         scope=None,
         inject_seed_framing=None,
+        reset_skills: dict | None = None,
     ) -> str | None:
         """Handle bridge-owned ``/new`` setup and return the remaining prompt.
 
@@ -160,7 +161,7 @@ class ClaudeSessionMixin:
         self._publish_event(
             request_id, session_key, 1,
             kind=AgentEventKind.ASSISTANT_DONE,
-            text=self._format_seed_ack(seed_stats),
+            text=self._format_seed_ack(seed_stats, reset_skills),
             model=model,
             token_usage=self._seed_usage_estimate(
                 seed_stats, context_window=context_window,
@@ -393,6 +394,6 @@ class ClaudeSessionMixin:
         return stats
 
     @staticmethod
-    def _format_seed_ack(stats: dict | None) -> str:
+    def _format_seed_ack(stats: dict | None, skills: dict | None = None) -> str:
         """Human-facing /new acknowledgement (``agent_bridge.continuity``)."""
-        return format_seed_ack(stats)
+        return format_seed_ack(stats, skills)

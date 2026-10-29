@@ -195,7 +195,12 @@ class CodexCommandMixin(CodexAppServerMixin):
             thread_resume_id = None
         explicit_thread = (fields.get("explicit_thread") or "").strip() in ("1", "true")
 
-        from agent_bridge.continuity import SEED_FRAMING_FIELD, SeedFraming
+        from agent_bridge.continuity import (
+            RESET_SKILLS_FIELD,
+            SEED_FRAMING_FIELD,
+            SeedFraming,
+            reset_skills_from_field,
+        )
         from .reset_evidence import CodexResetEvidence, parse_seed
 
         try:
@@ -210,6 +215,8 @@ class CodexCommandMixin(CodexAppServerMixin):
             seed_framing = SeedFraming.require(
                 SeedFraming.from_field(fields.get(SEED_FRAMING_FIELD)), seed,
             )
+            # TASK-1750: the app's skill facts, so the ack names the receipt's skills.
+            reset_skills = reset_skills_from_field(fields.get(RESET_SKILLS_FIELD))
         except ValueError as exc:
             self._publish_event(request_id, session_key, 1,
                                 kind=AgentEventKind.ERROR, text=str(exc), model=model)
@@ -275,10 +282,12 @@ class CodexCommandMixin(CodexAppServerMixin):
                     # acknowledges explicit no-resume under the session queue;
                     # the app verifies its empty successor before committing the
                     # receipt. Do not invent a task merely to mint a provider ID.
+                    from agent_bridge.continuity import format_seed_ack
+
                     self._publish_event(
                         request_id, session_key, 1,
                         kind=AgentEventKind.ASSISTANT_DONE,
-                        text="Session reset. Ready for a new conversation.",
+                        text=format_seed_ack({"clean_start": True}, reset_skills),
                         model=model,
                         extra_raw={"new_session_ack": reset_evidence.acknowledgment()},
                     )
@@ -384,7 +393,9 @@ class CodexCommandMixin(CodexAppServerMixin):
                             self._publish_event(
                                 request_id, session_key, seq,
                                 kind=AgentEventKind.ASSISTANT_DONE,
-                                text=format_seed_ack({**stats_from_messages(seed), "seeded": True}),
+                                text=format_seed_ack(
+                                    {**stats_from_messages(seed), "seeded": True}, reset_skills,
+                                ),
                                 model=model,
                                 extra_raw={"new_session_ack": reset_evidence.acknowledgment()},
                             )

@@ -17,6 +17,7 @@ from llm_bawt.service.system_prompt_pin import (
     MISSING_ROW,
     PENDING_KEY,
     PIN_KEY,
+    RESET_RENDER,
     RESET_SKILLS_KEY,
     SHA_MISMATCH,
     SystemPromptPinStore,
@@ -71,12 +72,13 @@ class Rig:
         return turn_id
 
     def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True, resume=None,
-                skill_manifest=None, injected_skills=()):
+                skill_manifest=None, injected_skills=(), use_reset_render=True):
         """Resolve a turn; ``dispatched`` models the bridge's first output confirming it."""
         decision = self.store.resolve(
             session_id=self.session_id, turn_id=turn_id, storage_bot=self.bot,
             rendered=rendered, cold_start=cold, sections=sections, resume_id=resume,
             skill_manifest=skill_manifest, injected_skills=injected_skills,
+            use_reset_render=use_reset_render,
         )
         if dispatched and decision is not None and decision.is_boundary:
             assert self.store.confirm(session_id=self.session_id, turn_id=turn_id)
@@ -466,7 +468,7 @@ def test_bare_reset_marker_beats_a_proven_compaction(rig):
 
 def test_bare_reset_marker_needs_a_session(rig):
     turn = rig.add_turn("/new")
-    assert rig.store.mark_reset_boundary(session_id=str(uuid.uuid4()), turn_id=turn, resume_id=None) is False
+    assert not rig.store.mark_reset_boundary(session_id=str(uuid.uuid4()), turn_id=turn, resume_id=None)
 
 
 def test_reset_skill_facts_land_on_the_session_and_need_it(rig):
@@ -474,6 +476,106 @@ def test_reset_skill_facts_land_on_the_session_and_need_it(rig):
     assert rig.store.record_reset_skills(session_id=rig.session_id, facts=facts) is True
     assert rig.metadata()[RESET_SKILLS_KEY] == facts
     assert rig.store.record_reset_skills(session_id=str(uuid.uuid4()), facts=facts) is False
+
+
+# ── TASK-1750: a bare reset's stored render is what the next turn pins ────
+
+SKILLS = {"refs": ["llm-bawt"], "tokens": 4200}
+
+
+def _bare_new_with_render(rig, resume=None, text_="R0", skills=SKILLS):
+    """A reset_only turn that stores its render and skill facts."""
+    turn = rig.add_turn("/new")
+    render = {"text": text_, "sections": WM, "skill_manifest": _manifest("llm-bawt"),
+              "injected_skills": ["llm-bawt", "bad ref"]}
+    mark = rig.store.mark_reset_boundary(session_id=rig.session_id, turn_id=turn,
+                                         resume_id=resume, render=render, skills=skills)
+    assert mark and mark.skills_recorded is (skills is not None)
+    return turn
+
+
+@pytest.mark.parametrize("resume", ["seed-41a1", None])  # seeded resume, or clean reset
+def test_first_turn_after_bare_new_pins_the_reset_render(rig, resume):
+    rig.resolve(rig.add_turn(), "V1", cold=True)
+    _rotate_to_successor(rig)
+    reset_turn = _bare_new_with_render(rig)
+    record = rig.turn_request(reset_turn)[PIN_KEY]
+    assert (record["action"], record["text"]) == (RESET_RENDER, "R0")
+    assert record["injected_skills"] == ["llm-bawt"]
+    assert rig.metadata()[RESET_SKILLS_KEY] == {**SKILLS, "turn_id": reset_turn}
+    assert rig.metadata()[BOUNDARY_KEY]["sha256"] == prompt_sha256("R0")
+
+    first = rig.add_turn("whats in your todo")
+    decision = rig.resolve(first, "V2", cold=resume is None, resume=resume,
+                           injected_skills=("other",), skill_manifest=_manifest("other"))
+    assert (decision.reason, decision.text, decision.is_boundary) == (COLD_START, "R0", True)
+    assert decision.drift  # the fresh render differs; it lands at the next boundary
+    assert decision.injected_skills == ("llm-bawt",)
+    assert decision.skill_manifest["entries"][0]["ref"] == "llm-bawt"
+    assert decision.pinned_sections == WM
+    audit = rig.turn_request(first)[PIN_KEY]
+    assert (audit["text"], audit["reset_turn_id"]) == ("R0", reset_turn)
+    assert rig.store.get(rig.session_id)["sha256"] == prompt_sha256("R0")
+    assert BOUNDARY_KEY not in rig.metadata()
+    kept = rig.resolve(rig.add_turn(), "V3", resume=resume or "minted")
+    assert (kept.action, kept.text, kept.injected_skills) == ("kept", "R0", ("llm-bawt",))
+
+
+def test_reset_render_survives_the_turn_backfill(rig):
+    reset_turn = _bare_new_with_render(rig)
+    rig.turns.update_turn(turn_id=reset_turn, request_payload={"messages": []})
+    first = rig.add_turn()
+    assert rig.resolve(first, "V2", resume="seed").text == "R0"
+
+
+def test_unconfirmed_turn_after_bare_new_pins_the_reset_render_again(rig):
+    _bare_new_with_render(rig)
+    assert rig.resolve(rig.add_turn(), "V2", resume="seed", dispatched=False).text == "R0"
+    assert rig.resolve(rig.add_turn(), "V3", resume="seed").text == "R0"
+
+
+def test_reset_that_never_ran_ignores_the_reset_render(rig):
+    first = rig.add_turn()
+    rig.resolve(first, "V1", cold=True, resume="old")
+    _bare_new_with_render(rig, resume="old")
+    kept = rig.resolve(rig.add_turn(), "V2", resume="old")
+    assert (kept.action, kept.text) == ("kept", "V1")
+
+
+def test_a_reset_follow_up_pins_its_own_render(rig):
+    _bare_new_with_render(rig)
+    turn = rig.add_turn("/new hi")
+    decision = rig.resolve(turn, "V2", cold=True, resume="seed", use_reset_render=False)
+    assert (decision.reason, decision.text) == (COLD_START, "V2")
+
+
+def test_a_missing_or_tampered_reset_render_falls_back_to_the_fresh_render(rig):
+    reset_turn = _bare_new_with_render(rig)
+    payload = rig.turn_request(reset_turn)
+    payload[PIN_KEY]["text"] = "tampered"
+    with rig.engine.begin() as conn:
+        conn.execute(text("UPDATE turn_logs SET request_json=:rj WHERE id=:id"),
+                     {"rj": json.dumps(payload), "id": reset_turn})
+    decision = rig.resolve(rig.add_turn(), "V2", resume="seed")
+    assert (decision.reason, decision.text, decision.injected_skills) == (COLD_START, "V2", ())
+
+
+def test_without_a_stored_render_the_receipt_names_no_skills(rig):
+    _bare_new_with_render(rig)
+    assert RESET_SKILLS_KEY in rig.metadata()
+    turn = rig.add_turn("/new")
+    mark = rig.store.mark_reset_boundary(session_id=rig.session_id, turn_id=turn,
+                                         resume_id=None, render=None, skills=SKILLS)
+    assert mark and not mark.skills_recorded
+    assert RESET_SKILLS_KEY not in rig.metadata()  # the older facts are dropped
+    assert "sha256" not in rig.metadata()[BOUNDARY_KEY]
+    assert rig.resolve(rig.add_turn(), "V2", resume="seed").text == "V2"
+
+
+def test_a_stored_render_without_skill_facts_records_none(rig):
+    _bare_new_with_render(rig, skills=None)
+    assert RESET_SKILLS_KEY not in rig.metadata()
+    assert rig.resolve(rig.add_turn(), "V2", resume="seed").text == "R0"
 
 
 # ── TASK-1309: the skill selection is pinned with the bytes ─────────────────

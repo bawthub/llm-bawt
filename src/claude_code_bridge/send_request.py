@@ -12,7 +12,12 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from agent_bridge.continuity import SEED_FRAMING_FIELD, SeedFraming
+from agent_bridge.continuity import (
+    RESET_SKILLS_FIELD,
+    SEED_FRAMING_FIELD,
+    SeedFraming,
+    reset_skills_from_field,
+)
 from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
 from agent_bridge.skill_selection import INJECTED_FIELD, SELECTION_FIELD
 
@@ -71,6 +76,8 @@ class SendRequest:
     bridge_reset_action: str | None = None
     # TASK-1579: app-resolved registry framing for a non-empty seed.
     inject_seed_framing: SeedFraming | None = None
+    # TASK-1750: the app's skill facts for this reset's acknowledgement.
+    reset_skills: dict | None = None
     # TASK-1295: the app-resolved catalog endpoint's access-path key. None only
     # when the field is absent (a legacy producer); a present-but-blank value
     # is kept as "" so it is rejected, never mistaken for legacy.
@@ -247,6 +254,7 @@ class SendRequest:
             trigger_message_id=trigger_message_id,
             bridge_reset_action=fields.get("bridge_reset_action") or None,
             inject_seed_framing=SeedFraming.from_field(fields.get(SEED_FRAMING_FIELD)),
+            reset_skills=reset_skills_from_field(fields.get(RESET_SKILLS_FIELD)),
             bot_effort=bot_effort,
             bot_max_turns=bot_max_turns,
             subagent_model=subagent_model,

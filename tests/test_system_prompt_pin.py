@@ -203,7 +203,12 @@ def test_bare_reset_marks_the_bound_session_and_pins_nothing(monkeypatch):
     out = apply_session_pin(_ctx(binding=successor, reset="reset_only", prompt="/new"),
                             _Client(), messages, turn_id="turn-new")
     assert out == (messages, None)
-    assert marks == [{"session_id": "successor", "turn_id": "turn-new", "resume_id": None}]
+    assert marks == [{
+        "session_id": "successor", "turn_id": "turn-new", "resume_id": None,
+        "render": {"text": "<rc>\n\nbase", "sections": None, "skill_manifest": None,
+                   "injected_skills": []},
+        "skills": None,
+    }]
     # Non-pinning backends do nothing at all.
     apply_session_pin(_ctx(reset="reset_only"), _Client(pins=False), messages, turn_id="t")
     assert len(marks) == 1
@@ -459,35 +464,100 @@ def test_codex_bridge_paste_decision(delivery, resuming, expected):
 def _skill_ctx(refs, injected, reset="reset_only", resolved=True):
     ctx = _ctx(binding={"thread_session_id": "successor"}, reset=reset, prompt="/new")
     resolution = SimpleNamespace(injected=tuple(
-        SimpleNamespace(ref=ref, tokens=tokens) for ref, tokens in injected))
+        SimpleNamespace(ref=ref, tokens=tokens) for ref, tokens in injected),
+        manifest=lambda: {"injected": [ref for ref, _tokens in injected]})
     ctx.llm_bawt = SimpleNamespace(_injected_skill_refs=tuple(refs),
                                    _skill_resolution=resolution if resolved else None)
     return ctx
 
 
-@pytest.mark.parametrize("reset", ["reset_only", "reset_follow_up"])
-def test_reset_records_the_renders_injected_skills(monkeypatch, reset):
-    recorded = []
-    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills",
-                        lambda self, **kw: recorded.append(kw))
-    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary", lambda self, **kw: True)
+def _record(monkeypatch, *, skills_recorded=True):
+    """Capture both reset writes; a bare reset reports whether its skills landed."""
+    marks, recorded = [], []
+
+    def mark(self, **kw):
+        marks.append(kw)
+        return pin_mod.ResetMark(True, skills_recorded=skills_recorded and kw["skills"] is not None)
+
+    def record(self, **kw):
+        recorded.append(kw)
+        return True
+
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary", mark)
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills", record)
     monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve", lambda self, **kw: None)
-    ctx = _skill_ctx(["agent-system", "llm-bawt"], [("agent-system", 4000), ("llm-bawt", 3500)], reset=reset)
+    return marks, recorded
+
+
+SEVERAL = (["agent-system", "llm-bawt"], [("agent-system", 4000), ("llm-bawt", 3500)])
+SEVERAL_FACTS = {"refs": ["agent-system", "llm-bawt"], "tokens": 7500}
+
+
+def test_bare_reset_stores_its_render_with_the_skill_facts(monkeypatch):
+    marks, recorded = _record(monkeypatch)
+    ctx = _skill_ctx(*SEVERAL)
+    apply_session_pin(ctx, _Client(), _messages(), turn_id="turn-new", sections=WM)
+    assert recorded == []
+    (mark,) = marks
+    assert mark["render"]["text"] == "<rc>\n\nbase" and mark["render"]["sections"] == WM
+    assert mark["render"]["injected_skills"] == ["agent-system", "llm-bawt"]
+    assert mark["skills"] == SEVERAL_FACTS
+    assert ctx.reset_skill_facts == SEVERAL_FACTS
+    kwargs = pin_mod.pin_backend_kwargs(ctx, None, agent=True)
+    assert kwargs[pin_mod.RESET_SKILLS_KWARG] == SEVERAL_FACTS
+
+
+def test_bare_reset_forwards_no_facts_the_store_did_not_record(monkeypatch):
+    marks, _ = _record(monkeypatch, skills_recorded=False)
+    ctx = _skill_ctx(*SEVERAL)
+    apply_session_pin(ctx, _Client(), _messages(), turn_id="t")
+    assert marks[0]["skills"] == SEVERAL_FACTS
+    assert getattr(ctx, "reset_skill_facts", None) is None
+    assert pin_mod.RESET_SKILLS_KWARG not in pin_mod.pin_backend_kwargs(ctx, None, agent=True)
+
+
+def test_bare_reset_without_a_render_claims_no_skills(monkeypatch):
+    marks, _ = _record(monkeypatch)
+
+    class _Broken(_Client):
+        def compose_system_prompt(self, base):
+            raise RuntimeError("render failed")
+
+    ctx = _skill_ctx(*SEVERAL)
+    assert apply_session_pin(ctx, _Broken(), _messages(), turn_id="t")[1] is None
+    assert (marks[0]["render"], marks[0]["skills"]) == (None, None)
+    assert getattr(ctx, "reset_skill_facts", None) is None
+
+
+def test_reset_follow_up_records_its_own_renders_skills(monkeypatch):
+    marks, recorded = _record(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve",
+                        lambda self, **kw: captured.update(kw))
+    ctx = _skill_ctx(*SEVERAL, reset="reset_follow_up")
     apply_session_pin(ctx, _Client(), _messages(), turn_id="turn-new")
-    assert recorded == [{"session_id": "successor", "facts": {
-        "refs": ["agent-system", "llm-bawt"], "tokens": 7500, "turn_id": "turn-new"}}]
+    assert marks == []
+    assert recorded == [{"session_id": "successor", "facts": {**SEVERAL_FACTS, "turn_id": "turn-new"}}]
+    assert ctx.reset_skill_facts == SEVERAL_FACTS
+    assert captured["use_reset_render"] is False  # it pins its own render, which it names
 
 
 def test_reset_records_an_empty_render_but_never_an_unknown_one(monkeypatch):
-    recorded = []
-    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills",
-                        lambda self, **kw: recorded.append(kw["facts"]))
-    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary", lambda self, **kw: True)
-    apply_session_pin(_skill_ctx([], []), _Client(), _messages(), turn_id="t")
-    apply_session_pin(_skill_ctx(["x"], [("x", 1)], resolved=False), _Client(), _messages(), turn_id="t")
-    apply_session_pin(_skill_ctx(["x"], [("y", 1)]), _Client(), _messages(), turn_id="t")
+    marks, recorded = _record(monkeypatch)
+    for reset in ("reset_only", "reset_follow_up"):
+        apply_session_pin(_skill_ctx([], [], reset=reset), _Client(), _messages(), turn_id="t")
+        apply_session_pin(_skill_ctx(["x"], [("x", 1)], reset=reset, resolved=False),
+                          _Client(), _messages(), turn_id="t")
+        apply_session_pin(_skill_ctx(["x"], [("y", 1)], reset=reset), _Client(), _messages(), turn_id="t")
     apply_session_pin(_skill_ctx(["x"], [("x", 1)], reset=None), _Client(), _messages(), turn_id="t")
-    assert recorded == [{"refs": [], "tokens": 0, "turn_id": "t"}]
+    assert [m["skills"] for m in marks] == [{"refs": [], "tokens": 0}, None, None]
+    assert [r["facts"] for r in recorded] == [{"refs": [], "tokens": 0, "turn_id": "t"}]
+
+
+def test_ordinary_turns_forward_no_reset_facts():
+    ctx = _skill_ctx(*SEVERAL, reset=None)
+    ctx.reset_skill_facts = SEVERAL_FACTS  # stale facts never ride a non-reset turn
+    assert pin_mod.RESET_SKILLS_KWARG not in pin_mod.pin_backend_kwargs(ctx, None, agent=True)
 
 
 def test_reset_skill_record_failure_fails_open(monkeypatch):
@@ -495,9 +565,9 @@ def test_reset_skill_record_failure_fails_open(monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills", boom)
-    marks = []
-    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary",
-                        lambda self, **kw: marks.append(kw))
+    resolved = []
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve", lambda self, **kw: resolved.append(kw))
+    ctx = _skill_ctx(["x"], [("x", 1)], reset="reset_follow_up")
     messages = _messages()
-    assert apply_session_pin(_skill_ctx(["x"], [("x", 1)]), _Client(), messages, turn_id="t") == (messages, None)
-    assert len(marks) == 1
+    assert apply_session_pin(ctx, _Client(), messages, turn_id="t") == (messages, None)
+    assert len(resolved) == 1 and getattr(ctx, "reset_skill_facts", None) is None

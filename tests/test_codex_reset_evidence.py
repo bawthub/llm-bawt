@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from agent_bridge.continuity import seed_receipt
+from agent_bridge.continuity import RESET_SKILLS_FIELD, reset_skills_field, seed_receipt
 from agent_bridge.events import AgentEventKind
 from agent_bridge.run_contract import TeardownReport
 from codex_bridge.bridge import CodexBridge
@@ -231,6 +231,28 @@ def test_standalone_clean_reset_does_not_invent_a_provider_turn(harness):
     }}
     assert events[0].trigger_message_id == "task-trigger" and events[0].provider == "codex"
     harness.publisher.publish_unified_event.assert_not_called()
+
+
+@pytest.mark.parametrize("skills,expected", [
+    (None, "Session reset. Ready for a new conversation."),
+    ({"refs": ["llm-bawt", "git-commits"], "tokens": 4200},
+     "Session reset. Injected skills: llm-bawt, git-commits (~4.2k tokens). Ready for a new conversation."),
+])
+def test_standalone_clean_reset_ack_lists_injected_skills(harness, skills, expected):
+    """TASK-1750: the Codex ack carries the app's skills facts, and nothing without them."""
+    standalone(harness)
+    field = reset_skills_field(skills)
+    if field is not None:
+        harness.fields[RESET_SKILLS_FIELD] = field
+    events = send(harness)
+    assert len(events) == 1 and events[0].text == expected
+
+
+def test_standalone_clean_reset_ack_ignores_a_malformed_skills_field(harness):
+    standalone(harness)
+    harness.fields[RESET_SKILLS_FIELD] = "{not json"
+    events = send(harness)
+    assert len(events) == 1 and events[0].text == "Session reset. Ready for a new conversation."
 
 
 @pytest.mark.parametrize("field,value", [

@@ -67,6 +67,9 @@ class TurnStreamContext:
     bridge_reset_action: str | None = None
     bridge_prompt: str | None = None
     chat_reset: Any = None
+    # TASK-1750: a reset's stored ``{refs, tokens}`` skill facts, set by
+    # apply_session_pin and forwarded to the bridge's /new acknowledgement.
+    reset_skill_facts: dict | None = None
     # TASK-701: opaque, signed current-turn capability forwarded only to
     # harnesses that support request-local MCP headers (Claude SDK today).
     task_turn_capability: str | None = None

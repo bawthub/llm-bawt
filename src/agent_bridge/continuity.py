@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 # Redis command field carrying the app-resolved ``{briefing, ack}`` framing.
 SEED_FRAMING_FIELD = "inject_seed_framing"
+# TASK-1750: Redis command field carrying a reset's ``{refs, tokens}`` skill facts.
+RESET_SKILLS_FIELD = "reset_injected_skills"
 
 
 def continuity_digest(messages: list[dict]) -> str:
@@ -178,14 +180,38 @@ def format_reset_receipt(seed: dict | None, skills: dict | None = None) -> str:
             "Continuity restored.")
 
 
-def format_seed_ack(stats: dict | None) -> str:
-    """Bridge /new acknowledgement; the seeded case is :func:`format_reset_receipt`."""
+def reset_skills_field(skills) -> str | None:
+    """The :data:`RESET_SKILLS_FIELD` value, or None when there is nothing to claim."""
+    if not _skills_clause(skills):
+        return None
+    refs = [r for r in skills["refs"] if isinstance(r, str) and r]
+    return json.dumps({"refs": refs, "tokens": _count(skills.get("tokens"))},
+                      ensure_ascii=False)
+
+
+def reset_skills_from_field(raw) -> dict | None:
+    """Decode the command field; anything malformed is absent, never a guess."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    return value if _skills_clause(value) else None
+
+
+def format_seed_ack(stats: dict | None, skills: dict | None = None) -> str:
+    """Bridge /new acknowledgement; the clean and seeded cases are :func:`format_reset_receipt`.
+
+    ``skills`` is the app's :data:`RESET_SKILLS_FIELD` facts, so the bridge
+    ack names the same skills as the app receipt; absent adds nothing.
+    """
     if stats is None or stats.get("clean_start"):
-        return RESET_CONFIRMATION
+        return format_reset_receipt(None, skills)
     if not stats.get("seeded"):
         reason = stats.get("reason", "nothing to seed")
-        return f"Session reset. History seeding on, but {reason}. Fresh start."
-    return format_reset_receipt(stats)
+        return f"Session reset. History seeding on, but {reason}.{_skills_clause(skills)} Fresh start."
+    return format_reset_receipt(stats, skills)
 
 
 async def post_continuity_receipt(app_api_url: str | None, thread_id: str | None,
