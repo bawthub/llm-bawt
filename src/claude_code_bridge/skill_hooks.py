@@ -58,18 +58,16 @@ REMINDER_INJECTED = (
 )
 
 
-def injected_skills_env(skill_selection: str | None) -> dict[str, str]:
-    """The env naming a managed selection's injected skills; ``{}`` when none.
+def injected_skills_env(field: str | None) -> dict[str, str]:
+    """The env naming the command's injected skills; ``{}`` when none.
 
-    A malformed selection raises ``SkillSelectionError``, as it does wherever
-    else the bridge applies it, so the turn fails visibly.
+    ``field`` is the command's ``INJECTED_FIELD``. An invalid ref raises
+    ``SkillSelectionError`` so the turn fails visibly.
     """
-    from agent_bridge.skill_selection import ManagedSelection
+    from agent_bridge.skill_selection import injected_field
 
-    selection = ManagedSelection.from_field(skill_selection)
-    if selection is None or not selection.injected:
-        return {}
-    return {INJECTED_SKILLS_ENV: ",".join(selection.injected)}
+    refs = [ref for ref in (field or "").split(",") if ref]
+    return {INJECTED_SKILLS_ENV: injected_field(refs)} if refs else {}
 
 
 def injected_skills(env: Mapping[str, str]) -> tuple[str, ...]:

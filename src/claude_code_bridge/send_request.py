@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from agent_bridge.continuity import SEED_FRAMING_FIELD, SeedFraming
 from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
-from agent_bridge.skill_selection import SELECTION_FIELD
+from agent_bridge.skill_selection import INJECTED_FIELD, SELECTION_FIELD
 
 from ._bridge_helpers import _bot_slug_from_session_key
 from .proxy.transport_policy import normalize_responses_transport
@@ -62,6 +62,8 @@ class SendRequest:
     # TASK-1309: the session's pinned managed selection, raw command field;
     # parsed where it is applied so a malformed one fails the turn visibly.
     skill_selection: str | None = None
+    # TASK-1691: comma-separated refs whose bodies the system prompt carries.
+    injected_skills: str | None = None
     # App-resolved Claude Code auto-compact window (None = CLI default).
     compact_threshold: int | None = None
     # App-resolved prompt-cache TTL ("5m"/"1h"; None = CLI default).
@@ -262,6 +264,7 @@ class SendRequest:
             task_turn_capability=task_turn_capability,
             skill_bundle=fields.get("skill_bundle"),
             skill_selection=fields.get(SELECTION_FIELD),
+            injected_skills=fields.get(INJECTED_FIELD),
             access_path=(
                 str(fields["access_path"]).strip()
                 if fields.get("access_path") is not None else None

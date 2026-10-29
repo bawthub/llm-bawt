@@ -181,6 +181,20 @@ def test_claude_bridge_reads_the_selection_field():
     assert SendRequest.from_fields({"session_key": "b:s"}).skill_selection is None
 
 
+def test_injected_skills_ride_their_own_command_field():
+    # TASK-1691: independent of the selection, so an inject-only bot names them too.
+    from agent_bridge.skill_selection import INJECTED_FIELD
+    from claude_code_bridge.send_request import SendRequest
+
+    fields = _publish(injected_skills=["git-commits", "peer-review"])
+    assert fields[INJECTED_FIELD] == "git-commits,peer-review" and SELECTION_FIELD not in fields
+    assert INJECTED_FIELD not in _publish(injected_skills=[])
+    with pytest.raises(SkillSelectionError):
+        _publish(injected_skills=["../x"])
+    assert SendRequest.from_fields(
+        {"session_key": "b:s", INJECTED_FIELD: "git-commits"}).injected_skills == "git-commits"
+
+
 def test_client_forwards_the_selection_into_the_backend_config():
     from llm_bawt.agent_backends.claude_code import ClaudeCodeBackend
     from llm_bawt.clients.agent_backend_client import AgentBackendClient
@@ -192,9 +206,11 @@ def test_client_forwards_the_selection_into_the_backend_config():
     seen: list[dict] = []
     backend.stream_raw = lambda prompt, config, **kw: seen.append(config) or iter(())
     with patch("llm_bawt.runtime_setting_resolution.resolve_global_runtime_setting", return_value=0):
-        list(client.stream_raw([Message("user", "hi")], skill_selection=MANIFEST))
+        list(client.stream_raw([Message("user", "hi")], skill_selection=MANIFEST,
+                               injected_skills=["git-commits"]))
         list(client.stream_raw([Message("user", "hi")]))
     assert seen[0]["skill_selection"] == MANIFEST and "skill_selection" not in seen[1]
+    assert seen[0]["injected_skills"] == ["git-commits"] and "injected_skills" not in seen[1]
     assert "skill_selection" not in client._bot_config  # request-local, never shared
 
 
@@ -244,12 +260,28 @@ class _Client:
         return base
 
 
+def test_injected_skills_follow_the_held_prompt_not_the_manifest():
+    # TASK-1691: an inject-only bot has no manifest but still names its skills.
+    ctx = _ctx(_resolution(None))
+    ctx.llm_bawt._injected_skill_refs = ("git-commits",)
+    assert pin_backend_kwargs(ctx, None, agent=True) == {"injected_skills": ["git-commits"]}
+    held = PinDecision(text="P", pin_turn_id="t", sha256="s", action="kept", reason=None,
+                       is_boundary=False, rendered_sha256="s", injected_skills=("peer-review",))
+    assert pin_backend_kwargs(ctx, held, agent=True)["injected_skills"] == ["peer-review"]
+    # The harness may still hold older bytes: claim nothing.
+    unverified = PinDecision(text="P", pin_turn_id="t", sha256="s", action="pinned",
+                             reason="missing_row", is_boundary=True, rendered_sha256="s",
+                             snapshot_unverified=True, injected_skills=("peer-review",))
+    assert "injected_skills" not in pin_backend_kwargs(ctx, unverified, agent=True)
+
+
 def test_the_hook_pins_this_renders_manifest(monkeypatch):
     captured = {}
     monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve",
                         lambda self, **kw: captured.update(kw))
     apply_session_pin(_ctx(_resolution(MANIFEST)), _Client(), [Message("system", "x")], turn_id="t")
     assert captured["skill_manifest"] == MANIFEST
+    assert captured["injected_skills"] == ()
 
 
 def test_a_corrupt_pinned_selection_fails_the_turn_instead_of_using_the_current(monkeypatch):

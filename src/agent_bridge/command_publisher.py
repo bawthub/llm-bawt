@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from .continuity import SEED_FRAMING_FIELD, SeedFraming
 from .publisher import COMMANDS_STREAM
@@ -72,6 +72,7 @@ class CommandPublisherMixin:
         access_path: str | None = None,
         access_path_provider: str | None = None,
         skill_selection: Mapping | None = None,
+        injected_skills: Sequence[str] | None = None,
     ) -> None:
         """Publish one idempotent ``chat.send`` command to the bridge stream.
 
@@ -99,6 +100,10 @@ class CommandPublisherMixin:
             if skill_bundle is not None:
                 raise SkillSelectionError("a skill bundle and a managed selection are exclusive")
             fields[SELECTION_FIELD] = ManagedSelection.from_manifest(skill_selection).to_field()
+        if injected_skills:  # TASK-1691: skills whose bodies the system prompt carries
+            from .skill_selection import INJECTED_FIELD, injected_field
+
+            fields[INJECTED_FIELD] = injected_field(injected_skills)
         if attachments:
             fields["attachments"] = json.dumps(attachments, ensure_ascii=False)
         if system_prompt:

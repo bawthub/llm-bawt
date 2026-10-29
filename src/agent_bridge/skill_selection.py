@@ -14,11 +14,11 @@ from pathlib import Path
 
 from .skill_registry import SkillRegistry, _name
 
-#: An entry's mode when the system prompt already carries its body. Mirrors
-#: ``llm_bawt.skills.resolver.INJECT``; the bridge never imports the app.
-INJECT_MODE = "inject"
 #: Command field carrying a :class:`ManagedSelection`.
 SELECTION_FIELD = "skill_selection"
+#: Command field naming the skills whose bodies the turn's system prompt
+#: carries (TASK-1691), comma-separated. Independent of any selection.
+INJECTED_FIELD = "injected_skills"
 #: The settings sources the Claude CLI loads when none are named. Passing
 #: ``skills`` makes the SDK default them to user+project only, which would
 #: silently drop local settings (hooks, permissions) for a managed bot.
@@ -35,14 +35,10 @@ class ManagedSelection:
 
     Built from the resolver's manifest (``SkillResolution.manifest``); its
     ``entries`` are the applied skills, available and injected alike.
-    ``injected`` names the entries whose bodies the pinned system prompt
-    already carries (``mode == "inject"``), so the harness hooks can count
-    them as loaded (TASK-1691).
     """
 
     refs: tuple[str, ...]
     manifest_sha: str
-    injected: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, manifest: Mapping) -> ManagedSelection:
@@ -55,8 +51,7 @@ class ManagedSelection:
         refs = [entry.get("ref") if isinstance(entry, Mapping) else None for entry in entries]
         if not all(isinstance(ref, str) and _REF.fullmatch(ref) for ref in refs):
             raise SkillSelectionError("skill selection has an invalid ref")
-        injected = [entry["ref"] for entry in entries if entry.get("mode") == INJECT_MODE]
-        return cls(tuple(dict.fromkeys(refs)), sha, tuple(dict.fromkeys(injected)))
+        return cls(tuple(dict.fromkeys(refs)), sha)
 
     @classmethod
     def from_field(cls, raw: str | None) -> ManagedSelection | None:
@@ -70,10 +65,18 @@ class ManagedSelection:
         return cls.from_manifest(data)
 
     def to_field(self) -> str:
-        injected = set(self.injected)
-        return json.dumps({"entries": [{"ref": ref, "mode": INJECT_MODE} if ref in injected
-                                       else {"ref": ref} for ref in self.refs],
+        return json.dumps({"entries": [{"ref": ref} for ref in self.refs],
                            "manifest_sha": self.manifest_sha}, separators=(",", ":"))
+
+
+def injected_field(refs) -> str:
+    """The :data:`INJECTED_FIELD` value; an invalid ref raises."""
+    from .skill_sources import _REF
+
+    refs = list(refs)
+    if not all(isinstance(ref, str) and _REF.fullmatch(ref) for ref in refs):
+        raise SkillSelectionError("injected skills have an invalid ref")
+    return ",".join(dict.fromkeys(refs))
 
 
 def legacy_claude_skill_roots() -> tuple[Path, ...]:

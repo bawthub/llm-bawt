@@ -70,12 +70,12 @@ class Rig:
         return turn_id
 
     def resolve(self, turn_id, rendered, *, cold=False, sections=None, dispatched=True, resume=None,
-                skill_manifest=None):
+                skill_manifest=None, injected_skills=()):
         """Resolve a turn; ``dispatched`` models the bridge's first output confirming it."""
         decision = self.store.resolve(
             session_id=self.session_id, turn_id=turn_id, storage_bot=self.bot,
             rendered=rendered, cold_start=cold, sections=sections, resume_id=resume,
-            skill_manifest=skill_manifest,
+            skill_manifest=skill_manifest, injected_skills=injected_skills,
         )
         if dispatched and decision is not None and decision.is_boundary:
             assert self.store.confirm(session_id=self.session_id, turn_id=turn_id)
@@ -492,6 +492,18 @@ def test_pinned_skills_move_only_at_a_boundary(rig):
     moved = rig.resolve(rig.add_turn("/new hi"), "V2", cold=True, skill_manifest=after_new)
     assert (moved.action, moved.skill_manifest) == ("pinned", after_new)
     assert rig.resolve(rig.add_turn(), "V2", skill_manifest=edited).skill_manifest == after_new
+
+
+def test_injected_skills_are_pinned_with_the_bytes(rig):
+    # TASK-1691: kept turns replay the pin's injected skills, not this render's.
+    first = rig.add_turn()
+    pinned = rig.resolve(first, "V1", cold=True, injected_skills=("git-commits", "bad ref"))
+    assert pinned.injected_skills == ("git-commits",)
+    assert rig.turn_request(first)[PIN_KEY]["injected_skills"] == ["git-commits"]
+    kept = rig.resolve(rig.add_turn(), "V1", injected_skills=())
+    assert (kept.action, kept.injected_skills) == ("kept", ("git-commits",))
+    moved = rig.resolve(rig.add_turn("/new hi"), "V2", cold=True)
+    assert moved.injected_skills == ()
 
 
 def test_a_session_pinned_unmanaged_stays_unmanaged_until_its_boundary(rig):

@@ -296,6 +296,7 @@ class AgentBridgeBackend(AgentBackend):
                             ),
                             skill_bundle=config.get("skill_bundle"),
                             skill_selection=config.get("skill_selection"),
+                            injected_skills=config.get("injected_skills"),
                             subagent_model=(
                                 str(config.get("subagent_model")).strip()
                                 if config.get("subagent_model") else None

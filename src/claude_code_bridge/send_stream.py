@@ -138,6 +138,7 @@ class ClaudeStreamMixin:
         native_route: NativeAuthRoute | None = None,
         skill_selection: str | None = None,
         prompt_cache_ttl: str | None = None,
+        injected_skills: str | None = None,
     ) -> dict:
         """Build the environment dict handed to ``ClaudeAgentOptions(env=...)``.
 
@@ -163,7 +164,7 @@ class ClaudeStreamMixin:
         # the harness hooks (``skill_hooks``) to count as loaded.
         from .skill_hooks import injected_skills_env
 
-        sdk_env.update(injected_skills_env(skill_selection))
+        sdk_env.update(injected_skills_env(injected_skills))
         if use_proxy:
             sdk_env["ANTHROPIC_BASE_URL"] = self._proxy_base_url  # type: ignore[assignment]
             # The SDK still requires *some* auth token to send; the

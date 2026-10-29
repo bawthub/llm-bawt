@@ -106,6 +106,7 @@ def test_admitted_skills_render_in_position_order_with_metadata(world):
         "skipped": [{"ref": "big", "reason": "over_cap"}]}
     # The turn pins the manifest of the very resolution this section rendered.
     assert owner._skill_resolution is world["resolution"]
+    assert owner._injected_skill_refs == ("a", "b")
     assert world["asked"] == ["fixture-one"] and world["engine"] == "engine"
     assert owner.resolves == [(PREAMBLE_KEY, "bot", "fixture-one"), (ENTRY_KEY, "bot", "fixture-one")]
 
@@ -151,7 +152,10 @@ def test_a_resolution_failure_skips_the_section(world):
 
 
 def test_an_entry_template_without_a_body_slot_skips_the_section(world):
-    assert _section(_Owner({PREAMBLE_KEY: "## Pre", ENTRY_KEY: "### {ref}"})) is None
+    owner = _Owner({PREAMBLE_KEY: "## Pre", ENTRY_KEY: "### {ref}"})
+    owner._injected_skill_refs = ("stale",)
+    assert _section(owner) is None
+    assert owner._injected_skill_refs == ()  # TASK-1691: no body, no injected claim
 
 
 def test_an_unreadable_template_skips_the_section(world):
@@ -162,6 +166,8 @@ def test_an_unreadable_template_skips_the_section(world):
 
     owner.config_resolver = SimpleNamespace(resolve_body=down)
     assert _section(owner) is None
+    # TASK-1691: the manifest may still mark them inject; the hook signal must not.
+    assert owner._skill_resolution is world["resolution"] and owner._injected_skill_refs == ()
 
 
 def test_registry_defaults_are_the_seed_constants():

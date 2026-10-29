@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_bridge.skill_selection import ManagedSelection, SkillSelectionError
+from agent_bridge.skill_selection import SkillSelectionError, injected_field
 from claude_code_bridge import skill_hooks
 from claude_code_bridge.skill_hooks import (
     INJECTED_SKILLS_ENV,
@@ -19,13 +19,6 @@ from claude_code_bridge.skill_hooks import (
     resume_reminder,
 )
 
-MANIFEST = {
-    "manifest_sha": "abc",
-    "entries": [{"ref": "git-commits", "mode": "inject"}, {"ref": "llm-bawt", "mode": "enable"},
-                {"ref": "peer-review", "mode": "inject"}],
-}
-
-
 @pytest.fixture(autouse=True)
 def _markers(tmp_path, monkeypatch):
     monkeypatch.setattr(skill_hooks, "MARKER_DIR", tmp_path)
@@ -35,20 +28,13 @@ def _push(sid="s1"):
     return {"session_id": sid, "tool_input": {"command": "git push origin abc:master"}}
 
 
-def test_selection_keeps_injected_refs_through_the_command_field():
-    selection = ManagedSelection.from_manifest(MANIFEST)
-    assert selection.injected == ("git-commits", "peer-review")
-    assert ManagedSelection.from_field(selection.to_field()) == selection
-
-
-def test_env_names_injected_skills_only_for_a_managed_selection():
-    field = ManagedSelection.from_manifest(MANIFEST).to_field()
+def test_the_command_field_names_injected_skills_into_the_env():
+    field = injected_field(["git-commits", "peer-review", "git-commits"])
+    assert field == "git-commits,peer-review"
     assert injected_skills_env(field) == {INJECTED_SKILLS_ENV: "git-commits,peer-review"}
-    assert injected_skills_env(None) == {}
-    plain = ManagedSelection.from_manifest({**MANIFEST, "entries": [{"ref": "llm-bawt"}]})
-    assert injected_skills_env(plain.to_field()) == {}
+    assert injected_skills_env(None) == {} and injected_skills_env("") == {}
     with pytest.raises(SkillSelectionError):
-        injected_skills_env("{not json")
+        injected_skills_env("git-commits,../etc")
 
 
 def test_gate_denies_a_mutating_git_command_with_no_skill_in_context():

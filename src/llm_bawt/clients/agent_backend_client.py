@@ -241,6 +241,8 @@ class AgentBackendClient(LLMClient):
         system_prompt_pin = kwargs.pop("system_prompt_pin", None)
         # TASK-1309: the skill manifest pinned with that prompt (request-local).
         skill_selection = kwargs.pop("skill_selection", None)
+        # TASK-1691: skills whose bodies that prompt carries, for the harness hooks.
+        injected_skills = kwargs.pop("injected_skills", None)
 
         # Extract system prompt from messages for backends that support it
         # (e.g. claude-code bridge). Merge into config so the backend can
@@ -269,6 +271,8 @@ class AgentBackendClient(LLMClient):
                 config["system_prompt_delivery"] = delivery
         if skill_selection is not None:
             config["skill_selection"] = skill_selection
+        if injected_skills:
+            config["injected_skills"] = list(injected_skills)
 
         execution = kwargs.pop("turn_execution", None)
         if execution is not None:

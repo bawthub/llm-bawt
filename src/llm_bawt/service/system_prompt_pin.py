@@ -44,7 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -70,6 +70,10 @@ PIN_VERSION = 1
 #: its bytes (TASK-1309), and the backend kwarg that carries it.
 SKILL_MANIFEST_KEY = "skill_manifest"
 SKILL_SELECTION_KWARG = "skill_selection"
+#: Key on the pin turn's audit record naming the skills whose bodies its bytes
+#: carry (TASK-1691), and the backend kwarg that carries them.
+INJECTED_SKILLS_KEY = "injected_skills"
+INJECTED_SKILLS_KWARG = "injected_skills"
 
 #: Pin-move reasons. Boundaries the harness itself observes are verified;
 #: fallbacks can disagree with the harness until its next boundary.
@@ -112,6 +116,8 @@ class PinDecision:
     candidate_sections: dict[str, dict] | None = field(default=None, compare=False)
     #: TASK-1309: the skill manifest pinned with these bytes (None = unmanaged).
     skill_manifest: dict | None = field(default=None, compare=False)
+    #: TASK-1691: refs whose bodies these pinned bytes carry.
+    injected_skills: tuple[str, ...] = field(default=(), compare=False)
 
     @property
     def drift(self) -> bool:
@@ -216,6 +222,31 @@ def _pinned_manifest(record: Mapping) -> dict | None:
     return _manifest_value(value)
 
 
+def _refs_value(value: Any) -> tuple[str, ...]:
+    """Valid skill refs from a stored list; anything malformed is dropped."""
+    from agent_bridge.skill_sources import _REF
+
+    if not isinstance(value, list):
+        return ()
+    return tuple(dict.fromkeys(r for r in value if isinstance(r, str) and _REF.fullmatch(r)))
+
+
+def fresh_injected_skills(ctx) -> tuple[str, ...]:
+    """Refs whose bodies this turn's render carries (empty if none were added)."""
+    return _refs_value(list(getattr(getattr(ctx, "llm_bawt", None), "_injected_skill_refs", ())))
+
+
+def held_injected_skills(decision: PinDecision | None, ctx) -> tuple[str, ...]:
+    """Skills whose bodies the prompt the harness holds carries.
+
+    A pinned turn names its pin's; an unverified pin names none, because the
+    harness may still hold older bytes. An unpinned turn names its render's.
+    """
+    if decision is None:
+        return fresh_injected_skills(ctx)
+    return () if decision.snapshot_unverified else decision.injected_skills
+
+
 def fresh_skill_manifest(ctx) -> dict | None:
     """This turn's resolved skill manifest (rendered with its injected section)."""
     resolution = getattr(getattr(ctx, "llm_bawt", None), "_skill_resolution", None)
@@ -236,6 +267,9 @@ def pin_backend_kwargs(ctx, decision: PinDecision | None, *, agent: bool) -> dic
     manifest = decision.skill_manifest if decision is not None else fresh_skill_manifest(ctx)
     if manifest is not None:
         kwargs[SKILL_SELECTION_KWARG] = manifest
+    injected = held_injected_skills(decision, ctx)
+    if injected:
+        kwargs[INJECTED_SKILLS_KWARG] = list(injected)
     return kwargs
 
 
@@ -344,6 +378,7 @@ def apply_session_pin(
             sections=sections,
             resume_id=resume_id,
             skill_manifest=fresh_skill_manifest(ctx),
+            injected_skills=fresh_injected_skills(ctx),
         )
     except SkillSelectionError:
         raise  # a corrupt pinned skill selection is never swapped for the current one
@@ -464,6 +499,7 @@ class SystemPromptPinStore:
         sections: Mapping[str, dict] | None = None,
         resume_id: str | None = None,
         skill_manifest: Mapping | None = None,
+        injected_skills: Sequence[str] = (),
     ) -> PinDecision | None:
         """Decide this turn's prompt, stage a pin move if needed, record the audit.
 
@@ -493,6 +529,10 @@ class SystemPromptPinStore:
         pinned with the bytes on the pin turn's audit record, so a kept turn
         replays the pinned one; a pin from before skills were pinned replays
         None (unmanaged) until its next boundary.
+
+        ``injected_skills`` (TASK-1691) names the skills whose bodies this
+        render carries; it is pinned the same way, and an older pin replays
+        none.
         """
         if self.engine is None or not session_id or not turn_id:
             return None
@@ -558,6 +598,7 @@ class SystemPromptPinStore:
                     pinned_sections=held_sections,
                     candidate_sections=candidate_sections,
                     skill_manifest=_manifest_value(skill_manifest),
+                    injected_skills=_refs_value(list(injected_skills)),
                 )
                 new_pin = {
                     "v": PIN_VERSION,
@@ -599,6 +640,8 @@ class SystemPromptPinStore:
                         if pin.get("snapshot_unverified") else None
                     ),
                     skill_manifest=_pinned_manifest(record),
+                    injected_skills=_refs_value(
+                        record.get(INJECTED_SKILLS_KEY) if isinstance(record, dict) else None),
                 )
             else:  # pin_move_reason keeps a pin only when both exist
                 raise RuntimeError("system prompt pin kept without pinned text")
@@ -612,6 +655,8 @@ class SystemPromptPinStore:
                 audit["text"] = decision.text
                 if decision.skill_manifest is not None:
                     audit[SKILL_MANIFEST_KEY] = decision.skill_manifest
+                if decision.injected_skills:
+                    audit[INJECTED_SKILLS_KEY] = list(decision.injected_skills)
             turn_request[PIN_KEY] = audit
             conn.execute(
                 text("UPDATE turn_logs SET request_json=:rj WHERE id=:id"),

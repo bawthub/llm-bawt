@@ -105,6 +105,9 @@ class OrchestratorInitializationMixin:
         # TASK-1309: this turn's skill resolution, set by the injected-skills
         # section on every agent build; the session pin replays its manifest.
         self._skill_resolution = None
+        # TASK-1691: refs whose bodies this turn's render actually carries;
+        # set only after the injected-skills section is added.
+        self._injected_skill_refs: tuple[str, ...] = ()
 
         if not self.model_definition:
             raise ValueError(f"Could not find model definition for: '{resolved_model_alias}'")

@@ -249,13 +249,16 @@ class PromptSectionsMixin:
         assigned to this bot in 'inject' mode, admitted under the token caps.
         Fails closed: any error omits the section; it never fails the build.
         The resolution is kept as ``_skill_resolution`` so the turn pins the
-        same manifest this section rendered (None when it failed)."""
+        same manifest this section rendered (None when it failed).
+        ``_injected_skill_refs`` names the skills whose bodies were added; it
+        stays empty whenever the section is not (TASK-1691)."""
         from ..skills.prompts import ENTRY_KEY, PREAMBLE_KEY, render_section
         from ..skills.resolver import INJECT
         from ..skills.service import SkillService
         from ..utils.db import get_shared_engine
 
         self._skill_resolution = None
+        self._injected_skill_refs = ()
         try:
             engine = get_shared_engine(self.config)
             resolution = SkillService.from_config(engine, self.config).resolve_bot(self.bot_id)
@@ -291,6 +294,7 @@ class PromptSectionsMixin:
                             if e.mode == INJECT and not e.applied],
             },
         )
+        self._injected_skill_refs = tuple(e.ref for e in injected)
 
     def _sec_working_memory(self, builder: PromptBuilder, prompt: str) -> None:
         """TASK-1281 working-memory section, rendered per turn by the dispatch path."""
