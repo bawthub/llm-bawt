@@ -457,6 +457,25 @@ class ServiceLLMBawt(BaseLLMBawt):
             slog.model_loaded(self.resolved_model_alias, model_type, load_time_ms)
             return client
 
+        elif model_type == "openai-compatible":
+            # Catalog chat-completions paths without a dedicated client
+            # (OpenRouter, Kimi, custom): same factory as background jobs, so
+            # the key comes from the access path's provider connection.
+            from .background_clients import ChatCompletionsFactory, UnsupportedBackgroundModel
+
+            factory = ChatCompletionsFactory()
+            if not factory.accepts(self.model_definition):
+                raise ValueError(
+                    f"Unsupported openai-compatible protocol for '{self.resolved_model_alias}'"
+                )
+            try:
+                client = factory.build(self.config, self.model_definition, self.resolved_model_alias)
+            except UnsupportedBackgroundModel as exc:
+                raise ValueError(str(exc)) from exc
+            load_time_ms = (time.perf_counter() - start_time) * 1000
+            slog.model_loaded(self.resolved_model_alias, model_type, load_time_ms)
+            return client
+
         elif model_type in ("agent_backend", "claude-code"):
             from ..bot_types import agent_backend_for_model_def
             from ..clients.agent_backend_client import AgentBackendClient

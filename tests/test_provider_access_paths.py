@@ -25,6 +25,7 @@ EXPECTED_OWNERS = {
     "xai-chat": "xai",
     "xai-responses": "xai",
     "openrouter-anthropic": "openrouter",
+    "openrouter-chat": "openrouter",
     # TASK-1476: bridge-proxy API keys moved into the encrypted store.
     "zai-anthropic": "zai",
     "kimi-coding-chat": "kimi-coding",

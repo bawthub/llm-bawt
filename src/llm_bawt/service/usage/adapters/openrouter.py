@@ -42,7 +42,7 @@ class OpenRouterUsageAdapter(UsageAdapter):
     provider = "openrouter"
     display_name = "OpenRouter"
     backend = "claude-code"  # reached via the claude-code bridge proxy
-    access_path_keys = ("openrouter-anthropic",)
+    access_path_keys = ("openrouter-anthropic", "openrouter-chat")
     kind = "balance"
     balance_mode = BALANCE_PROVIDER
     connection_id = "openrouter"

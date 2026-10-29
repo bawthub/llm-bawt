@@ -51,6 +51,9 @@ STANDARD_ACCESS_PATHS = (
     # chosen by vendor). Same key as the hand-created echo row, so the
     # ON CONFLICT seed never adds a second identical path there.
     AccessPathSeed("openrouter-anthropic", "openrouter", "anthropic-messages", "https://openrouter.ai/api", "api-key"),
+    # OpenRouter's OpenAI-compatible surface, so chat-harness bots can use
+    # OpenRouter models (TASK-1764). Same key, owned by the openrouter adapter.
+    AccessPathSeed("openrouter-chat", "openrouter", "chat-completions", "https://openrouter.ai/api/v1", "api-key"),
     AccessPathSeed("local-llamacpp", "local", "chat-completions", None, "none", "llama-cpp"),
     AccessPathSeed("local-vllm", "local", "chat-completions", None, "none", "vllm"),
     AccessPathSeed("ollama", "local", "chat-completions", None, "none", "ollama"),
