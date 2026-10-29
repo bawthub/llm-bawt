@@ -29,6 +29,10 @@ from .publisher import (
 
 logger = logging.getLogger(__name__)
 
+INACTIVITY_TIMEOUT_MARKER = "produced no event for"
+"""Phrase in the inactivity-watchdog error; the turn row's ``error_text`` keeps it,
+which is how a watchdog kill is recognized afterwards (TASK-1738)."""
+
 
 def _rpc_reply_matches(fields: dict, backend: str | None) -> bool:
     """Whether an RPC reply may answer a call addressed to *backend*.
@@ -404,7 +408,7 @@ class RedisSubscriber(CommandPublisherMixin):
             if remaining <= 0:
                 logger.warning("subscribe_run inactivity timeout for request_id=%s", request_id)
                 raise TimeoutError(
-                    f"bridge run {request_id} produced no event for {timeout_s:.0f}s"
+                    f"bridge run {request_id} {INACTIVITY_TIMEOUT_MARKER} {timeout_s:.0f}s"
                 )
 
             block_ms = min(int(remaining * 1000), 2000)

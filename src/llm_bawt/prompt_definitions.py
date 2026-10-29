@@ -22,6 +22,7 @@ from .chat_prompt_defaults import (
     RUNTIME_CONTEXT_TEMPLATE,
     SCOPED_COMMIT_PROMPT,
     SESSION_SEED_ACK,
+    TURN_CUTOFF_NOTICE,
     SESSION_SEED_BRIEFING,
     TTS_OUTPUT_INSTRUCTIONS,
 )
@@ -352,6 +353,25 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "Claude Code writes it into a synthetic transcript; Codex "
                 "injects it as a thread item. Resolved per bot at dispatch. "
                 "TASK-1579."
+            ),
+        },
+    ),
+    "agents.turn_cutoff_notice": PromptDefinition(
+        key="agents.turn_cutoff_notice",
+        title="Agent Turn Cut-off Notice",
+        category="agent_execution",
+        required_vars=("cause", "ended_at"),
+        loader=lambda: TURN_CUTOFF_NOTICE,
+        metadata={
+            "notes": (
+                "Prefixed to the first agent turn after the system cut off the "
+                "previous turn in the same session: a bridge restart (host "
+                "shutdown) or the app's inactivity watchdog. A killed tool call "
+                "reaches the agent as the SDK's user-rejection text, so this must "
+                "say nobody rejected anything and the bot should resume. {cause} "
+                "is the cut-off cause, {ended_at} its UTC time. A body that is "
+                "blank or no longer renders falls back to this default. Resolved "
+                "per bot at dispatch. TASK-1738."
             ),
         },
     ),

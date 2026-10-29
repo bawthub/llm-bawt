@@ -35,6 +35,17 @@ SESSION_SEED_BRIEFING = (
     "of older sessions, then the most recent messages. Treat it as "
     "background context; you don't need to repeat it back."
 )
+# Prefixed to the first turn after one the system cut off (TASK-1738). {cause}
+# names what killed it; {ended_at} is its UTC end time.
+TURN_CUTOFF_NOTICE = (
+    "[System notice: your previous turn in this session was cut off by {cause} "
+    "at {ended_at}. Nobody rejected or declined anything. If a tool call there "
+    "came back as rejected, or told you to STOP and wait for the user, that "
+    "was the cut-off, not a person. Do not wait for anyone because of it: "
+    "check what you had already completed, resume your work without repeating "
+    "side effects, then handle the message below.]"
+)
+
 SESSION_SEED_ACK = (
     "Context restored — I've reviewed our prior "
     "summaries and recent messages and I'm caught up."

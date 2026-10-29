@@ -25,6 +25,7 @@ from typing import Any, Iterator
 
 from .base import AgentBackend
 from ..seed_framing import resolve_seed_framing
+from ..turn_cutoff_notice import with_cutoff_notice
 from ..service.upstream_status import upstream_status_queue_item
 from ..utils.config import Config
 
@@ -43,6 +44,16 @@ def set_agent_subscriber(subscriber) -> None:
 def get_agent_subscriber():
     """Get the current Redis subscriber."""
     return _subscriber
+
+
+def _turn_log_engine():
+    """The service's turn-log engine, or None outside a running service."""
+    try:
+        from ..service.dependencies import get_turn_log_store
+
+        return get_turn_log_store().engine
+    except Exception:
+        return None
 
 
 async def _settle_bot_steer(payload: dict[str, Any], execution: Any) -> None:
@@ -215,6 +226,15 @@ class AgentBridgeBackend(AgentBackend):
             tmid = config.get("trigger_message_id")
             if isinstance(tmid, str) and tmid.strip():
                 trigger_message_id = tmid.strip()
+
+        # TASK-1738: after a restart or watchdog cut-off, the resumed session
+        # holds the SDK's "user rejected" text for the killed tool call; say
+        # plainly that it was the system, before the agent reads it as a person.
+        prompt = with_cutoff_notice(
+            prompt, engine=_turn_log_engine(),
+            bot_id=str(config.get("bot_id") or "").strip() or None,
+            session_key=session_key, request_id=request_id,
+        )
 
         # TASK-1579: a non-empty seed carries its registry framing, resolved
         # here at dispatch so bot overrides apply and bridges hold no copy.
