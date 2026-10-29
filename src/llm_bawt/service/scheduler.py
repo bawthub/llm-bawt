@@ -369,7 +369,9 @@ class JobScheduler:
                     from llm_bawt.service.tasks import TaskStatus as TStatus
                     if task_result.status == TStatus.COMPLETED:
                         result_data = task_result.result or {}
-                        status = JobStatus.SUCCESS if result_data.get("error") is None else JobStatus.FAILED
+                        status = (JobStatus.FAILED if result_data.get("error") is not None
+                                  else JobStatus.SKIPPED if result_data.get("skipped")
+                                  else JobStatus.SUCCESS)
                         result_json = json.dumps(result_data)
                         error_message = result_data.get("error")
                     else:

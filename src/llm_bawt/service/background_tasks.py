@@ -227,6 +227,7 @@ class BackgroundTasksMixin:
         total_facts = 0
         total_stored = 0
         summaries_processed = 0
+        skipped_no_human = 0
 
         for result in summarization_results:
             if not result.get("created", False):
@@ -242,10 +243,19 @@ class BackgroundTasksMixin:
 
             try:
                 from ..memory.postgresql import PostgreSQLMemoryBackend
-                from ..memory.summary_extraction_policy import summary_allows_extraction
+                from ..memory.summary_extraction_policy import (
+                    summary_allows_extraction,
+                    summary_has_human_source,
+                )
 
                 backend = PostgreSQLMemoryBackend(self.config, bot_id=bot_id)
                 if not summary_allows_extraction(backend, summary_id):
+                    continue
+                if not summary_has_human_source(backend, summary_id):
+                    # TASK-1727: bot-only session, nothing to learn about the user.
+                    log.info(f"[Extraction] Summary {summary_id[:8]}: no human-authored source — skipping")
+                    skipped_no_human += 1
+                    self._mark_summary_extracted(bot_id, summary_id)
                     continue
                 facts = extraction_service.extract_from_summary(
                     summary_text=summary_text,
@@ -353,6 +363,7 @@ class BackgroundTasksMixin:
 
         return {
             "summaries_processed": summaries_processed,
+            "summaries_skipped_no_human": skipped_no_human,
             "facts_extracted": total_facts,
             "facts_stored": total_stored,
             "extraction_method": extraction_model or "heuristic",
@@ -557,6 +568,21 @@ class BackgroundTasksMixin:
             bot_id,
             len(unprocessed),
         )
+
+        # TASK-1727: a window with no human-authored turn holds no user facts.
+        # Close it out without building a client or paying for a call.
+        from ..memory.speaker_attribution import human_user_turns_present
+
+        if not human_user_turns_present(unprocessed):
+            backend.mark_messages_processed([m["id"] for m in unprocessed])
+            return {
+                "skipped": True,
+                "reason": "No human-authored messages in window",
+                "bot_id": bot_id,
+                "messages_found": len(unprocessed),
+                "facts_extracted": 0,
+                "facts_stored": 0,
+            }
 
         # Use isolated background client for LLM calls
         extraction_client, extraction_model = self._get_background_client(
