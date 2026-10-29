@@ -17,6 +17,7 @@ from llm_bawt.service.system_prompt_pin import (
     MISSING_ROW,
     PENDING_KEY,
     PIN_KEY,
+    RESET_SKILLS_KEY,
     SHA_MISMATCH,
     SystemPromptPinStore,
     prompt_sha256,
@@ -466,6 +467,13 @@ def test_bare_reset_marker_beats_a_proven_compaction(rig):
 def test_bare_reset_marker_needs_a_session(rig):
     turn = rig.add_turn("/new")
     assert rig.store.mark_reset_boundary(session_id=str(uuid.uuid4()), turn_id=turn, resume_id=None) is False
+
+
+def test_reset_skill_facts_land_on_the_session_and_need_it(rig):
+    facts = {"refs": ["llm-bawt"], "tokens": 4200, "turn_id": "t"}
+    assert rig.store.record_reset_skills(session_id=rig.session_id, facts=facts) is True
+    assert rig.metadata()[RESET_SKILLS_KEY] == facts
+    assert rig.store.record_reset_skills(session_id=str(uuid.uuid4()), facts=facts) is False
 
 
 # ── TASK-1309: the skill selection is pinned with the bytes ─────────────────

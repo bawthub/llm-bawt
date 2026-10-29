@@ -15,6 +15,7 @@ from sqlalchemy import text
 from agent_bridge.continuity import RESET_CONFIRMATION, format_reset_receipt
 
 from ..chat_message_text import last_user_text
+from ..system_prompt_pin import RESET_SKILLS_KEY
 from .intent import NewSessionIntent, NewSessionResult, Origin, Outcome, Stage
 
 
@@ -25,12 +26,15 @@ def reset_confirmation(session_metadata) -> str:
     is app-captured and becomes ``restored`` only through the digest-bound
     bridge receipt, so it is the one record this text may describe. No seed,
     an empty selection, or an unacknowledged/failed restore keeps the plain
-    confirmation.
+    confirmation (plus any recorded injected skills).
     """
-    continuity = session_metadata.get("continuity") if isinstance(session_metadata, dict) else None
-    if not isinstance(continuity, dict) or continuity.get("status") != "restored":
-        return RESET_CONFIRMATION
-    return format_reset_receipt(continuity)
+    metadata = session_metadata if isinstance(session_metadata, dict) else {}
+    continuity = metadata.get("continuity")
+    restored = isinstance(continuity, dict) and continuity.get("status") == "restored"
+    # TASK-1750: skills the reset turn's own render carried, recorded on this
+    # session by the pin step; absent (unknown backend, failed resolve) says nothing.
+    return format_reset_receipt(continuity if restored else None,
+                                metadata.get(RESET_SKILLS_KEY))
 
 
 def receipt_content(receipt: dict) -> str:

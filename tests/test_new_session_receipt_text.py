@@ -71,3 +71,39 @@ def test_bridge_ack_and_app_receipt_share_one_formatter():
     stats = {**_restored()["continuity"], "seeded": True}
     assert format_seed_ack(stats) == reset_confirmation(_restored())
     assert format_seed_ack({"clean_start": True}) == RESET_CONFIRMATION
+
+
+SKILLS = {"refs": ["agent-system", "bawthub", "llm-bawt"], "tokens": 18342, "turn_id": "t"}
+
+
+def test_restored_receipt_names_injected_skills_and_their_tokens():
+    metadata = {**_restored(), "reset_injected_skills": SKILLS}
+    assert reset_confirmation(metadata) == (
+        "Session reset. Seeded 40 recent messages (~11.0k tokens), from 2026-10-21. "
+        "Injected skills: agent-system, bawthub, llm-bawt (~18.3k tokens). Continuity restored."
+    )
+
+
+def test_clean_reset_still_names_injected_skills():
+    metadata = {"continuity": {"status": "empty"},
+                "reset_injected_skills": {"refs": ["peer-review"], "tokens": 900}}
+    assert reset_confirmation(metadata) == (
+        "Session reset. Injected skills: peer-review (~900 tokens). Ready for a new conversation."
+    )
+
+
+@pytest.mark.parametrize("skills", [
+    None, "agent-system", {"refs": [], "tokens": 0}, {"refs": "llm-bawt", "tokens": 5},
+    {"refs": [None, ""], "tokens": 10},
+])
+def test_no_or_unknown_skills_add_nothing(skills):
+    metadata = {**_restored(), "reset_injected_skills": skills}
+    assert reset_confirmation(metadata) == reset_confirmation(_restored())
+    assert reset_confirmation({"reset_injected_skills": skills}) == RESET_CONFIRMATION
+
+
+def test_skills_without_a_token_count_omit_the_size():
+    metadata = {"reset_injected_skills": {"refs": ["llm-bawt"], "tokens": None}}
+    assert reset_confirmation(metadata) == (
+        "Session reset. Injected skills: llm-bawt. Ready for a new conversation."
+    )

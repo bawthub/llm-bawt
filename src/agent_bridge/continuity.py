@@ -141,24 +141,40 @@ def _seed_span(oldest, newest) -> str:
     return f", from {first}" if first == last else f", spanning {first} → {last}"
 
 
-def format_reset_receipt(seed: dict | None) -> str:
+def _skills_clause(skills) -> str:
+    """`` Injected skills: a, b (~Nk tokens).`` or "" when none/unknown."""
+    if not isinstance(skills, dict):
+        return ""
+    refs = skills.get("refs")
+    refs = [r for r in refs if isinstance(r, str) and r] if isinstance(refs, list) else []
+    if not refs:
+        return ""
+    tokens = _count(skills.get("tokens"))
+    size = f" (~{fmt_tokens(tokens)} tokens)" if tokens else ""
+    return f" Injected skills: {', '.join(refs)}{size}."
+
+
+def format_reset_receipt(seed: dict | None, skills: dict | None = None) -> str:
     """The one /new receipt text, shared by the app receipt and bridge acks.
 
     ``seed`` holds counts of what was actually restored (``summary_count``,
     ``message_count``, ``approx_tokens``, ``oldest_timestamp``,
     ``newest_timestamp``); None or no countable bucket is the plain
-    confirmation. Zero buckets are omitted.
+    confirmation. Zero buckets are omitted. ``skills`` (TASK-1750) is
+    ``{"refs": [...], "tokens": N}`` for the skill bodies the session's
+    prompt render carried; None, malformed or empty adds nothing.
     """
     seed = seed if isinstance(seed, dict) else {}
+    clause = _skills_clause(skills)
     summaries = _count(seed.get("summary_count"))
     messages = _count(seed.get("message_count"))
     buckets = [*([_plural(summaries, "summary record")] if summaries else []),
                *([_plural(messages, "recent message")] if messages else [])]
     if not buckets:
-        return RESET_CONFIRMATION
+        return f"Session reset.{clause} Ready for a new conversation."
     size = fmt_tokens(_count(seed.get("approx_tokens")))
     span = _seed_span(seed.get("oldest_timestamp"), seed.get("newest_timestamp"))
-    return (f"Session reset. Seeded {' + '.join(buckets)} (~{size} tokens){span}. "
+    return (f"Session reset. Seeded {' + '.join(buckets)} (~{size} tokens){span}.{clause} "
             "Continuity restored.")
 
 

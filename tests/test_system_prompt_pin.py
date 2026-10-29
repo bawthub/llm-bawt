@@ -452,3 +452,52 @@ def test_codex_bridge_paste_decision(delivery, resuming, expected):
 
     assert system_prompt_for_attempt("P", delivery, resuming=resuming) == expected
     assert system_prompt_for_attempt(None, delivery, resuming=resuming) is None
+
+
+# ── TASK-1750: the reset turn's injected skills feed the /new receipt ──────
+
+def _skill_ctx(refs, injected, reset="reset_only", resolved=True):
+    ctx = _ctx(binding={"thread_session_id": "successor"}, reset=reset, prompt="/new")
+    resolution = SimpleNamespace(injected=tuple(
+        SimpleNamespace(ref=ref, tokens=tokens) for ref, tokens in injected))
+    ctx.llm_bawt = SimpleNamespace(_injected_skill_refs=tuple(refs),
+                                   _skill_resolution=resolution if resolved else None)
+    return ctx
+
+
+@pytest.mark.parametrize("reset", ["reset_only", "reset_follow_up"])
+def test_reset_records_the_renders_injected_skills(monkeypatch, reset):
+    recorded = []
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills",
+                        lambda self, **kw: recorded.append(kw))
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary", lambda self, **kw: True)
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "resolve", lambda self, **kw: None)
+    ctx = _skill_ctx(["agent-system", "llm-bawt"], [("agent-system", 4000), ("llm-bawt", 3500)], reset=reset)
+    apply_session_pin(ctx, _Client(), _messages(), turn_id="turn-new")
+    assert recorded == [{"session_id": "successor", "facts": {
+        "refs": ["agent-system", "llm-bawt"], "tokens": 7500, "turn_id": "turn-new"}}]
+
+
+def test_reset_records_an_empty_render_but_never_an_unknown_one(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills",
+                        lambda self, **kw: recorded.append(kw["facts"]))
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary", lambda self, **kw: True)
+    apply_session_pin(_skill_ctx([], []), _Client(), _messages(), turn_id="t")
+    apply_session_pin(_skill_ctx(["x"], [("x", 1)], resolved=False), _Client(), _messages(), turn_id="t")
+    apply_session_pin(_skill_ctx(["x"], [("y", 1)]), _Client(), _messages(), turn_id="t")
+    apply_session_pin(_skill_ctx(["x"], [("x", 1)], reset=None), _Client(), _messages(), turn_id="t")
+    assert recorded == [{"refs": [], "tokens": 0, "turn_id": "t"}]
+
+
+def test_reset_skill_record_failure_fails_open(monkeypatch):
+    def boom(self, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "record_reset_skills", boom)
+    marks = []
+    monkeypatch.setattr(pin_mod.SystemPromptPinStore, "mark_reset_boundary",
+                        lambda self, **kw: marks.append(kw))
+    messages = _messages()
+    assert apply_session_pin(_skill_ctx(["x"], [("x", 1)]), _Client(), messages, turn_id="t") == (messages, None)
+    assert len(marks) == 1

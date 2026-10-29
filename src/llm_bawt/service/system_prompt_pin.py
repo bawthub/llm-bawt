@@ -74,6 +74,10 @@ SKILL_SELECTION_KWARG = "skill_selection"
 #: carry (TASK-1691), and the backend kwarg that carries them.
 INJECTED_SKILLS_KEY = "injected_skills"
 INJECTED_SKILLS_KWARG = "injected_skills"
+#: Key on ``sessions.session_metadata`` holding ``{"refs", "tokens", "turn_id"}``
+#: for the skill bodies a reset turn's own render carried (TASK-1750); the
+#: app-authored /new receipt cites it. Absent means unknown, never zero.
+RESET_SKILLS_KEY = "reset_injected_skills"
 
 #: Pin-move reasons. Boundaries the harness itself observes are verified;
 #: fallbacks can disagree with the harness until its next boundary.
@@ -247,6 +251,23 @@ def held_injected_skills(decision: PinDecision | None, ctx) -> tuple[str, ...]:
     return () if decision.snapshot_unverified else decision.injected_skills
 
 
+def fresh_injected_skill_facts(ctx) -> dict | None:
+    """``{"refs", "tokens"}`` for the skill bodies this turn's render carried.
+
+    None when the render never resolved skills (the section failed closed or
+    the backend renders none), so a receipt says nothing rather than guess.
+    Tokens are the resolver's admitted counts for exactly those refs.
+    """
+    resolution = getattr(getattr(ctx, "llm_bawt", None), "_skill_resolution", None)
+    if resolution is None:
+        return None
+    refs = fresh_injected_skills(ctx)
+    tokens = {e.ref: e.tokens or 0 for e in resolution.injected}
+    if any(ref not in tokens for ref in refs):
+        return None
+    return {"refs": list(refs), "tokens": sum(tokens[ref] for ref in refs)}
+
+
 def fresh_skill_manifest(ctx) -> dict | None:
     """This turn's resolved skill manifest (rendered with its injected section)."""
     resolution = getattr(getattr(ctx, "llm_bawt", None), "_skill_resolution", None)
@@ -323,6 +344,20 @@ def _iso(value: Any) -> str | None:
     return str(value) if value else None
 
 
+def _record_reset_skills(ctx, *, session_id: str, turn_id: str) -> None:
+    """Record the reset turn's injected skills for the /new receipt (TASK-1750)."""
+    facts = fresh_injected_skill_facts(ctx)
+    if facts is None:
+        return
+    try:
+        SystemPromptPinStore(ctx.svc._turn_log_store.engine).record_reset_skills(
+            session_id=session_id, facts={**facts, "turn_id": turn_id},
+        )
+    except Exception:
+        logger.warning("reset skill facts not recorded for session %s turn %s",
+                       session_id, turn_id, exc_info=True)
+
+
 def apply_session_pin(
     ctx, client, messages: list, *, turn_id: str, sections: Mapping[str, dict] | None = None,
 ) -> tuple[list, PinDecision | None]:
@@ -345,6 +380,8 @@ def apply_session_pin(
     binding = ctx.thread_binding or {}
     session_id = str(binding.get("thread_session_id") or "").strip()
     resume_id = _resume_id(binding)
+    if ctx.bridge_reset_action and session_id:
+        _record_reset_skills(ctx, session_id=session_id, turn_id=turn_id)
     if ctx.bridge_reset_action == "reset_only":
         if session_id:
             try:
@@ -704,6 +741,22 @@ class SystemPromptPinStore:
                         {"rj": dump_payload(turn_request), "id": turn_id},
                     )
         return True
+
+    def record_reset_skills(self, *, session_id: str, facts: Mapping[str, Any]) -> bool:
+        """Store :data:`RESET_SKILLS_KEY` on the session; False if the row is missing."""
+        if self.engine is None or not session_id:
+            return False
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE sessions SET session_metadata=jsonb_set(
+                        COALESCE(session_metadata, '{}'::jsonb),
+                        '{reset_injected_skills}', CAST(:facts AS jsonb)
+                    ) WHERE id=:sid
+                """),
+                {"facts": json.dumps(dict(facts)), "sid": session_id},
+            )
+            return bool(result.rowcount)
 
     def mark_reset_boundary(self, *, session_id: str, turn_id: str, resume_id: str | None) -> bool:
         """Record that a bare reset turn handed this session to a new SDK session.
