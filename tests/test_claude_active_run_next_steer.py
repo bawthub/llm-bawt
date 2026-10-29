@@ -420,6 +420,41 @@ async def test_system_next_steer_is_delivered_verbatim():
 
 
 @pytest.mark.anyio
+async def test_system_quiesce_steer_escalates_when_it_is_the_only_queued_command():
+    # TASK-1748: a quiesce control queued behind a long tool is interrupted in.
+    client = _FakeClient()
+    await client._query.frames.put(_INIT)
+    run = _run(client)
+    yielded, task = await _start(run)
+    await run.steer(DEFAULT_QUIESCE_REQUEST, priority="next", message_id=CMD, origin="system")
+    assert await run.escalate(CMD, interrupt_frame=FRAME) == "escalated"
+    assert client._query.control_requests == [{"subtype": "interrupt", "cancel_queued": True}]
+    assert client.replacements == [f"INTERRUPT[{DEFAULT_QUIESCE_REQUEST}]END"]
+    await client._query.frames.put(_lifecycle(CMD, "cancelled"))
+    await client._query.frames.put(_result("ended"))
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("other_origin", ["user", "bot"])
+async def test_system_quiesce_escalation_refuses_before_sweeping_another_command(other_origin):
+    # TASK-1748 (Codex DESIGN r1 B2): the sweep would mark the other command
+    # started, and a quiesce that ends the turn would drop it.
+    client = _FakeClient()
+    await client._query.frames.put(_INIT)
+    run = _run(client)
+    _, task = await _start(run)
+    await _next(run, "earlier note", BOT, origin=other_origin)
+    await run.steer(DEFAULT_QUIESCE_REQUEST, priority="next", message_id=CMD, origin="system")
+    with pytest.raises(RuntimeError, match="escalation_other_queued"):
+        await run.escalate(CMD, interrupt_frame=FRAME)
+    assert client._query.control_requests == []
+    assert client.replacements == []
+    assert CMD not in run._escalations
+    await _finish(client, task)
+
+
+@pytest.mark.anyio
 async def test_escalation_atomically_replaces_queued_message_once():
     client = _FakeClient()
     await client._query.frames.put(_INIT)

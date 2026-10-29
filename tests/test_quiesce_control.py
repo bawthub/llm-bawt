@@ -329,3 +329,24 @@ def test_a_failing_producer_pass_is_logged_and_the_later_pumps_still_run(caplog)
 
     asyncio.run(scenario())
     assert "Quiesce control producer pass failed" in caplog.text
+
+
+def test_the_escalation_pass_runs_after_the_producer_and_its_failure_is_logged(monkeypatch, caplog):
+    """TASK-1748: the escalator rides the leader sweep; a failure never fails the sweep."""
+    seen = []
+
+    class Escalator:
+        async def run_pass(self, subscriber):
+            seen.append(subscriber)
+            raise RuntimeError("bridge gone")
+
+    subscriber = object()
+    monkeypatch.setattr("llm_bawt.agent_backends.agent_bridge.get_agent_subscriber", lambda: subscriber)
+
+    async def scenario():
+        pumps, _ = _pumps(Producer(SimpleNamespace(linked=0, enqueued=0, retry_in=None)))
+        pumps.quiesce_escalation = Escalator()
+        await pumps.run_pass(_noop_emit)
+
+    asyncio.run(scenario())
+    assert seen == [subscriber] and "Quiesce escalation pass failed" in caplog.text

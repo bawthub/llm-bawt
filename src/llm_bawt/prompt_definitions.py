@@ -59,6 +59,7 @@ from .prompt_default_loaders import (
     load_ops_quiesce_end_turn_new_turn,
     load_ops_quiesce_end_turn_no_receipt,
     load_ops_quiesce_receipt,
+    load_ops_quiesce_interrupt_frame,
     load_ops_quiesce_request,
     load_profile_consolidation,
     load_recall_synthesis_system,
@@ -608,6 +609,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "reach a safe stopping point and end its turn, not start new work or poll, "
             "and may invite an ops_quiesce_ack. Sent once per held run, from system. "
             "Used verbatim; a blank body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_interrupt_frame": PromptDefinition(
+        key="ops.quiesce_interrupt_frame",
+        title="Ops Quiesce Interrupt Frame (escalated control steer)",
+        category="agent_execution",
+        loader=load_ops_quiesce_interrupt_frame,
+        required_vars=("messages",),
+        metadata={"notes": (
+            "TASK-1748: the replacement query when a quiesce request sat queued behind a "
+            "long-running tool and the app interrupted that tool. {messages} is replaced by "
+            "the ops.quiesce_request text. It must tell the bot the interruption came from "
+            "the system (not a user rejection) and to end its turn now, never to continue "
+            "the task. A body without {messages} falls back to the seed. Target-bot "
+            "overrides supported."
         )},
     ),
     "ops.quiesce_end_turn.new_turn": PromptDefinition(

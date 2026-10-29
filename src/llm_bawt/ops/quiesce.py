@@ -286,8 +286,21 @@ def cancel_quiesce_job(engine, job_id: str, *, actor: str, reason: str | None = 
     return "cancelled", JOB_CANCELLED
 
 
-def _status_row(status: Any) -> dict[str, Any]:
-    return {"turn_id": status.turn_id, "drained": bool(status.drained), "reason": status.reason}
+def _status_row(status: Any, escalation: Any = None) -> dict[str, Any]:
+    row = {"turn_id": status.turn_id, "drained": bool(status.drained), "reason": status.reason}
+    if escalation is not None:
+        # TASK-1748: the one interrupt of a control stuck behind a running tool.
+        row["escalated_at"] = escalation["created_at"]
+        row["escalation"] = escalation["outcome"]
+    return row
+
+
+def _escalations(conn, gate_id: int) -> dict[int, Any]:
+    """The gate's quiesce escalation records (shared ``gate_escalations``), by member id."""
+    from ..service.gate_steer_escalation import KIND_QUIESCE_ESCALATE, gate_escalations
+
+    return {int(row["subject"]): row for row in gate_escalations(conn, gate_id)
+            if row["kind"] == KIND_QUIESCE_ESCALATE}
 
 
 class QuiesceDriver:
@@ -448,7 +461,8 @@ class QuiesceDriver:
             receipt["generations"].append(gate_id)
             self._write(conn, job["id"], {"quiesce_gate_id": gate_id, "quiesce_json": json.dumps(receipt)})
         statuses = list(self.gates.drain_status(conn, gate_id))
-        receipt["roster"] = [_status_row(s) for s in statuses]
+        escalations = _escalations(conn, gate_id)
+        receipt["roster"] = [_status_row(s, escalations.get(s.member_id)) for s in statuses]
         receipt["observed_at"] = _utc_iso(job["db_now"])
         if all(s.drained for s in statuses):
             return self._dispatch(conn, job, snapshot, gate_id, receipt)

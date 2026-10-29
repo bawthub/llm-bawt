@@ -405,7 +405,9 @@ class ClaudeActiveRun:
             if self._completed.is_set():
                 raise RuntimeError("no_active_run")
             held = self._held.get(message_id)
-            if held is None or held.origin != "user":
+            # TASK-1748: a system steer is a quiesce control row; bot steers
+            # never interrupt a running tool (TASK-934).
+            if held is None or held.origin not in ("user", "system"):
                 raise RuntimeError("unknown_user_steer")
             if self._commands.get(message_id) not in _UNSTARTED or message_id in self._started_ever:
                 raise RuntimeError("steer_already_started")
@@ -424,6 +426,11 @@ class ClaudeActiveRun:
                 and uuid not in self._settled
                 and uuid not in self._replayed
             )
+            if held.origin == "system" and eligible != (message_id,):
+                # TASK-1748: the sweep takes every queued command and marks it
+                # started; a quiesce that then ends the turn would drop them.
+                # Refuse before the interrupt, so nothing is swept.
+                raise RuntimeError("escalation_other_queued")
             window = _SweepWindow(eligible=frozenset(eligible))
             self._sweep = window
             # The old turn's result must not end the send handler while the

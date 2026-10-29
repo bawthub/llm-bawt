@@ -52,11 +52,26 @@ DEFAULT_QUIESCE_REQUEST = (
     "saying what you are waiting on. You can pick the work up again in a later turn.]"
 )
 
+# TASK-1748: the replacement query when the quiesce request was escalated
+# into a running tool. ``{messages}`` is where the request itself goes. It
+# must end the turn: the chat interrupt frame says "continue the task".
+QUIESCE_INTERRUPT_FRAME_KEY = "ops.quiesce_interrupt_frame"
+QUIESCE_INTERRUPT_SLOT = "{messages}"
+DEFAULT_QUIESCE_INTERRUPT_FRAME = (
+    "[System interruption: the system stopped the tool you were running because an "
+    "approved operation could not wait for it to finish. Nobody rejected your work "
+    "and this is not a message from the user. The system's request is below.]\n"
+    "{messages}\n\n"
+    "End your turn now. Do not continue the interrupted task and do not re-run the "
+    "tool in this turn; note where you stopped so you can pick it up in a later turn."
+)
+
 SEEDS = {
     RECEIPT_KEY: DEFAULT_RECEIPT,
     END_TURN_NEW_TURN_KEY: DEFAULT_END_TURN_NEW_TURN,
     END_TURN_NO_RECEIPT_KEY: DEFAULT_END_TURN_NO_RECEIPT,
     QUIESCE_REQUEST_KEY: DEFAULT_QUIESCE_REQUEST,
+    QUIESCE_INTERRUPT_FRAME_KEY: DEFAULT_QUIESCE_INTERRUPT_FRAME,
 }
 
 
@@ -76,7 +91,25 @@ def resolve(key: str, bot_id: str | None) -> str:
     return SEEDS[key]
 
 
+def render_quiesce_interrupt_frame(bot_id: str | None) -> str:
+    """The escalation frame for ``bot_id`` with the bridge's item slot in place.
+
+    A body without the ``{messages}`` slot would drop the request itself, so
+    it falls back to the seed rather than send an unframed interrupt.
+    """
+    from agent_bridge.steer_contract import STEER_ITEMS_SLOT
+
+    body = resolve(QUIESCE_INTERRUPT_FRAME_KEY, bot_id)
+    if QUIESCE_INTERRUPT_SLOT not in body:
+        logger.warning("ops prompt %s has no %s slot, using seed", QUIESCE_INTERRUPT_FRAME_KEY,
+                       QUIESCE_INTERRUPT_SLOT)
+        body = DEFAULT_QUIESCE_INTERRUPT_FRAME
+    return body.replace(QUIESCE_INTERRUPT_SLOT, STEER_ITEMS_SLOT, 1)
+
+
 __all__ = [
-    "DEFAULT_END_TURN_NEW_TURN", "DEFAULT_END_TURN_NO_RECEIPT", "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT",
-    "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY", "QUIESCE_REQUEST_KEY", "RECEIPT_KEY", "SEEDS", "resolve",
+    "DEFAULT_END_TURN_NEW_TURN", "DEFAULT_END_TURN_NO_RECEIPT", "DEFAULT_QUIESCE_INTERRUPT_FRAME",
+    "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT", "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY",
+    "QUIESCE_INTERRUPT_FRAME_KEY", "QUIESCE_INTERRUPT_SLOT", "QUIESCE_REQUEST_KEY", "RECEIPT_KEY", "SEEDS",
+    "render_quiesce_interrupt_frame", "resolve",
 ]

@@ -27,11 +27,12 @@ class LeaderSidePumps:
 
     def __init__(self, service: Any, store: Any, *, talk_replies: Any = None,
                  quiesce_control: Any = None, cancel_notices: Any = None,
-                 approver_notices: Any = None) -> None:
+                 approver_notices: Any = None, quiesce_escalation: Any = None) -> None:
         self.service = service
         self.store = store
         self.talk_replies = talk_replies
         self.quiesce_control = quiesce_control
+        self.quiesce_escalation = quiesce_escalation
         self.cancel_notices = cancel_notices
         self.approver_notices = approver_notices
         self.talk_reply_task: asyncio.Task | None = None
@@ -43,6 +44,7 @@ class LeaderSidePumps:
         from .approval_fanout import ApprovalFanoutPump
         from .delivery_cancel_notice import CancelNoticePump
         from .quiesce_control import build_producer
+        from .quiesce_escalation import build_escalator
         from .talk_reply_outbox import TalkReplyOutbox
 
         engine = store.engine
@@ -51,6 +53,8 @@ class LeaderSidePumps:
             talk_replies=TalkReplyOutbox(engine) if engine is not None else None,
             # TASK-1431 S3: link each quiesce-held running run to its control row.
             quiesce_control=build_producer(store),
+            # TASK-1748: interrupt a held run whose control sat behind a long tool.
+            quiesce_escalation=build_escalator(store),
             cancel_notices=CancelNoticePump(store) if engine is not None else None,
             approver_notices=ApprovalFanoutPump(store) if engine is not None else None,
         )
@@ -68,6 +72,8 @@ class LeaderSidePumps:
             self.talk_reply_task = task
         if self.quiesce_control is not None:
             await self._produce_controls()
+        if self.quiesce_escalation is not None:
+            await self._escalate_controls()
         if self.cancel_notices is not None:
             await self._send_notices(emit, self.cancel_notices)
         if self.approver_notices is not None:
@@ -99,6 +105,15 @@ class LeaderSidePumps:
             self._cancel_control_recheck()
             delay = min(max(result.retry_in, 0.5), CONTROL_RECHECK_CAP_SECONDS)
             self._control_recheck = asyncio.get_running_loop().call_later(delay, dispatcher.wake)
+
+    async def _escalate_controls(self) -> None:
+        """Escalate stuck controls once each; a failed pass never fails the sweep."""
+        from ..agent_backends.agent_bridge import get_agent_subscriber
+
+        try:
+            await self.quiesce_escalation.run_pass(get_agent_subscriber())
+        except Exception:
+            logger.exception("Quiesce escalation pass failed")
 
     def _cancel_control_recheck(self) -> None:
         handle, self._control_recheck = self._control_recheck, None

@@ -175,6 +175,12 @@ def load_ops_quiesce_request() -> str:
     return DEFAULT_QUIESCE_REQUEST
 
 
+def load_ops_quiesce_interrupt_frame() -> str:
+    from .ops.quiesce_prompts import DEFAULT_QUIESCE_INTERRUPT_FRAME
+
+    return DEFAULT_QUIESCE_INTERRUPT_FRAME
+
+
 def load_ops_quiesce_end_turn_new_turn() -> str:
     from .ops.quiesce_prompts import DEFAULT_END_TURN_NEW_TURN
 
