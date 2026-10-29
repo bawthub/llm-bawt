@@ -16,7 +16,7 @@ import base64
 import logging
 from typing import Any, List
 
-from anthropic import Anthropic
+from anthropic import Anthropic, BadRequestError
 
 from .base import LLMClient
 from ..models.message import Message
@@ -45,6 +45,7 @@ class AnthropicMessagesClient(LLMClient):
             raise ValueError("Anthropic Messages endpoint has no base_url")
         self.base_url = base_url
         self.client = Anthropic(api_key=api_key or _NO_AUTH_KEY, base_url=base_url)
+        self._omit_temperature = False
 
     # -- message conversion ------------------------------------------------
     @staticmethod
@@ -125,15 +126,32 @@ class AnthropicMessagesClient(LLMClient):
         temperature = kwargs.get("temperature")
         if temperature is None:
             temperature = self.config.TEMPERATURE
-        response = self.client.messages.create(
-            **self._payload(messages, max_tokens=max_tokens, temperature=temperature))
-        return self._text(response)
+        return self._create(self.client, messages, max_tokens=max_tokens, temperature=temperature)
 
     def query_bounded(
         self, messages: List[Message], *, timeout_seconds: float,
         max_tokens: int, temperature: float = 0.0,
     ) -> str:
         bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
-        response = bounded.messages.create(
-            **self._payload(messages, max_tokens=max_tokens, temperature=temperature))
+        return self._create(bounded, messages, max_tokens=max_tokens, temperature=temperature)
+
+    @staticmethod
+    def _rejects_temperature(error: BadRequestError) -> bool:
+        return "temperature" in str(error).lower()
+
+    def _create(self, sdk: Any, messages: List[Message], *, max_tokens: int, temperature: float | None) -> str:
+        """Send once; a model that rejects ``temperature`` (current Claude models
+        do) is retried without it and remembered, like ``OpenAIClient``."""
+        if self._omit_temperature:
+            temperature = None
+        try:
+            response = sdk.messages.create(
+                **self._payload(messages, max_tokens=max_tokens, temperature=temperature))
+        except BadRequestError as error:
+            if temperature is None or not self._rejects_temperature(error):
+                raise
+            logger.info("%s rejects temperature; retrying without it", self.model)
+            self._omit_temperature = True
+            response = sdk.messages.create(
+                **self._payload(messages, max_tokens=max_tokens, temperature=None))
         return self._text(response)

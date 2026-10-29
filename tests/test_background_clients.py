@@ -199,6 +199,33 @@ def test_messages_client_defaults_and_bounded():
     sdk.with_options.assert_called_with(timeout=3, max_retries=0)
 
 
+def _bad_request(message):
+    import anthropic
+    import httpx
+    request = httpx.Request("POST", "https://a.example/v1/messages")
+    return anthropic.BadRequestError(message, response=httpx.Response(400, request=request), body=None)
+
+
+def test_messages_client_drops_temperature_a_model_rejects_and_remembers():
+    client, sdk = _messages_client()
+    ok = sdk.messages.create.return_value
+    sdk.messages.create.side_effect = [_bad_request("`temperature` is deprecated for this model."), ok, ok]
+    assert client.query_bounded([Message(role="user", content="u")], timeout_seconds=3, max_tokens=9) == "hello"
+    first, retry = (c.kwargs for c in sdk.messages.create.call_args_list)
+    assert first["temperature"] == 0.0 and "temperature" not in retry
+    client.query([Message(role="user", content="u")])
+    assert "temperature" not in sdk.messages.create.call_args.kwargs
+    assert sdk.messages.create.call_count == 3
+
+
+def test_messages_client_other_bad_requests_are_not_retried():
+    client, sdk = _messages_client()
+    sdk.messages.create.side_effect = _bad_request("max_tokens too large")
+    with pytest.raises(Exception, match="max_tokens"):
+        client.query_bounded([Message(role="user", content="u")], timeout_seconds=3, max_tokens=9)
+    assert sdk.messages.create.call_count == 1
+
+
 def test_messages_client_images():
     client, sdk = _messages_client()
     client.query([Message(role="user", content="see", content_parts=[
