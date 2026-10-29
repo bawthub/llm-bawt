@@ -120,32 +120,56 @@ def fmt_tokens(n: int | None) -> str:
     return f"{n / 1000:.1f}k"
 
 
+RESET_CONFIRMATION = "Session reset. Ready for a new conversation."
+
+
+def _count(value) -> int:
+    """A positive int count, else 0 (bools, strings and negatives are not counts)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _seed_span(oldest, newest) -> str:
+    try:
+        first, last = (datetime.fromtimestamp(float(ts), timezone.utc).strftime("%Y-%m-%d")
+                       for ts in (oldest, newest))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    return f", from {first}" if first == last else f", spanning {first} → {last}"
+
+
+def format_reset_receipt(seed: dict | None) -> str:
+    """The one /new receipt text, shared by the app receipt and bridge acks.
+
+    ``seed`` holds counts of what was actually restored (``summary_count``,
+    ``message_count``, ``approx_tokens``, ``oldest_timestamp``,
+    ``newest_timestamp``); None or no countable bucket is the plain
+    confirmation. Zero buckets are omitted.
+    """
+    seed = seed if isinstance(seed, dict) else {}
+    summaries = _count(seed.get("summary_count"))
+    messages = _count(seed.get("message_count"))
+    buckets = [*([_plural(summaries, "summary record")] if summaries else []),
+               *([_plural(messages, "recent message")] if messages else [])]
+    if not buckets:
+        return RESET_CONFIRMATION
+    size = fmt_tokens(_count(seed.get("approx_tokens")))
+    span = _seed_span(seed.get("oldest_timestamp"), seed.get("newest_timestamp"))
+    return (f"Session reset. Seeded {' + '.join(buckets)} (~{size} tokens){span}. "
+            "Continuity restored.")
+
+
 def format_seed_ack(stats: dict | None) -> str:
-    """Human-facing /new acknowledgement, reporting seed stats when present."""
-    base = "Session reset."
+    """Bridge /new acknowledgement; the seeded case is :func:`format_reset_receipt`."""
     if stats is None or stats.get("clean_start"):
-        return f"{base} Ready for a new conversation."
+        return RESET_CONFIRMATION
     if not stats.get("seeded"):
         reason = stats.get("reason", "nothing to seed")
-        return f"{base} History seeding on, but {reason}. Fresh start."
-    summ = stats.get("summary_count", 0)
-    msgs = stats.get("message_count", 0)
-    toks = stats.get("approx_tokens", 0)
-    span = ""
-    oldest = stats.get("oldest_timestamp")
-    newest = stats.get("newest_timestamp")
-    if oldest and newest:
-        try:
-            o = datetime.fromtimestamp(oldest, timezone.utc).strftime("%Y-%m-%d")
-            n = datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%d")
-            span = f", spanning {o} → {n}" if o != n else f", from {o}"
-        except Exception:
-            span = ""
-    return (
-        f"{base} Seeded {summ} summary record{'s' if summ != 1 else ''} + "
-        f"{msgs} recent message{'s' if msgs != 1 else ''} "
-        f"(~{fmt_tokens(toks)} tokens){span}. Continuity restored."
-    )
+        return f"Session reset. History seeding on, but {reason}. Fresh start."
+    return format_reset_receipt(stats)
 
 
 async def post_continuity_receipt(app_api_url: str | None, thread_id: str | None,

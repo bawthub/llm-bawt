@@ -12,27 +12,10 @@ from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import text
 
+from agent_bridge.continuity import RESET_CONFIRMATION, format_reset_receipt
+
 from ..chat_message_text import last_user_text
 from .intent import NewSessionIntent, NewSessionResult, Origin, Outcome, Stage
-
-RESET_CONFIRMATION = "Session reset. Ready for a new conversation."
-
-
-def _source_count(value) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}{'' if count == 1 else 's'}"
-
-
-def _seed_span(oldest, newest) -> str:
-    try:
-        first, last = (datetime.fromtimestamp(float(ts), timezone.utc).strftime("%Y-%m-%d")
-                       for ts in (oldest, newest))
-    except (TypeError, ValueError, OverflowError, OSError):
-        return ""
-    return f", from {first}" if first == last else f", spanning {first} → {last}"
 
 
 def reset_confirmation(session_metadata) -> str:
@@ -47,17 +30,7 @@ def reset_confirmation(session_metadata) -> str:
     continuity = session_metadata.get("continuity") if isinstance(session_metadata, dict) else None
     if not isinstance(continuity, dict) or continuity.get("status") != "restored":
         return RESET_CONFIRMATION
-    summaries = _source_count(continuity.get("summary_count"))
-    messages = _source_count(continuity.get("message_count"))
-    buckets = [*([_plural(summaries, "summary record")] if summaries else []),
-               *([_plural(messages, "recent message")] if messages else [])]
-    if not buckets:
-        return RESET_CONFIRMATION
-    tokens = _source_count(continuity.get("approx_tokens"))
-    size = f"~{tokens / 1000:.1f}k" if tokens >= 1000 else f"~{tokens}"
-    span = _seed_span(continuity.get("oldest_timestamp"), continuity.get("newest_timestamp"))
-    return (f"Session reset. Seeded {' + '.join(buckets)} ({size} tokens){span}. "
-            "Continuity restored.")
+    return format_reset_receipt(continuity)
 
 
 def receipt_content(receipt: dict) -> str:

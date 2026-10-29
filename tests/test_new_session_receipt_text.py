@@ -62,3 +62,12 @@ def test_restored_summaries_only_and_missing_span_stay_factual():
 ])
 def test_restored_record_without_countable_sources_is_not_described(counts):
     assert reset_confirmation(_restored(**counts)) == RESET_CONFIRMATION
+
+
+def test_bridge_ack_and_app_receipt_share_one_formatter():
+    """TASK-1750: the bridge ack and app receipt can't drift (no zero bucket)."""
+    from agent_bridge.continuity import format_seed_ack
+
+    stats = {**_restored()["continuity"], "seeded": True}
+    assert format_seed_ack(stats) == reset_confirmation(_restored())
+    assert format_seed_ack({"clean_start": True}) == RESET_CONFIRMATION
