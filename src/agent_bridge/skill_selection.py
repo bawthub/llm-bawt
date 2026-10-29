@@ -14,6 +14,9 @@ from pathlib import Path
 
 from .skill_registry import SkillRegistry, _name
 
+#: An entry's mode when the system prompt already carries its body. Mirrors
+#: ``llm_bawt.skills.resolver.INJECT``; the bridge never imports the app.
+INJECT_MODE = "inject"
 #: Command field carrying a :class:`ManagedSelection`.
 SELECTION_FIELD = "skill_selection"
 #: The settings sources the Claude CLI loads when none are named. Passing
@@ -32,10 +35,14 @@ class ManagedSelection:
 
     Built from the resolver's manifest (``SkillResolution.manifest``); its
     ``entries`` are the applied skills, available and injected alike.
+    ``injected`` names the entries whose bodies the pinned system prompt
+    already carries (``mode == "inject"``), so the harness hooks can count
+    them as loaded (TASK-1691).
     """
 
     refs: tuple[str, ...]
     manifest_sha: str
+    injected: tuple[str, ...] = ()
 
     @classmethod
     def from_manifest(cls, manifest: Mapping) -> ManagedSelection:
@@ -48,7 +55,8 @@ class ManagedSelection:
         refs = [entry.get("ref") if isinstance(entry, Mapping) else None for entry in entries]
         if not all(isinstance(ref, str) and _REF.fullmatch(ref) for ref in refs):
             raise SkillSelectionError("skill selection has an invalid ref")
-        return cls(tuple(dict.fromkeys(refs)), sha)
+        injected = [entry["ref"] for entry in entries if entry.get("mode") == INJECT_MODE]
+        return cls(tuple(dict.fromkeys(refs)), sha, tuple(dict.fromkeys(injected)))
 
     @classmethod
     def from_field(cls, raw: str | None) -> ManagedSelection | None:
@@ -62,7 +70,9 @@ class ManagedSelection:
         return cls.from_manifest(data)
 
     def to_field(self) -> str:
-        return json.dumps({"entries": [{"ref": ref} for ref in self.refs],
+        injected = set(self.injected)
+        return json.dumps({"entries": [{"ref": ref, "mode": INJECT_MODE} if ref in injected
+                                       else {"ref": ref} for ref in self.refs],
                            "manifest_sha": self.manifest_sha}, separators=(",", ":"))
 
 

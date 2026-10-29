@@ -158,7 +158,9 @@ def bootstrap_claude_home() -> None:
         except Exception as exc:
             logger.warning("Failed to parse %s, rebuilding it: %s", settings_path, exc)
 
-    normalized = _ensure_compact_hook(_normalize_mcp_settings(settings))
+    from .skill_hooks import install_settings
+
+    normalized = install_settings(_ensure_compact_hook(_normalize_mcp_settings(settings)))
     # Suppress Claude Code's built-in Co-Authored-By/PR attribution. Bots sign
     # commits with their own per-bot trailer (agent-skills git-commits skill);
     # the harness default otherwise gets appended alongside it.

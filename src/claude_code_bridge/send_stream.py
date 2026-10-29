@@ -159,6 +159,11 @@ class ClaudeStreamMixin:
         # single ResultMessage; flag off → "running in background"
         # stub + task-notification + second ResultMessage).
         sdk_env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+        # TASK-1691: the skills this turn's system prompt already carries, for
+        # the harness hooks (``skill_hooks``) to count as loaded.
+        from .skill_hooks import injected_skills_env
+
+        sdk_env.update(injected_skills_env(skill_selection))
         if use_proxy:
             sdk_env["ANTHROPIC_BASE_URL"] = self._proxy_base_url  # type: ignore[assignment]
             # The SDK still requires *some* auth token to send; the
