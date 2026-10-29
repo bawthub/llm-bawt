@@ -268,7 +268,7 @@ async def steer_active_turn(
     # TASK-1243: the run's own pinned capabilities, never the bot's current backend.
     if caps is None:
         backend_name, caps = _run_steer_caps(service, turn)
-    request.priority = SendNow.priority_for(caps) if send_now_delivery_id else request.priority  # TASK-1749
+    request.priority = SendNow.priority() if send_now_delivery_id else request.priority  # TASK-1749
     refusal = steer_refusal(caps, request.priority)
     if refusal is not None:
         raise HTTPException(status_code=409, detail=refusal)

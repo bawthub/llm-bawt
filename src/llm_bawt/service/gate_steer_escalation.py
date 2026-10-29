@@ -118,11 +118,13 @@ class SendNow:
         return cls.of_metadata(metadata)
 
     @staticmethod
-    def priority_for(caps: frozenset[str]) -> str:
-        """``now`` interrupts the running tool; a run that can't take it gets ``next``."""
-        from ..steer_capabilities import NEXT, NOW
+    def priority() -> str:
+        """Always ``now``: it interrupts the running tool. The claim steers a
+        forced row only into a run that takes ``now``; a run that lost it
+        since is refused by ``steer_refusal``, never silently ``next``."""
+        from ..steer_capabilities import NOW
 
-        return NOW if NOW in caps else NEXT
+        return NOW
 
 
 class SendNowRefused(HTTPException):
@@ -209,18 +211,31 @@ def roster_send_now_turn(conn, *, bot_id: str, turn_id: str, delivery_id: str,
     ``save_turn`` re-attach is exempt (C1). A job gate steers it like any
     member; an operator gate only records it.
     """
-    from .turn_gates import ACCEPTED, GateMember, gate_is_live, initial_control_state, insert_member
+    from .turn_gates import (
+        ACCEPTED, REVOKED_UNSTARTED, GateMember, gate_is_live, initial_control_state, insert_member,
+    )
 
     for gate_id in sorted(gate_ids):
         if not gate_is_live(conn, gate_id, fresh=True):
             continue
         owner_kind = conn.execute(sa_text("SELECT owner_kind FROM system_gates WHERE id=:id"),
                                   {"id": gate_id}).scalar_one()
-        insert_member(conn, GateMember(
+        control_state = initial_control_state(owner_kind, ACCEPTED)
+        if not insert_member(conn, GateMember(
             gate_id=gate_id, bot_id=bot_id, turn_id=turn_id, turn_status="reserved",
             disposition=ACCEPTED, producer_kind="delivery", producer_id=delivery_id,
-            control_state=initial_control_state(owner_kind, ACCEPTED),
-        ), skip_existing=True)
+            control_state=control_state,
+        ), skip_existing=True):
+            # The capture already rostered this turn id: a requeued delivery
+            # whose earlier reservation was revoked unstarted. That row would
+            # count as drained and hold save_turn; the forced start makes it
+            # accepted. A live (accepted/running) row is left as it is.
+            conn.execute(sa_text("""
+                UPDATE gate_members SET disposition=:accepted, turn_status='reserved',
+                    control_state=:control, control_changed_at=now()
+                WHERE gate_id=:gate AND turn_id=:turn AND disposition=:revoked
+            """), {"accepted": ACCEPTED, "control": control_state, "gate": gate_id,
+                   "turn": turn_id, "revoked": REVOKED_UNSTARTED})
         set_escalation_outcome(conn, gate_id=gate_id, kind=KIND_USER_SEND_NOW,
                                subject=delivery_id, outcome="turn_started", turn_id=turn_id)
 

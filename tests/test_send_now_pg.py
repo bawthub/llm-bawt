@@ -19,9 +19,19 @@ from llm_bawt.service.gate_steer_escalation import (
 from llm_bawt.service.turn_gates import GateScope, release_gates
 from tests.test_delivery_claim_gate_pg import _claim, _enqueue, _row
 from tests.test_turn_gates_pg import _activate, _open, _spec, gated  # noqa: F401  (gated is a fixture)
-from tests.test_user_stop_hold_pg import _user_chat
+from tests.test_user_stop_hold_pg import _user_chat as _shared_user_chat
 
 pytestmark = pytest.mark.usefixtures("private_app_pg")
+
+
+def _user_chat(gated, deliveries, bot):
+    """The user's chat row with the payload ``ordinary_turn_queue`` writes (prefer_steer=False)."""
+    record = _shared_user_chat(gated, deliveries, bot)
+    with deliveries.engine.begin() as conn:
+        conn.execute(sa_text(
+            "UPDATE inter_bot_deliveries SET payload_json=payload_json || '{\"prefer_steer\": false}'::jsonb"
+            " WHERE id=:id"), {"id": record.id})
+    return record
 
 
 def _quiesce(gated, bot):
@@ -77,6 +87,47 @@ def test_stamped_user_row_runs_under_a_live_quiesce_and_is_rostered(gated):
         audit = gate_escalations(conn, gate.id)
     assert [(a["kind"], a["subject"], a["actor"], a["outcome"], a["turn_id"]) for a in audit] == [
         (KIND_USER_SEND_NOW, user.id, "user:nick", "turn_started", claimed.turn_id)]
+
+
+@pytest.mark.integration
+def test_a_revoked_unstarted_capture_of_the_same_turn_becomes_accepted(gated):
+    """Codex r1 B1: a requeued row's earlier revoked reservation shares its turn id."""
+    from llm_bawt.service.turn_gates import REVOKED_UNSTARTED, GateMember, insert_member
+
+    bot = gated.bot()
+    deliveries, _ = _enqueue(gated, bot, "bot callback")
+    user = _user_chat(gated, deliveries, bot)
+    _owner, gate = _quiesce(gated, bot)
+    with gated.store.engine.begin() as conn:
+        insert_member(conn, GateMember(
+            gate_id=gate.id, bot_id=bot, turn_id=user.turn_id, turn_status="reserved",
+            disposition=REVOKED_UNSTARTED, producer_kind="delivery", producer_id=user.id,
+            control_state="not_needed",
+        ))
+    stamp_send_now(gated.store.engine, user.id, "nick")
+
+    claimed = _claim(deliveries, bot)
+
+    assert claimed is not None and claimed.id == user.id
+    [member] = [m for m in _members(gated, gate.id) if m["turn_id"] == user.turn_id]
+    assert member["disposition"] == "accepted"
+
+
+@pytest.mark.integration
+def test_a_run_without_now_is_never_next_steered_and_runs_after_its_turn(gated):
+    """Codex r1 B2: Send now never silently degrades to a `next` steer."""
+    bot = gated.bot()
+    deliveries, _ = _enqueue(gated, bot, "bot callback")
+    user = _user_chat(gated, deliveries, bot)
+    turn = _open(gated.store, bot)
+    _quiesce(gated, bot)
+    stamp_send_now(gated.store.engine, user.id, "nick")
+
+    assert deliveries.claim_next(bot, claim_owner="worker", steer_capable=frozenset({"next"})) is None
+    with gated.store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET status='ok', ended_at=now() WHERE id=:id"), {"id": turn})
+    claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=frozenset({"next"}))
+    assert claimed is not None and claimed.id == user.id and claimed.status == "DISPATCHING"
 
 
 @pytest.mark.integration

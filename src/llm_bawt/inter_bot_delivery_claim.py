@@ -13,7 +13,7 @@ from .inter_bot_steer_only import (
     NO_ACTIVE_RUN, UNSUPPORTED_BACKEND, is_steer_only, settle_not_needed,
 )
 from .maintenance_delivery import MaintenanceBarrier
-from .steer_capabilities import NEXT, run_steer_caps
+from .steer_capabilities import NEXT, NOW, run_steer_caps
 
 QUEUED = "QUEUED"
 STEERING = "STEERING"
@@ -117,8 +117,7 @@ class DeliveryClaim:
                     return None
             payload = head["payload_json"] if isinstance(head["payload_json"], dict) else {}
             policy = SessionPolicy(head.get("session_policy") or SessionPolicy.CONTINUE.value)
-            # A forced chat row steers into a running turn instead of waiting for it.
-            prefer_steer = bool(payload.get("prefer_steer", True)) or bool(forced)
+            prefer_steer = bool(payload.get("prefer_steer", True))
             steer_only = is_steer_only(payload)
             from .service.turn_admission import classify_target, write_reservation
             # Same classified view save_turn admits against (TASK-1082). Only an
@@ -142,10 +141,15 @@ class DeliveryClaim:
             # TASK-1243: the active run's own pinned capability decides; the
             # bot's current answer only stands in for a run not bound yet.
             provisional = _provisional_caps(steer_capable)
-            can_steer = NEXT in (provisional if active is None else run_steer_caps(
+            run_caps = provisional if active is None else run_steer_caps(
                 backend=active.get("agent_backend"), caps=active.get("agent_steer_caps"),
                 provisional=provisional,
-            ))
+            )
+            can_steer = NEXT in run_caps
+            # TASK-1749: a forced chat row interrupts a run that takes `now`;
+            # any other run is never silently `next`-steered: the row waits
+            # for that turn to end, then starts past the hold.
+            prefer_steer = prefer_steer or (bool(forced) and NOW in run_caps)
             if steer_only and not can_steer:
                 # TASK-1431: nothing here can be steered, so the row is not
                 # needed; it never waits for or starts a turn.
