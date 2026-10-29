@@ -15,9 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from ..mcp_result_envelope import is_mcp_result_envelope
+
 USER = "user"
 ASSISTANT = "assistant"
 BOT = "bot"
+TOOL = "tool"
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,11 @@ def speaker_of(msg: Any) -> Speaker:
         author_type, author_id = _field(author, "entity_type"), _field(author, "entity_id")
     if str(author_type or "").lower() == BOT:
         return Speaker(BOT, str(author_id or "").strip().lower() or "unknown")
+    # The continuation writer historically stamped these user-role rows with
+    # user authorship. Recognize its full app-owned frame so old rows are safe
+    # too; ordinary content claiming to be a bot/tool remains a user turn.
+    if is_mcp_result_envelope(_field(msg, "content")):
+        return Speaker(TOOL)
     return Speaker(USER)
 
 
@@ -68,9 +76,5 @@ def human_user_turns_present(messages: list[Any]) -> bool:
 
 
 def extraction_input(messages: list[Any]) -> list[Any]:
-    """Messages fact extraction may see: bot-origin deliveries are dropped.
-
-    Extraction stores facts about the user; a delivery is another bot's speech,
-    so it is neither a user fact nor useful context worth paying for.
-    """
-    return [m for m in messages if speaker_of(m).kind != BOT]
+    """Exclude inter-bot speech and internal tool results from user facts."""
+    return [m for m in messages if speaker_of(m).kind not in (BOT, TOOL)]

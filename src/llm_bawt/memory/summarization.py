@@ -622,8 +622,8 @@ def format_session_for_summarization(session: Session) -> str:
         # Label by durable authorship, not role: bot deliveries are role=user
         # but must never read as the user's words (TASK-1724).
         speaker = speaker_of(msg)
-        if speaker.kind == "system":
-            continue  # Skip system messages in summarization
+        if speaker.kind in ("system", "tool"):
+            continue  # Internal tool results are not a participant's speech.
         content = msg.get("content", "").strip()
         lines.append(f"{summary_label(speaker)}: {content}")
     return "\n".join(lines)

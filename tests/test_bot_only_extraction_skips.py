@@ -4,11 +4,20 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 from sqlalchemy import JSON, Column, MetaData, String, Table, create_engine, insert
 from sqlalchemy.pool import StaticPool
 
 from llm_bawt.memory.summary_extraction_policy import summary_has_human_source
+from llm_bawt.service.approval_continuations import build_mcp_result_prompt
 from llm_bawt.service.background_tasks import BackgroundTasksMixin
+
+TOOL_ROW = {"id": "t", "role": "user", "author_entity_type": "user",
+            "author_entity_id": "u", "content": build_mcp_result_prompt({
+                "kind": "mcp_tool_result", "approval_request_id": "a",
+                "original_tool_use_id": "t", "tool_name": "example_lookup",
+                "result": {"user_name": "Made-up name"}, "is_error": False,
+            })}
 
 HUMAN = {"id": "h", "role": "user", "content": "I adopted a third dog.",
          "author_entity_type": "user", "author_entity_id": "u"}
@@ -51,12 +60,20 @@ def test_bot_only_window_skips_without_client_and_marks_processed(monkeypatch):
     service._get_background_client.assert_not_called()
 
 
+def test_tool_result_only_window_skips_without_client_and_marks_processed(monkeypatch):
+    service, backend, task = _service(monkeypatch, [TOOL_ROW, REPLY])
+    result = service._process_memory_extraction(task)
+    assert result["skipped"] is True
+    assert backend.processed == ["t", "r"]
+    service._get_background_client.assert_not_called()
+
+
 def test_mixed_window_still_runs_extraction(monkeypatch):
-    service, backend, task = _service(monkeypatch, [DELIVERY, HUMAN, REPLY])
+    service, backend, task = _service(monkeypatch, [DELIVERY, TOOL_ROW, HUMAN, REPLY])
     result = service._process_memory_extraction(task)
     assert not result.get("skipped")
     service._get_background_client.assert_called_once()
-    assert set(backend.processed) == {"d", "h", "r"}
+    assert set(backend.processed) == {"d", "t", "h", "r"}
 
 
 def _summary_backend(source_rows):
@@ -64,7 +81,7 @@ def _summary_backend(source_rows):
                            connect_args={"check_same_thread": False})
     meta = MetaData()
     table = Table("messages", meta, Column("id", String, primary_key=True),
-                  Column("role", String), Column("author_entity_type", String),
+                  Column("role", String), Column("content", String), Column("author_entity_type", String),
                   Column("author_entity_id", String), Column("summary_metadata", JSON))
     meta.create_all(engine)
     with engine.begin() as conn:
@@ -72,21 +89,24 @@ def _summary_backend(source_rows):
             {"id": "summary", "role": "summary",
              "summary_metadata": {"message_ids": [r["id"] for r in source_rows]}}])
         conn.execute(insert(table), [
-            {k: r[k] for k in ("id", "role", "author_entity_type", "author_entity_id")}
+            {**{k: r[k] for k in ("id", "role", "author_entity_type", "author_entity_id")},
+             "content": r["content"]}
             for r in source_rows])
     return SimpleNamespace(engine=engine, _messages_table_name="messages")
 
 
 def test_summary_of_bot_only_session_has_no_human_source():
     assert not summary_has_human_source(_summary_backend([DELIVERY, REPLY]), "summary")
-    assert summary_has_human_source(_summary_backend([DELIVERY, HUMAN, REPLY]), "summary")
+    assert not summary_has_human_source(_summary_backend([TOOL_ROW, REPLY]), "summary")
+    assert summary_has_human_source(_summary_backend([DELIVERY, TOOL_ROW, HUMAN, REPLY]), "summary")
     assert not summary_has_human_source(_summary_backend([HUMAN]), "missing")
 
 
-def test_summary_extraction_skips_bot_only_session(monkeypatch):
+@pytest.mark.parametrize("source", [DELIVERY, TOOL_ROW], ids=["bot", "tool-result"])
+def test_summary_extraction_skips_bot_only_session(monkeypatch, source):
     from llm_bawt.memory.extraction.service import MemoryExtractionService
 
-    backend = _summary_backend([DELIVERY, REPLY])
+    backend = _summary_backend([source, REPLY])
     monkeypatch.setattr("llm_bawt.memory.postgresql.PostgreSQLMemoryBackend",
                         lambda *a, **kw: backend)
     monkeypatch.setattr("llm_bawt.memory.summary_extraction_policy.summary_allows_extraction",

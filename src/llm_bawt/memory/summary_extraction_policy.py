@@ -57,6 +57,6 @@ def summary_has_human_source(backend, summary_id: str) -> bool:
         if not isinstance(ids, list) or not ids:
             return False
         rows = conn.execute(text(
-            f"SELECT role, author_entity_type, author_entity_id FROM {table} WHERE id IN :ids"
+            f"SELECT role, content, author_entity_type, author_entity_id FROM {table} WHERE id IN :ids"
         ).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).mappings().all()
         return human_user_turns_present([dict(r) for r in rows])

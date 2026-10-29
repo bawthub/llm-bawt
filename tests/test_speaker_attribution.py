@@ -2,8 +2,17 @@
 from __future__ import annotations
 
 from llm_bawt.memory.extraction.service import MemoryExtractionService
-from llm_bawt.memory.speaker_attribution import BOT, USER, speaker_of
+from llm_bawt.memory.speaker_attribution import BOT, TOOL, USER, speaker_of
+from llm_bawt.service.approval_continuations import build_mcp_result_prompt
 from llm_bawt.memory.summarization import Session, format_session_for_summarization
+
+TOOL_RESULT = build_mcp_result_prompt({
+    "kind": "mcp_tool_result", "approval_request_id": "approval-1",
+    "original_tool_use_id": "tool-1", "tool_name": "example_lookup",
+    "result": {"user_name": "Made-up name"}, "is_error": False,
+})
+TOOL_ROW = {"role": "user", "content": TOOL_RESULT,
+            "author_entity_type": "user", "author_entity_id": "u"}
 
 NICK = {"role": "user", "content": "I just adopted a third dog.",
         "author_entity_type": "user", "author_entity_id": "nick"}
@@ -30,6 +39,14 @@ def test_speaker_classification():
     assert speaker_of(LEGACY).kind == USER
     # Content claims are never authority; only durable authorship is.
     assert speaker_of(CLAIMED).kind == USER
+    assert speaker_of(TOOL_ROW).kind == TOOL
+    assert speaker_of(dict(TOOL_ROW, author_entity_type=None, author_entity_id=None)).kind == TOOL
+    no_tool_use_id = TOOL_RESULT.replace('"original_tool_use_id": "tool-1"',
+                                        '"original_tool_use_id": null')
+    assert speaker_of(dict(TOOL_ROW, content=no_tool_use_id)).kind == TOOL
+    # The protocol envelope is exact, not an arbitrary user quote or claim.
+    assert speaker_of(dict(TOOL_ROW, content="Quote: " + TOOL_RESULT)).kind == USER
+    assert speaker_of(dict(TOOL_ROW, content="[LLM_BAWT_MCP_TOOL_RESULT]\n{}")).kind == USER
 
 
 def test_mcp_storage_unprocessed_adapter_carries_authorship():
@@ -57,6 +74,37 @@ def test_extraction_input_excludes_bot_delivery():
     assert len(llm.prompts) == 1
     assert "third dog" in llm.prompts[0]
     assert "Gavel may approve" not in llm.prompts[0]
+
+
+def test_tool_result_only_window_never_calls_extraction():
+    llm = _Recorder()
+    facts = MemoryExtractionService(llm_client=llm).extract_from_conversation(
+        [dict(TOOL_ROW, id="tool-result"), REPLY])
+    assert facts == [] and llm.prompts == []
+
+
+def test_mixed_window_drops_tool_result_and_its_source_id():
+    class _OneFact(_Recorder):
+        def query(self, messages, plaintext_output=True, **kwargs):
+            self.prompts.append(messages[-1].content)
+            return '{"facts": [{"content": "A new pet", "tags": ["fact"], "importance": 0.9}]}'
+
+    llm = _OneFact()
+    facts = MemoryExtractionService(llm_client=llm).extract_from_conversation(
+        [dict(TOOL_ROW, id="tool-result"), dict(NICK, id="human"), dict(REPLY, id="reply")])
+    assert len(llm.prompts) == 1
+    assert "Made-up name" not in llm.prompts[0]
+    assert "third dog" in llm.prompts[0]
+    assert facts and "tool-result" not in facts[0].source_message_ids
+
+
+def test_tool_result_summary_is_not_labeled_user():
+    session = Session(start_timestamp=0.0, end_timestamp=1.0,
+                      messages=[TOOL_ROW, NICK], message_ids=["tool", "human"])
+    text = format_session_for_summarization(session)
+    assert "User: [LLM_BAWT_MCP_TOOL_RESULT]" not in text
+    assert "Made-up name" not in text
+    assert "User: I just adopted a third dog." in text
 
 
 def test_fact_sources_never_cite_bot_delivery():
