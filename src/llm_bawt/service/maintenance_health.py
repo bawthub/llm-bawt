@@ -41,10 +41,6 @@ UNKNOWN = "unknown"
 
 _SPENDING_CODE = re.compile(r"[\w-]*:spending-limit|insufficient_quota", re.I)
 _STATUS_IN_TEXT = re.compile(r"(?:error code|status(?: code)?|HTTP)[:\s]+(\d{3})", re.I)
-# A provider error code token, e.g. ``personal-team-blocked:spending-limit`` or
-# ``invalid_api_key``: read from a quoted ``code`` field only, so arbitrary
-# message text (which can echo request data or keys) never reaches a reason.
-_CODE_FIELD = re.compile(r"""['"]code['"]\s*:\s*['"]([A-Za-z0-9_.:-]{1,64})['"]""")
 
 
 def _status_of(error: Any) -> int | None:
@@ -85,20 +81,16 @@ def classify_failure(error: Any) -> str:
 
 
 def safe_detail(error: Any) -> str:
-    """Secret-free description: exception type, HTTP status, provider code.
+    """Secret-free description: exception type and HTTP status only.
 
     Raw exception/reply text is never kept: provider errors can echo request
-    content or credentials, and this lands in a bell reason and a log line.
+    content or credentials (even in a ``code`` field), and this lands in a bell reason and a log line.
     """
-    text = str(error)
     kind = "error reply" if isinstance(error, str) else type(error).__name__
     parts = [kind]
     status = _status_of(error)
     if status is not None:
         parts.append(f"HTTP {status}")
-    code = _CODE_FIELD.search(text)
-    if code:
-        parts.append(f"code {code.group(1)}")
     return ", ".join(parts)
 
 

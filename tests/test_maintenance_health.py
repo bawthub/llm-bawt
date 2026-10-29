@@ -126,10 +126,13 @@ def test_raw_error_text_never_reaches_reason_or_log(caplog):
     with pytest.raises(_StatusError):
         _client(health, inner).query(messages=[])
     reason = _only(health)[0]["reason"]
-    assert "HTTP 401" in reason and "code invalid_api_key" in reason
+    assert "HTTP 401" in reason and "invalid_api_key" not in reason
     inner.query.side_effect = None
     inner.query.return_value = f"ERROR: request echoed {secret}"
     _client(health, inner).query(messages=[])
+    inner.query.side_effect = ValueError(f"request echoed {{'code':'{secret}'}}")
+    with pytest.raises(ValueError):
+        _client(health, inner).query(messages=[])
     assert secret not in str(health.checks_payload()) and secret not in caplog.text
 
 
