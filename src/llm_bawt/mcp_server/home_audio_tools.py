@@ -25,10 +25,14 @@ def _voice(bot_id: str, voice: str | None) -> str:
     if voice and voice.strip():
         return voice.strip()
     from llm_bawt.bots import get_bot
+    from llm_bawt.voice_resolution import effective_voice_for_bot
     bot = get_bot(bot_id)
-    if bot is None or not bot.default_voice:
-        raise ValueError("No default voice configured for this bot; supply voice explicitly")
-    return bot.default_voice
+    resolved = effective_voice_for_bot(Config(), bot) if bot is not None else None
+    if resolved is None or not resolved.voice:
+        raise ValueError(
+            "No voice configured for this bot and no global default voice; supply voice explicitly"
+        )
+    return resolved.voice
 
 
 @mcp.tool()

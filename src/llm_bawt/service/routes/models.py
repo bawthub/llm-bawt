@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...bots import BotManager
 from ...steer_capabilities import bot_steer_caps
+from ...voice_resolution import global_default_voice, resolve_bot_voice
 from ..dependencies import get_service
 from ..providers.registry import access_path_connections, route_eligibility
 from ..schemas import (
@@ -188,8 +189,11 @@ def list_bots():
     """List available bots configured on the service."""
     service = get_service()
     bot_manager = BotManager(service.config)
-    bots = [
-        BotInfo(
+    global_voice = global_default_voice(service.config)
+    bots = []
+    for bot in bot_manager.list_bots():
+        voice = resolve_bot_voice(bot.default_voice, global_voice)
+        bots.append(BotInfo(
             slug=bot.slug,
             name=bot.name,
             description=bot.description,
@@ -202,6 +206,8 @@ def list_bots():
             include_in_global_search=bot.include_in_global_search,
             tags=bot.tags,
             default_voice=bot.default_voice,
+            effective_voice=voice.voice,
+            effective_voice_source=voice.source,
             uses_tools=bot.uses_tools,
             uses_search=bot.uses_search,
             uses_home_assistant=bot.uses_home_assistant,
@@ -216,7 +222,5 @@ def list_bots():
             agent_backend_config=bot.agent_backend_config or {},
             settings=bot.settings,
             steer_capabilities=sorted(bot_steer_caps(bot)),
-        )
-        for bot in bot_manager.list_bots()
-    ]
+        ))
     return BotsResponse(data=bots)

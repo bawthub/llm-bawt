@@ -31,6 +31,9 @@ class BotInfo(BaseModel):
     include_in_global_search: bool = True
     tags: list[str] | None = Field(default=None, description=_TAGS_DOC)
     default_voice: str | None = None
+    # TASK-1702: bot default_voice ?? global default_voice; None = no voice.
+    effective_voice: str | None = None
+    effective_voice_source: Literal["bot", "global"] | None = None
     uses_tools: bool = False
     uses_search: bool = False
     uses_home_assistant: bool = False

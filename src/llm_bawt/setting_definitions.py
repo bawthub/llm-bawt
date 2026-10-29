@@ -255,6 +255,23 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "a signed-in person manages grants."
         ),
     ),
+    # TASK-1702: global only. The voice a bot speaks with when it has no own
+    # bot_profiles.default_voice. No default: unset means bots without their
+    # own voice have none, and voice shows as unavailable (never substituted).
+    # Resolved in voice_resolution.resolve_bot_voice.
+    "default_voice": SettingDefinition(
+        key="default_voice",
+        type="str",
+        default=None,
+        applies_to=(),  # GLOBAL-ONLY: the per-bot voice is the bot_profiles column.
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Default voice",
+        help=(
+            "Global only: the TTS voice id used by any bot that has no voice of "
+            "its own. Unset: those bots have no voice."
+        ),
+        ui_widget="voice",
+    ),
     "skills_total_token_cap": SettingDefinition(
         key="skills_total_token_cap",
         type="int",
