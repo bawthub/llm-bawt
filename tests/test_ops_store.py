@@ -291,6 +291,15 @@ def test_find_active_jobs_excludes_terminal():
     assert active == [j1.id]
 
 
+def test_quiesce_api_exposes_scope_for_idle_bots_not_in_turn_roster():
+    job = OpsJob(operation_slug="test.restart-thing", args_json="{}", display_args_json="{}",
+                 invocation_snapshot_json=json.dumps({"quiesce": {"scope": {"all_agents": True}}}),
+                 state="quiescing")
+    assert job.to_api()["quiesce"]["scope"] == {"all_agents": True}
+    job.invocation_snapshot_json = "bad snapshot"
+    assert job.to_api()["quiesce"]["scope"] is None
+
+
 def test_live_jobs_include_old_active_and_only_fresh_outcomes():
     store = _store()
     op = store.create_operation(_op_data())

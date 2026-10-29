@@ -252,7 +252,9 @@ def live_jobs():
     visible without a per-job status fanout or stale page-1 assumptions.
     """
     store = _store()
-    since = datetime.now(timezone.utc) - timedelta(seconds=15)
+    # Keep outcomes beyond an idle poll interval so short bot-initiated jobs
+    # cannot finish and disappear between two global banner reads.
+    since = datetime.now(timezone.utc) - timedelta(seconds=60)
     rows = store.find_active_jobs(limit=None, recent_terminal_since=since)
     return {"jobs": attach_members(store.engine, [r.to_api(include_output=False) for r in rows])}
 

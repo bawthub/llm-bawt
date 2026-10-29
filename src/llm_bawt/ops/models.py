@@ -556,7 +556,15 @@ def _quiesce_api(job: "OpsJob") -> dict[str, Any] | None:
         callback = json.loads(job.receipt_callback_json) if job.receipt_callback_json else None
     except (json.JSONDecodeError, TypeError):
         callback = {"unreadable": True}
+    try:
+        snapshot = json.loads(job.invocation_snapshot_json) if job.invocation_snapshot_json else {}
+        scope = snapshot.get("quiesce", {}).get("scope")
+        if not isinstance(scope, dict):
+            scope = None
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        scope = None
     return {
+        "scope": scope,
         "gate_id": job.quiesce_gate_id,
         "deadline_at": _iso_utc(job.quiesce_deadline_at),
         "open_deadline_at": _open_deadline(job),
