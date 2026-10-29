@@ -30,11 +30,15 @@ from .context_env import effective_context_window
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
-# Post-DONE /context read cap; it bounds the session-lock hold after DONE.
-# TASK-1700: 1,283 successful reads over 3 days had p50 467 ms, p99 1.06 s,
-# max 1.83 s, yet ~3% of completed turns still timed out at 2 s, clustered where
-# several bots finished in the same second. 4 s is ~2x the observed max.
-NATIVE_CONTEXT_READ_TIMEOUT_S = 4.0
+# Post-DONE /context read: per-attempt cap and attempt count. Together they
+# bound the session-lock hold after DONE (worst case 2 x 2 s). TASK-1700:
+# successful reads (1,283 over 3 days) had p50 467 ms, p99 1.06 s, max 1.83 s,
+# but ~3.5% of turns timed out at 2 s; those misses did not follow resets and
+# skewed only mildly toward concurrent turn ends. That sample is truncated at
+# the cap, so instead of guessing a longer one, a timed-out read is retried
+# once and the log says whether the retry recovered and how long it took.
+NATIVE_CONTEXT_READ_TIMEOUT_S = 2.0
+NATIVE_CONTEXT_READ_ATTEMPTS = 2
 
 # ``context_breakdown_status`` when the read ran but returned nothing usable,
 # so the UI can say why instead of a blanket "unavailable".
@@ -239,18 +243,30 @@ class ClaudeUsageMixin:
         if sdk_client is None:
             return None
         started = time.monotonic()
-        try:
-            # The session lock stays held until teardown: never delay a queued
-            # successor by more than this bounded post-DONE control request.
-            return dict(await asyncio.wait_for(
-                sdk_client.get_context_usage(), timeout=NATIVE_CONTEXT_READ_TIMEOUT_S
-            ))
-        except Exception as context_error:
-            # INFO: a missing breakdown must be attributable (timeout vs error).
-            logger.info("Native context usage unavailable after %.0f ms: %s: %s",
-                        (time.monotonic() - started) * 1000,
-                        type(context_error).__name__, context_error)
-            return None
+        for attempt in range(1, NATIVE_CONTEXT_READ_ATTEMPTS + 1):
+            try:
+                # The session lock stays held until teardown: never delay a queued
+                # successor by more than these bounded post-DONE control requests.
+                usage = dict(await asyncio.wait_for(
+                    sdk_client.get_context_usage(), timeout=NATIVE_CONTEXT_READ_TIMEOUT_S
+                ))
+            except TimeoutError:
+                # INFO: these lines are the only view of the tail past the cap.
+                logger.info("Native context usage attempt %d/%d timed out after %.0f ms",
+                            attempt, NATIVE_CONTEXT_READ_ATTEMPTS,
+                            (time.monotonic() - started) * 1000)
+                continue
+            except Exception as context_error:
+                # Errors are not slowness: retrying would only extend the hold.
+                logger.info("Native context usage unavailable after %.0f ms: %s: %s",
+                            (time.monotonic() - started) * 1000,
+                            type(context_error).__name__, context_error)
+                return None
+            if attempt > 1:
+                logger.info("Native context usage recovered on attempt %d after %.0f ms",
+                            attempt, (time.monotonic() - started) * 1000)
+            return usage
+        return None
 
     def _compute_result_usage(
         self,

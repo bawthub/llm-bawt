@@ -14,7 +14,11 @@ from claude_code_bridge.command_ops import ClaudeCommandMixin
 from claude_code_bridge.event_ops import ClaudeEventMixin
 from claude_code_bridge.send_handler import ClaudeSendMixin
 from claude_code_bridge.send_stream_events import StreamBlockState
-from claude_code_bridge.send_usage import NATIVE_CONTEXT_READ_TIMEOUT_S, ClaudeUsageMixin
+from claude_code_bridge.send_usage import (
+    NATIVE_CONTEXT_READ_ATTEMPTS,
+    NATIVE_CONTEXT_READ_TIMEOUT_S,
+    ClaudeUsageMixin,
+)
 from claude_code_bridge.session_ops import ClaudeSessionMixin
 from tests.virtual_clock import run as run_virtual
 from tests.virtual_clock import run_timing
@@ -570,15 +574,22 @@ def test_abort_during_result_context_read_preserves_result_usage(monkeypatch):
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
-@pytest.mark.parametrize(("reply_after", "breakdown"), [
-    (1.5, True),  # beyond the old 0.9 s cap that dropped ~9% of breakdowns
-    (3.0, True),  # beyond the old 2 s cap that timed out ~3% (TASK-1700)
-    (NATIVE_CONTEXT_READ_TIMEOUT_S + 0.1, False),
+@pytest.mark.parametrize(("replies", "breakdown", "elapsed"), [
+    # beyond the old 0.9 s cap that dropped ~9% of breakdowns
+    ([1.5], True, 1.5),
+    # TASK-1700: a stuck first request is retried once and can recover
+    ([NATIVE_CONTEXT_READ_TIMEOUT_S + 5, 0.4], True, NATIVE_CONTEXT_READ_TIMEOUT_S + 0.4),
+    # both attempts stuck: the hold is bounded by attempts x cap
+    ([NATIVE_CONTEXT_READ_TIMEOUT_S + 5] * 3, False,
+     NATIVE_CONTEXT_READ_TIMEOUT_S * NATIVE_CONTEXT_READ_ATTEMPTS),
 ])
-def test_native_context_read_waits_up_to_its_cap(reply_after, breakdown):
+def test_native_context_read_retries_a_timeout_within_its_bound(replies, breakdown, elapsed):
+    calls = []
+
     class Client:
         async def get_context_usage(self):
-            await asyncio.sleep(reply_after)
+            calls.append(True)
+            await asyncio.sleep(replies[len(calls) - 1])
             return {"totalTokens": 55}
 
     async def run():
@@ -587,9 +598,22 @@ def test_native_context_read_waits_up_to_its_cap(reply_after, breakdown):
         usage = await ClaudeUsageMixin._read_native_context_usage(Client())
         return usage, loop.time() - started
 
-    usage, elapsed = run_virtual(run())
+    usage, took = run_virtual(run())
     assert (usage == {"totalTokens": 55}) is breakdown
-    assert elapsed == pytest.approx(min(reply_after, NATIVE_CONTEXT_READ_TIMEOUT_S))
+    assert took == pytest.approx(elapsed)
+    assert len(calls) == min(len(replies), NATIVE_CONTEXT_READ_ATTEMPTS)
+
+
+def test_native_context_read_error_is_not_retried():
+    calls = []
+
+    class Client:
+        async def get_context_usage(self):
+            calls.append(True)
+            raise RuntimeError("control channel closed")
+
+    assert asyncio.run(ClaudeUsageMixin._read_native_context_usage(Client())) is None
+    assert len(calls) == 1
 
 
 def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
@@ -599,8 +623,10 @@ def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
         clients = iter((first, second))
         monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", lambda **kw: next(clients))
         reading = asyncio.Event()
+        reads = []
 
         async def slow_context():
+            reads.append(True)
             reading.set()
             await asyncio.Event().wait()
 
@@ -617,10 +643,16 @@ def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
         successor = harness.send("successor")
         await harness.queued.wait()
         assert not second.waiting.is_set()
-        # The SDK read must time out at its virtual deadline, freeing the lock
-        # for the queued turn without waiting for the stuck control request.
-        loop.advance(NATIVE_CONTEXT_READ_TIMEOUT_S)
+        # Each SDK read attempt must time out at its virtual deadline, freeing
+        # the lock for the queued turn without waiting for the stuck request.
+        for attempt in range(1, NATIVE_CONTEXT_READ_ATTEMPTS + 1):
+            assert not second.waiting.is_set()
+            loop.advance(NATIVE_CONTEXT_READ_TIMEOUT_S)
+            if attempt < NATIVE_CONTEXT_READ_ATTEMPTS:
+                while len(reads) <= attempt:
+                    await asyncio.sleep(0)
         await second.waiting.wait()
+        assert len(reads) == NATIVE_CONTEXT_READ_ATTEMPTS
         assert first.disconnect_calls == 1
         second.release_stream.set()
         await asyncio.gather(initial, successor)
