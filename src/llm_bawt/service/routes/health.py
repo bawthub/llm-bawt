@@ -45,8 +45,9 @@ def get_maintenance_health():
     has run since start. A failing job is ``down`` with its error class,
     provider, credential name and failure count; its next success clears it.
 
-    Backup-model state (slice B) adds one row per provider: ``warning`` while
-    maintenance runs on the backup, ``ok`` "back on primary" after switch-back.
+    Backup-model state (slice B) adds at most one ``degraded`` row per provider:
+    ``maintenance_fallback:<p>`` while on the backup, then
+    ``maintenance_fallback_recovered:<p>`` for 24h after switch-back.
     It is read from the durable Redis record on every poll, so a switch is
     never lost to a restart; Redis down is reported by the state row instead.
     """
