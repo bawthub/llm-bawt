@@ -32,6 +32,24 @@ def test_speaker_classification():
     assert speaker_of(CLAIMED).kind == USER
 
 
+def test_mcp_storage_unprocessed_adapter_carries_authorship():
+    import asyncio
+
+    from llm_bawt.mcp_server.storage import MemoryStorage
+
+    rows = [dict(DELIVERY, id="d1", timestamp=1.0, session_id="s"),
+            dict(NICK, id="n1", timestamp=2.0, session_id="s"),
+            {"id": "x1", "role": "user", "content": "legacy", "timestamp": 3.0,
+             "session_id": "s", "author_entity_type": None, "author_entity_id": None}]
+    storage = MemoryStorage.__new__(MemoryStorage)
+    storage._get_backend = lambda *a, **k: type(
+        "B", (), {"get_unprocessed_messages": lambda self, limit=100: rows})()
+    msgs = asyncio.run(storage.get_unprocessed_messages(bot_id="t"))
+    assert [speaker_of(m).kind for m in msgs] == [BOT, USER, USER]
+    assert speaker_of(msgs[0]).bot_id == "snark"
+    assert speaker_of(msgs[0].to_dict()).kind == BOT
+
+
 def test_extraction_input_excludes_bot_delivery():
     llm = _Recorder()
     MemoryExtractionService(llm_client=llm).extract_from_conversation(

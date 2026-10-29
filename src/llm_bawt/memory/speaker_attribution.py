@@ -43,9 +43,12 @@ def speaker_of(msg: Any) -> Speaker:
         return Speaker(ASSISTANT)
     if role != USER:
         return Speaker(role)
-    if str(_field(msg, "author_entity_type") or "").lower() == BOT:
-        bot_id = str(_field(msg, "author_entity_id") or "").strip().lower()
-        return Speaker(BOT, bot_id or "unknown")
+    author_type, author_id = _field(msg, "author_entity_type"), _field(msg, "author_entity_id")
+    author = _field(msg, "author")  # AuthorReference object or its to_dict()
+    if author is not None and author_type is None:
+        author_type, author_id = _field(author, "entity_type"), _field(author, "entity_id")
+    if str(author_type or "").lower() == BOT:
+        return Speaker(BOT, str(author_id or "").strip().lower() or "unknown")
     return Speaker(USER)
 
 

@@ -537,8 +537,8 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 content=r["content"],
                 timestamp=r["timestamp"],
                 session_id=r.get("session_id"),
-                author_entity_type=r.get("author_entity_type"),
-                author_entity_id=r.get("author_entity_id"),
+                author=normalize_author(
+                    r.get("author_entity_type"), r.get("author_entity_id")),
             )
             for r in results
         ]
