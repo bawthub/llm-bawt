@@ -23,6 +23,10 @@ Every op targets the local Docker daemon via the mounted socket. The
     {"action": "restart", "compose_project": "...", "compose_service": "..."}
     {"action": "restart", "compose_project": "...",
      "compose_service_from_arg": "<arg-key>"}
+
+A restart/start may add ``health_url``/``health_field``/``health_value``/
+``health_timeout_seconds`` (TASK-1697, :mod:`.restart_health`): the job then
+fails unless the service answers healthy afterwards.
 """
 
 from __future__ import annotations
@@ -96,10 +100,13 @@ _LLM_BAWT_SEEDS: list[dict[str, Any]] = [
         "command_script": _spec(
             action="restart",
             container_name="llm-bawt-app",
+            # TASK-1697: the job fails unless the app answers healthy again.
+            health_url="http://127.0.0.1:8642/health", health_field="status", health_value="ok",
+            health_timeout_seconds=150,
         ),
         "args_schema_json": _no_args_schema(),
         "args_defaults_json": _defaults(),
-        "timeout_seconds": 120,
+        "timeout_seconds": 240,
         "start_delay_seconds": 5,
         "risk_level": RISK_MEDIUM,
         "category": "restart",
@@ -298,10 +305,14 @@ _BAWTHUB_SEEDS: list[dict[str, Any]] = [
             action="restart",
             compose_project=_BAWTHUB_PROJECT,
             compose_service="frontend",
+            # TASK-1697: probe the Hono API through Vite's /api proxy, so a
+            # dead API (not just a dead Vite) fails the job.
+            health_url="http://127.0.0.1:5173/api/health", health_field="status", health_value="healthy",
+            health_timeout_seconds=150,
         ),
         "args_schema_json": _no_args_schema(),
         "args_defaults_json": _defaults(),
-        "timeout_seconds": 120,
+        "timeout_seconds": 240,
         "start_delay_seconds": 0,
         "risk_level": RISK_LOW,
         "category": "restart",

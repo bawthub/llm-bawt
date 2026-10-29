@@ -29,6 +29,7 @@ if __package__:
     from .dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, DevConfigReconciler
     from .image_deploy import IMAGE_ACTIONS, ImageDeployer
     from .plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
+    from .restart_health import has_health, wait_healthy
     from .routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 else:  # pragma: no cover - standalone worker image
@@ -41,6 +42,7 @@ else:  # pragma: no cover - standalone worker image
     from dev_config_reconcile import ACTION as DEV_CONFIG_ACTION, DevConfigReconciler
     from image_deploy import IMAGE_ACTIONS, ImageDeployer
     from plan_reconcile import ACTION as PLAN_ACTION, PlanReconciler
+    from restart_health import has_health, wait_healthy
     from routing_reconcile import ACTION as ROUTING_ACTION, RoutingReconciler
     from tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, TaggedConfigReconciler
 
@@ -98,9 +100,10 @@ class _AttachStream:
 
 
 class DockerAPI:
-    def __init__(self, timeout: float):
+    def __init__(self, timeout: float, *, clock=time.monotonic, sleep=time.sleep):
         self.timeout = timeout
         self.side_effect_started = False
+        self.clock, self.sleep = clock, sleep
 
     def request(self, method: str, path: str, *, body: dict | None = None,
                 headers: dict | None = None, raw: bool = False):
@@ -189,7 +192,11 @@ class DockerAPI:
         # MAY still finish in the daemon. Never interpret that as safe to retry.
         self.side_effect_started = True
         self.request("POST", path)
-        return f"Docker {action} completed for {container['Id']}"
+        done = f"Docker {action} completed for {container['Id']}"
+        if has_health(spec):
+            # TASK-1697: Docker accepting the restart is not the service being up.
+            return f"{done}; " + wait_healthy(self, container_id, spec, clock=self.clock, sleep=self.sleep)
+        return done
 
 
 def atomic_json(path: Path, value: dict) -> None:

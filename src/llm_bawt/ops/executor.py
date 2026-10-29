@@ -33,6 +33,8 @@ from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .plan_reconcile import (ACTION as PLAN_ACTION, WORKER_CAPABILITY_LABEL as PLAN_WORKER_LABEL,
                              validate_plan_spec)
 from .release_spec import is_release_spec, validate_release_spec
+from .restart_health import (HEALTH_KEYS as RESTART_HEALTH_KEYS, WORKER_CAPABILITY_LABEL as RESTART_HEALTH_LABEL,
+                             has_health as has_restart_health, validate_health as validate_restart_health)
 from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
@@ -232,12 +234,15 @@ def validate_spec(command_script: str) -> dict:
     if is_release_spec(spec):
         return validate_release_spec(spec)
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
-               "compose_service", "compose_service_from_arg", "stop_grace_seconds"}
+               "compose_service", "compose_service_from_arg", "stop_grace_seconds", *RESTART_HEALTH_KEYS}
     if not isinstance(spec, dict) or set(spec) - allowed:
         raise ValueError("Docker spec must be an object with supported fields only")
     if not isinstance(spec.get("action"), str) or spec["action"] not in SUPPORTED_ACTIONS:
         raise ValueError("unsupported Docker action")
+    validate_restart_health(spec)  # TASK-1697: optional post-action health probe
     for k, v in spec.items():
+        if k in RESTART_HEALTH_KEYS:
+            continue
         if k != "stop_grace_seconds" and (not isinstance(v, str) or not v.strip()):
             raise ValueError(f"Docker spec {k} must be a nonempty string")
     names = sum(k in spec for k in ("container_name", "container_name_from_arg"))
@@ -611,6 +616,14 @@ class DockerExecutor(Executor):
             self._check_remove_worker(snapshot["execution"])
         if action in CONFIG_CHECKED_ACTIONS:
             self._check_config_worker(snapshot["execution"], action)
+        if has_restart_health(snapshot["spec"]):
+            # TASK-1697: an older worker would reject the health fields mid-job
+            # or, worse, skip the probe; refuse before dispatch instead.
+            self._require_worker_label(
+                snapshot["execution"], RESTART_HEALTH_LABEL,
+                missing=(f"configured immutable ops worker lacks {RESTART_HEALTH_LABEL}; "
+                         "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
+                unverifiable="cannot verify the restart-health capability of the ops worker")
         if snapshot.get("quiesce"):
             self.check_quiesce_fence(snapshot["execution"])
         # TASK-1169 S4c: a self-target the mode cannot survive, after the cheap

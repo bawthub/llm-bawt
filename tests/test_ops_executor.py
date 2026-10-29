@@ -323,10 +323,12 @@ def test_restart_app_seed_targets_stable_explicit_container_name():
         row for row in SEEDS
         if row["slug"] == "llm-bawt.restart-app"
     )
-    assert json.loads(operation["command_script"]) == {
+    spec = json.loads(operation["command_script"])
+    assert {k: spec[k] for k in ("action", "container_name")} == {
         "action": "restart",
         "container_name": "llm-bawt-app",
     }
+    assert "compose_project" not in spec and "compose_service" not in spec
 
 
 @pytest.mark.parametrize("spec", [{}, [], {"action": "nuke", "container_name": "x"},
