@@ -614,7 +614,10 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
             return None
         if status == REQ_RESPONDED:
             return build_respond_prompt(resolution_message or "", row.subject, row.tool_name, bot_id=bot_id)
-        return build_continuation_prompt(status == REQ_APPROVED, row.subject, row.tool_name, bot_id=bot_id)
+        return build_continuation_prompt(
+            status == REQ_APPROVED, row.subject, row.tool_name,
+            tool_arguments_json=row.tool_arguments_json, bot_id=bot_id,
+        )
 
     prompt = continuation_prompt(expected_status, expected_message)
     row = store.resolve_request(

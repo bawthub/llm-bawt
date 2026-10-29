@@ -63,9 +63,9 @@ def record(store, request_id="req-1", tool_name="generic", arguments=None, **kwa
     )
 
 
-def harness(store, request_id="h-1"):
+def harness(store, request_id="h-1", arguments=None):
     return store.record_request(request_id=request_id, bot_id="test-bot", user_id="test-user",
-        turn_id="turn-1", backend="claude-code", tool_name="Bash", tool_arguments={"command": "x"},
+        turn_id="turn-1", backend="claude-code", tool_name="Bash", tool_arguments=arguments or {"command": "x"},
         subject="x", grant_key="g", policy_id=None, severity="high", prompt="Approve?", session_id="thread-1")
 
 
@@ -426,7 +426,8 @@ def test_harness_resolve_renders_bot_scope_before_committing(client, store, monk
     row = harness(store)
     calls = []
 
-    def render(approved, subject, tool_name, *, bot_id=None):
+    def render(approved, subject, tool_name, *, tool_arguments_json=None, bot_id=None):
+        assert tool_arguments_json == row.tool_arguments_json
         calls.append((store.get_request(row.id).status, bot_id))
         if len(calls) == 1:
             raise ValueError("Prompt database unavailable")
@@ -444,6 +445,59 @@ def test_harness_resolve_renders_bot_scope_before_committing(client, store, monk
     assert response.status_code == 503  # No bridge for grant delivery in this fixture.
     assert calls == [("pending", "test-bot"), ("pending", "test-bot")]
     assert store.get_request(row.id).status == REQ_APPROVED
+
+
+@pytest.mark.parametrize(
+    ("winner_status", "winner_message", "requested_decision"),
+    [(REQ_DENIED, "", "approve"), ("responded", "winner guidance", "respond")],
+)
+def test_harness_resolve_reconciles_concurrent_winner(
+    client, store, monkeypatch, winner_status, winner_message, requested_decision,
+):
+    row = harness(store)
+    original_resolve = store.resolve_request
+
+    def competing_resolve(request_id, **kwargs):
+        original_resolve(request_id, status=winner_status, message=winner_message,
+                         continuation_owner="client")
+        return original_resolve(request_id, **kwargs)
+
+    monkeypatch.setattr(store, "resolve_request", competing_resolve)
+    response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={
+        "decision": requested_decision, "message": "losing guidance",
+        "dispatch_continuation": False,
+    })
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == winner_status
+    assert result["already_resolved"] is False  # Pending at the initial read.
+    assert result["continuation_owner"] == "client"
+    assert store.get_request(row.id).resolution_message == winner_message
+    if winner_status == REQ_DENIED:
+        assert "DENIED" in result["continuation_prompt"]
+        assert "APPROVED" not in result["continuation_prompt"]
+    else:
+        assert winner_message in result["continuation_prompt"]
+        assert "losing guidance" not in result["continuation_prompt"]
+
+
+def test_client_owner_approved_prompt_carries_complete_stored_arguments(client, store, monkeypatch):
+    original_args = {"command": "x", "timeout": 100, "cwd": "/repo"}
+    row = harness(store, arguments=original_args)
+    # A policy subject can be just the command; options like cwd and timeout
+    # are bound by the exact grant and must be present in the continuation.
+    assert json.loads(row.tool_arguments_json) == original_args
+
+    class Subscriber:
+        async def send_approval_grant(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(routes, "_subscriber", lambda: Subscriber())
+    response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={
+        "decision": "approve", "dispatch_continuation": False,
+    })
+    assert response.status_code == 200
+    assert json.dumps(original_args, ensure_ascii=False, sort_keys=True) in response.json()["continuation_prompt"]
 
 
 def test_client_owner_retries_do_not_regrant_or_change_response(client, store, monkeypatch):

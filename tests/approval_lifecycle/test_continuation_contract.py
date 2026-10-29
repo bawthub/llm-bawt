@@ -35,10 +35,10 @@ def test_all_continuation_guidance_resolves_from_registry_at_call_time(monkeypat
             return f"registry:{key}:{variables.get('shown', '')}:{variables.get('message', '')}"
 
     monkeypatch.setattr("llm_bawt.prompt_registry.get_prompt_resolver", lambda: Resolver())
-    assert build_continuation_prompt(True, "call", "Bash", bot_id="test-bot") == "registry:approvals.approved_guidance:call:"
-    assert build_continuation_prompt(False, "call", "Bash", bot_id="test-bot") == "registry:approvals.denied_guidance:call:"
-    assert build_respond_prompt("ok", "call", "Bash", bot_id="test-bot") == "registry:approvals.responded_guidance:call:ok"
-    assert build_respond_prompt("", "call", "Bash", bot_id="test-bot") == "registry:approvals.no_response_guidance:call:"
+    assert build_continuation_prompt(True, "call", "Bash", bot_id="test-bot").startswith("registry:approvals.approved_guidance:call:\n")
+    assert build_continuation_prompt(False, "call", "Bash", bot_id="test-bot").startswith("registry:approvals.denied_guidance:call:\n")
+    assert build_respond_prompt("ok", "call", "Bash", bot_id="test-bot").startswith("registry:approvals.responded_guidance:call:ok\n")
+    assert build_respond_prompt("", "call", "Bash", bot_id="test-bot").startswith("registry:approvals.no_response_guidance:call:\n")
 
 
 @pytest.mark.parametrize("approved", [True, False])
@@ -61,6 +61,23 @@ def test_edited_response_guidance_cannot_drop_original_request_or_reply(monkeypa
     monkeypatch.setattr("llm_bawt.prompt_registry.get_prompt_resolver", lambda: Resolver())
     with pytest.raises(ValueError, match="omitted the original request or reply"):
         build_respond_prompt("reply", "shown", "Bash")
+
+
+@pytest.mark.parametrize(
+    ("kind", "build"),
+    [
+        ("approved", lambda: build_continuation_prompt(True, "call", "Bash")),
+        ("denied", lambda: build_continuation_prompt(False, "call", "Bash")),
+        ("responded", lambda: build_respond_prompt("reply", "call", "Bash")),
+        ("reviewed", lambda: build_respond_prompt("", "call", "Bash")),
+    ],
+)
+def test_harness_continuation_has_structural_metadata_without_changing_legacy_opening(kind, build):
+    content = build()
+    assert content.startswith("[The user ")
+    marker, metadata = content.rsplit("\n", 2)[1:]
+    assert marker == "[LLM_BAWT_HARNESS_CONTINUATION_V1]"
+    assert json.loads(metadata) == {"kind": kind, "tool_name": "Bash"}
 
 
 def test_preview_explains_structural_ops_fallback():

@@ -505,6 +505,15 @@ def spawn_continuation(
         )
 
 
+HARNESS_CONTINUATION_MARKER = "[LLM_BAWT_HARNESS_CONTINUATION_V1]"
+
+
+def _frame_harness_guidance(rendered: str, *, kind: str, tool_name: str) -> str:
+    """Keep the legacy opening while carrying UI identity outside editable text."""
+    metadata = json.dumps({"kind": kind, "tool_name": tool_name}, ensure_ascii=False, sort_keys=True)
+    return f"{rendered}\n{HARNESS_CONTINUATION_MARKER}\n{metadata}"
+
+
 def build_continuation_prompt(
     approved: bool, subject: str, tool_name: str, *, tool_arguments_json: str | None = None,
     bot_id: str | None = None,
@@ -521,7 +530,7 @@ def build_continuation_prompt(
     rendered = _continuation_guidance(key, bot_id, variables={"tool_name": tool_name, "shown": shown})
     if shown and shown not in rendered:
         raise ValueError(f"Continuation guidance {key} omitted the original call")
-    return rendered
+    return _frame_harness_guidance(rendered, kind="approved" if approved else "denied", tool_name=tool_name)
 
 
 def build_respond_prompt(
@@ -536,7 +545,7 @@ def build_respond_prompt(
     )
     if msg and (shown not in rendered or msg not in rendered):
         raise ValueError(f"Continuation guidance {key} omitted the original request or reply")
-    return rendered
+    return _frame_harness_guidance(rendered, kind="responded" if msg else "reviewed", tool_name=tool_name)
 
 
 __all__ = [
