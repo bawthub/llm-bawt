@@ -147,10 +147,13 @@ def test_rolled_back_gate_is_never_announced(gated):
         activate_hold(conn, _spec(gated.owner(), GateScope.for_bots(bot)))
         tx.rollback()
         conn.close()
-        with gated.store.engine.connect() as probe:
-            probe.execute(sa_text("SELECT 1"))
-        listener.poll()
-        assert not listener.notifies
+        # Fence: a committed sentinel NOTIFY queues after any notify the hold
+        # committed, so once it arrives a late gate NOTIFY cannot still be in flight.
+        sentinel = f"fence-{uuid.uuid4()}"
+        with gated.store.engine.begin() as probe:
+            probe.execute(sa_text("SELECT pg_notify(:ch, :p)"), {"ch": GATE_CHANGED_CHANNEL, "p": sentinel})
+        payloads = _await_notifies(listener, sentinel, 1)
+        assert payloads == [sentinel]
     finally:
         listener.close()
 
