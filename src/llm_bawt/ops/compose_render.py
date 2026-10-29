@@ -194,7 +194,8 @@ def unescape_dollars(value):
     if isinstance(value, list):
         return [unescape_dollars(v) for v in value]
     if isinstance(value, dict):
-        return {k: unescape_dollars(v) for k, v in value.items()}
+        # Keys too: Compose escapes a label key `a$b` as `a$$b`.
+        return {unescape_dollars(k): unescape_dollars(v) for k, v in value.items()}
     return value
 
 
