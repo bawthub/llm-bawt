@@ -606,6 +606,17 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
     already_resolved = row.status != "pending"
     new_status = {"approve": REQ_APPROVED, "deny": REQ_DENIED,
                   "cancel": REQ_CANCELLED, "respond": REQ_RESPONDED}[outcome]
+    expected_status = row.status if already_resolved else new_status
+    expected_message = row.resolution_message if already_resolved else message
+
+    def continuation_prompt(status: str, resolution_message: str | None) -> str | None:
+        if status == REQ_CANCELLED:
+            return None
+        if status == REQ_RESPONDED:
+            return build_respond_prompt(resolution_message or "", row.subject, row.tool_name, bot_id=bot_id)
+        return build_continuation_prompt(status == REQ_APPROVED, row.subject, row.tool_name, bot_id=bot_id)
+
+    prompt = continuation_prompt(expected_status, expected_message)
     row = store.resolve_request(
         request_id, status=new_status, resolved_by=body.resolved_by, message=message,
         continuation_owner="server" if body.dispatch_continuation else "client",
@@ -613,10 +624,9 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
     if row is None:
         raise HTTPException(status_code=404, detail="Request disappeared during resolve")
     approved = row.status == REQ_APPROVED
-    prompt = (None if row.status == REQ_CANCELLED else
-              build_respond_prompt(row.resolution_message, row.subject, row.tool_name)
-              if row.status == REQ_RESPONDED else
-              build_continuation_prompt(approved, row.subject, row.tool_name))
+    if row.status != expected_status or (row.status == REQ_RESPONDED and row.resolution_message != expected_message):
+        # Another resolver won the compare-and-set. Return its actual decision.
+        prompt = continuation_prompt(row.status, row.resolution_message)
     try:
         get_turn_log_store().set_approval_status(
             tool_use_id=request_id, approval_request_id=request_id, approval_status=row.status)

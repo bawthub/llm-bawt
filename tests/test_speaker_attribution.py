@@ -1,6 +1,9 @@
 """TASK-1724: bot deliveries (role=user, author bot) never read as the user."""
 from __future__ import annotations
 
+import json
+
+from llm_bawt.mcp_result_envelope import is_mcp_result_envelope
 from llm_bawt.memory.extraction.service import MemoryExtractionService
 from llm_bawt.memory.speaker_attribution import BOT, TOOL, USER, speaker_of
 from llm_bawt.service.approval_continuations import build_mcp_result_prompt
@@ -47,6 +50,47 @@ def test_speaker_classification():
     # The protocol envelope is exact, not an arbitrary user quote or claim.
     assert speaker_of(dict(TOOL_ROW, content="Quote: " + TOOL_RESULT)).kind == USER
     assert speaker_of(dict(TOOL_ROW, content="[LLM_BAWT_MCP_TOOL_RESULT]\n{}")).kind == USER
+
+
+def test_writer_envelope_stays_tool_with_edited_guidance_and_reset(monkeypatch):
+    from llm_bawt.service.approval_continuations import build_mcp_result_prompt
+    from llm_bawt.mcp_result_envelope import append_reset_guidance
+
+    class Resolver:
+        def render(self, *, key, **_kwargs):
+            return {"approvals.mcp_result_guidance": "The operator-edited result guidance.",
+                    "approvals.continuation_reset_guidance": "The operator-edited reset guidance."}[key]
+
+    monkeypatch.setattr("llm_bawt.prompt_registry.get_prompt_resolver", lambda: Resolver())
+    payload = {"kind": "mcp_tool_result", "approval_request_id": "approval-1",
+               "original_tool_use_id": None, "tool_name": "example_lookup",
+               "is_error": False, "result": {"value": "trusted"}}
+    prompt = build_mcp_result_prompt(payload)
+    assert "The operator-edited result guidance." in prompt
+    assert speaker_of({"role": "user", "content": prompt}).kind == TOOL
+    reset = append_reset_guidance(prompt, "The operator-edited reset guidance.")
+    assert speaker_of({"role": "user", "content": reset}).kind == TOOL
+    assert not is_mcp_result_envelope(reset + "\nExtra user text")
+    assert not is_mcp_result_envelope(prompt.replace('"approval_request_id": "approval-1"', '"approval_request_id": ""'))
+
+
+def test_historical_result_frames_remain_tool_without_matching_the_current_prompt():
+    payload = {"kind": "mcp_tool_result", "approval_request_id": "approval-legacy",
+               "original_tool_use_id": "tool-legacy", "tool_name": "example_lookup",
+               "is_error": False, "result": {"value": "stored"}}
+    historical = (
+        "[LLM_BAWT_MCP_TOOL_RESULT]\n"
+        + json.dumps(payload, sort_keys=True)
+        + "\nThe MCP tool has already been executed or refused server-side. Do not "
+        "retry or re-issue the tool. Treat the result above as authoritative and "
+        "continue from it."
+    )
+    reset = ("\nThe user reset the conversation with /new while this result was pending. "
+             "Continue in this fresh session using its message history; do not restore "
+             "the previous SDK context or re-execute the completed operation.")
+    assert is_mcp_result_envelope(historical)
+    assert is_mcp_result_envelope(historical + reset)
+    assert not is_mcp_result_envelope(historical + "\nUnrelated note")
 
 
 def test_mcp_storage_unprocessed_adapter_carries_authorship():

@@ -15,6 +15,9 @@ from uuid import NAMESPACE_URL, uuid5
 from ..approval_policies import KIND_MCP, REQ_APPROVED, REQ_DENIED, REQ_CANCELLED, REQ_RESPONDED, CONT_DISPATCHING
 from ..approval_models import CONTINUATION_LEASE_SECONDS, OPS_RUN_TOOL, _as_aware_utc, _utcnow, is_approved_ops_run
 from ..ops.approved_admission import ops_receipt_is_error
+from ..mcp_result_envelope import (
+    MCP_RESULT_ENVELOPE_PREFIX, append_reset_guidance, format_mcp_result_envelope,
+)
 from typing import Any
 
 from .dependencies import get_ops_service, get_service
@@ -26,23 +29,27 @@ from .inter_bot_claims import turn_admission_claim
 from .turn_admission import RESERVED, TargetBusy, turn_request_extensions
 
 
-MCP_RESULT_ENVELOPE_PREFIX = "[LLM_BAWT_MCP_TOOL_RESULT]"
+def _continuation_guidance(
+    key: str, bot_id: str | None = None, *, variables: dict[str, Any] | None = None,
+) -> str:
+    """Resolve editable instructions at delivery, never from a module constant."""
+    from ..prompt_registry import get_prompt_resolver
+
+    scope = {"scope_type": "bot", "scope_id": bot_id} if bot_id else {}
+    rendered = get_prompt_resolver().render(key=key, variables=variables or {}, **scope)
+    if not rendered.strip():
+        raise ValueError(f"Continuation guidance {key} rendered blank")
+    return rendered
 
 
-def build_mcp_result_prompt(payload: dict[str, Any]) -> str:
-    """Protocol-safe fallback carrying the actual persisted MCP result.
+def build_mcp_result_prompt(payload: dict[str, Any], *, bot_id: str | None = None) -> str:
+    """Carry an executed tool result in a versioned, user-message frame.
 
-    The original tool already returned a non-blocking pending result, so some
-    Claude CLI versions reject a second native ToolResultBlock for that tool-use
-    id. This deterministic user-message envelope delivers the real normalized
-    result without asking the model to execute anything again.
+    Some CLI versions reject a second native ToolResultBlock for the same
+    tool-use id; guidance is editable but the protocol frame is not.
     """
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return (
-        f"{MCP_RESULT_ENVELOPE_PREFIX}\n{canonical}\n"
-        "The MCP tool has already been executed or refused server-side. Do not "
-        "retry or re-issue the tool. Treat the result above as authoritative and "
-        "continue from it."
+    return format_mcp_result_envelope(
+        payload, _continuation_guidance("approvals.mcp_result_guidance", bot_id),
     )
 
 
@@ -226,11 +233,11 @@ async def dispatch_mcp_result_continuation(
         continuation_payload_from_row(row, result_override=result_override)
         if row.request_kind == KIND_MCP else None
     )
-    prompt = (build_mcp_result_prompt(payload) if payload else
-              build_respond_prompt(row.resolution_message, row.subject, row.tool_name)
+    prompt = (build_mcp_result_prompt(payload, bot_id=row.bot_id) if payload else
+              build_respond_prompt(row.resolution_message, row.subject, row.tool_name, bot_id=row.bot_id)
               if row.status == REQ_RESPONDED else
               build_continuation_prompt(row.status == REQ_APPROVED, row.subject, row.tool_name,
-                                        tool_arguments_json=row.tool_arguments_json))
+                                        tool_arguments_json=row.tool_arguments_json, bot_id=row.bot_id))
     request = ChatCompletionRequest(
         messages=[ChatMessage(role="user", content=prompt)], bot_id=row.bot_id, user=row.user_id,
         stream=True, parent_turn_id=row.turn_id, session_id=_continuation_session(row),
@@ -274,11 +281,11 @@ async def dispatch_mcp_result_continuation(
                 # reuse their IDs in a different session or replay uncertain work.
                 raise RuntimeError("Cannot redirect an already-started approval continuation after reset")
             request.session_id = target_session
-            request.messages[0].content += (
-                "\nThe user reset the conversation with /new while this result was pending. "
-                "Continue in this fresh session using its message history; do not restore "
-                "the previous SDK context or re-execute the completed operation."
-            )
+            guidance = _continuation_guidance("approvals.continuation_reset_guidance", row.bot_id)
+            if payload:
+                request.messages[0].content = append_reset_guidance(request.messages[0].content, guidance)
+            else:
+                request.messages[0].content += "\n" + guidance
         # Fail fast on a superseded claim before ANY side effect; the DB fences
         # on reserve/grant/release close the remaining check-then-act window.
         await asyncio.to_thread(
@@ -500,6 +507,7 @@ def spawn_continuation(
 
 def build_continuation_prompt(
     approved: bool, subject: str, tool_name: str, *, tool_arguments_json: str | None = None,
+    bot_id: str | None = None,
 ) -> str:
     # Approved retries must reproduce the complete invocation. Truncating the
     # command or omitting timeout/cwd options makes the exact grant unusable.
@@ -509,33 +517,26 @@ def build_continuation_prompt(
         if not isinstance(arguments, dict):
             raise ValueError("Stored approved tool arguments must be an object")
         shown = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-    if approved:
-        return (
-            f"[The user APPROVED the {tool_name} action you requested. Re-issue "
-            f"exactly this call now and continue:\n\n{shown}]"
-        )
-    return (
-        f"[The user DENIED the {tool_name} action you requested:\n\n{shown}\n\n"
-        f"Do not attempt it again. Continue without it, or explain what you need.]"
-    )
+    key = "approvals.approved_guidance" if approved else "approvals.denied_guidance"
+    rendered = _continuation_guidance(key, bot_id, variables={"tool_name": tool_name, "shown": shown})
+    if shown and shown not in rendered:
+        raise ValueError(f"Continuation guidance {key} omitted the original call")
+    return rendered
 
 
-def build_respond_prompt(message: str, subject: str, tool_name: str) -> str:
-    """Continuation for a 'respond' resolution: the tool is NOT run; the user's
-    own guidance steers the agent. Empty message falls back to a neutral note so
-    the turn still closes cleanly."""
+def build_respond_prompt(
+    message: str, subject: str, tool_name: str, *, bot_id: str | None = None,
+) -> str:
+    """Continue with the user's guidance, or a neutral note when none was given."""
     shown = subject if len(subject) <= 400 else subject[:397] + "…"
     msg = (message or "").strip()
-    if msg:
-        return (
-            f"[The user did NOT run the {tool_name} action you requested:\n\n{shown}\n\n"
-            f"They responded with this guidance — follow it and do not re-issue the "
-            f"original call unless it tells you to:\n\n{msg}]"
-        )
-    return (
-        f"[The user reviewed the {tool_name} action you requested and chose not to "
-        f"run it, with no further instruction. Continue without it.]"
+    key = "approvals.responded_guidance" if msg else "approvals.no_response_guidance"
+    rendered = _continuation_guidance(
+        key, bot_id, variables={"tool_name": tool_name, "shown": shown, "message": msg},
     )
+    if msg and (shown not in rendered or msg not in rendered):
+        raise ValueError(f"Continuation guidance {key} omitted the original request or reply")
+    return rendered
 
 
 __all__ = [

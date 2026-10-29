@@ -151,6 +151,42 @@ def load_deliveries_cancel_notice() -> str:
     return DEFAULT_CANCEL_NOTICE
 
 
+def load_approvals_approved_guidance() -> str:
+    from .service.approval_continuation_prompts import APPROVED_GUIDANCE
+
+    return APPROVED_GUIDANCE
+
+
+def load_approvals_denied_guidance() -> str:
+    from .service.approval_continuation_prompts import DENIED_GUIDANCE
+
+    return DENIED_GUIDANCE
+
+
+def load_approvals_responded_guidance() -> str:
+    from .service.approval_continuation_prompts import RESPONDED_GUIDANCE
+
+    return RESPONDED_GUIDANCE
+
+
+def load_approvals_no_response_guidance() -> str:
+    from .service.approval_continuation_prompts import NO_RESPONSE_GUIDANCE
+
+    return NO_RESPONSE_GUIDANCE
+
+
+def load_approvals_mcp_result_guidance() -> str:
+    from .mcp_result_envelope import LEGACY_MCP_RESULT_GUIDANCE
+
+    return LEGACY_MCP_RESULT_GUIDANCE
+
+
+def load_approvals_continuation_reset_guidance() -> str:
+    from .mcp_result_envelope import LEGACY_RESET_GUIDANCE
+
+    return LEGACY_RESET_GUIDANCE
+
+
 def load_approvals_approver_request() -> str:
     from .service.approval_fanout_prompt import DEFAULT_APPROVER_REQUEST
 

@@ -422,6 +422,30 @@ def test_recovery_repairs_pre_atomic_result_outbox_gap(store):
     assert store.get_request(row.id).continuation_id
 
 
+def test_harness_resolve_renders_bot_scope_before_committing(client, store, monkeypatch):
+    row = harness(store)
+    calls = []
+
+    def render(approved, subject, tool_name, *, bot_id=None):
+        calls.append((store.get_request(row.id).status, bot_id))
+        if len(calls) == 1:
+            raise ValueError("Prompt database unavailable")
+        return "rendered call"
+
+    monkeypatch.setattr(routes, "build_continuation_prompt", render)
+    with pytest.raises(ValueError, match="Prompt database unavailable"):
+        client.post(f"/v1/chat/approvals/{row.id}/resolve",
+                    json={"decision": "approve", "dispatch_continuation": False})
+    assert store.get_request(row.id).status == "pending"
+    assert store.get_request(row.id).grant_state != "sent"
+
+    response = client.post(f"/v1/chat/approvals/{row.id}/resolve",
+                           json={"decision": "approve", "dispatch_continuation": False})
+    assert response.status_code == 503  # No bridge for grant delivery in this fixture.
+    assert calls == [("pending", "test-bot"), ("pending", "test-bot")]
+    assert store.get_request(row.id).status == REQ_APPROVED
+
+
 def test_client_owner_retries_do_not_regrant_or_change_response(client, store, monkeypatch):
     row = harness(store)
     grants = []

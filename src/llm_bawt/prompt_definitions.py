@@ -30,6 +30,12 @@ from .prompt_default_loaders import (
     load_agents_docs,
     load_approvals_approver_request,
     load_approvals_approver_resolved,
+    load_approvals_mcp_result_guidance,
+    load_approvals_continuation_reset_guidance,
+    load_approvals_approved_guidance,
+    load_approvals_denied_guidance,
+    load_approvals_responded_guidance,
+    load_approvals_no_response_guidance,
     load_agents_project_plan,
     load_agents_review,
     load_agents_task_execution,
@@ -536,6 +542,60 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "to the original request, so it must tell the bot to check what it "
             "already completed and not repeat side effects. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "approvals.approved_guidance": PromptDefinition(
+        key="approvals.approved_guidance",
+        title="Approved Tool Continuation",
+        category="agent_execution",
+        required_vars=("tool_name", "shown"),
+        loader=load_approvals_approved_guidance,
+        metadata={"notes": "Re-issues a user-approved tool call with its complete arguments; bot overrides supported."},
+    ),
+    "approvals.denied_guidance": PromptDefinition(
+        key="approvals.denied_guidance",
+        title="Denied Tool Continuation",
+        category="agent_execution",
+        required_vars=("tool_name", "shown"),
+        loader=load_approvals_denied_guidance,
+        metadata={"notes": "Continues without a user-denied tool call; bot overrides supported."},
+    ),
+    "approvals.responded_guidance": PromptDefinition(
+        key="approvals.responded_guidance",
+        title="Responded Tool Continuation",
+        category="agent_execution",
+        required_vars=("tool_name", "shown", "message"),
+        loader=load_approvals_responded_guidance,
+        metadata={"notes": "Delivers a user's guidance instead of running the tool; bot overrides supported."},
+    ),
+    "approvals.no_response_guidance": PromptDefinition(
+        key="approvals.no_response_guidance",
+        title="Reviewed Tool Continuation (No Response)",
+        category="agent_execution",
+        required_vars=("tool_name",),
+        loader=load_approvals_no_response_guidance,
+        metadata={"notes": "Continues without the tool when a review supplies no further guidance; bot overrides supported."},
+    ),
+    "approvals.mcp_result_guidance": PromptDefinition(
+        key="approvals.mcp_result_guidance",
+        title="MCP Result Continuation Guidance",
+        category="agent_execution",
+        loader=load_approvals_mcp_result_guidance,
+        metadata={"notes": (
+            "Instructions after a server-executed MCP tool result. The app frames the "
+            "result as protocol data, so editing this text cannot change tool-result "
+            "classification. Resolved at each continuation; bot overrides supported."
+        )},
+    ),
+    "approvals.continuation_reset_guidance": PromptDefinition(
+        key="approvals.continuation_reset_guidance",
+        title="Approval Continuation After /new",
+        category="agent_execution",
+        loader=load_approvals_continuation_reset_guidance,
+        metadata={"notes": (
+            "Instructions when an approval continuation follows the user's /new "
+            "reset. Versioned MCP-result frames retain classification after edits. "
+            "Resolved at each redirected continuation; bot overrides supported."
         )},
     ),
     "approvals.approver_request": PromptDefinition(

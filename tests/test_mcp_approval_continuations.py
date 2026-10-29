@@ -474,6 +474,8 @@ def test_pending_restart_result_follows_new_without_rebinding_original_authority
     assert request.continuation_payload.original_tool_use_id == row.tool_use_id
     assert request.continuation_payload.result == {"job_id": "job-1", "state": "queued"}
     assert "/new" in request.messages[0].content
+    from llm_bawt.mcp_result_envelope import is_mcp_result_envelope
+    assert is_mcp_result_envelope(request.messages[0].content)
     assert "old-huge-sdk" not in request.model_dump_json()
     saved = store.get_request(row.id)
     assert saved.caller_context_json == original_context
