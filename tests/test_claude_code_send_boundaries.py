@@ -572,6 +572,7 @@ def test_abort_during_result_context_read_preserves_result_usage(monkeypatch):
 
 @pytest.mark.parametrize(("reply_after", "breakdown"), [
     (1.5, True),  # beyond the old 0.9 s cap that dropped ~9% of breakdowns
+    (3.0, True),  # beyond the old 2 s cap that timed out ~3% (TASK-1700)
     (NATIVE_CONTEXT_READ_TIMEOUT_S + 0.1, False),
 ])
 def test_native_context_read_waits_up_to_its_cap(reply_after, breakdown):
@@ -624,9 +625,11 @@ def test_queued_successor_waits_at_most_the_direct_context_bound(monkeypatch):
         second.release_stream.set()
         await asyncio.gather(initial, successor)
         assert len(harness.terminal("successor")) == 1
-        assert not [event for event in harness.events if event.run_id == "turn-request"
-                    and event.kind == AgentEventKind.USAGE_UPDATE
-                    and event.token_usage and event.token_usage.get("usage_status") == "final"]
+        finals = [event.token_usage for event in harness.events if event.run_id == "turn-request"
+                  and event.kind == AgentEventKind.USAGE_UPDATE
+                  and event.token_usage and event.token_usage.get("usage_status") == "final"]
+        assert [usage.get("context_breakdown_status") for usage in finals] == ["unavailable"]
+        assert not any("context_breakdown" in usage for usage in finals)
 
     run_timing(run())
 

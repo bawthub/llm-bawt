@@ -441,7 +441,7 @@ def test_proxy_post_done_breakdown_preserves_provider_headline():
     assert "context_breakdown" not in final
 
 
-def test_post_done_timeout_and_compact_are_fail_open():
+def test_post_done_failed_read_marks_reason_and_compact_skips_read():
     harness = _Harness()
     calls = []
 
@@ -450,13 +450,24 @@ def test_post_done_timeout_and_compact_are_fail_open():
         return None
 
     harness._read_native_context_usage = read
+    final = {"output_tokens": 7, "total_cost_usd": 0.3}
     assert asyncio.run(harness._publish_post_done_context(
         object(), request_id="req", session_key="session", seq=1,
-        model="claude-direct", final_usage={"output_tokens": 7},
+        model="claude-direct", final_usage=final,
+    )) == 2
+    usage = harness.events[-1][3]["token_usage"]
+    assert usage == {**final, "usage_status": "final", "context_breakdown_status": "unavailable"}
+    assert "context_breakdown_status" not in final
+    harness.events.clear()
+    # No terminal usage means nothing to annotate.
+    assert asyncio.run(harness._publish_post_done_context(
+        object(), request_id="req", session_key="session", seq=1,
+        model="claude-direct", final_usage=None,
     )) == 1
     assert not harness.events
     assert asyncio.run(harness._publish_post_done_context(
         object(), request_id="req", session_key="session", seq=1,
         model="claude-direct", final_usage={"context_action": "compact"},
     )) == 1
-    assert calls == [True]
+    assert not harness.events
+    assert calls == [True, True]

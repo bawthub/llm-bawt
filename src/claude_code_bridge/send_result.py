@@ -10,6 +10,7 @@ from agent_bridge.events import AgentEventKind
 
 from ._bridge_helpers import _fmt_tokens, _read_latest_compact_metadata
 from .context_breakdown import compact_context_breakdown
+from .send_usage import CONTEXT_BREAKDOWN_UNAVAILABLE
 from .send_errors import retry_exhausted_text
 
 
@@ -215,16 +216,29 @@ class ClaudeResultMixin:
         consumer can persist it without replacing terminal cost/output values.
         On proxy turns the CLI's category counts are estimates: keep the upstream
         resident total and window authoritative. A failed or slow control read
-        leaves the already-published turn alone.
+        keeps the published values and adds only ``context_breakdown_status``.
         """
         if isinstance(final_usage, dict) and final_usage.get("context_action") == "compact":
             return seq
         started = time.monotonic()
         native = await self._read_native_context_usage(sdk_client)
-        if not native:
-            return seq
-        breakdown = compact_context_breakdown(native, read_ms=(time.monotonic() - started) * 1000)
+        breakdown = (
+            compact_context_breakdown(native, read_ms=(time.monotonic() - started) * 1000)
+            if native else None
+        )
         if breakdown is None:
+            # Re-publish the unchanged terminal usage with the reason, so the
+            # persisted turn says why it has no breakdown (TASK-1700).
+            if not isinstance(final_usage, dict) or not final_usage:
+                return seq
+            seq += 1
+            self._publish_event(
+                request_id, session_key, seq, kind=AgentEventKind.USAGE_UPDATE,
+                model=model, token_usage={
+                    **final_usage, "usage_status": "final",
+                    "context_breakdown_status": CONTEXT_BREAKDOWN_UNAVAILABLE,
+                },
+            )
             return seq
         if session_start in {"clean", "seeded"}:
             breakdown["session_start"] = session_start

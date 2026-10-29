@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,9 +30,15 @@ from .context_env import effective_context_window
 
 logger = logging.getLogger("claude_code_bridge.bridge")
 
-# Post-DONE /context read cap. Reads ran up to ~870 ms and ~9% missed at 0.9 s;
-# 2 s keeps the extra session-lock hold after DONE negligible (TASK-1442).
-NATIVE_CONTEXT_READ_TIMEOUT_S = 2.0
+# Post-DONE /context read cap; it bounds the session-lock hold after DONE.
+# TASK-1700: 1,283 successful reads over 3 days had p50 467 ms, p99 1.06 s,
+# max 1.83 s, yet ~3% of completed turns still timed out at 2 s, clustered where
+# several bots finished in the same second. 4 s is ~2x the observed max.
+NATIVE_CONTEXT_READ_TIMEOUT_S = 4.0
+
+# ``context_breakdown_status`` when the read ran but returned nothing usable,
+# so the UI can say why instead of a blanket "unavailable".
+CONTEXT_BREAKDOWN_UNAVAILABLE = "unavailable"
 
 
 def turn_session_ledger(resume_id: str | None) -> SessionLedger:
@@ -231,6 +238,7 @@ class ClaudeUsageMixin:
     async def _read_native_context_usage(sdk_client) -> dict | None:
         if sdk_client is None:
             return None
+        started = time.monotonic()
         try:
             # The session lock stays held until teardown: never delay a queued
             # successor by more than this bounded post-DONE control request.
@@ -239,7 +247,8 @@ class ClaudeUsageMixin:
             ))
         except Exception as context_error:
             # INFO: a missing breakdown must be attributable (timeout vs error).
-            logger.info("Native context usage unavailable: %s: %s",
+            logger.info("Native context usage unavailable after %.0f ms: %s: %s",
+                        (time.monotonic() - started) * 1000,
                         type(context_error).__name__, context_error)
             return None
 
