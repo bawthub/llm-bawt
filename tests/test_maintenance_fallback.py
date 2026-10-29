@@ -10,7 +10,7 @@ import pytest
 
 from llm_bawt.service import maintenance_fallback as mf
 from llm_bawt.service.maintenance_fallback import (
-    Backup, FallbackClient, MemoryExhaustionStore, StateHealth, fallback_checks, served_model,
+    Backup, Exhaustion, FallbackClient, MemoryExhaustionStore, StateHealth, fallback_checks, served_model,
 )
 from llm_bawt.service.maintenance_health import MaintenanceHealth, MonitoredClient
 
@@ -334,11 +334,11 @@ def test_no_model_literals_in_module():
     assert not re.search(r"\b(gpt-|grok-|claude-|gemini-|llama)", text)
 
 
-def test_each_edge_row_carries_a_distinct_since_stable_across_polls():
+def test_each_edge_row_carries_a_distinct_episode_stable_across_polls():
     rig = Rig()
     _exhaust(rig)
     first = fallback_checks(rig.store)
-    assert first[0]["since"] and fallback_checks(rig.store) == first
+    assert first[0]["episode"] and fallback_checks(rig.store) == first
     _recover(rig)
     back = fallback_checks(rig.store)
     rig.clock.now += 60
@@ -346,8 +346,23 @@ def test_each_edge_row_carries_a_distinct_since_stable_across_polls():
     again = fallback_checks(rig.store)
     _recover(rig)
     merged = fallback_checks(rig.store)
-    sinces = [r[0]["since"] for r in (first, back, again, merged)]
-    assert len(set(sinces)) == 4  # every edge is a new bell incident (Loopy r1 B1)
+    episodes = [r[0]["episode"] for r in (first, back, again, merged)]
+    assert len(set(episodes)) == 4  # every edge is a new bell incident (Loopy r1 B1)
+
+
+def test_edges_within_one_instant_still_get_distinct_episodes():
+    """Loopy r2 B1: Retry-After 0 lets switch, recover and re-switch share one instant."""
+    rig = Rig()
+    store = rig.store
+    seen = []
+    for _ in range(2):
+        assert store.mark(Exhaustion(provider=PRIMARY_PROVIDER, since=rig.clock.now,
+                                     until=rig.clock.now, hint_source="hint"))
+        seen.append(fallback_checks(store)[0]["episode"])
+        record = store.get(PRIMARY_PROVIDER)
+        assert store.clear(PRIMARY_PROVIDER, record.since, store.claim_probe(PRIMARY_PROVIDER, 30))
+        seen.append(fallback_checks(store)[0]["episode"])
+    assert len(set(seen)) == 4  # the clock never moved
 
 
 class _ClaimDownStore(MemoryExhaustionStore):

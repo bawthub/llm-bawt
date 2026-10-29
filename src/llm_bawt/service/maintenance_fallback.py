@@ -47,6 +47,9 @@ STATE_JOB = "maintenance_fallback_state"
 _KEY = "maintenance:fallback:{provider}"
 _PROBE = "maintenance:fallback:{provider}:probe"
 _RECOVERED = "maintenance:fallback:{provider}:recovered"
+# Per-provider edge counter, never expires: every switch and recovery takes the
+# next value, so two edges can never share a bell incident id however fast.
+_EDGE = "maintenance:fallback:{provider}:edge"
 # A probe is one real call: its claim must outlive that call, not the cooldown,
 # so a crashed probe frees the primary quickly.
 PROBE_CLAIM_SECONDS = 300
@@ -65,6 +68,7 @@ class Exhaustion:
     until: float
     hint_source: str
     backup: str | None = None
+    edge: int = 0
 
 
 def _iso(ts: float) -> str:
@@ -79,6 +83,7 @@ class Episode:
     first_since: float
     recovered_at: float
     episodes: int
+    edge: int = 0
 
 
 class ExhaustionStore(ABC):
@@ -95,7 +100,7 @@ class ExhaustionStore(ABC):
 
     @abstractmethod
     def mark(self, record: Exhaustion) -> bool:
-        """Create the record if absent. True = this caller made the switch."""
+        """Create the record if absent, stamped with the next edge number. True = this caller made the switch."""
 
     @abstractmethod
     def claim_probe(self, provider: str, ttl_seconds: int) -> str | None:
@@ -107,7 +112,7 @@ class ExhaustionStore(ABC):
 
     @abstractmethod
     def clear(self, provider: str, since: float, token: str) -> bool:
-        """Successful probe: delete the record and record the episode, if still the holder."""
+        """Successful probe: delete the record and record the episode (next edge number), if still the holder."""
 
     @abstractmethod
     def all(self) -> list[Exhaustion]: ...
@@ -116,7 +121,16 @@ class ExhaustionStore(ABC):
     def episodes(self) -> list[Episode]: ...
 
 
-# Fenced on the record's ``since`` (ms) and the probe token. KEYS: record, probe[, episode].
+# Create the record only if absent, stamped with the next edge. KEYS: record, edge.
+_MARK = """
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+local rec = cjson.decode(ARGV[1])
+rec['edge'] = redis.call('INCR', KEYS[2])
+redis.call('SET', KEYS[1], cjson.encode(rec))
+return 1
+"""
+
+# Fenced on the record's ``since`` (ms) and the probe token. KEYS: record, probe[, episode, edge].
 _REARM = """
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
@@ -135,7 +149,8 @@ if not raw then return 0 end
 local rec = cjson.decode(raw)
 if string.format('%d', rec['since']) ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
-local ep = {first_since = rec['since'], recovered_at = tonumber(ARGV[3]), episodes = 1}
+local ep = {first_since = rec['since'], recovered_at = tonumber(ARGV[3]), episodes = 1,
+            edge = redis.call('INCR', KEYS[4])}
 local old = redis.call('GET', KEYS[3])
 if old then
   local prev = cjson.decode(old)
@@ -162,6 +177,7 @@ class RedisExhaustionStore(ExhaustionStore):
                                            socket_timeout=2.0, socket_connect_timeout=2.0)
         self._rearm = self._redis.register_script(_REARM)
         self._clear = self._redis.register_script(_CLEAR)
+        self._mark = self._redis.register_script(_MARK)
 
     def _run(self, fn: Callable[[], Any]) -> Any:
         try:
@@ -176,15 +192,16 @@ class RedisExhaustionStore(ExhaustionStore):
         data = json.loads(raw)
         return Exhaustion(provider=data["provider"], since=data["since"] / 1000,
                           until=data["until"], hint_source=data["hint_source"],
-                          backup=data.get("backup"))
+                          backup=data.get("backup"), edge=int(data.get("edge", 0)))
 
     def get(self, provider: str) -> Exhaustion | None:
         return self._load(self._run(lambda: self._redis.get(_KEY.format(provider=provider))))
 
     def mark(self, record: Exhaustion) -> bool:
         payload = asdict(record) | {"since": _ms(record.since)}
-        return bool(self._run(lambda: self._redis.set(
-            _KEY.format(provider=record.provider), json.dumps(payload), nx=True)))
+        return bool(self._run(lambda: self._mark(
+            keys=[_KEY.format(provider=record.provider), _EDGE.format(provider=record.provider)],
+            args=[json.dumps(payload)])))
 
     def claim_probe(self, provider: str, ttl_seconds: int) -> str | None:
         token = uuid.uuid4().hex
@@ -200,7 +217,7 @@ class RedisExhaustionStore(ExhaustionStore):
     def clear(self, provider: str, since: float, token: str) -> bool:
         return bool(self._run(lambda: self._clear(
             keys=[_KEY.format(provider=provider), _PROBE.format(provider=provider),
-                  _RECOVERED.format(provider=provider)],
+                  _RECOVERED.format(provider=provider), _EDGE.format(provider=provider)],
             args=[_ms(since), token, time.time(), RECOVERED_ROW_SECONDS])))
 
     def all(self) -> list[Exhaustion]:
@@ -221,7 +238,8 @@ class RedisExhaustionStore(ExhaustionStore):
                     out.append(Episode(provider=key.split(":")[2],
                                        first_since=data["first_since"] / 1000,
                                        recovered_at=float(data["recovered_at"]),
-                                       episodes=int(data["episodes"])))
+                                       episodes=int(data["episodes"]),
+                                       edge=int(data.get("edge", 0))))
             return out
         return self._run(scan)
 
@@ -234,6 +252,7 @@ class MemoryExhaustionStore(ExhaustionStore):
         self._records: dict[str, Exhaustion] = {}
         self._probes: dict[str, tuple[str, float]] = {}
         self._episodes: dict[str, Episode] = {}
+        self._edges: dict[str, int] = {}
         self._clock = clock
         self.down = False
 
@@ -250,6 +269,10 @@ class MemoryExhaustionStore(ExhaustionStore):
             return None
         return record
 
+    def _next_edge(self, provider: str) -> int:
+        self._edges[provider] = self._edges.get(provider, 0) + 1
+        return self._edges[provider]
+
     def get(self, provider: str) -> Exhaustion | None:
         self._check()
         with self._lock:
@@ -261,7 +284,9 @@ class MemoryExhaustionStore(ExhaustionStore):
         with self._lock:
             if record.provider in self._records:
                 return False
-            self._records[record.provider] = Exhaustion(**asdict(record))
+            stored = Exhaustion(**asdict(record))
+            stored.edge = self._next_edge(record.provider)
+            self._records[record.provider] = stored
             return True
 
     def claim_probe(self, provider: str, ttl_seconds: int) -> str | None:
@@ -296,7 +321,8 @@ class MemoryExhaustionStore(ExhaustionStore):
             self._episodes[provider] = Episode(
                 provider=provider,
                 first_since=min(record.since, prev.first_since) if prev else record.since,
-                recovered_at=now, episodes=(prev.episodes + 1) if prev else 1)
+                recovered_at=now, episodes=(prev.episodes + 1) if prev else 1,
+                edge=self._next_edge(provider))
             del self._records[provider]
             del self._probes[provider]
             return True
@@ -515,9 +541,10 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
 
     The bell only shows non-ok rows, so both "on backup" and "was on backup"
     (the episode, kept ``RECOVERED_ROW_SECONDS``) are ``degraded``. BawtHub
-    identifies a bell incident by child ``name:status:since``; ``since`` is the
-    edge time (switch for a live record, latest recovery for an episode), so
-    every edge is a new notice and polls of unchanged state keep the same id.
+    identifies a bell incident by child ``name:status:episode``; ``episode`` is
+    the provider's edge number (switch for a live record, latest recovery for an
+    episode), taken from a counter that never repeats, so every edge is a new
+    notice however close together, and polls of unchanged state keep the same id.
     A live record wins over an episode for the same provider.
     """
     rows: dict[str, dict[str, Any]] = {}
@@ -525,7 +552,7 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
         count = f"{episode.episodes} episode{'s' if episode.episodes != 1 else ''}"
         rows[episode.provider] = {
             "name": f"maintenance_fallback_recovered:{episode.provider}", "status": "degraded",
-            "since": _iso(episode.recovered_at),
+            "episode": str(episode.edge),
             "reason": f"{episode.provider} spending limit: maintenance was on the backup model "
                       f"from {_iso(episode.first_since)} to {_iso(episode.recovered_at)} "
                       f"({count}); back on primary",
@@ -533,7 +560,7 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
     for record in sorted(store.all(), key=lambda r: r.provider):
         rows[record.provider] = {
             "name": f"maintenance_fallback:{record.provider}", "status": "degraded",
-            "since": _iso(record.since),
+            "episode": str(record.edge),
             "reason": f"{record.provider} spending limit since {_iso(record.since)}: "
                       f"maintenance on the backup model; next primary probe after "
                       f"{_iso(record.until)}",
