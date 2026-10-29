@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, update
 from sqlmodel import Session, select
 
+from .approval_events import append_approval_transition
 from .approval_mcp_store import McpApprovalStoreMixin
 from .approval_orchestration_store import OrchestrationApprovalStoreMixin
 from .approval_models import (
@@ -106,6 +107,8 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                     status=REQ_PENDING,
                 )
                 session.add(row)
+                session.flush()
+                append_approval_transition(getattr(self, "events", None), session.connection(), row)
                 session.commit()
                 session.refresh(row)
                 return row
@@ -182,7 +185,7 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                 if continuation_owner not in ("server", "client", "none"):
                     raise ValueError("Invalid continuation owner")
                 values["continuation_owner"] = continuation_owner
-            session.exec(
+            changed = session.exec(
                 update(ToolApprovalRequest)
                 .where(
                     ToolApprovalRequest.id == request_id,
@@ -190,6 +193,9 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                 )
                 .values(**values)
             )
+            if changed.rowcount == 1:
+                append_approval_transition(getattr(self, "events", None), session.connection(),
+                                           session.get(ToolApprovalRequest, request_id))
             session.commit()
             return session.get(ToolApprovalRequest, request_id)
 

@@ -31,6 +31,8 @@ from llm_bawt.ops import (
 )
 from llm_bawt.ops.seeds import SEEDS, seed_all
 from llm_bawt.ops.store import OpsStoreUnavailable
+from llm_bawt.profiles import EntityProfile, EntityType
+from llm_bawt.system_events import SystemEventEmitter
 
 _OK = True
 
@@ -194,6 +196,32 @@ def test_seed_all_bootstraps_canonical_catalog():
 
 
 # ---- Job lifecycle ---------------------------------------------------------
+
+
+def test_winning_job_transitions_append_once_without_args_or_output():
+    store = _store()
+    EntityProfile.__table__.create(store.engine, checkfirst=True)
+    with Session(store.engine) as session:
+        session.add(EntityProfile(entity_type=EntityType.USER, entity_id="test-user"))
+        session.commit()
+    store.events = SystemEventEmitter(store.engine)
+    operation = store.create_operation(_op_data())
+    job = store.create_job(operation=operation, args_json='{"token":"secret"}',
+                           display_args_json="{}", idempotency_key="event-test",
+                           caller_user_id="test-user")
+    store.mark_dispatching(job.id, host_unit_name="test-unit")
+    store.mark_running(job.id)
+    store.mark_terminal(job.id, state=JOB_SUCCEEDED, output_tail="sensitive output")
+    store.mark_terminal(job.id, state=JOB_FAILED, output_tail="losing update")
+    events = store.events.list_user("test-user")
+    assert len(events) == 4
+    assert [row["id"] for row in events] == sorted((row["id"] for row in events), key=int)
+    assert all(row["subject_id"] == job.id for row in events)
+    with store.engine.connect() as conn:
+        raw = conn.exec_driver_sql("SELECT event_key, summary, payload FROM system_events").all()
+    assert len({row.event_key for row in raw}) == 4
+    assert "secret" not in str(raw) and "sensitive output" not in str(raw)
+
 
 def test_create_job_snapshots_operation_version_and_hash():
     store = _store()

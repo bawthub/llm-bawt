@@ -107,7 +107,8 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
         # subscribe produced no audio. A failed claim fails closed: no hello,
         # an error frame and the subscriber closed; the client reconnects and
         # the next claim retries the migration.
-        reader = sub.ui_stream(bot_ids, user_id, consumer_id, include_global=True)
+        reader = sub.ui_stream(bot_ids, user_id, consumer_id, include_global=True,
+                               include_system=bool(user_id))
         await reader.claim()
         yield _sse(
             "hello",
@@ -129,6 +130,20 @@ async def _unified_event_stream(redis_url: str, bot_ids: list[str], user_id: str
         async for event_data in reader.events(timeout_s=86400):
             if event_data is not None:
                 replayed = event_data.pop("_replayed", False)
+                if event_data.get("_type") == "system_event":
+                    # Redis can replay an event after its bot became private.
+                    # Re-read the committed projection off-loop and fail closed.
+                    emitter = getattr(get_service(), "_system_events", None)
+                    try:
+                        receipt = (await asyncio.to_thread(
+                            emitter.get_user_event, user_id, int(event_data["id"])
+                        ) if emitter is not None else None)
+                    except Exception:
+                        log.exception("System event visibility check failed")
+                        receipt = None
+                    if receipt is None:
+                        continue
+                    event_data = receipt
                 yield _sse("event", {**event_data, "replayed": replayed})
 
             now = asyncio.get_running_loop().time()

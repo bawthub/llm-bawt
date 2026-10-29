@@ -19,8 +19,10 @@ from sqlalchemy import func, inspect, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
+from ..system_events import SystemEventEmitter
 from ..utils.config import Config, has_database_credentials
 from ..utils.schema import SchemaBootstrapGuard
+from .events import append_job_transition, append_job_transition_by_id
 from .container_remove import ACTION as REMOVE_ACTION, validate_remove_schema  # TASK-1439 T2c
 from .executor import validate_spec
 from .release_spec import is_release_spec
@@ -121,16 +123,28 @@ class OpsStore:
     def __init__(self, config: Config, engine: Any = None):
         self.config = config
         self.engine = engine
+        self.events: SystemEventEmitter | None = None
         if engine is not None:
             self._ensure_tables_exist()
+            self._ensure_event_ledger()
         elif has_database_credentials(config):
             try:
                 from ..utils.db import get_shared_engine
                 self.engine = get_shared_engine(config)
                 self._ensure_tables_exist()
+                self._ensure_event_ledger()
             except Exception as exc:
                 self.engine = None
                 logger.warning("Ops store DB unavailable: %s", exc)
+
+    def _ensure_event_ledger(self):
+        if self.engine is None:
+            return
+        try:
+            self.events = SystemEventEmitter(self.engine)
+        except Exception:
+            # Event projection must not prevent reconciler claims or job creation.
+            logger.exception("Ops event ledger unavailable; domain jobs continue")
 
     def _ensure_tables_exist(self):
         if self.engine is None:
@@ -386,10 +400,12 @@ class OpsStore:
                 fence(session)
             session.add(row)
             try:
+                session.flush()
                 if self.engine.dialect.name == "postgresql":
                     # Delivered only if this transaction commits.
                     session.execute(text("SELECT pg_notify(:channel, :job_id)"),
                                     {"channel": JOB_CREATED_CHANNEL, "job_id": row.id})
+                append_job_transition(getattr(self, "events", None), session.connection(), row)
                 session.commit()
             except IntegrityError:
                 session.rollback()
@@ -451,6 +467,8 @@ class OpsStore:
                 values["worker_slot_at"] = values["dispatched_at"]
             result = session.execute(update(OpsJob).where(OpsJob.id == job_id, OpsJob.state == JOB_QUEUED)
                 .values(**values).execution_options(synchronize_session=False))
+            if result.rowcount == 1:
+                append_job_transition(getattr(self, "events", None), session.connection(), session.get(OpsJob, job_id))
             session.commit()
             return result.rowcount == 1
 
@@ -458,8 +476,11 @@ class OpsStore:
         if self.engine is None:
             return None
         with Session(self.engine) as session:
-            session.execute(update(OpsJob).where(OpsJob.id == job_id, OpsJob.state.in_(from_states))
-                            .values(**values).execution_options(synchronize_session=False))
+            old_state = session.exec(select(OpsJob.state).where(OpsJob.id == job_id).with_for_update()).first()
+            result = session.execute(update(OpsJob).where(OpsJob.id == job_id, OpsJob.state.in_(from_states))
+                                     .values(**values).execution_options(synchronize_session=False))
+            if result.rowcount == 1 and "state" in values and old_state != values["state"]:
+                append_job_transition(getattr(self, "events", None), session.connection(), session.get(OpsJob, job_id))
             session.commit()
         return self.get_job(job_id)
 
@@ -549,6 +570,8 @@ class OpsStore:
                 " AND submitted_at + make_interval(secs => :deadline) < now()"),
                 {"failed": JOB_FAILED, "queued": JOB_QUEUED, "id": job_id,
                  "prefix": f"{code}: ", "deadline": float(deadline_seconds)})
+            if result.rowcount == 1:
+                append_job_transition_by_id(getattr(self, "events", None), conn, job_id)
         return result.rowcount == 1
 
     def touch_reconcile(self, job_id):

@@ -33,6 +33,8 @@ COMMANDS_STREAM = "agent:commands"
 RUN_STREAM_PREFIX = "agent:run:"
 # Unified event stream for all bots: events:{bot_id}:{user_id}
 UNIFIED_EVENTS_PREFIX = "events:"
+# Durable per-user system receipts never share the per-bot stream namespace.
+SYSTEM_EVENTS_PREFIX = "system_events:"
 # Shared bot-configuration notifications (no user-specific data in payloads).
 GLOBAL_CONFIG_STREAM = f"{UNIFIED_EVENTS_PREFIX}system:__config__"
 

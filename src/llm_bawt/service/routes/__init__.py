@@ -9,6 +9,7 @@ from .botchat import router as botchat_router
 from .chat import router as chat_router
 from .config import router as config_router
 from .event_stream import router as event_stream_router
+from .system_events import router as system_events_router
 from .health import router as health_router
 from .google_home_probe import router as google_home_probe_router
 from .history import router as history_router
@@ -58,6 +59,7 @@ all_routers = [
     models_router,
     model_catalog_router,
     event_stream_router,
+    system_events_router,
     botchat_router,
     chat_router,
     tasks_router,

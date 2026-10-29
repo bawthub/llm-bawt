@@ -555,6 +555,12 @@ def test_backend_record_request_preserves_key_and_grant_roundtrip():
         def add(self, row):
             rows[row.id] = row
 
+        def flush(self):
+            pass
+
+        def connection(self):
+            return self
+
         def commit(self):
             pass
 
@@ -563,6 +569,7 @@ def test_backend_record_request_preserves_key_and_grant_roundtrip():
 
     namespace = dict(json=json, Session=Session, ToolApprovalRequest=types.SimpleNamespace,
                      REQ_PENDING="pending", ApprovalPersistError=RuntimeError,
+                     append_approval_transition=lambda *_args: None,
                      logger=logging.getLogger(__name__))
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
     b = _bridge()

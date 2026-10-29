@@ -15,6 +15,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from .approval_events import append_approval_transition
 from .approval_models import (
     ApprovalDuplicatePending,
     ApprovalPersistError,
@@ -390,6 +391,8 @@ class McpApprovalStoreMixin:
                     continuation_state=CONT_NOT_NEEDED,
                 )
                 session.add(row)
+                session.flush()
+                append_approval_transition(getattr(self, "events", None), session.connection(), row)
                 session.commit()
                 session.refresh(row)
                 return _mcp_record_result(row, True, with_created)

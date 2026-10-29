@@ -144,6 +144,18 @@ def check_mcp_tool_registry() -> dict:
                   "MCP tools were not registered at startup; approved MCP calls are refused")
 
 
+def check_system_events(service) -> dict:
+    emitter = getattr(service, "_system_events", None)
+    if emitter is None:
+        return _check("system.events", DOWN, "event ledger unavailable")
+    count, age = emitter.pending_health()
+    failures = type(emitter).failed_appends
+    if age > 60 or failures:
+        return _check("system.events", DEGRADED,
+                      f"{count} event(s) unpublished; oldest {int(age)}s; {failures} append failure(s) this process")
+    return _check("system.events", OK, f"{count} event(s) awaiting fan-out")
+
+
 def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
     from .runtime_health import RuntimeHealthChecks
 
@@ -166,6 +178,7 @@ def collect(config: Any, ops_store, ops_service, *, service=None) -> dict:
             ("ops.admission", lambda: [check_ops_admission(
                 getattr(service, "_tool_approval_policy_store", None))]),
             ("mcp.tool_registry", lambda: [check_mcp_tool_registry()]),
+            ("system.events", lambda: [check_system_events(service)]),
         ])
     for name, probe in probes:
         try:

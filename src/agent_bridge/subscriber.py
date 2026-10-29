@@ -460,6 +460,7 @@ class RedisSubscriber(CommandPublisherMixin):
         consumer_id: str,
         *,
         include_global: bool = False,
+        include_system: bool = False,
     ) -> UiStreamReader:
         """Cursor reader for one SSE connection of a UI window (TASK-1582).
 
@@ -467,7 +468,8 @@ class RedisSubscriber(CommandPublisherMixin):
         a window retires its own group once its state is migrated.
         """
         bot_ids = [bot_id] if isinstance(bot_id, str) else list(bot_id)
-        keys = unified_stream_keys(bot_ids, user_id, include_global=include_global)
+        keys = unified_stream_keys(bot_ids, user_id, include_global=include_global,
+                                   include_system=include_system)
         return UiStreamReader(self._redis, consumer_id, keys)
 
     async def publish_tool_event(

@@ -52,9 +52,11 @@ from typing import Any, Callable, Iterable
 
 from sqlalchemy import text
 
+from ..system_events import SystemEventEmitter
 from ..service.turn_admission import activate_hold
 from ..service.turn_gates import (GateScope, GateSpec, _LIVE, ensure_gate_schema, extend_gate, gate_drain_status,
                                   release_gates)
+from .events import append_job_transition_by_id
 from .models import (JOB_CANCELLED, JOB_DISPATCHING, JOB_FAILED, JOB_QUIESCING, JOB_TERMINAL_STATES)
 from .quiesce_prompts import END_TURN_NEW_TURN_KEY, END_TURN_NO_RECEIPT_KEY, resolve
 from .store import slot_cap_reached, slot_holders
@@ -256,6 +258,11 @@ def cancel_quiesce_job(engine, job_id: str, *, actor: str, reason: str | None = 
     """
     if engine is None or engine.dialect.name != "postgresql":
         raise QuiesceUnavailable("quiesce requires PostgreSQL")
+    try:
+        events = SystemEventEmitter(engine)
+    except Exception:
+        logger.exception("Quiesce event ledger unavailable; cancellation continues")
+        events = None
     claimed = {"actor_claimed": actor, "reason": reason}
     error = (f"cancelled by operator (claimed actor: {actor}) before dispatch; no action submitted"
              + (f": {reason}" if reason else ""))
@@ -283,6 +290,7 @@ def cancel_quiesce_job(engine, job_id: str, *, actor: str, reason: str | None = 
         conn.execute(text("UPDATE ops_jobs SET quiesce_json=:q WHERE id=:id"),
                      {"q": json.dumps(receipt), "id": job_id})
         release_job_gates(conn, job_id)
+        append_job_transition_by_id(events, conn, job_id)
     return "cancelled", JOB_CANCELLED
 
 
@@ -311,6 +319,11 @@ class QuiesceDriver:
             raise QuiesceUnavailable("quiesce requires PostgreSQL")
         ensure_gate_schema(engine)
         self.engine = engine
+        try:
+            self.events = SystemEventEmitter(engine)
+        except Exception:
+            logger.exception("Quiesce event ledger unavailable; driver continues")
+            self.events = None
         self.driver_id = driver_id or uuid.uuid4().hex
         self.gates = gates or TurnGates()
         self.lease_seconds = lease_seconds
@@ -371,8 +384,10 @@ class QuiesceDriver:
         if deadline_from is not None:
             sets.append("quiesce_deadline_at=COALESCE(quiesce_deadline_at,"
                         " now() + (:timeout * interval '1 second'))")
-        conn.execute(text(f"UPDATE ops_jobs SET {', '.join(sets)} WHERE id=:id"),
-                     {**values, "id": job_id, "timeout": deadline_from})
+        result = conn.execute(text(f"UPDATE ops_jobs SET {', '.join(sets)} WHERE id=:id"),
+                              {**values, "id": job_id, "timeout": deadline_from})
+        if result.rowcount == 1 and "state" in values:
+            append_job_transition_by_id(self.events, conn, job_id)
 
     @staticmethod
     def _open_expired(conn, job, snapshot) -> bool:

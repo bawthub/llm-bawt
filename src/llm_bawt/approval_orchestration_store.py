@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
+from .approval_events import append_approval_transition
 from .approval_models import (
     ApprovalPersistError,
     KIND_ORCHESTRATION,
@@ -98,6 +99,8 @@ class OrchestrationApprovalStoreMixin:
                     else None,
                 )
                 session.add(row)
+                session.flush()
+                append_approval_transition(getattr(self, "events", None), session.connection(), row)
                 session.commit()
                 session.refresh(row)
                 return row, True

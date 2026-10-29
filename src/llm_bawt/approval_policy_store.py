@@ -25,6 +25,7 @@ from .approval_models import (
     _new_id,
     _utcnow,
 )
+from .system_events import SystemEventEmitter
 from .utils.config import Config, has_database_credentials
 from .utils.schema import SchemaBootstrapGuard
 
@@ -63,9 +64,11 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
         """
         self.config = config
         self.engine = None
+        self.events: SystemEventEmitter | None = None
         if engine is not None:
             self.engine = engine
             self._ensure_tables_exist()
+            self._ensure_event_ledger()
             return
         if not has_database_credentials(config):
             return
@@ -76,9 +79,16 @@ class ToolApprovalPolicyStore(ApprovalRequestStoreMixin):
             if self.engine is None:
                 return
             self._ensure_tables_exist()
+            self._ensure_event_ledger()
         except Exception as e:  # noqa: BLE001
             self.engine = None
             logger.warning("Tool approval policies DB unavailable: %s", e)
+
+    def _ensure_event_ledger(self) -> None:
+        try:
+            self.events = SystemEventEmitter(self.engine)
+        except Exception:
+            logger.exception("Approval event ledger unavailable; approvals continue")
 
     def _ensure_tables_exist(self) -> None:
         if self.engine is None:

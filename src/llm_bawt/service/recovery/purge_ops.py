@@ -21,6 +21,9 @@ from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
 from ...agent_backends.agent_bridge import get_agent_subscriber
+from ...approval_events import append_approval_transition
+from ...ops.events import append_job_transition
+from ...system_events import SystemEventEmitter
 from ...approval_models import (
     CONT_DELIVERED,
     CONT_DISPATCHING,
@@ -103,7 +106,15 @@ def purge_ops(engine, *, stamp: RunStamp, dry_run: bool = False) -> dict[str, An
                               "approvals": [], "unrecallable": [], "jobs": []}
     now = _utcnow()
     reason = stamp.text(PURGED_BY_OPERATOR)
+    events = None
+    if not dry_run:
+        try:
+            events = SystemEventEmitter(engine)
+        except Exception:
+            log.exception("Purge event ledger unavailable; domain purge continues")
     cards: list[ToolApprovalRequest] = []
+    changed_approvals: list[ToolApprovalRequest] = []
+    changed_jobs: list[OpsJob] = []
     with Session(engine) as session:
         approvals = select(ToolApprovalRequest).where(in_flight_ops_run()).order_by(ToolApprovalRequest.id)
         for row in session.exec(approvals if dry_run else approvals.with_for_update()).all():
@@ -129,6 +140,7 @@ def purge_ops(engine, *, stamp: RunStamp, dry_run: bool = False) -> dict[str, An
                 row.result_json, row.result_is_error = json.dumps(PURGED_RESULT), False
                 cards.append(row)
             session.add(row)
+            changed_approvals.append(row)
         session.flush()
         jobs = select(OpsJob).where(OpsJob.state.not_in(JOB_TERMINAL_STATES)).order_by(OpsJob.id)
         for job in session.exec(jobs if dry_run else jobs.with_for_update()).all():
@@ -137,9 +149,15 @@ def purge_ops(engine, *, stamp: RunStamp, dry_run: bool = False) -> dict[str, An
             if not dry_run:
                 job.state, job.finished_at, job.error_text = JOB_CANCELLED, now, reason
                 session.add(job)
+                changed_jobs.append(job)
         if dry_run:
             session.rollback()
             return report
+        session.flush()
+        for row in changed_approvals:
+            append_approval_transition(events, session.connection(), row)
+        for job in changed_jobs:
+            append_job_transition(events, session.connection(), job)
         resolved = [(row.id, row.tool_use_id) for row in cards]
         session.commit()
     _resolve_cards(engine, resolved)

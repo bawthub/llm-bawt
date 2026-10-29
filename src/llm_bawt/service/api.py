@@ -123,6 +123,14 @@ async def lifespan(app):
     service = BackgroundService(config)
     set_service(service)
     service.start_worker()
+    # One committed ledger feeds both the bounded read API and Redis outbox.
+    # Bootstrap off-loop; a schema outage keeps history visibly unavailable.
+    from ..system_events import SystemEventEmitter
+    try:
+        service._system_events = await asyncio.to_thread(SystemEventEmitter, model_engine)
+    except Exception:
+        log.exception("System event history unavailable; outbox not started")
+        service._system_events = None
 
     # Start job scheduler if enabled
     scheduler = None
@@ -277,6 +285,15 @@ async def lifespan(app):
             log.exception("Failed to start shared agent Redis transport")
             redis_subscriber = None
 
+    if service._system_events is not None and config.REDIS_URL:
+        # Keep retrying Redis even when the shared subscriber was unavailable
+        # at startup; committed rows must not wait for another app restart.
+        from .system_event_outbox import run_system_event_outbox
+        service._system_event_outbox_task = asyncio.create_task(
+            run_system_event_outbox(service._system_events, config.REDIS_URL),
+            name="system-event-outbox",
+        )
+
     # Durable callbacks target agent harnesses and require the shared Redis
     # transport. Start recovery only after subscriber initialization; when Redis
     # is unavailable rows remain QUEUED and no retry attempt is consumed.
@@ -390,6 +407,7 @@ async def lifespan(app):
 
 
 BACKGROUND_TASK_ATTRIBUTES = (
+    "_system_event_outbox_task",
     "_tool_persist_task",
     "_mcp_continuation_task",
     "_ops_receipt_task",

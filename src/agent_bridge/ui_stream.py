@@ -28,7 +28,7 @@ from typing import Any, AsyncIterator, Iterable
 
 from redis.exceptions import ResponseError
 
-from .publisher import GLOBAL_CONFIG_STREAM, UNIFIED_EVENTS_PREFIX
+from .publisher import GLOBAL_CONFIG_STREAM, SYSTEM_EVENTS_PREFIX, UNIFIED_EVENTS_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +85,14 @@ def unified_stream_keys(
     user_id: str,
     *,
     include_global: bool = False,
+    include_system: bool = False,
 ) -> dict[str, str]:
-    """Map each unified stream key a window reads to its bot id."""
+    """Map window streams; durable system events use a separate namespace."""
     keys = {f"{UNIFIED_EVENTS_PREFIX}{bid}:{user_id}": bid for bid in bot_ids}
     if include_global:
         keys[GLOBAL_CONFIG_STREAM] = "system"
+    if include_system and user_id:
+        keys[f"{SYSTEM_EVENTS_PREFIX}{user_id}"] = "system_event"
     return keys
 
 
