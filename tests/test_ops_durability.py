@@ -5,6 +5,7 @@ explicitly receive local SQLite engines and executors are fakes.
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
 import threading
 import time
@@ -306,6 +307,31 @@ def test_http_pagination_attribution_and_conflict(system, monkeypatch):
         conflict = client.post("/v1/ops/jobs", json={"operation": op.slug, "args": {"name": "other"}, "idempotency_key": "http"})
         assert conflict.status_code == 409
         assert client.get(f"/v1/ops/operations/{op.slug}/revisions").json()["total"] == 1
+
+
+def test_http_live_jobs_retains_short_outcome_beyond_idle_poll(system, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from llm_bawt.service.routes import ops as routes
+    from llm_bawt.ops import JOB_FAILED, JOB_SUCCEEDED
+
+    store, _, _, op = system
+    monkeypatch.setattr(routes, "_store", lambda: store)
+    active = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="active")
+    recent = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="recent")
+    expired = store.create_job(operation=op, args_json="{}", display_args_json="{}", idempotency_key="expired")
+    now = datetime.now(timezone.utc)
+    store.mark_terminal(recent.id, state=JOB_SUCCEEDED, finished_at=now - timedelta(seconds=35))
+    store.mark_terminal(expired.id, state=JOB_FAILED, finished_at=now - timedelta(seconds=75))
+    app = FastAPI()
+    app.include_router(routes.router)
+    with TestClient(app) as client:
+        response = client.get("/v1/ops/jobs/live")
+    assert response.status_code == 200
+    rows = {row["id"]: row for row in response.json()["jobs"]}
+    assert set(rows) == {active.id, recent.id}
+    assert rows[recent.id]["terminal"] is True
+    assert all("output_tail" not in row for row in rows.values())
 
 
 @pytest.fixture
