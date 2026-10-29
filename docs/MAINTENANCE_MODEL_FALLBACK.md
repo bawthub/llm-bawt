@@ -85,25 +85,30 @@ Keyed by provider, not model: a spending limit is per provider account.
 
 ## Notifications (transitions only)
 
-Via the existing bell/notify path, one event per transition:
-- **switched**: "<provider> spending limit: maintenance now on backup <alias>".
-- **switched back**: probe succeeded, "<provider> back as maintenance model".
-- **backup also failed**: loud — a slice A maintenance-failure warning for the job,
-  naming both models and both error classes (type + status only, per slice A B2).
+The bell is **pull-based** (slice A): BawtHub polls `/v1/health/maintenance` and renders
+its `checks` rows. Nothing is pushed, so there is no send that can fail and no outbox.
+Notices are rows rendered on every poll from the durable Redis state:
+- **switched**: while `maintenance:fallback:<provider>` exists, row
+  `maintenance_fallback:<provider>` is `warning`: "<provider> spending limit since
+  <exhausted_since>: maintenance on backup <alias>".
+- **switched back**: a successful probe deletes the record (compare-and-delete Lua on
+  `exhausted_since`) and in the same script writes `maintenance:fallback:<provider>:recovered`
+  = `{recovered_at, exhausted_since}`. While that key exists and no record does, the same
+  row name is `ok`: "<provider> back on primary since <recovered_at>". A new exhaustion
+  replaces it (the record wins). The recovered key has a TTL (shown long enough to be seen,
+  e.g. 24h); expiry only drops an `ok` row.
+- **backup also failed**: loud, a slice A `down` row for the job naming both models and
+  both error classes (type + status only, per slice A B2).
 No per-call notifications.
 
-Transition dedupe (Loopy B3): the state change itself is the dedupe. The exhausted
-record is written with `SET NX` (switched) and deleted by a compare-and-delete Lua script
-(switched back), so exactly one caller wins each edge. The winner, in the same atomic
-step, appends the event to a Redis outbox list (`maintenance:fallback:outbox`, `LPUSH`
-inside the same `MULTI`/Lua). A publisher drains the outbox and removes an entry only
-after the bell send succeeded (`LMOVE` to a processing list, ack by `LREM`; entries
-left in processing are retried by the running publisher, not only at startup: each
-processing entry carries `claimed_at`; the publisher loop re-sends any entry older than
-a visibility timeout, with backoff, until the bell send succeeds (Loopy r2
-cmvtiaov600x90mld616rhkvl). A crash or send failure therefore re-sends
-instead of losing the notice; delivery is at-least-once, and the bell row is keyed by
-the event id so a re-send updates rather than duplicates.
+Why this resolves Loopy B3 (cmvtiaov600x90mld616rhkvl): a notice can't be lost because it
+is not an event. It is the state itself, which has no TTL while exhausted and is re-read on
+every poll; an app crash or restart between edge and poll changes nothing. It can't repeat
+or flap: there is exactly one row per provider (keyed by name, deduped like slice A rows),
+its status is a pure function of the two keys, and the edges are atomic Lua writes, so
+consecutive polls with unchanged state render byte-identical rows. Concurrent callers
+crossing an edge produce one state, hence one row. Redis unavailable → one
+`maintenance_fallback_state` `down` row instead (see State).
 
 ## Attribution
 
@@ -141,8 +146,9 @@ warning chip if the chosen backup shares the maintenance model's provider.
 - Exhausted record outlives `until`: a first call long after cooldown plus N concurrent
   calls → exactly one primary call (the probe), the rest on backup.
 - Crashed probe: claim TTL expires, next call re-probes.
-- Outbox: publisher fails/crashes after the edge win → notice re-sent on restart, once
-  in the bell.
+- Poll rows: exhausted → one `warning` row, stable across repeated polls and a fresh
+  process; probe success → same row name `ok`; re-exhaustion → `warning` again; no
+  duplicate rows.
 - Utility/summary responses and usage logs report the backup model when it served.
 - Explicit `request.model` + spending_limit → no backup, visible failure.
 - Concurrent calls crossing an edge → exactly one "switched" / one "switched back".
