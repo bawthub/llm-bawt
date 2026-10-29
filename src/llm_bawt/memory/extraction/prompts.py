@@ -304,6 +304,28 @@ Session: {start_date} to {end_date}
 Output only valid JSON:"""
 
 
+# System instructions for the extraction calls. They also keep the client from
+# injecting a bot's personality prompt. Code defaults for the registry keys
+# below (TASK-1721); callers use get_extraction_system_prompt(), never these.
+FACT_EXTRACTION_SYSTEM_PROMPT = (
+    "You are a memory extraction assistant. Extract facts from conversations "
+    "and return them as JSON."
+)
+SUMMARY_EXTRACTION_SYSTEM_PROMPT = (
+    "You are a memory extraction assistant. Extract persistent user facts from "
+    "conversation summaries and return them as JSON."
+)
+MEMORY_UPDATE_SYSTEM_PROMPT = (
+    "You are a memory management assistant. Compare facts and determine actions "
+    "(ADD, UPDATE, DELETE, NONE) as JSON."
+)
+
+
+def get_extraction_system_prompt(key: str) -> str:
+    """Resolve one ``memory.extraction.*.system`` instruction at call time."""
+    return get_prompt_resolver().render(key=key, variables={})
+
+
 def get_summary_extraction_prompt(
     summary_text: str, start_date: str, end_date: str
 ) -> str:

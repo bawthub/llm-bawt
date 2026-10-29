@@ -14,6 +14,7 @@ from typing import Optional, Protocol
 from ..speaker_attribution import extraction_input, human_user_turns_present
 from .prompts import (
     MEMORY_TAGS,
+    get_extraction_system_prompt,
     get_fact_extraction_prompt,
     get_memory_update_prompt,
     get_summary_extraction_prompt,
@@ -225,7 +226,7 @@ class MemoryExtractionService:
 
         system_msg = Message(
             role="system",
-            content="You are a memory extraction assistant. Extract persistent user facts from conversation summaries and return them as JSON.",
+            content=get_extraction_system_prompt("memory.extraction.summary.system"),
         )
         user_msg = Message(role="user", content=prompt)
 
@@ -270,7 +271,7 @@ class MemoryExtractionService:
         # personality system prompt. The extraction task needs a clean context.
         system_msg = Message(
             role="system",
-            content="You are a memory extraction assistant. Extract facts from conversations and return them as JSON."
+            content=get_extraction_system_prompt("memory.extraction.fact.system"),
         )
         user_msg = Message(role="user", content=prompt)
         
@@ -560,7 +561,7 @@ class MemoryExtractionService:
         # personality system prompt. The memory management task needs a clean context.
         system_msg = Message(
             role="system",
-            content="You are a memory management assistant. Compare facts and determine actions (ADD, UPDATE, DELETE, NONE) as JSON."
+            content=get_extraction_system_prompt("memory.extraction.update.system"),
         )
         user_msg = Message(role="user", content=prompt)
         

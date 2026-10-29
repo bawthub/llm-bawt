@@ -740,7 +740,7 @@ def summarize_session_with_llm(
             f"{service_url}/v1/llm/complete",
             json={
                 "prompt": prompt,
-                "system": "You are a helpful assistant that summarizes conversations concisely.",
+                "system": summary_system_prompt(config),
                 "max_tokens": SUMMARY_MAX_OUTPUT_TOKENS,
                 "temperature": 0.3,
             },
@@ -779,7 +779,16 @@ def summarize_session_with_llm(
         return None
 
 
+# Code default for the registry key ``history.summarization.system``; callers
+# resolve the key at call time (TASK-1721), never this constant directly.
 SUMMARY_SYSTEM_PROMPT = "You are a helpful assistant that summarizes conversations concisely."
+
+
+def summary_system_prompt(config: Any | None = None) -> str:
+    """System instruction for a summarization call, resolved from the registry."""
+    from ..prompt_registry import PromptResolver
+
+    return PromptResolver(config).render(key="history.summarization.system", variables={})
 
 # Substrings that mean the "summary" is really an error message that leaked
 # into the completion body — never persist those as a summary.
@@ -832,7 +841,7 @@ def summarize_session_with_client(
     try:
         response = client.query(
             messages=[
-                Message(role="system", content=SUMMARY_SYSTEM_PROMPT),
+                Message(role="system", content=summary_system_prompt(config)),
                 Message(role="user", content=prompt),
             ],
             max_tokens=max_tokens,

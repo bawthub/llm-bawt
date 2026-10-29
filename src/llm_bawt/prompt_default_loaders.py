@@ -31,6 +31,30 @@ def load_memory_extraction_summary() -> str:
     return SUMMARY_EXTRACTION_PROMPT_TEMPLATE
 
 
+def load_history_summarization_system() -> str:
+    from .memory.summarization import SUMMARY_SYSTEM_PROMPT
+
+    return SUMMARY_SYSTEM_PROMPT
+
+
+def load_memory_extraction_fact_system() -> str:
+    from .memory.extraction.prompts import FACT_EXTRACTION_SYSTEM_PROMPT
+
+    return FACT_EXTRACTION_SYSTEM_PROMPT
+
+
+def load_memory_extraction_summary_system() -> str:
+    from .memory.extraction.prompts import SUMMARY_EXTRACTION_SYSTEM_PROMPT
+
+    return SUMMARY_EXTRACTION_SYSTEM_PROMPT
+
+
+def load_memory_extraction_update_system() -> str:
+    from .memory.extraction.prompts import MEMORY_UPDATE_SYSTEM_PROMPT
+
+    return MEMORY_UPDATE_SYSTEM_PROMPT
+
+
 def load_profile_consolidation() -> str:
     from .memory.extraction.prompts import PROFILE_CONSOLIDATION_PROMPT
 
