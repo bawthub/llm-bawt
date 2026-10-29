@@ -95,12 +95,17 @@ Keyed by provider, not model: a spending limit is per provider account.
 
 The bell is **pull-based** (slice A): BawtHub polls `/v1/health/maintenance` and shows
 every row whose status is not `ok` (`systemHealth.ts` maps non-ok children to a degraded
-parent; `ok` rows never reach the bell). Nothing is pushed, so there is no send that can
-fail and no outbox. Notices are non-ok rows rendered on every poll from durable Redis
-state, one row name per provider, `maintenance_fallback:<provider>`:
-- **switched** (record present): `degraded`, "<provider> spending limit since
+parent; `ok` rows never reach the bell). The bell identifies an incident by the parent's
+`since`/status plus the sorted non-ok child `name:status` set (`systemHealthView.ts`
+`incidentId`), so each edge must change that set to raise a new notice (Codex r2
+cmvtiwyhq00xo0mldhhflujii). Nothing is pushed, so there is no send that can fail and no
+outbox. Notices are non-ok rows rendered on every poll from durable Redis state, at most
+one row per provider, under a name that differs per state:
+- **switched** (record present): row `maintenance_fallback:<provider>`, `degraded`,
+  "<provider> spending limit since
   <exhausted_since>: maintenance on backup <alias>; next probe after <until>".
-- **switched back** (no record, episode key present): `degraded`, "<provider> was on
+- **switched back** (no record, episode key present): row
+  `maintenance_fallback_recovered:<provider>`, `degraded`, "<provider> was on
   backup from <first_since> to <recovered_at> (<n> episode(s)); back on primary". The
   clear script writes the episode key `maintenance:fallback:<provider>:recovered` =
   `{first_since, recovered_at, episodes}` in the same atomic step that deletes the record,
@@ -120,7 +125,9 @@ first switch until 24h after the last recovery, Redis always holds a key that re
 non-ok row. An episode that starts and ends between two polls is still shown (as the
 episode row) for 24h, far longer than any poll interval; an app crash or restart between
 edge and poll changes nothing because the row is re-derived from Redis on every poll.
-Why it can't repeat or flap: one row name per provider, status and text are a pure
+Each edge swaps the row name (switched ↔ recovered), so the bell's incident id changes and
+the notice is new; unchanged state keeps the same id, so no repeat.
+Why it can't repeat or flap: at most one row per provider, name, status and text are a pure
 function of the two keys, edges are atomic and token-fenced (State), so polls with
 unchanged state render byte-identical rows, and concurrent callers crossing an edge
 produce one state, hence one row. Redis unavailable → one `maintenance_fallback_state`
@@ -169,6 +176,10 @@ warning chip if the chosen backup shares the maintenance model's provider.
   process; probe success → same row name, still `degraded` (episode) for the window, then
   gone; switch+recover between two polls → episode row visible; two episodes → one row,
   count 2; never an `ok` row; no duplicates.
+- Bell grouping (BawtHub test through the real parse + `systemHealthAlerts`): fixture
+  payloads for healthy → switched → recovered → re-switched, and switched+recovered
+  between two polls, each give a distinct incidentId and a visible alert; repeated polls
+  of one state keep the same incidentId.
 - Fencing: probe lease expires mid-call, another call re-claims and re-arms; the late
   first probe's success or spending_limit changes nothing (record and `until` intact).
 - Utility/summary responses and usage logs report the backup model when it served.
