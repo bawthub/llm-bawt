@@ -45,7 +45,7 @@ class AnthropicMessagesClient(LLMClient):
             raise ValueError("Anthropic Messages endpoint has no base_url")
         self.base_url = base_url
         self.client = Anthropic(api_key=api_key or _NO_AUTH_KEY, base_url=base_url)
-        self._omit_temperature = False
+        self._rejected_fields: set[str] = set()
 
     # -- message conversion ------------------------------------------------
     @staticmethod
@@ -108,14 +108,23 @@ class AnthropicMessagesClient(LLMClient):
             if getattr(block, "type", None) == "text"
         ).strip()
 
-    def _payload(self, messages: List[Message], *, max_tokens: int, temperature: float | None) -> dict:
+    def _payload(self, messages: List[Message], *, max_tokens: int, optional: dict[str, Any]) -> dict:
         system, turns = self._prepare(messages)
         payload: dict[str, Any] = {"model": self.model, "max_tokens": int(max_tokens), "messages": turns}
         if system:
             payload["system"] = system
-        if temperature is not None:
-            payload["temperature"] = float(temperature)
+        payload.update(optional)
         return payload
+
+    def job_request_options(self, job: str, *, reasoning_effort: str | None = None) -> dict[str, Any]:
+        """Reasoning effort ``none`` → Messages ``thinking: disabled`` (TASK-1726).
+
+        Other efforts have no Messages shape that OpenAI-style effort maps to
+        honored across access paths, so they keep the provider default.
+        """
+        if reasoning_effort == "none":
+            return {"thinking": {"type": "disabled"}}
+        return {}
 
     # -- LLMClient ---------------------------------------------------------
     def get_styling(self) -> tuple[str | None, str]:
@@ -126,32 +135,40 @@ class AnthropicMessagesClient(LLMClient):
         temperature = kwargs.get("temperature")
         if temperature is None:
             temperature = self.config.TEMPERATURE
-        return self._create(self.client, messages, max_tokens=max_tokens, temperature=temperature)
+        optional: dict[str, Any] = {"temperature": float(temperature)}
+        if kwargs.get("thinking"):
+            optional["thinking"] = kwargs["thinking"]
+        return self._create(self.client, messages, max_tokens=max_tokens, optional=optional)
 
     def query_bounded(
         self, messages: List[Message], *, timeout_seconds: float,
         max_tokens: int, temperature: float = 0.0,
     ) -> str:
         bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
-        return self._create(bounded, messages, max_tokens=max_tokens, temperature=temperature)
+        return self._create(bounded, messages, max_tokens=max_tokens,
+                            optional={"temperature": float(temperature)})
 
     @staticmethod
-    def _rejects_temperature(error: BadRequestError) -> bool:
-        return "temperature" in str(error).lower()
+    def _rejected_field(error: BadRequestError, sent: dict[str, Any]) -> str | None:
+        message = str(error).lower()
+        return next((field for field in sent if field in message), None)
 
-    def _create(self, sdk: Any, messages: List[Message], *, max_tokens: int, temperature: float | None) -> str:
-        """Send once; a model that rejects ``temperature`` (current Claude models
-        do) is retried without it and remembered, like ``OpenAIClient``."""
-        if self._omit_temperature:
-            temperature = None
-        try:
-            response = sdk.messages.create(
-                **self._payload(messages, max_tokens=max_tokens, temperature=temperature))
-        except BadRequestError as error:
-            if temperature is None or not self._rejects_temperature(error):
-                raise
-            logger.info("%s rejects temperature; retrying without it", self.model)
-            self._omit_temperature = True
-            response = sdk.messages.create(
-                **self._payload(messages, max_tokens=max_tokens, temperature=None))
+    def _create(self, sdk: Any, messages: List[Message], *, max_tokens: int, optional: dict[str, Any]) -> str:
+        """Send with the optional fields (``temperature``, ``thinking``) this
+        endpoint hasn't rejected. A 400 naming one of them (current Claude
+        models reject both) is retried without it and remembered for the
+        client's lifetime, like ``OpenAIClient``; no model-name literals."""
+        sent = {k: v for k, v in optional.items() if k not in self._rejected_fields}
+        while True:
+            try:
+                response = sdk.messages.create(
+                    **self._payload(messages, max_tokens=max_tokens, optional=sent))
+                break
+            except BadRequestError as error:
+                field = self._rejected_field(error, sent)
+                if field is None:
+                    raise
+                logger.info("%s rejects %s; retrying without it", self.model, field)
+                self._rejected_fields.add(field)
+                sent.pop(field)
         return self._text(response)

@@ -24,6 +24,20 @@ from .prompts import (
 logger = logging.getLogger(__name__)
 
 
+class EmptyCompletionError(RuntimeError):
+    """The model answered 200 with no text (e.g. reasoning used the whole cap)."""
+
+
+def _require_completion(response: object) -> None:
+    """An empty reply is a failed LLM call, never "no facts" (TASK-1726).
+
+    Raising sends the caller down the same fallback as any other LLM failure,
+    instead of recording zero facts as a successful extraction.
+    """
+    if not isinstance(response, str) or not response.strip():
+        raise EmptyCompletionError("empty completion from extraction model")
+
+
 class LLMClientProtocol(Protocol):
     """Protocol for LLM clients that can be used for extraction."""
     
@@ -292,6 +306,7 @@ class MemoryExtractionService:
         message_ids: list[str],
     ) -> list[ExtractedFact]:
         """Parse the LLM response into ExtractedFact objects."""
+        _require_completion(response)
         facts = []
         
         # Try to extract JSON from the response (look for code blocks first)
@@ -584,6 +599,7 @@ class MemoryExtractionService:
         When possible, matches parsed facts back to original facts to preserve
         meaning fields (intent, etc.) that were extracted with conversation context.
         """
+        _require_completion(response)
         actions = []
         
         # Build lookup for matching back to original facts

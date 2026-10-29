@@ -218,6 +218,33 @@ def test_messages_client_drops_temperature_a_model_rejects_and_remembers():
     assert sdk.messages.create.call_count == 3
 
 
+def test_messages_client_effort_none_disables_thinking():
+    client, sdk = _messages_client()
+    assert client.job_request_options("summaries", reasoning_effort="none") == {"thinking": {"type": "disabled"}}
+    assert client.job_request_options("summaries", reasoning_effort="low") == {}
+    assert client.job_request_options("summaries") == {}
+    client.query([Message(role="user", content="u")], **client.job_request_options("x", reasoning_effort="none"))
+    assert sdk.messages.create.call_args.kwargs["thinking"] == {"type": "disabled"}
+
+
+def test_messages_client_drops_thinking_an_endpoint_rejects_and_keeps_temperature_memory():
+    client, sdk = _messages_client()
+    ok = sdk.messages.create.return_value
+    sdk.messages.create.side_effect = [
+        _bad_request("`temperature` is deprecated for this model."),
+        _bad_request('"thinking.type.disabled" is not supported for this model.'),
+        ok, ok]
+    options = client.job_request_options("x", reasoning_effort="none")
+    assert client.query([Message(role="user", content="u")], **options) == "hello"
+    calls = [c.kwargs for c in sdk.messages.create.call_args_list]
+    assert "thinking" in calls[1] and "temperature" not in calls[1]
+    assert "thinking" not in calls[2] and "temperature" not in calls[2]
+    client.query([Message(role="user", content="u")], **options)
+    assert sdk.messages.create.call_count == 4
+    last = sdk.messages.create.call_args.kwargs
+    assert "thinking" not in last and "temperature" not in last
+
+
 def test_messages_client_other_bad_requests_are_not_retried():
     client, sdk = _messages_client()
     sdk.messages.create.side_effect = _bad_request("max_tokens too large")
