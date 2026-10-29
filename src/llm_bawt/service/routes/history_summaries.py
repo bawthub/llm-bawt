@@ -75,6 +75,7 @@ def _build_summary_callable(service, bot_id: str, user_id: str = "system", model
         # heuristic. ``_get_background_client`` is the one job-model resolver.
         client, model_alias = service._get_background_client(
             model_override=requested_model, job="history_summary_rebuild",
+            allow_fallback=not model,
         )
         if client is None:
             raise RuntimeError(

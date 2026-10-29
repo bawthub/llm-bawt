@@ -157,5 +157,9 @@ def test_route_serves_aggregator_shape(monkeypatch):
     health = MaintenanceHealth()
     health.record_failure("j", mh.AUTH, "401", model="m", provider="xai", credential="Default")
     monkeypatch.setattr(mh, "_registry", health)
+    from llm_bawt.service import maintenance_fallback as mf
+    from llm_bawt.service.routes import health as health_route
+    monkeypatch.setattr(mf, "default_store", lambda _config: mf.MemoryExhaustionStore())
+    monkeypatch.setattr(health_route, "get_service", lambda: SimpleNamespace(config=None))
     payload = get_maintenance_health()
     assert payload["checks"][0]["status"] == "down"

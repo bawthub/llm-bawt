@@ -212,7 +212,7 @@ class _Bridge(BridgeSessionResetMixin):
 
     # TASK-857: the /new pre-seed summarize borrows the GLOBAL background job
     # client (InstanceManagerMixin in prod); stubbed here.
-    def _get_background_client(self, model_override=None, job=None):
+    def _get_background_client(self, model_override=None, job=None, allow_fallback=False):
         self.bg_client_calls += 1
         return self._bg_client, ("bg-model" if self._bg_client else None)
 

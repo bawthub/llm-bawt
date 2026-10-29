@@ -44,10 +44,25 @@ def get_maintenance_health():
     Always 200: ``{"checks": [{name, status, reason}]}``, one row per job that
     has run since start. A failing job is ``down`` with its error class,
     provider, credential name and failure count; its next success clears it.
+
+    Backup-model state (slice B) adds one row per provider: ``warning`` while
+    maintenance runs on the backup, ``ok`` "back on primary" after switch-back.
+    It is read from the durable Redis record on every poll, so a switch is
+    never lost to a restart; Redis down is reported by the state row instead.
     """
+    from ..maintenance_fallback import (
+        StateUnavailable, default_state_health, default_store, fallback_checks,
+    )
     from ..maintenance_health import maintenance_health
 
-    return maintenance_health().checks_payload()
+    try:
+        fallback_rows = fallback_checks(default_store(get_service().config))
+    except StateUnavailable as error:
+        default_state_health().unavailable(str(error))
+        fallback_rows = []
+    payload = maintenance_health().checks_payload()
+    payload["checks"].extend(fallback_rows)
+    return payload
 
 
 @router.get("/v1/status", response_model=SystemStatusResponse, tags=["System"])

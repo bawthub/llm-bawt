@@ -20,7 +20,9 @@ def test_explicit_model_uses_direct_client_without_bot_or_history():
         result = raw_completion(RawCompletionRequest(prompt="what next?", system="curate", model="grok-4.3"))
     assert result.model == "grok-4.3"
     assert result.content == '{"headline":"Next"}'
-    service._get_background_client.assert_called_once_with(model_override="grok-4.3", job="utility_completion")
+    service._get_background_client.assert_called_once_with(
+        model_override="grok-4.3", job="utility_completion", allow_fallback=False,
+    )
     kwargs = client.query.call_args.kwargs
     assert kwargs["stream"] is False and kwargs["plaintext_output"] is True
     assert [(message.role, message.content) for message in kwargs["messages"]] == [
@@ -81,7 +83,9 @@ def test_no_model_uses_global_maintenance_setting_not_loaded_client():
         result = raw_completion(RawCompletionRequest(prompt="hello"))
     assert result.model == "configured-maintenance"
     setting.assert_called_once_with(service.config, "maintenance_model")
-    service._get_background_client.assert_called_once_with(model_override="configured-maintenance", job="utility_completion")
+    service._get_background_client.assert_called_once_with(
+        model_override="configured-maintenance", job="utility_completion", allow_fallback=True,
+    )
     service._client_cache["loaded"].query.assert_not_called()
 
 

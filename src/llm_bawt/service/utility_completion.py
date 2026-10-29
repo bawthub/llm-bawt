@@ -43,6 +43,7 @@ def complete_utility(
     unless an ordinary utility caller explicitly supplies a catalog model.
     """
     from ..runtime_settings import resolve_job_model
+    from .maintenance_fallback import served_model
 
     service = get_service()
     requested_model = request.model or resolve_job_model(service.config, "maintenance_model")
@@ -51,7 +52,9 @@ def complete_utility(
         from .maintenance_health import record_unconfigured
         record_unconfigured(job, "maintenance_model")
         raise HTTPException(status_code=503, detail="No maintenance model configured")
-    client, model_alias = service._get_background_client(model_override=requested_model, job=job)
+    client, model_alias = service._get_background_client(
+        model_override=requested_model, job=job, allow_fallback=not request.model,
+    )
     if client is None or model_alias is None:
         raise HTTPException(status_code=422, detail="Configured model has no direct API client")
     if timeout_seconds is not None:
@@ -84,7 +87,7 @@ def complete_utility(
         if not isinstance(response, str) or not response.strip() or response.lstrip().startswith("ERROR:"):
             raise ValueError("Model returned no usable completion")
         return RawCompletionResponse(
-            content=response, model=model_alias,
+            content=response, model=served_model(client, model_alias),
             tokens=len(response) // 4, elapsed_ms=(time.perf_counter() - start) * 1000,
         )
     except Exception as error:

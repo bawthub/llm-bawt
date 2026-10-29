@@ -453,11 +453,16 @@ class InstanceManagerMixin:
 
     def _get_background_client(
         self, model_override: str | None = None, *, job: str = "background",
+        allow_fallback: bool = False,
     ) -> tuple[Any | None, str | None]:
         """Background client wrapped so every call's outcome is recorded for ``job``.
 
         TASK-1704: a job with no usable client is recorded as a failure too, so
         "fell back to heuristics" stops being silent. See ``maintenance_health``.
+
+        ``allow_fallback`` is set only by callers whose model came from settings
+        (not one a caller named): then a provider spending limit replays the
+        call on ``maintenance_model_fallback``. See ``maintenance_fallback``.
         """
         from .maintenance_health import UNAVAILABLE, MonitoredClient, maintenance_health
 
@@ -469,8 +474,56 @@ class InstanceManagerMixin:
                 model=model_alias or model_override, provider=provider, credential=credential,
             )
             return None, None
-        return MonitoredClient(client, job=job, model=model_alias, provider=provider,
-                               credential=credential), model_alias
+        monitored = MonitoredClient(client, job=job, model=model_alias, provider=provider,
+                                    credential=credential)
+        if not allow_fallback or not provider:
+            return monitored, model_alias
+        return self._with_maintenance_fallback(monitored, job, model_alias, provider), model_alias
+
+    def _with_maintenance_fallback(self, primary: Any, job: str, model_alias: str,
+                                   provider: str) -> Any:
+        """Wrap ``primary`` so a spending limit reaches the configured backup (slice B)."""
+        from ..runtime_settings import resolve_job_model
+        from .maintenance_fallback import (
+            COOLDOWN_SETTING, FALLBACK_SETTING, Backup, FallbackClient,
+            default_state_health, default_store,
+        )
+        from .maintenance_health import MonitoredClient, maintenance_health
+
+        def incompatible(alias: str | None, why: str) -> None:
+            maintenance_health().record_failure(
+                job, "fallback_unavailable", f"backup {FALLBACK_SETTING}: {why}",
+                model=alias, provider=None, credential=None)
+
+        def open_backup(primary_provider: str) -> Backup | None:
+            alias = resolve_job_model(self.config, FALLBACK_SETTING)
+            if not alias:
+                incompatible(None, "not set")
+                return None
+            client, backup_alias = self._resolve_background_client(alias)
+            if client is None or backup_alias is None:
+                incompatible(alias, "not in the catalog or no API client")
+                return None
+            backup_provider, credential = self._background_credential_labels(backup_alias)
+            if not backup_provider or backup_provider == primary_provider:
+                incompatible(backup_alias, "must be on a different provider than the primary")
+                return None
+            return Backup(client=MonitoredClient(client, job=job, model=backup_alias,
+                                                 provider=backup_provider, credential=credential),
+                          model=backup_alias, provider=backup_provider)
+
+        def cooldown() -> float:
+            from ..runtime_settings import RuntimeSettingsResolver
+            from ..setting_definitions import SETTING_DEFINITIONS
+
+            value = RuntimeSettingsResolver(config=self.config, bot=None).resolve(
+                COOLDOWN_SETTING, fallback=SETTING_DEFINITIONS[COOLDOWN_SETTING].default)
+            return max(0.0, float(value or 0))
+
+        return FallbackClient(primary, job=job, model=model_alias, provider=provider,
+                              open_backup=open_backup, store=default_store(self.config),
+                              cooldown_seconds=cooldown, state_health=default_state_health(),
+                              on_incompatible=incompatible)
 
     def _background_credential_labels(self, model_alias: str | None) -> tuple[str | None, str | None]:
         """Provider id and stored credential *name* (never the secret) for a job model."""

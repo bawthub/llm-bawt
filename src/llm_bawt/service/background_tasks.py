@@ -148,6 +148,7 @@ class BackgroundTasksMixin:
         # factory instead resolves the requested model with the chat harness.
         llm_client, model_to_use = self._get_background_client(
             model_override=requested_model, job="profile_maintenance",
+            allow_fallback=not task.payload.get("model"),
         )
         if not llm_client:
             return {"error": f"Profile maintenance model '{requested_model}' is unavailable as a background client"}
@@ -195,7 +196,9 @@ class BackgroundTasksMixin:
         """
         from ..memory.extraction.service import MemoryExtractionService, MemoryAction
 
-        extraction_client, extraction_model = self._get_background_client(job="summary_fact_extraction")
+        extraction_client, extraction_model = self._get_background_client(
+            job="summary_fact_extraction", allow_fallback=True,
+        )
         use_llm = extraction_client is not None
 
         if not use_llm:
@@ -410,6 +413,7 @@ class BackgroundTasksMixin:
         # Use isolated background client — never interferes with main chat model
         client, model_alias = self._get_background_client(
             model_override=requested_model, job="history_summarization",
+            allow_fallback=not task.payload.get("model"),
         )
 
         # TASK-858: size the prompt off the job model's REAL context window.
@@ -468,7 +472,8 @@ class BackgroundTasksMixin:
         )
 
         if model_alias:
-            result["model"] = model_alias
+            from .maintenance_fallback import served_model
+            result["model"] = served_model(client, model_alias)
         result["used_heuristic_fallback"] = use_heuristic_fallback
 
         # Phase 2: Extract memories from newly created summaries
@@ -556,6 +561,7 @@ class BackgroundTasksMixin:
         # Use isolated background client for LLM calls
         extraction_client, extraction_model = self._get_background_client(
             model_override=task.payload.get("model"), job="memory_extraction",
+            allow_fallback=not task.payload.get("model"),
         )
         use_llm = extraction_client is not None
 

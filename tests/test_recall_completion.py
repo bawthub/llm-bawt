@@ -40,7 +40,9 @@ def test_bounded_utility_uses_only_explicit_input_and_maintenance_model(utility)
     result = llm.complete_utility(RawCompletionRequest(prompt="selected evidence", system="extract only",
                                                       max_tokens=900, temperature=0.0), timeout_seconds=20)
     resolver.assert_called_once_with(service.config, "maintenance_model")
-    service._get_background_client.assert_called_once_with(model_override="configured-maintenance", job="recall_completion")
+    service._get_background_client.assert_called_once_with(
+        model_override="configured-maintenance", job="recall_completion", allow_fallback=True,
+    )
     client.query.assert_not_called()
     kwargs = client.query_bounded.call_args.kwargs
     assert [(m.role, m.content) for m in kwargs.pop("messages")] == [

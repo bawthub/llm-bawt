@@ -481,6 +481,32 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         legacy_keys=("PROFILE_MAINTENANCE_MODEL",),
         ui_widget="model",
     ),
+    # TASK-1704 slice B: user-chosen backup for maintenance calls whose
+    # provider hits a spending limit. Unset = no backup (failures alert only).
+    "maintenance_model_fallback": SettingDefinition(
+        key="maintenance_model_fallback",
+        type="str",
+        default=None,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Backup job model (on spending limit)",
+        help="Used only when a background job's provider reports a spending "
+             "limit; rate limits and other errors never switch. While it is in "
+             "use, maintenance data (memories, summaries, profile facts) is sent "
+             "to this model's provider. Pick a model on a different provider. "
+             "Unset = no backup; the failure only raises an alert.",
+        ui_widget="model",
+    ),
+    "maintenance_fallback_cooldown_seconds": SettingDefinition(
+        key="maintenance_fallback_cooldown_seconds",
+        type="int",
+        default=3600,
+        applies_to=BOT_TYPES_ALL,
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Backup job model cooldown (seconds)",
+        help="How long jobs stay on the backup before one call retries the "
+             "primary, when the provider gives no reset time of its own.",
+    ),
     # --- subagent/small-fast model (TASK-546): proxy-compatible override -------
     # When the claude-code bridge routes through the Anthropic-compat proxy
     # (non-Anthropic providers like openai_chatgpt/zai/xai), Claude Code's
