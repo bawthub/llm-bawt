@@ -842,6 +842,9 @@ from . import bot_profile_tools as _bot_profile_tools  # noqa: F401, E402
 # Grant tags (approve_ops) set by a grant manager bot, audited (TASK-1609)
 from . import bot_grant_tools as _bot_grant_tools  # noqa: F401, E402
 
+# Durable bot wake-ups over prompt schedules (TASK-1719)
+from . import schedule_tools as _schedule_tools  # noqa: F401, E402
+
 # ---------------------------------------------------------------------------
 # Ops tools (TASK-639 — DB-configured operations catalog)
 # ---------------------------------------------------------------------------

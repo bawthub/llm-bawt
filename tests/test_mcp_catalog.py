@@ -170,7 +170,9 @@ async def test_catalog_token_budgets():
     # BawtHub browser; the bearer warning in-band): 4,403 (+36).
     # TASK-1661: ops_approvals_get (an approval notice names a request id the
     # capped listing may not reach; the reason-privacy rule in-band): 4,439 (+36).
-    assert sum(descriptions) <= 4439, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1719: schedule_wakeup (durable wake-ups; "instead of CronCreate"
+    # in-band, since session-only harness timers die on /new and restarts): 4,499 (+60).
+    assert sum(descriptions) <= 4499, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -256,7 +258,11 @@ async def test_catalog_token_budgets():
     # create silently dropped the owner a bot asked for.
     # TASK-1659: browser_check_session, no arguments: 16,288 (+64).
     # TASK-1661: ops_approvals_get (request_id): 16,366 (+78).
-    assert total <= 16366, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1719: schedule_wakeup (action enum, message, target, three
+    # mutually exclusive timings, timezone, task_id, label, idempotency_key,
+    # schedule_id): 16,723 (+357). One durable tool replaces session-only
+    # CronCreate timers and hand-built /v1/prompt-schedules curls.
+    assert total <= 16723, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

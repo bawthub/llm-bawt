@@ -134,6 +134,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "home_audio_enqueue": "Audible: queue text or a generated WAV asset_id to an explicit target. Shared FIFO, waits for idle, expires after five minutes. Reuse idempotency_key; queued is not played.",
     "home_audio_status": "Read announcement state and errors. completed means observed playback completion; interrupted/failed may have played partially and are never auto-replayed.",
     "home_audio_cancel": "Cancel only a queued announcement. Does not stop preparing/playing jobs; inspect returned status.",
+    "schedule_wakeup": "Durable future message to a bot (default you); survives restart, /new, compaction. Use instead of CronCreate. at|in_minutes|cron; task_id tags it. list/cancel your wake-ups.",
     "notify_user": "Push to the user's phone. Only for: an approval waiting on the user, a release/deploy finished or failed, or a decision blocking work. Never routine progress. high passes quiet hours. Rate limited; dedupe_key collapses repeats. link: app path.",
     "generate_image": "Generate or edit an image; provider: grok (default)|openai. reference_asset_id reuses an image. Returns inline image and asset_id/URLs for iteration.",
     "web_search": "Search current web sources; provider: brave|reddit|tavily|duckduckgo, or omit for configured fan-out. max_results is per provider. Use crawl4ai for page content.",
@@ -146,7 +147,7 @@ TOOL_SUMMARIES: dict[str, str] = {
 REFERENCE_GROUPS: dict[str, tuple[str, ...]] = {
     "tasks": ("tasks_", "steps_", "projects_", "activity_", "initiative_"),
     "memory-history": ("memory_", "messages_", "context_", "facts_", "system_", "profile", "working_memory_"),
-    "sessions-delivery": ("sessions_", "bots_", "agent_", "self_"),
+    "sessions-delivery": ("sessions_", "bots_", "agent_", "self_", "schedule_"),
     "ops-media": ("ops_", "media_", "generate_", "web_", "x_", "speech_", "home_audio_", "notify_", "browser_"),
 }
 
