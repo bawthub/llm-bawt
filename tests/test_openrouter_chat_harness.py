@@ -91,3 +91,51 @@ def test_chat_client_without_a_connected_key_fails_visibly():
     with patch("llm_bawt.service.providers.registry.access_path_adapter", return_value=owner), \
          pytest.raises(ValueError, match="no connected API key"):
         ServiceLLMBawt._initialize_client(svc)
+
+
+def test_inline_key_never_bypasses_a_disconnected_provider():
+    model_def = dict(_catalog().resolve("deepseek-flash", harness="chat"), api_key="sk-inline")
+    owner = SimpleNamespace(id="openrouter", api_key=lambda: None)
+    with patch("llm_bawt.service.providers.registry.access_path_adapter", return_value=owner), \
+         pytest.raises(ValueError, match="no connected API key"):
+        ServiceLLMBawt._initialize_client(_service(model_def))
+
+
+def test_inline_key_still_serves_an_unowned_custom_path():
+    from llm_bawt.service.background_clients import endpoint_api_key
+
+    with patch("llm_bawt.service.providers.registry.access_path_adapter", return_value=None):
+        assert endpoint_api_key(None, {"access_path": "openai-compatible",
+                                       "auth_mechanism": "configured",
+                                       "api_key": "sk-custom"}) == "sk-custom"
+
+
+def test_tool_call_round_trips_over_chat_completions():
+    from llm_bawt.models.message import Message
+
+    model_def = _catalog().resolve("deepseek-flash", harness="chat")
+    owner = SimpleNamespace(id="openrouter", api_key=lambda: "sk-or-test")
+    tools = [{"type": "function", "function": {
+        "name": "web_search", "description": "search",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}},
+                       "required": ["q"]}}}]
+    call = SimpleNamespace(id="call_1", type="function",
+                           function=SimpleNamespace(name="web_search", arguments='{"q": "dogs"}'))
+    completion = SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content="", tool_calls=[call]))])
+    svc = _service(model_def)
+    svc.config.TOP_P = 1.0
+    svc.config.SYSTEM_MESSAGE = ""
+    svc.config.get_model_max_tokens = lambda _alias: 256
+    with patch("llm_bawt.service.providers.registry.access_path_adapter", return_value=owner), \
+         patch("llm_bawt.clients.openai_client.OpenAI") as sdk:
+        sdk.return_value.chat.completions.create.return_value = completion
+        client = ServiceLLMBawt._initialize_client(svc)
+        result, _ = client.query_with_tools([Message(role="user", content="find dogs")],
+                                            tools_schema=tools, max_tokens=256)
+    payload = sdk.return_value.chat.completions.create.call_args.kwargs
+    assert payload["model"] == UPSTREAM
+    assert payload["tools"] == tools and payload["tool_choice"] == "auto"
+    assert result["tool_calls"] == [{"id": "call_1", "type": "function",
+                                     "function": {"name": "web_search",
+                                                  "arguments": '{"q": "dogs"}'}}]

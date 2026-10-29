@@ -74,19 +74,22 @@ NO_KEY = "not-needed"
 def endpoint_api_key(config: Any, model_def: dict) -> str:
     """API key for the endpoint's access path, from its owning provider connection.
 
-    An explicit ``api_key`` on the definition wins (custom endpoints). An
+    An explicit ``api_key`` on the definition is used only when no provider
+    owns the path (custom endpoints). An
     ``api-key`` path with no connected key raises, so the job fails visibly
     instead of calling upstream unauthenticated. Other paths get :data:`NO_KEY`.
     """
+    from .providers.registry import access_path_adapter
+
+    # A provider-owned path takes its key only from that connection, so a
+    # disconnected provider can't keep sending on an inline key (TASK-1764).
+    adapter = access_path_adapter(config, model_def.get("access_path"))
     explicit = model_def.get("api_key")
-    if explicit:
+    if explicit and adapter is None:
         return str(explicit)
     auth = model_def.get("auth_mechanism")
     if auth != "api-key":
         return NO_KEY
-    from .providers.registry import access_path_adapter
-
-    adapter = access_path_adapter(config, model_def.get("access_path"))
     reader = getattr(adapter, "api_key", None)
     key = reader() if callable(reader) else None
     if not key:
