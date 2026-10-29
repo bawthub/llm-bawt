@@ -181,6 +181,23 @@ def label_files_valid(working_dir: str, files: list) -> bool:
                     and COMPOSE_FILE.fullmatch(posixpath.basename(f)) for f in files))
 
 
+def unescape_dollars(value):
+    """Undo Compose's ``$$`` escape in rendered strings (TASK-1697).
+
+    ``docker compose config`` re-emits every literal ``$`` as ``$$`` so its
+    output stays loadable; Compose itself unescapes when it creates the
+    container. A renderer that hands the JSON straight to the Engine must do the
+    same, or a ``CMD-SHELL`` ``$$?`` reaches the shell as its PID.
+    """
+    if isinstance(value, str):
+        return value.replace("$$", "$")
+    if isinstance(value, list):
+        return [unescape_dollars(v) for v in value]
+    if isinstance(value, dict):
+        return {k: unescape_dollars(v) for k, v in value.items()}
+    return value
+
+
 def renderer_argv(spec: dict, source: dict, *, hash_only: bool) -> list[str]:
     argv = ["compose", "-p", spec["compose_project"]]
     for path in source["compose_files"]:
@@ -215,6 +232,7 @@ class ComposeRenderer:
             raise ComposeError("renderer_output_invalid") from None
         if not isinstance(config, dict):
             raise ComposeError("renderer_output_invalid")
+        config = unescape_dollars(config)
         line = self._run(source, image_ref, renderer_argv(self.spec, source, hash_only=True)).strip()
         match = re.fullmatch(re.escape(self.spec["compose_service"]) + r" ([0-9a-f]{64})", line)
         if not match:
