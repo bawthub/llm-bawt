@@ -165,3 +165,15 @@ def test_openrouter_failures_show_no_balance(monkeypatch, status, payload, expec
 def test_openrouter_without_a_key_never_calls_upstream(monkeypatch):
     snap, seen, _url = _openrouter_fetch(monkeypatch, key=None)
     assert snap.status == "unauthorized" and seen == {}
+
+
+def test_unrecognized_usage_shape_is_unpriced_not_free():
+    usage = bs.normalize_usage({"id": "r", "usage": {"total_tokens": 100}})
+    assert usage == {}
+    assert bs.call_cost(usage, {"input": 1, "output": 2}) == (None, None)
+    assert bs.catalog_cost({}, {"input": 1, "output": 2}) is None
+
+
+def test_unrecognized_usage_shape_keeps_a_reported_cost():
+    usage = bs.normalize_usage({"usage": {"total_tokens": 100, "cost": 0.25}})
+    assert bs.call_cost(usage, None)[1] == "provider_reported"

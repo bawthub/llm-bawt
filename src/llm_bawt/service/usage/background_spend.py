@@ -89,18 +89,22 @@ def normalize_usage(response: Any) -> dict | None:
         cache_write = _int(raw.get("cache_creation_input_tokens"))
         input_tokens = _int(raw.get("input_tokens"))
         output_tokens = _int(raw.get("output_tokens"))
-    else:  # Responses: cached tokens are inside input_tokens
+    elif "input_tokens" in raw or "output_tokens" in raw:  # Responses: cached inside input_tokens
         cache_read = _int(details_in.get("cached_tokens"))
         input_tokens = max(_int(raw.get("input_tokens")) - cache_read, 0)
         output_tokens = _int(raw.get("output_tokens"))
         cache_write = 0
-    usage: dict[str, Any] = {
-        "input_tokens": input_tokens,
-        "cache_read_tokens": cache_read,
-        "cache_write_tokens": cache_write,
-        "output_tokens": output_tokens,
-        "reasoning_tokens": _int(details_out.get("reasoning_tokens")),
-    }
+    else:
+        input_tokens = None  # unrecognized shape: no token counts, so never catalog-priced
+    usage: dict[str, Any] = {}
+    if input_tokens is not None:
+        usage.update({
+            "input_tokens": input_tokens,
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": _int(details_out.get("reasoning_tokens")),
+        })
     reported = None
     ticks = _decimal(raw.get("cost_in_usd_ticks"))
     if ticks is not None:
@@ -118,8 +122,8 @@ def catalog_cost(usage: dict, pricing: Any) -> Decimal | None:
     Every token class the call used must have a rate; a partial rate card is
     not a price. Reasoning tokens are billed inside ``output_tokens``.
     """
-    if not isinstance(pricing, dict):
-        return None
+    if not isinstance(pricing, dict) or "input_tokens" not in usage:
+        return None  # no recognized token counts: unpriced, never $0
     total = Decimal(0)
     for tokens_key, rate_key in (("input_tokens", "input"), ("output_tokens", "output"),
                                  ("cache_read_tokens", "cache_read"), ("cache_write_tokens", "cache_write")):
