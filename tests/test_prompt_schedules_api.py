@@ -6,11 +6,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import create_engine
+from sqlmodel import Session, create_engine
 
 from llm_bawt.service.prompt_schedule_management import PromptManagement
 from llm_bawt.service.routes import prompt_schedules as routes
-from llm_bawt.service.scheduler import create_scheduler_tables
+from llm_bawt.service.scheduler import ScheduledJob, create_scheduler_tables
 
 
 @pytest.fixture
@@ -47,11 +47,32 @@ def test_round_trip_revision_pause_resume_cancel(client):
     assert response.status_code == 200, response.text
     assert response.json()["revision"] == 2
     assert client.patch(url+"?user=test", json={"expected_revision": 1, "name": "Stale"}).status_code == 409
-    assert client.post(url+"/pause?user=test").json()["lifecycle"] == "paused"
-    assert client.post(url+"/resume?user=test").json()["enabled"] is True
-    assert client.delete(url+"?user=test").json()["lifecycle"] == "cancelled"
+    assert item["next_run_at"] is not None
+    paused = client.post(url+"/pause?user=test").json()
+    assert paused["lifecycle"] == "paused" and paused["next_run_at"] is None
+    assert client.get(url+"?user=test").json()["next_run_at"] is None
+    with Session(routes.management().engine) as session:
+        assert session.get(ScheduledJob, item["id"]).next_run_at is None
+    resumed = client.post(url+"/resume?user=test").json()
+    assert resumed["enabled"] is True and resumed["next_run_at"] is not None
+    cancelled = client.delete(url+"?user=test").json()
+    assert cancelled["lifecycle"] == "cancelled" and cancelled["next_run_at"] is None
+    assert client.get(url+"?user=test").json()["next_run_at"] is None
+    with Session(routes.management().engine) as session:
+        assert session.get(ScheduledJob, item["id"]).next_run_at is None
     assert client.post(url+"/resume?user=test").status_code == 409
 
+
+def test_disabled_create_and_update_clear_due_pointer(client):
+    paused = create(client, payload(enabled=False))
+    assert paused["lifecycle"] == "paused" and paused["next_run_at"] is None
+    item = create(client)
+    url = f"/v1/prompt-schedules/{item['id']}?user=test"
+    stopped = client.patch(url, json={"expected_revision": 1, "enabled": False}).json()
+    assert stopped["lifecycle"] == "paused" and stopped["next_run_at"] is None
+    assert client.get("/v1/prompt-schedules?user=test&lifecycle=paused").json()["total_count"] == 2
+    resumed = client.patch(url, json={"expected_revision": 2, "enabled": True}).json()
+    assert resumed["lifecycle"] == "active" and resumed["next_run_at"] is not None
 
 def test_create_idempotency_and_payload_conflict(client):
     body = payload()

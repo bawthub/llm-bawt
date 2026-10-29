@@ -39,7 +39,7 @@ def run_view(occurrence, run):
 
 def schedule_view(job, schedule, last_run=None):
     return dict(id=job.id, bot_id=job.bot_id if schedule.target_mode == "specific" else None,
-                enabled=job.enabled, next_run_at=db_utc(job.next_run_at) if job.next_run_at else None,
+                enabled=job.enabled, next_run_at=(db_utc(job.next_run_at) if schedule.lifecycle == "active" and job.enabled and job.next_run_at else None),
                 timing=schedule.timing_json, last_run=last_run,
                 **{key: getattr(schedule, key) for key in (
                     "owner_user_id", "name", "description", "prompt", "requested_model",
@@ -114,7 +114,7 @@ class PromptManagement:
                 raise HTTPException(422, "Schedule has no future execution")
             job = ScheduledJob(id=identifier, job_type=JobType.SEND_PROMPT,
                                bot_id=data.bot_id if data.target_mode == "specific" else "*",
-                               enabled=data.enabled, next_run_at=due)
+                               enabled=data.enabled, next_run_at=due if data.enabled else None)
             session.add(job)
             session.flush()
             fields = {key: value for key, value in payload.items() if key not in {"bot_id", "enabled", "timing"}}
@@ -159,6 +159,8 @@ class PromptManagement:
                         raise HTTPException(409, "Schedule has no future execution")
                 job.enabled = parsed.enabled
                 schedule.lifecycle = "active" if parsed.enabled else "paused"
+            if not job.enabled:
+                job.next_run_at = None
             for key, value in parsed.model_dump(mode="json").items():
                 if key == "timing":
                     schedule.timing_json = value
@@ -200,6 +202,8 @@ class PromptManagement:
             schedule.revision += 1
             schedule.updated_at = now
             job.enabled = action == "resume"
+            if not job.enabled:
+                job.next_run_at = None
             session.add(job)
             session.add(schedule)
             return schedule_view(job, schedule)

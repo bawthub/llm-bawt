@@ -42,6 +42,24 @@ def test_schema_creation_idempotent_and_maintenance_untouched(engine):
         assert session.get(ScheduledJob, "maintenance").next_run_at is None
 
 
+def test_legacy_inactive_due_pointers_are_backfilled_without_touching_maintenance(engine):
+    store = PromptScheduleStore(engine)
+    active = create(store)
+    paused = create(store, enabled=False)
+    with Session(engine) as session:
+        session.add(ScheduledJob(id="maintenance-due", job_type=JobType.MEMORY_DECAY,
+                                 bot_id="test", next_run_at=NOW))
+        job = session.get(ScheduledJob, paused)
+        job.next_run_at = NOW  # Legacy paused row from before the upgrade.
+        session.add(job)
+        session.commit()
+    create_scheduler_tables(engine)
+    create_scheduler_tables(engine)  # Repeat startup is safe.
+    with Session(engine) as session:
+        assert session.get(ScheduledJob, paused).next_run_at is None
+        assert session.get(ScheduledJob, active).next_run_at is not None
+        assert db_utc(session.get(ScheduledJob, "maintenance-due").next_run_at) == NOW
+
 def test_due_reservation_snapshot_and_pending_survive_new_store(engine):
     store = PromptScheduleStore(engine)
     job = create(store, requested_model="explicit-model")

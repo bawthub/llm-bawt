@@ -81,6 +81,11 @@ def create_scheduler_tables(engine) -> None:
         if engine.dialect.name == "postgresql":
             conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS target_mode VARCHAR NOT NULL DEFAULT 'specific'"))
             conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS candidate_bot_ids JSON"))
+        # Idempotent upgrade of legacy paused/cancelled rows. Only schedule-owned
+        # jobs are touched; maintenance jobs retain their due pointers.
+        conn.execute(text("UPDATE scheduled_jobs SET next_run_at = NULL "
+                          "WHERE next_run_at IS NOT NULL AND id IN "
+                          "(SELECT job_id FROM prompt_schedules WHERE lifecycle <> 'active')"))
 
 
 def _migrate_postgres_jobtype_enum(engine) -> None:

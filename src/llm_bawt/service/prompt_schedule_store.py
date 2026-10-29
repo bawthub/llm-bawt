@@ -46,7 +46,7 @@ class PromptScheduleStore:
             raise ValueError("Schedule has no future execution within its bounds")
         with Session(self.engine) as session, session.begin():
             job = ScheduledJob(job_type=JobType.SEND_PROMPT, bot_id=bot_id.strip(),
-                               enabled=enabled, next_run_at=due)
+                               enabled=enabled, next_run_at=due if enabled else None)
             session.add(job)
             session.flush()
             schedule = PromptSchedule(
