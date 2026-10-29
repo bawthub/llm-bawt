@@ -125,8 +125,12 @@ first switch until 24h after the last recovery, Redis always holds a key that re
 non-ok row. An episode that starts and ends between two polls is still shown (as the
 episode row) for 24h, far longer than any poll interval; an app crash or restart between
 edge and poll changes nothing because the row is re-derived from Redis on every poll.
-Each edge swaps the row name (switched ↔ recovered), so the bell's incident id changes and
-the notice is new; unchanged state keeps the same id, so no repeat.
+Each row carries `since` = its edge time (switch time for a live record, latest recovery
+time for an episode). BawtHub's incident id includes each non-ok child's `name:status:since`
+(Loopy impl r1 cmvtjiant00xs0mld9xzrrfjb: the row name alone made a re-switch equal to the
+first switch, so a dismissed first switch hid it). Every edge gets a new id, even after
+the previous notice was dismissed; unchanged state keeps the same id, so no repeat. Reason
+text is deliberately not part of the id (it carries counts/times).
 Why it can't repeat or flap: at most one row per provider, name, status and text are a pure
 function of the two keys, edges are atomic and token-fenced (State), so polls with
 unchanged state render byte-identical rows, and concurrent callers crossing an edge

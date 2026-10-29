@@ -332,3 +332,42 @@ def test_get_background_client_default_has_no_fallback():
 def test_no_model_literals_in_module():
     text = Path(mf.__file__).read_text()
     assert not re.search(r"\b(gpt-|grok-|claude-|gemini-|llama)", text)
+
+
+def test_each_edge_row_carries_a_distinct_since_stable_across_polls():
+    rig = Rig()
+    _exhaust(rig)
+    first = fallback_checks(rig.store)
+    assert first[0]["since"] and fallback_checks(rig.store) == first
+    _recover(rig)
+    back = fallback_checks(rig.store)
+    rig.clock.now += 60
+    _exhaust(rig)
+    again = fallback_checks(rig.store)
+    _recover(rig)
+    merged = fallback_checks(rig.store)
+    sinces = [r[0]["since"] for r in (first, back, again, merged)]
+    assert len(set(sinces)) == 4  # every edge is a new bell incident (Loopy r1 B1)
+
+
+class _ClaimDownStore(MemoryExhaustionStore):
+    def claim_probe(self, provider, ttl):
+        raise mf.StateUnavailable("redis gone mid-call")
+
+
+def test_claim_probe_failure_after_good_get_is_stateless_per_call():
+    rig = Rig()
+    rig.store = _ClaimDownStore(clock=rig.clock)
+    _exhaust(rig)
+    rig.clock.now += 700  # cooldown over: this call must claim the probe
+    rig.primary_inner.query.reset_mock()
+    rig.primary_inner.query.side_effect = _spend()
+    rig.backup_inner.query.return_value = "b"
+    client = rig.client()
+    assert client.query(messages=[]) == "b" and client.last_via_fallback
+    assert rig.primary_inner.query.call_count == 1  # primary tried first (Loopy r1 B2)
+    rig.primary_inner.query.side_effect = None
+    rig.primary_inner.query.return_value = "p"
+    assert rig.client().query(messages=[]) == "p"
+    rows = [r for r in rig.health.checks_payload()["checks"] if r["name"] == mf.STATE_JOB]
+    assert len(rows) == 1 and rows[0]["status"] == "down"

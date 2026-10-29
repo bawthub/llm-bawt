@@ -440,11 +440,15 @@ class FallbackClient:
         if record is not None:
             if self._clock() < record.until:
                 return self._via_backup(method, None, args, kwargs)
-            token, _ = self._state_op(
+            token, claimed = self._state_op(
                 lambda: self._store.claim_probe(self._provider, PROBE_CLAIM_SECONDS), None)
-            if not token:
+            if not claimed:
+                # Redis failed mid-call: stateless per-call mode (primary, then backup).
+                stateful = False
+            elif not token:
                 return self._via_backup(method, None, args, kwargs)
-            probing = (record, token)
+            else:
+                probing = (record, token)
 
         try:
             result = getattr(self._primary, method)(*args, **kwargs)
@@ -510,16 +514,18 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
     """Bell rows from durable state, one per provider, never ``ok``.
 
     The bell only shows non-ok rows, so both "on backup" and "was on backup"
-    (the episode, kept ``RECOVERED_ROW_SECONDS``) are ``degraded``. They carry
-    different row names because BawtHub identifies a bell incident by child
-    name + status: each edge must change the non-ok child set to raise a new
-    notice. A live record wins over an episode for the same provider.
+    (the episode, kept ``RECOVERED_ROW_SECONDS``) are ``degraded``. BawtHub
+    identifies a bell incident by child ``name:status:since``; ``since`` is the
+    edge time (switch for a live record, latest recovery for an episode), so
+    every edge is a new notice and polls of unchanged state keep the same id.
+    A live record wins over an episode for the same provider.
     """
     rows: dict[str, dict[str, Any]] = {}
     for episode in sorted(store.episodes(), key=lambda e: e.provider):
         count = f"{episode.episodes} episode{'s' if episode.episodes != 1 else ''}"
         rows[episode.provider] = {
             "name": f"maintenance_fallback_recovered:{episode.provider}", "status": "degraded",
+            "since": _iso(episode.recovered_at),
             "reason": f"{episode.provider} spending limit: maintenance was on the backup model "
                       f"from {_iso(episode.first_since)} to {_iso(episode.recovered_at)} "
                       f"({count}); back on primary",
@@ -527,6 +533,7 @@ def fallback_checks(store: ExhaustionStore) -> list[dict[str, Any]]:
     for record in sorted(store.all(), key=lambda r: r.provider):
         rows[record.provider] = {
             "name": f"maintenance_fallback:{record.provider}", "status": "degraded",
+            "since": _iso(record.since),
             "reason": f"{record.provider} spending limit since {_iso(record.since)}: "
                       f"maintenance on the backup model; next primary probe after "
                       f"{_iso(record.until)}",
