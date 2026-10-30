@@ -117,6 +117,7 @@ def test_ops_profile_models_expose_and_stop_timeout_in_drift_and_create_body():
     {"expose": ["127.0.0.1:8650"]}, {"stop_grace_period": "0s"},
     {"stop_grace_period": "5.5s"}, {"privileged": True},
     {"pull_policy": "always"}, {"image": "ops:latest"},
+    {"healthcheck": {"test": ["NONE"]}},
 ])
 def test_ops_profile_refuses_unsupported_or_unpinned_config(changes):
     with pytest.raises(ComposeError):

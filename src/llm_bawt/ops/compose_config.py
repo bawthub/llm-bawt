@@ -413,6 +413,9 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
         missing = required - set(service)
         if missing:
             raise ComposeError("unsupported_compose_key", sorted(missing))
+        # The reconciler must remain health-observable through a self-recreate.
+        if isinstance(service["healthcheck"], dict) and service["healthcheck"].get("test") == ["NONE"]:
+            raise ComposeError("unsupported_compose_key", ["healthcheck.test"])
         if not isinstance(image_ref, str) or not re.fullmatch(
                 r"(?:sha256:[0-9a-f]{64}|[a-z0-9._/-]+@sha256:[0-9a-f]{64})", image_ref):
             raise ComposeError("compose_image_mismatch")
