@@ -231,8 +231,8 @@ services:
     image: redis:7-alpine
     container_name: llm-bawt-redis
     command: ["redis-server", "--maxmemory", "1gb", "--maxmemory-policy", "allkeys-lru"]
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # No host port: redis is unauthenticated and carries the agent bridge
+    # transport, so only compose-network clients (redis://redis:6379) may reach it.
     volumes:
       - redis-data:/data
     restart: unless-stopped
