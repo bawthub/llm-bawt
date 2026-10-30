@@ -224,3 +224,62 @@ def test_main_refuses_bad_snapshot(monkeypatch, tmp_path):
     assert egress.main() == 2
     monkeypatch.delenv(egress.ALLOWLIST_ENV)
     assert egress.main() == 2
+
+
+async def _loopback_proxy(upstream_handler, limits=Limits()):
+    """Real loopback sockets: an upstream server and the proxy dialing it."""
+    upstream = await asyncio.start_server(upstream_handler, "127.0.0.1", 0)
+    up_port = upstream.sockets[0].getsockname()[1]
+
+    async def opener(address, port):
+        return await asyncio.open_connection("127.0.0.1", up_port)
+
+    proxy = EgressProxy(ALLOW, limits, resolver=_resolver("8.8.8.8"), opener=opener)
+    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0, limit=limits.head_bytes)
+    return upstream, server, server.sockets[0].getsockname()[1]
+
+
+def test_client_half_close_still_gets_the_response():
+    # Codex r1 Blocker cmvvfaxtc010a0mpdkn411ese: write_eof must not cut the response.
+    async def pong(reader, writer):
+        data = await reader.read()  # until the client's EOF
+        writer.write(b"pong:" + data)
+        await writer.drain()
+        writer.close()
+
+    async def run():
+        upstream, server, port = await _loopback_proxy(pong)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"CONNECT api.example.com:443 HTTP/1.1\r\n\r\n")
+            assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+            writer.write(b"ping")
+            writer.write_eof()
+            body = await asyncio.wait_for(reader.read(), 5)
+            writer.close()
+            return body
+        finally:
+            server.close()
+            upstream.close()
+
+    assert asyncio.run(run()) == b"pong:ping"
+
+
+def test_single_oversized_header_line_gets_431():
+    # Codex r1 should-fix cmvvfaxtc010b0mpd9zy9r8qd.
+    async def never(reader, writer):
+        writer.close()
+
+    async def run():
+        upstream, server, port = await _loopback_proxy(never)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"CONNECT api.example.com:443 HTTP/1.1\r\nX: " + b"a" * 9000 + b"\r\n\r\n")
+            reply = await asyncio.wait_for(reader.read(), 5)
+            writer.close()
+            return reply
+        finally:
+            server.close()
+            upstream.close()
+
+    assert asyncio.run(run()).startswith(b"HTTP/1.1 431")

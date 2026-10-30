@@ -175,7 +175,10 @@ def parse_connect(head: bytes, allowlist: Allowlist) -> str:
 async def read_head(reader: asyncio.StreamReader, limits: Limits) -> bytes:
     head, lines = b"", 0
     while True:
-        line = await reader.readline()
+        try:
+            line = await reader.readline()
+        except (ValueError, asyncio.LimitOverrunError) as exc:  # one line beyond the stream limit
+            raise Refused(431, "head too large") from exc
         if not line:
             raise Refused(400, "incomplete head")
         head += line
@@ -230,14 +233,35 @@ class EgressProxy:
             pass
 
     async def _tunnel(self, reader, writer, up_reader, up_writer) -> None:
+        loop = asyncio.get_running_loop()
+        last = [loop.time()]  # activity in either direction keeps the tunnel alive
+
         async def pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
-            while data := await asyncio.wait_for(src.read(self.limits.chunk), self.limits.idle_timeout):
+            while True:
+                try:
+                    data = await asyncio.wait_for(src.read(self.limits.chunk), self.limits.idle_timeout)
+                except asyncio.TimeoutError:
+                    if loop.time() - last[0] >= self.limits.idle_timeout:
+                        raise
+                    continue
+                if not data:
+                    break
+                last[0] = loop.time()
                 dst.write(data)
                 await dst.drain()  # bounded buffers: backpressure, never accumulate
+            # Half-close: the peer's EOF is forwarded; the other direction keeps flowing.
+            if dst.can_write_eof():
+                dst.write_eof()
 
         tasks = [asyncio.ensure_future(pump(reader, up_writer)), asyncio.ensure_future(pump(up_reader, writer))]
         try:
-            await asyncio.wait(tasks, timeout=self.limits.lifetime, return_when=asyncio.FIRST_COMPLETED)
+            pending = set(tasks)
+            deadline = loop.time() + self.limits.lifetime
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, timeout=max(0.0, deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
+                if not done or any(t.exception() is not None for t in done if not t.cancelled()):
+                    break  # lifetime reached, or a direction failed: tear down both
         finally:
             for task in tasks:
                 task.cancel()
