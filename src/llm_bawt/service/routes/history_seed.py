@@ -42,6 +42,7 @@ def cap_seed_contents(
 def build_context_seed(
     bot_id: str, model: str | None, service, session_id: str | None = None,
     *, llm_bawt=None, history_scope: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
     """Build the context-seed payload for a fresh Claude Code SDK session.
 
@@ -73,11 +74,15 @@ def build_context_seed(
     # grok-4.5@xai-responses, a responses-only endpoint incompatible with
     # harness=chat → hard failure. TASK-620.
     if llm_bawt is None:
+        # TASK-1774: a seed is one user's history. Without the caller's user
+        # there is nothing safe to show; never fall back to DEFAULT_USER.
+        if not user_id:
+            raise ValueError("context seed requires the requesting user_id")
         model_alias, _ = service._resolve_request_model(
             model, effective_bot_id, local_mode=False
         )
         llm_bawt = service._get_llm_bawt(
-            model_alias, effective_bot_id, service.config.DEFAULT_USER
+            model_alias, effective_bot_id, user_id
         )
     else:
         # Automation already owns an isolated, owner-scoped instance. Never
@@ -309,6 +314,7 @@ def maybe_build_session_seed(
 def get_context_seed(
     bot_id: str = Query(..., description="Bot ID to build a session seed for"),
     model: str | None = Query(None, description="Optional model alias for context-window sizing"),
+    user_id: str = Query(..., min_length=1, max_length=128, description="Requesting user; the seed is that user's history (TASK-1774)"),
 ):
     """Return the context payload a chat bot would receive, for seeding a fresh
     Claude Code SDK session (TASK-445). Thin HTTP wrapper over
@@ -319,7 +325,7 @@ def get_context_seed(
     effective_bot_id = bot_id or service._default_bot
     from ...model_catalog import ModelResolutionError
     try:
-        return build_context_seed(bot_id, model, service)
+        return build_context_seed(bot_id, model, service, user_id=user_id)
     except ModelResolutionError as e:
         # Not a server fault: this bot's model can't be resolved for a seed
         # (e.g. a chat-harness bot whose model falls back to a responses-only

@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 # the context payload (chat keeps these; the plain system row is discarded by
 # both delivery modes). Keep in sync with core/base.py's inline check.
 _TOOL_RESULT_PREFIXES = ("[Tool Results]", "[Tools used:")
+
+
+def _file_safe(value: str) -> str:
+    """Filename-safe form of a user id (TASK-1774 per-user history files)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
 
 
 def _is_tool_result_system(msg) -> bool:
@@ -168,8 +174,11 @@ class HistoryManager:
             dir_name = os.path.dirname(base_path)
             file_name = os.path.basename(base_path)
             name, ext = os.path.splitext(file_name)
-            # Create bot-specific filename: history.json -> history_spark.json
-            self.history_file = os.path.join(dir_name, f"{name}_{bot_id}{ext}")
+            # Create bot-specific filename: history.json -> history_spark.json.
+            # TASK-1774: with a user, one file per (bot, user):
+            # history_spark__alice.json, so users never share a file.
+            owner = f"{bot_id}__{_file_safe(user_id)}" if user_id else bot_id
+            self.history_file = os.path.join(dir_name, f"{name}_{owner}{ext}")
         else:
             self.history_file = None
             
@@ -245,9 +254,15 @@ class HistoryManager:
                 logger.debug(f"Loaded {len(self.messages)} messages from PostgreSQL short-term memory")
                 return
             except Exception as e:
-                logger.warning(f"Failed to load from PostgreSQL, falling back to file: {e}")
-                # Fall through to file-based loading
-        
+                # TASK-1774: no file fallback. A DB-backed bot's history lives
+                # only in its user-scoped partition reads; a file is not.
+                logger.warning(
+                    "History load failed for bot=%s user=%s; context has no "
+                    "history: %s", self.bot_id, self.user_id, e,
+                )
+                self.messages = []
+                return
+
         # File-based fallback
         if not self.history_file or not os.path.exists(self.history_file):
             print("No history file found. Skipping history load.")
