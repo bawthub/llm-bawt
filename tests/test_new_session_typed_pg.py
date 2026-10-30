@@ -151,3 +151,68 @@ def test_explicit_archived_thread_command_has_no_reset_receipt_intent(rig):
     deliveries, record = _admit(rig, explicit=True)
     assert "new_session_intent" not in record.metadata
     assert NewSessionReceipt.typed_intent(record) is None
+
+
+def _codex_seeded_finish(rig, *, count: int = 45):
+    """Bare /new on Codex: the bridge restores a bound seed into a minted thread."""
+    deliveries, record = _admit(rig)
+    claim, payload, new_id, _event = _finish_bridge(rig, deliveries, record)
+    digest = f"seed-digest-{count}"
+    assert deliveries.bind_new_session_seed(claim.id, {"count": count, "payload_digest": digest})
+    with rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE sessions SET session_metadata=jsonb_set(session_metadata,
+                '{agent_session_keys}', '{"codex": "codex-thread"}'::jsonb) WHERE id=:id
+        """), {"id": new_id})
+    event = SimpleNamespace(
+        run_id=payload["inter_bot_bridge_request_id"], provider="codex",
+        trigger_message_id=claim.user_message_id,
+        raw={"new_session_ack": {"thread_session_id": new_id, "clean_start": False,
+                                 "provider_session_id": "codex-thread",
+                                 "seed_digest": digest, "seeded_count": count}},
+    )
+    assert NewSessionReceipt.record_provider_ack(
+        rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
+    )
+    return deliveries, record, claim, payload, new_id
+
+
+def test_seeded_codex_bare_new_commits_receipt(rig):
+    """TASK-1787: a seed-bound Codex thread is reset proof, not a failure."""
+    deliveries, record, claim, payload, new_id = _codex_seeded_finish(rig)
+    delivered = deliveries.mark_delivered(claim.id, claim.claim_token,
+                                          response_model="fixture", response_chars=12)
+    dispatcher = _dispatcher(deliveries)
+    asyncio.run(dispatcher._finish_delivered(delivered))
+    assert dispatcher._emit.await_args.args[0].status == "DELIVERED"
+    receipt = deliveries.get(record.id).metadata["new_session_receipt"]
+    assert receipt["new_session_id"] == new_id
+    assert receipt["provider_session_id"] == "codex-thread"
+    assert receipt["message_id"] == payload["assistant_message_id"]
+
+
+@pytest.mark.parametrize("damage", ["digest", "count", "unbound_key"])
+def test_seeded_codex_bare_new_without_exact_seed_evidence_fails_closed(rig, damage):
+    """The Codex provider key counts only with the exact bound seed and binding."""
+    deliveries, record, claim, _payload, new_id = _codex_seeded_finish(rig)
+    with rig.engine.begin() as conn:
+        if damage == "unbound_key":
+            conn.execute(text("""
+                UPDATE sessions SET session_metadata=session_metadata - 'agent_session_keys'
+                WHERE id=:id
+            """), {"id": new_id})
+        else:
+            path = "{new_session_seed,payload_digest}" if damage == "digest" else "{new_session_seed,count}"
+            value = '"other-digest"' if damage == "digest" else "0"
+            conn.execute(text(f"""
+                UPDATE inter_bot_deliveries
+                SET metadata_json=jsonb_set(metadata_json, '{path}', '{value}'::jsonb)
+                WHERE id=:id
+            """), {"id": record.id})
+    delivered = deliveries.mark_delivered(claim.id, claim.claim_token,
+                                          response_model="fixture", response_chars=12)
+    dispatcher = _dispatcher(deliveries)
+    asyncio.run(dispatcher._finish_delivered(delivered))
+    failed = deliveries.get(record.id)
+    assert failed.status == "FAILED"
+    assert "new_session_receipt" not in failed.metadata

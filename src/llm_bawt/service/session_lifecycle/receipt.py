@@ -285,7 +285,18 @@ class NewSessionReceipt:
                 bound_key = (session["session_metadata"] or {}).get(
                     "agent_session_keys", {}).get(provider.replace("-", "_"))
                 if provider_key:
-                    if (provider == "codex" and intent.follow_up is None) or bound_key != provider_key:
+                    # Bare Codex /new mints a thread only to restore a seed
+                    # (TASK-1579); that key is proof only when the ack names
+                    # the exact non-empty seed this delivery bound (TASK-1787).
+                    seed = metadata.get("new_session_seed")
+                    seeded = (isinstance(seed, dict) and type(seed.get("count")) is int
+                              and seed["count"] > 0
+                              and isinstance(seed.get("payload_digest"), str)
+                              and bool(seed["payload_digest"])
+                              and ack.get("seed_digest") == seed["payload_digest"]
+                              and ack.get("seeded_count") == seed["count"])
+                    if ((provider == "codex" and intent.follow_up is None and not seeded)
+                            or bound_key != provider_key):
                         return None
                 elif ack.get("clean_start") is not True or bound_key:
                     # A clean reset defers provider minting until the next turn;
