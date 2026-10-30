@@ -1,5 +1,5 @@
 import os
-import re
+from urllib.parse import quote
 import json
 import time
 import logging
@@ -26,8 +26,12 @@ _TOOL_RESULT_PREFIXES = ("[Tool Results]", "[Tools used:")
 
 
 def _file_safe(value: str) -> str:
-    """Filename-safe form of a user id (TASK-1774 per-user history files)."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    """Filename-safe, injective form of a user id (TASK-1774 per-user files).
+
+    Percent-encoding with no safe characters: distinct ids never share a
+    file ('a@b' -> 'a%40b', 'a_b' -> 'a_b') and '/' can't leave the dir.
+    """
+    return quote(value, safe="")
 
 
 def _is_tool_result_system(msg) -> bool:

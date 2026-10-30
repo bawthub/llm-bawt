@@ -63,9 +63,31 @@ def test_file_mode_keeps_one_file_per_user(tmp_path) -> None:
     assert [m.content for m in alice_again.messages] == ["alice secret"]
 
 
-def test_file_name_cannot_escape_the_history_dir(tmp_path) -> None:
-    m = _manager(tmp_path, "../../etc/x")
-    assert str(tmp_path) == str(__import__("pathlib").Path(m.history_file).parent)
+@pytest.mark.parametrize("first,second", [("a@b", "a_b"), ("a/b", "a_b"), ("a%40b", "a@b")])
+def test_distinct_users_never_share_a_file(tmp_path, first, second) -> None:
+    owner = _manager(tmp_path, first)
+    owner.messages = [Message(role="user", content="first secret", timestamp=1.0)]
+    owner.save_history()
+
+    other = _manager(tmp_path, second)
+    assert other.history_file != owner.history_file
+    other.load_history()
+    assert other.messages == []
+
+
+@pytest.mark.parametrize("user", ["../../etc/x", "..", "a/../../b", "x\x00y", "/abs"])
+def test_file_name_cannot_escape_the_history_dir(tmp_path, user) -> None:
+    from pathlib import Path
+
+    m = _manager(tmp_path, user)
+    path = Path(m.history_file)
+    assert path.parent == tmp_path
+    assert "\x00" not in path.name and "/" not in path.name
+
+
+@pytest.mark.parametrize("user", ["nick", "alice-2", "voicetest_loopy", "a.b"])
+def test_plain_ids_keep_a_readable_name(tmp_path, user) -> None:
+    assert _manager(tmp_path, user).history_file.endswith(f"history_dash__{user}.json")
 
 
 class _Stop(Exception):
