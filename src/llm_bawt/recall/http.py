@@ -15,7 +15,9 @@ class BoundedHTTP:
         self.remaining_bytes = max_bytes
         self.calls = 0
 
-    async def json(self, method: str, url: str, *, byte_limit: int = 65_536, **kwargs):
+    async def json(self, method: str, url: str, *, byte_limit: int = 65_536,
+                   status_codes: dict[int, str] | None = None, **kwargs):
+        """``status_codes`` maps an HTTP error status to the caller's own error code."""
         if self.calls >= self.max_calls or self.remaining_bytes <= 0:
             raise RecallError("retrieval_budget")
         self.calls += 1
@@ -27,7 +29,7 @@ class BoundedHTTP:
                 if response.status_code == 429:
                     raise RecallError("busy")
                 if response.status_code >= 400:
-                    raise RecallError("source_unavailable")
+                    raise RecallError((status_codes or {}).get(response.status_code, "source_unavailable"))
                 async for chunk in response.aiter_bytes(chunk_size=4096):
                     self.remaining_bytes -= len(chunk)
                     if len(chunks) + len(chunk) > byte_limit or self.remaining_bytes < 0:

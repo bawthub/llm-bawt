@@ -65,18 +65,56 @@ def test_bounded_provider_errors_do_not_echo_source_text(utility, error, status,
     assert "secret history" not in caplog.text
 
 
-@pytest.mark.parametrize("window,output_cap", [(512, 1600), (8192, 99), (None, 1600), (8192, None)])
-def test_bounded_utility_checks_resolved_model_budget_before_query(utility, window, output_cap):
+@pytest.mark.parametrize("window,output_cap,status", [(512, 1600, 413), (8192, 99, 413),
+                                                      (None, 1600, 503), (8192, None, 503)])
+def test_bounded_utility_checks_resolved_model_budget_before_query(utility, window, output_cap, status):
     service, client, _ = utility
     service.config.get_model_context_window.return_value = window
     service.config.get_model_max_tokens.return_value = output_cap
     with pytest.raises(HTTPException) as caught:
         llm.complete_utility(RawCompletionRequest(prompt="evidence", system="extract", max_tokens=400),
                              timeout_seconds=20)
-    assert caught.value.status_code == 422
+    # TASK-1795: too large is the caller's (413); an unreadable budget is the server's (503).
+    assert caught.value.status_code == status
     client.query_bounded.assert_not_called()
     service.config.get_model_context_window.assert_called_once_with("configured-maintenance")
     service.config.get_model_max_tokens.assert_called_once_with("configured-maintenance")
+
+
+class _AmbiguousBareKey(Exception):
+    pass
+
+
+def test_budget_reads_the_endpoint_ref_not_the_ambiguous_bare_key(utility):
+    """TASK-1795: one model on two access paths made the bare key ambiguous."""
+    service, client, resolver = utility
+    resolver.return_value = "shared-model@first-path"
+    service._get_background_client.return_value = (client, "shared-model")
+
+    def by_ref(name):
+        if name == "shared-model":
+            raise _AmbiguousBareKey(name)
+        return {"shared-model@first-path": 8192}[name]
+
+    service.config.get_model_context_window.side_effect = by_ref
+    service.config.get_model_max_tokens.side_effect = lambda name: by_ref(name) and 1600
+    result = llm.complete_utility(RawCompletionRequest(prompt="evidence", system="extract", max_tokens=400),
+                                  timeout_seconds=20)
+    assert result.content == '{"findings":[]}'
+    service.config.get_model_context_window.assert_called_once_with("shared-model@first-path")
+
+
+def test_unreadable_budget_is_recorded_in_maintenance_health(utility, monkeypatch):
+    service, client, _ = utility
+    service.config.get_model_context_window.side_effect = _AmbiguousBareKey("x")
+    health = MagicMock()
+    monkeypatch.setattr("llm_bawt.service.maintenance_health.maintenance_health", lambda: health)
+    with pytest.raises(HTTPException) as caught:
+        llm.complete_utility(RawCompletionRequest(prompt="evidence", system="extract"), timeout_seconds=20)
+    assert (caught.value.status_code, caught.value.detail) == (503, "recall_model_budget_unavailable")
+    client.query_bounded.assert_not_called()
+    job, error_class = health.record_failure.call_args.args[:2]
+    assert (job, error_class) == ("recall_completion", "budget_unavailable")
 
 
 def _client(cls, handler):
@@ -180,6 +218,42 @@ def test_empty_or_incompatible_model_output_is_typed_failure(api, utility, outpu
     assert response.status_code == 502
     assert response.json() == {"detail": "recall_completion_unavailable"}
     client.query.assert_not_called()
+
+
+@pytest.mark.parametrize("raised,status,detail", [
+    (HTTPException(status_code=422, detail="x"), 503, "recall_completion_unavailable"),
+    (HTTPException(status_code=503, detail="x"), 503, "recall_completion_unavailable"),
+    (HTTPException(status_code=413, detail="x"), 413, "recall_input_too_large"),
+    (HTTPException(status_code=502, detail="x"), 502, "recall_completion_unavailable"),
+])
+def test_route_reports_server_faults_as_server_errors(api, monkeypatch, raised, status, detail):
+    """TASK-1795: a server-side 422 read as the caller's bad request."""
+    def fail(*args, **kwargs):
+        raise raised
+
+    monkeypatch.setattr(module, "complete_utility", fail)
+    response = api.post("/v1/llm/recall-complete", json={"prompt": "evidence", "system": "extract"})
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [(413, "input_budget"), (422, "invalid_request"),
+                                         (429, "busy"), (504, "timeout"),
+                                         (503, "model_unavailable"), (502, "model_unavailable")])
+async def test_synthesizer_maps_route_status_to_recall_error_code(monkeypatch, status, code):
+    from llm_bawt.recall.completion import UtilitySynthesizer
+    from llm_bawt.recall.contracts import Evidence, RecallError
+
+    async def transport(request):
+        return httpx.Response(status, json={"detail": "x"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(transport), **kwargs))
+    with pytest.raises(RecallError) as caught:
+        await UtilitySynthesizer("https://test.invalid").synthesize(
+            "system", "query", [Evidence("messages", "m1", "b", "u", "text")], 100)
+    assert caught.value.code == code
 
 
 @pytest.mark.asyncio

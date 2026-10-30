@@ -100,7 +100,11 @@ class RecallCompletionRunner:
             status = 429 if exc.code == "busy" else 503
             raise HTTPException(status_code=status, detail="recall_completion_unavailable") from None
         except HTTPException as exc:
-            status = exc.status_code if exc.status_code in {422, 502, 503} else 502
+            # Only the caller's own input is the caller's fault (413). Any other
+            # failure is the server's: a 4xx here would read as a bad request.
+            if exc.status_code == 413:
+                raise HTTPException(status_code=413, detail="recall_input_too_large") from None
+            status = 503 if exc.status_code in {422, 503} else 502
             raise HTTPException(status_code=status, detail="recall_completion_unavailable") from None
         except Exception:
             raise HTTPException(status_code=502, detail="recall_completion_unavailable") from None

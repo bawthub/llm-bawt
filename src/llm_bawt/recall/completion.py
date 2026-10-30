@@ -19,6 +19,11 @@ def input_tokens(system: str, query: str, evidence: list[Evidence]) -> int:
     return tokens(system) + tokens(synthesis_prompt(query, evidence))
 
 
+# The recall-complete route's caller-side failures; any other status is the model's.
+_ROUTE_ERRORS = {413: "input_budget", 422: "invalid_request"}
+_PASSED_THROUGH = frozenset({"timeout", "busy", *_ROUTE_ERRORS.values()})
+
+
 class UtilitySynthesizer(Synthesizer):
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
@@ -36,9 +41,10 @@ class UtilitySynthesizer(Synthesizer):
             reader = BoundedHTTP(client, max_calls=1, max_bytes=MAX_MODEL_BYTES)
             try:
                 result = await reader.json("POST", f"{self.base_url}/v1/llm/recall-complete",
-                                           byte_limit=MAX_MODEL_BYTES, json=body)
+                                           byte_limit=MAX_MODEL_BYTES, json=body,
+                                           status_codes=_ROUTE_ERRORS)
             except RecallError as error:
-                code = error.code if error.code in {"timeout", "busy"} else "model_unavailable"
+                code = error.code if error.code in _PASSED_THROUGH else "model_unavailable"
                 raise RecallError(code) from error
         if not isinstance(result, dict) or not isinstance(result.get("content"), str):
             raise RecallError("invalid_synthesis")

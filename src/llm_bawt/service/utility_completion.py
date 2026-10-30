@@ -12,24 +12,36 @@ from .schemas import RawCompletionRequest, RawCompletionResponse
 log = get_service_logger(__name__)
 
 
-def validate_model_budget(request: RawCompletionRequest, config, model_alias: str) -> None:
+class BudgetUnavailable(Exception):
+    """The catalog can't give a usable context window/output cap for the model."""
+
+
+def validate_model_budget(request: RawCompletionRequest, config, model_ref: str) -> None:
     """Catalog-driven preflight with conservative provider-framing headroom.
 
+    ``model_ref`` is the ref the client was resolved from, never the bare model
+    key: one model on two access paths makes the bare key ambiguous (TASK-1795).
     o200k is an estimate for non-OpenAI models, not their exact tokenizer.
     Provider rejection is terminal, never a retry with a larger budget.
+
+    Raises :class:`BudgetUnavailable` when the budget can't be read and
+    HTTP 413 when the request doesn't fit it.
     """
     from ..recall.budgets import tokens
 
     try:
-        window = config.get_model_context_window(model_alias)
-        output_cap = config.get_model_max_tokens(model_alias)
-        if type(window) is not int or window <= 0 or type(output_cap) is not int or output_cap <= 0:
-            raise ValueError("missing model budget")
+        window = config.get_model_context_window(model_ref)
+        output_cap = config.get_model_max_tokens(model_ref)
+    except Exception as error:
+        raise BudgetUnavailable(type(error).__name__) from None
+    if type(window) is not int or window <= 0 or type(output_cap) is not int or output_cap <= 0:
+        raise BudgetUnavailable("missing model budget")
+    try:
         needed = tokens(request.system or "") + tokens(request.prompt) + request.max_tokens + 256
-        if needed > window or request.max_tokens > output_cap:
-            raise ValueError("model budget exceeded")
     except Exception:
-        raise HTTPException(status_code=422, detail="recall_model_budget_unavailable") from None
+        raise HTTPException(status_code=503, detail="recall_tokenizer_unavailable") from None
+    if needed > window or request.max_tokens > output_cap:
+        raise HTTPException(status_code=413, detail="recall_input_too_large")
 
 
 def complete_utility(
@@ -58,7 +70,15 @@ def complete_utility(
     if client is None or model_alias is None:
         raise HTTPException(status_code=422, detail="Configured model has no direct API client")
     if timeout_seconds is not None:
-        validate_model_budget(request, service.config, model_alias)
+        try:
+            validate_model_budget(request, service.config, requested_model)
+        except BudgetUnavailable as error:
+            # A configuration fault, not a bad request: fail visibly (TASK-1795).
+            from .maintenance_health import maintenance_health
+            maintenance_health().record_failure(
+                job, "budget_unavailable", f"no model budget for {requested_model}: {error}",
+                model=requested_model, provider=None, credential=None)
+            raise HTTPException(status_code=503, detail="recall_model_budget_unavailable") from None
 
     try:
         start = time.perf_counter()
