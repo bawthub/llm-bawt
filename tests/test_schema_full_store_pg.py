@@ -10,111 +10,22 @@ import hashlib
 import json
 import os
 import runpy
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
-from tests.pg_isolation import require_test_db_config
-from tests.private_postgres import PORT, private_url
+from tests.full_store_fixture import full_store_db  # noqa: F401  (pytest fixture)
 
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def full_store_db(private_pg, monkeypatch):
-    from llm_bawt.utils import db
-
-    name = f"schema_full_{uuid.uuid4().hex[:12]}_test"
-    admin = create_engine(private_url(private_pg, "postgres"), isolation_level="AUTOCOMMIT")
-    with admin.connect() as conn:
-        assert conn.execute(text("SELECT current_database()")).scalar_one() == "postgres"
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
-    url = private_url(private_pg, name)
-    monkeypatch.setattr(db, "build_postgres_url", lambda config: url)
-    monkeypatch.setenv("LLM_BAWT_POSTGRES_HOST", str(private_pg))
-    monkeypatch.setenv("LLM_BAWT_POSTGRES_PORT", PORT)
-    monkeypatch.setenv("LLM_BAWT_POSTGRES_USER", "test_user")
-    monkeypatch.setenv("LLM_BAWT_POSTGRES_DATABASE", name)
-    monkeypatch.setenv("LLM_BAWT_POSTGRES_PASSWORD", uuid.uuid4().hex)
-    engine = create_engine(url)
-    try:
-        config = require_test_db_config()
-        assert config.POSTGRES_DATABASE == engine.url.database == name
-        with engine.connect() as conn:
-            assert conn.execute(text("SELECT current_database()")).scalar_one() == name
-        yield config, engine
-    finally:
-        engine.dispose()
-        db.reset_shared_engines()
-        with admin.connect() as conn:
-            conn.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
-        admin.dispose()
-
-
 def test_pristine_full_store_catalog(full_store_db, tmp_path):
-    from agent_bridge.store import create_agent_event_tables
-    from llm_bawt.approval_policy_store import ToolApprovalPolicyStore
-    from llm_bawt.integrations.google_home_oauth import ProbeOAuthStore, ProbeSettings
-    from llm_bawt.integrations.google_home_probe_store import ProbeCaptureStore
-    from llm_bawt.integrations.home_audio_store import HomeAudioStore
-    from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
-    from llm_bawt.media.assets import MediaAssetStore
-    from llm_bawt.media.db import MediaGenerationStore
-    from llm_bawt.media.gpu_handoff_store import GpuHandoffStore
-    from llm_bawt.memory.model_catalog_migration import migrate_model_catalog
-    from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
-    from llm_bawt.ops.release_store import ReleaseStore
-    from llm_bawt.ops.store import OpsStore
-    from llm_bawt.profiles import ProfileManager
-    from llm_bawt.prompt_registry import PromptTemplateStore
-    from llm_bawt.runtime_settings import BotProfileStore, RuntimeSettingsStore
-    from llm_bawt.service.chat_pending_questions import PendingQuestionStore
-    from llm_bawt.service.scheduler import create_scheduler_tables
-    from llm_bawt.service.talk_reply_outbox import TalkReplyOutbox
-    from llm_bawt.service.turn_logs import TurnLogStore
+    from llm_bawt.schema_bootstrap import bootstrap_full_store
 
     config, engine = full_store_db
-    manifest = []
-
-    def bootstrap(label, action):
-        action()
-        manifest.append(label)
-
-    # Dependencies matter: memory installs sessions and the two fresh FKs;
-    # model migration needs bot_profiles and creates the referenced catalog.
-    bootstrap("memory.postgresql:PostgreSQLMemoryBackend", lambda: PostgreSQLMemoryBackend(config, bot_id="schema_full_fixture"))
-    bootstrap("runtime_settings:BotProfileStore", lambda: BotProfileStore(config))
-    bootstrap("memory.model_catalog_migration:migrate_model_catalog", lambda: migrate_model_catalog(engine))
-    bootstrap("runtime_settings:RuntimeSettingsStore", lambda: RuntimeSettingsStore(config))
-    bootstrap("profiles:ProfileManager", lambda: ProfileManager(config))
-    bootstrap("prompt_registry:PromptTemplateStore", lambda: PromptTemplateStore(config))
-    bootstrap("approval_policy_store:ToolApprovalPolicyStore", lambda: ToolApprovalPolicyStore(config, engine=engine))
-    bootstrap("service.turn_logs:TurnLogStore", lambda: TurnLogStore(config))
-    bootstrap("service.chat_pending_questions:PendingQuestionStore", lambda: PendingQuestionStore(config))
-    bootstrap("service.scheduler:create_scheduler_tables", lambda: create_scheduler_tables(engine))
-    bootstrap("inter_bot_delivery:InterBotDeliveryStore", lambda: InterBotDeliveryStore(config))
-    bootstrap("service.talk_reply_outbox:TalkReplyOutbox", lambda: TalkReplyOutbox(engine))
-    bootstrap("media.db:MediaGenerationStore", lambda: MediaGenerationStore(config))
-    bootstrap("media.assets:MediaAssetStore", lambda: MediaAssetStore(config))
-    bootstrap("media.gpu_handoff_store:GpuHandoffStore", lambda: GpuHandoffStore(engine))
-    bootstrap("integrations.home_audio_store:HomeAudioStore", lambda: HomeAudioStore(engine))
-    bootstrap("integrations.google_home_probe_store:ProbeCaptureStore", lambda: ProbeCaptureStore(engine))
-    bootstrap("integrations.google_home_oauth:ProbeOAuthStore", lambda: ProbeOAuthStore(engine, ProbeSettings()))
-    bootstrap("ops.store:OpsStore", lambda: OpsStore(config, engine=engine))
-    bootstrap("ops.release_store:ReleaseStore", lambda: ReleaseStore(config, engine=engine))
-    bootstrap("agent_bridge.store:create_agent_event_tables", lambda: create_agent_event_tables(engine))
-
-    # Memory constructor provisions exactly one three-partition synthetic bot.
-    # Remove only those test-owned empty children, with RESTRICT; the reference
-    # consists of shared source schema, not fixture-created runtime partitions.
-    with engine.begin() as conn:
-        for parent in ("messages", "memories", "forgotten_messages"):
-            child = f"{parent}_p_schema_full_fixture"
-            assert conn.execute(text(f"SELECT count(*) FROM ONLY public.{child}")).scalar_one() == 0
-            conn.execute(text(f"DROP TABLE public.{child} RESTRICT"))
+    manifest = bootstrap_full_store(config, engine)
 
     catalog_tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/schema_catalog.py"))
     lines, metadata = catalog_tool["capture_test"](config.POSTGRES_DATABASE)
