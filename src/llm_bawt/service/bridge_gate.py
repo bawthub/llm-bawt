@@ -355,3 +355,9 @@ def bridge_gates() -> BridgeGates:
 def check(request: Request, gate: Gate) -> Outcome:
     """Route guard: refuse (401) a request this gate must not let through."""
     return _GATES.check(gate, request.headers.get(HEADER))
+
+
+def reject_bridge_token_for_preview(request: Request) -> None:
+    """A broad production bridge grant must never authenticate a Preview request."""
+    if request.headers.get(HEADER) is not None:
+        raise HTTPException(status_code=403, detail="Preview broker does not accept bridge tokens")

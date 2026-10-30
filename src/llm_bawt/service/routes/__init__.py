@@ -25,6 +25,7 @@ from .nextcloud_setup import router as nextcloud_setup_router
 from .prompts import router as prompts_router
 from .profiles import router as profiles_router
 from .providers import router as providers_router
+from ..preview_credential import router as preview_credential_router
 from .integrations import router as integrations_router
 from .settings import router as settings_router
 from .setup import router as setup_router
@@ -78,6 +79,7 @@ all_routers = [
     memory_router,
     prompts_router,
     providers_router,
+    preview_credential_router,
     nextcloud_setup_router,  # Specific setup routes precede generic integration paths.
     integrations_router,
     settings_router,
