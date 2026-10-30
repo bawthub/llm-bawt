@@ -476,3 +476,18 @@ def test_worker_modules_import_standalone_with_the_standard_library_only(tmp_pat
     proc = subprocess.run([sys.executable, "-I", "-c", code, str(ops)], capture_output=True, text=True,
                           check=False, timeout=60)
     assert proc.returncode == 0, proc.stderr[-2000:]
+
+
+# ── TASK-1831: a Compose-only plan (the guarded tagged reconcile) ───────────
+
+def test_a_compose_only_plan_binds_the_compose_file_and_the_whole_tree(repo, tmp_path):
+    from llm_bawt.ops.source_state import compose_source_plan
+    only = compose_source_plan({"project_dir": str(repo), "compose_files": [f"{repo}/docker-compose.yml"]})
+    assert only == {"paths": [], "compose_files": ["docker-compose.yml"], "bytecode_ok": True}
+    (repo / "notes.txt").write_text("scratch\n")  # untracked elsewhere: not its concern
+    assert check(repo, tmp_path, **only)[0] == git(repo, "rev-parse", "HEAD").strip()
+    (repo / "docker-compose.yml").write_text("services: {redis: {}}\n")
+    assert refused(repo, tmp_path, **only).code == "source_dirty"
+    git(repo, "checkout", "--", "docker-compose.yml")
+    (repo / "src" / "pkg" / "module.py").write_text("VALUE = 2\n")  # any tracked change, as for the app
+    assert refused(repo, tmp_path, **only).code == "source_dirty"

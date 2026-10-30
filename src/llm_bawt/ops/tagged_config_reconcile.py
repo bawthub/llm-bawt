@@ -15,22 +15,40 @@ neither the frontend kind (digest-pinned, verified release) nor the app kind
   HEALTHCHECK is inherited through the clone;
 * checks ``depends_on`` as a precondition and verifies the target's own
   in-container health URL, as the app kind does (:class:`ServiceConfigReconciler`).
+
+TASK-1831 (redis: no HTTP endpoint, shared infrastructure) adds two optional
+spec parts:
+
+* ``health_probe: {"type": "docker_health"}`` in place of the health URL
+  triple: the target's own Docker healthcheck is the probe, run by the
+  image-deploy machinery (:mod:`health_probe`), never a second check;
+* ``source_repository``/``source_branch``: the Compose source guard. The
+  rendered Compose files come from the checkout, so a guarded row binds them to
+  one commit (:func:`source_state.compose_source_plan`, the sealed git check
+  the app kind runs, scoped to the Compose files and a clean tree) that the app
+  proves is the published branch head, and re-checks before the swap.
 """
 from __future__ import annotations
 
 import re
 
 if __package__:
-    from .app_config_reconcile import (HEALTH_PATTERNS, ServiceConfigReconciler, validate_health_value,
+    from .app_config_reconcile import (HEALTH_PATTERNS, SourceGuardedReconciler, validate_health_value,
                                        validate_label_compose_config)
+    from .health_probe import DOCKER_HEALTH, validate_health_probe
+    from .source_state import (compose_source_plan, source_commit, valid_source_commit,
+                               validate_compose_source_spec)
     from .compose_config import PINNED_PROCESS_PROFILE, evaluate, port_list
     from .compose_render import SAFE_PATH, label_files_valid
     from .config_reconcile import (CONTAINER_NAME_PATTERN, check_compose_identity, current_config_hash,
                                    valid_hashes, validate_target_fields)
     from .service_identity import SPEC_PATTERNS
 else:  # standalone immutable worker
-    from app_config_reconcile import (HEALTH_PATTERNS, ServiceConfigReconciler, validate_health_value,
+    from app_config_reconcile import (HEALTH_PATTERNS, SourceGuardedReconciler, validate_health_value,
                                       validate_label_compose_config)
+    from health_probe import DOCKER_HEALTH, validate_health_probe
+    from source_state import (compose_source_plan, source_commit, valid_source_commit,
+                              validate_compose_source_spec)
     from compose_config import PINNED_PROCESS_PROFILE, evaluate, port_list
     from compose_render import SAFE_PATH, label_files_valid
     from config_reconcile import (CONTAINER_NAME_PATTERN, check_compose_identity, current_config_hash,
@@ -38,6 +56,10 @@ else:  # standalone immutable worker
     from service_identity import SPEC_PATTERNS
 
 ACTION = "reconcile_tagged_config"
+# TASK-1831: a worker that runs a docker_health probe or the Compose source
+# guard on this kind. Required only by a spec that uses either, so dispatch
+# refuses before an older worker would refuse the spec shape mid-job.
+TAGGED_GUARD_LABEL = "llm-bawt.ops.tagged-guard"
 SCHEMA = "llm-bawt.ops.tagged-config-reconcile/v1"
 # An explicit tag, never a digest: ``[registry[:port]/]repository:tag``.
 IMAGE_TAG_PATTERN = (r"(?:[a-z0-9.-]+(?::[0-9]{1,5})?/)?[a-z0-9][a-z0-9._/-]{0,127}"
@@ -45,36 +67,66 @@ IMAGE_TAG_PATTERN = (r"(?:[a-z0-9.-]+(?::[0-9]{1,5})?/)?[a-z0-9][a-z0-9._/-]{0,1
 _PATTERNS = {
     "container_name": CONTAINER_NAME_PATTERN,
     **SPEC_PATTERNS,
-    **HEALTH_PATTERNS,
     "image_tag": IMAGE_TAG_PATTERN,
 }
-_SPEC_KEYS = frozenset({"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
-                        "health_timeout_seconds", "health_value", *_PATTERNS})
+_BASE_KEYS = frozenset({"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
+                        "health_timeout_seconds", *_PATTERNS})
+# Exactly one health part: the in-container URL triple or a docker_health probe.
+_URL_HEALTH_KEYS = frozenset({"health_value", *HEALTH_PATTERNS})
+_PROBE_HEALTH_KEYS = frozenset({"health_probe"})
+_GUARD_KEYS = frozenset({"source_repository", "source_branch"})
 _BINDING_KEYS = frozenset({"container_id", "image_id", "image_ref", "image_tag", "image_tag_moved", "source",
                            "current_config_hash", "desired_hash", "rendered_hash", "drift", "mounts", "tmpfs",
-                           "ports", "depends_on", "display"})
+                           "ports", "depends_on", "display", "source_commit"})
+
+
+def needs_tagged_guard_worker(spec: dict) -> bool:
+    """Whether a (validated) tagged spec uses a TASK-1831 part."""
+    return "health_probe" in spec or source_guarded(spec)
+
+
+def source_guarded(spec: dict) -> bool:
+    """Whether a (validated) tagged spec carries the Compose source guard."""
+    return "source_repository" in spec
 
 
 def validate_tagged_spec(spec: dict) -> dict:
-    if not isinstance(spec, dict) or set(spec) != _SPEC_KEYS:
+    if not isinstance(spec, dict):
+        raise ValueError("tagged config reconcile spec has missing or unsupported fields")
+    extra = set(spec) - _BASE_KEYS
+    guard = extra & _GUARD_KEYS
+    if (not _BASE_KEYS <= set(spec) or guard not in (set(), _GUARD_KEYS)
+            or extra - guard not in (_URL_HEALTH_KEYS, _PROBE_HEALTH_KEYS)):
         raise ValueError("tagged config reconcile spec has missing or unsupported fields")
     if spec["action"] != ACTION:
         raise ValueError("not a tagged config reconcile spec")
-    validate_target_fields(spec, _PATTERNS)
+    validate_target_fields(spec, {**_PATTERNS, **({} if "health_probe" in spec else HEALTH_PATTERNS)})
     if "/." in spec["image_tag"] or "//" in spec["image_tag"]:
         raise ValueError("config reconcile spec image_tag is invalid")
-    validate_health_value(spec)
+    if "health_probe" in spec:
+        # A tagged image carries no release identity for an HTTP probe to echo.
+        if validate_health_probe(spec["health_probe"])["type"] != DOCKER_HEALTH:
+            raise ValueError("a tagged config reconcile health_probe must be docker_health")
+    else:
+        validate_health_value(spec)
+    if guard:
+        validate_compose_source_spec(spec)
     validate_label_compose_config(spec)
     return spec
 
 
-def tagged_config_binding(spec: dict, container: dict, image: dict, renderer, *, tag_moved) -> tuple[dict, dict]:
+def tagged_config_binding(spec: dict, container: dict, image: dict, renderer, *, tag_moved,
+                          source_checker=None) -> tuple[dict, dict]:
     """``(public approval binding, private desired config)``; raises ValueError.
 
     ``tag_moved(tag) -> bool`` is resolved by the caller: the app inspects the
     tag at approval; the worker carries the approved value forward and never
-    resolves it."""
+    resolves it. A guarded spec requires ``source_checker``, which proves the
+    Compose files and tree are exactly one commit; whether that commit is
+    published is the app's check, made against ``source_commit``."""
     validate_tagged_spec(spec)
+    if source_guarded(spec) and source_checker is None:
+        raise ValueError("a source-guarded tagged reconcile needs the source check")
     check_compose_identity(spec, container)
     tag = spec["image_tag"]
     ref = container["Config"].get("Image", "")
@@ -90,7 +142,10 @@ def tagged_config_binding(spec: dict, container: dict, image: dict, renderer, *,
                "drift": result["drift"], "mounts": result["mounts"],
                "tmpfs": sorted(desired.get("tmpfs", {})), "ports": port_list(desired["ports"]),
                "depends_on": [f"{name}:{cond}" for name, cond in desired["depends_on"].items()],
-               "display": result["display"]}
+               "display": result["display"], "source_commit": None}
+    if source_guarded(spec):
+        head = source_checker.check(result["source"]["project_dir"], compose_source_plan(result["source"]))
+        binding["source_commit"] = source_commit(spec, head)
     return binding, desired
 
 
@@ -111,7 +166,9 @@ def valid_tagged_binding(snapshot: dict) -> bool:
                 and label_files_valid(source["project_dir"], source["compose_files"])
                 and all(isinstance(x, str) for x in lists)
                 and all(re.fullmatch(r"/[^\s]*", x) for x in binding["tmpfs"])
-                and set(binding["display"]) == set(spec["display_values"]))
+                and set(binding["display"]) == set(spec["display_values"])
+                and (valid_source_commit(spec, binding["source_commit"]) if source_guarded(spec)
+                     else binding["source_commit"] is None))
     except (TypeError, ValueError, KeyError, AttributeError):
         return False
 
@@ -126,6 +183,7 @@ def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
             f"Target: {spec['container_name']} ({binding['container_id']})\n"
             f"Unchanged image: {binding['image_id']} (tag {binding['image_tag']})\n{moved}"
             f"Compose source: {', '.join(binding['source']['compose_files'])}\n"
+            f"{_commit_line(binding['source_commit'])}"
             f"Drift (names only): {drift}\n"
             f"Ports after: {', '.join(binding['ports']) or 'none'}\n"
             f"Requires running: {', '.join(binding['depends_on']) or 'nothing'} (never restarted)\n"
@@ -138,20 +196,37 @@ def approval_text(spec: dict, binding: dict, prefix: str | None) -> str:
             "Any change to the container or the rendered configuration cancels execution.")
 
 
-class TaggedConfigReconciler(ServiceConfigReconciler):
+def _commit_line(commit) -> str:
+    if commit is None:
+        return ""
+    return (f"Compose source commit: {commit['head'][:12]} "
+            f"(published {commit['repository']} {commit['branch']} head; clean tree required)\n")
+
+
+class TaggedConfigReconciler(SourceGuardedReconciler):
     """The service reconcile for a tagged public image, swapped by running ID."""
 
     SCHEMA = SCHEMA
     ACTION_NAME = "reconcile-tagged-config"
-    DETAIL_KEYS = (*ServiceConfigReconciler.DETAIL_KEYS, "tmpfs")
+    DETAIL_KEYS = (*SourceGuardedReconciler.DETAIL_KEYS, "tmpfs", "source_commit")
 
     def _valid_binding(self) -> bool:
         return valid_tagged_binding(self.snapshot)
 
     def _bind(self, old, image, binding):
-        return tagged_config_binding(self.spec, old, image, self._renderer(),
-                                     tag_moved=lambda _tag: binding["image_tag_moved"])
+        checker = self._source_checker() if source_guarded(self.spec) else None
+        actual, desired = tagged_config_binding(self.spec, old, image, self._renderer(),
+                                                tag_moved=lambda _tag: binding["image_tag_moved"],
+                                                source_checker=checker)
+        if checker is not None:
+            self._hold_source(checker, actual, compose_source_plan(actual["source"]))
+        return actual, desired
+
+    def _before_swap(self):
+        super()._before_swap()
+        if source_guarded(self.spec):
+            self._recheck_source()
 
 
-__all__ = ["ACTION", "IMAGE_TAG_PATTERN", "SCHEMA", "TaggedConfigReconciler", "approval_text",
-           "tagged_config_binding", "valid_tagged_binding", "validate_tagged_spec"]
+__all__ = ["ACTION", "IMAGE_TAG_PATTERN", "SCHEMA", "TAGGED_GUARD_LABEL", "TaggedConfigReconciler", "approval_text",
+           "needs_tagged_guard_worker", "source_guarded", "tagged_config_binding", "valid_tagged_binding", "validate_tagged_spec"]

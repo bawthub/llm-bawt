@@ -280,8 +280,10 @@ class OpsService:
                 raise OpsDispatchError(exc.code, str(exc)) from exc
             except (ValueError, ExecutorError) as exc:
                 raise OpsDispatchError("target_unavailable", str(exc)) from exc
-            if spec["action"] == APP_CONFIG_ACTION:
+            if snapshot["config"].get("source_commit") is not None:
+                # TASK-1474 app source; TASK-1831 a guarded tagged row's Compose source.
                 self._check_source_published(snapshot["config"]["source_commit"])
+            if spec["action"] == APP_CONFIG_ACTION:
                 snapshot["newly_trusted"] = newly_trusted(snapshot["config"]["classification"],
                                                           self._last_classification(operation_slug))
         elif spec["action"] == PLAN_ACTION:

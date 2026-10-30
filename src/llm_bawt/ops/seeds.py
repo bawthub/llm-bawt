@@ -650,6 +650,42 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
     "risk_level": RISK_HIGH,
     "category": "configuration",
     "approval_prompt_prefix": "Reconcile Crawl4AI configuration with the same image (cuts page fetches)",
+}, {
+    # TASK-1831: Redis carries the agent bridge transport and runs a public
+    # tagged image with no HTTP endpoint, so its own Docker healthcheck is the
+    # probe. Shared infrastructure: the Compose source guard binds the rendered
+    # service to the published branch head and a clean tree.
+    "slug": "llm-bawt.reconcile-redis-config",
+    "title": "Reconcile Redis configuration",
+    "description": (
+        "Recreate Redis from its declared Compose service using the SAME local image the running "
+        "container uses. No pull; a moved tag is reported, never followed. Refuses unless the checkout "
+        "is clean and exactly the published branch head. Approval shows changed names, ports and mounts "
+        "only, never values. Verifies the container's own Docker healthcheck and restores the previous "
+        "container on failure. The data volume is kept. Interrupts every bridge's Redis connection: "
+        "in-flight agent turns may fail."
+    ),
+    "enabled": False,
+    "executor_kind": EXECUTOR_DOCKER,
+    "target_host": "",
+    "working_directory": None,
+    "command_script": _spec(
+        action="reconcile_tagged_config", container_name="llm-bawt-redis",
+        compose_project=_LLM_BAWT_PROJECT, compose_service="redis", image_tag="redis:7-alpine",
+        compose_config={"renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"]},
+        display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=120,
+        health_probe={"type": "docker_health"},
+        source_repository="bawthub/llm-bawt", source_branch="master",
+    ),
+    "args_schema_json": _schema({}),
+    "args_defaults_json": _defaults(),
+    "timeout_seconds": 900,
+    "start_delay_seconds": 0,
+    "max_output_bytes": 65536,
+    "max_concurrent": 1,
+    "risk_level": RISK_CRITICAL,
+    "category": "configuration",
+    "approval_prompt_prefix": "Reconcile Redis configuration with the same image (interrupts the bridge transport)",
 }, *(
     # TASK-1476: the agent bridges, Compose-built from the shared bridge image
     # and recreated at the same image. Same refusals and trust block as the

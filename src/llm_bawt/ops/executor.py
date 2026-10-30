@@ -40,7 +40,8 @@ from .service_identity import SPEC_PATTERNS as COMPOSE_SPEC_PATTERNS
 from .routing_reconcile import (ACTION as ROUTING_ACTION, WORKER_CAPABILITY_LABEL,
                                 routing_binding, validate_routing_spec)
 from .source_state import SourceChecker
-from .tagged_config_reconcile import ACTION as TAGGED_CONFIG_ACTION, tagged_config_binding, validate_tagged_spec
+from .tagged_config_reconcile import (ACTION as TAGGED_CONFIG_ACTION, TAGGED_GUARD_LABEL, needs_tagged_guard_worker,
+                                      source_guarded, tagged_config_binding, validate_tagged_spec)
 from .validation import canonical_json
 from .execution_mode import EXECUTION_ISOLATED, EXECUTION_PROCESS, EXECUTOR_MODES, snapshot_execution_mode
 from .process_launch import ProcessLauncher
@@ -80,6 +81,9 @@ def spec_capability_labels(spec: dict) -> tuple[str, ...]:
     config = spec.get("compose_config") or {}
     if config.get("profile") == HARDENED_PROFILE.name or "adopt_files" in config:
         labels.append(HARDENED_PROFILE_LABEL)
+    if spec.get("action") == TAGGED_CONFIG_ACTION and needs_tagged_guard_worker(spec):
+        # TASK-1831: a docker_health probe or the Compose source guard on the tagged kind.
+        labels.append(TAGGED_GUARD_LABEL)
     return tuple(labels)
 
 
@@ -530,7 +534,9 @@ class DockerExecutor(Executor):
                                               extra=(PROCESS_PROFILE_LABEL,))
                 return binding, desired, container
             if spec["action"] == TAGGED_CONFIG_ACTION:
-                return (*tagged_config_binding(spec, container, image, renderer,
+                checker = (SourceChecker(self._render_api_factory(), spec["compose_config"]["renderer_image"],
+                                         tag="src" + os.urandom(4).hex()) if source_guarded(spec) else None)
+                return (*tagged_config_binding(spec, container, image, renderer, source_checker=checker,
                                                tag_moved=lambda tag: self._image_tag_moved(tag, image)), container)
             if spec["action"] == DEV_CONFIG_ACTION:
                 return (*dev_config_binding(spec, container, image, renderer,

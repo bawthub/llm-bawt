@@ -61,8 +61,9 @@ def bind_plan(spec: dict, accept_loss, *, executor, get_operation, executor_kind
         except (ValueError, ExecutorError) as exc:
             raise PlanError("target_unavailable", f"{slug}: {exc}") from exc
         newly = None
-        if target_spec["action"] == APP_CONFIG_ACTION:
+        if binding.get("source_commit") is not None:  # app source, or a guarded tagged row (TASK-1831)
             check_source(binding["source_commit"])
+        if target_spec["action"] == APP_CONFIG_ACTION:
             newly = newly_trusted(binding["classification"], last_classification(slug))
         targets.append({"slug": slug, "operation": op.to_api(), "spec": target_spec, "config": binding,
                         "newly_trusted": newly})

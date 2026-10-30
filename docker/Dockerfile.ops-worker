@@ -48,4 +48,7 @@ LABEL llm-bawt.ops.health-probe="1"
 # TASK-1801: ...and reconciles/deploys the pinned-hardened profile (cap_drop,
 # cpus, pids_limit, read_only) with one-time adoption of an earlier file list.
 LABEL llm-bawt.ops.hardened-profile="1"
+# TASK-1831: ...and reconciles a tagged image verified by its own Docker
+# healthcheck and behind the Compose source guard (redis).
+LABEL llm-bawt.ops.tagged-guard="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

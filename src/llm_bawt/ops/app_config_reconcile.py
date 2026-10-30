@@ -305,7 +305,11 @@ class ServiceConfigReconciler(ConfigReconciler):
         return None  # a pinned local image carries no release identity
 
     def _require_probe(self):
-        """Verified by the spec's own ``health_url``/field/value (below)."""
+        """Verified by the spec's own ``health_url``/field/value (below), or
+        by a declared ``health_probe`` (TASK-1831: a tagged image with no HTTP
+        endpoint), which the image-deploy machinery validates and runs."""
+        if "health_probe" in self.spec:
+            super()._require_probe()
 
     def _swap_ref(self, binding):
         return binding["image_id"]  # never the tag: it may name another image
@@ -337,6 +341,8 @@ class ServiceConfigReconciler(ConfigReconciler):
             self._fail(f"dependency_unhealthy: {service}; nothing changed", known=True)
 
     def _verify_release(self, container_id, expect):
+        if "health_probe" in self.spec:
+            return super()._verify_release(container_id, expect)
         code, out = self._exec(container_id, ["curl", "-fsS", "--max-time", "10", self.spec["health_url"]])
         if code != 0:
             raise StepError(f"in-container health request exited {code}")
@@ -353,12 +359,10 @@ class ServiceConfigReconciler(ConfigReconciler):
         return {"field": field, "status": "matched", "stat": self._stats(container_id)}
 
 
-class AppConfigReconciler(ServiceConfigReconciler):
-    """The service reconcile for a Compose-built image, behind the source guard."""
-
-    SCHEMA = SCHEMA
-    ACTION_NAME = "reconcile-app-config"
-    DETAIL_KEYS = (*ServiceConfigReconciler.DETAIL_KEYS, "source_commit", "classification")
+class SourceGuardedReconciler(ServiceConfigReconciler):
+    """A service reconcile whose rendered inputs come from the checkout: the
+    sealed git source check binds them to one commit at approval and again as
+    the last read before the swap (TASK-1474; TASK-1831 for Compose-only)."""
 
     def __init__(self, *args, source_checker=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -370,26 +374,17 @@ class AppConfigReconciler(ServiceConfigReconciler):
         return self._source_checker_override or SourceChecker(
             self.api, self.spec["compose_config"]["renderer_image"], tag=self.job_id[:12])
 
-    def _valid_binding(self) -> bool:
-        return valid_app_binding(self.snapshot)
-
-    def _bind(self, old, image, binding):
-        checker = self._source_checker()
-        actual, desired = app_config_binding(self.spec, old, image, self._renderer(),
-                                             tag_moved=lambda _tag: binding["image_tag_moved"],
-                                             source_checker=checker)
-        if actual["source_commit"] != binding["source_commit"]:
+    def _hold_source(self, checker, actual, plan):
+        """Refuse a checkout that moved since approval; keep the check for :meth:`_recheck_source`."""
+        if actual["source_commit"] != self.snapshot["config"]["source_commit"]:
             raise SourceStateError("source_moved_since_approval", detail="the checkout is not the approved commit")
-        self._source_check = (checker, actual["source"]["project_dir"],
-                              source_plan(self.spec, actual["source"], old, image, desired))
-        return actual, desired
+        self._source_check = (checker, actual["source"]["project_dir"], plan)
 
-    def _before_swap(self):
-        self._check_dependencies()
+    def _recheck_source(self):
         # The render and the dependency reads take seconds, so the source is
         # checked once more as the last read before the old container stops.
-        # What remains is the window from here to the new container importing
-        # its modules (seconds, under the target lock): a writer to the
+        # What remains is the window from here to the new container reading
+        # its inputs (seconds, under the target lock): a writer to the
         # checkout in that window is not caught. Source edits that land after
         # the swap are the next reconcile's or deploy's concern, as before.
         self._phase("source")
@@ -402,9 +397,32 @@ class AppConfigReconciler(ServiceConfigReconciler):
             self._fail("source_moved_since_approval; nothing changed", known=True)
 
 
+class AppConfigReconciler(SourceGuardedReconciler):
+    """The service reconcile for a Compose-built image, behind the source guard."""
+
+    SCHEMA = SCHEMA
+    ACTION_NAME = "reconcile-app-config"
+    DETAIL_KEYS = (*ServiceConfigReconciler.DETAIL_KEYS, "source_commit", "classification")
+
+    def _valid_binding(self) -> bool:
+        return valid_app_binding(self.snapshot)
+
+    def _bind(self, old, image, binding):
+        checker = self._source_checker()
+        actual, desired = app_config_binding(self.spec, old, image, self._renderer(),
+                                             tag_moved=lambda _tag: binding["image_tag_moved"],
+                                             source_checker=checker)
+        self._hold_source(checker, actual, source_plan(self.spec, actual["source"], old, image, desired))
+        return actual, desired
+
+    def _before_swap(self):
+        self._check_dependencies()
+        self._recheck_source()
+
+
 __all__ = ["ACTION", "BUILT_PROFILE_LABEL", "HEALTH_PATTERNS", "PROCESS_PROFILE_LABEL", "SCHEMA",
            "SOURCE_GUARD_LABEL", "WORKER_CAPABILITY_LABEL",
-           "AppConfigReconciler", "ServiceConfigReconciler",
+           "AppConfigReconciler", "ServiceConfigReconciler", "SourceGuardedReconciler",
            "app_config_binding",
            "approval_text", "image_refs", "image_tag", "newly_trusted", "snapshot_approval_text", "trust_text",
            "uses_process_profile", "valid_app_binding", "valid_image_tag", "validate_app_spec",

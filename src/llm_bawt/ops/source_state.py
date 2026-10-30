@@ -193,10 +193,7 @@ def valid_branch(branch) -> bool:
 
 def validate_source_spec(spec: dict) -> None:
     """The source fields of an app spec; raises ValueError."""
-    if not REPOSITORY.fullmatch(str(spec["source_repository"])):
-        raise ValueError("source_repository must be owner/repo")
-    if not valid_branch(spec["source_branch"]):
-        raise ValueError("source_branch is not a plain branch name")
+    validate_compose_source_spec(spec)
     lists = {}
     for key in ("source_mounts", "data_mounts"):
         value = spec[key]
@@ -368,15 +365,19 @@ class _Steps:
         if lines[0] != self.project:
             raise SourceStateError("source_tree_unsupported", detail="project directory is not the repository root")
         head = lines[1]
-        flagged = [r[2:] for r in _records(self.git("ls-files", "-z", "-v", "--", *paths)) if not r.startswith("H ")]
+        # A compose-only plan (TASK-1831: a tagged image has no source mounts)
+        # names no paths; git reads an empty pathspec as the whole repository,
+        # so the per-path steps scope to the Compose files instead.
+        scoped = paths or compose
+        flagged = [r[2:] for r in _records(self.git("ls-files", "-z", "-v", "--", *scoped)) if not r.startswith("H ")]
         if flagged:
             raise SourceStateError("source_index_flags", flagged)
         self.git("read-tree", head, fresh=True)
         dirty = _records(self.git("status", "--porcelain=v2", "-z", "--untracked-files=no", fresh=True))
         if dirty:
             raise SourceStateError("source_dirty", _status_names(dirty))
-        others = _records(self.git("ls-files", "-z", "--others", "--directory", "--no-empty-directory",
-                                   "--", *paths, fresh=True))
+        others = [] if not paths else _records(self.git("ls-files", "-z", "--others", "--directory",
+                                                        "--no-empty-directory", "--", *paths, fresh=True))
         cache = [p for p in others if PYCACHE_DIR in p.split("/")]
         stray = [p for p in others if p not in cache]
         if stray:
@@ -384,7 +385,7 @@ class _Steps:
         if cache and not self.plan["bytecode_ok"]:
             # Python would load a forged .pyc whose header matches its source.
             raise SourceStateError("source_bytecode_unsafe", cache, detail=f"{PYCACHE_PREFIX} not outside every mount")
-        blobs = self._tree(head, paths)
+        blobs = self._tree(head, paths) if paths else {}
         tracked = self._tree(head, compose, recursive=False)
         bad_compose = [c for c in compose if c not in tracked or tracked[c][0] != "100644"]
         if bad_compose:
@@ -421,6 +422,22 @@ class _Steps:
         return entries
 
 
+def validate_compose_source_spec(spec: dict) -> None:
+    """The published-source fields alone (TASK-1831): a kind with no source
+    mounts still renders its Compose files from the checkout."""
+    if not REPOSITORY.fullmatch(str(spec["source_repository"])):
+        raise ValueError("source_repository must be owner/repo")
+    if not valid_branch(spec["source_branch"]):
+        raise ValueError("source_branch is not a plain branch name")
+
+
+def compose_source_plan(source: dict) -> dict:
+    """The :class:`SourceChecker` plan that binds only the Compose files."""
+    project = source["project_dir"]
+    return {"paths": [], "compose_files": [posixpath.relpath(f, project) for f in source["compose_files"]],
+            "bytecode_ok": True}
+
+
 def source_commit(spec: dict, head: str) -> dict:
     return {"repository": spec["source_repository"], "branch": spec["source_branch"], "head": head}
 
@@ -442,5 +459,6 @@ def valid_classification(spec: dict, value) -> bool:
 
 
 __all__ = ["ENV_NAME", "PRODUCT_ENV", "PYCACHE_PREFIX", "RESERVED_ENV", "RESERVED_PREFIXES", "SOURCE_CHECK_LABEL",
-           "SOURCE_FIELDS", "SourceChecker", "SourceStateError", "reserved_env_name", "source_commit",
-           "source_plan", "valid_classification", "valid_source_commit", "validate_source_spec"]
+           "SOURCE_FIELDS", "SourceChecker", "SourceStateError", "compose_source_plan", "reserved_env_name",
+           "source_commit", "source_plan", "valid_classification", "valid_source_commit", "validate_compose_source_spec",
+           "validate_source_spec"]

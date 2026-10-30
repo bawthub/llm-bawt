@@ -462,3 +462,159 @@ def test_worker_image_carries_the_module_and_the_v3_label():
     dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
     assert "src/llm_bawt/ops/tagged_config_reconcile.py" in dockerfile
     assert f'LABEL {PROCESS_PROFILE_LABEL}="1"' in dockerfile
+
+
+# ── TASK-1831: the container's own healthcheck and the Compose source guard ──
+
+from llm_bawt.ops.seeds import SEEDS  # noqa: E402
+from llm_bawt.ops.source_state import SourceStateError  # noqa: E402
+from llm_bawt.ops.tagged_config_reconcile import TAGGED_GUARD_LABEL  # noqa: E402
+from tests.test_ops_app_config_reconcile import HEAD, PublishedVerifier  # noqa: E402
+from tests.test_ops_image_deploy import _service  # noqa: E402
+
+_URL_KEYS = ("health_url", "health_field", "health_value")
+GSPEC = {**{k: v for k, v in SPEC.items() if k not in _URL_KEYS}, "health_probe": {"type": "docker_health"},
+         "source_repository": "bawthub/llm-bawt", "source_branch": "master"}
+from llm_bawt.ops.health_probe import WORKER_LABEL as PROBE_WORKER_LABEL  # noqa: E402
+
+GUARD_WORKER = {**TAGGED_WORKER, TAGGED_GUARD_LABEL: "1", PROBE_WORKER_LABEL: "1"}
+REDIS_SEED = next(s for s in SEEDS if s["slug"] == "llm-bawt.reconcile-redis-config")
+NEW_ENV = {"CRAWL4AI_API_TOKEN": "", "NEW": "1"}
+
+
+class SickDocker(CrawlDocker):
+    """The same image, but only the new container reports ``new_status``."""
+
+    def __init__(self, new_status, **kwargs):
+        super().__init__(**kwargs)
+        self.new_status = new_status
+
+    def request(self, method, path, **kwargs):
+        result = super().request(method, path, **kwargs)
+        if method == "POST" and path.split("?")[0].endswith("/start"):
+            for cid, container in self.containers.items():
+                if cid != self.old_id and container.get("State", {}).get("Running") and "Health" in container["State"]:
+                    container["State"]["Health"]["Status"] = self.new_status
+        return result
+
+
+def gbinding(api, spec=GSPEC):
+    return tagged_config_binding(spec, api.by_name(NAME), api.images[CRAWL_ID],
+                                 ComposeRenderer(api, spec, tag="crawl1"), tag_moved=lambda _tag: False,
+                                 source_checker=_StubSource())[0]
+
+
+class _StubSource:
+    def check(self, _project_dir, _plan):
+        return HEAD
+
+
+def gsnapshot(api, spec=GSPEC):
+    return {"spec": spec, "resolved_args": {}, "config": gbinding(api, spec), "execution": EXECUTION}
+
+
+def test_spec_accepts_exactly_one_health_form_and_a_whole_guard():
+    assert validate_spec(json.dumps(GSPEC)) == GSPEC
+    assert validate_spec(REDIS_SEED["command_script"])["health_probe"] == {"type": "docker_health"}
+    probe_only = {k: v for k, v in GSPEC.items() if not k.startswith("source_")}
+    assert validate_spec(json.dumps(probe_only)) == probe_only
+    for bad in ({**GSPEC, "health_url": SPEC["health_url"]},  # both health forms
+                {**GSPEC, "health_probe": {"type": "http_exec", "url": "http://127.0.0.1:1/h"}},
+                {k: v for k, v in GSPEC.items() if k != "source_branch"},  # half a guard
+                {k: v for k, v in GSPEC.items() if k != "health_probe"}):  # no health at all
+        with pytest.raises(ValueError):
+            validate_spec(json.dumps(bad))
+
+
+def test_docker_health_passes_on_the_containers_own_status_without_exec(tmp_path, source):
+    api = CrawlDocker(compose=crawl_compose(environment=NEW_ENV))
+    result = run(api, tmp_path, gsnapshot(api))
+    assert result["schema"] == SCHEMA and api.create_bodies
+    assert not api.exec_cmds
+    assert api.by_name(NAME)["Id"] != api.old_id
+
+
+@pytest.mark.parametrize("health, match", [("unhealthy", "unhealthy"), ("starting", "health")],
+                         ids=["unhealthy", "timeout"])
+def test_docker_health_failure_or_timeout_restores_the_previous_container(tmp_path, health, match):
+    api = SickDocker(health, compose=crawl_compose(environment=NEW_ENV))
+    snap = gsnapshot(api)
+    with pytest.raises(DeployFailed, match=match) as caught:
+        run(api, tmp_path, snap)
+    assert caught.value.detail["restored"] and api.by_name(NAME)["Id"] == api.old_id
+    assert not api.exec_cmds
+
+
+def test_guarded_binding_names_the_commit_and_checks_only_the_compose_files(source):
+    api = CrawlDocker()
+    source.calls.clear()
+    snap = {"spec": GSPEC, "resolved_args": {}, "execution": EXECUTION,
+            "config": tagged_config_binding(GSPEC, api.by_name(NAME), api.images[CRAWL_ID],
+                                            ComposeRenderer(api, GSPEC, tag="c"), tag_moved=lambda _t: False,
+                                            source_checker=source)[0]}
+    assert snap["config"]["source_commit"] == {"repository": "bawthub/llm-bawt", "branch": "master", "head": HEAD}
+    assert source.calls == [(APP_DIR, {"paths": [], "compose_files": ["docker-compose.yml"], "bytecode_ok": True})]
+    assert valid_tagged_binding(snap) and _valid_config_snapshot(snap)
+    assert f"Compose source commit: {HEAD[:12]}" in approval_text(GSPEC, snap["config"], None)
+    for tamper in (None, {**snap["config"]["source_commit"], "branch": "main"}):
+        assert not valid_tagged_binding({**snap, "config": {**snap["config"], "source_commit": tamper}})
+    with pytest.raises(ValueError, match="needs the source check"):
+        tagged_config_binding(GSPEC, api.by_name(NAME), api.images[CRAWL_ID], ComposeRenderer(api, GSPEC, tag="c"),
+                              tag_moved=lambda _t: False)
+
+
+def test_an_unguarded_binding_carries_no_commit(source):
+    snap = snapshot(CrawlDocker())
+    assert snap["config"]["source_commit"] is None
+    assert not valid_tagged_binding({**snap, "config": {**snap["config"], "source_commit": {"head": HEAD}}})
+
+
+def test_a_dirty_compose_source_refuses_approval(source):
+    source.answers = [SourceStateError("source_dirty", ["docker-compose.yml"])]
+    executor = _executor(CrawlDocker(), worker_labels=GUARD_WORKER)
+    with pytest.raises(ConfigCheckError, match="source_dirty"):
+        executor.config_approval(GSPEC)
+
+
+@pytest.mark.parametrize("answers, match", [
+    (["cd" * 20], "source_moved_since_approval"),  # moved by the worker's bind
+    ([HEAD, "cd" * 20], "source_moved_since_approval"),  # moved before the swap
+    ([HEAD, SourceStateError("source_dirty", ["docker-compose.yml"])], "source_dirty"),
+], ids=["bind", "recheck-moved", "recheck-dirty"])
+def test_a_moved_or_dirty_source_refuses_before_create(tmp_path, source, answers, match):
+    api = CrawlDocker(compose=crawl_compose(environment=NEW_ENV))
+    snap = gsnapshot(api)
+    source.answers = list(answers)
+    with pytest.raises((DeployFailed, SourceStateError), match=match):
+        run(api, tmp_path, snap)
+    assert not api.create_bodies and api.by_name(NAME)["Id"] == api.old_id
+
+
+def test_guarded_tagged_reconcile_requires_the_guard_worker():
+    api = CrawlDocker()
+    with pytest.raises(ConfigCheckError) as caught:
+        _executor(api, worker_labels={**TAGGED_WORKER, PROBE_WORKER_LABEL: "1"}).config_approval(GSPEC)
+    assert caught.value.code == "config_reconcile_unavailable" and TAGGED_GUARD_LABEL in str(caught.value)
+    assert _executor(api, worker_labels=TAGGED_WORKER).config_approval(SPEC)["source_commit"] is None
+    assert _executor(api, worker_labels=GUARD_WORKER).config_approval(GSPEC)["source_commit"]["head"] == HEAD
+
+
+@pytest.mark.parametrize("published, code", [(HEAD, None), ("cd" * 20, "source_not_published")])
+def test_a_guarded_row_must_run_the_published_head(published, code):
+    from llm_bawt.ops.service import OpsDispatchError
+    service, store, executor = _service(PublishedVerifier(published))
+    store.create_operation({**REDIS_SEED, "slug": "x.guarded", "enabled": True,
+                            "command_script": json.dumps(GSPEC)})
+    api = CrawlDocker()
+    executor.config_approval = lambda spec: gbinding(api, spec)
+    if code is None:
+        assert service.prepare_invocation("x.guarded", {})["config"]["source_commit"]["head"] == HEAD
+        return
+    with pytest.raises(OpsDispatchError) as caught:
+        service.prepare_invocation("x.guarded", {})
+    assert caught.value.code == code
+
+
+def test_worker_image_carries_the_tagged_guard_label():
+    dockerfile = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile.ops-worker").read_text()
+    assert f'LABEL {TAGGED_GUARD_LABEL}="1"' in dockerfile
