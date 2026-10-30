@@ -52,6 +52,7 @@ from typing import Any, Callable, Iterable
 
 from sqlalchemy import text
 
+from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ..system_events import SystemEventEmitter
 from ..service.turn_admission import activate_hold
 from ..service.turn_gates import (GateScope, GateSpec, _LIVE, ensure_gate_schema, extend_gate, gate_drain_status,
@@ -125,13 +126,15 @@ def cancel_pending_controls(conn, *, gate_ids: Iterable[int]) -> int:
     if linked:
         still_linked = LIVE_MEMBER_SQL.format(
             where="m.control_delivery_id = d.id AND m.control_state = 'steering'")
-        conn.execute(text(f"""
+        DeliveryTransitionEvents.stage(conn, *conn.execute(text(f"""
             UPDATE inter_bot_deliveries d SET status='CANCELLED', delivery_mode='skipped',
                 last_error=:reason, next_retry_at=NULL, claim_token=NULL, claim_owner=NULL,
                 lease_expires_at=NULL, updated_at=now()
             WHERE d.id = ANY(:linked) AND d.lane = 'control' AND d.status = 'QUEUED'
               AND NOT EXISTS ({still_linked})
-        """), {"linked": linked, "reason": f"{NOT_NEEDED}:control_released"})
+            RETURNING d.*
+        """), {"linked": linked, "reason": f"{NOT_NEEDED}:control_released"}).mappings().all(),
+            reason_code="control_released")
     return len(links)
 
 

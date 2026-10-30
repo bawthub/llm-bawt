@@ -37,6 +37,7 @@ from sqlmodel import Session, select
 from ..approval_mcp_store import requeued_continuation_state, returned_claim
 from ..approval_models import CONT_DISPATCHING, CONT_SUPPRESSED, ToolApprovalRequest
 from ..inter_bot_delivery import RESERVATION_KEPT_RESET_STATUSES, InterBotDeliveryStore
+from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ..request_identity import AdmissionUnavailable as IdentityAdmissionUnavailable
 from .turn_gates import (
     ACCEPTED,
@@ -859,8 +860,9 @@ def _revoke_producer(conn, turn_id: str, *, delivery_id: str | None, owner: str 
                 claim_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL,
                 last_error='Stopped by user', updated_at=now()
             WHERE id=:id AND turn_id=:turn_id AND status IN ('QUEUED','DISPATCHING')
-            RETURNING transport_accepted_at
+            RETURNING *
         """), {"id": delivery_id, "turn_id": turn_id}).mappings().first()
+        DeliveryTransitionEvents.stage(conn, revoked, reason_code="user_stop")
         producer = {"kind": "delivery", "id": delivery_id, "revoked": revoked is not None,
                     "accepted": bool(revoked and revoked["transport_accepted_at"])}
     elif owner:

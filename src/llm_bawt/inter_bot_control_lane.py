@@ -31,6 +31,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Connection
 
 from .bot_identities import SYSTEM_BOT_ID
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .message_authorship import AuthorReference
 from .steer_capabilities import NEXT
@@ -294,6 +295,7 @@ class ControlClaim:
             "claim_token": f"claim-{uuid.uuid4().hex}", "claim_owner": claim_owner,
             "turn": pin["turn_id"],
         }).mappings().one()
+        DeliveryTransitionEvents.stage(conn, row)
         return DeliveryRecord.from_mapping(row)
 
     @staticmethod
@@ -306,6 +308,7 @@ class ControlClaim:
             WHERE id=:id AND status='QUEUED' AND lane='control'
             RETURNING *
         """), {"id": head["id"], "status": status, "reason": reason}).mappings().one()
+        DeliveryTransitionEvents.stage(conn, row, reason_code=reason.split(":", 1)[0])
         return DeliveryRecord.from_mapping(row)
 
 
@@ -446,6 +449,7 @@ class ControlSteerFailure:
             RETURNING *
         """), {"id": row["id"], "token": row["claim_token"], "status": status,
                "reason": reason}).mappings().first()
+        DeliveryTransitionEvents.stage(conn, settled, reason_code=reason.split(":", 1)[0])
         return DeliveryRecord.from_mapping(settled) if settled else None
 
 

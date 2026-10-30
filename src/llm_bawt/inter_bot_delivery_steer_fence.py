@@ -33,6 +33,7 @@ from typing import Any, Mapping
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Connection
 
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,7 @@ class SteerLifecycleFence:
             "error": rejection_error(proof, _generation(metadata)),
             "merge": json.dumps(rejection_merge(metadata, proof)),
         }).mappings().first()
+        DeliveryTransitionEvents.stage(conn, reopened, reason_code="steer_rejected")
         return DeliveryRecord.from_mapping(reopened) if reopened else None
 
     def reopen_rejected_steer(

@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer, MetaData, String, Table, UniqueConstraint, delete, func,
     insert, select, text, update,
 )
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Engine
 
@@ -82,9 +83,17 @@ class SystemEventEmitter:
     _schema_guard = SchemaBootstrapGuard()
     failed_appends = 0  # Process-local health signal; failures also log with key.
 
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, *, bootstrap: bool = True):
+        """``bootstrap=False`` is for a caller that already saw the table and
+        must not run DDL on a second connection mid-transaction."""
         self.engine = engine
-        self._schema_guard.run(engine, "system-events-v1", lambda conn: _metadata.create_all(conn))
+        if bootstrap:
+            self._schema_guard.run(engine, "system-events-v1", lambda conn: _metadata.create_all(conn))
+
+    @staticmethod
+    def table_exists(conn: Connection) -> bool:
+        """Whether the ledger table exists, read on ``conn`` (no DDL, no second connection)."""
+        return sa_inspect(conn).has_table(_system_events.name)
 
     def append(
         self, conn: Connection, *, event_key: str, kind: str, source: str,

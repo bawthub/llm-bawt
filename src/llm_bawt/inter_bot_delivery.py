@@ -35,6 +35,7 @@ from .service.approval_fanout import ensure_fanout_schema
 from .service.delivery_cancel_notice import ensure_cancel_notice_schema
 from .service.turn_gates import ensure_gate_schema
 from .inter_bot_delivery_query import DeliveryListFilter, parse_statuses
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 from .inter_bot_delivery_user import resolve_delivery_user
@@ -96,6 +97,8 @@ class InterBotDeliveryStore:
     def __init__(self, config: Config, *, provision_schema: bool = True):
         self.config = config
         self.engine = get_shared_engine(config)
+        if self.engine is not None:
+            DeliveryTransitionEvents.install(self.engine)  # TASK-1745 receipts
         # TASK-1311: the leadership session gets its own one-connection engine
         # (libpq keepalives, bounded probes) instead of pinning a pool slot.
         self._lock_engine: Engine | None = None
@@ -253,6 +256,7 @@ class InterBotDeliveryStore:
                 from .service.system_gate_admission import admit_enqueue
 
                 admit_enqueue(conn, target, on_gate=on_gate)
+                DeliveryTransitionEvents.stage(conn, record)
             return record, duplicate
 
     def get(self, delivery_id: str, *, allowed_bot_ids: frozenset[str] | None = None) -> DeliveryRecord | None:
@@ -331,6 +335,7 @@ class InterBotDeliveryStore:
                   AND transport_accepted_at < now() - interval '7 days'
                 RETURNING *
             """)).mappings().all()
+            DeliveryTransitionEvents.stage(conn, *rows, reason_code="recovery_window_expired")
             for row in rows:
                 from .service.session_lifecycle.recovery import NewSessionRecovery
                 from .service.usage.balance import charge_settled_turns
@@ -398,6 +403,7 @@ class InterBotDeliveryStore:
                 WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim
                 RETURNING *
             """), {"id": delivery_id, "claim": claim_token}).mappings().first()
+            DeliveryTransitionEvents.stage(conn, cancelled, reason_code="user_stop")
         return DeliveryRecord.from_mapping(cancelled) if cancelled else None
 
     def claim_next(
@@ -495,6 +501,7 @@ class InterBotDeliveryStore:
                 WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
                 RETURNING *
             """), values).mappings().first()
+            DeliveryTransitionEvents.stage(conn, row)
         return DeliveryRecord.from_mapping(row) if row else None
 
     def requeue(
@@ -580,6 +587,7 @@ class InterBotDeliveryStore:
                     last_error='Stopped by user', updated_at=now()
                 WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token RETURNING *
             """), values).mappings().first()
+            DeliveryTransitionEvents.stage(conn, row, reason_code="user_stop")
             return DeliveryRecord.from_mapping(row) if row else None
         mode_reset = (
             ", delivery_mode=NULL, target_turn_id=NULL, transport_accepted_at=NULL"
@@ -603,6 +611,7 @@ class InterBotDeliveryStore:
             WHERE id=:id AND status IN ('STEERING','DISPATCHING') AND claim_token=:claim_token
             RETURNING *
         """), values).mappings().first()
+        DeliveryTransitionEvents.stage(conn, row)
         if row and row.get("reset_status") not in RESERVATION_KEPT_RESET_STATUSES:
             conn.execute(sa_text(
                 "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
@@ -675,6 +684,7 @@ class InterBotDeliveryStore:
                 "claim_token": claim_token,
                 "error": error[:4000],
             }).mappings().first()
+            DeliveryTransitionEvents.stage(conn, row)
             if row:
                 conn.execute(sa_text("""
                     UPDATE turn_logs SET status='error', end_reason='error',
@@ -694,6 +704,7 @@ class InterBotDeliveryStore:
                     last_error=:error, updated_at=now()
                 WHERE id=:id AND status != 'DELIVERED' RETURNING *
             """), {"id": delivery_id, "error": error[:4000]}).mappings().first()
+            DeliveryTransitionEvents.stage(conn, row)
         return DeliveryRecord.from_mapping(row) if row else None
 
     @staticmethod
@@ -731,6 +742,7 @@ class InterBotDeliveryStore:
               AND (:allow_accepted OR transport_accepted_at IS NULL) RETURNING *
         """), {"id": candidate["id"], "reason": reason,
                "allow_accepted": allow_accepted_queued}).mappings().first()
+        DeliveryTransitionEvents.stage(conn, row)
         if row and candidate["status"] == QUEUED:
             conn.execute(sa_text(
                 "DELETE FROM turn_logs WHERE id=:turn_id AND status='reserved'"
@@ -837,6 +849,8 @@ class InterBotDeliveryStore:
             row = conn.execute(sa_text(
                 f"UPDATE inter_bot_deliveries SET {assignments} WHERE id=:id{predicate} RETURNING *"
             ), values).mappings().first()
+            if "status" in assignments:
+                DeliveryTransitionEvents.stage(conn, row)
         return DeliveryRecord.from_mapping(row) if row else self.get(delivery_id)
 
     def recover_expired(self, *, live_owner: str | None = None) -> list[DeliveryRecord]:

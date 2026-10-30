@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from ..inter_bot_delivery import DeliveryRecord
+from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ..message_authorship import AuthorReference
 from .prompt_capabilities import resolve_prompt_target
 from .prompt_delivery_state import gate_reason, receipt, transition
@@ -280,12 +281,15 @@ class PromptDeliveryWorker:
             if record.status == "QUEUED" and record.transport_accepted_at is None:
                 reason = gate_reason(*rows, now)
                 if reason:
-                    session.connection().execute(text("""
+                    conn = session.connection()
+                    DeliveryTransitionEvents.stage(conn, conn.execute(text("""
                         UPDATE inter_bot_deliveries SET status='CANCELLED',
                             last_error=:error, updated_at=CURRENT_TIMESTAMP,
                             next_retry_at=NULL
                         WHERE id=:id AND status='QUEUED' AND transport_accepted_at IS NULL
-                    """), {"id": record.id, "error": reason[1]})
+                        RETURNING *
+                    """), {"id": record.id, "error": reason[1]}).mappings().first(),
+                        reason_code="schedule_gate")
                     session.connection().execute(text(
                         "DELETE FROM turn_logs WHERE id=:id AND status='reserved'"
                     ), {"id": record.turn_id})

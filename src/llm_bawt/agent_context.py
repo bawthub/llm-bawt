@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .utils.config import Config
 from .utils.db import get_shared_engine
 
@@ -258,6 +259,7 @@ def recover_delivery_after_overflow(
         "payload": json.dumps(payload, ensure_ascii=False, default=str),
         "error": error[:4000],
     }).mappings().first()
+    DeliveryTransitionEvents.stage(conn, row, reason_code="context_overflow")
     return dict(row) if row else None
 
 

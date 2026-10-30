@@ -19,6 +19,7 @@ from sqlalchemy import text
 from ...bot_tags import BotTags
 from ...bot_types import durable_agent_backend
 from ...bots import BotManager
+from ...inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ...inter_bot_delivery_record import DeliveryRecord
 from ..jobs.idle_context_candidates import IdleContextCandidates
 from ..turn_admission import classify_target, lock_target
@@ -241,14 +242,14 @@ class NewSessionLifecycle:
                 reason = None
         if reason is None:
             return False
-        conn.execute(text("""
+        DeliveryTransitionEvents.stage(conn, conn.execute(text("""
             UPDATE inter_bot_deliveries
             SET status='FAILED', last_error=:reason, next_retry_at=NULL,
                 metadata_json=jsonb_set(metadata_json, '{new_session_skip_reason}',
                                         to_jsonb(CAST(:reason AS text))),
                 updated_at=now()
-            WHERE id=:id AND status='QUEUED'
-        """), {"id": head["id"], "reason": reason})
+            WHERE id=:id AND status='QUEUED' RETURNING *
+        """), {"id": head["id"], "reason": reason}).mappings().first(), reason_code="stale_reset")
         return True
 
     def _admit(self, intent: NewSessionIntent) -> tuple[DeliveryRecord | None, str | None]:

@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from agent_bridge.maintenance import is_new_command
 
+from ...inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ...inter_bot_delivery_record import DeliveryRecord
 
 
@@ -24,6 +25,7 @@ class NewSessionRecovery:
                   AND metadata_json->'new_session_receipt' IS NULL
                 RETURNING *
             """), {"id": delivery_id, "reason": reason[:4000]}).mappings().one_or_none()
+            DeliveryTransitionEvents.stage(conn, row, reason_code="reset_receipt_missing")
         return DeliveryRecord.from_mapping(row) if row else None
 
     @staticmethod
@@ -41,6 +43,7 @@ class NewSessionRecovery:
                   AND metadata_json->'new_session_receipt' IS NULL
                 RETURNING *
             """), {"id": delivery_id, "reason": reason[:4000]}).mappings().one_or_none()
+            DeliveryTransitionEvents.stage(conn, row, reason_code="reset_receipt_missing")
         return DeliveryRecord.from_mapping(row) if row else None
 
     @classmethod
@@ -49,13 +52,13 @@ class NewSessionRecovery:
         if head.get("transport_accepted_at") is None or not cls.is_reset(head):
             return False
         reason = "accepted reset was requeued; outcome ambiguous without replay proof"
-        conn.execute(text("""
+        DeliveryTransitionEvents.stage(conn, conn.execute(text("""
             UPDATE inter_bot_deliveries SET status='FAILED',
                 next_retry_at=NULL, last_error=:reason,
                 metadata_json=jsonb_set(metadata_json, '{new_session_ambiguous}',
                                         'true'::jsonb), updated_at=now()
-            WHERE id=:id AND status='QUEUED'
-        """), {"id": head["id"], "reason": reason})
+            WHERE id=:id AND status='QUEUED' RETURNING *
+        """), {"id": head["id"], "reason": reason}).mappings().first(), reason_code="reset_ambiguous")
         conn.execute(text("""
             UPDATE turn_logs SET status='error', end_reason='error',
                 error_text=:reason, ended_at=COALESCE(ended_at, now())
@@ -92,6 +95,7 @@ class NewSessionRecovery:
             WHERE id=:id AND status=:status AND claim_token=:token
               AND transport_accepted_at IS NOT NULL RETURNING *
         """), params).mappings().one_or_none()
+        DeliveryTransitionEvents.stage(conn, row, reason_code="reset_ambiguous")
         if row is not None:
             conn.execute(text("""
                 UPDATE turn_logs SET status='error', end_reason='error',

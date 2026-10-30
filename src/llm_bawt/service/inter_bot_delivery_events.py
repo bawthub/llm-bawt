@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from ..inter_bot_delivery import DELIVERED, DISPATCHING, FAILED, QUEUED, DeliveryRecord
-from ..inter_bot_delivery_retry import retry_original_author
+from ..inter_bot_delivery_ledger import delivery_audience
 from ..inter_bot_delivery_steer_fence import steer_uncertain
 
 logger = logging.getLogger(__name__)
@@ -75,29 +75,17 @@ def delivery_event(record: DeliveryRecord, *, default_user: str,
     if wait_reason is not None:
         event["wait_reason"] = wait_reason
     if record.metadata.get("prompt_schedule"):
-        event["user_id"] = record.author_entity_id
-        event["bot_id"] = record.target_bot_id
         event["prompt_schedule"] = record.metadata["prompt_schedule"]
-    chat_user = None
-    if record.metadata.get("ordinary_chat"):
-        # Ordinary queued sends belong to the selected user, not the
-        # service's default user or the inter-bot sender namespace. A
-        # system-authored restart child (TASK-1231B) belongs to the user
-        # whose request it carries.
-        if record.author_entity_type == "user":
-            chat_user = record.author_entity_id
-        else:
-            original = retry_original_author(record)
-            if original is not None and original.entity_type == "user":
-                chat_user = original.entity_id
-    if chat_user:
+    # One audience rule for the live event and its durable receipt (TASK-1745):
+    # ordinary sends belong to the selected user (a system restart child to
+    # the user whose request it carries, TASK-1231B), not the default user.
+    audience = delivery_audience(record, default_user=default_user)
+    if audience.ordinary_chat_user:
         event.update(
-            bot_id=record.target_bot_id, user_id=chat_user,
             ordinary_chat=True, user_message_id=record.user_message_id,
             session_id=record.metadata["ordinary_chat"].get("session_id"),
         )
-    if record.metadata.get("maintenance_user_queue"):
-        event.update(bot_id=record.target_bot_id, user_id=record.author_entity_id)
+    event.update(bot_id=audience.bot_id, user_id=audience.user_id)
     return event
 
 

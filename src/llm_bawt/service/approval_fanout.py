@@ -43,6 +43,7 @@ from sqlmodel import Session
 from ..approval_models import KIND_MCP, OPS_RUN_TOOL, REQ_PENDING, ToolApprovalRequest
 from ..bot_identities import SYSTEM_BOT_ID
 from ..bot_tags import BehaviorTag
+from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ..inter_bot_delivery_record import DeliveryRecord
 from ..inter_bot_steer_only import STEER_ONLY_KEY
 from ..utils.db import is_postgresql
@@ -341,11 +342,13 @@ class ApprovalFanoutPump:
         """
         if not delivery_id:
             return False
-        if conn.execute(sa_text("""
+        cancelled = conn.execute(sa_text("""
             UPDATE inter_bot_deliveries SET status='CANCELLED', next_retry_at=NULL,
                 last_error=:reason, updated_at=now()
-            WHERE id=:id AND status='QUEUED'
-        """), {"id": delivery_id, "reason": reason}).rowcount:
+            WHERE id=:id AND status='QUEUED' RETURNING *
+        """), {"id": delivery_id, "reason": reason}).mappings().first()
+        if cancelled is not None:
+            DeliveryTransitionEvents.stage(conn, cancelled, reason_code="approval_resolved")
             return True
         status = conn.execute(sa_text("SELECT status FROM inter_bot_deliveries WHERE id=:id"),
                               {"id": delivery_id}).scalar()

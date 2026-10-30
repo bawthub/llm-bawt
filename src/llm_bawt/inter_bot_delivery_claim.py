@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text as sa_text
 
 from .agent_context import SessionPolicy
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_user import resolve_delivery_user
 from .inter_bot_steer_only import (
@@ -83,11 +84,11 @@ class DeliveryClaim:
                 ):
                     return None
                 if store._explicit_stop_requested(conn, head["turn_id"]):
-                    conn.execute(sa_text("""
+                    DeliveryTransitionEvents.stage(conn, conn.execute(sa_text("""
                         UPDATE inter_bot_deliveries SET status='CANCELLED',
                             next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
-                        WHERE id=:id AND status='QUEUED'
-                    """), {"id": head["id"]})
+                        WHERE id=:id AND status='QUEUED' RETURNING *
+                    """), {"id": head["id"]}).mappings().first(), reason_code="user_stop")
                     return None
                 from .service.approval_fanout import claim_fence
 
@@ -95,11 +96,12 @@ class DeliveryClaim:
                 # whose card was decided) since enqueue is cancelled, not run.
                 fenced = claim_fence(conn, head)
                 if fenced is not None:
-                    conn.execute(sa_text("""
+                    DeliveryTransitionEvents.stage(conn, conn.execute(sa_text("""
                         UPDATE inter_bot_deliveries SET status='CANCELLED',
                             next_retry_at=NULL, last_error=:reason, updated_at=now()
-                        WHERE id=:id AND status='QUEUED'
-                    """), {"id": head["id"], "reason": fenced})
+                        WHERE id=:id AND status='QUEUED' RETURNING *
+                    """), {"id": head["id"], "reason": fenced}).mappings().first(),
+                        reason_code="approval_fenced")
                     return None
                 if gate_blocks(conn, target, GateActor("delivery_claim", head["turn_id"]),
                                exclude_owner_id=exempt_owner, exclude_gate_ids=forced) is not None:
@@ -169,11 +171,12 @@ class DeliveryClaim:
                             delivery_id=head["id"], bot_id=target,
                             trigger_message_id=head["user_message_id"],
                         )
-                    conn.execute(sa_text("""
+                    DeliveryTransitionEvents.stage(conn, conn.execute(sa_text("""
                         UPDATE inter_bot_deliveries SET status='FAILED',
                             last_error=:error, next_retry_at=NULL, updated_at=now()
-                        WHERE id=:id AND status='QUEUED'
-                    """), {"id": head["id"], "error": str(exc)})
+                        WHERE id=:id AND status='QUEUED' RETURNING *
+                    """), {"id": head["id"], "error": str(exc)}).mappings().first(),
+                        reason_code="user_unresolved")
                     return None
                 if any(str(row.get("user_id") or "") != delivery_user_id for row in state.rows):
                     return None
@@ -277,6 +280,7 @@ class DeliveryClaim:
                     "target_turn_id": target_turn_id,
                     "delivery_mode": delivery_mode,
                 }).mappings().first()
+                DeliveryTransitionEvents.stage(conn, row)
                 break
         return DeliveryRecord.from_mapping(row) if row else None
 

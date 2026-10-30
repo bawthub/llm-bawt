@@ -12,6 +12,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Connection
 
 from .inter_bot_delivery_claim import QUEUED
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
 from .inter_bot_delivery_record import DeliveryRecord
 from .inter_bot_delivery_steer_fence import pending_rejection, rejection_error, rejection_merge
 
@@ -132,6 +133,7 @@ class DeliveryLeaseRecovery:
                         "error": rejection_error(proof, int(metadata.get("steer_generation") or 0)),
                         "merge": json.dumps(rejection_merge(metadata, proof)),
                     }).mappings().one()
+                    DeliveryTransitionEvents.stage(conn, updated, reason_code="steer_rejected")
                     recovered.append(DeliveryRecord.from_mapping(updated))
                     continue
                 elif (
@@ -147,6 +149,7 @@ class DeliveryLeaseRecovery:
                 updated = conn.execute(sa_text(
                     f"UPDATE inter_bot_deliveries SET {assignments}, updated_at=now() WHERE id=:id RETURNING *"
                 ), {"id": row["id"]}).mappings().one()
+                DeliveryTransitionEvents.stage(conn, updated, reason_code="lease_recovery")
                 if updated["status"] == "CANCELLED" and is_turn:
                     # TASK-1232 P4: a user Stop ends the turn too. Cancelling
                     # only the delivery left the row open, and admission

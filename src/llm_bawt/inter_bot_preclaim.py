@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlmodel import Session, select
 
+from .inter_bot_delivery_ledger import DeliveryTransitionEvents
+
 
 # A DISPATCHING row whose fallback turn the target accepted and has not ended:
 # already delivered in order, so it neither heads the queue nor fences a jump.
@@ -135,11 +137,14 @@ def load_claim_head(conn, target: str, config):
             """), {"id": head["turn_id"]}).mappings().first()
             if terminal and terminal["ended_at"] is not None:
                 succeeded = terminal["status"] in {"ok", "completed"} and not terminal["error_text"]
-                conn.execute(text("""
+                settled = conn.execute(text("""
                     UPDATE inter_bot_deliveries SET status=:status, last_error=:error,
                         next_retry_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=:id
+                    RETURNING *
                 """), {"id": head["id"], "status": "DELIVERED" if succeeded else "FAILED",
-                       "error": None if succeeded else terminal["error_text"] or "Target turn ended unsuccessfully"})
+                       "error": None if succeeded else terminal["error_text"] or "Target turn ended unsuccessfully"}
+                ).mappings().first()
+                DeliveryTransitionEvents.stage(conn, settled, reason_code="accepted_turn_ended")
                 return None
             return head
         occurrence = session.get(PromptOccurrence, origin.get("occurrence_id"))
@@ -190,14 +195,16 @@ def load_claim_head(conn, target: str, config):
             except ValueError as exc:
                 reason = "failed", str(exc)
         if reason:
-            conn.execute(text("""
+            refused = conn.execute(text("""
                 UPDATE inter_bot_deliveries SET status=:status,
                     last_error=:error, updated_at=CURRENT_TIMESTAMP,
                     next_retry_at=NULL, claim_token=NULL, claim_owner=NULL,
                     lease_expires_at=NULL
                 WHERE id=:id AND status='QUEUED' AND transport_accepted_at IS NULL
+                RETURNING *
             """), {"id": head["id"], "status": "FAILED" if reason[0] == "failed" else "CANCELLED",
-                   "error": reason[1]})
+                   "error": reason[1]}).mappings().first()
+            DeliveryTransitionEvents.stage(conn, refused, reason_code="schedule_gate")
             conn.execute(text(
                 "DELETE FROM turn_logs WHERE id=:id AND status='reserved'"
             ), {"id": head["turn_id"]})
