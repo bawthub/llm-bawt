@@ -43,6 +43,8 @@ _TONES = {
     "QUEUED": "info", "STEERING": "info", "DISPATCHING": "info",
     "DELIVERED": "success", "FAILED": "error", "CANCELLED": "warning",
 }
+# User-authored (ordinary chat) deliveries get a receipt only when they fail.
+_USER_RECEIPT_STATUSES = frozenset({"FAILED", "CANCELLED"})
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,11 @@ class DeliveryTransitionEvents:
     @staticmethod
     def _append(emitter: "SystemEventEmitter", conn: Connection, record: DeliveryRecord, *,
                 default_user: str | None, reason_code: str | None) -> None:
+        # TASK-1786: a user's own chat turn rides a delivery row but is not a
+        # relay; the chat already shows it. Only its failure is worth a receipt.
+        user_authored = record.author_entity_type == "user"
+        if user_authored and record.status not in _USER_RECEIPT_STATUSES:
+            return
         audience = delivery_audience(record, default_user=default_user)
         # The emitter checks ``bot_id``; the other party must be public too.
         other = record.target_bot_id if audience.bot_id == record.sender_bot_id else record.sender_bot_id
@@ -235,7 +242,8 @@ class DeliveryTransitionEvents:
             kind="inter_bot_delivery", source="delivery",
             user_id=audience.user_id,
             tone=_TONES.get(record.status, "info"),
-            summary=f"{record.sender_bot_id} → {record.target_bot_id} · {record.status.lower()}"[:500],
+            summary=f"{'You' if user_authored else record.sender_bot_id} → {record.target_bot_id}"
+                    f" · {record.status.lower()}"[:500],
             bot_id=audience.bot_id, actor_type=record.author_entity_type or "bot",
             actor_id=(record.author_entity_id or record.sender_bot_id)[:128],
             subject_type="delivery", subject_id=record.id,

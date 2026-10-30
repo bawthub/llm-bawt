@@ -211,9 +211,13 @@ def test_an_ordinary_chat_send_belongs_to_its_user(ledger, monkeypatch):
     record, _ = _send(ledger, sender, target, author=AuthorReference.user(ledger.user),
                       producer="ordinary", user_message_id=str(uuid.uuid4()),
                       metadata={"ordinary_chat": {"session_id": f"s-{ledger.tag}"}})
+    # TASK-1786: an ordinary chat turn is not a relay, so no QUEUED receipt.
+    assert _events(ledger, record.id) == []
+    assert ledger.deliveries.mark_failed(record.id, "boom") is not None
     (event,) = _events(ledger, record.id)
     assert event["visibility"] == "user_feed" and event["user_id"] == ledger.user
     assert event["bot_id"] == target
+    assert event["summary"] == f"You → {target} · failed"
 
 
 def test_competing_multi_row_cancels_never_deadlock_on_the_event_lock(ledger):
