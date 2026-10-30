@@ -1,20 +1,24 @@
 """One durable, user-scoped ledger for operational events (TASK-1745).
 
-Domain writers append in their existing transaction. Redis is an outbox projection,
-never the owner of a receipt; a crash after XADD and before stamping may replay a
-row, so consumers deduplicate by its immutable database id.
+Domain writers stage appends in their existing transaction
+(:meth:`SystemEventEmitter.append_at_commit`); the rows are written at that
+transaction's commit. Redis is an outbox projection, never the owner of a
+receipt; a crash after XADD and before stamping may replay a row, so consumers
+deduplicate by its immutable database id.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import (
     JSON, BigInteger, CheckConstraint, Column, DateTime, Identity, Index,
     Integer, MetaData, String, Table, UniqueConstraint, delete, func,
-    insert, select, text, update,
+    event, insert, select, text, update,
 )
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import JSONB
@@ -77,6 +81,86 @@ def _receipt(row: Any) -> dict[str, Any]:
     }
 
 
+class CommitStagedAppends:
+    """Run a connection's staged event appends from its ``commit`` hook.
+
+    :meth:`SystemEventEmitter.append` takes a transaction-scoped advisory lock
+    to keep event ids in commit order. Taken mid-transaction, that lock
+    deadlocks against a writer that holds a domain row lock this transaction
+    still needs and appends at its own commit (an ops failure releasing gates
+    vs a delivery claim). Staged here, every append runs after the
+    transaction's last domain write, so the event lock is always its last
+    lock, whoever owns the transaction. A rollback, or a rolled-back
+    savepoint, drops what it staged.
+    """
+
+    _STAGED = "llm_bawt.system_events.staged"
+    _MARKS = "llm_bawt.system_events.savepoints"
+    _lock = threading.Lock()
+
+    @classmethod
+    def stage(cls, conn: Connection, append: Callable[[Connection], Any]) -> None:
+        """Run ``append(conn)`` when ``conn``'s transaction commits. Never raises."""
+        try:
+            cls.install(conn.engine)
+            conn.info.setdefault(cls._STAGED, []).append(append)
+        except Exception:  # noqa: BLE001 - a receipt never blocks its domain write
+            SystemEventEmitter.failed_appends += 1
+            logger.exception("could not stage a system event")
+
+    @classmethod
+    def install(cls, engine: Engine) -> None:
+        """Attach the transaction hooks to ``engine`` once (no I/O)."""
+        if event.contains(engine, "commit", cls._on_commit):
+            return
+        with cls._lock:
+            if event.contains(engine, "commit", cls._on_commit):
+                return
+            event.listen(engine, "begin", cls._reset)
+            event.listen(engine, "rollback", cls._reset)
+            event.listen(engine, "savepoint", cls._on_savepoint)
+            event.listen(engine, "rollback_savepoint", cls._on_rollback_savepoint)
+            event.listen(engine, "release_savepoint", cls._on_release_savepoint)
+            event.listen(engine, "commit", cls._on_commit)  # last: ``contains`` checks it
+
+    @classmethod
+    def _reset(cls, conn: Connection) -> None:
+        # ``Connection.info`` outlives the checkout; never carry appends across transactions.
+        conn.info.pop(cls._STAGED, None)
+        conn.info.pop(cls._MARKS, None)
+
+    # Savepoints nest LIFO. A stack, not a name map: SQLAlchemy dispatches
+    # ``savepoint`` before it generates the name (``name`` is None there).
+    @classmethod
+    def _on_savepoint(cls, conn: Connection, name: str | None) -> None:
+        conn.info.setdefault(cls._MARKS, []).append(len(conn.info.get(cls._STAGED) or ()))
+
+    @classmethod
+    def _on_rollback_savepoint(cls, conn: Connection, name: str, context: Any) -> None:
+        marks = conn.info.get(cls._MARKS)
+        mark = marks.pop() if marks else None
+        staged = conn.info.get(cls._STAGED)
+        if mark is not None and staged is not None:
+            del staged[mark:]
+
+    @classmethod
+    def _on_release_savepoint(cls, conn: Connection, name: str, context: Any) -> None:
+        marks = conn.info.get(cls._MARKS)
+        if marks:
+            marks.pop()
+
+    @classmethod
+    def _on_commit(cls, conn: Connection) -> None:
+        staged = conn.info.pop(cls._STAGED, None)
+        conn.info.pop(cls._MARKS, None)
+        for append in staged or ():
+            try:
+                append(conn)
+            except Exception:  # noqa: BLE001 - appends are savepoint-isolated
+                SystemEventEmitter.failed_appends += 1
+                logger.exception("system event not recorded; the transaction still commits")
+
+
 class SystemEventEmitter:
     """Owns schema, transactional append, scoped reads and outbox projection."""
 
@@ -95,6 +179,15 @@ class SystemEventEmitter:
         """Whether the ledger table exists, read on ``conn`` (no DDL, no second connection)."""
         return sa_inspect(conn).has_table(_system_events.name)
 
+    def append_at_commit(self, conn: Connection, **fields: Any) -> None:
+        """Stage :meth:`append` for ``conn``'s commit; the producer entry point.
+
+        Never call :meth:`append` mid-transaction from a domain writer: its
+        event-order lock must be the transaction's last lock
+        (:class:`CommitStagedAppends`).
+        """
+        CommitStagedAppends.stage(conn, lambda c: self.append(c, **fields))
+
     def append(
         self, conn: Connection, *, event_key: str, kind: str, source: str,
         user_id: str | None, tone: str, summary: str,
@@ -103,7 +196,9 @@ class SystemEventEmitter:
         subject_id: str | None = None, payload: dict[str, Any] | None = None,
         visible: bool = True,
     ) -> int | None:
-        """Append in the caller's transaction, without poisoning it on bad metadata.
+        """Append now, in the caller's transaction, without poisoning it on bad metadata.
+
+        Runs from the commit hook (or a test); producers use :meth:`append_at_commit`.
 
         Missing owners are audit-only, never guessed. A savepoint isolates an
         unexpected projection failure from the producer's domain transaction.

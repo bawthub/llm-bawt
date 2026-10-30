@@ -15,7 +15,7 @@ def append_job_transition(emitter: SystemEventEmitter | None, conn, job: OpsJob)
     state = job.state
     # Lifecycle states never revert to an earlier state. A retry of the same
     # winning transition therefore uses the same key, not a new receipt.
-    emitter.append(
+    emitter.append_at_commit(
         conn, event_key=f"ops:{job.id}:{state}", kind="ops_job",
         source="ops", user_id=job.caller_user_id,
         tone=("info" if state not in JOB_TERMINAL_STATES else

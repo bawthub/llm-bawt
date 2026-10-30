@@ -25,7 +25,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import event
 from sqlalchemy.engine import Connection, Engine
 
 from .bot_tags.facade import BotTags
@@ -94,11 +93,10 @@ def configured_default_user() -> str | None:
 class DeliveryTransitionEvents:
     """Stage winning delivery transitions; append them to the ledger at commit."""
 
-    _STAGED = "llm_bawt.delivery_events.staged"
-    _MARKS = "llm_bawt.delivery_events.savepoints"
-    # Weak keys: tests and reconnects dispose engines, and a recycled id()
-    # must never inherit another engine's emitter or hook state.
-    _emitters: "weakref.WeakKeyDictionary[Engine, SystemEventEmitter]" = weakref.WeakKeyDictionary()
+    # Engines whose event table is known to exist. Weak keys, and a value that
+    # never references its key: a disposed engine (tests, reconnects) is freed,
+    # and a recycled id() never inherits another engine's state.
+    _ready: "weakref.WeakKeyDictionary[Engine, bool]" = weakref.WeakKeyDictionary()
     _lock = threading.Lock()
 
     @classmethod
@@ -111,84 +109,34 @@ class DeliveryTransitionEvents:
         """
         try:
             from .inter_bot_delivery_record import DeliveryRecord
+            from .system_events import CommitStagedAppends
 
             records = [r if isinstance(r, DeliveryRecord) else DeliveryRecord.from_mapping(r)
                        for r in rows if r is not None]
             if not records:
                 return
-            # Hooks only: this connection is mid-transaction, so no schema work here.
-            cls.install(conn.engine, warm=False)
-            conn.info.setdefault(cls._STAGED, []).extend((r, reason_code) for r in records)
+            staged = [(r, reason_code) for r in records]
+            CommitStagedAppends.stage(conn, lambda c: cls.flush(c, staged))
         except Exception:  # noqa: BLE001 - receipts never block a delivery
             cls._count_failure()
             logger.exception("could not stage a delivery event")
 
     @classmethod
-    def install(cls, engine: Engine, *, warm: bool = True) -> None:
-        """Attach the commit/rollback/savepoint hooks to ``engine`` once.
+    def install(cls, engine: Engine) -> None:
+        """Build the event table for ``engine`` now, outside any transaction.
 
-        ``warm`` also builds the emitter (and its table) now, outside any
-        transaction; a store calls this at construction. Never raises: without
-        hooks, staged rows are simply never appended.
+        A store calls this at construction, so a commit never has to. Never
+        raises: without the table, staged rows are skipped at commit.
         """
+        from .system_events import CommitStagedAppends
+
         try:
-            if event.contains(engine, "commit", cls._on_commit):
-                if warm:
-                    cls.emitter(engine)
-                return
-            with cls._lock:
-                if event.contains(engine, "commit", cls._on_commit):
-                    return
-                event.listen(engine, "begin", cls._reset)
-                event.listen(engine, "rollback", cls._reset)
-                event.listen(engine, "savepoint", cls._on_savepoint)
-                event.listen(engine, "rollback_savepoint", cls._on_rollback_savepoint)
-                event.listen(engine, "release_savepoint", cls._on_release_savepoint)
-                event.listen(engine, "commit", cls._on_commit)  # last: ``contains`` checks it
+            CommitStagedAppends.install(engine)
         except Exception:  # noqa: BLE001 - receipts never block a delivery
             cls._count_failure()
             logger.exception("delivery event hooks unavailable; deliveries continue without receipts")
             return
-        if warm:
-            cls.emitter(engine)
-
-    @classmethod
-    def _reset(cls, conn: Connection) -> None:
-        # ``Connection.info`` outlives the checkout; never carry rows across transactions.
-        conn.info.pop(cls._STAGED, None)
-        conn.info.pop(cls._MARKS, None)
-
-    # Savepoints nest LIFO. A stack, not a name map: SQLAlchemy dispatches
-    # ``savepoint`` before it generates the name (``name`` is None there).
-    @classmethod
-    def _on_savepoint(cls, conn: Connection, name: str | None) -> None:
-        conn.info.setdefault(cls._MARKS, []).append(len(conn.info.get(cls._STAGED) or ()))
-
-    @classmethod
-    def _on_rollback_savepoint(cls, conn: Connection, name: str, context: Any) -> None:
-        marks = conn.info.get(cls._MARKS)
-        mark = marks.pop() if marks else None
-        staged = conn.info.get(cls._STAGED)
-        if mark is not None and staged is not None:
-            del staged[mark:]
-
-    @classmethod
-    def _on_release_savepoint(cls, conn: Connection, name: str, context: Any) -> None:
-        marks = conn.info.get(cls._MARKS)
-        if marks:
-            marks.pop()
-
-    @classmethod
-    def _on_commit(cls, conn: Connection) -> None:
-        staged = conn.info.pop(cls._STAGED, None)
-        conn.info.pop(cls._MARKS, None)
-        if not staged:
-            return
-        try:
-            cls.flush(conn, staged)
-        except Exception:  # noqa: BLE001 - appends are savepoint-isolated
-            cls._count_failure()
-            logger.exception("delivery events not recorded; the transitions still commit")
+        cls.emitter(engine)
 
     @staticmethod
     def _count_failure() -> None:
@@ -198,26 +146,22 @@ class DeliveryTransitionEvents:
 
     @classmethod
     def emitter(cls, engine: Engine | None) -> "SystemEventEmitter | None":
-        """One emitter per engine; an unavailable ledger never blocks deliveries."""
+        """An emitter whose table exists; an unavailable ledger never blocks deliveries."""
         from .system_events import SystemEventEmitter
 
         if engine is None:
             return None
-        found = cls._emitters.get(engine)
-        if found is not None:
-            return found
+        if cls._ready.get(engine):
+            return SystemEventEmitter(engine, bootstrap=False)
+        try:
+            found = SystemEventEmitter(engine)
+        except Exception:  # noqa: BLE001 - deliveries continue without receipts
+            SystemEventEmitter.failed_appends += 1
+            logger.exception("delivery event ledger unavailable; deliveries continue")
+            return None
         with cls._lock:
-            found = cls._emitters.get(engine)
-            if found is not None:
-                return found
-            try:
-                found = SystemEventEmitter(engine)
-            except Exception:  # noqa: BLE001 - deliveries continue without receipts
-                SystemEventEmitter.failed_appends += 1
-                logger.exception("delivery event ledger unavailable; deliveries continue")
-                return None
-            cls._emitters[engine] = found
-            return found
+            cls._ready[engine] = True
+        return found
 
     @classmethod
     def _commit_emitter(cls, conn: Connection) -> "SystemEventEmitter | None":
@@ -229,20 +173,19 @@ class DeliveryTransitionEvents:
         """
         from .system_events import SystemEventEmitter
 
-        found = cls._emitters.get(conn.engine)
-        if found is not None:
-            return found
-        try:
-            with conn.begin_nested():
-                exists = SystemEventEmitter.table_exists(conn)
-        except Exception:  # noqa: BLE001 - deliveries continue without receipts
-            exists = False
-        if not exists:
-            cls._count_failure()
-            logger.warning("delivery events: event ledger table not ready on this engine; skipped")
-            return None
-        with cls._lock:
-            return cls._emitters.setdefault(conn.engine, SystemEventEmitter(conn.engine, bootstrap=False))
+        if not cls._ready.get(conn.engine):
+            try:
+                with conn.begin_nested():
+                    exists = SystemEventEmitter.table_exists(conn)
+            except Exception:  # noqa: BLE001 - deliveries continue without receipts
+                exists = False
+            if not exists:
+                cls._count_failure()
+                logger.warning("delivery events: event ledger table not ready on this engine; skipped")
+                return None
+            with cls._lock:
+                cls._ready[conn.engine] = True
+        return SystemEventEmitter(conn.engine, bootstrap=False)
 
     @classmethod
     def flush(

@@ -180,3 +180,49 @@ def test_uncommitted_event_not_visible_to_a_second_reader(tmp_path):
         assert first is not None
         assert store.list_user("reader", after=0) == []
     assert [row["id"] for row in store.list_user("reader", after=0)] == [str(first)]
+
+
+def test_producers_only_stage_appends_for_commit():
+    """The event-order lock must be a transaction's last lock (TASK-1745 r1).
+
+    A producer calling ``append`` mid-transaction takes it early and can
+    deadlock a writer that appends at its own commit. Only the commit-time
+    paths may call it: ``append_at_commit``'s staged call and the delivery
+    ledger's flush, which itself runs from the commit hook.
+    """
+    import ast
+    from pathlib import Path
+
+    import llm_bawt
+
+    allowed = {"system_events.py", "inter_bot_delivery_ledger.py"}
+    offenders = []
+    for path in Path(llm_bawt.__file__).parent.rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        if "event_key" not in source:  # parse only candidate files (unit time budget)
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "append" and any(k.arg == "event_key" for k in node.keywords)
+                    and path.name not in allowed):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == []
+
+
+def test_append_at_commit_writes_only_when_the_transaction_commits():
+    store = emitter()
+    fields = dict(kind="ops", source="ops", user_id="u", tone="info", summary="s")
+    with store.engine.connect() as conn:
+        with conn.begin():
+            store.append_at_commit(conn, event_key="kept", **fields)
+            assert conn.execute(text("SELECT count(*) FROM system_events")).scalar_one() == 0
+        tx = conn.begin()
+        store.append_at_commit(conn, event_key="rolled", **fields)
+        tx.rollback()
+        with conn.begin():
+            nested = conn.begin_nested()
+            store.append_at_commit(conn, event_key="savepoint", **fields)
+            nested.rollback()
+    with store.engine.connect() as conn:
+        keys = [r[0] for r in conn.execute(text("SELECT event_key FROM system_events"))]
+    assert keys == ["kept"]

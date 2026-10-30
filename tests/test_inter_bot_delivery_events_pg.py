@@ -260,3 +260,62 @@ def test_competing_multi_row_cancels_never_deadlock_on_the_event_lock(ledger):
     (x_event,) = [e for e in _events(ledger, x.id) if e["payload"]["phase"] == "CANCELLED"]
     (y_event,) = [e for e in _events(ledger, y.id) if e["payload"]["phase"] == "CANCELLED"]
     assert y_event["id"] < x_event["id"]  # commit order
+
+
+def test_an_ops_event_never_deadlocks_a_committing_delivery_transition(ledger):
+    """A quiesce failure (A) records its job transition, then needs a delivery
+    row (``release_job_gates`` → ``cancel_pending_controls``) that B holds while
+    B's transition commits.
+
+    Were the ops event appended at the write, A would hold the event-order
+    lock while waiting on B's row lock, and B's commit hook would wait on A's
+    event lock: a deadlock. Staged for commit, B commits first and A follows.
+    """
+    from types import SimpleNamespace
+
+    from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+    from llm_bawt.ops.events import append_job_transition
+    from llm_bawt.system_events import SystemEventEmitter
+
+    y, _ = _send(ledger, ledger.bot(), ledger.bot())
+    engine = ledger.deliveries.engine
+    emitter = SystemEventEmitter(engine)
+    job = SimpleNamespace(id=f"job-{ledger.tag}", operation_slug="test.quiesce", state="failed",
+                          caller_bot_id=None, caller_user_id=ledger.user, caller_actor="test")
+    b_locked, b_go = threading.Event(), threading.Event()
+    b_pid = {}
+
+    def run_b():
+        with engine.begin() as conn:
+            conn.execute(sa_text("SET LOCAL lock_timeout = '15s'"))
+            b_pid["pid"] = conn.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
+            row = _row(conn, y.id, lock=True)
+            b_locked.set()
+            assert b_go.wait(30)
+            assert InterBotDeliveryStore.cancel_unaccepted_locked(conn, row, "user_stop") is not None
+
+    def run_a():
+        with engine.begin() as conn:
+            conn.execute(sa_text("SET LOCAL lock_timeout = '15s'"))
+            append_job_transition(emitter, conn, job)
+            # Waits on B's row lock with the ops event staged.
+            assert _row(conn, y.id, lock=True)["status"] == "CANCELLED"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            b = pool.submit(run_b)
+            assert b_locked.wait(30)
+            a = pool.submit(run_a)
+            wait_blocked_by(engine, b_pid["pid"], a)
+            b_go.set()
+            b.result(timeout=60)
+            a.result(timeout=60)
+        (y_event,) = [e for e in _events(ledger, y.id) if e["payload"]["phase"] == "CANCELLED"]
+        with engine.connect() as conn:
+            ops_id = conn.execute(sa_text("SELECT id FROM system_events WHERE event_key=:k"),
+                                  {"k": f"ops:{job.id}:failed"}).scalar_one()
+        assert y_event["id"] < ops_id  # commit order
+    finally:
+        with engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM system_events WHERE event_key=:k"),
+                         {"k": f"ops:{job.id}:failed"})

@@ -10,7 +10,7 @@ def append_approval_transition(emitter: SystemEventEmitter | None, conn,
                                row: ToolApprovalRequest) -> None:
     if emitter is None:
         return
-    emitter.append(
+    emitter.append_at_commit(
         conn, event_key=f"approval:{row.id}:{row.status}",
         kind="approval", source="approval",
         user_id=row.user_id if row.user_id not in ("", "unknown") else None,
