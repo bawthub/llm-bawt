@@ -202,6 +202,23 @@ def test_disconnected_or_missing_bundle_does_not_fallback(server, change):
     assert _get(client, grant).status_code == 503
 
 
+def test_key_derivation_failure_is_visible_unavailable(server, monkeypatch):
+    client, engine, grant, _ = server
+    capability = _cap(grant)
+    monkeypatch.setattr(broker.crypto, "derive_key", Mock(side_effect=RuntimeError("missing owner key")))
+    response = client.get("/v1/preview/credential",
+                          headers={broker.CAPABILITY_HEADER: capability})
+    assert response.status_code == 503
+    assert "missing owner key" not in response.text
+    assert "provider_connection:claude" not in engine.queries
+
+
+def test_non_object_decrypted_secret_fails_visibly(server):
+    client, engine, grant, _ = server
+    engine.rows["provider_connection:claude"]["secret_enc"] = "[]"
+    assert _get(client, grant).status_code == 503
+
+
 def test_unreadable_or_malformed_credential_fails_visibly(server):
     client, engine, grant, _ = server
     engine.rows["provider_connection:claude"]["secret_enc"] = "not-json"

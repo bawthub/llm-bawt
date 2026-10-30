@@ -108,6 +108,8 @@ def verify_capability(token: str | None, grant: PreviewGrant, *, now: int) -> No
                     grant.expires_at, now + _CAPABILITY_SECONDS
                 ) or payload != grant.payload(cap_exp)):
             raise ValueError("wrong Preview grant or expiration")
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(503, "Preview broker signing key unavailable") from exc
     except (ValueError, TypeError, KeyError, UnicodeError, Base64Error) as exc:
         raise HTTPException(403, "Invalid Preview broker capability") from exc
 
@@ -153,7 +155,7 @@ def _access_token(engine, grant: PreviewGrant, now: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise HTTPException(503, "Preview provider credential unavailable")
     record = CredentialStore._record(grant.provider, raw)
-    if record.status != STATUS_CONNECTED:
+    if record.status != STATUS_CONNECTED or not isinstance(record.secret, dict):
         raise HTTPException(503, "Preview provider credential unavailable")
     if grant.provider == "claude":
         bundle = record.secret.get("claudeAiOauth")
