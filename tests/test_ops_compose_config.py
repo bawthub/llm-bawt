@@ -9,7 +9,7 @@ import posixpath
 import pytest
 
 from llm_bawt.ops.compose_config import (
-    CONFIG_HASH_LABEL, UNEXPECTED_VALUE, UNSET_VALUE, apply_desired, display_values, drift, evaluate,
+    CONFIG_HASH_LABEL, OPS_PROFILE, UNEXPECTED_VALUE, UNSET_VALUE, apply_desired, display_values, drift, evaluate,
     mount_source_changes, normalized, running, translate,
 )
 from llm_bawt.ops.compose_render import (
@@ -74,6 +74,61 @@ def test_translate_refuses_what_it_does_not_model(service, code):
         _desired(**service)
     assert caught.value.code == code
     assert "10.0.0.9" not in str(caught.value)
+
+
+def _ops_service(**changes):
+    service = {"image": "sha256:" + "a" * 64,
+               "command": [], "entrypoint": ["python", "-m", "llm_bawt.ops.reconciler"],
+               "environment": {"LLM_BAWT_OPS_RECONCILER_IMAGE": "sha256:" + "a" * 64},
+               "expose": ["8650", "8651/tcp"],
+               "healthcheck": {"test": ["CMD", "python", "-c", "pass"], "interval": "15s"},
+               "networks": {"default": None}, "restart": "unless-stopped",
+               "stop_grace_period": "5s", "volumes": []}
+    service.update(changes)
+    return {"services": {"ops-reconciler": service}, "networks": {"default": {}}}
+
+
+def _ops_spec():
+    return {"compose_project": "ops", "compose_service": "ops-reconciler",
+            "container_name": "ops-ops-reconciler-1"}
+
+
+def test_ops_profile_models_expose_and_stop_timeout_in_drift_and_create_body():
+    image_id = "sha256:" + "a" * 64
+    image = {"Config": {"ExposedPorts": {"8642/tcp": {}}}}
+    wanted = translate(_ops_service(), _ops_spec(), image_id, OPS_PROFILE)
+    assert wanted["expose"] == ["8650/tcp", "8651/tcp"] and wanted["stop_timeout"] == 5
+    container = _container()
+    container["Config"].update(ExposedPorts={"8642/tcp": {}, "8650/tcp": {}}, StopTimeout=10)
+    names = drift(normalized(wanted, image), normalized(running(container), image))
+    assert [n for n in names if n.startswith(("expose:", "stop_grace_period:"))] == [
+        "expose:+8651/tcp", "stop_grace_period:~"]
+    body = {"Image": image_id, "Labels": {}, "HostConfig": container["HostConfig"],
+            "NetworkingConfig": {"EndpointsConfig": {"ops_default": {}}}}
+    created = apply_desired(body, container, wanted, container_name="ops-ops-reconciler-1",
+                            service="ops-reconciler", rendered_hash="h", image=image)
+    assert sorted(created["ExposedPorts"]) == ["8642/tcp", "8650/tcp", "8651/tcp"]
+    assert created["StopTimeout"] == 5
+    assert "StopTimeout" not in created["HostConfig"]  # Docker stores it under Config, not HostConfig.
+
+
+@pytest.mark.parametrize("changes", [
+    {"expose": ["8650", "8650/tcp"]}, {"expose": ["65536"]},
+    {"expose": ["127.0.0.1:8650"]}, {"stop_grace_period": "0s"},
+    {"stop_grace_period": "5.5s"}, {"privileged": True},
+    {"pull_policy": "always"}, {"image": "ops:latest"},
+])
+def test_ops_profile_refuses_unsupported_or_unpinned_config(changes):
+    with pytest.raises(ComposeError):
+        translate(_ops_service(**changes), _ops_spec(), "sha256:" + "a" * 64, OPS_PROFILE)
+
+
+def test_ops_profile_requires_all_safety_relevant_fields():
+    for name in ("image", "entrypoint", "command", "expose", "healthcheck", "stop_grace_period"):
+        service = _ops_service()["services"]["ops-reconciler"]
+        service.pop(name)
+        with pytest.raises(ComposeError, match="unsupported_compose_key"):
+            translate({"services": {"ops-reconciler": service}}, _ops_spec(), "sha256:" + "a" * 64, OPS_PROFILE)
 
 
 def test_unset_variable_error_names_only_the_variable():

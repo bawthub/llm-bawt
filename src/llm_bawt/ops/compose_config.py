@@ -120,6 +120,14 @@ BUILT_PROFILE = ServiceProfile("built", frozenset({
 PINNED_PROCESS_PROFILE = ServiceProfile("pinned-process", SERVICE_KEYS | {
     "container_name", "depends_on", "ports", "tmpfs"}, built=False, models_process=True,
     pull_policies=PULL_POLICIES)
+# TASK-1169: the ops reconciler is a pinned-image Compose service, not a
+# build or a mutable tag. Its internal exposed ports and stop grace period
+# must be owned by this profile rather than silently inherited from the old
+# container during same-image recreation.
+OPS_PROFILE = ServiceProfile("pinned-ops", frozenset({
+    "command", "entrypoint", "environment", "expose", "healthcheck", "image",
+    "networks", "restart", "stop_grace_period", "volumes"}),
+    built=False, models_process=True, pull_policies=frozenset())
 # TASK-1649: a Compose-built DEV service (the BawtHub hot-reload frontend). The
 # built keys plus its memory cap, which this profile owns: the desired
 # configuration always carries ``memory`` (0 = unlimited) and the recreate
@@ -225,6 +233,30 @@ def _ports(value) -> dict:
             raise ComposeError("unsupported_compose_key", ["ports"])
         bindings.setdefault(key, []).append(entry)
     return {k: sorted(v, key=lambda b: (b["HostIp"], b["HostPort"])) for k, v in sorted(bindings.items())}
+
+
+def _exposed(value) -> list[str]:
+    """Compose ``expose`` entries become Docker ExposedPorts; no host publishing."""
+    if not isinstance(value, list) or not value or len(value) > 32:
+        raise ComposeError("unsupported_compose_key", ["expose"])
+    ports = []
+    for entry in value:
+        if not isinstance(entry, str) or not re.fullmatch(r"[1-9][0-9]{0,4}(?:/(?:tcp|udp))?", entry):
+            raise ComposeError("unsupported_compose_key", ["expose"])
+        number, _, protocol = entry.partition("/")
+        if int(number) > 65535:
+            raise ComposeError("unsupported_compose_key", ["expose"])
+        ports.append(f"{number}/{protocol or 'tcp'}")
+    if len(set(ports)) != len(ports):
+        raise ComposeError("unsupported_compose_key", ["expose"])
+    return sorted(ports)
+
+
+def _stop_timeout(value) -> int:
+    duration = _duration(value, "stop_grace_period")
+    if not 1_000_000_000 <= duration <= 60_000_000_000 or duration % 1_000_000_000:
+        raise ComposeError("unsupported_compose_key", ["stop_grace_period"])
+    return duration // 1_000_000_000
 
 
 def _depends_on(value) -> dict:
@@ -358,6 +390,10 @@ def _process(service: dict, spec: dict, mounts: dict) -> dict:
     tmpfs = _tmpfs(service.get("tmpfs"), mounts)
     if tmpfs:
         process["tmpfs"] = tmpfs
+    if "expose" in service:
+        process["expose"] = _exposed(service["expose"])
+    if "stop_grace_period" in service:
+        process["stop_timeout"] = _stop_timeout(service["stop_grace_period"])
     return process
 
 
@@ -372,6 +408,14 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
         raise ComposeError("unsupported_compose_key", unknown)
     if "pull_policy" in service and service["pull_policy"] not in profile.pull_policies:
         raise ComposeError("unsupported_pull_policy")
+    if profile is OPS_PROFILE:
+        required = {"image", "entrypoint", "command", "expose", "healthcheck", "stop_grace_period"}
+        missing = required - set(service)
+        if missing:
+            raise ComposeError("unsupported_compose_key", sorted(missing))
+        if not isinstance(image_ref, str) or not re.fullmatch(
+                r"(?:sha256:[0-9a-f]{64}|[a-z0-9._/-]+@sha256:[0-9a-f]{64})", image_ref):
+            raise ComposeError("compose_image_mismatch")
     if not profile.models_process:
         for key in ("command", "entrypoint"):
             if service.get(key) is not None:
@@ -477,6 +521,8 @@ def running(container: dict) -> dict:
             "security_opt": list(host.get("SecurityOpt") or []),
             "healthcheck": _health_state(config.get("Healthcheck")),
             "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items())),
+            "expose": sorted((config.get("ExposedPorts") or {}).keys()),
+            "stop_timeout": config.get("StopTimeout"),
             "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)}}
 
 
@@ -498,6 +544,8 @@ def normalized(state: dict, image: dict) -> dict:
         result["cmd"] = image_config.get("Cmd")
     if "entrypoint" in result and result["entrypoint"] is None:
         result["entrypoint"] = image_config.get("Entrypoint")
+    if "expose" in result:
+        result["expose"] = sorted(set(result["expose"]) | set(image_config.get("ExposedPorts") or {}))
     health, image_health = result.get("healthcheck"), _health_state(image_config.get("Healthcheck"))
     if health is not None and image_health is not None:
         health = {k: v or image_health[k] for k, v in health.items()}
@@ -540,6 +588,11 @@ def drift(desired: dict, actual: dict) -> list[str]:
     # TASK-1649: only a profile that owns the memory cap compares it.
     if "memory" in desired and desired["memory"] != actual["memory"]:
         names.append("memory:~")
+    if "expose" in desired:
+        names += [f"expose:+{p}" for p in set(desired["expose"]) - set(actual["expose"])]
+        names += [f"expose:-{p}" for p in set(actual["expose"]) - set(desired["expose"])]
+    if "stop_timeout" in desired and desired["stop_timeout"] != actual["stop_timeout"]:
+        names.append("stop_grace_period:~")
     return sorted(names)
 
 
@@ -612,7 +665,10 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
             else:
                 body[key] = list(desired[field])
         body["OpenStdin"], body["Tty"] = desired["stdin_open"], desired["tty"]
-        body["ExposedPorts"] = {**(image_config.get("ExposedPorts") or {}), **{k: {} for k in desired["ports"]}}
+        body["ExposedPorts"] = {**(image_config.get("ExposedPorts") or {}), **{k: {} for k in desired["ports"]},
+                                **{k: {} for k in desired.get("expose", [])}}
+        if "stop_timeout" in desired:
+            body["StopTimeout"] = desired["stop_timeout"]
         if desired.get("healthcheck") is None:
             body.pop("Healthcheck", None)  # the image's own applies
         else:
