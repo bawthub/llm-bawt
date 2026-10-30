@@ -154,6 +154,34 @@ class TurnChangedFile(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
     )
 
+    # TASK-1275 S2 workspace identity (additive, nullable). identity_status
+    # NULL = legacy row, never backfilled; "unresolved" keeps repo_key
+    # "workspace". ``path`` stays the raw tool path.
+    workspace_repo_id: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
+    workspace_repo_name: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    workspace_id: str | None = Field(default=None, sa_column=Column(String(160), nullable=True))
+    workspace_kind: str | None = Field(default=None, sa_column=Column(String(16), nullable=True))
+    repo_relative_path: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    git_branch: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    git_head_sha: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
+    git_base_sha: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
+    identity_status: str | None = Field(default=None, sa_column=Column(String(16), nullable=True))
+    provenance: str | None = Field(default=None, sa_column=Column(String(16), nullable=True))
+
+
+IDENTITY_FIELDS = (
+    "workspace_repo_id", "workspace_repo_name", "workspace_id", "workspace_kind",
+    "repo_relative_path", "git_branch", "git_head_sha", "git_base_sha",
+    "identity_status", "provenance",
+)
+_IDENTITY_SQL_TYPES = {
+    "workspace_repo_id": "VARCHAR(128)", "workspace_repo_name": "VARCHAR(255)",
+    "workspace_id": "VARCHAR(160)", "workspace_kind": "VARCHAR(16)",
+    "repo_relative_path": "TEXT", "git_branch": "VARCHAR(255)",
+    "git_head_sha": "VARCHAR(64)", "git_base_sha": "VARCHAR(64)",
+    "identity_status": "VARCHAR(16)", "provenance": "VARCHAR(16)",
+}
+
 
 class TurnDiffPayloadRecord(SQLModel, table=True):
     """Bounded Postgres fallback for diff bytes when no object store exists.
@@ -202,6 +230,10 @@ class ChangedFileInput:
     # None = unknown; the store only overwrites a row's value when the bridge
     # actually reported one, so the richer capture always wins.
     in_repo: bool | None = None
+    # TASK-1275 S2: raw capture evidence (absolute_path is used for identity
+    # resolution only, never persisted) and the resolved identity fields.
+    absolute_path: str | None = None
+    identity: dict[str, str | None] = field(default_factory=dict)
 
 
 def decode_file_changes(files: list[Any]) -> list[ChangedFileInput]:
@@ -233,8 +265,18 @@ def decode_file_changes(files: list[Any]) -> list[ChangedFileInput]:
             before=_decode_b64(raw.get("before_b64")),
             after=_decode_b64(raw.get("after_b64")),
             in_repo=raw["in_repo"] if isinstance(raw.get("in_repo"), bool) else None,
+            absolute_path=_bounded_str(raw.get("absolute_path"), 4096),
+            identity={
+                key: _bounded_str(raw.get(key), 255)
+                for key in ("git_branch", "git_head_sha", "provenance")
+                if _bounded_str(raw.get(key), 255)
+            },
         ))
     return out
+
+
+def _bounded_str(value: Any, limit: int) -> str | None:
+    return value if isinstance(value, str) and 0 < len(value) <= limit else None
 
 
 def _decode_b64(value: Any) -> bytes | None:
@@ -288,6 +330,7 @@ def serialize_changed_file(row: TurnChangedFile) -> dict[str, Any]:
         "ignored": row.ignored_version == version,
         "commit_requested": row.commit_requested_at is not None,
         "commit_state": "not_applicable" if row.in_repo is False else "unknown",
+        **{key: getattr(row, key, None) for key in IDENTITY_FIELDS},
     }
 
 
@@ -408,6 +451,12 @@ class ChangedFilesStore:
                     "ALTER TABLE turn_changed_files ADD COLUMN commit_requested_at "
                     f"{column_type}"
                 ))
+            for name in IDENTITY_FIELDS:
+                if name not in legacy_columns:
+                    conn.execute(sa_text(
+                        f"ALTER TABLE turn_changed_files ADD COLUMN {name} "
+                        f"{_IDENTITY_SQL_TYPES[name]}"
+                    ))
             conn.execute(sa_text(
                 "CREATE INDEX IF NOT EXISTS ix_turn_changed_files_commit_requested_at"
                 " ON turn_changed_files (commit_requested_at)"
@@ -451,12 +500,7 @@ class ChangedFilesStore:
                     after_key, after_sha, after_n, trunc_a = self._offload_side(
                         session, f.after, f.binary
                     )
-                    row = session.exec(
-                        select(TurnChangedFile)
-                        .where(TurnChangedFile.turn_id == turn_id)
-                        .where(TurnChangedFile.repo_key == f.repo_key)
-                        .where(TurnChangedFile.path == f.path)
-                    ).first()
+                    row = self._converged_row(session, turn_id, f)
                     is_new = row is None
                     if row is None:
                         row = TurnChangedFile(turn_id=turn_id, repo_key=f.repo_key, path=f.path)
@@ -490,6 +534,18 @@ class ChangedFilesStore:
                         row.content_type = f.content_type
                     if f.in_repo is not None:
                         row.in_repo = f.in_repo
+                    # A later unresolved upsert never downgrades a resolved
+                    # identity; it may only fill facts the row still lacks.
+                    downgrade = (
+                        row.identity_status == "resolved"
+                        and f.identity.get("identity_status") != "resolved"
+                    )
+                    for key, value in f.identity.items():
+                        if key not in IDENTITY_FIELDS or value is None:
+                            continue
+                        if downgrade and getattr(row, key) is not None:
+                            continue
+                        setattr(row, key, value)
                     # Multiple Edit/Write calls may target the same path in one
                     # turn. Keep the FIRST before-side and the LATEST after-side
                     # so the diff represents the whole turn, not only its last
@@ -527,6 +583,34 @@ class ChangedFilesStore:
         except Exception:
             logger.exception("Failed to persist changed files for turn=%s", turn_id)
         return saved
+
+    @staticmethod
+    def _converged_row(session: Session, turn_id: str, f: ChangedFileInput):
+        """Row for this file, merging the unresolved and resolved upserts.
+
+        TASK-1275 S2: the app-side TOOL_END fallback may persist before the
+        bridge companion (repo_key "workspace"), or after it (resolved
+        workspace repo_key). Both carry the same raw tool path, so they
+        converge on one row; a resolved identity rekeys the fallback row.
+        """
+        base = select(TurnChangedFile).where(
+            TurnChangedFile.turn_id == turn_id, TurnChangedFile.path == f.path,
+        )
+        row = session.exec(base.where(TurnChangedFile.repo_key == f.repo_key)).first()
+        if row is not None:
+            return row
+        if f.repo_key == "workspace":
+            # Unresolved after resolved: reuse the single resolved row, if any.
+            resolved = session.exec(
+                base.where(TurnChangedFile.identity_status == "resolved")
+            ).all()
+            return resolved[0] if len(resolved) == 1 else None
+        if f.identity.get("identity_status") == "resolved":
+            row = session.exec(base.where(TurnChangedFile.repo_key == "workspace")).first()
+            if row is not None:
+                row.repo_key = f.repo_key
+            return row
+        return None
 
     def _offload_side(
         self, session: Session, data: bytes | None, binary: bool

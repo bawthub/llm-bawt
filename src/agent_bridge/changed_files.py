@@ -13,6 +13,7 @@ import base64
 import difflib
 import hashlib
 import logging
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ class _PendingCapture:
     repo_label: str
     repo_path: str
     in_repo: bool
+    repo_root: Path | None
     before: _FileSnapshot
 
 
@@ -102,6 +104,7 @@ class ToolChangedFileCapture:
                 repo_label=repo_label or repo_key,
                 repo_path=repo_path,
                 in_repo=repo_root is not None,
+                repo_root=repo_root,
                 before=self._baselines.setdefault(
                     (request_id, absolute_path), self._read_snapshot(absolute_path)
                 ),
@@ -165,6 +168,12 @@ class ToolChangedFileCapture:
                 "content_type": None if binary else "text/plain; charset=utf-8",
                 "before_b64": self._encode(pending.before.data) if pending.before.exists else None,
                 "after_b64": self._encode(after.data) if after.exists else None,
+                # TASK-1275 S2: raw evidence for app-side workspace identity.
+                # The app resolves repo/workspace identity at persist time;
+                # the bridge only reports what it observed at TOOL_END.
+                "absolute_path": str(pending.absolute_path),
+                "provenance": "tool",
+                **self._git_facts(pending.repo_root),
             }
             return pending.tool_name, pending.arguments, captured
         except Exception:
@@ -195,6 +204,28 @@ class ToolChangedFileCapture:
         if not candidate.is_absolute():
             candidate = self._cwd / candidate
         return candidate.resolve(strict=False)
+
+    @staticmethod
+    def _git_facts(repo_root: Path | None) -> dict[str, str]:
+        """Branch and HEAD of the checkout at TOOL_END; omitted when unknown."""
+        if repo_root is None:
+            return {}
+        facts: dict[str, str] = {}
+        for key, args in (
+            ("git_head_sha", ("rev-parse", "--verify", "-q", "HEAD")),
+            ("git_branch", ("symbolic-ref", "-q", "--short", "HEAD")),
+        ):
+            try:
+                result = subprocess.run(
+                    ("git", "-C", str(repo_root), *args),
+                    capture_output=True, text=True, timeout=2, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            value = result.stdout.strip()
+            if result.returncode == 0 and value:
+                facts[key] = value
+        return facts
 
     @staticmethod
     def _find_repo_root(path: Path) -> Path | None:

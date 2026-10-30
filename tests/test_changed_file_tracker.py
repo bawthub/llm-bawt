@@ -101,3 +101,25 @@ def test_binary_file_keeps_metadata_without_content(tmp_path: Path):
     assert changed["binary"] is True
     assert changed["before_b64"] is None
     assert changed["after_b64"] is None
+
+
+def test_capture_records_git_head_and_branch(tmp_path: Path):
+    import subprocess
+
+    repo = tmp_path / "gitrepo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    run("init", "-q", "-b", "trunk")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    target = repo / "f.py"
+    target.write_text("1\n")
+    capture = ToolChangedFileCapture(cwd=repo)
+    capture.start(request_id="r", tool_use_id="t", tool_name="Edit", arguments={"file_path": str(target)})
+    target.write_text("2\n")
+    finished = capture.finish(request_id="r", tool_use_id="t", tool_name="Edit")
+    payload = finished[2]
+    assert payload["git_head_sha"] == head
+    assert payload["git_branch"] == "trunk"
+    assert payload["provenance"] == "tool"
+    assert payload["absolute_path"] == str(target)
