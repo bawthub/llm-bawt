@@ -694,6 +694,58 @@ On echo both operations are enabled. The first approved deploy (v0.1.58, run
 rollback has been verified; a rollback needs its own explicit request and
 approval, not an automatic test of the enabled action.
 
+### CI-published images, row health probes and the hardened profile (TASK-1801; not activated)
+
+`bawthub.deploy-pocket-tts` / `bawthub.rollback-pocket-tts` /
+`bawthub.reconcile-pocket-tts-config` reuse the same worker for the CPU
+pocket-tts worker. They seed **disabled** with `require_approval` policies.
+
+* **Binding `ci_publish`.** A deploy spec with `binding: "ci_publish"` binds to
+  the CI publish run, not a release row. Its args are exactly `workflow_run_id`,
+  `source_sha` and `digest`. `GitHubReleaseVerifier.verify_publish` requires:
+  * the run is a completed, successful `workflow_run` of `workflow_path` on the
+    canonical branch;
+  * its attempt-specific `<image>-publish-receipt-<attempt>` artifact
+    (`bawthub.image-publish-receipt/v1`) equals the args;
+  * the receipt's `trigger_run_id` is a completed, successful `push` run of the
+    spec's `trigger_workflow_path` on the canonical branch, in the same
+    repository and head repository, whose `head_sha` is `source_sha`.
+
+  A `workflow_run` run's own `head_sha` is the branch head when it was queued,
+  not the commit it built, so it is never compared. `trigger_workflow_path` is
+  required for `ci_publish` and refused on any other spec. The image's labels
+  (`com.bawthub.release.schema=1`, `org.opencontainers.image.version`
+  `sha-<sha>`, `.revision`, `com.bawthub.release.workflow-run-id`) are checked
+  before the swap, as for frontend releases.
+* **`health_probe`** (optional per spec):
+  * `{"type": "docker_health"}`: the container's own healthcheck, plus the
+    running image ID and its release labels;
+  * `{"type": "http_exec", "port", "path"}`: an in-container GET.
+
+  The worker built for this change requires a probe on every image-family spec.
+  The app refuses a probe spec on a worker without
+  `llm-bawt.ops.health-probe="1"`.
+* **`compose_config.profile: "pinned-hardened"`** models `cpus`, `mem_limit`
+  and `memswap_limit`, `pids_limit`, `read_only`, `cap_drop`, `security_opt`
+  and `tmpfs` as drift. It needs a worker labelled
+  `llm-bawt.ops.hardened-profile="1"`.
+
+Activation order:
+1. Rebuild the worker and confirm both labels. Nick approves the
+   `LLM_BAWT_OPS_WORKER_IMAGE` repin; then recreate app and ops-reconciler.
+2. Immediately after the repin, PATCH every frontend image row with
+   `health_probe {"type":"http_exec","port":3000,"path":"/api/health"}`, and
+   re-file any pending frontend cards. Until that PATCH lands, the new worker
+   refuses the unpatched rows.
+3. Seed-defaults inserts only missing rows. Review the pocket rows and their
+   policies, enable them, and reload the policies.
+4. The first deploy's preflight pull checks GHCR access.
+
+A container still on the local `bawthub-pocket-tts:local` build carries no
+release labels, so the reconcile can't adopt it. If the first deploy reports
+`config_drift`, nothing has changed. The adoption path is the operator's
+BawtHub `make pocket-up BAWTHUB_POCKET_TTS_IMAGE=<repo>@<verified digest>`.
+
 ## Durable one-command BawtHub release orchestration (TASK-1030)
 
 `bawthub.release-prod` is a typed release executor operation. It is not a shell,
