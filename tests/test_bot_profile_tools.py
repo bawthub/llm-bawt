@@ -350,7 +350,6 @@ def test_a_model_switcher_may_switch_its_own_model(rig):
     ({"endpoint_id": 99}, "unknown_endpoint"),
     ({"endpoint_id": 2, "default_model": "fixture-model-a"}, "model_endpoint_mismatch"),
     ({"endpoint_id": 3}, "endpoint_ineligible"),
-    ({"endpoint_id": None, "default_model": "fixture-model-a"}, "model_endpoint_mismatch"),
 ])
 def test_a_switch_the_catalog_refuses_writes_nothing(rig, changes, error):
     assert _call(changes=changes)["error"] == error
@@ -376,14 +375,29 @@ def test_an_unreadable_catalog_fails_closed(rig, monkeypatch):
     assert rig.app.writes == []
 
 
-def test_a_null_endpoint_clears_the_model_like_the_pickers_clear(rig):
-    result = _call(changes={"endpoint_id": None})
+@pytest.mark.parametrize("changes", [
+    {"endpoint_id": None}, {"endpoint_id": None, "default_model": None},
+    {"endpoint_id": None, "default_model": "fixture-model-a"},
+])
+def test_a_null_endpoint_is_refused_because_the_route_has_no_model_clear(rig, changes):
+    result = _call(changes=changes)
 
-    assert rig.catalog_reads == []
-    assert {k: rig.app.writes[0][k] for k in ("default_model", "endpoint_id")} == {
-        "default_model": None, "endpoint_id": None}
-    assert "harness" not in rig.app.writes[0]
-    assert set(result["changed"]) == {"default_model", "endpoint_id"}
+    assert result["error"] == "invalid_request" and "not cleared" in result["message"]
+    assert rig.app.calls == [] and rig.catalog_reads == []
+
+
+@pytest.mark.parametrize("harness", ["chat", "claude-code", "claude-proxy", "codex"])
+def test_the_profile_route_refuses_a_null_endpoint_on_every_harness(harness):
+    """Route-level pin for the refusal above: PATCH /v1/bots/{slug}/profile
+    validates through this function, which 422s without an integer endpoint."""
+    from fastapi import HTTPException
+
+    from llm_bawt.service.routes import bot_profile_validation as validation
+
+    with pytest.raises(HTTPException) as exc:
+        validation._validate_model_endpoint(
+            {"slug": "fixture-bot", "harness": harness, "endpoint_id": None, "default_model": None})
+    assert exc.value.status_code == 422
 
 
 def test_a_model_switch_of_a_private_bot_is_refused(rig):

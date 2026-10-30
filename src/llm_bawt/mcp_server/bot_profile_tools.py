@@ -161,16 +161,8 @@ async def _picker_endpoints(agent_backend: str | None) -> list[dict[str, Any]]:
 
 async def _model_assignment(changes: dict[str, Any], profile: dict[str, Any]
                             ) -> tuple[dict[str, Any] | None, str | None]:
-    """The profile fields a picker pick of ``changes[endpoint_id]`` writes, or an error.
-
-    ``endpoint_id: null`` clears the model like the picker's clear (harness kept).
-    """
+    """The profile fields a picker pick of ``changes[endpoint_id]`` writes, or an error."""
     endpoint_id = changes[ENDPOINT]
-    if endpoint_id is None:
-        if changes.get(MODEL) is not None:
-            return None, _error("model_endpoint_mismatch",
-                                "clearing the endpoint clears the model; pass default_model null")
-        return {MODEL: None, ENDPOINT: None}, None
     backend = (profile.get("agent_backend") or "").strip().lower()
     try:
         endpoints = await _picker_endpoints(backend)
@@ -211,11 +203,14 @@ def _validate(changes: Any, reason: Any, expected: Any) -> str | None:
     if MODEL in changes and ENDPOINT not in changes:
         return _error("invalid_request", "a model switch names endpoint_id (the model it serves "
                       "is written with it); default_model alone is refused")
-    if ENDPOINT in changes and not (changes[ENDPOINT] is None or (
-            isinstance(changes[ENDPOINT], int) and not isinstance(changes[ENDPOINT], bool))):
-        return _error("invalid_request", "endpoint_id must be an integer id or null")
-    if MODEL in changes and changes[MODEL] is not None and not isinstance(changes[MODEL], str):
-        return _error("invalid_request", "default_model must be a model key or null")
+    # No null: the profile route requires an endpoint for every harness
+    # (bot_profile_validation._validate_model_endpoint), so there is no clear.
+    if ENDPOINT in changes and not (
+            isinstance(changes[ENDPOINT], int) and not isinstance(changes[ENDPOINT], bool)):
+        return _error("invalid_request", "endpoint_id must be an integer catalog endpoint id; "
+                      "a bot's model can be switched, not cleared")
+    if MODEL in changes and not isinstance(changes[MODEL], str):
+        return _error("invalid_request", "default_model must be a model key")
     if TAGS in changes and (not isinstance(changes[TAGS], list)
                             or not all(isinstance(tag, str) for tag in changes[TAGS])):
         return _error("invalid_request", "tags must be a list of tag slugs (a full-set replace)")
