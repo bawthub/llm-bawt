@@ -96,11 +96,42 @@ def test_monitored_effort_lookup_failure_omits_effort():
     assert seen == [None]
 
 
-def test_monitored_query_bounded_untouched():
+def test_monitored_query_bounded_injects_job_options():
+    """TASK-1795: recall's bounded call ran at the provider's default effort, so a
+    reasoning model spent the whole output cap thinking and returned no text."""
     inner = MagicMock()
+    inner.job_request_options = lambda job, reasoning_effort=None: {"reasoning_effort": reasoning_effort}
     inner.query_bounded.return_value = "ok"
     _monitored(inner).query_bounded([], timeout_seconds=1, max_tokens=5)
-    assert inner.query_bounded.call_args.kwargs == {"timeout_seconds": 1, "max_tokens": 5}
+    assert inner.query_bounded.call_args.kwargs == {
+        "timeout_seconds": 1, "max_tokens": 5, "reasoning_effort": "none"}
+
+
+def test_monitored_query_bounded_caller_wins():
+    inner = MagicMock()
+    inner.job_request_options = lambda job, reasoning_effort=None: {"reasoning_effort": reasoning_effort}
+    inner.query_bounded.return_value = "ok"
+    _monitored(inner).query_bounded([], timeout_seconds=1, max_tokens=5, reasoning_effort="low")
+    assert inner.query_bounded.call_args.kwargs["reasoning_effort"] == "low"
+
+
+def test_responses_query_bounded_sends_job_options():
+    client = _bare(ResponsesClient)
+    sdk = MagicMock()
+    client.client = sdk
+    client._response_text = lambda response: "ok"
+    options = client.job_request_options("recall_completion", reasoning_effort="none")
+    assert client.query_bounded([Message(role="user", content="x")], timeout_seconds=1,
+                                max_tokens=5, **options) == "ok"
+    payload = sdk.with_options.return_value.responses.create.call_args.kwargs
+    assert payload["reasoning"] == {"effort": "none"}
+    assert payload["prompt_cache_key"] == "llm-bawt:recall_completion"
+
+
+def test_base_query_bounded_accepts_job_options():
+    import pytest
+    with pytest.raises(NotImplementedError):
+        LLMClient.query_bounded(MagicMock(), [], timeout_seconds=1, max_tokens=1, reasoning_effort="none")
 
 
 def test_setting_is_db_runtime_and_unset_by_default():

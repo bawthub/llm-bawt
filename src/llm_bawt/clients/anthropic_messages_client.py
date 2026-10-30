@@ -143,11 +143,13 @@ class AnthropicMessagesClient(LLMClient):
 
     def query_bounded(
         self, messages: List[Message], *, timeout_seconds: float,
-        max_tokens: int, temperature: float = 0.0,
+        max_tokens: int, temperature: float = 0.0, thinking: dict | None = None,
     ) -> str:
         bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
-        return self._create(bounded, messages, max_tokens=max_tokens,
-                            optional={"temperature": float(temperature)})
+        optional: dict[str, Any] = {"temperature": float(temperature)}
+        if thinking:
+            optional["thinking"] = thinking
+        return self._create(bounded, messages, max_tokens=max_tokens, optional=optional)
 
     @staticmethod
     def _rejected_field(error: BadRequestError, sent: dict[str, Any]) -> str | None:

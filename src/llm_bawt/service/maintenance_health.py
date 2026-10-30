@@ -236,4 +236,6 @@ class MonitoredClient:
         return self._call("query", *args, **{**self._job_options(), **kwargs})
 
     def query_bounded(self, *args: Any, **kwargs: Any) -> Any:
-        return self._call("query_bounded", *args, **kwargs)
+        # Same job options as query(): without them a reasoning model can spend
+        # the whole bounded output cap thinking and return no text (TASK-1795).
+        return self._call("query_bounded", *args, **{**self._job_options(), **kwargs})

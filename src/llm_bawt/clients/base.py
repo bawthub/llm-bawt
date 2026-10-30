@@ -77,12 +77,15 @@ class LLMClient(ABC):
 
     def query_bounded(
         self, messages: List[Message], *, timeout_seconds: float,
-        max_tokens: int, temperature: float = 0.0,
+        max_tokens: int, temperature: float = 0.0, **job_options: Any,
     ) -> str:
         """One stateless text call with transport timeout and no retries/tools.
 
         Utility callers must fail closed for clients without this contract;
         silently delegating to query() could start an unbounded agent run.
+        ``job_options`` are this client's own :meth:`job_request_options`
+        (e.g. reasoning effort), so a bounded maintenance call honors the
+        same DB settings as ``query`` (TASK-1795).
         """
         raise NotImplementedError("Client does not support bounded utility completion")
 

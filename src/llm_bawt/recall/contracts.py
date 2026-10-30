@@ -53,6 +53,11 @@ class RecallError(Exception):
         super().__init__(code)
 
 
+# Wire detail of /v1/llm/recall-complete when the model answered with no text,
+# so the synthesizer reports `empty_response`, not `model_unavailable` (TASK-1795).
+EMPTY_COMPLETION_DETAIL = "recall_empty_completion"
+
+
 class RecallRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     query: str = Field(min_length=1, max_length=1000)

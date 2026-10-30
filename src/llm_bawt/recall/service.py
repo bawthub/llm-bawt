@@ -45,7 +45,7 @@ class Synthesis(BaseModel):
 # Codes are server-owned; even an injected/provider-raised RecallError may not
 # smuggle source contents through the error channel.
 ERROR_CODES = frozenset({
-    "unauthorized", "policy_unavailable", "source_unavailable", "model_unavailable",
+    "unauthorized", "policy_unavailable", "source_unavailable", "model_unavailable", "empty_response",
     "invalid_request", "invalid_handle", "handle_scope_mismatch", "followup_limit",
     "query_budget", "input_budget", "retrieval_budget", "invalid_synthesis",
     "ungrounded_synthesis", "task_provenance_incomplete", "timeout", "busy",

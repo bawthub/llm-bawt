@@ -16,6 +16,10 @@ class BudgetUnavailable(Exception):
     """The catalog can't give a usable context window/output cap for the model."""
 
 
+class EmptyCompletion(ValueError):
+    """The model answered with no text, e.g. its reasoning spent the output cap."""
+
+
 def validate_model_budget(request: RawCompletionRequest, config, model_ref: str) -> None:
     """Catalog-driven preflight with conservative provider-framing headroom.
 
@@ -106,7 +110,9 @@ def complete_utility(
                 messages=messages, timeout_seconds=timeout_seconds,
                 max_tokens=request.max_tokens, temperature=request.temperature,
             )
-        if not isinstance(response, str) or not response.strip() or response.lstrip().startswith("ERROR:"):
+        if isinstance(response, str) and not response.strip():
+            raise EmptyCompletion("Model returned an empty completion")
+        if not isinstance(response, str) or response.lstrip().startswith("ERROR:"):
             raise ValueError("Model returned no usable completion")
         return RawCompletionResponse(
             content=response, model=served_model(client, model_alias),
@@ -115,6 +121,9 @@ def complete_utility(
     except Exception as error:
         if timeout_seconds is not None:
             log.warning("Bounded utility completion failed (%s)", type(error).__name__)
+            if isinstance(error, EmptyCompletion):
+                from ..recall.contracts import EMPTY_COMPLETION_DETAIL
+                raise HTTPException(status_code=502, detail=EMPTY_COMPLETION_DETAIL) from None
             status = 422 if isinstance(error, NotImplementedError) else 502
             raise HTTPException(status_code=status, detail="Recall completion unavailable") from None
         if request.image_url:

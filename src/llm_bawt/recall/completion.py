@@ -6,7 +6,9 @@ from dataclasses import asdict
 import httpx
 
 from .budgets import compact_json, tokens
-from .contracts import MAX_INPUT_TOKENS, MAX_MODEL_BYTES, Evidence, RecallError, Synthesizer
+from .contracts import (
+    EMPTY_COMPLETION_DETAIL, MAX_INPUT_TOKENS, MAX_MODEL_BYTES, Evidence, RecallError, Synthesizer,
+)
 from .http import BoundedHTTP
 from .prompt import resolve_recall_system_prompt
 
@@ -21,7 +23,9 @@ def input_tokens(system: str, query: str, evidence: list[Evidence]) -> int:
 
 # The recall-complete route's caller-side failures; any other status is the model's.
 _ROUTE_ERRORS = {413: "input_budget", 422: "invalid_request"}
-_PASSED_THROUGH = frozenset({"timeout", "busy", *_ROUTE_ERRORS.values()})
+# The model answered, but with no text: not an outage (TASK-1795).
+_ROUTE_DETAILS = {EMPTY_COMPLETION_DETAIL: "empty_response"}
+_PASSED_THROUGH = frozenset({"timeout", "busy", *_ROUTE_ERRORS.values(), *_ROUTE_DETAILS.values()})
 
 
 class UtilitySynthesizer(Synthesizer):
@@ -42,7 +46,8 @@ class UtilitySynthesizer(Synthesizer):
             try:
                 result = await reader.json("POST", f"{self.base_url}/v1/llm/recall-complete",
                                            byte_limit=MAX_MODEL_BYTES, json=body,
-                                           status_codes=_ROUTE_ERRORS)
+                                           status_codes=_ROUTE_ERRORS,
+                                           error_details=_ROUTE_DETAILS)
             except RecallError as error:
                 code = error.code if error.code in _PASSED_THROUGH else "model_unavailable"
                 raise RecallError(code) from error

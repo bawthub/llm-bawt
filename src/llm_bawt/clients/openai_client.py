@@ -413,8 +413,9 @@ class OpenAIClient(LLMClient):
 
     def query_bounded(
         self, messages: List[Message], *, timeout_seconds: float,
-        max_tokens: int, temperature: float = 0.0,
+        max_tokens: int, temperature: float = 0.0, **job_options: Any,
     ) -> str:
+        # job_request_options() is the base no-op here, so job_options is empty.
         payload = self._build_query_payload(
             messages, stream=False, max_tokens=max_tokens, temperature=temperature,
         )

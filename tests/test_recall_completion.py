@@ -212,8 +212,8 @@ def test_recall_route_works_with_isolated_input(api, utility):
     assert response.json() == {"content": '{"findings":[]}'}
 
 
-@pytest.mark.parametrize("output", ["", "   ", "ERROR: provider rejected temperature"])
-def test_empty_or_incompatible_model_output_is_typed_failure(api, utility, output):
+@pytest.mark.parametrize("output", ["ERROR: provider rejected temperature", None])
+def test_incompatible_model_output_is_typed_failure(api, utility, output):
     _, client, _ = utility
     client.query_bounded.return_value = output
     response = api.post("/v1/llm/recall-complete", json={"prompt": "evidence", "system": "extract"})
@@ -256,6 +256,40 @@ async def test_synthesizer_maps_route_status_to_recall_error_code(monkeypatch, s
         await UtilitySynthesizer("https://test.invalid").synthesize(
             "system", "query", [Evidence("messages", "m1", "b", "u", "text")], 100)
     assert caught.value.code == code
+
+
+@pytest.mark.parametrize("output", ["", "   "])
+def test_route_reports_empty_completion_as_empty_response(api, utility, output):
+    """TASK-1795: an empty model answer was reported as model_unavailable."""
+    _, client, _ = utility
+    client.query_bounded.return_value = output
+    response = api.post("/v1/llm/recall-complete", json={"prompt": "evidence", "system": "extract"})
+    assert (response.status_code, response.json()) == (502, {"detail": "recall_empty_completion"})
+    client.query.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,detail,code", [
+    (502, "recall_empty_completion", "empty_response"),
+    (502, "recall_completion_unavailable", "model_unavailable"),
+    (502, "x" * 4096, "model_unavailable"),
+    (413, "recall_empty_completion", "empty_response"),
+])
+async def test_synthesizer_maps_empty_completion_detail(monkeypatch, status, detail, code):
+    from llm_bawt.recall.completion import UtilitySynthesizer
+    from llm_bawt.recall.contracts import Evidence, RecallError
+    from llm_bawt.recall.service import ERROR_CODES
+
+    async def transport(request):
+        return httpx.Response(status, json={"detail": detail})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(transport), **kwargs))
+    with pytest.raises(RecallError) as caught:
+        await UtilitySynthesizer("https://test.invalid").synthesize(
+            "system", "query", [Evidence("messages", "m1", "b", "u", "text")], 100)
+    assert caught.value.code == code and code in ERROR_CODES
 
 
 @pytest.mark.asyncio

@@ -265,6 +265,17 @@ def test_messages_client_effort_none_disables_thinking():
     assert sdk.messages.create.call_args.kwargs["thinking"] == {"type": "disabled"}
 
 
+def test_messages_client_bounded_honors_thinking_disabled():
+    """TASK-1795: recall's bounded call must carry effort=none like query()."""
+    client, sdk = _messages_client()
+    options = client.job_request_options("recall_completion", reasoning_effort="none")
+    assert client.query_bounded([Message(role="user", content="u")], timeout_seconds=3,
+                                max_tokens=9, **options) == "hello"
+    assert sdk.messages.create.call_args.kwargs["thinking"] == {"type": "disabled"}
+    client.query_bounded([Message(role="user", content="u")], timeout_seconds=3, max_tokens=9)
+    assert "thinking" not in sdk.messages.create.call_args.kwargs
+
+
 def test_messages_client_drops_thinking_an_endpoint_rejects_and_keeps_temperature_memory():
     client, sdk = _messages_client()
     ok = sdk.messages.create.return_value

@@ -393,9 +393,11 @@ class ResponsesClient(LLMClient):
     def query_bounded(
         self, messages: List[Message], *, timeout_seconds: float,
         max_tokens: int, temperature: float = 0.0,
+        reasoning_effort: str | None = None, cache_routing_key: str | None = None,
     ) -> str:
         payload = self._build_base_payload(
             messages, max_tokens=max_tokens, temperature=temperature, log_input=False,
+            reasoning_effort=reasoning_effort, cache_routing_key=cache_routing_key,
         )
         bounded = self.client.with_options(timeout=timeout_seconds, max_retries=0)
         response = bounded.responses.create(**payload)

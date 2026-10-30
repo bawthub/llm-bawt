@@ -16,7 +16,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...recall.budgets import BoundedWorker, tokens
-from ...recall.contracts import RecallError
+from ...recall.contracts import EMPTY_COMPLETION_DETAIL, RecallError
 from ..schemas import RawCompletionRequest
 from ..utility_completion import complete_utility
 
@@ -104,6 +104,8 @@ class RecallCompletionRunner:
             # failure is the server's: a 4xx here would read as a bad request.
             if exc.status_code == 413:
                 raise HTTPException(status_code=413, detail="recall_input_too_large") from None
+            if exc.detail == EMPTY_COMPLETION_DETAIL:
+                raise HTTPException(status_code=502, detail=EMPTY_COMPLETION_DETAIL) from None
             status = 503 if exc.status_code in {422, 503} else 502
             raise HTTPException(status_code=status, detail="recall_completion_unavailable") from None
         except Exception:
