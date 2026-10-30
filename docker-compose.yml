@@ -307,6 +307,9 @@ services:
     volumes:
       - ./.logs:/app/.logs
       - ${HOME}/dev:/home/bridge/dev
+      # TASK-1275: an additive identical-path view for portable Git worktrees.
+      # Keep the existing SDK cwd/mount; Codex remains excluded from this pilot.
+      - ${HOME}/dev:${HOME}/dev
       - ${HOME}/.config/claude-code-bridge:/home/bridge/.claude
       - ${HOME}/.config/claude-code-bridge/.claude.json:/home/bridge/.claude.json
       # TASK-636: credential bind mount REMOVED — the bridge fetches tokens
