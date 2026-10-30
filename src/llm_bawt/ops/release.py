@@ -11,6 +11,11 @@ secrets), so the operator approves an exact, verified release:
   receipt is read from the run's LATEST attempt (``release-receipt-<attempt>``,
   TASK-1030) with a fallback to the pre-TASK-1030 single ``release-receipt``
   artifact. Only a ``complete`` receipt is deployable.
+* deploy, ``binding: ci_publish`` (TASK-1801) — a completed, successful
+  ``workflow_run`` run of the pinned publish workflow on the canonical branch,
+  for exactly the source SHA, whose ``<image>-publish-receipt-<attempt>``
+  artifact binds that SHA to the immutable digest. There is no release row and
+  no git tag: the version is ``sha-<source sha>``, which the image labels carry.
 * rollback — a SUCCEEDED deploy job for the same target, its recorded
   last-known-good image, and a CAS that the target still runs what it deployed.
 
@@ -35,6 +40,10 @@ from .image_deploy import DEPLOY_ACTION, ROLLBACK_ACTION, parse_deployment
 
 RECEIPT_SCHEMA = "bawthub.release-receipt/v1"
 RECEIPT_ARTIFACT = "release-receipt"
+RECEIPT_FILE = "release.json"
+PUBLISH_RECEIPT_SCHEMA = "bawthub.image-publish-receipt/v1"
+PUBLISH_RECEIPT_FILE = "publish-receipt.json"
+BINDING_CI_PUBLISH = "ci_publish"
 DEPLOYABLE_RECEIPT_STATUSES = ("complete",)
 # Public deploy input is a durable release ID. The four identity fields below
 # are derived from the verified release row, never accepted from the caller.
@@ -42,6 +51,9 @@ _DEPLOY_ARGS = {"release_run_id": r"[0-9a-f]{32}"}
 _VERIFIER_ARGS = {"workflow_run_id": r"[0-9]{1,20}", "digest": r"sha256:[0-9a-f]{64}",
                   "source_sha": r"[0-9a-f]{40}", "version": r"[0-9]+\.[0-9]+\.[0-9]+"}
 _ROLLBACK_ARGS = {"deploy_job_id": r"[0-9a-f]{32}"}
+# TASK-1801: a CI-published image is named by its run, source SHA and digest.
+_PUBLISH_ARGS = {"workflow_run_id": r"[0-9]{1,20}", "source_sha": r"[0-9a-f]{40}",
+                 "digest": r"sha256:[0-9a-f]{64}"}
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 
 
@@ -63,6 +75,10 @@ class ReleaseVerifier(ABC):
     @abstractmethod
     def verify(self, spec: dict, args: dict) -> dict:
         """Return the verified release binding or raise ReleaseVerificationError."""
+
+    def verify_publish(self, spec: dict, args: dict) -> dict:
+        """TASK-1801: the verified CI publish binding, or raise ReleaseVerificationError."""
+        raise ReleaseVerificationError("this release verifier cannot verify CI-published images")
 
     def branch_head(self, repo: str, branch: str) -> str:
         """The commit ``refs/heads/<branch>`` of ``repo`` names on the forge (TASK-1474)."""
@@ -117,7 +133,7 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError(f"GitHub GET {path.split('?')[0]} returned HTTP {status}")
         return json.loads(body)
 
-    def _artifact_receipt(self, repo: str, run_id: str, name: str) -> dict | None:
+    def _artifact_receipt(self, repo: str, run_id: str, name: str, filename: str = RECEIPT_FILE) -> dict | None:
         """Return the named receipt, ``None`` if the run has no such artifact."""
         listing = self._json(f"/repos/{repo}/actions/runs/{run_id}/artifacts?name={name}")
         live = [a for a in listing.get("artifacts", []) if a.get("name") == name and not a.get("expired")]
@@ -133,9 +149,9 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError(f"receipt artifact download returned HTTP {status}")
         try:
             with zipfile.ZipFile(io.BytesIO(body)) as archive:
-                return json.loads(archive.read("release.json"))
+                return json.loads(archive.read(filename))
         except (zipfile.BadZipFile, KeyError, ValueError) as exc:
-            raise ReleaseVerificationError("receipt artifact has no valid release.json") from exc
+            raise ReleaseVerificationError(f"receipt artifact has no valid {filename}") from exc
 
     def latest_receipt(self, repo: str, run_id: str, run_attempt) -> dict:
         """Receipt of the run's latest attempt; legacy single artifact fallback.
@@ -192,25 +208,62 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError(f"GitHub branch {branch} did not resolve to exactly one commit")
         return sha
 
-    def verify(self, spec, args):
-        _require_args(args, _VERIFIER_ARGS)
+    def _run(self, spec, run_id, event):
+        """The pinned workflow's completed, successful run of ``event`` on the canonical branch."""
         self._token = self._fixed_token if self._fixed_token is not None else _stored_release_token()
         if not self._token:
             raise ReleaseVerificationError(
                 "release verification token not connected (Providers: GitHub release verification)")
-        repo, run_id = spec["github_repository"], args["workflow_run_id"]
+        repo = spec["github_repository"]
         run = self._json(f"/repos/{repo}/actions/runs/{run_id}")
         checks = {
             "status": (run.get("status"), "completed"),
             "conclusion": (run.get("conclusion"), "success"),
             "workflow path": ((run.get("path") or "").split("@")[0], spec["workflow_path"]),
             "branch": (run.get("head_branch"), spec["canonical_branch"]),
-            "event": (run.get("event"), "workflow_dispatch"),
+            "event": (run.get("event"), event),
             "repository": ((run.get("repository") or {}).get("full_name"), repo),
         }
         for label, (got, want) in checks.items():
             if got != want:
                 raise ReleaseVerificationError(f"workflow run {run_id} {label} is {got!r}, expected {want!r}")
+        return run
+
+    def verify_publish(self, spec, args):
+        _require_args(args, _PUBLISH_ARGS)
+        repo, run_id, sha = spec["github_repository"], args["workflow_run_id"], args["source_sha"]
+        # A workflow_run run always executes the default branch's workflow
+        # file, and its head_sha is the triggering CI push run's commit.
+        run = self._run(spec, run_id, "workflow_run")
+        if run.get("head_sha") != sha:
+            raise ReleaseVerificationError(f"workflow run {run_id} head_sha is {run.get('head_sha')!r}, expected {sha!r}")
+        attempt = str(run.get("run_attempt") or "").strip()
+        if not attempt.isdigit():
+            raise ReleaseVerificationError(f"workflow run {run_id} has no run attempt")
+        image = spec["image_repository"].rsplit("/", 1)[-1]
+        name = f"{image}-publish-receipt-{attempt}"
+        receipt = self._artifact_receipt(repo, run_id, name, PUBLISH_RECEIPT_FILE)
+        if receipt is None:
+            raise ReleaseVerificationError(f"run must carry exactly one unexpired {name} artifact")
+        expected = {"schema": PUBLISH_RECEIPT_SCHEMA, "repository": repo, "workflow_run_id": run_id,
+                    "workflow_run_attempt": attempt, "source_sha": sha,
+                    "image_repository": spec["image_repository"], "digest": args["digest"], "status": "complete"}
+        for key, want in expected.items():
+            if receipt.get(key) != want:
+                raise ReleaseVerificationError(f"publish receipt {key} is {receipt.get(key)!r}, expected {want!r}")
+        version = f"sha-{sha}"
+        return {"binding": BINDING_CI_PUBLISH, "github_repository": repo, "workflow_run_id": run_id,
+                "workflow_run_attempt": attempt, "workflow_run_url": run.get("html_url", ""),
+                "workflow_path": spec["workflow_path"], "trigger_sha": sha, "source_sha": sha,
+                "version": version, "tag": version, "digest": args["digest"],
+                "image_repository": spec["image_repository"],
+                "image_ref": f"{spec['image_repository']}@{args['digest']}", "receipt_status": "complete",
+                "verified_at": datetime.now(timezone.utc).isoformat()}
+
+    def verify(self, spec, args):
+        _require_args(args, _VERIFIER_ARGS)
+        repo, run_id = spec["github_repository"], args["workflow_run_id"]
+        run = self._run(spec, run_id, "workflow_dispatch")
         receipt = self.latest_receipt(repo, run_id, run.get("run_attempt"))
         if receipt.get("status") not in DEPLOYABLE_RECEIPT_STATUSES:
             raise ReleaseVerificationError(
@@ -258,6 +311,15 @@ def bind_image_invocation(*, spec: dict, args: dict, store, releases, executor,
                           verifier: ReleaseVerifier) -> dict:
     """Bind a verified release ID to the existing immutable-image worker."""
     current = executor.inspect_target_image(spec)
+    if spec["action"] == DEPLOY_ACTION and spec.get("binding") == BINDING_CI_PUBLISH:
+        release = verifier.verify_publish(spec, _require_args(args, _PUBLISH_ARGS))
+        for key, want in (("workflow_run_id", args["workflow_run_id"]), ("source_sha", args["source_sha"]),
+                          ("digest", args["digest"]), ("image_repository", spec["image_repository"]),
+                          ("binding", BINDING_CI_PUBLISH)):
+            if release.get(key) != want:
+                raise ReleaseVerificationError(f"publish verification differs from the request: {key}")
+        release["expected_current_image_id"] = current
+        return {"release": release}
     if spec["action"] == DEPLOY_ACTION:
         _require_args(args, _DEPLOY_ARGS)
         try:
@@ -288,6 +350,13 @@ def bind_image_invocation(*, spec: dict, args: dict, store, releases, executor,
 def binding_matches_args(snapshot: dict) -> bool:
     """Cheap consistency check for _verify_snapshot (no network)."""
     action, args = snapshot["spec"].get("action"), snapshot["resolved_args"]
+    if action == DEPLOY_ACTION and snapshot["spec"].get("binding") == BINDING_CI_PUBLISH:
+        release = snapshot.get("release") or {}
+        return ("rollback" not in snapshot and set(args) == set(_PUBLISH_ARGS)
+                and release.get("binding") == BINDING_CI_PUBLISH and "release_run_id" not in release
+                and all(release.get(key) == args.get(key) for key in _PUBLISH_ARGS)
+                and release.get("version") == f"sha-{args.get('source_sha')}"
+                and release.get("image_ref") == f"{snapshot['spec']['image_repository']}@{args.get('digest')}")
     if action == DEPLOY_ACTION:
         release = snapshot.get("release") or {}
         return ("rollback" not in snapshot and set(args) == set(_DEPLOY_ARGS)

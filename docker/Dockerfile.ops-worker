@@ -11,7 +11,8 @@ COPY src/llm_bawt/ops/worker.py src/llm_bawt/ops/image_deploy.py src/llm_bawt/op
      src/llm_bawt/ops/source_state.py src/llm_bawt/ops/service_identity.py \
      src/llm_bawt/ops/tagged_config_reconcile.py src/llm_bawt/ops/plan_reconcile.py \
      src/llm_bawt/ops/probe_contract.py src/llm_bawt/ops/container_remove.py \
-     src/llm_bawt/ops/dev_config_reconcile.py src/llm_bawt/ops/restart_health.py /ops/
+     src/llm_bawt/ops/dev_config_reconcile.py src/llm_bawt/ops/restart_health.py \
+     src/llm_bawt/ops/health_probe.py /ops/
 LABEL llm-bawt.ops.routing-reconcile="1"
 # TASK-1518: this worker renders the target's Compose service, reconciles its
 # configuration and refuses a deploy over configuration drift.
@@ -41,4 +42,10 @@ LABEL llm-bawt.ops.dev-config-reconcile="1"
 # TASK-1697: ...and verifies a restart/start's in-container health URL afterwards
 # (restart_health.py), so a service that never comes back fails the job.
 LABEL llm-bawt.ops.restart-health="1"
+# TASK-1801: ...verifies an image target with the catalog row's health_probe
+# (health_probe.py) instead of a built-in port/path...
+LABEL llm-bawt.ops.health-probe="1"
+# TASK-1801: ...and reconciles/deploys the pinned-hardened profile (cap_drop,
+# cpus, pids_limit, read_only) with one-time adoption of an earlier file list.
+LABEL llm-bawt.ops.hardened-profile="1"
 ENTRYPOINT ["python3", "-I", "/ops/worker.py"]

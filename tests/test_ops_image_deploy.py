@@ -553,6 +553,8 @@ def test_preflight_only_pulls_for_deploy(monkeypatch):
     monkeypatch.setattr(executor, "_check_config_worker", lambda _s, _action=None: None)
     monkeypatch.setattr(executor, "ensure_renderer_image", lambda _s: None)
     monkeypatch.setattr(executor, "self_target", lambda _s: None)  # Not under test (TASK-1169 S4c).
+    # Worker capabilities have their own tests (TASK-1801, test_ops_health_probe).
+    monkeypatch.setattr(executor, "_check_spec_capabilities", lambda _s, _spec: None)
     executor.client.ping = lambda: True
     executor.preflight({"spec": {**SPEC, "action": "rollback_image"}, "execution": {}})
     executor.preflight({"spec": {"action": "restart"}, "execution": {}})
@@ -580,6 +582,9 @@ class FakeExecutor(Executor):
 
     def inspect_target_image(self, spec):
         return self.current_image
+
+    def check_spec_capabilities(self, spec):
+        pass  # a worker built with every capability (TASK-1801)
 
     def config_check(self, spec, image_ref=None):
         self.config_checks.append((spec["action"], image_ref))

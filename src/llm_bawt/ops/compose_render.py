@@ -163,8 +163,17 @@ def compose_source(spec: dict, container: dict) -> dict:
         # list is shown on the approval card.
         if not label_files_valid(working_dir, files):
             raise ComposeError("compose_source_invalid", detail="config files label")
-    elif files != [posixpath.join(working_dir, name) for name in names]:
-        raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
+    else:
+        expected = [posixpath.join(working_dir, name) for name in names]
+        adopt = spec["compose_config"].get("adopt_files")
+        # TASK-1801: a target created from an earlier file list (pocket-tts was
+        # brought up locally-built, without the image overlay) is adopted onto
+        # the catalog's list. Only that exact earlier list is accepted; the
+        # target is always RENDERED from the catalog's files, and the swap
+        # relabels the new container with them, so adoption happens once.
+        if files != expected and not (adopt and files == [posixpath.join(working_dir, n) for n in adopt]):
+            raise ComposeError("compose_source_invalid", detail="config files differ from the catalog spec")
+        files = expected
     return {"project_dir": working_dir, "compose_files": files}
 
 

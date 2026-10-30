@@ -24,7 +24,7 @@ from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .release_spec import is_release_spec
 from .routing_reconcile import ACTION as ROUTING_ACTION, valid_routing_binding
 from .release_store import ReleaseStore
-from .release import (GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
+from .release import (BINDING_CI_PUBLISH, GitHubReleaseVerifier, ReleaseVerificationError, ReleaseVerifier,
                       bind_image_invocation, binding_matches_args)
 from .models import (JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_LOST, JOB_QUEUED,
                      JOB_QUIESCING, JOB_RUNNING, JOB_SUCCEEDED, JOB_TERMINAL_STATES, OpsOperation)
@@ -313,6 +313,9 @@ class OpsService:
             # TASK-997: the approver sees and the worker executes ONE verified
             # release (or recorded last-known-good) plus an image CAS.
             try:
+                # TASK-1801: never put a probe/hardened spec before an approver
+                # when the worker could not run it.
+                executor.check_spec_capabilities(spec)
                 snapshot.update(bind_image_invocation(spec=spec, args=merged, store=self.store,
                                                       releases=self.releases, executor=executor,
                                                       verifier=self._release_verifier))
@@ -424,7 +427,11 @@ class OpsService:
                                    or len(source["deploy_operation_script_hash"]) != 64
                                    or any(char not in "0123456789abcdef" for char in source["deploy_operation_script_hash"])):
                     raise ValueError("snapshot production baseline is invalid")
-            if detached["spec"].get("action") == DEPLOY_ACTION:
+            # TASK-1801: a ci_publish deploy has no release row; binding_matches_args
+            # above already bound its release to the args, and the worker
+            # re-verifies RepoDigest and image labels.
+            if (detached["spec"].get("action") == DEPLOY_ACTION
+                    and detached["spec"].get("binding") != BINDING_CI_PUBLISH):
                 binding = self.releases.verified_binding(detached["resolved_args"]["release_run_id"])
                 release = detached.get("release") or {}
                 for key in ("workflow_run_id", "workflow_run_attempt", "source_sha", "version",

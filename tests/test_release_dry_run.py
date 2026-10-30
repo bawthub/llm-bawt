@@ -88,6 +88,9 @@ class FakeDocker(Executor):
     def inspect_target_image(self, spec):
         return self.current
 
+    def check_spec_capabilities(self, spec):
+        pass  # a worker built with every capability (TASK-1801)
+
     def inspect_target_health(self, spec):
         return "healthy"
 

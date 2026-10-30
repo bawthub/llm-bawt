@@ -18,7 +18,7 @@ from ..utils.config import Config
 from .app_config_reconcile import (ACTION as APP_CONFIG_ACTION, BUILT_PROFILE_LABEL, PROCESS_PROFILE_LABEL,
                                    SOURCE_GUARD_LABEL, WORKER_CAPABILITY_LABEL as APP_CONFIG_WORKER_LABEL,
                                    app_config_binding, uses_process_profile, validate_app_spec)
-from .compose_config import evaluate
+from .compose_config import HARDENED_PROFILE, HARDENED_PROFILE_LABEL, evaluate, selected_profile
 # TASK-1169 S4: the error/result types live in executor_types; re-exported here.
 from .executor_types import (ConfigCheckError, DispatchResult, ExecutorError,  # noqa: F401
                              QuiesceFenceUnsupported, ReconcileResult)
@@ -29,6 +29,7 @@ from .container_remove import (ACTION as REMOVE_ACTION, WORKER_CAPABILITY_LABEL 
                                RemoveRefused, removal_binding, target_name, validate_remove_spec)
 from .config_reconcile import (ACTION as CONFIG_ACTION, WORKER_CAPABILITY_LABEL as CONFIG_WORKER_LABEL,
                                config_binding, validate_compose_config, validate_config_spec)
+from .health_probe import WORKER_LABEL as HEALTH_PROBE_LABEL, validate_health_probe
 from .image_deploy import DEPLOY_ACTION, IMAGE_ACTIONS
 from .plan_reconcile import (ACTION as PLAN_ACTION, WORKER_CAPABILITY_LABEL as PLAN_WORKER_LABEL,
                              validate_plan_spec)
@@ -67,6 +68,19 @@ CONFIG_WORKER_LABELS[PLAN_ACTION] = (*dict.fromkeys((*CONFIG_WORKER_LABELS[APP_C
                                                      *CONFIG_WORKER_LABELS[TAGGED_CONFIG_ACTION])),
                                      PLAN_WORKER_LABEL)
 CONFIG_CHECKED_ACTIONS = frozenset(CONFIG_WORKER_LABELS)
+
+
+def spec_capability_labels(spec: dict) -> tuple[str, ...]:
+    """TASK-1801: worker capabilities a spec's optional fields need. A worker
+    built before them would refuse the spec mid-job (or, for a probe, verify
+    the wrong port), so every action carrying them is refused before dispatch."""
+    labels = []
+    if "health_probe" in spec:
+        labels.append(HEALTH_PROBE_LABEL)
+    config = spec.get("compose_config") or {}
+    if config.get("profile") == HARDENED_PROFILE.name or "adopt_files" in config:
+        labels.append(HARDENED_PROFILE_LABEL)
+    return tuple(labels)
 
 
 def _require_supported_mode(executor, snapshot):
@@ -148,6 +162,13 @@ class Executor(ABC):
         start fence (TASK-1233). Fails closed unless an executor proves it."""
         raise QuiesceFenceUnsupported(f"{self.kind()} executor cannot enforce the quiesce start fence")
 
+    def check_spec_capabilities(self, spec: dict) -> None:
+        """Approval-time, read-only: the worker carries every capability the
+        spec's optional fields need (TASK-1801). Raise ExecutorError."""
+        if spec_capability_labels(spec):
+            raise ExecutorError(f"{self.kind()} executor cannot run specs that need "
+                                + ", ".join(spec_capability_labels(spec)))
+
     def check_target(self, spec: dict, args: dict) -> None:
         """Approval-time, read-only: the spec's target exists where this executor
         acts. Raise ExecutorError so nobody approves a guaranteed failure."""
@@ -181,10 +202,17 @@ def validate_image_spec(spec: dict) -> dict:
     every identity is pinned in the operator-reviewed spec, never in job args.
     ``compose_config`` (TASK-1518) is required for deploy and optional for
     rollback, which never checks it: a rollback must stay possible."""
-    allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", "compose_config", *_IMAGE_SPEC_PATTERNS}
+    allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", "compose_config", "health_probe",
+               "binding", *_IMAGE_SPEC_PATTERNS}
     if set(spec) - allowed or set(_IMAGE_SPEC_PATTERNS) - set(spec):
         raise ValueError(f"image spec requires exactly {sorted(allowed)} "
-                         "(stop_grace_seconds optional, compose_config required for deploy)")
+                         "(stop_grace_seconds, health_probe and binding optional, compose_config required for deploy)")
+    # TASK-1801: what a deploy binds to: a release-run row (default) or a CI
+    # publish run whose receipt names the digest.
+    if spec.get("binding", BINDING_RELEASE_RUN) not in IMAGE_BINDINGS:
+        raise ValueError("image spec binding must be one of " + ", ".join(sorted(IMAGE_BINDINGS)))
+    if "health_probe" in spec:
+        validate_health_probe(spec["health_probe"])
     if spec["action"] == DEPLOY_ACTION and "compose_config" not in spec:
         raise ValueError("deploy image spec requires compose_config (TASK-1518 drift guard)")
     if "compose_config" in spec:
@@ -199,6 +227,11 @@ def validate_image_spec(spec: dict) -> dict:
     if type(health) is not int or not 10 <= health <= 900:
         raise ValueError("health_timeout_seconds must be an integer in 10..900")
     return spec
+
+
+BINDING_RELEASE_RUN = "release_run"
+BINDING_CI_PUBLISH = "ci_publish"
+IMAGE_BINDINGS = frozenset({BINDING_RELEASE_RUN, BINDING_CI_PUBLISH})
 
 
 def worker_request(job_id: str, snapshot: dict, fence: dict | None = None) -> dict:
@@ -376,9 +409,21 @@ class DockerExecutor(Executor):
             unverifiable="cannot verify quiesce fence support of the ops worker",
             missing_error=QuiesceFenceUnsupported)
 
+    def check_spec_capabilities(self, spec):
+        self._check_spec_capabilities(self.execution_settings(spec), spec)
+
+    def _check_spec_capabilities(self, settings, spec):
+        for label in spec_capability_labels(spec):
+            self._require_worker_label(
+                settings, label,
+                missing=(f"configured immutable ops worker lacks {label}; "
+                         "rebuild the worker image and repin LLM_BAWT_OPS_WORKER_IMAGE first"),
+                unverifiable="cannot verify the capabilities of the ops worker")
+
     def routing_approval(self, spec):
         self._check_prerequisites(self.execution_settings(spec))
         self._check_routing_worker(self.execution_settings(spec))
+        self._check_spec_capabilities(self.execution_settings(spec), spec)
         try:
             target = self.client.containers.get(spec["container_name"])
             target.reload()
@@ -436,7 +481,7 @@ class DockerExecutor(Executor):
         """(renderer, container attrs, image attrs) after every prerequisite."""
         settings = self.execution_settings(spec)
         self._check_prerequisites(settings)
-        self._check_config_worker(settings, spec["action"])
+        self._check_config_worker(settings, spec["action"], extra=spec_capability_labels(spec))
         self.ensure_renderer_image(spec)
         try:
             target = self.client.containers.get(spec["container_name"])
@@ -505,7 +550,8 @@ class DockerExecutor(Executor):
                                    "deploy spec declares no compose_config; the drift guard cannot run")
         renderer, container, image = self._config_inputs(spec)
         try:
-            result = evaluate(spec, container, image, renderer, image_ref or container["Config"].get("Image", ""))
+            result = evaluate(spec, container, image, renderer, image_ref or container["Config"].get("Image", ""),
+                              selected_profile(spec["compose_config"]))
         except ComposeError as exc:
             raise ConfigCheckError(exc.code, f"compose config check failed: {exc}") from exc
         except (ValueError, KeyError) as exc:
@@ -627,6 +673,8 @@ class DockerExecutor(Executor):
             self._check_remove_worker(snapshot["execution"])
         if action in CONFIG_CHECKED_ACTIONS:
             self._check_config_worker(snapshot["execution"], action)
+        # TASK-1801: every action, rollback and routing included.
+        self._check_spec_capabilities(snapshot["execution"], snapshot["spec"])
         if has_restart_health(snapshot["spec"]):
             # TASK-1697: an older worker would reject the health fields mid-job
             # or, worse, skip the probe; refuse before dispatch instead.

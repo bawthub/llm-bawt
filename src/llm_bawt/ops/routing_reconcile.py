@@ -12,9 +12,11 @@ import re
 from urllib.parse import quote
 
 if __package__:
+    from .health_probe import validate_health_probe
     from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from .service_identity import SPEC_PATTERNS, ComposeServiceRef
 else:  # standalone immutable worker
+    from health_probe import validate_health_probe
     from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from service_identity import SPEC_PATTERNS, ComposeServiceRef
 
@@ -35,8 +37,12 @@ def validate_routing_spec(spec: dict) -> dict:
         "route_service": r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}",
         "hostname": r"[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}",
     }
-    if set(spec) != {"action", "add_prefixes", "stop_grace_seconds", "health_timeout_seconds", *patterns}:
+    required = {"action", "add_prefixes", "stop_grace_seconds", "health_timeout_seconds", *patterns}
+    # TASK-1801: the row's own post-swap probe (optional until the app requires it).
+    if not required <= set(spec) <= required | {"health_probe"}:
         raise ValueError("routing spec has missing or unsupported fields")
+    if "health_probe" in spec:
+        validate_health_probe(spec["health_probe"])
     if spec["action"] != ACTION or spec["add_prefixes"] != ["/api/system"]:
         raise ValueError("routing repair supports only the system-health prefix")
     for key, pattern in patterns.items():
@@ -138,6 +144,7 @@ class RoutingReconciler(ImageDeployer):
         if not state.get("Running") or (state.get("Health") or {}).get("Status") != "healthy":
             self._fail("routing repair requires a running healthy frontend", known=True)
         self.detail["routing"] = {k: binding[k] for k in ("before_rule", "after_rule", "config_hash")}
+        self._approved_image_id = binding["image_id"]
         if binding["before_rule"] == binding["after_rule"]:
             self.detail["health"] = self._verify_release(old["Id"], binding["release"])
             self.detail["unchanged"] = True

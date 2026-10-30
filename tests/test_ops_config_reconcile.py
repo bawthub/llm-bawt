@@ -14,6 +14,7 @@ from llm_bawt.ops.config_reconcile import (
     SCHEMA, WORKER_CAPABILITY_LABEL, ConfigReconciler, config_binding, valid_config_binding,
 )
 from llm_bawt.ops.executor import ConfigCheckError, DockerExecutor, validate_spec
+from llm_bawt.ops.health_probe import WORKER_LABEL as HEALTH_PROBE_LABEL
 from llm_bawt.ops.image_deploy import DeployFailed
 from llm_bawt.ops.seeds import SEEDS
 from llm_bawt.ops.worker import run as worker_run
@@ -262,7 +263,8 @@ def _executor(api, *, worker_labels=None, renderer_present=True):
 
     def get_image(ref):
         if ref == WORKER:
-            labels = {WORKER_CAPABILITY_LABEL: "1"} if worker_labels is None else worker_labels
+            labels = ({WORKER_CAPABILITY_LABEL: "1", HEALTH_PROBE_LABEL: "1"} if worker_labels is None
+                      else worker_labels)
             return SimpleNamespace(attrs={"Config": {"Labels": labels}})
         if ref == RENDERER and not present["renderer"]:
             raise _NotFound(ref)

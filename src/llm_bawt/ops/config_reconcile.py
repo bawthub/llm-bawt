@@ -15,13 +15,15 @@ import re
 from urllib.parse import quote
 
 if __package__:
-    from .compose_config import apply_desired, canonical_hash, evaluate
+    from .compose_config import apply_desired, canonical_hash, evaluate, selected_profile
     from .compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH, validate_interpolation_env
+    from .health_probe import validate_health_probe
     from .image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from .service_identity import SPEC_PATTERNS, ComposeServiceRef
 else:  # standalone immutable worker
-    from compose_config import apply_desired, canonical_hash, evaluate
+    from compose_config import apply_desired, canonical_hash, evaluate, selected_profile
     from compose_render import COMPOSE_FILE, MAX_COMPOSE_FILES, SAFE_PATH, validate_interpolation_env
+    from health_probe import validate_health_probe
     from image_deploy import ImageDeployer, clone_create_body, demux_stdout, release_from_labels
     from service_identity import SPEC_PATTERNS, ComposeServiceRef
 
@@ -47,18 +49,28 @@ def validate_compose_config(value) -> dict:
     project directory comes from the target's own Compose labels (no host path
     in a catalog seed)."""
     required = {"compose_files", "renderer_image", "image_variable"}
-    if not isinstance(value, dict) or not required <= set(value) <= required | {"interpolation_env"}:
+    optional = {"interpolation_env", "profile", "adopt_files"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | optional:
         raise ValueError("compose_config requires exactly compose_files, renderer_image, image_variable"
-                         " (and optional interpolation_env)")
+                         " (and optional interpolation_env, profile, adopt_files)")
     files = value["compose_files"]
-    if (not isinstance(files, list) or not 1 <= len(files) <= MAX_COMPOSE_FILES or len(set(files)) != len(files)
-            or not all(isinstance(f, str) and COMPOSE_FILE.fullmatch(f) for f in files)):
+    if not _file_list(files):
         raise ValueError("compose_config.compose_files must be 1..4 distinct Compose file basenames")
+    selected_profile(value)  # TASK-1801: a named, selectable profile only
+    # TASK-1801: the one earlier file list a target may be adopted from.
+    if "adopt_files" in value and (not _file_list(value["adopt_files"]) or value["adopt_files"] == files):
+        raise ValueError("compose_config.adopt_files must be 1..4 distinct Compose file basenames"
+                         " other than compose_files")
     validate_renderer_image(value)
     if not isinstance(value["image_variable"], str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value["image_variable"]):
         raise ValueError("compose_config.image_variable is invalid")
     validate_interpolation_env(value)
     return value
+
+
+def _file_list(files) -> bool:
+    return (isinstance(files, list) and 1 <= len(files) <= MAX_COMPOSE_FILES and len(set(files)) == len(files)
+            and all(isinstance(f, str) and COMPOSE_FILE.fullmatch(f) for f in files))
 
 
 def validate_renderer_image(value: dict) -> None:
@@ -69,16 +81,20 @@ def validate_renderer_image(value: dict) -> None:
 def validate_config_spec(spec: dict) -> dict:
     required = {"action", "compose_config", "display_values", "stat_paths", "stop_grace_seconds",
                 "health_timeout_seconds", *_PATTERNS}
-    if not isinstance(spec, dict) or set(spec) != required:
+    # TASK-1801: optional row-declared probe; a slow-starting target (a model
+    # load) may wait up to 900s for health.
+    if not isinstance(spec, dict) or not required <= set(spec) <= required | {"health_probe"}:
         raise ValueError("config reconcile spec has missing or unsupported fields")
     if spec["action"] != ACTION:
         raise ValueError("not a config reconcile spec")
-    validate_target_fields(spec, _PATTERNS)
+    validate_target_fields(spec, _PATTERNS, health_max=900)
     validate_compose_config(spec["compose_config"])
+    if "health_probe" in spec:
+        validate_health_probe(spec["health_probe"])
     return spec
 
 
-def validate_target_fields(spec: dict, patterns: dict) -> None:
+def validate_target_fields(spec: dict, patterns: dict, *, health_max: int = 180) -> None:
     """Fields every config-reconcile kind shares (TASK-1474)."""
     for key, pattern in patterns.items():
         if not isinstance(spec[key], str) or not re.fullmatch(pattern, spec[key]):
@@ -94,7 +110,7 @@ def validate_target_fields(spec: dict, patterns: dict) -> None:
     if (not isinstance(paths, list) or len(paths) > 4
             or not all(isinstance(p, str) and SAFE_PATH.fullmatch(p) and ".." not in p.split("/") for p in paths)):
         raise ValueError("stat_paths must be up to 4 absolute container paths")
-    for key, low, high in (("stop_grace_seconds", 0, 60), ("health_timeout_seconds", 10, 180)):
+    for key, low, high in (("stop_grace_seconds", 0, 60), ("health_timeout_seconds", 10, health_max)):
         if type(spec[key]) is not int or not low <= spec[key] <= high:
             raise ValueError(f"config reconcile spec {key} is out of bounds")
 
@@ -130,7 +146,7 @@ def config_binding(spec: dict, container: dict, image: dict, renderer) -> tuple[
     release = release_from_labels(image["Config"].get("Labels"))
     if not release or not all(release.values()):
         raise ValueError("config target has no verifiable release identity")
-    result = evaluate(spec, container, image, renderer, ref)
+    result = evaluate(spec, container, image, renderer, ref, selected_profile(spec["compose_config"]))
     binding = {"container_id": container["Id"], "image_id": image["Id"], "image_ref": ref,
                "source": result["source"], "current_config_hash": current_config_hash(container, image),
                "desired_hash": result["desired_hash"], "rendered_hash": result["rendered_hash"],
@@ -237,6 +253,9 @@ class ConfigReconciler(ImageDeployer):
         if not state.get("Running") or (state.get("Health") or {}).get("Status") != "healthy":
             self._fail("config reconcile requires a running healthy target", known=True)
         self.detail["config"] = {k: binding[k] for k in self.DETAIL_KEYS}
+        # TASK-1801: relabel an adopted target; a docker_health probe on the
+        # verify-only path checks the approved image.
+        self._source, self._approved_image_id = binding["source"], binding["image_id"]
         return old, image
 
     def _verify_only(self, old) -> bool:

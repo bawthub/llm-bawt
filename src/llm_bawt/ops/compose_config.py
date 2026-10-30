@@ -27,7 +27,10 @@ or pulls; a declared ``image`` only names the tag the build carries
 (crawl4ai, TASK-1476) uses :data:`PINNED_PROCESS_PROFILE`: the pinned keys plus
 the process settings it declares. A Compose-built DEV service (the BawtHub
 hot-reload frontend, TASK-1649) uses :data:`DEV_PROFILE`: the built keys plus
-its memory cap (``mem_limit``/``memswap_limit``).
+its memory cap (``mem_limit``/``memswap_limit``). A digest-pinned HARDENED
+image service (pocket-tts, TASK-1801) uses :data:`HARDENED_PROFILE`: the pinned
+keys, the process settings, its memory cap and the confinement it declares
+(``cap_drop``, ``cpus``, ``pids_limit``, ``read_only``), which that profile owns.
 
 Healthcheck, tmpfs and a declared entrypoint (TASK-1476) are stored in the
 desired configuration only when declared, so a service that declares none
@@ -136,6 +139,32 @@ MEMORY_KEYS = ("mem_limit", "memswap_limit")
 DEV_PROFILE = ServiceProfile("dev", BUILT_PROFILE.keys | set(MEMORY_KEYS), built=True, models_process=True,
                              pull_policies=BUILT_PULL_POLICIES)
 _MAX_MEMORY = 1 << 50
+# TASK-1801: a digest-pinned image whose Compose service declares its own
+# confinement. The profile OWNS it: the desired configuration always carries
+# ``hardening`` (an undeclared field is its unconfined value), so a capability,
+# CPU, PID or read-only change on the running container is drift, and an added
+# capability (``cap_add`` is never accepted) is removed by a reconcile.
+# ``profiles`` is Compose activation metadata, validated and never applied.
+HARDENING_KEYS = frozenset({"cap_drop", "cpus", "pids_limit", "read_only"})
+# Worker image label proving it carries this profile and target adoption.
+HARDENED_PROFILE_LABEL = "llm-bawt.ops.hardened-profile"
+HARDENED_PROFILE = ServiceProfile("pinned-hardened", SERVICE_KEYS | HARDENING_KEYS | set(MEMORY_KEYS) | {
+    "container_name", "healthcheck", "profiles", "security_opt", "tmpfs"}, built=False, models_process=True,
+    pull_policies=PULL_POLICIES)
+# Profiles a catalog row may select by name (``compose_config.profile``); the
+# other kinds' profiles are fixed by their action.
+SELECTABLE_PROFILES = {p.name: p for p in (PINNED_PROFILE, HARDENED_PROFILE)}
+_CAPABILITY = re.compile(r"(?:CAP_)?([A-Z_]{1,32})")
+_PROFILE_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}")
+_MAX_NANO_CPUS = 64 * 1_000_000_000
+
+
+def selected_profile(compose_config: dict | None) -> ServiceProfile:
+    """The profile a catalog row's ``compose_config.profile`` names (default pinned)."""
+    name = (compose_config or {}).get("profile", PINNED_PROFILE.name)
+    if name not in SELECTABLE_PROFILES:
+        raise ValueError("compose_config.profile must be one of " + ", ".join(sorted(SELECTABLE_PROFILES)))
+    return SELECTABLE_PROFILES[name]
 
 
 def built_image_tag(value) -> str:
@@ -350,6 +379,53 @@ def _memory(service: dict) -> dict:
     return {"Memory": memory, "MemorySwap": swap}
 
 
+def _capabilities(value, key: str) -> list[str]:
+    """A capability list as sorted, ``CAP_``-less upper-case names."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) and _CAPABILITY.fullmatch(v) for v in value):
+        raise ComposeError("unsupported_compose_key", [key])
+    names = sorted({_CAPABILITY.fullmatch(v).group(1) for v in value})
+    if len(names) != len(value):
+        raise ComposeError("unsupported_compose_key", [key])
+    return names
+
+
+def _hardening(service: dict) -> dict:
+    """``HostConfig`` CapDrop/CapAdd/NanoCpus/PidsLimit/ReadonlyRootfs (TASK-1801).
+    Undeclared means unconfined: no dropped capability, no CPU or PID limit, a
+    writable root filesystem. CapAdd is always empty (``cap_add`` refuses)."""
+    cpus = service.get("cpus")
+    if cpus is None:
+        nano = 0
+    else:
+        if isinstance(cpus, str) and re.fullmatch(r"[0-9]{1,2}(?:\.[0-9]{1,9})?", cpus):
+            cpus = float(cpus)
+        if type(cpus) not in (int, float) or not 0 < cpus * 1_000_000_000 <= _MAX_NANO_CPUS:
+            raise ComposeError("unsupported_compose_key", ["cpus"])
+        nano = round(cpus * 1_000_000_000)
+    pids = service.get("pids_limit")
+    if pids is not None and (type(pids) is not int or not 1 <= pids <= 65535):
+        raise ComposeError("unsupported_compose_key", ["pids_limit"])
+    profiles = service.get("profiles")
+    if profiles is not None and (not isinstance(profiles, list)
+                                 or not all(isinstance(p, str) and _PROFILE_NAME.fullmatch(p) for p in profiles)):
+        raise ComposeError("unsupported_compose_key", ["profiles"])
+    return {"CapDrop": _capabilities(service.get("cap_drop"), "cap_drop"), "CapAdd": [],
+            "NanoCpus": nano, "PidsLimit": pids or 0, "ReadonlyRootfs": _flag(service.get("read_only"), "read_only")}
+
+
+def _running_hardening(host: dict) -> dict:
+    def caps(value):
+        return sorted({(_CAPABILITY.fullmatch(v).group(1) if isinstance(v, str) and _CAPABILITY.fullmatch(v) else str(v))
+                       for v in value or []})
+    pids = host.get("PidsLimit")
+    return {"CapDrop": caps(host.get("CapDrop")), "CapAdd": caps(host.get("CapAdd")),
+            "NanoCpus": int(host.get("NanoCpus") or 0),
+            "PidsLimit": pids if type(pids) is int and pids > 0 else 0,
+            "ReadonlyRootfs": bool(host.get("ReadonlyRootfs"))}
+
+
 def _tmpfs(value, mounts: dict) -> dict:
     """``HostConfig.Tmpfs``: ``{path: options}``. A path already mounted refuses."""
     if value is None:
@@ -481,6 +557,8 @@ def translate(rendered: dict, spec: dict, image_ref: str, profile: ServiceProfil
         desired.update(_process(service, spec, mounts))
     if "mem_limit" in profile.keys:
         desired["memory"] = _memory(service)
+    if HARDENING_KEYS <= profile.keys:
+        desired["hardening"] = _hardening(service)
     if built_tag is not None:
         desired["image"] = built_tag  # identity only: the swap uses the bound image ID
     return desired
@@ -526,7 +604,8 @@ def running(container: dict) -> dict:
             "tmpfs": dict(sorted((host.get("Tmpfs") or {}).items())),
             "expose": sorted((config.get("ExposedPorts") or {}).keys()),
             "stop_timeout": config.get("StopTimeout"),
-            "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)}}
+            "memory": {"Memory": int(host.get("Memory") or 0), "MemorySwap": int(host.get("MemorySwap") or 0)},
+            "hardening": _running_hardening(host)}
 
 
 def normalized(state: dict, image: dict) -> dict:
@@ -591,6 +670,10 @@ def drift(desired: dict, actual: dict) -> list[str]:
     # TASK-1649: only a profile that owns the memory cap compares it.
     if "memory" in desired and desired["memory"] != actual["memory"]:
         names.append("memory:~")
+    # TASK-1801: only a profile that owns confinement compares it.
+    if "hardening" in desired:
+        names += [f"hardening:~{k}" for k in desired["hardening"]
+                  if desired["hardening"][k] != actual["hardening"].get(k)]
     if "expose" in desired:
         names += [f"expose:+{p}" for p in set(desired["expose"]) - set(actual["expose"])]
         names += [f"expose:-{p}" for p in set(actual["expose"]) - set(desired["expose"])]
@@ -693,6 +776,13 @@ def apply_desired(body: dict, old: dict, desired: dict, *, container_name: str, 
         host["Tmpfs"] = dict(desired.get("tmpfs", {})) or None
     if "memory" in desired:
         host["Memory"], host["MemorySwap"] = desired["memory"]["Memory"], desired["memory"]["MemorySwap"]
+    if "hardening" in desired:
+        hardening = desired["hardening"]
+        host["CapDrop"] = list(hardening["CapDrop"]) or None
+        host["CapAdd"] = None
+        host["NanoCpus"] = hardening["NanoCpus"]
+        host["PidsLimit"] = hardening["PidsLimit"] or None
+        host["ReadonlyRootfs"] = hardening["ReadonlyRootfs"]
     if host.get("NetworkMode") not in desired["networks"]:
         host["NetworkMode"] = desired["networks"][0]
     current = body.get("NetworkingConfig", {}).get("EndpointsConfig") or {}

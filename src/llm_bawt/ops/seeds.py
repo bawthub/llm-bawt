@@ -343,6 +343,10 @@ _PROD_COMPOSE_CONFIG = {
     "image_variable": "BAWTHUB_FRONTEND_IMAGE",
 }
 
+# TASK-1801: the frontend's own health endpoint, in-container (the worker
+# stays network-less). Data on the row, never wired into the executor.
+_FRONTEND_PROBE = {"type": "http_exec", "port": 3000, "path": "/api/health"}
+
 _PROD_TARGET = dict(
     container_name="bawthub-frontend-prod-1",
     compose_project=_BAWTHUB_PROJECT,
@@ -354,6 +358,7 @@ _PROD_TARGET = dict(
     stop_grace_seconds=20,
     health_timeout_seconds=180,
     compose_config=_PROD_COMPOSE_CONFIG,
+    health_probe=_FRONTEND_PROBE,
 )
 
 _IMAGE_SEEDS: list[dict[str, Any]] = [
@@ -433,6 +438,7 @@ _ROUTING_SEEDS: list[dict[str, Any]] = [{
         image_repository="ghcr.io/bawthub/frontend", router_name="frontprod-api",
         route_service="frontend-prod", hostname="app.bawthub.com",
         add_prefixes=["/api/system"], stop_grace_seconds=20, health_timeout_seconds=180,
+        health_probe=_FRONTEND_PROBE,
     ),
     "args_schema_json": _schema({}),
     "args_defaults_json": _defaults(),
@@ -467,7 +473,7 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
         image_repository="ghcr.io/bawthub/frontend", compose_config=_PROD_COMPOSE_CONFIG,
         display_values={"BAWTHUB_AUTH_SESSIONS": ["on", "off"]},
         stat_paths=["/run/bawthub-service-token/token"],
-        stop_grace_seconds=20, health_timeout_seconds=180,
+        stop_grace_seconds=20, health_timeout_seconds=180, health_probe=_FRONTEND_PROBE,
     ),
     "args_schema_json": _schema({}),
     "args_defaults_json": _defaults(),
@@ -712,6 +718,131 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
 # The env_import destinations a plan may accept losing (closed list).
 _DESTINATIONS = sorted(DESTINATION_PROBES)
 
+# ---------------------------------------------------------------------------
+# TASK-1801: the optional CPU Pocket TTS worker, deployed from the image its CI
+# publish workflow pushes (no release row, no build executor). Arguments name
+# the publish run, its source SHA and the digest; the app verifies the run and
+# its publish receipt before approval. The image is versioned ``sha-<sha>``.
+# The pinned-hardened profile also compares the worker's caps, CPU, PIDs and
+# read-only root, so a deploy can never quietly drop them. The target was
+# created from the local-build overlay; ``adopt_files`` lets the first deploy
+# (or the reconcile below) adopt it and relabel it with the image overlay.
+# ---------------------------------------------------------------------------
+
+_POCKET_COMPOSE_CONFIG = {
+    "compose_files": ["docker-compose.yml", "docker-compose.pocket.yml", "docker-compose.pocket-image.yml"],
+    "adopt_files": ["docker-compose.yml", "docker-compose.pocket.yml"],
+    "renderer_image": _PROD_COMPOSE_CONFIG["renderer_image"],
+    "image_variable": "BAWTHUB_POCKET_TTS_IMAGE",
+    "profile": "pinned-hardened",
+}
+
+_POCKET_TARGET = dict(
+    container_name="bawthub-pocket-tts-1",
+    compose_project=_BAWTHUB_PROJECT,
+    compose_service="pocket-tts",
+    image_repository="ghcr.io/bawthub/pocket-tts",
+    github_repository="bawthub/bawthub",
+    workflow_path=".github/workflows/publish-tenant-voice.yml",
+    canonical_branch="main",
+    stop_grace_seconds=10,
+    # The model loads at start (healthcheck start_period 180s).
+    health_timeout_seconds=300,
+    compose_config=_POCKET_COMPOSE_CONFIG,
+    # Its own Docker healthcheck is the probe; identity is checked on the image.
+    health_probe={"type": "docker_health"},
+)
+
+_POCKET_SEEDS: list[dict[str, Any]] = [
+    {
+        "slug": "bawthub.deploy-pocket-tts",
+        "title": "Deploy the Pocket TTS worker image",
+        "description": (
+            "Replace the Pocket TTS worker with the image its CI publish run pushed, pinned by digest. "
+            "The run, its publish receipt, the source SHA and the digest are verified before approval; "
+            "the previous container is restored automatically if health or release verification fails. "
+            "Interrupts Pocket voice synthesis while the model loads."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="deploy_image", binding="ci_publish", **_POCKET_TARGET),
+        "args_schema_json": _schema(
+            {
+                "workflow_run_id": {"type": "string", "pattern": "^[0-9]{1,20}$"},
+                "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            },
+            required=["workflow_run_id", "source_sha", "digest"],
+        ),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 1200,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_HIGH,
+        "category": "deploy",
+        "approval_prompt_prefix": "Deploy Pocket TTS worker image",
+    },
+    {
+        "slug": "bawthub.rollback-pocket-tts",
+        "title": "Roll back the Pocket TTS worker image",
+        "description": (
+            "Restore the last-known-good image recorded by a succeeded Pocket TTS deploy job. "
+            "Never pulls; refuses if the worker no longer runs that deploy's image."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(action="rollback_image", **_POCKET_TARGET),
+        "args_schema_json": _schema(
+            {"deploy_job_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}},
+            required=["deploy_job_id"],
+        ),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 900,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_CRITICAL,
+        "category": "deploy",
+        "approval_prompt_prefix": "Roll back Pocket TTS worker image",
+    },
+    {
+        "slug": "bawthub.reconcile-pocket-tts-config",
+        "title": "Reconcile Pocket TTS worker configuration",
+        "description": (
+            "Recreate the Pocket TTS worker from its declared Compose service using the SAME pinned image. "
+            "No build or pull. Approval shows changed names only, never values. Verifies health and "
+            "release identity and restores the previous container on failure. Interrupts Pocket voice "
+            "synthesis while the model loads."
+        ),
+        "enabled": False,
+        "executor_kind": EXECUTOR_DOCKER,
+        "target_host": "",
+        "working_directory": None,
+        "command_script": _spec(
+            action="reconcile_frontend_config", container_name=_POCKET_TARGET["container_name"],
+            compose_project=_BAWTHUB_PROJECT, compose_service="pocket-tts",
+            image_repository=_POCKET_TARGET["image_repository"], compose_config=_POCKET_COMPOSE_CONFIG,
+            display_values={}, stat_paths=[], stop_grace_seconds=10, health_timeout_seconds=300,
+            health_probe=_POCKET_TARGET["health_probe"],
+        ),
+        "args_schema_json": _schema({}),
+        "args_defaults_json": _defaults(),
+        "timeout_seconds": 1200,
+        "start_delay_seconds": 0,
+        "max_output_bytes": 65536,
+        "max_concurrent": 1,
+        "risk_level": RISK_HIGH,
+        "category": "configuration",
+        "approval_prompt_prefix": "Reconcile Pocket TTS worker configuration with the same image",
+    },
+]
+
+
 # TASK-1476: the one-window cutover. Recreates each target in order, each
 # only after the previous one is verified, then probes every credential the
 # app had; any failure reverts every recreated target in reverse. Every
@@ -860,6 +991,7 @@ SEEDS: list[dict[str, Any]] = [
     *_IMAGE_SEEDS,
     *_ROUTING_SEEDS,
     *_CONFIG_SEEDS,
+    *_POCKET_SEEDS,
     *_PLAN_SEEDS,
     *_RELEASE_SEEDS,
 ]

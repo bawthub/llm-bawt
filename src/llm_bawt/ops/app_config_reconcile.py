@@ -304,6 +304,9 @@ class ServiceConfigReconciler(ConfigReconciler):
     def _release(self, binding):
         return None  # a pinned local image carries no release identity
 
+    def _require_probe(self):
+        """Verified by the spec's own ``health_url``/field/value (below)."""
+
     def _swap_ref(self, binding):
         return binding["image_id"]  # never the tag: it may name another image
 

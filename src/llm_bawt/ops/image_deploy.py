@@ -14,7 +14,9 @@ Deploy and rollback share ONE replace path:
   from the image, TASK-1518, else ``config_drift`` and nothing changes) →
   create clone ``<name>-next-<job8>`` → stop old → rename old ``-prev-<job8>`` →
   rename new to canonical → start → wait for Docker health → verify release
-  identity via in-container ``/api/health`` → remove old container.
+  identity with the row's ``health_probe`` (TASK-1801: an in-container HTTP
+  request, or the container's own Docker health plus its image identity) →
+  remove old container.
 
 Any failure after the old container is stopped first tries to RESTORE it. A
 verified restore is a known outcome (``failed``); anything else is uncertain
@@ -34,19 +36,21 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 if __package__:
-    from .compose_config import CONFIG_HASH_LABEL, evaluate
+    from .compose_config import CONFIG_HASH_LABEL, evaluate, selected_profile
     from .compose_render import ComposeRenderer
+    from .health_probe import DOCKER_HEALTH, HTTP_EXEC, http_exec_argv, validate_health_probe
     from .service_identity import ComposeServiceRef
 else:  # standalone immutable worker
-    from compose_config import CONFIG_HASH_LABEL, evaluate
+    from compose_config import CONFIG_HASH_LABEL, evaluate, selected_profile
     from compose_render import ComposeRenderer
+    from health_probe import DOCKER_HEALTH, HTTP_EXEC, http_exec_argv, validate_health_probe
     from service_identity import ComposeServiceRef
 
 DEPLOY_SCHEMA = "llm-bawt.ops.image-deploy/v1"
 DEPLOY_ACTION = "deploy_image"
 ROLLBACK_ACTION = "rollback_image"
 IMAGE_ACTIONS = frozenset({DEPLOY_ACTION, ROLLBACK_ACTION})
-HEALTH_URL = "http://127.0.0.1:3000/api/health"
+CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
 
 # Container.Config keys a Compose service may override; when equal to the OLD
 # image's value they were inherited and must come from the NEW image instead.
@@ -124,6 +128,10 @@ class ImageDeployer:
         self._renderer_override = renderer
         self._config_hash = None
         self._declared = None
+        # TASK-1801: the Compose source the target is rendered from (relabels
+        # an adopted target) and the image ID a docker_health probe requires.
+        self._source = None
+        self._approved_image_id = None
         self.spec = snapshot["spec"]
         self.snapshot = snapshot
         self.job_id = job_id
@@ -138,6 +146,7 @@ class ImageDeployer:
 
     # ── entry ────────────────────────────────────────────────────────────
     def run(self) -> str:
+        self._require_probe()
         with self._target_lock():
             try:
                 self._perform()
@@ -148,6 +157,14 @@ class ImageDeployer:
                            known=not getattr(self.api, "side_effect_started", False))
         self.detail["phase"] = "done"
         return json.dumps(self.detail, sort_keys=True)
+
+    def _require_probe(self):
+        """TASK-1801: verification is the row's declared probe, never a
+        built-in port/path. A spec without one refuses before anything."""
+        try:
+            validate_health_probe(self.spec.get("health_probe"))
+        except ValueError as exc:
+            self._fail(f"{exc}; nothing changed", known=True)
 
     @contextmanager
     def _target_lock(self):
@@ -182,6 +199,10 @@ class ImageDeployer:
             env.update(self._declared["env"])
             body["Env"] = [f"{k}={v}" for k, v in sorted(env.items())]
             body["Labels"].update(self._declared["labels"])
+        if self._source:
+            # TASK-1801: an adopted target was created from an earlier file
+            # list; the new container records the files it was rendered from.
+            body["Labels"][CONFIG_FILES_LABEL] = ",".join(self._source["compose_files"])
         return body
 
     def _renderer(self):
@@ -194,7 +215,8 @@ class ImageDeployer:
         Compares everything but the image, which the deploy swaps on purpose."""
         self._phase("config-check")
         try:
-            result = evaluate(self.spec, old, old_image, self._renderer(), ref)
+            result = evaluate(self.spec, old, old_image, self._renderer(), ref,
+                              selected_profile(self.spec["compose_config"]))
         except ValueError as exc:  # ComposeError: fixed codes and names only
             self._fail(f"compose config check failed: {exc}; nothing changed", known=True)
         if result["drift"]:
@@ -203,6 +225,7 @@ class ImageDeployer:
                        + ", ".join(result["drift"]) + "); run the config reconcile operation first; "
                        "nothing changed", known=True)
         self._config_hash = result["rendered_hash"]
+        self._source = result["source"]
         self._declared = {"env": result["desired"]["env"], "labels": result["desired"]["labels"]}
 
     def _fail(self, message: str, *, known: bool):
@@ -278,6 +301,7 @@ class ImageDeployer:
         job8 = self.job_id[:8]
         temp, prev = f"{self.name}-next-{job8}", f"{self.name}-prev-{job8}"
         self._phase("create")
+        self._approved_image_id = new_image["Id"]
         body = self._create_body(old, old_image, new_image, ref)
         try:
             new_id = self.api.request("POST", "/containers/create?" + urlencode({"name": temp}), body=body)["Id"]
@@ -370,9 +394,14 @@ class ImageDeployer:
             self.sleep(2)
 
     def _verify_release(self, container_id, expect):
+        """Verify the running target with the row's ``health_probe``."""
+        probe = self.spec["health_probe"]
+        if probe["type"] == DOCKER_HEALTH:
+            return self._verify_docker_health(container_id, expect)
+        if probe["type"] != HTTP_EXEC:
+            raise StepError("unsupported health probe")
         exec_id = self.api.request("POST", f"/containers/{container_id}/exec", body={
-            "AttachStdout": True, "AttachStderr": True,
-            "Cmd": ["curl", "-fsS", "--max-time", "10", HEALTH_URL]})["Id"]
+            "AttachStdout": True, "AttachStderr": True, "Cmd": http_exec_argv(probe)})["Id"]
         raw = self.api.request("POST", f"/exec/{exec_id}/start", body={"Detach": False, "Tty": False}, raw=True)
         code = self.api.request("GET", f"/exec/{exec_id}/json").get("ExitCode")
         stdout = demux_stdout(raw)
@@ -389,6 +418,25 @@ class ImageDeployer:
             if got != expect:
                 raise StepError(f"running release {got} != expected {expect}")
         return {"status": payload.get("status"), "release": baked}
+
+    def _verify_docker_health(self, container_id, expect):
+        """TASK-1801: the target's own Docker healthcheck is the probe, so the
+        identity is checked on the container: it must run the approved image
+        and that image's release labels must equal the bound release."""
+        if not self._approved_image_id:
+            raise StepError("no approved image to verify against")
+        container = self.api.request("GET", f"/containers/{quote(container_id, safe='')}/json")
+        state = container.get("State") or {}
+        if not state.get("Running") or (state.get("Health") or {}).get("Status") != "healthy":
+            raise StepError("container is not running healthy")
+        if container.get("Image") != self._approved_image_id:
+            raise StepError("container does not run the approved image")
+        image = self._image(self._approved_image_id) or {"Config": {}}
+        baked = release_from_labels((image.get("Config") or {}).get("Labels"))
+        if expect is not None and baked != expect:
+            raise StepError(f"running release {baked} != expected {expect}")
+        return {"status": "healthy", "probe": DOCKER_HEALTH, "image_id": self._approved_image_id,
+                "release": baked}
 
 
 def clone_create_body(old: dict, old_image: dict, new_image: dict, ref: str, job_id: str) -> dict:

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from llm_bawt.ops.executor import DockerExecutor, ExecutorError, validate_spec
+from llm_bawt.ops.health_probe import WORKER_LABEL as HEALTH_PROBE_LABEL
 from llm_bawt.ops.image_deploy import DeployFailed, clone_create_body
 from llm_bawt.ops.routing_reconcile import (
     SCHEMA, WORKER_CAPABILITY_LABEL, RoutingReconciler,
@@ -194,6 +195,11 @@ def test_legacy_worker_capability_fails_before_dispatch(monkeypatch):
     with pytest.raises(ExecutorError, match="deploy the tested worker first"):
         executor.preflight({"spec": SPEC, "execution": {"worker_image": "old"}})
     images.get = lambda _: SimpleNamespace(attrs={"Config": {"Labels": {WORKER_CAPABILITY_LABEL: "1"}}})
+    # TASK-1801: the seeded row carries a health probe, which the worker must also run.
+    with pytest.raises(ExecutorError, match=HEALTH_PROBE_LABEL):
+        executor.preflight({"spec": SPEC, "execution": {"worker_image": "new"}})
+    images.get = lambda _: SimpleNamespace(attrs={"Config": {"Labels": {WORKER_CAPABILITY_LABEL: "1",
+                                                                         HEALTH_PROBE_LABEL: "1"}}})
     executor.preflight({"spec": SPEC, "execution": {"worker_image": "new"}})
 
 
