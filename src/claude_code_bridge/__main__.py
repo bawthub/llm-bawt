@@ -10,11 +10,9 @@ import os
 import signal
 import sys
 
-from agent_bridge import preview_credentials
 from agent_bridge.publisher import RedisPublisher
 
 from .bootstrap import bootstrap_claude_home
-from .native_auth import AUTH_ENV_KEYS
 from .bridge import ClaudeCodeBridge
 from .proxy import ProxyServer
 
@@ -60,16 +58,6 @@ def main() -> None:
     # Suppress noisy httpx request logging
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logger = logging.getLogger("claude_code_bridge")
-
-    if preview_credentials.enabled():
-        local = preview_credentials.local_claude_credentials(AUTH_ENV_KEYS)
-        if local:
-            logger.error(
-                "Preview bridge refuses to start: local Claude credentials are "
-                "visible (%s). A preview bridge takes credentials only from the "
-                "preview gateway.", ", ".join(local),
-            )
-            sys.exit(1)
 
     bootstrap_claude_home()
 

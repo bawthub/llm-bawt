@@ -32,7 +32,7 @@ from typing import ClassVar
 
 import httpx
 
-from agent_bridge import bridge_token, preview_credentials
+from agent_bridge import bridge_token
 
 from .anthropic_passthrough import AnthropicPassthroughAdapter
 
@@ -75,8 +75,6 @@ class OpenRouterAdapter(AnthropicPassthroughAdapter):
 
     @staticmethod
     def _fetch_broker_key() -> str:
-        if preview_credentials.enabled():
-            raise RuntimeError("OpenRouter API keys are not served in preview")
         api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
         if not api_url:
             raise RuntimeError(

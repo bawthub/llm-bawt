@@ -77,7 +77,7 @@ _SETTING_PREFIX = "provider_connection:"
 # integrations.connections.IntegrationStore). The generic /v1/settings routes
 # have no service-token auth, so they neither list, write nor delete these rows
 # (TASK-1520); the provider and integration APIs are the only way in.
-CREDENTIAL_SETTING_PREFIXES: tuple[str, ...] = (_SETTING_PREFIX, "integration_connection:", "preview_broker:")
+CREDENTIAL_SETTING_PREFIXES: tuple[str, ...] = (_SETTING_PREFIX, "integration_connection:")
 
 
 def is_credential_setting_key(key: str) -> bool:

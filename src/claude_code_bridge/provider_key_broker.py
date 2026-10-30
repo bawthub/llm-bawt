@@ -17,7 +17,7 @@ import os
 
 import httpx
 
-from agent_bridge import bridge_token, preview_credentials
+from agent_bridge import bridge_token
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +37,7 @@ def broker_response(provider_id: str) -> httpx.Response:
 
     Raises ``BrokerKeyError`` when ``LLM_BAWT_API_URL`` is unset and lets
     ``httpx.HTTPError`` through on a transport failure.
-
-    Preview role serves no API keys: it raises ``BrokerKeyError`` (never
-    ``BrokerKeyNotInstalled``, which callers may treat as "use a fallback").
     """
-    if preview_credentials.enabled():
-        raise BrokerKeyError(f"{provider_id} API keys are not served in preview")
     api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
     if not api_url:
         raise BrokerKeyError(

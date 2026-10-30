@@ -18,7 +18,7 @@ from typing import Callable
 
 import httpx
 
-from agent_bridge import bridge_token, preview_credentials
+from agent_bridge import bridge_token
 
 # Shared with the codex bridge's seed acknowledgement (TASK-1579).
 from agent_bridge.continuity import fmt_tokens as _fmt_tokens  # noqa: F401
@@ -411,17 +411,7 @@ def _fetch_broker_token(
 
     The digest lets the sole refresher reuse a newer generation under its lock.
     No bearer/refresh token is placed in a query string or log.
-
-    Preview role: only the preview credential gateway; ``force`` and the
-    rejected digest are not forwarded, and any failure yields ``(None, None)``.
     """
-    if preview_credentials.enabled():
-        try:
-            cred = preview_credentials.fetch("claude")
-        except preview_credentials.PreviewCredentialError as e:
-            logger.warning("Preview Claude credential refused: %s", e)
-            return None, None
-        return cred.access_token, int(cred.expires_at_s * 1000)
     api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
     if not api_url:
         return None, None
@@ -463,10 +453,6 @@ def _get_fresh_oauth_token(*, force_refresh: bool = False) -> str | None:
     read-only in both cases.
     """
     stale_candidate: str | None = None
-
-    # Preview role: the gateway or nothing. No bundle, env or stale fallback.
-    if preview_credentials.enabled():
-        return _fetch_broker_token()[0]
 
     # 1. Broker endpoint — the app owns the refresh chain (DB row is truth).
     token, _expires_at = _fetch_broker_token(force=force_refresh)

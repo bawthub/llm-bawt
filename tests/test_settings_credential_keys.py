@@ -30,12 +30,9 @@ from llm_bawt.service.schemas import (
 
 PROVIDER_KEY = "provider_connection:example"
 INTEGRATION_KEY = "integration_connection:example"
-PREVIEW_KEY = "preview_broker:active_grant"
 RESERVED_KEYS = [
     PROVIDER_KEY,
     INTEGRATION_KEY,
-    PREVIEW_KEY,
-    " Preview_Broker:active_grant",
     "integration_connection:pending:example",
     # Case and padding variants are refused too: nothing that looks like a
     # credential key is writable through the generic route.
@@ -61,7 +58,6 @@ def store(monkeypatch):
     # Rows a CredentialStore wrote (ciphertext stand-ins) next to a normal setting.
     settings_store.set_value("global", "*", PROVIDER_KEY, {"secret_enc": "enc:v1:original"})
     settings_store.set_value("global", "*", INTEGRATION_KEY, {"secret_enc": "enc:v1:original"})
-    settings_store.set_value("global", "*", PREVIEW_KEY, {"run_id": "fixture-only"})
     settings_store.set_value("global", "*", "ordinary_setting", 1)
     return settings_store
 
@@ -90,13 +86,12 @@ def test_put_refuses_credential_keys_in_every_scope(store, scope):
     assert raised.value.status_code == 403
 
 
-@pytest.mark.parametrize("key", [PROVIDER_KEY, INTEGRATION_KEY, PREVIEW_KEY])
+@pytest.mark.parametrize("key", [PROVIDER_KEY, INTEGRATION_KEY])
 def test_delete_refuses_credential_keys(store, key):
     with pytest.raises(HTTPException) as raised:
         settings_routes.delete_runtime_setting(scope_type="global", key=key, scope_id=None)
     assert raised.value.status_code == 403
-    expected = {"run_id": "fixture-only"} if key == PREVIEW_KEY else {"secret_enc": "enc:v1:original"}
-    assert _stored(store, key) == expected
+    assert _stored(store, key) == {"secret_enc": "enc:v1:original"}
 
 
 def test_batch_refuses_whole_batch_with_a_credential_key(store):
@@ -119,8 +114,6 @@ def test_scope_listing_hides_credential_rows(store):
     {},
     {"key_prefix": "provider_connection:"},
     {"key_prefix": "integration_connection:"},
-    {"key_prefix": "preview_broker:"},
-    {"key": PREVIEW_KEY},
     {"key": PROVIDER_KEY},
 ])
 def test_all_listing_hides_credential_rows(store, filters):
@@ -128,7 +121,7 @@ def test_all_listing_hides_credential_rows(store, filters):
               "limit": 200, "offset": 0, **filters}
     response = settings_routes.list_all_runtime_settings(**params)
     keys = [item.key for item in response.settings]
-    assert not any(key.startswith(providers_base.CREDENTIAL_SETTING_PREFIXES) for key in keys)
+    assert not any(key.startswith(("provider_connection:", "integration_connection:")) for key in keys)
     assert response.total_count == len(keys)
 
 
