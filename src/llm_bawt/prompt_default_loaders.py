@@ -205,6 +205,18 @@ def load_ops_quiesce_receipt() -> str:
     return DEFAULT_RECEIPT
 
 
+def load_ops_quiesce_resume() -> str:
+    from .ops.quiesce_prompts import DEFAULT_RESUME
+
+    return DEFAULT_RESUME
+
+
+def load_ops_quiesce_resume_blocked() -> str:
+    from .ops.quiesce_prompts import DEFAULT_RESUME_BLOCKED
+
+    return DEFAULT_RESUME_BLOCKED
+
+
 def load_ops_quiesce_request() -> str:
     from .ops.quiesce_prompts import DEFAULT_QUIESCE_REQUEST
 

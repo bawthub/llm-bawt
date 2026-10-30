@@ -255,6 +255,21 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "a signed-in person manages grants."
         ),
     ),
+    # TASK-1798: global only; read live by ops.resume_sender. No default: unset
+    # means a failed quiesce job's held bots are logged as unresumed, nobody told.
+    "ops_resume_coordinator_capability": SettingDefinition(
+        key="ops_resume_coordinator_capability",
+        type="str",
+        default=None,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Ops resume coordinator capability",
+        help=(
+            "Global only: a role-tag capability. When a quiesce ops job runs and "
+            "fails, bots holding a role with it are told which bots it held, instead "
+            "of those bots being told to resume. Unset: nobody is told; the app logs it."
+        ),
+    ),
     # TASK-1702: global only. The voice a bot speaks with when it has no own
     # bot_profiles.default_voice. No default: unset means bots without their
     # own voice have none, and voice shows as unavailable (never substituted).

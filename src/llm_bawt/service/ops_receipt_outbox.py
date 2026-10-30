@@ -10,6 +10,9 @@ terminal; this loop only reads terminal rows.
 Exactly-once is the sender's: idempotency key ``ops-receipt:<job_id>`` plus a
 conditional stamp, so several app processes, or an old reconciler image still
 sending during rollout, only ever produce one delivery row.
+
+TASK-1798: the same pass resumes the bots each terminal quiesce job held
+(:class:`QuiesceResumeSender`), with the same announce hook.
 """
 from __future__ import annotations
 
@@ -17,7 +20,8 @@ import asyncio
 import logging
 
 from ..ops.receipt_callback import QuiesceReceiptSender
-from .dependencies import get_ops_service
+from ..ops.resume_sender import COORDINATOR_CAPABILITY_SETTING, QuiesceResumeSender
+from .dependencies import get_ops_service, get_runtime_settings_store
 
 log = logging.getLogger(__name__)
 
@@ -45,9 +49,22 @@ def build_receipt_sender(service) -> QuiesceReceiptSender | None:
     return QuiesceReceiptSender(ops, dispatcher.store, on_enqueued=announce(dispatcher))
 
 
+def build_resume_sender(service, receipts: QuiesceReceiptSender) -> QuiesceResumeSender:
+    """The resume sender beside ``receipts``, reading the coordinator setting live."""
+    store = get_runtime_settings_store(service.config)
+
+    def coordinator_capability() -> str | None:
+        value = store.get_scope_settings("global", "*").get(COORDINATOR_CAPABILITY_SETTING)
+        return value if isinstance(value, str) else None
+
+    return QuiesceResumeSender(receipts.ops, receipts.deliveries,
+                               coordinator_capability=coordinator_capability,
+                               on_enqueued=receipts.on_enqueued)
+
+
 async def run_ops_receipt_outbox(service, *, idle_seconds: float = 2.0) -> None:
     """Lifespan loop; a DB outage logs and retries, it never kills the loop."""
-    sender = None
+    sender = resumes = None
     while True:
         try:
             sender = sender or build_receipt_sender(service)
@@ -55,6 +72,8 @@ async def run_ops_receipt_outbox(service, *, idle_seconds: float = 2.0) -> None:
                 log.info("ops receipt outbox disabled: no dispatcher or no PostgreSQL ops store")
                 return
             await asyncio.to_thread(sender.deliver_due)
+            resumes = resumes or build_resume_sender(service, sender)
+            await asyncio.to_thread(resumes.deliver_due)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -62,4 +81,4 @@ async def run_ops_receipt_outbox(service, *, idle_seconds: float = 2.0) -> None:
         await asyncio.sleep(idle_seconds)
 
 
-__all__ = ["announce", "build_receipt_sender", "run_ops_receipt_outbox"]
+__all__ = ["announce", "build_receipt_sender", "build_resume_sender", "run_ops_receipt_outbox"]

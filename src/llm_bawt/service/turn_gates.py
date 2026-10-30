@@ -263,6 +263,18 @@ _GATE_RELATIONS = {
             UNIQUE (gate_id, kind, subject)
         )
     """,
+    # TASK-1798: what a quiesce job's end sent each bot it held. One row per
+    # (job, bot, kind); ``kind='done'`` with bot ``*`` marks the job finished.
+    "ops_resume_notices": """
+        CREATE TABLE IF NOT EXISTS ops_resume_notices (
+            job_id VARCHAR(64) NOT NULL,
+            bot_id VARCHAR(128) NOT NULL,
+            kind VARCHAR(16) NOT NULL CHECK (kind IN ('resume','escalation','done')),
+            delivery_id VARCHAR(96),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (job_id, bot_id, kind)
+        )
+    """,
 }
 
 # Every gate_members column added after the table shipped; ``ensure_columns``

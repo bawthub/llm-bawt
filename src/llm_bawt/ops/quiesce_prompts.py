@@ -66,12 +66,38 @@ DEFAULT_QUIESCE_INTERRUPT_FRAME = (
     "tool in this turn; note where you stopped so you can pick it up in a later turn."
 )
 
+# TASK-1798: the new turn sent to each bot a quiesce job held, once the job
+# ended and its target is up. The resume facts (job, state, the bot's own
+# ops_quiesce_ack note) follow as JSON.
+RESUME_KEY = "ops.quiesce_resume"
+DEFAULT_RESUME = (
+    "[Ops resume: an operation that ended your earlier turn has finished and the "
+    "service is back. Nobody asked you to stop the work for good. The JSON below "
+    "names the job, how it ended and the note you left when you stopped, if any. "
+    "Pick up what you were doing from where you stopped. Do not re-run the "
+    "operation.]"
+)
+
+# TASK-1798: sent to coordinator bots instead of resuming held bots when the
+# job ran and failed, so its target may be down. The JSON names the job and
+# the bots it held.
+RESUME_BLOCKED_KEY = "ops.quiesce_resume_blocked"
+DEFAULT_RESUME_BLOCKED = (
+    "[Ops job failed after it ran: an operation that held other bots' turns "
+    "ended without success, so its target may be down. The held bots were not "
+    "told to resume. The JSON below names the job, its error and the bots it "
+    "held, with the notes they left. Check the target's health; once it is up, "
+    "tell those bots to resume. Do not re-run the operation without approval.]"
+)
+
 SEEDS = {
     RECEIPT_KEY: DEFAULT_RECEIPT,
     END_TURN_NEW_TURN_KEY: DEFAULT_END_TURN_NEW_TURN,
     END_TURN_NO_RECEIPT_KEY: DEFAULT_END_TURN_NO_RECEIPT,
     QUIESCE_REQUEST_KEY: DEFAULT_QUIESCE_REQUEST,
     QUIESCE_INTERRUPT_FRAME_KEY: DEFAULT_QUIESCE_INTERRUPT_FRAME,
+    RESUME_KEY: DEFAULT_RESUME,
+    RESUME_BLOCKED_KEY: DEFAULT_RESUME_BLOCKED,
 }
 
 
@@ -109,7 +135,7 @@ def render_quiesce_interrupt_frame(bot_id: str | None) -> str:
 
 __all__ = [
     "DEFAULT_END_TURN_NEW_TURN", "DEFAULT_END_TURN_NO_RECEIPT", "DEFAULT_QUIESCE_INTERRUPT_FRAME",
-    "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT", "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY",
-    "QUIESCE_INTERRUPT_FRAME_KEY", "QUIESCE_INTERRUPT_SLOT", "QUIESCE_REQUEST_KEY", "RECEIPT_KEY", "SEEDS",
+    "DEFAULT_QUIESCE_REQUEST", "DEFAULT_RECEIPT", "DEFAULT_RESUME", "DEFAULT_RESUME_BLOCKED", "END_TURN_NEW_TURN_KEY", "END_TURN_NO_RECEIPT_KEY",
+    "QUIESCE_INTERRUPT_FRAME_KEY", "QUIESCE_INTERRUPT_SLOT", "QUIESCE_REQUEST_KEY", "RECEIPT_KEY", "RESUME_BLOCKED_KEY", "RESUME_KEY", "SEEDS",
     "render_quiesce_interrupt_frame", "resolve",
 ]

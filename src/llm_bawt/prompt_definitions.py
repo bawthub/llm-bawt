@@ -67,6 +67,8 @@ from .prompt_default_loaders import (
     load_ops_quiesce_receipt,
     load_ops_quiesce_interrupt_frame,
     load_ops_quiesce_request,
+    load_ops_quiesce_resume,
+    load_ops_quiesce_resume_blocked,
     load_profile_consolidation,
     load_recall_synthesis_system,
     load_self_recap_system,
@@ -655,6 +657,34 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "outcome. The receipt JSON is appended. It must say the operation "
             "already ran or failed and is not to be re-run. Used verbatim; a blank "
             "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_resume": PromptDefinition(
+        key="ops.quiesce_resume",
+        title="Ops Quiesce Resume",
+        category="agent_execution",
+        loader=load_ops_quiesce_resume,
+        metadata={"notes": (
+            "TASK-1798: prefix of the system delivery sent once per bot whose turn a "
+            "quiesce ops job held, after the job ended and its target is up (it "
+            "succeeded, or never ran). JSON with the job id, operation, state and the "
+            "bot's own ops_quiesce_ack note is appended. It must tell the bot to pick "
+            "its work up again and not to re-run the operation. Used verbatim; a blank "
+            "body falls back to the seed. Target-bot overrides supported."
+        )},
+    ),
+    "ops.quiesce_resume_blocked": PromptDefinition(
+        key="ops.quiesce_resume_blocked",
+        title="Ops Quiesce Resume Blocked (coordinator notice)",
+        category="agent_execution",
+        loader=load_ops_quiesce_resume_blocked,
+        metadata={"notes": (
+            "TASK-1798: prefix of the system delivery sent to each coordinator bot "
+            "(runtime setting ops_resume_coordinator_capability) instead of resuming "
+            "held bots, when a quiesce ops job ran and did not succeed. JSON with the "
+            "job, its error and the held bots with their notes is appended. It must "
+            "ask for a health check and a manual resume, never a re-run. Used "
+            "verbatim; a blank body falls back to the seed. Target-bot overrides supported."
         )},
     ),
     "ops.quiesce_request": PromptDefinition(
