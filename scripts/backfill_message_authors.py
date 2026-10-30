@@ -8,7 +8,9 @@ requesting user to their first-party system author.
 Dry run (default) prints per-rule counts and writes nothing. ``--apply`` needs
 ``--expect N`` equal to the dry-run writable count; the batch rolls back on any
 mismatch. ``--revert BATCH`` restores the previous authorship on rows that
-batch set. Protected partitions (Mira) are never read or written.
+batch set. Private bots' partitions (``private`` tag or the legacy
+``include_in_global_search=false`` column) are never read or written; if that
+set cannot be read the script aborts before touching anything.
 
 scripts/ is not mounted in the app container, so pipe it in from the checkout:
 
@@ -26,7 +28,7 @@ from llm_bawt.message_author_backfill import (
     ApprovalContinuationAuthorBackfill,
     MessageAuthorBackfill,
 )
-from llm_bawt.service.jobs.idle_context_candidates import PROTECTED_BOT_IDS
+from llm_bawt.orphan_partitions import read_protected_slugs
 from llm_bawt.utils import db
 from llm_bawt.utils.config import config
 
@@ -43,7 +45,9 @@ def main() -> int:
     args = parser.parse_args()
 
     engine = create_engine(db.build_postgres_url(config))
-    backfill = KINDS[args.kind](engine, excluded_partitions=PROTECTED_BOT_IDS)
+    with engine.connect() as conn:
+        protected = read_protected_slugs(conn)  # raises (fail closed) if unreadable
+    backfill = KINDS[args.kind](engine, excluded_partitions=protected)
     if args.revert:
         # Revert restores each audit row's own old_* values, so it is kind-agnostic.
         print(f"restored {backfill.revert(args.revert)} rows from batch {args.revert}")
@@ -52,7 +56,7 @@ def main() -> int:
     plan = backfill.plan()
     for rule, count in sorted(plan.counts.items()):
         print(f"{rule:16} {count:>7}  {'write' if rule in plan.written_rules else 'unchanged'}")
-    print(f"{'writable':16} {plan.writable:>7}  (excluded partitions: {sorted(PROTECTED_BOT_IDS)})")
+    print(f"{'writable':16} {plan.writable:>7}  (excluded private partitions: {len(backfill.excluded)})")
     if not args.apply:
         return 0
     if args.expect is None:
