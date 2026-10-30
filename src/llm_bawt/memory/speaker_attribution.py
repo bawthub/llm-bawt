@@ -21,6 +21,7 @@ USER = "user"
 ASSISTANT = "assistant"
 BOT = "bot"
 TOOL = "tool"
+SYSTEM_AUTHOR_TYPE = "system"
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,10 @@ def speaker_of(msg: Any) -> Speaker:
         author_type, author_id = _field(author, "entity_type"), _field(author, "entity_id")
     if str(author_type or "").lower() == BOT:
         return Speaker(BOT, str(author_id or "").strip().lower() or "unknown")
+    # TASK-1807: app-owned approval-continuation turns (tool results, harness
+    # approval outcomes) are stamped with a first-party system author.
+    if str(author_type or "").lower() == SYSTEM_AUTHOR_TYPE:
+        return Speaker(TOOL)
     # The continuation writer historically stamped these user-role rows with
     # user authorship. Recognize its full app-owned frame so old rows are safe
     # too; ordinary content claiming to be a bot/tool remains a user turn.

@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from types import MappingProxyType
+from typing import Any, Iterable, Literal, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-EntityType = Literal["user", "bot"]
+EntityType = Literal["user", "bot", "system"]
 AuthorStatus = Literal["canonical", "legacy", "unknown"]
+
+# TASK-1807: first-party system authors. These are product identifiers, not
+# deployment data: the app persists its own approval-continuation turns (MCP
+# result envelopes, harness approval outcomes) under them so the rows are not
+# attributed to the human user. Only the app may write them (trusted storage
+# parameter in-process; signed service capability over MCP); caller-facing
+# inputs keep ``normalize_author`` (user|bot only). The value is the
+# presentation label.
+SYSTEM_AUTHORS: Mapping[str, str] = MappingProxyType({
+    "approval-continuation:mcp": "Tool result",
+    "approval-continuation:harness": "Approval result",
+})
 
 
 @dataclass(frozen=True)
@@ -27,6 +40,13 @@ class AuthorReference:
     @classmethod
     def bot(cls, entity_id: str) -> "AuthorReference":
         return cls("bot", normalize_entity_id(entity_id))
+
+    @classmethod
+    def system(cls, entity_id: str) -> "AuthorReference":
+        normalized = normalize_entity_id(entity_id)
+        if normalized not in SYSTEM_AUTHORS:
+            raise ValueError("unknown system author")
+        return cls("system", normalized)
 
     @classmethod
     def unknown(cls) -> "AuthorReference":
@@ -64,6 +84,36 @@ def normalize_author(
         normalize_entity_id(entity_id or ""),
         status,
     )
+
+
+def normalize_persisted_author(
+    entity_type: str | None,
+    entity_id: str | None,
+    *,
+    status: AuthorStatus = "canonical",
+) -> AuthorReference | None:
+    """Validate an author pair read back from a stored row (TASK-1807).
+
+    Unlike :func:`normalize_author`, this also accepts the allowlisted
+    first-party system authors the app persists. Never use it on caller
+    input: it is the read-side counterpart, not a write authority.
+    """
+    if (entity_type or "").strip().lower() == "system":
+        reference = AuthorReference.system(entity_id or "")
+        return AuthorReference(reference.entity_type, reference.entity_id, status)
+    return normalize_author(entity_type, entity_id, status=status)
+
+
+def require_system_author(author: object) -> AuthorReference:
+    """Accept only an allowlisted system ``AuthorReference`` (TASK-1807).
+
+    The trusted write route's gate: anything else (user/bot authors, strings,
+    unknown system ids) is a ValueError, so a trusted parameter can never be
+    used to forge a human or bot author.
+    """
+    if not isinstance(author, AuthorReference) or author.entity_type != "system":
+        raise ValueError("trusted author must be a system author")
+    return AuthorReference.system(author.entity_id or "")
 
 
 class EffectiveAuthorRule:
@@ -145,7 +195,7 @@ class LegacyAuthorResolver:
 
         for row in rows:
             message_id = str(row.get("id") or "")
-            explicit = normalize_author(
+            explicit = normalize_persisted_author(
                 row.get("author_entity_type"),
                 row.get("author_entity_id"),
             )

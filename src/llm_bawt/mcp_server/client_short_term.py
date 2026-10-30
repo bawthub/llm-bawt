@@ -32,6 +32,9 @@ class _MCPShortTermManager:
         # server-mode deployments persist it too (display-only on the row).
         # ``session_id`` (TASK-251): explicit thread override — None keeps the
         # server-side active-thread resolution (the primary mode).
+        # TASK-1807: a system author is app-owned and travels as the trusted
+        # object, never as the caller-facing (user|bot) author strings.
+        system = author is not None and author.entity_type == "system"
         msg = self._memory_client.add_message(
             role=role,
             content=content,
@@ -40,8 +43,9 @@ class _MCPShortTermManager:
             attachments=attachments,
             reasoning=reasoning,
             session_id=session_id,
-            author_entity_type=(author.entity_type if author else None),
-            author_entity_id=(author.entity_id if author else None),
+            author_entity_type=(author.entity_type if author and not system else None),
+            author_entity_id=(author.entity_id if author and not system else None),
+            **({"trusted_author": author} if system else {}),
         )
         return msg.id
 

@@ -10,7 +10,7 @@ from typing import Iterable
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from .message_authorship import AuthorReference, normalize_entity_id
+from .message_authorship import SYSTEM_AUTHORS, AuthorReference, normalize_entity_id
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,9 @@ class EntityPresentationResolver:
             entity_type, entity_id = key
             if entity_type is None or entity_id is None:
                 result[key] = self._unknown(author)
+                continue
+            if entity_type == "system":
+                result[key] = self._system(author)
                 continue
 
             profile = profiles.get((entity_type, entity_id), {})
@@ -167,6 +170,21 @@ class EntityPresentationResolver:
     def _stable_color(entity_type: str, entity_id: str) -> str:
         digest = hashlib.sha256(f"{entity_type}:{entity_id}".encode()).digest()
         return _DEFAULT_COLORS[digest[0] % len(_DEFAULT_COLORS)]
+
+    def _system(self, author: AuthorReference) -> EntityPresentation:
+        """TASK-1807: fixed first-party label; no profile lookup."""
+        label = SYSTEM_AUTHORS.get(author.entity_id or "")
+        if label is None:
+            return self._unknown(author)
+        return EntityPresentation(
+            entity_type="system",
+            entity_id=author.entity_id,
+            display_name=label,
+            color="slate",
+            avatar=None,
+            avatar_render=None,
+            status=author.status,
+        )
 
     def _unknown(self, author: AuthorReference) -> EntityPresentation:
         return EntityPresentation(

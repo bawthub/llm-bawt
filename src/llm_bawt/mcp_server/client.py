@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 
 from llm_bawt.utils.config import Config
 from llm_bawt.bot_access.service import ServicePrincipal
+from llm_bawt.message_authorship import AuthorReference, require_system_author
 
 # Responsibility split (TASK-1222): the facade composes these mixins. The
 # result types, ``_run_async`` and ``_MCPShortTermManager`` are re-exported so
@@ -545,8 +546,15 @@ class MemoryClient(
         reasoning: str | None = None,
         author_entity_type: str | None = None,
         author_entity_id: str | None = None,
+        *,
+        trusted_author: AuthorReference | None = None,
     ) -> MessageResult:
         """Add a message to conversation history.
+
+        ``trusted_author`` (TASK-1807): an allowlisted system author from app
+        code. Embedded mode hands the object to storage; server mode sends it
+        over this client's signed service transport, where ``messages_add``
+        accepts a system author only from that service principal.
 
         Args:
             role: Message role (user/assistant/system).
@@ -563,6 +571,13 @@ class MemoryClient(
             MessageResult with the stored message.
         """
         self._ensure_initialized()
+        if trusted_author is not None:
+            if author_entity_type is not None or author_entity_id is not None:
+                raise ValueError("trusted_author excludes caller author fields")
+            trusted_author = require_system_author(trusted_author)
+            if self.server_url:
+                author_entity_type = trusted_author.entity_type
+                author_entity_id = trusted_author.entity_id
 
         if self.server_url:
             result = self._call_server("messages_add", {
@@ -597,6 +612,7 @@ class MemoryClient(
                 user_id=self.user_id,
                 author_entity_type=author_entity_type,
                 author_entity_id=author_entity_id,
+                trusted_author=trusted_author,
             )
         )
         return MessageResult.from_dict(result.to_dict())

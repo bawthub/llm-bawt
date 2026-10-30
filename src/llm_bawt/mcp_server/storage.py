@@ -22,7 +22,12 @@ from typing import Any, TYPE_CHECKING
 from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
 from llm_bawt.memory.embeddings import generate_embedding
 from llm_bawt.memory.short_term_message_reads import history_owner_clause
-from llm_bawt.message_authorship import AuthorReference, normalize_author
+from llm_bawt.message_authorship import (
+    AuthorReference,
+    normalize_author,
+    normalize_persisted_author,
+    require_system_author,
+)
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.db import get_shared_engine
 
@@ -414,8 +419,15 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         user_id: str | None = None,
         author_entity_type: str | None = None,
         author_entity_id: str | None = None,
+        *,
+        trusted_author: AuthorReference | None = None,
     ) -> Message:
         """Add a message to conversation history.
+
+        ``trusted_author`` (TASK-1807) carries an allowlisted first-party
+        system author from in-process app code (the embedded MemoryClient or
+        the service-fenced ``messages_add`` tool). It is an object, never a
+        caller string, and excludes ``author_entity_*``.
 
         ``message_id`` allows the client to supply a stable UUID (e.g. the
         frontend-generated user-message UUID) so downstream joins on
@@ -435,7 +447,13 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         provided = (str(message_id).strip() if message_id else "") or None
         message_id_final = provided or str(uuid.uuid4())
         ts = timestamp if timestamp is not None else time.time()
-        author = normalize_author(author_entity_type, author_entity_id)
+        if trusted_author is not None:
+            # TASK-1807: in-process app writes only; never caller strings.
+            if author_entity_type is not None or author_entity_id is not None:
+                raise ValueError("trusted_author excludes caller author fields")
+            author = require_system_author(trusted_author)
+        else:
+            author = normalize_author(author_entity_type, author_entity_id)
 
         # TASK-284: stamp the live thread's session_id on every insert. Resolve
         # from the sessions table (DB-derived source of truth) so all workers /
@@ -538,7 +556,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 content=r["content"],
                 timestamp=r["timestamp"],
                 session_id=r.get("session_id"),
-                author=normalize_author(
+                author=normalize_persisted_author(
                     r.get("author_entity_type"), r.get("author_entity_id")),
             )
             for r in results

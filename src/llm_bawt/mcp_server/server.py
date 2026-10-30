@@ -36,6 +36,7 @@ from llm_bawt.shared.logging import LogConfig
 from .registry import mcp  # noqa: F401 — re-exported for downstream tool modules
 from .bot_access_identity import BotAccessMiddleware
 from .agent_view import for_caller
+from .system_author_fence import fenced_system_author, is_system_author_request
 
 if TYPE_CHECKING:
     pass
@@ -390,6 +391,10 @@ async def add_message(
         Stored message dict.
     """
     logger.debug("MCP tool invoked: tools/add_message bot_id=%s role=%s", bot_id, role)
+    trusted = None
+    if is_system_author_request(author_entity_type):  # TASK-1807: service-only
+        trusted = fenced_system_author(author_entity_id, bot_id=bot_id)
+        author_entity_type = author_entity_id = None
     storage = _get_storage()
     message = await storage.add_message(
         role=role,
@@ -403,6 +408,7 @@ async def add_message(
         user_id=user_id,
         author_entity_type=author_entity_type,
         author_entity_id=author_entity_id,
+        trusted_author=trusted,
     )
     return message.to_dict()
 
