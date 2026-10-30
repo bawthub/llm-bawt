@@ -40,6 +40,7 @@ def test_preview_refuses_to_start_without_explicit_role(monkeypatch):
             pass
 
 
+@pytest.mark.real_process(reason="fresh Python process verifies the preview import boundary")
 def test_import_does_not_import_production_app():
     import subprocess
     import sys
