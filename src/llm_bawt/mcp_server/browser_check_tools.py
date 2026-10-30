@@ -38,6 +38,13 @@ _SESSIONS_OFF = (
     "deployment. Open the UI directly (a 401 code=user_required means no user "
     "is selected, not a login); for curl, send the user-subject cookie or header."
 )
+# A 404 is ambiguous: the route 404s when sessions are off, but so does a
+# wrong BAWTHUB_BROWSER_CHECK_INTERNAL_URL. Say both (review cmvv1vj1w).
+_MINT_NOT_FOUND = (
+    "BawtHub has no browser-check route here: either sign-in sessions are off "
+    "(then " + _SESSIONS_OFF + ") or BAWTHUB_BROWSER_CHECK_INTERNAL_URL does "
+    "not point at the frontend's internal port."
+)
 
 
 def _config() -> tuple[str, str] | None:
@@ -81,7 +88,7 @@ async def browser_check_session() -> dict[str, Any]:
     except httpx.HTTPStatusError as error:
         if error.response.status_code == 404:
             # The mint route answers 404 whenever sessions are off.
-            return {"error": _SESSIONS_OFF, "status": 404}
+            return {"error": _MINT_NOT_FOUND, "status": 404}
         try:
             payload = error.response.json()
         except Exception:

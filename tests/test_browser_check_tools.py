@@ -93,6 +93,8 @@ def test_sessions_off_404_explains_no_session_needed(rig):
     result = _call()
     assert result["status"] == 404
     assert "sessions are off" in result["error"] and "user_required" in result["error"]
+    # Ambiguous 404: a wrong internal URL must be named too.
+    assert "BAWTHUB_BROWSER_CHECK_INTERNAL_URL" in result["error"]
 
 
 def test_bawthub_refusal_is_reported(rig):
