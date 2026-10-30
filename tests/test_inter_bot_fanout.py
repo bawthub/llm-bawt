@@ -241,9 +241,18 @@ def test_a_user_fan_out_may_wait_for_nothing_either(no_service):
     assert response.json()["detail"]["error"] == "fanout_waited"
 
 
-@pytest.mark.parametrize("key", ["batch_id", "batch", "control", "new_session_intent"])
+@pytest.mark.parametrize("key", ["batch_id", "batch", "control", "new_session_intent", "prompt_schedule"])
 def test_server_owned_metadata_is_refused_on_the_batch_route(no_service, key):
     response = _batch(idempotency_key="k", metadata={key: "forged"})
+    assert response.status_code == 422 and "server-owned" in response.text
+
+
+def test_a_caller_cannot_claim_a_schedule_owner_on_the_single_route(no_service):
+    """TASK-1790: a schedule's owner routes its receipts; only the scheduler writes it."""
+    response = _client().post("/v1/inter-bot-deliveries", json={
+        "sender_bot_id": SENDER, "target_bot_id": "fx-a", "message": "hi",
+        "metadata": {"prompt_schedule": {"schedule_id": "j", "owner_user_id": "someone-else"}},
+    })
     assert response.status_code == 422 and "server-owned" in response.text
 
 

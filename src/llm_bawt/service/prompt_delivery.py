@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import uuid
@@ -12,7 +11,7 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from ..inter_bot_delivery import DeliveryRecord
-from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
+from ..inter_bot_delivery_ledger import DeliveryTransitionEvents, scheduler_sender_id
 from .prompt_capabilities import resolve_prompt_target
 from .prompt_delivery_state import gate_reason, receipt, schedule_author, transition
 from .prompt_schedule_models import NONTERMINAL, PromptOccurrence, PromptSchedule
@@ -82,7 +81,7 @@ class PromptDeliveryWorker:
 
     def _enqueue(self, run_id, prepared, dispatcher, now):
         snapshot, session_id, model, job_id, key = prepared
-        sender = "scheduler:" + hashlib.sha256(snapshot["owner_user_id"].encode()).hexdigest()
+        sender = scheduler_sender_id(snapshot["owner_user_id"])
         author = schedule_author(snapshot)
         idem = f"schedule:{job_id}:occurrence:{key}"
         # Serialize outbox attempts with pause/cancel and other workers.

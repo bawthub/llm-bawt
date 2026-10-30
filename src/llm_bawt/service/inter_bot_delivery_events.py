@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from ..inter_bot_delivery import DELIVERED, DISPATCHING, FAILED, QUEUED, DeliveryRecord
-from ..inter_bot_delivery_ledger import delivery_audience
+from ..inter_bot_delivery_ledger import delivery_audience, proven_schedule
 from ..inter_bot_delivery_steer_fence import steer_uncertain
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,11 @@ def delivery_event(record: DeliveryRecord, *, default_user: str,
     }
     if wait_reason is not None:
         event["wait_reason"] = wait_reason
-    if record.metadata.get("prompt_schedule"):
+    if schedule := proven_schedule(record):
         event["prompt_schedule"] = record.metadata["prompt_schedule"]
+        # TASK-1790: the relay graphic and bot-bar pulse read sender_bot_id; a
+        # bot-created wake-up is that bot's message, not the scheduler's.
+        event["sender_bot_id"] = schedule.origin
     # One audience rule for the live event and its durable receipt (TASK-1745):
     # ordinary sends belong to the selected user (a system restart child to
     # the user whose request it carries, TASK-1231B), not the default user.

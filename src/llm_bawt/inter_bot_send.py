@@ -51,8 +51,10 @@ PRIVILEGED_FIELDS = ("session_id", "augment_memory", "raw_message")
 # Metadata only the server writes. Receipts, recovery and scheduled reset
 # continuity trust ``new_session_intent``; the fan-out rate limit counts
 # ``batch_id``; ``batch`` records a batch's resolved targets; ``control`` is the
-# control lane's pin. A caller supplying any of them is refused on every route.
-SERVER_OWNED_METADATA_KEYS = ("new_session_intent", "batch_id", "batch", "control")
+# control lane's pin; ``prompt_schedule`` is written only by the scheduler's
+# outbox (its owner routes receipts, TASK-1790). A caller supplying any of them
+# is refused on every route.
+SERVER_OWNED_METADATA_KEYS = ("new_session_intent", "batch_id", "batch", "control", "prompt_schedule")
 
 
 class _DeliveryFields(BaseModel):

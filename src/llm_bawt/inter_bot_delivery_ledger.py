@@ -56,12 +56,51 @@ class DeliveryAudience:
     ordinary_chat_user: str | None = None
 
 
+SCHEDULER_SENDER_PREFIX = "scheduler:"
+
+
+def scheduler_sender_id(owner_user_id: str) -> str:
+    """The sender of every prompt-schedule delivery owned by ``owner_user_id``."""
+    import hashlib
+
+    return SCHEDULER_SENDER_PREFIX + hashlib.sha256(owner_user_id.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ScheduledOrigin:
+    """A prompt-schedule delivery the server proved it produced (TASK-1790)."""
+
+    owner_user_id: str
+    origin: str  # the creating bot, or the scheduler sender for a user schedule
+
+
+def proven_schedule(record: DeliveryRecord) -> ScheduledOrigin | None:
+    """``record``'s schedule origin, only when the scheduler produced it.
+
+    ``metadata.prompt_schedule`` alone is caller-shaped. Trust it only when the
+    server stamped the schedule producer at enqueue and the sender is the
+    scheduler identity of the claimed owner, so no other caller can name an
+    owner and route the row's events to that user.
+    """
+    schedule = record.metadata.get("prompt_schedule")
+    if (not isinstance(schedule, dict)
+            or record.metadata.get("_request_identity_producer") != "schedule"):
+        return None
+    owner = schedule.get("owner_user_id") or (
+        record.author_entity_id if record.author_entity_type == "user" else None)
+    if not isinstance(owner, str) or not owner or record.sender_bot_id != scheduler_sender_id(owner):
+        return None
+    origin = record.author_entity_id if record.author_entity_type == "bot" else record.sender_bot_id
+    return ScheduledOrigin(owner, origin)
+
+
 def delivery_audience(record: DeliveryRecord, *, default_user: str | None) -> DeliveryAudience:
     """The owning user of ``record``'s lifecycle events.
 
     Ordinary chat sends belong to their user author (or the user a
-    system-authored restart child carries); maintenance user-queue and prompt
-    schedule rows to their user author; every other bot-to-bot relay to the
+    system-authored restart child carries); maintenance user-queue rows to
+    their user author; a proven prompt-schedule row (:func:`proven_schedule`)
+    to its owner; every other bot-to-bot relay to the
     service's configured default user. Precedence matches the live projection:
     maintenance user-queue, then ordinary chat, then prompt schedule.
     """
@@ -80,11 +119,10 @@ def delivery_audience(record: DeliveryRecord, *, default_user: str | None) -> De
         return DeliveryAudience(record.author_entity_id, record.target_bot_id, chat_user)
     if chat_user:
         return DeliveryAudience(chat_user, record.target_bot_id, chat_user)
-    if schedule := record.metadata.get("prompt_schedule"):
+    if schedule := proven_schedule(record):
         # A bot-created wake-up is authored by that bot but owned by the user
         # it was scheduled for (TASK-1790); older rows carry only the author.
-        return DeliveryAudience(schedule.get("owner_user_id") or record.author_entity_id,
-                                record.target_bot_id)
+        return DeliveryAudience(schedule.owner_user_id, record.target_bot_id)
     return DeliveryAudience(default_user, record.sender_bot_id)
 
 
@@ -226,9 +264,9 @@ class DeliveryTransitionEvents:
             return
         audience = delivery_audience(record, default_user=default_user)
         # A bot-created wake-up's sender is the scheduler; the bot is its author.
-        scheduled = bool(record.metadata.get("prompt_schedule"))
-        origin = (record.author_entity_id if scheduled and record.author_entity_type == "bot"
-                  else record.sender_bot_id)
+        schedule = proven_schedule(record)
+        scheduled = schedule is not None
+        origin = schedule.origin if schedule else record.sender_bot_id
         # The emitter checks ``bot_id``; the other party must be public too.
         other = record.target_bot_id if audience.bot_id == record.sender_bot_id else origin
         visible = True

@@ -239,10 +239,13 @@ def test_a_bot_created_wakeup_is_the_creators_relay_for_the_owner(ledger, monkey
     """TASK-1790: the scheduler sends it, the creating bot authors it, the owner sees it."""
     from llm_bawt.utils.config import config
 
+    from llm_bawt.inter_bot_delivery_ledger import scheduler_sender_id
+    from llm_bawt.service.inter_bot_delivery_events import delivery_event
+
     monkeypatch.setattr(config, "DEFAULT_USER", f"someone-else-{ledger.tag}", raising=False)
     creator, target = ledger.bot(), ledger.bot()
-    record, _ = _send(ledger, f"scheduler:{ledger.tag}", target, author=AuthorReference.bot(creator),
-                      producer="schedule",
+    record, _ = _send(ledger, scheduler_sender_id(ledger.user), target,
+                      author=AuthorReference.bot(creator), producer="schedule",
                       metadata={"prompt_schedule": {"schedule_id": f"j-{ledger.tag}",
                                                     "owner_user_id": ledger.user}})
     (event,) = _events(ledger, record.id)
@@ -250,6 +253,55 @@ def test_a_bot_created_wakeup_is_the_creators_relay_for_the_owner(ledger, monkey
     assert event["bot_id"] == target
     assert event["actor_type"] == "bot" and event["actor_id"] == creator
     assert event["summary"] == f"{creator} → {target} (scheduled) · queued"
+    # The live relay graphic and bot-bar pulse read sender_bot_id.
+    live = delivery_event(record, default_user=config.DEFAULT_USER)
+    assert (live["sender_bot_id"], live["target_bot_id"]) == (creator, target)
+    assert (live["user_id"], live["bot_id"]) == (ledger.user, target)
+
+
+def test_a_claimed_schedule_owner_never_routes_a_receipt_to_that_user(ledger):
+    """TASK-1790: only a scheduler-produced row of that owner's scheduler reaches them."""
+    victim, bot, target = f"evt-victim-{ledger.tag}", ledger.bot(), ledger.bot()
+    engine = ledger.deliveries.engine
+    with Session(engine) as session:  # a real second user the forgery could reach
+        session.add(EntityProfile(entity_type=EntityType.USER, entity_id=victim))
+        session.commit()
+    try:
+        _check_claimed_owner(ledger, victim, bot, target)
+    finally:
+        with engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM entity_profiles WHERE entity_type='USER' AND entity_id=:u"),
+                         {"u": victim})
+
+
+def _check_claimed_owner(ledger, victim, bot, target):
+    from llm_bawt.inter_bot_delivery_ledger import scheduler_sender_id
+    from llm_bawt.service.inter_bot_delivery_events import delivery_event
+
+    claim = {"prompt_schedule": {"schedule_id": f"j-{ledger.tag}", "owner_user_id": victim}}
+    forged = [
+        # A bot's own send naming another user as the schedule owner.
+        _send(ledger, bot, target, metadata=claim)[0],
+        # Wearing that user's scheduler sender without the server's producer stamp.
+        _send(ledger, scheduler_sender_id(victim), target, author=AuthorReference.bot(bot),
+              metadata=claim, idempotency_key=f"forged-{ledger.tag}")[0],
+        # A real scheduler row whose metadata names a different owner.
+        _send(ledger, scheduler_sender_id(ledger.user), target, author=AuthorReference.bot(bot),
+              producer="schedule", metadata=claim, idempotency_key=f"mismatch-{ledger.tag}")[0],
+    ]
+    for record in forged:
+        (event,) = _events(ledger, record.id)
+        live = delivery_event(record, default_user=ledger.user)
+        # The default relay audience; a scheduler-named sender is no known bot,
+        # so its receipt fails closed to audit-only (no user at all).
+        assert live["user_id"] == ledger.user, record.sender_bot_id
+        assert event["user_id"] in (ledger.user, None) and event["user_id"] != victim
+        assert "(scheduled)" not in event["summary"] and "prompt_schedule" not in live
+        assert live["sender_bot_id"] == record.sender_bot_id
+    real, _ = _send(ledger, scheduler_sender_id(victim), target, author=AuthorReference.bot(bot),
+                    producer="schedule", metadata=claim, idempotency_key=f"real-{ledger.tag}")
+    (event,) = _events(ledger, real.id)
+    assert event["user_id"] == delivery_event(real, default_user=ledger.user)["user_id"] == victim
 
 
 def test_competing_multi_row_cancels_never_deadlock_on_the_event_lock(ledger):
