@@ -15,7 +15,7 @@ from llm_bawt.ops import JOB_ACCEPTED, JOB_FAILED, JOB_SUCCEEDED
 from llm_bawt.ops.executor import ReconcileResult
 from llm_bawt.ops.quiesce import record_ack
 from llm_bawt.ops.quiesce_prompts import DEFAULT_RESUME, DEFAULT_RESUME_BLOCKED
-from llm_bawt.ops.resume_sender import QuiesceResumeSender
+from llm_bawt.ops.resume_sender import EPOCH, QuiesceResumeSender
 from tests.test_ops_quiesce_pg import _agent_bot, _receipt_deliveries, rig  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -27,6 +27,11 @@ def resume(rig):  # noqa: F811
     sender = QuiesceResumeSender(rig.service, rig.deliveries,
                                  coordinator_capability=lambda: capability["value"])
     sender.capability = capability
+    # The sender's first-run epoch: an hour back, so jobs these tests finish count.
+    rig.sql("INSERT INTO ops_resume_notices (job_id, bot_id, kind, created_at)"
+            " VALUES (:e, :e, 'done', now() - interval '1 hour')"
+            " ON CONFLICT (job_id, bot_id, kind) DO UPDATE SET created_at = EXCLUDED.created_at",
+            e=EPOCH)
     yield sender
     rig.sql("DELETE FROM ops_resume_notices WHERE job_id IN"
             " (SELECT id FROM ops_jobs WHERE operation_slug=:s)", s=rig.slug)
@@ -154,4 +159,58 @@ def test_the_caller_that_gets_the_receipt_is_not_also_resumed(rig, resume):  # n
     _dispatch(rig, job_id)
     _finish(rig, job_id)
     assert resume.deliver_due() == [job_id]
+    assert _resumes(rig) == []
+
+
+def _member(rig, turn_id, **cols):  # noqa: F811
+    sets = ", ".join(f"{k}=:{k}" for k in cols)
+    rig.sql(f"UPDATE gate_members SET {sets} WHERE turn_id=:t", t=turn_id, **cols)
+
+
+def test_a_turn_that_ended_on_its_own_is_not_resumed(rig, resume):  # noqa: F811
+    """not_needed / turn_not_running: the job never stopped it (e.g. the approver)."""
+    turn_id = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    _member(rig, turn_id, control_state="not_needed")
+    rig.end(turn_id)
+    _dispatch(rig, job_id)
+    _finish(rig, job_id)
+    assert resume.deliver_due() == [job_id]
+    assert _resumes(rig) == []
+
+
+def test_an_unstarted_turn_the_hold_requeued_is_not_resumed(rig, resume):  # noqa: F811
+    """revoked_unstarted gets its own work back; a resume would duplicate it."""
+    turn_id = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    _member(rig, turn_id, disposition="revoked_unstarted", control_state="not_needed")
+    rig.end(turn_id)
+    _dispatch(rig, job_id)
+    _finish(rig, job_id)
+    assert resume.deliver_due() == [job_id]
+    assert _resumes(rig) == []
+
+
+def test_a_cancelled_member_without_an_ack_is_resumed(rig, resume):  # noqa: F811
+    turn_id = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    _member(rig, turn_id, control_state="cancelled")
+    rig.end(turn_id)
+    _dispatch(rig, job_id)
+    _finish(rig, job_id)
+    assert resume.deliver_due() == [job_id]
+    [delivery] = _resumes(rig)
+    assert _facts(delivery)["ack_status"] is None
+
+
+def test_jobs_finished_before_the_sender_first_ran_are_skipped(rig, resume):  # noqa: F811
+    turn_id, job_id = _held_and_stopping(rig)
+    rig.end(turn_id)
+    _dispatch(rig, job_id)
+    _finish(rig, job_id)
+    rig.sql("UPDATE ops_resume_notices SET created_at = now() WHERE job_id=:e AND bot_id=:e", e=EPOCH)
+    assert resume.deliver_due() == []
     assert _resumes(rig) == []

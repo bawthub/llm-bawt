@@ -21,8 +21,9 @@ Exactly once: each delivery's idempotency key is ``ops-resume:<job>:<bot>``
 (``ops-resume-blocked:`` for coordinators), and ``ops_resume_notices`` records
 each send plus a ``done`` row per job, so a crash mid-job re-reads the same
 deliveries rather than sending more. Only jobs that finished within
-:data:`RECENT_SECONDS` are considered, so deploying this never resumes bots
-for old jobs. Framing text is registry-owned (:mod:`.quiesce_prompts`).
+:data:`RECENT_SECONDS` are considered, and never bots
+for old jobs: only jobs that finished after its first run (the ``EPOCH`` row)
+count, and a held bot is one whose turn the job actually stopped. Framing text is registry-owned (:mod:`.quiesce_prompts`).
 """
 from __future__ import annotations
 
@@ -44,10 +45,15 @@ COORDINATOR_CAPABILITY_SETTING = "ops_resume_coordinator_capability"
 RECENT_SECONDS = 6 * 3600
 NOTE_LIMIT = 2000
 DONE_BOT = "*"
+# ops_resume_notices (EPOCH, EPOCH, done): when this sender first ran. Jobs that
+# finished before it are never resumed, so deploying it resends nothing.
+EPOCH = "*"
 
 _DUE = """
     SELECT j.id FROM ops_jobs j
     WHERE j.state = ANY(:terminal) AND j.finished_at > now() - make_interval(secs => :recent)
+      AND j.finished_at > (SELECT e.created_at FROM ops_resume_notices e
+                           WHERE e.job_id = :epoch AND e.bot_id = :epoch AND e.kind = 'done')
       AND EXISTS (SELECT 1 FROM system_gates g JOIN gate_members m ON m.gate_id = g.id
                   WHERE g.owner_kind = 'job' AND g.owner_id = j.id)
       AND NOT EXISTS (SELECT 1 FROM ops_resume_notices n
@@ -56,11 +62,17 @@ _DUE = """
 """
 
 # One row per held bot: its latest ack across every generation of the job.
+# Held means the job actually stopped that turn: its control ask was sent
+# (steering/cancelled) or the bot acked "stopping". A turn that ended on its
+# own (not_needed), the job caller's own turn (self) and an unstarted turn the
+# hold requeued (revoked_unstarted: it gets its work back) are not held.
 _HELD = """
     SELECT DISTINCT ON (m.bot_id) m.bot_id, m.ack_status, m.ack_note, t.user_id
     FROM system_gates g JOIN gate_members m ON m.gate_id = g.id
     LEFT JOIN turn_logs t ON t.id = m.turn_id
     WHERE g.owner_kind = 'job' AND g.owner_id = :job
+      AND m.disposition <> 'revoked_unstarted' AND m.control_state <> 'self'
+      AND (m.control_state IN ('steering', 'cancelled') OR m.ack_status = 'stopping')
     ORDER BY m.bot_id, m.acked_at DESC NULLS LAST, m.id DESC
 """
 
@@ -95,9 +107,10 @@ class QuiesceResumeSender:
         return self.ops.store.engine
 
     def deliver_due(self, *, limit: int = 20) -> list[str]:
+        self._mark(EPOCH, EPOCH, "done", None)  # first run only: ON CONFLICT keeps it
         with self.engine.connect() as conn:
             due = [row[0] for row in conn.execute(text(_DUE), {
-                "terminal": list(JOB_TERMINAL_STATES), "recent": RECENT_SECONDS,
+                "terminal": list(JOB_TERMINAL_STATES), "recent": RECENT_SECONDS, "epoch": EPOCH,
                 "limit": int(limit)}).all()]
         done = []
         for job_id in due:
