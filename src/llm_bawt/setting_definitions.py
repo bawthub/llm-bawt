@@ -255,6 +255,22 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "a signed-in person manages grants."
         ),
     ),
+    # TASK-1818: global only; read live by mcp_server.bot_profile_tools. No
+    # default: unset means no bot can switch another bot's model.
+    "bots_model_switch_capability": SettingDefinition(
+        key="bots_model_switch_capability",
+        type="str",
+        default=None,
+        applies_to=(),  # GLOBAL-ONLY: read from the global scope; bot rows ignored.
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Model switch capability",
+        help=(
+            "Global only: a role-tag capability. Bots holding a role with it may "
+            "switch a bot's model (endpoint) with bots_profile_patch, and that tool "
+            "refuses to add or remove those roles. Unset: only a signed-in person "
+            "switches models, in the UI."
+        ),
+    ),
     # TASK-1798: global only; read live by ops.resume_sender. No default: unset
     # means a failed quiesce job's held bots are logged as unresumed, nobody told.
     "ops_resume_coordinator_capability": SettingDefinition(

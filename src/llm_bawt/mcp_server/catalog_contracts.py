@@ -101,7 +101,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "projects_delete": "Permanently delete a project; its tasks remain but become unassigned.",
     "activity_get": "Read recent task/project activity; limit is capped at 100.",
     "bots_list_available": "List inter-bot message targets with tags and live state (busy/idle turn, queue, gate, approvals, session); tag filters. Private and inactive bots are hidden.",
-    "bots_profile_patch": "Edit a bot's profile/tags (full set) with a reason; compare-and-set, 409 writes nothing. Private bots and own tags refused. Returns before/after + rollback.",
+    "bots_profile_patch": "Edit a bot's profile/tags (full set)/model endpoint with a reason; compare-and-set, 409 writes nothing. Private bots and own tags refused. Returns diff + rollback.",
     "bots_grant_set": "Grant or revoke a grant tag (approve_ops) on another bot with a reason; grant managers only. Own and private bots refused. Audited, idempotent.",
     "ops_approvals_list": "approve_ops holders: other bots' pending ops approvals you may decide; sensitive args masked.",
     "ops_approvals_get": "approve_ops holders: read one ops approval you may decide by ID, pending or resolved; sensitive args masked.",

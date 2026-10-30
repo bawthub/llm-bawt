@@ -1,5 +1,7 @@
 """bots_profile_patch: caller, target and compare-and-set contract (TASK-1521).
 
+Also the model switch and protected roles (TASK-1818).
+
 The app route is replaced by a recorder that answers like
 ``PATCH /v1/bots/{slug}/profile``; the route itself is covered against
 PostgreSQL in ``test_bot_profile_patch_pg.py``.
@@ -47,7 +49,8 @@ class _App:
         if self.patch is not None:
             return self.patch
         merged = dict(self.profile)
-        merged.update({k: v for k, v in body.items() if k in tools.ALLOWED_FIELDS})
+        merged.update({k: v for k, v in body.items()
+                       if k in tools.ALLOWED_FIELDS | {tools.HARNESS}})
         return _Response(200, merged)
 
     @property
@@ -57,7 +60,20 @@ class _App:
 
 def _profile(**fields):
     return {"slug": TARGET, "name": "Target", "description": "old", "color": None,
-            "system_prompt": "fixture", "tags": ["inactive"], **fields}
+            "system_prompt": "fixture", "tags": ["inactive"], "agent_backend": "fixture-harness",
+            "default_model": "fixture-model-a", "endpoint_id": 1, "harness": "fixture-harness",
+            **fields}
+
+
+#: The picker list for the target's runtime: what GET /v1/models/catalog/endpoints answers.
+ENDPOINTS = [
+    {"id": 1, "model_key": "fixture-model-a", "harness": "fixture-harness",
+     "eligibility": {"eligible": True}},
+    {"id": 2, "model_key": "fixture-model-b", "harness": "fixture-proxy",
+     "eligibility": {"eligible": True}},
+    {"id": 3, "model_key": "fixture-model-c", "harness": "fixture-harness",
+     "eligibility": {"eligible": False, "reason": "fixture route not connected"}},
+]
 
 
 @pytest.fixture
@@ -74,8 +90,18 @@ def rig(monkeypatch):
     monkeypatch.setattr(tools, "current_task_turn_context", lambda: turn)
     monkeypatch.setattr(tools, "_resolve_access", resolve)
     monkeypatch.setattr(tools, "_app", app)
-    monkeypatch.setattr(tools, "_manager_roles", lambda: frozenset({"fixture-manager"}))
-    return SimpleNamespace(app=app, access=access)
+    monkeypatch.setattr(tools, "_protected_roles", lambda: frozenset({"fixture-manager"}))
+    switchers = {CALLER}
+    monkeypatch.setattr(tools, "_may_switch_models", lambda slug: slug in switchers)
+    catalog_reads: list[str | None] = []
+
+    async def picker(backend):
+        catalog_reads.append(backend)
+        return ENDPOINTS
+
+    monkeypatch.setattr(tools, "_picker_endpoints", picker)
+    return SimpleNamespace(app=app, access=access, switchers=switchers,
+                           catalog_reads=catalog_reads)
 
 
 def _call(**kwargs) -> dict:
@@ -112,8 +138,8 @@ def test_the_private_tag_cannot_be_added(rig, tags):
     assert rig.app.writes == []
 
 
-@pytest.mark.parametrize("field", ["default_model", "agent_backend", "endpoint_id", "harness",
-                                   "bot_type", "include_in_global_search", "agent_backend_config"])
+@pytest.mark.parametrize("field", ["agent_backend", "harness", "bot_type",
+                                   "include_in_global_search", "agent_backend_config"])
 def test_runtime_route_and_privacy_fields_are_refused(rig, field):
     result = _call(changes={field: "x"})
 
@@ -244,12 +270,191 @@ def test_a_tag_write_that_keeps_a_held_manager_role_passes(rig):
     assert result["changed"]["tags"]["after"] == ["fixture-manager", "no_global_search"]
 
 
-def test_unreadable_manager_roles_fail_closed_for_a_tag_write(rig, monkeypatch):
+def test_unreadable_protected_roles_fail_closed_for_a_tag_write(rig, monkeypatch):
     def down():
         raise RuntimeError("settings store down")
 
-    monkeypatch.setattr(tools, "_manager_roles", down)
+    monkeypatch.setattr(tools, "_protected_roles", down)
 
     assert _call(changes={"tags": ["no_global_search"]})["error"] == "unavailable"
     assert rig.app.writes == []
     assert _call(changes={"description": "new"})["changed"]
+
+
+# --- Model switch (TASK-1818) ------------------------------------------------
+
+
+def test_a_model_switcher_writes_exactly_what_a_picker_pick_writes(rig):
+    result = _call(changes={"endpoint_id": 2}, reason="quota")
+
+    assert rig.catalog_reads == ["fixture-harness"]
+    assert rig.app.writes == [{
+        "default_model": "fixture-model-b", "endpoint_id": 2, "harness": "fixture-proxy",
+        "updated_by": f"bot:{CALLER}", "change_note": "quota", "expected_tags": ["inactive"],
+        "expected_fields": {"default_model": "fixture-model-a", "endpoint_id": 1,
+                            "harness": "fixture-harness"}}]
+    assert result["changed"] == {
+        "default_model": {"before": "fixture-model-a", "after": "fixture-model-b"},
+        "endpoint_id": {"before": 1, "after": 2},
+        "harness": {"before": "fixture-harness", "after": "fixture-proxy"}}
+    # harness follows the endpoint, so the rollback names only the switch.
+    assert result["rollback"] == {
+        "changes": {"default_model": "fixture-model-a", "endpoint_id": 1},
+        "expected": {"default_model": "fixture-model-b", "endpoint_id": 2}}
+
+
+def test_the_rollback_of_a_model_switch_is_itself_a_valid_switch(rig):
+    rollback = _call(changes={"endpoint_id": 2})["rollback"]
+    rig.app.profile = _profile(default_model="fixture-model-b", endpoint_id=2,
+                               harness="fixture-proxy")
+
+    undone = _call(**rollback)
+
+    assert undone["changed"]["endpoint_id"] == {"before": 2, "after": 1}
+    assert rig.app.writes[-1]["harness"] == "fixture-harness"
+
+
+def test_a_matching_default_model_is_accepted_with_its_endpoint(rig):
+    result = _call(changes={"endpoint_id": 2, "default_model": "fixture-model-b"})
+
+    assert result["changed"]["endpoint_id"]["after"] == 2
+
+
+def test_a_caller_without_the_model_switch_capability_is_refused(rig):
+    rig.switchers.clear()
+
+    for changes in ({"endpoint_id": 2}, {"endpoint_id": 2, "description": "new"}):
+        assert _call(changes=changes)["error"] == "capability_required"
+    assert rig.app.calls == [] and rig.catalog_reads == []
+    # Other fields stay open to every bot.
+    assert _call(changes={"description": "new"})["changed"]
+
+
+def test_an_unreadable_capability_fails_closed(rig, monkeypatch):
+    def down(_slug):
+        raise RuntimeError("settings store down")
+
+    monkeypatch.setattr(tools, "_may_switch_models", down)
+
+    assert _call(changes={"endpoint_id": 2})["error"] == "unavailable"
+    assert rig.app.calls == []
+
+
+def test_a_model_switcher_may_switch_its_own_model(rig):
+    rig.app.profile = _profile(slug=CALLER)
+
+    assert _call(bot_id=CALLER, changes={"endpoint_id": 2})["changed"]["endpoint_id"]["after"] == 2
+
+
+@pytest.mark.parametrize("changes, error", [
+    ({"endpoint_id": 99}, "unknown_endpoint"),
+    ({"endpoint_id": 2, "default_model": "fixture-model-a"}, "model_endpoint_mismatch"),
+    ({"endpoint_id": 3}, "endpoint_ineligible"),
+    ({"endpoint_id": None, "default_model": "fixture-model-a"}, "model_endpoint_mismatch"),
+])
+def test_a_switch_the_catalog_refuses_writes_nothing(rig, changes, error):
+    assert _call(changes=changes)["error"] == error
+    assert rig.app.writes == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"default_model": "fixture-model-b"}, {"endpoint_id": "2"}, {"endpoint_id": True},
+    {"endpoint_id": 2, "default_model": 5},
+])
+def test_malformed_model_switches_are_refused_before_anything_is_read(rig, changes):
+    assert _call(changes=changes)["error"] == "invalid_request"
+    assert rig.app.calls == [] and rig.catalog_reads == []
+
+
+def test_an_unreadable_catalog_fails_closed(rig, monkeypatch):
+    async def down(_backend):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(tools, "_picker_endpoints", down)
+
+    assert _call(changes={"endpoint_id": 2})["error"] == "unavailable"
+    assert rig.app.writes == []
+
+
+def test_a_null_endpoint_clears_the_model_like_the_pickers_clear(rig):
+    result = _call(changes={"endpoint_id": None})
+
+    assert rig.catalog_reads == []
+    assert {k: rig.app.writes[0][k] for k in ("default_model", "endpoint_id")} == {
+        "default_model": None, "endpoint_id": None}
+    assert "harness" not in rig.app.writes[0]
+    assert set(result["changed"]) == {"default_model", "endpoint_id"}
+
+
+def test_a_model_switch_of_a_private_bot_is_refused(rig):
+    assert _call(bot_id=HIDDEN, changes={"endpoint_id": 2})["error"] == "access_denied"
+    rig.app.profile = _profile(tags=["private"])
+    assert _call(changes={"endpoint_id": 2})["error"] == "access_denied"
+    assert rig.app.writes == []
+
+
+def test_a_stale_model_switch_is_a_conflict(rig):
+    stale = _call(changes={"endpoint_id": 2}, expected={"endpoint_id": 7})
+    assert stale["error"] == "conflict" and stale["current"] == {"endpoint_id": 1}
+    assert rig.app.writes == []
+
+    rig.app.patch = _Response(409, {"detail": {
+        "code": "fields_changed", "message": "changed", "current": {"endpoint_id": 3}}})
+    raced = _call(changes={"endpoint_id": 2})
+    assert raced["error"] == "conflict" and raced["code"] == "fields_changed"
+
+
+@pytest.mark.parametrize("held, wanted", [
+    (["inactive"], ["inactive", "fixture-coordinator"]),
+    (["inactive", "fixture-coordinator"], ["inactive"]),
+])
+def test_a_model_switch_role_cannot_be_added_or_removed(rig, monkeypatch, held, wanted):
+    monkeypatch.setattr(tools, "_protected_roles",
+                        lambda: frozenset({"fixture-manager", "fixture-coordinator"}))
+    rig.app.profile = _profile(tags=held)
+
+    result = _call(changes={"tags": wanted})
+
+    assert result["error"] == "tag_locked"
+    assert result["tags"] == ["fixture-coordinator"]
+    assert rig.app.writes == []
+
+
+def test_protected_roles_union_both_configured_capabilities(monkeypatch):
+    from llm_bawt.bot_tags import grants
+
+    monkeypatch.setattr(tools, "_global_settings", lambda: {
+        grants.MANAGER_CAPABILITY_SETTING: "fixture-manage",
+        tools.MODEL_SWITCH_CAPABILITY_SETTING: " fixture-coordinate "})
+    roles = {"fixture-manage": {"fixture-manager"}, "fixture-coordinate": {"fixture-coordinator"}}
+    asked: list[str] = []
+
+    def manager_roles(_conn, capability, **_kw):
+        asked.append(capability)
+        return frozenset(roles[capability])
+
+    monkeypatch.setattr(grants, "manager_roles", manager_roles)
+    monkeypatch.setattr("llm_bawt.utils.db.get_shared_engine", lambda _cfg: _Engine())
+
+    assert tools._protected_roles() == {"fixture-manager", "fixture-coordinator"}
+    assert sorted(asked) == ["fixture-coordinate", "fixture-manage"]
+
+
+def test_unset_capabilities_protect_nothing_and_let_no_bot_switch(monkeypatch):
+    monkeypatch.setattr(tools, "_global_settings", lambda: {})
+    monkeypatch.setattr("llm_bawt.utils.db.get_shared_engine",
+                        lambda _cfg: pytest.fail("no capability configured, nothing to read"))
+
+    assert tools._protected_roles() == frozenset()
+    assert tools._may_switch_models(CALLER) is False
+
+
+class _Engine:
+    def connect(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False

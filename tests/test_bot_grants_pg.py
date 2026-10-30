@@ -324,3 +324,24 @@ def test_holds_grant_is_live_and_fails_closed_for_private_and_unknown_bots(grant
     with engine.begin() as conn:
         tag(conn, "fixture-target", BehaviorTag.PRIVATE)
     assert holds("fixture-target") is False
+
+
+# --- holds_capability (TASK-1818: the model-switch gate) ------------------------
+
+
+def test_holds_capability_follows_role_capabilities_and_fails_closed_for_private(grant_api):
+    engine = grant_api.rig.engine
+
+    def holds(slug, capability=CAPABILITY):
+        with engine.connect() as conn:
+            return grants.holds_capability(conn, slug, capability)
+
+    assert holds(MANAGER) is True
+    assert holds(MANAGER, "fixture-other-capability") is False
+    assert holds(MANAGER, None) is False
+    assert holds("fixture-target") is False
+    assert holds("fixture-nobody") is False
+
+    with engine.begin() as conn:
+        tag(conn, MANAGER, BehaviorTag.PRIVATE)
+    assert holds(MANAGER) is False

@@ -145,6 +145,11 @@ def is_grant_manager(conn, bot_slug: str, capability: str | None, *, lock: bool 
     With ``lock`` the answer holds until the caller commits (see :func:`manager_roles`);
     the caller holds the bot's tag lock, which serializes its role assignments.
     """
+    return holds_capability(conn, bot_slug, capability, lock=lock)
+
+
+def holds_capability(conn, bot_slug: str, capability: str | None, *, lock: bool = False) -> bool:
+    """Whether a non-private bot holds a role carrying ``capability``; any doubt answers no."""
     roles = manager_roles(conn, capability, lock=lock)
     if not roles:
         return False
