@@ -153,6 +153,10 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
 
     # ── broker token resolution ──────────────────────────────────────────
     def _cache_valid(self) -> bool:
+        # Preview: consult the gateway on every request so a revoked or
+        # expired grant takes effect immediately (never serve a cached bearer).
+        if preview_credentials.enabled():
+            return False
         if not self._cached_token or self._cached_expires_at is None:
             return False
         return (self._cached_expires_at - time.time()) > _CACHE_BUFFER_S

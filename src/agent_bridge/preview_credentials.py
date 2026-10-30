@@ -69,6 +69,37 @@ def enabled(environ: Mapping[str, str] | None = None) -> bool:
     return env.get(ENABLED_ENV) == "1"
 
 
+# A preview bridge must hold no Claude credential of its own: the Claude CLI
+# would read (and may refresh) a bundle it can see, making it a second
+# refresher on the app's rotating token. Checked at startup before anything
+# touches ~/.claude; the external container probe is the other half.
+CONFIG_DIR_ENVS = ("CLAUDE_CONFIG_DIR", "CLAUDE_LOGIN_CONFIG_DIR")
+BUNDLE_NAME = ".credentials.json"
+
+
+def local_claude_credentials(
+    auth_env_keys: tuple[str, ...],
+    environ: Mapping[str, str] | None = None,
+    home: str | None = None,
+) -> list[str]:
+    """Every local Claude credential source visible to this process (names only).
+
+    ``auth_env_keys`` is the caller's canonical list of inherited env values
+    that select the CLI's auth mode, credential or upstream (the Claude bridge
+    passes ``native_auth.AUTH_ENV_KEYS``); any non-empty one counts.
+    """
+    env = os.environ if environ is None else environ
+    found = [name for name in auth_env_keys if (env.get(name) or "").strip()]
+    home = home if home is not None else os.path.expanduser("~")
+    dirs = [os.path.join(home, ".claude")]
+    dirs += [d for d in ((env.get(n) or "").strip() for n in CONFIG_DIR_ENVS) if d]
+    for directory in dict.fromkeys(dirs):
+        path = os.path.join(directory, BUNDLE_NAME)
+        if os.path.lexists(path):  # a dangling symlink still counts
+            found.append(path)
+    return found
+
+
 def _gateway_url(env: Mapping[str, str]) -> str:
     url = (env.get(URL_ENV) or "").strip().rstrip("/")
     if not url.startswith(("http://", "https://")):

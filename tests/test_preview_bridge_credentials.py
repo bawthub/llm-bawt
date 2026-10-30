@@ -13,6 +13,7 @@ import pytest
 
 from agent_bridge import preview_credentials as pc
 from claude_code_bridge import _bridge_helpers as helpers
+from claude_code_bridge.native_auth import AUTH_ENV_KEYS
 from claude_code_bridge.provider_key_broker import (
     BrokerKeyError,
     BrokerKeyNotInstalled,
@@ -242,6 +243,21 @@ def test_chatgpt_preview_refusal_raises(preview_env):
         OpenAIChatGPTAdapter()._fetch_broker_token()
 
 
+def test_chatgpt_preview_never_serves_cached_bearer_after_refusal(preview_env):
+    # Codex r1 B2: a persistent adapter must consult the gateway every request.
+    import asyncio
+
+    install, calls = preview_env
+    adapter = OpenAIChatGPTAdapter()
+    install(_resp(200, _chatgpt_ok()))
+    token, _base = asyncio.run(adapter.authorize())
+    assert token == "tok-o"
+    install(_resp(403, {"detail": "revoked"}))
+    with pytest.raises(RuntimeError, match="Preview ChatGPT credential refused"):
+        asyncio.run(adapter.authorize())
+    assert len(calls) == 2
+
+
 def test_api_key_brokers_refuse_in_preview_without_requests(preview_env):
     install, calls = preview_env
     install(_resp(200, {"access_token": "k"}))
@@ -253,3 +269,102 @@ def test_api_key_brokers_refuse_in_preview_without_requests(preview_env):
     with pytest.raises(RuntimeError, match="not served in preview"):
         OpenRouterAdapter._fetch_broker_key()
     assert calls == []
+
+
+# ── startup: no local Claude credential may be visible ─────────────────────
+
+def _bundle(directory):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / pc.BUNDLE_NAME
+    path.write_text("{}")
+    return str(path)
+
+
+def _local(env, home):
+    return pc.local_claude_credentials(AUTH_ENV_KEYS, env, home=str(home))
+
+
+def test_clean_preview_home_has_no_local_credentials(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    assert _local({}, tmp_path) == []
+
+
+def test_home_bundle_detected(tmp_path):
+    path = _bundle(tmp_path / ".claude")
+    assert _local({}, tmp_path) == [path]
+
+
+@pytest.mark.parametrize("env_name", pc.CONFIG_DIR_ENVS)
+def test_config_dir_bundle_detected(tmp_path, env_name):
+    path = _bundle(tmp_path / "cfg")
+    assert _local({env_name: str(tmp_path / "cfg")}, tmp_path / "h") == [path]
+
+
+def test_dangling_bundle_symlink_detected(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    link = tmp_path / ".claude" / pc.BUNDLE_NAME
+    link.symlink_to(tmp_path / "missing")
+    assert _local({}, tmp_path) == [str(link)]
+
+
+def test_auth_env_keys_cover_inherited_auth_token():
+    # Codex r1 B1: LegacyNativeRoute would let an inherited ANTHROPIC_AUTH_TOKEN through.
+    assert {"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} <= set(AUTH_ENV_KEYS)
+
+
+@pytest.mark.parametrize("env_name", AUTH_ENV_KEYS)
+def test_credential_env_detected_but_blank_ignored(tmp_path, env_name):
+    assert _local({env_name: "x"}, tmp_path) == [env_name]
+    assert _local({env_name: "  "}, tmp_path) == []
+
+
+class _BootstrapReached(Exception):
+    pass
+
+
+@pytest.fixture
+def bridge_main(monkeypatch, tmp_path):
+    from claude_code_bridge import __main__ as bridge_main_mod
+
+    def reached():
+        raise _BootstrapReached
+
+    monkeypatch.setattr(bridge_main_mod, "bootstrap_claude_home", reached)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (*AUTH_ENV_KEYS, *pc.CONFIG_DIR_ENVS):
+        monkeypatch.delenv(name, raising=False)
+    return bridge_main_mod, tmp_path
+
+
+@pytest.mark.parametrize("plant", ["home_bundle", "config_dir", *AUTH_ENV_KEYS])
+def test_preview_bridge_refuses_to_start_with_local_credentials(bridge_main, monkeypatch, caplog, plant):
+    mod, home = bridge_main
+    monkeypatch.setenv(pc.ENABLED_ENV, "1")
+    if plant == "home_bundle":
+        _bundle(home / ".claude")
+    elif plant == "config_dir":
+        _bundle(home / "cfg")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "cfg"))
+    else:
+        monkeypatch.setenv(plant, "secret-value")
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 1
+    assert "Preview bridge refuses to start" in caplog.text
+    assert "secret-value" not in caplog.text  # names only, never values
+
+
+def test_clean_preview_bridge_proceeds_to_bootstrap(bridge_main, monkeypatch):
+    mod, _ = bridge_main
+    monkeypatch.setenv(pc.ENABLED_ENV, "1")
+    with pytest.raises(_BootstrapReached):
+        mod.main()
+
+
+def test_non_preview_bridge_ignores_local_credentials(bridge_main, monkeypatch):
+    mod, home = bridge_main
+    monkeypatch.delenv(pc.ENABLED_ENV, raising=False)
+    _bundle(home / ".claude")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
+    with pytest.raises(_BootstrapReached):
+        mod.main()
