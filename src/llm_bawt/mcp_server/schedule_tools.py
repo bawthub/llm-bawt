@@ -8,9 +8,10 @@ so the wake-up survives all of those.
 The owning user and the creating bot come from the signed turn, never from
 arguments: an unsigned client can't schedule, and a bot can't schedule as
 another bot. Wake-ups are ordinary schedules owned by the caller's user (they
-show on the Schedules page) whose name carries ``wakeup:<creator>:``; list and
-cancel only see wake-ups the caller created or that target the caller, never
-the user's own hand-made schedules.
+show on the Schedules page) whose name carries ``wakeup:<creator>:``. The
+server proves and persists that creator (``creator_bot_id``), and runs are
+authored by it (TASK-1790); list and cancel only see wake-ups the caller
+created or that target the caller, never the user's own hand-made schedules.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 from pydantic import Field
 
@@ -35,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 _APP_BASE_URL = os.getenv("LLM_BAWT_APP_BASE_URL", "http://localhost:8642").rstrip("/")
 _TIMEOUT_S = 30.0
-_PREFIX = "wakeup:"
 _MISFIRE_GRACE_S = 604800
 _TASK_RE = re.compile(r"^TASK-\d+$")
 Identifier = Annotated[str, Field(min_length=1, max_length=64)]
@@ -103,31 +103,13 @@ async def _call(method: str, path: str, user: str, body: dict | None = None,
     return payload, None
 
 
-def _create_key(bot: str, nonce: str) -> str:
-    return str(uuid5(NAMESPACE_URL, f"schedule_wakeup:{bot}:{nonce}"))
-
-
 def _creator(schedule: dict) -> str | None:
     """The bot that created this wake-up, or None if it isn't provably one.
 
-    The name is user-editable, so it only names a claim: ``wakeup:<bot>:<nonce>:``.
-    The schedule id is derived server-side from the owner and the create key,
-    and the key from that bot and nonce, so a renamed or hand-made schedule
-    can't match the id it claims.
+    The server proves it once at create (``proven_wakeup_creator``) and
+    persists it; the user-editable name is never consulted here (TASK-1790).
     """
-    from llm_bawt.service.prompt_schedule_management import schedule_identifier
-
-    name = schedule.get("name") or ""
-    if not name.startswith(_PREFIX):
-        return None
-    parts = name[len(_PREFIX):].split(":", 2)
-    if len(parts) < 2 or not parts[0] or not parts[1]:
-        return None
-    creator, nonce = parts[0], parts[1]
-    owner = schedule.get("owner_user_id") or ""
-    if schedule.get("id") != schedule_identifier(owner, _create_key(creator, nonce)):
-        return None
-    return creator
+    return schedule.get("creator_bot_id") or None
 
 
 def _visible(schedule: dict, bot: str) -> bool:
@@ -188,10 +170,13 @@ async def schedule_wakeup(
     if caller is None:
         return _error("unauthorized", "a signed bot turn is required")
     bot, user = caller.bot_id.strip().lower(), caller.user_id.strip().lower()
+    from llm_bawt.service.prompt_schedule_management import (
+        WAKEUP_PREFIX, schedule_identifier, wakeup_create_key,
+    )
 
     if action == "list":
         payload, error = await _call("GET", "/v1/prompt-schedules", user,
-                                     params={"search": _PREFIX, "lifecycle": "active", "limit": 100},
+                                     params={"search": WAKEUP_PREFIX, "lifecycle": "active", "limit": 100},
                                      unknown="the schedule list is unavailable; try again")
         if error:
             return error
@@ -223,12 +208,10 @@ async def schedule_wakeup(
     timing, problem = _timing(at, in_minutes, cron, timezone)
     if problem:
         return _error("invalid_request", problem)
-    from llm_bawt.service.prompt_schedule_management import schedule_identifier
-
     replayable = bool(idempotency_key and idempotency_key.strip())
     nonce = (hashlib.sha256(idempotency_key.strip().encode()).hexdigest()[:16]
              if replayable else uuid4().hex[:16])
-    key = _create_key(bot, nonce)
+    key = wakeup_create_key(bot, nonce)
     if replayable:
         # A retry returns the original even when in_minutes moved once_at.
         existing, _ = await _call("GET", f"/v1/prompt-schedules/{schedule_identifier(user, key)}", user,
@@ -236,7 +219,7 @@ async def schedule_wakeup(
         if existing is not None:
             return _dump({**_summary(existing), "duplicate": True})
     header = f"[Scheduled wake-up from {bot}" + (f", {task}" if task else "") + "]"
-    name = f"{_PREFIX}{bot}:{nonce}:{(label or task or 'wake-up').strip()}"[:120]
+    name = f"{WAKEUP_PREFIX}{bot}:{nonce}:{(label or task or 'wake-up').strip()}"[:120]
     body = {
         "name": name, "description": f"task_id={task}" if task else "",
         "prompt": f"{header}\n\n{message.strip()}", "bot_id": target, "target_mode": "specific",

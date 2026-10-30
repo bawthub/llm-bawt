@@ -4,9 +4,20 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from ..message_authorship import AuthorReference
 from .prompt_schedule_models import NONTERMINAL
 from .prompt_schedule_store import db_utc
 from .scheduler import JobStatus
+
+
+def schedule_author(snapshot: dict) -> AuthorReference:
+    """Who an occurrence's delivery is from: its proven creator bot, else its owner.
+
+    One rule for enqueue and dispatch validation (TASK-1790). The owner stays
+    the run's user (visibility, session, gates) either way.
+    """
+    creator = snapshot.get("creator_bot_id")
+    return AuthorReference.bot(creator) if creator else AuthorReference.user(snapshot["owner_user_id"])
 
 
 def receipt(run) -> dict:

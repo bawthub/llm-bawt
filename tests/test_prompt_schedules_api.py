@@ -138,3 +138,32 @@ def test_list_filter_and_last_run(client):
     assert client.get("/v1/prompt-schedules?user=test&search=nope").json()["total_count"] == 0
     listed = client.get("/v1/prompt-schedules?user=test").json()["schedules"][0]
     assert listed["last_run"]["state"] == "pending"
+
+
+def test_wakeup_creator_is_proven_once_at_create_and_backfilled(client):
+    """TASK-1790: only a name that matches its derived id proves a bot creator."""
+    from sqlalchemy import text
+
+    from llm_bawt.service.prompt_schedule_management import upgrade_prompt_schedules, wakeup_create_key
+
+    nonce = "0123456789abcdef"
+    name = f"wakeup:snark:{nonce}:x"
+    real = create(client, payload() | {"name": name, "idempotency_key": str(wakeup_create_key("snark", nonce))})
+    forged = create(client, payload() | {"name": name})
+    plain = create(client)
+    assert (real["creator_bot_id"], forged["creator_bot_id"], plain["creator_bot_id"]) == ("snark", None, None)
+    url = f"/v1/prompt-schedules/{real['id']}?user=test"
+    renamed = client.patch(url, json={"expected_revision": real["revision"], "name": "wakeup:al:x:y"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["creator_bot_id"] == "snark"
+
+    # Rows from before the column existed: the backfill re-proves from the name.
+    engine = routes.management().engine
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE prompt_schedules SET creator_bot_id=NULL"))
+        conn.execute(text("UPDATE prompt_schedules SET name=:name WHERE job_id=:id"),
+                     {"name": f"wakeup:snark:{nonce}:x", "id": real["id"]})
+        upgrade_prompt_schedules(conn, engine.dialect.name)
+        upgrade_prompt_schedules(conn, engine.dialect.name)  # idempotent
+        creators = dict(conn.execute(text("SELECT job_id, creator_bot_id FROM prompt_schedules")).all())
+    assert creators == {real["id"]: "snark", forged["id"]: None, plain["id"]: None}

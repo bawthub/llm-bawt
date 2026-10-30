@@ -23,7 +23,8 @@ _ORIGINS = text("""
     JOIN sessions s ON s.id = m.session_id AND s.bot_id = m.bot_id
     WHERE m.bot_id = :bot_id AND m.id IN :message_ids AND m.role = 'user'
       AND p.owner_user_id = :owner AND s.user_id = :owner
-      AND d.author_entity_type = 'user' AND d.author_entity_id = :owner
+      AND ((d.author_entity_type = 'user' AND d.author_entity_id = :owner)
+           OR (d.author_entity_type = 'bot' AND d.author_entity_id = p.creator_bot_id))
       AND o.session_id = m.session_id
 """).bindparams(bindparam("message_ids", expanding=True))
 

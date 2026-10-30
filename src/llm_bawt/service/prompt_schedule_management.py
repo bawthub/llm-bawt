@@ -24,6 +24,52 @@ def schedule_identifier(owner, idempotency_key):
     return str(uuid5(NAMESPACE_URL, f"prompt-schedule:{owner}:{idempotency_key}"))
 
 
+WAKEUP_PREFIX = "wakeup:"
+
+
+def wakeup_create_key(bot, nonce):
+    """The create key ``schedule_wakeup`` derives from its signed caller and a nonce."""
+    return str(uuid5(NAMESPACE_URL, f"schedule_wakeup:{bot}:{nonce}"))
+
+
+def proven_wakeup_creator(owner, identifier, name):
+    """The bot that created a wake-up schedule, or None if it isn't provably one.
+
+    The name ``wakeup:<bot>:<nonce>:`` is only a claim; the id is derived from
+    the owner and the create key, and the key from that bot and nonce, so a
+    renamed or hand-made schedule can't match the id it claims (TASK-1719).
+    Resolved once at create and persisted as ``creator_bot_id`` (TASK-1790).
+    """
+    if not (name or "").startswith(WAKEUP_PREFIX):
+        return None
+    parts = name[len(WAKEUP_PREFIX):].split(":", 2)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    creator, nonce = parts[0], parts[1]
+    if identifier != schedule_identifier(owner or "", wakeup_create_key(creator, nonce)):
+        return None
+    return creator
+
+
+def upgrade_prompt_schedules(conn, dialect):
+    """Additive prompt_schedules columns plus the creator backfill; idempotent."""
+    if dialect == "postgresql":
+        conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS target_mode VARCHAR NOT NULL DEFAULT 'specific'"))
+        conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS candidate_bot_ids JSON"))
+        conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS creator_bot_id VARCHAR"))
+    # Wake-ups created before TASK-1790 carry their creator only in the name.
+    # A row whose name no longer proves it stays NULL (user-authored).
+    rows = conn.execute(text(
+        "SELECT job_id, owner_user_id, name FROM prompt_schedules "
+        "WHERE creator_bot_id IS NULL AND name LIKE 'wakeup:%'")).all()
+    for job_id, owner, name in rows:
+        creator = proven_wakeup_creator(owner, job_id, name)
+        if creator:
+            conn.execute(text("UPDATE prompt_schedules SET creator_bot_id=:creator "
+                              "WHERE job_id=:id AND creator_bot_id IS NULL"),
+                         {"creator": creator, "id": job_id})
+
+
 def run_view(occurrence, run):
     receipt = json.loads(run.result_json or "{}")
     return dict(id=occurrence.run_id, state=occurrence.state,
@@ -42,7 +88,7 @@ def schedule_view(job, schedule, last_run=None):
                 enabled=job.enabled, next_run_at=(db_utc(job.next_run_at) if schedule.lifecycle == "active" and job.enabled and job.next_run_at else None),
                 timing=schedule.timing_json, last_run=last_run,
                 **{key: getattr(schedule, key) for key in (
-                    "owner_user_id", "name", "description", "prompt", "requested_model",
+                    "owner_user_id", "creator_bot_id", "name", "description", "prompt", "requested_model",
                     "target_mode", "candidate_bot_ids", "clear_context", "augment_memory", "extract_memory", "missed_policy",
                     "misfire_grace_seconds", "lifecycle", "revision", "created_at", "updated_at")})
 
@@ -119,6 +165,7 @@ class PromptManagement:
             session.flush()
             fields = {key: value for key, value in payload.items() if key not in {"bot_id", "enabled", "timing"}}
             schedule = PromptSchedule(job_id=identifier, owner_user_id=owner, timing_json=payload["timing"],
+                                      creator_bot_id=proven_wakeup_creator(owner, identifier, data.name),
                                       lifecycle="active" if data.enabled else "paused", create_request_hash=digest, **fields)
             session.add(schedule)
             session.flush()
@@ -240,7 +287,8 @@ class PromptManagement:
             run = JobRun(job_id=identifier, bot_id=job.bot_id, started_at=now)
             session.add(run)
             session.flush()
-            snapshot = dict(owner_user_id=owner, bot_id=job.bot_id, name=schedule.name, prompt=schedule.prompt,
+            snapshot = dict(owner_user_id=owner, creator_bot_id=schedule.creator_bot_id,
+                            bot_id=job.bot_id, name=schedule.name, prompt=schedule.prompt,
                             target_mode=schedule.target_mode, candidate_bot_ids=schedule.candidate_bot_ids,
                             model=schedule.requested_model, clear_context=schedule.clear_context,
                             augment_memory=schedule.augment_memory, extract_memory=schedule.extract_memory,

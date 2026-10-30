@@ -59,14 +59,14 @@ class LocalDeliveryStore:
                            inter_bot_delivery_id=delivery_id, inter_bot_turn_id=turn_id,
                            inter_bot_bridge_request_id="req_delivery_" + delivery_id[9:])
             values = dict(id=delivery_id, sender=kwargs["sender_bot_id"],
-                          owner=kwargs["author"].entity_id, target=kwargs["target_bot_id"],
+                          author_type=kwargs["author"].entity_type, owner=kwargs["author"].entity_id, target=kwargs["target_bot_id"],
                           message=kwargs["message"], key=kwargs["idempotency_key"],
                           message_id=message_id, turn_id=turn_id,
                           payload=json.dumps(payload), meta=json.dumps(kwargs["metadata"]))
             conn.execute(text("""INSERT INTO inter_bot_deliveries
                 (id,sender_bot_id,author_entity_type,author_entity_id,target_bot_id,message,
                  idempotency_key,user_message_id,turn_id,payload_json,metadata_json)
-                VALUES (:id,:sender,'user',:owner,:target,:message,:key,:message_id,
+                VALUES (:id,:sender,:author_type,:owner,:target,:message,:key,:message_id,
                         :turn_id,:payload,:meta)"""), values)
         if self.failure == "after":
             raise RuntimeError("injected after committed enqueue")
@@ -132,12 +132,18 @@ def rig(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600):
+def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600, creator=None):
     timing = (PromptTiming(kind="once", once_at=now + timedelta(seconds=1)) if once else
               PromptTiming(kind="interval", interval_seconds=60, anchor_at=now + timedelta(seconds=1)))
     job = rig.worker.store.create(owner=OWNER, bot_id=BOT, name="Automation", prompt="Literal saved prompt",
                                   now=now, timing=timing, clear_context=clear,
                                   requested_model="second", misfire_grace_seconds=grace)
+    if creator:
+        with Session(rig.engine) as session:
+            row = session.get(PromptSchedule, job)
+            row.creator_bot_id = creator
+            session.add(row)
+            session.commit()
     run = rig.worker.store.reserve_due(now + timedelta(seconds=1))[0]
     return job, run
 
@@ -295,6 +301,30 @@ def test_valid_claim_reads_bound_model_and_nonactive_thread(rig):
         assert head["id"] == record.id
         assert json.loads(head["payload_json"])["model"] == "second@test-native"
     assert occurrence(rig, run).state == "queued"
+
+
+def test_bot_created_wakeup_is_authored_by_its_creator_and_owned_by_the_user(rig):
+    """TASK-1790: Snark's wake-up to a bot shows as Snark's, not the user's."""
+    _, run = reserve(rig, creator="snark")
+    record = enqueue(rig, run)
+    assert record.author == AuthorReference.bot("snark")
+    assert record.sender_bot_id.startswith("scheduler:")
+    assert rig.delivery.payload(record.id)["user"] == OWNER
+    assert record.metadata["prompt_schedule"]["owner_user_id"] == OWNER
+    with rig.engine.begin() as conn:
+        assert load_claim_head(conn, BOT, rig.service.config)["id"] == record.id
+
+
+@pytest.mark.parametrize("author", [AuthorReference.bot("snark"), AuthorReference.user("someone-else")])
+def test_outbox_author_must_match_the_schedule_snapshot(rig, author):
+    _, run = reserve(rig)
+    record = enqueue(rig, run)
+    assert record.author == AuthorReference.user(OWNER)
+    rig.delivery.update(record.id, author_entity_type=author.entity_type, author_entity_id=author.entity_id)
+    with rig.engine.begin() as conn:
+        assert load_claim_head(conn, BOT, rig.service.config) is None
+    failed = rig.delivery.get(record.id)
+    assert failed.status == "FAILED" and "no matching immutable outbox" in failed.last_error
 
 
 @pytest.mark.parametrize("status", ["active", "deleted"])

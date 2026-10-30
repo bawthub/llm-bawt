@@ -80,8 +80,11 @@ def delivery_audience(record: DeliveryRecord, *, default_user: str | None) -> De
         return DeliveryAudience(record.author_entity_id, record.target_bot_id, chat_user)
     if chat_user:
         return DeliveryAudience(chat_user, record.target_bot_id, chat_user)
-    if record.metadata.get("prompt_schedule"):
-        return DeliveryAudience(record.author_entity_id, record.target_bot_id)
+    if schedule := record.metadata.get("prompt_schedule"):
+        # A bot-created wake-up is authored by that bot but owned by the user
+        # it was scheduled for (TASK-1790); older rows carry only the author.
+        return DeliveryAudience(schedule.get("owner_user_id") or record.author_entity_id,
+                                record.target_bot_id)
     return DeliveryAudience(default_user, record.sender_bot_id)
 
 
@@ -222,8 +225,12 @@ class DeliveryTransitionEvents:
         if user_authored and record.status not in _USER_RECEIPT_STATUSES:
             return
         audience = delivery_audience(record, default_user=default_user)
+        # A bot-created wake-up's sender is the scheduler; the bot is its author.
+        scheduled = bool(record.metadata.get("prompt_schedule"))
+        origin = (record.author_entity_id if scheduled and record.author_entity_type == "bot"
+                  else record.sender_bot_id)
         # The emitter checks ``bot_id``; the other party must be public too.
-        other = record.target_bot_id if audience.bot_id == record.sender_bot_id else record.sender_bot_id
+        other = record.target_bot_id if audience.bot_id == record.sender_bot_id else origin
         visible = True
         if other and other != audience.bot_id:
             try:
@@ -242,8 +249,8 @@ class DeliveryTransitionEvents:
             kind="inter_bot_delivery", source="delivery",
             user_id=audience.user_id,
             tone=_TONES.get(record.status, "info"),
-            summary=f"{'You' if user_authored else record.sender_bot_id} → {record.target_bot_id}"
-                    f" · {record.status.lower()}"[:500],
+            summary=f"{'You' if user_authored else origin} → {record.target_bot_id}"
+                    f"{' (scheduled)' if scheduled else ''} · {record.status.lower()}"[:500],
             bot_id=audience.bot_id, actor_type=record.author_entity_type or "bot",
             actor_id=(record.author_entity_id or record.sender_bot_id)[:128],
             subject_type="delivery", subject_id=record.id,

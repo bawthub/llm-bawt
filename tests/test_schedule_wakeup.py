@@ -10,7 +10,7 @@ import pytest
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.mcp_server import bot_access_identity, schedule_tools
-from llm_bawt.service.prompt_schedule_management import schedule_identifier
+from llm_bawt.service.prompt_schedule_management import proven_wakeup_creator, schedule_identifier
 
 NOW = datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc)
 
@@ -51,8 +51,11 @@ def rig(monkeypatch):
     async def request(method, path, user, body=None, params=None):
         state.calls.append((method, path, user, body, params))
         if method == "POST":
-            # The real API derives the id from owner + create key (PromptManagement.create).
-            row = {"id": schedule_identifier(user, body["idempotency_key"]), "owner_user_id": user,
+            # The real API derives the id from owner + create key, and proves
+            # the creator from that id once (PromptManagement.create).
+            identifier = schedule_identifier(user, body["idempotency_key"])
+            row = {"id": identifier, "owner_user_id": user,
+                   "creator_bot_id": proven_wakeup_creator(user, identifier, body["name"]),
                    "bot_id": body["bot_id"], "name": body["name"],
                    "description": body["description"], "timing": body["timing"],
                    "next_run_at": "x", "lifecycle": "active"}
@@ -105,6 +108,8 @@ async def test_create_uses_signed_owner_and_callback_defaults(rig):
     assert body["description"] == "task_id=TASK-1713"
     assert body["prompt"].startswith("[Scheduled wake-up from byte, TASK-1713]\n\n")
     assert out["id"] in rig.schedules
+    # TASK-1790: the tool's create key is what proves the creator on the server.
+    assert rig.schedules[out["id"]]["creator_bot_id"] == "byte"
 
 
 @pytest.mark.anyio
@@ -183,10 +188,12 @@ async def test_list_and_cancel_see_only_own_or_targeting_wakeups(rig):
     for blocked in ("hand", "forged-own", "forged-target", al_own):
         out = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id=blocked))
         assert out["error"] == "forbidden" and rig.schedules[blocked]["lifecycle"] == "active"
-    # Renaming a real wake-up doesn't move it to another creator either.
-    rig.schedules[mine]["name"] = rig.schedules[mine]["name"].replace("wakeup:byte:", "wakeup:al:")
+    # The creator is persisted at create (TASK-1790): renaming a real wake-up
+    # moves it to no other creator, and its original creator keeps it.
+    rig.schedules[mine]["name"] = rig.schedules[mine]["name"].replace("wakeup:byte:", "wakeup:snark:")
+    rig.caller = SimpleNamespace(bot_id="snark", user_id="owner")
     assert result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id=mine))["error"] == "forbidden"
-    rig.schedules[mine]["name"] = rig.schedules[mine]["name"].replace("wakeup:al:", "wakeup:byte:")
+    rig.caller = SimpleNamespace(bot_id="byte", user_id="owner")
     out = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id=mine))
     assert out["lifecycle"] == "cancelled"
     missing = result(await schedule_tools.schedule_wakeup(action="cancel", schedule_id="nope"))

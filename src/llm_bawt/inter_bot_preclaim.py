@@ -119,7 +119,7 @@ def load_claim_head(conn, target: str, config):
         return head
 
     from .service.prompt_schedule_models import PromptOccurrence, PromptSchedule
-    from .service.prompt_delivery_state import gate_reason, transition, receipt
+    from .service.prompt_delivery_state import gate_reason, receipt, schedule_author, transition
     from .service.scheduler import ScheduledJob, JobRun
 
     # Origin metadata is only a hint; validate against the immutable outbox.
@@ -153,10 +153,11 @@ def load_claim_head(conn, target: str, config):
         payload = head["payload_json"]
         if isinstance(payload, str):
             payload = json.loads(payload)
+        author = schedule_author(occurrence.snapshot_json) if occurrence else None
         valid = bool(job and schedule and occurrence and run
                      and occurrence.job_id == job.id
-                     and head["author_entity_type"] == "user"
-                     and head["author_entity_id"] == occurrence.snapshot_json["owner_user_id"]
+                     and head["author_entity_type"] == author.entity_type
+                     and head["author_entity_id"] == author.entity_id
                      and head["target_bot_id"] == occurrence.snapshot_json["bot_id"]
                      and head["idempotency_key"] == f"schedule:{job.id}:occurrence:{occurrence.occurrence_key}"
                      and payload.get("session_id") == occurrence.session_id

@@ -235,6 +235,23 @@ def test_a_cancelled_ordinary_chat_send_gets_one_user_receipt(ledger, monkeypatc
     assert event["summary"] == f"You → {target} · cancelled"
 
 
+def test_a_bot_created_wakeup_is_the_creators_relay_for_the_owner(ledger, monkeypatch):
+    """TASK-1790: the scheduler sends it, the creating bot authors it, the owner sees it."""
+    from llm_bawt.utils.config import config
+
+    monkeypatch.setattr(config, "DEFAULT_USER", f"someone-else-{ledger.tag}", raising=False)
+    creator, target = ledger.bot(), ledger.bot()
+    record, _ = _send(ledger, f"scheduler:{ledger.tag}", target, author=AuthorReference.bot(creator),
+                      producer="schedule",
+                      metadata={"prompt_schedule": {"schedule_id": f"j-{ledger.tag}",
+                                                    "owner_user_id": ledger.user}})
+    (event,) = _events(ledger, record.id)
+    assert event["visibility"] == "user_feed" and event["user_id"] == ledger.user
+    assert event["bot_id"] == target
+    assert event["actor_type"] == "bot" and event["actor_id"] == creator
+    assert event["summary"] == f"{creator} → {target} (scheduled) · queued"
+
+
 def test_competing_multi_row_cancels_never_deadlock_on_the_event_lock(ledger):
     """A holds X's receipt staged while it waits on Y; B cancels Y and commits.
 

@@ -18,7 +18,7 @@ def fixture(monkeypatch):
                            connect_args={"check_same_thread": False})
     with engine.begin() as conn:
         for ddl in [
-            "CREATE TABLE prompt_schedules (job_id TEXT PRIMARY KEY, owner_user_id TEXT)",
+            "CREATE TABLE prompt_schedules (job_id TEXT PRIMARY KEY, owner_user_id TEXT, creator_bot_id TEXT)",
             "CREATE TABLE prompt_occurrences (run_id TEXT, job_id TEXT, scheduled_for TEXT, delivery_id TEXT, session_id TEXT)",
             "CREATE TABLE inter_bot_deliveries (id TEXT, user_message_id TEXT, target_bot_id TEXT, author_entity_type TEXT, author_entity_id TEXT, metadata_json TEXT)",
             "CREATE TABLE messages (id TEXT, bot_id TEXT, role TEXT, session_id TEXT)",
@@ -35,10 +35,11 @@ def fixture(monkeypatch):
 
 def seed(engine, *, key="one", owner="alice", bot="bot", role="user",
          session_owner=None, delivery_owner=None, delivery_type="user",
-         linked=True, occurrence_session=None):
+         linked=True, occurrence_session=None, creator=None):
     mid, sid, did, job = (f"{prefix}-{key}" for prefix in ("m", "s", "d", "job"))
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO prompt_schedules VALUES (:job,:owner)"), {"job": job, "owner": owner})
+        conn.execute(text("INSERT INTO prompt_schedules VALUES (:job,:owner,:creator)"),
+                     {"job": job, "owner": owner, "creator": creator})
         conn.execute(text("INSERT INTO sessions VALUES (:sid,:bot,:owner)"), {"sid": sid, "bot": bot, "owner": session_owner or owner})
         conn.execute(text("INSERT INTO messages VALUES (:mid,:bot,:role,:sid)"), {"mid": mid, "bot": bot, "role": role, "sid": sid})
         conn.execute(text("INSERT INTO inter_bot_deliveries VALUES (:did,:mid,:bot,:type,:owner,:meta)"), {
@@ -86,6 +87,16 @@ def test_owner_bot_role_and_durable_session_boundaries(fixture):
     assert set(result) == {good["id"]}
     assert set(history_scheduler.hydrate_scheduler_for_page(service, "bot", rows, "bob")) == {"m-other-owner"}
     assert history_scheduler.hydrate_scheduler_for_page(service, "bot", [good], "bob") == {}
+
+
+def test_bot_created_wakeup_keeps_its_badge_only_for_its_persisted_creator(fixture):
+    """TASK-1790: a wake-up run is authored by the bot that created it."""
+    engine, service, _ = fixture
+    good = seed(engine, key="wakeup", creator="snark", delivery_type="bot", delivery_owner="snark")
+    rows = [good,
+            seed(engine, key="other-bot-author", creator="snark", delivery_type="bot", delivery_owner="al"),
+            seed(engine, key="no-creator", delivery_type="bot", delivery_owner="snark")]
+    assert set(history_scheduler.hydrate_scheduler_for_page(service, "bot", rows, "alice")) == {good["id"]}
 
 
 def test_forged_message_fields_and_delivery_metadata_do_not_confer_origin(fixture):

@@ -75,12 +75,11 @@ def create_scheduler_tables(engine) -> None:
     _migrate_postgres_jobtype_enum(engine)
     from .prompt_schedule_models import PromptOccurrence, PromptSchedule
     SQLModel.metadata.create_all(engine, tables=[PromptSchedule.__table__, PromptOccurrence.__table__])
-    # Existing installations predate automatic schedule targeting. These are
-    # default-off, additive columns; leave TASK-1197 parameter snapshots intact.
+    # Existing installations predate automatic targeting and wake-up creators.
+    # Additive columns; leave TASK-1197 parameter snapshots intact.
     with engine.begin() as conn:
-        if engine.dialect.name == "postgresql":
-            conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS target_mode VARCHAR NOT NULL DEFAULT 'specific'"))
-            conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS candidate_bot_ids JSON"))
+        from .prompt_schedule_management import upgrade_prompt_schedules
+        upgrade_prompt_schedules(conn, engine.dialect.name)
         # Idempotent upgrade of legacy paused/cancelled rows. Only schedule-owned
         # jobs are touched; maintenance jobs retain their due pointers.
         conn.execute(text("UPDATE scheduled_jobs SET next_run_at = NULL "

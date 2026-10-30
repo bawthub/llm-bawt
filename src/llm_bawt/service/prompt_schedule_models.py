@@ -25,6 +25,9 @@ class PromptSchedule(SQLModel, table=True):
     )
     job_id: str = Field(primary_key=True, foreign_key="scheduled_jobs.id")
     owner_user_id: str = Field(index=True)
+    # Set only by the server at create, from a proven schedule_wakeup identity;
+    # never from input. Its runs are authored by this bot (TASK-1790).
+    creator_bot_id: str | None = None
     name: str = Field(max_length=120)
     description: str = Field(default="", sa_column=Column(Text, nullable=False))
     prompt: str = Field(sa_column=Column(Text, nullable=False))

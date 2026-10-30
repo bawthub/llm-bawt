@@ -13,9 +13,8 @@ from sqlmodel import Session, select
 
 from ..inter_bot_delivery import DeliveryRecord
 from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
-from ..message_authorship import AuthorReference
 from .prompt_capabilities import resolve_prompt_target
-from .prompt_delivery_state import gate_reason, receipt, transition
+from .prompt_delivery_state import gate_reason, receipt, schedule_author, transition
 from .prompt_schedule_models import NONTERMINAL, PromptOccurrence, PromptSchedule
 from .prompt_schedule_store import PromptScheduleStore
 from .scheduler import ScheduledJob, JobRun
@@ -84,6 +83,7 @@ class PromptDeliveryWorker:
     def _enqueue(self, run_id, prepared, dispatcher, now):
         snapshot, session_id, model, job_id, key = prepared
         sender = "scheduler:" + hashlib.sha256(snapshot["owner_user_id"].encode()).hexdigest()
+        author = schedule_author(snapshot)
         idem = f"schedule:{job_id}:occurrence:{key}"
         # Serialize outbox attempts with pause/cancel and other workers.
         # Dispatch takes target -> job -> delivery; this transaction now takes
@@ -106,10 +106,10 @@ class PromptDeliveryWorker:
             found = session.connection().execute(text("""
                 SELECT id FROM inter_bot_deliveries
                 WHERE sender_bot_id=:sender AND target_bot_id=:target
-                  AND author_entity_type='user' AND author_entity_id=:owner
+                  AND author_entity_type=:author_type AND author_entity_id=:author_id
                   AND idempotency_key=:key
             """), {"sender": sender, "target": snapshot["bot_id"],
-                   "owner": AuthorReference.user(snapshot["owner_user_id"]).entity_id,
+                   "author_type": author.entity_type, "author_id": author.entity_id,
                    "key": idem}).scalar_one_or_none()
             if found:
                 record = self._locked_delivery(session, found)
@@ -133,7 +133,7 @@ class PromptDeliveryWorker:
                 record, _ = dispatcher.store.enqueue(
                     sender_bot_id=sender,
                     target_bot_id=snapshot["bot_id"], message=snapshot["prompt"],
-                    author=AuthorReference.user(snapshot["owner_user_id"]),
+                    author=author,
                     idempotency_key=idem,
                     session_policy="continue",
                     payload={
@@ -146,6 +146,8 @@ class PromptDeliveryWorker:
                     metadata={"prompt_schedule": {
                         "schedule_id": job_id, "occurrence_id": run_id,
                         "scheduled_for": snapshot["scheduled_for"],
+                        # The audience user; a bot-created run's author is the bot.
+                        "owner_user_id": snapshot["owner_user_id"],
                     }},
                     producer="schedule", connection=session.connection(),
                     # schedule_held above already waited out any live gate; hold
