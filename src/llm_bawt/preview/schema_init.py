@@ -9,10 +9,10 @@ requires before it serves chat.
 Fails closed, before writing anything, when:
 
 * the connected database is not the one named on the command line;
-* the database already holds runtime history (``messages``, ``memories``,
-  ``sessions``); a seed target is always a fresh database;
-* the database was already seeded (re-seed means a fresh volume);
-* the artifact does not match its manifest or the current allowlist.
+* the database holds any relation at all (already seeded, prior history or
+  leftover rows); a seed target is always a fresh database;
+* the artifact does not match its manifest (sha256, columns, row counts) or
+  the current allowlist.
 
     python -m llm_bawt.preview.schema_init --seed DIR --database NAME
 """
@@ -30,7 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from llm_bawt.preview.seed_allowlist import COPY, SCHEMA_ONLY, column_list
-from llm_bawt.preview.seed_export import MANIFEST, SEED_FORMAT
+from llm_bawt.preview.seed_export import MANIFEST, SEED_FORMAT, _csv_rows
 
 META_TABLE = "preview_seed_meta"
 HISTORY_TABLES = ("messages", "memories", "sessions")
@@ -41,25 +41,42 @@ CREATE TABLE public.{META_TABLE} (
   seed_format integer NOT NULL,
   manifest_sha256 text NOT NULL,
   exported_at timestamptz NOT NULL,
-  -- Rows the schema bootstrap itself wrote into schema-only tables (e.g. the
-  -- System entity profile), per table. The seed audit holds those tables to
-  -- exactly this baseline: nothing from production may appear there.
+  -- Row digest (row_digest_sql) of every schema-only table the schema
+  -- bootstrap itself wrote into (e.g. the System entity profile), taken on a
+  -- database that was empty beforehand. The seed audit holds each schema-only
+  -- table to exactly these rows: nothing from production may appear there.
   bootstrap_rows jsonb NOT NULL,
   loaded_at timestamptz NOT NULL DEFAULT now()
 )
 """
 
+# User relations in a database created from a clean template: none.
+_USER_RELATIONS_SQL = """
+SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+"""
 
-def _bootstrap_rows(cur) -> dict[str, int]:
-    rows: dict[str, int] = {}
+
+def row_digest_sql(table: str) -> str:
+    """SQL returning the md5 of every row of ``public.<table>`` in order, or '' when empty/absent.
+
+    Shared by the loader (baseline) and the seed audit, so both hash rows the same way.
+    query_to_xml defers parsing, so a table the bootstrap did not create is '' rather than an error.
+    """
+    inner = (f"SELECT coalesce(md5(string_agg(r::text, chr(10) ORDER BY r::text)), '''') AS d "
+             f"FROM public.{table} r")
+    return (f"SELECT coalesce((SELECT (xpath('/row/d/text()', query_to_xml('{inner}', false, true, '')))[1]::text "
+            f"WHERE to_regclass('public.{table}') IS NOT NULL), '')")
+
+
+def _bootstrap_rows(cur) -> dict[str, str]:
+    rows: dict[str, str] = {}
     for table in sorted(SCHEMA_ONLY):
-        cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
-        if cur.fetchone()[0] is None:
-            continue
-        cur.execute(f"SELECT count(*) FROM public.{table}")
-        count = cur.fetchone()[0]
-        if count:
-            rows[table] = count
+        cur.execute(row_digest_sql(table))
+        digest = cur.fetchone()[0] or ""
+        if digest:
+            rows[table] = digest
     return rows
 
 
@@ -84,7 +101,20 @@ def verify_artifact(seed: Path) -> tuple[dict, str]:
             raise SeedInitError(f"{table}: seed file missing or linked")
         if hashlib.sha256(path.read_bytes()).hexdigest() != entry.get("sha256"):
             raise SeedInitError(f"{table}: sha256 mismatch")
+        rows = _csv_rows(path)
+        if rows != entry.get("rows"):
+            raise SeedInitError(f"{table}: file has {rows} rows, manifest says {entry.get('rows')!r}")
     return manifest, hashlib.sha256(raw).hexdigest()
+
+
+def _require_empty(engine: Engine, database: str) -> None:
+    """Before any write: the target is the named database and holds no relation at all."""
+    with engine.connect() as conn:
+        current = conn.execute(text("SELECT current_database()")).scalar_one()
+        if current != database:
+            raise SeedInitError(f"connected to {current!r}, expected {database!r}")
+        if conn.execute(text(_USER_RELATIONS_SQL)).scalar_one():
+            raise SeedInitError("database is not empty; a seed target is always a fresh database")
 
 
 def _preflight(engine: Engine, database: str) -> None:
@@ -106,7 +136,7 @@ def load_seed(config, engine: Engine, seed: Path, database: str) -> dict[str, in
     from llm_bawt.schema_bootstrap import bootstrap_full_store
 
     manifest, manifest_sha = verify_artifact(seed)
-    _preflight(engine, database)
+    _require_empty(engine, database)
     bootstrap_full_store(config, engine)
     _preflight(engine, database)  # bootstrap must not have produced history
 

@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from llm_bawt.preview.probes import seed_audit_queries
-from llm_bawt.preview.schema_init import META_TABLE, SeedInitError, load_seed
+from llm_bawt.preview.schema_init import META_TABLE, SeedInitError, _require_empty, load_seed
 from llm_bawt.preview.seed_allowlist import COPY, export_query
 from llm_bawt.preview.seed_export import write_manifest
 from llm_bawt.schema_bootstrap import bootstrap_full_store
@@ -99,6 +99,20 @@ def test_seed_round_trip_then_refuses_reseed(full_store_db, preview_db, tmp_path
             " VALUES ('USER', 'leaked', 'Leaked', now(), now())"))
         failures = [label for label, sql in seed_audit_queries() if conn.execute(text(sql)).scalar_one() != 0]
         assert failures == ["entity_profiles bootstrap rows only"]
-    with pytest.raises(SeedInitError, match="already seeded"):
+        conn.execute(text("DELETE FROM entity_profiles WHERE entity_id = 'leaked'"))
+        assert [label for label, sql in seed_audit_queries() if conn.execute(text(sql)).scalar_one() != 0] == []
+        # Same row count, different contents: a replaced bootstrap row fails too.
+        assert conn.execute(text("UPDATE entity_profiles SET display_name = 'Replaced'")).rowcount >= 1
+        failures = [label for label, sql in seed_audit_queries() if conn.execute(text(sql)).scalar_one() != 0]
+        assert failures == ["entity_profiles bootstrap rows only"]
+    with pytest.raises(SeedInitError, match="not empty"):
         load_seed(config, engine, tmp_path, name)
-    db.reset_shared_engines()
+
+
+def test_non_empty_target_is_refused_before_any_write(preview_db, monkeypatch):
+    name, engine = preview_db
+    monkeypatch.setenv("LLM_BAWT_POSTGRES_DATABASE", name)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE public.leftover (id int)"))
+    with pytest.raises(SeedInitError, match="not empty"):
+        _require_empty(engine, name)

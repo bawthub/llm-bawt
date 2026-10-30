@@ -45,3 +45,11 @@ def test_linked_file_refuses(seed):
     target.symlink_to(real)
     with pytest.raises(SeedInitError, match="linked"):
         verify_artifact(seed)
+
+
+def test_row_count_mismatch_refuses(seed):
+    manifest = json.loads((seed / "manifest.json").read_text())
+    manifest["tables"]["models"]["rows"] = 2
+    (seed / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(SeedInitError, match="rows"):
+        verify_artifact(seed)

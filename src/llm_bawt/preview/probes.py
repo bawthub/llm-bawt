@@ -20,15 +20,18 @@ printing PASS/FAIL lines, exit non-zero on any FAIL:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
+from llm_bawt.preview import topology
+from llm_bawt.preview.schema_init import row_digest_sql
 from llm_bawt.preview.seed_allowlist import (
     BOT_SETTING_KEYS, COPY, GLOBAL_SETTING_KEYS, PRIVATE_BOTS_SQL, SCHEMA_ONLY, SEED_ACTOR,
     Actor, Null,
 )
 
-NETWORK = "llm-bawt-preview"
+NETWORK = topology.NETWORK_NAMES["preview"]
 PROBE_IMAGE = "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 DB_CONTAINER_FILTER = "com.docker.compose.service=preview-postgres"
 ALLOWED_ENV_PREFIXES = ("LLM_BAWT_POSTGRES_", "POSTGRES_", "LLM_BAWT_REDIS_URL", "LLM_BAWT_PREVIEW_", "LLM_BAWT_SERVICE_")
@@ -39,17 +42,17 @@ IMAGE_ENV = frozenset({
     "VIRTUAL_ENV", "HOME",
 })
 ALLOWED_MOUNT_DESTINATIONS = ("/var/lib/postgresql/data", "/data", "/seed", "/run/secrets/")
-# (label, host, port): production surfaces the preview must never reach.
-TARGETS = (
-    ("prod postgres", "10.0.2.32", 5432),
-    ("prod redis", "llm-bawt-redis", 6379),
-    ("prod app", "llm-bawt-app", 8642),
-    ("prod mcp", "llm-bawt-app", 8001),
-    ("claude bridge", "llm-bawt-claude-code-bridge", 8681),
-    ("codex bridge", "llm-bawt-codex-bridge", 8682),
-    ("echo host", "172.18.0.1", 22),
-    ("internet", "1.1.1.1", 443),
-)
+# Install-specific production surfaces outside Compose (the LAN database, the
+# docker host, ...) come from the operator at run time, never from source:
+# ``label=host:port`` entries separated by ``;``.
+TARGETS_ENV = "LLM_BAWT_PREVIEW_PROBE_TARGETS"
+PROJECT_ENV = "COMPOSE_PROJECT_NAME"
+DEFAULT_PROJECT = "llm-bawt"
+# Generic: no route to the internet either.
+INTERNET_TARGET = ("internet", "1.1.1.1", 443)
+SERVICE_LABEL = "com.docker.compose.service"
+PROJECT_LABEL = "com.docker.compose.project"
+PREVIEW_NETWORK_NAMES = frozenset(topology.NETWORK_NAMES.values())
 
 
 def _run(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -61,37 +64,104 @@ def _report(ok: bool, label: str) -> bool:
     return ok
 
 
-def _containers() -> list[dict]:
-    ids = _run("docker", "ps", "-q", "--filter", "label=com.docker.compose.project",
-               "--filter", f"network={NETWORK}").stdout.split()
+def _project() -> str:
+    return os.environ.get(PROJECT_ENV) or DEFAULT_PROJECT
+
+
+def _project_containers() -> list[dict]:
+    """Every container of the Compose project, running or not."""
+    ids = _run("docker", "ps", "-aq", "--filter", f"label={PROJECT_LABEL}={_project()}").stdout.split()
     if not ids:
         return []
     return json.loads(_run("docker", "inspect", *ids).stdout)
 
 
-def inventory() -> bool:
-    containers = _containers()
-    ok = _report(bool(containers), f"preview containers running on {NETWORK}")
+def _service(c: dict) -> str:
+    return (c["Config"].get("Labels") or {}).get(SERVICE_LABEL, "")
+
+
+def _networks(c: dict) -> set[str]:
+    return set((c["NetworkSettings"].get("Networks") or {}))
+
+
+def parse_targets(value: str | None) -> list[tuple[str, str, int]]:
+    """``label=host:port;...`` -> [(label, host, port)]; raises ValueError if malformed."""
+    targets = []
+    for entry in filter(None, (part.strip() for part in (value or "").split(";"))):
+        label, sep, address = entry.partition("=")
+        host, colon, port = address.rpartition(":")
+        if not (sep and colon and label and host and port.isdigit()):
+            raise ValueError(f"malformed probe target {entry!r}")
+        targets.append((label, host, int(port)))
+    return targets
+
+
+def prod_targets(containers: list[dict]) -> list[tuple[str, str, int]]:
+    """Every address and exposed TCP port of the project's non-preview containers."""
+    targets = []
     for c in containers:
-        name = c["Name"].lstrip("/")
-        networks = sorted(c["NetworkSettings"]["Networks"])
-        ok &= _report(networks == [NETWORK], f"{name}: networks {networks}")
-        ports = {k: v for k, v in (c["NetworkSettings"].get("Ports") or {}).items() if v}
-        ok &= _report(not ports, f"{name}: no published ports {ports or ''}")
-        ok &= _report(not c["HostConfig"].get("Privileged"), f"{name}: unprivileged")
-        for m in c["Mounts"]:
-            dest = m["Destination"]
-            allowed = dest.startswith(ALLOWED_MOUNT_DESTINATIONS) and not m["Source"].endswith(".sock")
-            if m["Type"] == "bind" and dest not in ("/seed",) and not dest.startswith("/run/secrets/"):
-                allowed = False
-            if dest == "/seed":
-                allowed &= not m.get("RW", True)
-            ok &= _report(allowed, f"{name}: mount {m['Type']} -> {dest}")
-        env_names = sorted(e.split("=", 1)[0] for e in c["Config"]["Env"])
-        bad = [n for n in env_names if n not in IMAGE_ENV and not n.startswith(ALLOWED_ENV_PREFIXES)]
-        ok &= _report(not bad, f"{name}: env names {env_names}" + (f" unexpected {bad}" if bad else ""))
-        inline = [n for n in env_names if "PASSWORD" in n and not n.endswith("_FILE")]
-        ok &= _report(not inline, f"{name}: no inline password env {inline or ''}")
+        service = _service(c)
+        if topology.is_preview_service(service):
+            continue
+        ports = sorted(int(p.split("/")[0]) for p in (c["Config"].get("ExposedPorts") or {}) if p.endswith("/tcp"))
+        for net in (c["NetworkSettings"].get("Networks") or {}).values():
+            ip = net.get("IPAddress")
+            for port in ports if ip else ():
+                targets.append((f"prod {service}", ip, port))
+    return targets
+
+
+def inventory_findings(containers: list[dict]) -> list[tuple[bool, str]]:
+    """(ok, label) for every preview container and every prod container on a preview network.
+
+    Preview containers are selected by service name, not by network, so a
+    service that drifted off its networks is still inspected.
+    """
+    findings: list[tuple[bool, str]] = []
+    preview = [c for c in containers if topology.is_preview_service(_service(c))]
+    running = {_service(c) for c in preview if c["State"].get("Running")}
+    missing = sorted(topology.REQUIRED_RUNNING - running)
+    findings.append((not missing, f"required preview services running {'missing ' + str(missing) if missing else ''}"))
+    for c in containers:
+        service = _service(c)
+        if topology.is_preview_service(service):
+            continue
+        allowed = {topology.NETWORK_NAMES[k] for k in topology.PROD_JOINERS.get(service, ())}
+        stray = sorted((_networks(c) & PREVIEW_NETWORK_NAMES) - allowed)
+        findings.append((not stray, f"{service}: off preview networks {stray or ''}"))
+    for c in preview:
+        findings.extend(_preview_container_findings(c))
+    return findings
+
+
+def _preview_container_findings(c: dict) -> list[tuple[bool, str]]:
+    name = c["Name"].lstrip("/")
+    expected = {topology.NETWORK_NAMES[k] for k in topology.networks_for(_service(c))}
+    networks = _networks(c)
+    findings = [(networks == expected, f"{name}: networks {sorted(networks)} == {sorted(expected)}")]
+    ports = {k: v for k, v in (c["NetworkSettings"].get("Ports") or {}).items() if v}
+    findings.append((not ports, f"{name}: no published ports {ports or ''}"))
+    findings.append((not c["HostConfig"].get("Privileged"), f"{name}: unprivileged"))
+    for m in c["Mounts"]:
+        dest = m["Destination"]
+        allowed = dest.startswith(ALLOWED_MOUNT_DESTINATIONS) and not m["Source"].endswith(".sock")
+        if m["Type"] == "bind" and dest != "/seed" and not dest.startswith("/run/secrets/"):
+            allowed = False
+        if dest == "/seed":
+            allowed &= not m.get("RW", True)
+        findings.append((allowed, f"{name}: mount {m['Type']} -> {dest}"))
+    env_names = sorted(e.split("=", 1)[0] for e in c["Config"]["Env"])
+    bad = [n for n in env_names if n not in IMAGE_ENV and not n.startswith(ALLOWED_ENV_PREFIXES)]
+    findings.append((not bad, f"{name}: env names {env_names}" + (f" unexpected {bad}" if bad else "")))
+    inline = [n for n in env_names if "PASSWORD" in n and not n.endswith("_FILE")]
+    findings.append((not inline, f"{name}: no inline password env {inline or ''}"))
+    return findings
+
+
+def inventory() -> bool:
+    ok = True
+    for passed, label in inventory_findings(_project_containers()):
+        ok &= _report(passed, label)
     return ok
 
 
@@ -99,13 +169,11 @@ def seed_audit_queries() -> list[tuple[str, str]]:
     """(label, SQL returning a count that must be 0), derived from the allowlist."""
     # Schema-only tables hold exactly the rows the schema bootstrap wrote
     # (recorded by schema_init in preview_seed_meta.bootstrap_rows), never any
-    # production row. A table the bootstrap did not create counts as 0;
-    # query_to_xml defers parsing so a missing relation is not an error.
+    # production row: the row digest must equal the recorded one ('' when the
+    # bootstrap wrote none), so a replaced row fails as surely as an added one.
     checks = [(f"{t} bootstrap rows only",
-               f"SELECT coalesce((SELECT (xpath('/row/c/text()', query_to_xml("
-               f"'SELECT count(*) AS c FROM public.{t}', false, true, '')))[1]::text::int "
-               f"WHERE to_regclass('public.{t}') IS NOT NULL), 0)"
-               f" - coalesce((SELECT (bootstrap_rows->>'{t}')::int FROM public.preview_seed_meta), 0)")
+               f"SELECT CASE WHEN ({row_digest_sql(t)}) = coalesce("
+               f"(SELECT bootstrap_rows->>'{t}' FROM public.preview_seed_meta), '') THEN 0 ELSE 1 END")
               for t in sorted(SCHEMA_ONLY)]
     for table, rule in COPY.items():
         for column, treatment in rule.columns.items():
@@ -142,8 +210,14 @@ def seed() -> bool:
 
 
 def network() -> bool:
-    ok = True
-    for label, host, port in TARGETS:
+    try:
+        extra = parse_targets(os.environ.get(TARGETS_ENV))
+    except ValueError as exc:
+        return _report(False, f"network: {TARGETS_ENV}: {exc}")
+    ok = _report(bool(extra), f"network: {TARGETS_ENV} names the install's non-Compose prod surfaces")
+    found = prod_targets(_project_containers())
+    ok &= _report(bool(found), f"network: production containers of project {_project()!r} found")
+    for label, host, port in [*found, *extra, INTERNET_TARGET]:
         # A throwaway container on the preview network: same reachability as
         # any preview service, without exec into one of them.
         probe = _run("docker", "run", "--rm", "--network", NETWORK, PROBE_IMAGE,

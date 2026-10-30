@@ -18,6 +18,8 @@ from pathlib import Path
 
 import yaml
 
+from llm_bawt.preview import topology
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
 SERVICES = COMPOSE["services"]
@@ -36,24 +38,27 @@ def _networks(svc) -> set[str]:
     return set(networks if isinstance(networks, list) else networks.keys())
 
 
-# Preview-side networks and who may join them. The credential gateway bridges
-# the prod app (broker side) and the preview bridge (consumer side) and is on
-# nothing else: never `default` (prod Redis) and never `preview`.
-PREVIEW_NETWORKS = {"preview", "preview-broker-net", "preview-credential-net"}
-SERVICE_NETWORKS = {"preview-credential-gateway": {"preview-broker-net", "preview-credential-net"}}
-# Non-preview services allowed onto a preview-side network.
-PROD_JOINERS = {"app": {"preview-broker-net"}}
+PREVIEW_NETWORKS = set(topology.NETWORK_NAMES)
 
 
-def test_preview_networks_are_internal():
-    for key in PREVIEW_NETWORKS & set(COMPOSE.get("networks", {})):
-        assert COMPOSE["networks"][key]["internal"] is True, key
-    assert "preview" in COMPOSE["networks"]
+def test_preview_networks_are_internal_with_fixed_names():
+    declared = COMPOSE.get("networks", {})
+    assert "preview" in declared
+    for key in PREVIEW_NETWORKS & set(declared):
+        assert declared[key]["internal"] is True, key
+        # The live probe matches containers by these names.
+        assert declared[key]["name"] == topology.NETWORK_NAMES[key], key
+
+
+def test_preview_profile_and_service_prefix_coincide():
+    # The probe finds preview containers by the prefix; the profile and the
+    # prefix must select the same services.
+    assert set(PREVIEW) == {n for n in SERVICES if topology.is_preview_service(n)}
 
 
 def test_preview_services_join_only_their_networks():
     for name, svc in PREVIEW.items():
-        assert _networks(svc) == SERVICE_NETWORKS.get(name, {"preview"}), name
+        assert _networks(svc) == topology.networks_for(name), name
 
 
 def test_prod_services_stay_off_preview_networks():
@@ -61,7 +66,7 @@ def test_prod_services_stay_off_preview_networks():
         if name in PREVIEW:
             continue
         joined = _networks(svc) & PREVIEW_NETWORKS
-        assert joined <= PROD_JOINERS.get(name, set()), f"{name} joins {joined}"
+        assert joined <= topology.PROD_JOINERS.get(name, set()), f"{name} joins {joined}"
 
 
 def test_no_ports_privilege_or_host_namespaces():
