@@ -391,6 +391,9 @@ services:
     volumes:
       - ./.logs:/app/.logs
       - ${HOME}/dev:/home/bridge/dev
+      # TASK-1275: identical host root for portable Git worktrees, without
+      # changing the existing Codex cwd, config or session mounts.
+      - ${HOME}/dev:${HOME}/dev
       # TASK-636: auth.json bind mount REMOVED — materialized from the app's
       # broker endpoint at startup (GET /v1/providers/openai_chatgpt/bundle).
       # config.toml + sessions stay mounted (not credential material).
