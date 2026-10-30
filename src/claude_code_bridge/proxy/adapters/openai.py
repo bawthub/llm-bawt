@@ -18,7 +18,7 @@ from typing import ClassVar
 
 import httpx
 
-from agent_bridge import bridge_token
+from agent_bridge import bridge_token, preview_credentials
 
 from .base import ProviderAdapter
 
@@ -35,6 +35,8 @@ class OpenAIAdapter(ProviderAdapter):
 
     @staticmethod
     def _fetch_broker_key() -> str:
+        if preview_credentials.enabled():
+            raise RuntimeError("OpenAI API keys are not served in preview")
         api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
         if not api_url:
             raise RuntimeError(

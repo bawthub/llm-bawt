@@ -22,7 +22,7 @@ from typing import ClassVar
 
 import httpx
 
-from agent_bridge import bridge_token
+from agent_bridge import bridge_token, preview_credentials
 
 from .base import ProviderAdapter
 from .. import retry as retry_mod
@@ -168,7 +168,16 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
         """Ask the app for the current ChatGPT access token.
 
         Returns ``(token, account_id, expires_at)``.
+
+        Preview role: only the preview credential gateway, never ``force``;
+        any refusal raises with no fallback.
         """
+        if preview_credentials.enabled():
+            try:
+                cred = preview_credentials.fetch("openai_chatgpt")
+            except preview_credentials.PreviewCredentialError as e:
+                raise RuntimeError(f"Preview ChatGPT credential refused: {e}") from e
+            return cred.access_token, cred.account_id, cred.expires_at_s
         api_url = (os.environ.get("LLM_BAWT_API_URL") or "").rstrip("/")
         if not api_url:
             raise RuntimeError(
