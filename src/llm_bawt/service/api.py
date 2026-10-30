@@ -87,6 +87,15 @@ async def lifespan(app):
     config.install_model_catalog(normalized_catalog)
     log.info("Loaded %d normalized model endpoints", len(normalized_catalog))
 
+    # Production-only Preview authorization. The approved service configuration
+    # selects a DB endpoint/run and a gateway-only export volume; no activation
+    # fields withdraw an old grant. Never run this in the isolated Preview app.
+    from ..preview.credential_publisher import activate, renew_forever
+
+    preview_credential_file = await asyncio.to_thread(
+        activate, model_engine, normalized_catalog,
+    )
+
     # Ensure media_generations table exists
     try:
         get_media_generation_store(config)
@@ -122,6 +131,13 @@ async def lifespan(app):
 
     service = BackgroundService(config)
     set_service(service)
+    if preview_credential_file is not None:
+        import os
+
+        service._preview_credential_task = asyncio.create_task(
+            renew_forever(model_engine, normalized_catalog, preview_credential_file, dict(os.environ)),
+            name="preview-credential-renewal",
+        )
     service.start_worker()
     # One committed ledger feeds both the bounded read API and Redis outbox.
     # Bootstrap off-loop; a schema outage keeps history visibly unavailable.
@@ -413,6 +429,7 @@ BACKGROUND_TASK_ATTRIBUTES = (
     "_ops_receipt_task",
     "_quiesce_exit_task",
     "_gate_change_task",
+    "_preview_credential_task",
     "_claude_refresh_task",
     "_codex_refresh_task",
 )
