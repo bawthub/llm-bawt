@@ -85,23 +85,53 @@ def test_an_unsteerable_run_lets_nothing_pass(gated):
     assert deliveries.claim_next(bot, claim_owner="worker", steer_capable=False) is None
     assert _state(deliveries, held.id)["last_error"] is None
 
-@pytest.mark.integration
-def test_a_sender_never_passes_its_own_earlier_waiting_row(gated):
-    """Codex DESIGN r1 B1: one author's order is a causal boundary."""
+def _from_same_sender(gated, held, bot, message):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
 
-    bot = gated.bot()
-    deliveries, held = _enqueue(gated, bot, "A: wait")
-    _wait_for_turn_end(deliveries, held)
-    later, _ = InterBotDeliveryStore(gated.store.config), None
+    deliveries = InterBotDeliveryStore(gated.store.config)
     with deliveries.engine.connect() as conn:
         sender = conn.execute(sa_text(
             "SELECT sender_bot_id FROM inter_bot_deliveries WHERE id=:id"), {"id": held.id}).scalar_one()
-    same, _ = later.enqueue(
-        sender_bot_id=sender, target_bot_id=bot, message="B: same sender",
-        payload={"messages": [{"role": "user", "content": "B"}], "bot_id": bot, "user": "nick", "stream": True},
+    record, _ = deliveries.enqueue(
+        sender_bot_id=sender, target_bot_id=bot, message=message,
+        payload={"messages": [{"role": "user", "content": message}], "bot_id": bot, "user": "nick", "stream": True},
     )
-    _, other = _enqueue(gated, bot, "C: other sender")
+    return record
+
+
+@pytest.mark.integration
+def test_a_sender_steers_past_its_own_earlier_waiting_row(gated):
+    """TASK-1803: one idle-only broadcast must not hold its sender's steers
+    for the whole running turn (the 10-30 Nova incident)."""
+    bot = gated.bot()
+    deliveries, held = _enqueue(gated, bot, "A: idle-only broadcast")
+    _wait_for_turn_end(deliveries, held)
+    first = _from_same_sender(gated, held, bot, "B: hold that push")
+    second = _from_same_sender(gated, held, bot, "C: rework spec")
+    turn = _open(gated.store, bot)
+
+    claimed = _claim(deliveries, bot)
+    assert claimed is not None and claimed.id == first.id
+    assert claimed.status == "STEERING" and claimed.target_turn_id == turn
+    assert _state(deliveries, held.id)["status"] == "QUEUED"
+    # Steers keep their own order: C waits for B to settle, never jumps it.
+    assert _claim(deliveries, bot) is None
+    assert _state(deliveries, second.id)["attempt_count"] == 0
+
+
+@pytest.mark.integration
+def test_a_sender_never_passes_its_own_earlier_non_waiting_row(gated):
+    """Codex TASK-1758 DESIGN r1 B1 still holds for every other earlier row:
+    a steer never passes its author's earlier reset (a turn of its own)."""
+    bot = gated.bot()
+    deliveries, held = _enqueue(gated, bot, "A: wait")
+    _wait_for_turn_end(deliveries, held)
+    reset = _from_same_sender(gated, held, bot, "B: reset first")
+    with deliveries.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET session_policy='reset_without_history'"
+                             " WHERE id=:id"), {"id": reset.id})
+    same = _from_same_sender(gated, held, bot, "C: same sender")
+    _, other = _enqueue(gated, bot, "D: other sender")
     _open(gated.store, bot)
 
     claimed = _claim(deliveries, bot)

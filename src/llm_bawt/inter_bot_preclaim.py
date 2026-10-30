@@ -228,9 +228,15 @@ def load_steer_jumper(conn, held_head, config):
     Wait-for-turn-end rows never pass each other: they keep FIFO order. Only
     plain ready ``continue`` rows qualify (a prompt-schedule row or a reset is
     a turn of its own); the caller runs every claim check on the result.
-    It never passes an earlier waiting row of its own author (a sender's
-    order holds), and no row passes while a steer or an unaccepted dispatch
-    is in flight, so one pass happens at a time.
+    A steer also passes its own author's earlier wait-for-turn-end rows
+    (TASK-1803): a sender that queued a message for after the turn and then
+    asks to steer wants the steer now; holding it made one idle-only
+    broadcast silence that sender's every steer for a whole running turn.
+    This is a deliberate priority choice, revising the TASK-1758 same-author
+    fence (Codex DESIGN r1 B1). That fence still holds for the author's other
+    earlier rows (a reset, a scheduled prompt, a delayed steer), and no row
+    passes while a steer or an unaccepted dispatch is in flight, so one pass
+    happens at a time.
     """
     candidate = conn.execute(text(f"""
         SELECT d.* FROM inter_bot_deliveries d
@@ -239,11 +245,13 @@ def load_steer_jumper(conn, held_head, config):
           AND COALESCE(d.session_policy, 'continue') = 'continue'
           AND d.metadata_json->'prompt_schedule' IS NULL
           AND COALESCE(d.payload_json->>'prefer_steer', 'true') <> 'false'
-          -- Causal boundary: never pass an earlier waiting row of the same author.
+          -- Causal boundary: never pass an earlier row of the same author,
+          -- except its wait-for-turn-end rows (TASK-1803).
           AND NOT EXISTS (
               SELECT 1 FROM inter_bot_deliveries w
               WHERE w.target_bot_id=d.target_bot_id AND w.lane='normal'
                 AND w.status='QUEUED' AND w.ordinal < d.ordinal
+                AND COALESCE(w.payload_json->>'prefer_steer', 'true') <> 'false'
                 AND w.sender_bot_id = d.sender_bot_id
                 AND w.author_entity_type IS NOT DISTINCT FROM d.author_entity_type
                 AND w.author_entity_id IS NOT DISTINCT FROM d.author_entity_id
