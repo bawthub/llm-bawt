@@ -734,6 +734,7 @@ async def get_messages(
     session_id: str | None = None,
     summaries_only: bool = False,
     exclude_summarized: bool = False,
+    user_id: str | None = None,
 ) -> list[dict]:
     """Get messages for building context windows.
 
@@ -744,6 +745,9 @@ async def get_messages(
     ``exclude_summarized`` drops already-summarized bubbles from a session-scoped
     read so raw and summary rows stay disjoint (no double-loading).
     """
+    # TASK-1774: ``user_id`` limits the read to that user's sessions; request
+    # context assembly always passes it. (Kept out of the docstring: it is the
+    # tool description and counts against the catalog token budget.)
     logger.debug(
         "MCP tool invoked: tools/get_messages bot_id=%s session_id=%s summaries_only=%s excl_summ=%s",
         bot_id, session_id, summaries_only, exclude_summarized,
@@ -752,7 +756,7 @@ async def get_messages(
     return for_caller(await storage.get_messages(
         bot_id=bot_id, since_seconds=since_seconds, limit=limit,
         session_id=session_id, summaries_only=summaries_only,
-        exclude_summarized=exclude_summarized,
+        exclude_summarized=exclude_summarized, user_id=user_id,
     ))
 
 

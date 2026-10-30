@@ -273,6 +273,7 @@ class MemoryClient(
         session_id: str | None = None,
         summaries_only: bool = False,
         exclude_summarized: bool = False,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get conversation messages with optional filtering.
 
@@ -285,6 +286,9 @@ class MemoryClient(
                 transcript. When None, existing behaviour is unchanged.
             summaries_only: TASK-284 step 12 — return only the rolling summary
                 husks (continuity), no raw bubbles.
+            user_id: TASK-1774 — limit the read to this user's sessions. It is
+                passed explicitly (not taken from ``self.user_id``) because
+                tool and route readers share this client.
 
         Returns:
             List of message dicts with role, content, timestamp, session_id.
@@ -298,6 +302,7 @@ class MemoryClient(
                     "limit": limit, "session_id": session_id,
                     "summaries_only": summaries_only,
                     "exclude_summarized": exclude_summarized,
+                    "user_id": user_id,
                 },
             )
             # Apply timestamp filtering (server doesn't support since/until yet)
@@ -314,7 +319,7 @@ class MemoryClient(
             return result
         storage = self._get_storage()
         # Use storage API directly (async) via helper
-        messages = _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit, session_id=session_id, summaries_only=summaries_only, exclude_summarized=exclude_summarized))
+        messages = _run_async(storage.get_messages(bot_id=self.bot_id, since_seconds=since_seconds, limit=limit, session_id=session_id, summaries_only=summaries_only, exclude_summarized=exclude_summarized, user_id=user_id))
 
         # Apply timestamp filtering if specified (post-filter for now)
         if since is not None or until is not None:

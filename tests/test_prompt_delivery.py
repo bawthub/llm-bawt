@@ -547,10 +547,17 @@ def test_automation_history_excludes_global_summaries_and_fails_closed():
         Message(role="summary", content="Own summary", session_id="automation"),
     ])
     history._db_backend = SimpleNamespace(load_session_scoped=loader)
+    history.user_id = None
     history.load_history()
     loader.assert_not_called()
     assert history.messages == []
+    # TASK-1774: an ownerless automation read is refused before any query.
+    with pytest.raises(ValueError, match="requires its owner"):
+        history.load_history(session_id="automation")
+    loader.assert_not_called()
+    history.user_id = OWNER
     history.load_history(session_id="automation")
+    assert loader.call_args.kwargs["user_id"] == OWNER
     assert [message.content for message in history.messages] == ["Automation only", "Own summary"]
     loader.side_effect = RuntimeError("scoped read failed")
     with pytest.raises(RuntimeError, match="scoped read"):

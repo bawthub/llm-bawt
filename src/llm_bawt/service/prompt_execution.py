@@ -20,10 +20,15 @@ class PromptHistoryManager(HistoryManager):
         if session_id is None:
             # Construction must not load the personal conversation at all.
             return
+        if not self.user_id:
+            # TASK-1774: an ownerless read would span every user's threads.
+            raise ValueError("Automation scoped history requires its owner")
         loader = getattr(self._db_backend, "load_session_scoped", None)
         if not callable(loader):
             raise ValueError("Automation requires persistent scoped history")
-        messages = loader(since_minutes=since_minutes, session_id=session_id)
+        messages = loader(
+            since_minutes=since_minutes, session_id=session_id, user_id=self.user_id,
+        )
         if messages is None:
             raise ValueError("Automation scoped history is unavailable")
         # Existing thread loaders intentionally include global rolling summaries
@@ -45,6 +50,7 @@ class PromptLLMBawt(BoundAgentLLMBawt):
         self.history_manager = PromptHistoryManager(
             client=self.client, config=self.config, bot_id=self.bot_id,
             settings_getter=self._resolve_setting,
+            user_id=self.user_id,
             db_backend=PostgreSQLShortTermManager(
                 self.config, bot_id=self.bot_id, user_id=self.user_id,
             ),

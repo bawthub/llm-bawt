@@ -21,6 +21,7 @@ from typing import Any, TYPE_CHECKING
 
 from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
 from llm_bawt.memory.embeddings import generate_embedding
+from llm_bawt.memory.short_term_message_reads import history_owner_clause
 from llm_bawt.message_authorship import AuthorReference, normalize_author
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.db import get_shared_engine
@@ -565,6 +566,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         session_id: str | None = None,
         summaries_only: bool = False,
         exclude_summarized: bool = False,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get messages for building a context window.
 
@@ -591,12 +593,17 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         session-scoped v2 read composes this with the active thread's raw bubbles
         (``session_id=...``) to reproduce the legacy summary-aware view for a
         single selected thread. Cheap: it never pulls cross-session raw rows.
+
+        TASK-1774: ``user_id`` limits every mode to that user's sessions. A
+        bot's partition holds all of its users' conversations, so context
+        assembly for a request must pass it; ``None`` keeps the bot-wide read.
         """
         if summaries_only:
             return await asyncio.to_thread(
                 self._get_summary_husks,
                 bot_id,
                 limit=limit,
+                user_id=user_id,
             )
         if session_id is not None:
             return await asyncio.to_thread(
@@ -606,6 +613,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 limit=limit,
                 session_id=session_id,
                 exclude_summarized=exclude_summarized,
+                user_id=user_id,
             )
         if raw:
             return await asyncio.to_thread(
@@ -613,13 +621,16 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 bot_id,
                 since_seconds=since_seconds,
                 limit=limit,
+                user_id=user_id,
             )
 
         manager = self.get_short_term_manager(bot_id)
 
         try:
             def load_and_hydrate() -> list[dict[str, Any]]:
-                messages = manager.get_messages(since_minutes=since_seconds)
+                messages = manager.get_messages(
+                    since_minutes=since_seconds, user_id=user_id,
+                )
                 if limit is not None and limit >= 0:
                     messages = messages[-limit:]
 
@@ -650,6 +661,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         limit: int | None = None,
         session_id: str | None = None,
         exclude_summarized: bool = False,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Direct-table read of real message bubbles.
 
@@ -680,6 +692,8 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         if since_seconds is not None and since_seconds >= 0:
             params["cutoff"] = time.time() - since_seconds
             clauses.append("timestamp >= :cutoff")
+        if user_id is not None:  # TASK-1774: only this user's sessions
+            clauses.append(history_owner_clause(params, bot_id=bot_id, user_id=user_id))
         where = " AND ".join(clauses)
         sql = f"""
             SELECT id, role, content, timestamp, session_id,
@@ -714,6 +728,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         self,
         bot_id: str = "default",
         limit: int | None = None,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Direct-table read of the ``role='summary'`` continuity husks only.
 
@@ -725,16 +740,20 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         from sqlalchemy import text
 
         backend = self._get_backend(bot_id)
+        clauses = ["role = 'summary'"]
+        params: dict[str, Any] = {}
+        if user_id is not None:  # TASK-1774: only this user's summaries
+            clauses.append(history_owner_clause(params, bot_id=bot_id, user_id=user_id))
         sql = f"""
             SELECT id, role, content, timestamp, session_id,
                    author_entity_type, author_entity_id
             FROM {backend._messages_table_name}
-            WHERE role = 'summary'
+            WHERE {" AND ".join(clauses)}
             ORDER BY timestamp ASC
         """
         try:
             with backend.engine.connect() as conn:
-                rows = conn.execute(text(sql)).fetchall()
+                rows = conn.execute(text(sql), params).fetchall()
             out = [
                 {
                     "id": r.id,

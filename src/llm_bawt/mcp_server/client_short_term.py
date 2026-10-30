@@ -48,11 +48,16 @@ class _MCPShortTermManager:
     def get_messages(
         self,
         since_minutes: int | None = None,
+        *,
+        user_id: str | None = None,
     ) -> list:
         # NOTE: despite name, since_minutes is seconds for backward compatibility.
+        # ``user_id`` (TASK-1774): only that user's sessions.
         from llm_bawt.models.message import Message
 
-        rows = self._memory_client.get_messages(since_seconds=since_minutes)
+        rows = self._memory_client.get_messages(
+            since_seconds=since_minutes, user_id=user_id,
+        )
         return [
             Message(
                 role=r.get("role", ""),
@@ -67,7 +72,11 @@ class _MCPShortTermManager:
         ]
 
     def load_session_scoped(
-        self, since_minutes: int | None = None, session_id: str | None = None
+        self,
+        since_minutes: int | None = None,
+        session_id: str | None = None,
+        *,
+        user_id: str | None = None,
     ) -> list | None:
         """Session-scoped history read (TASK-284 step 12 / TASK-251).
 
@@ -84,6 +93,9 @@ class _MCPShortTermManager:
         Returns a chronologically-ordered ``list[Message]``, or ``None`` when
         no thread can be resolved (the caller falls back to the continuous
         load — never a silent empty context).
+
+        ``user_id`` (TASK-1774) limits the thread and the summaries to that
+        user's sessions; another user's session id yields no raw rows.
         """
         from llm_bawt.models.message import Message
 
@@ -95,9 +107,11 @@ class _MCPShortTermManager:
 
         raw_rows = self._memory_client.get_messages(
             session_id=session_id, since_seconds=since_minutes,
-            exclude_summarized=True,
+            exclude_summarized=True, user_id=user_id,
         )
-        summary_rows = self._memory_client.get_messages(summaries_only=True)
+        summary_rows = self._memory_client.get_messages(
+            summaries_only=True, user_id=user_id,
+        )
 
         merged = [
             Message(

@@ -262,7 +262,9 @@ async def test_catalog_token_budgets():
     # mutually exclusive timings, timezone, task_id, label, idempotency_key,
     # schedule_id): 16,723 (+357). One durable tool replaces session-only
     # CronCreate timers and hand-built /v1/prompt-schedules curls.
-    assert total <= 16723, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1774: messages_get user_id (context reads scoped to one user's
+    # sessions; a bot's partition holds every user's history): 16,744 (+21).
+    assert total <= 16744, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

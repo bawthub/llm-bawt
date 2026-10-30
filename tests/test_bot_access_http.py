@@ -69,7 +69,8 @@ def test_service_client_signed_http_roundtrip_and_private_other_denial(monkeypat
                                  MEMORY_MIN_RELEVANCE=0.0)
         own.config = config
         history = HistoryManager(SimpleNamespace(), config,
-                                 db_backend=own.get_short_term_manager(), bot_id="private_fixture")
+                                 db_backend=own.get_short_term_manager(), bot_id="private_fixture",
+                                 user_id="user_a")
         history.load_history()
         payload = history.build_context_payload(delivery="inline", max_tokens=0)
         assert [m.content for m in payload.regular_messages] == ["private synthetic history"]

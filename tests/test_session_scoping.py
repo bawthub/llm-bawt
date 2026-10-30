@@ -39,7 +39,8 @@ def scoped_env(private_app_pg):
     Layout built once per class:
       thread_a: user/assistant pair  ("alpha" turns)
       thread_b: user/assistant pair  ("beta" turns)   <- left ACTIVE
-      one summary row (continuous, bot-wide)
+      one summary row (continuous across this user's threads)
+      other_thread: ANOTHER user's pair + summary on the same bot (TASK-1774)
     """
     from sqlalchemy import text
     from tests.pg_isolation import require_test_db_config
@@ -67,6 +68,13 @@ def scoped_env(private_app_pg):
     pg.add_message(role="assistant", content="beta answer", session_id=thread_b)
     # A continuous rolling summary (summaries are bot-wide, provenance only).
     pg.add_message(role="summary", content="rolling summary husk", session_id=thread_a)
+    # TASK-1774: a second user of the same bot. Their rows share the bot's
+    # partition and must never reach the first user's context.
+    other_user = "_t1774_other_user"
+    other_thread = direct.get_or_create_active_session(bot_id=bot, user_id=other_user)
+    pg.add_message(role="user", content="gamma secret question", session_id=other_thread)
+    pg.add_message(role="assistant", content="gamma secret answer", session_id=other_thread)
+    pg.add_message(role="summary", content="gamma secret summary", session_id=other_thread)
 
     env = {
         "bot": bot,
@@ -78,6 +86,8 @@ def scoped_env(private_app_pg):
         "direct": direct,
         "thread_a": thread_a,
         "thread_b": thread_b,
+        "other_user": other_user,
+        "other_thread": other_thread,
     }
     yield env
 
@@ -150,7 +160,7 @@ class TestScopedPersistenceProofs:
 class TestScopedContextProofs:
     """Proofs 3 & 4 — context pool scoping through HistoryManager."""
 
-    def _history_manager(self, env):
+    def _history_manager(self, env, *, manager=None, user=None):
         from llm_bawt.utils.history import HistoryManager
 
         class _NullClient:  # console shim for file-fallback error paths
@@ -159,8 +169,9 @@ class TestScopedContextProofs:
         return HistoryManager(
             client=_NullClient(),
             config=env["config"],
-            db_backend=env["manager"],
+            db_backend=manager or env["manager"],
             bot_id=env["bot"],
+            user_id=user or env["user"],
         )
 
     def test_proof3_scoped_load_is_thread_raw_plus_summaries(self, scoped_env):
@@ -176,8 +187,55 @@ class TestScopedContextProofs:
             f"{[(m.role, m.content) for m in raw]}"
         )
         assert any("alpha" in (m.content or "") for m in raw)
-        # Rolling summaries ride along (continuity — bot-wide by design).
+        # Rolling summaries ride along (continuity across this user's threads).
         assert summaries, "rolling summaries missing from scoped pool"
+
+    @pytest.mark.parametrize("manager_key", ["manager", "direct"])
+    def test_task1774_continuous_load_is_one_users_history(self, scoped_env, manager_key):
+        """Two users of one bot: each continuous pool holds only their own rows
+        (raw and summaries), through the MCP adapter and the direct manager."""
+        e = scoped_env
+        hm = self._history_manager(e, manager=e[manager_key])
+        hm.load_history()
+        joined = "\n".join(m.content or "" for m in hm.messages)
+        assert "alpha question" in joined and "rolling summary husk" in joined
+        assert "gamma secret" not in joined, (
+            f"another user's history leaked into the context: {joined!r}"
+        )
+
+        other = self._history_manager(e, manager=e[manager_key], user=e["other_user"])
+        other.load_history()
+        contents = {m.content for m in other.messages}
+        assert contents == {
+            "gamma secret question", "gamma secret answer", "gamma secret summary",
+        }
+
+    @pytest.mark.parametrize("manager_key", ["manager", "direct"])
+    def test_task1774_scoped_load_rejects_another_users_thread(self, scoped_env, manager_key):
+        """Opening another user's session id yields none of its rows, and the
+        rolling summaries are the caller's own."""
+        e = scoped_env
+        hm = self._history_manager(e, manager=e[manager_key])
+        hm.load_history(session_id=e["other_thread"])
+        joined = "\n".join(m.content or "" for m in hm.messages)
+        assert "gamma secret" not in joined
+        assert "rolling summary husk" in joined
+
+    def test_task1774_userless_load_fails_closed_and_warns(self, scoped_env, caplog):
+        from llm_bawt.utils.history import HistoryManager
+
+        e = scoped_env
+        hm = HistoryManager(
+            client=object(), config=e["config"], db_backend=e["manager"], bot_id=e["bot"],
+        )
+        hm.messages = ["stale"]
+        with caplog.at_level("WARNING", logger="llm_bawt.utils.history"):
+            hm.load_history()
+        assert hm.messages == []
+        assert any(
+            "History load refused" in r.getMessage() and e["bot"] in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_proof4_default_load_is_continuous_across_threads(self, scoped_env):
         """THE regression guard: no session_id -> continuous pool."""

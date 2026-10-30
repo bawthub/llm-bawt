@@ -90,7 +90,7 @@ def test_cold_history_read_constructs_manager_without_schema_ddl(monkeypatch) ->
         def __init__(self, *, config, bot_id, provision_schema=True):
             provision_values.append(provision_schema)
 
-        def get_messages(self, since_minutes=None):
+        def get_messages(self, since_minutes=None, *, user_id=None):
             worker_threads.append(threading.get_ident())
             return []
 

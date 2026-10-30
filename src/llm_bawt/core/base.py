@@ -138,6 +138,7 @@ class BaseLLMBawt(OrchestratorInitializationMixin, PromptSectionsMixin, ABC):
             db_backend=self.memory.get_short_term_manager() if self.memory else None,
             bot_id=self.bot_id,
             settings_getter=self._resolve_setting,
+            user_id=self.user_id,
         )
         self.load_history()
     

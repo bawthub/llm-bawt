@@ -263,6 +263,7 @@ class ServiceLLMBawt(BaseLLMBawt):
             db_backend=db_backend,
             bot_id=self.bot_id,
             settings_getter=self._resolve_setting,
+            user_id=self.user_id,
         )
         self.load_history()
 

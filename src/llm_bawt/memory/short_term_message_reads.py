@@ -14,11 +14,32 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 
+def history_owner_clause(params: dict, *, bot_id: str, user_id: str) -> str:
+    """SQL predicate limiting a ``messages_p_<bot>`` read to one user (TASK-1774).
+
+    A bot's partition holds every user's conversations; only the durable
+    ``sessions`` row records whose thread a message belongs to. Context reads
+    for a request must carry this predicate, or one user's history (raw turns
+    and rolling summaries) is served to another. Adds its bind parameters to
+    ``params`` and returns the clause.
+    """
+    params["owner_bot"] = bot_id
+    params["owner_user"] = user_id
+    return (
+        "session_id IN (SELECT id FROM sessions"
+        " WHERE bot_id = :owner_bot AND user_id = :owner_user)"
+    )
+
+
 class ShortTermMessageReadsMixin:
     """Message reads for ``PostgreSQLShortTermManager``."""
 
     def load_session_scoped(
-        self, since_minutes: int | None = None, session_id: str | None = None
+        self,
+        since_minutes: int | None = None,
+        session_id: str | None = None,
+        *,
+        user_id: str | None = None,
     ) -> list | None:
         """Session-scoped history read (TASK-251) — direct-manager twin of the
         MCP adapter's ``load_session_scoped`` so embedded mode (no MCP server)
@@ -28,11 +49,16 @@ class ShortTermMessageReadsMixin:
         composed with the bot's rolling summary husks, chronological. When
         ``session_id`` is None resolves the active thread; returns None when
         no thread can be resolved (caller falls back to the continuous load).
+
+        ``user_id`` (TASK-1774, default: this manager's user) scopes both the
+        thread and the summaries to that user's sessions, so a session id
+        belonging to someone else yields no rows.
         """
         from ..models.message import Message
 
+        owner = user_id if user_id is not None else self.user_id
         if not session_id:
-            active = self.get_active_session(bot_id=self.bot_id, user_id=self.user_id)
+            active = self.get_active_session(bot_id=self.bot_id, user_id=owner)
             if not active or not active.get("id"):
                 return None
             session_id = active["id"]
@@ -47,6 +73,15 @@ class ShortTermMessageReadsMixin:
             # NOTE: legacy naming — value is seconds (matches get_messages).
             params["cutoff"] = time.time() - since_minutes
             raw_clauses.append("timestamp >= :cutoff")
+        summary_params: dict = {}
+        summary_clauses = ["role = 'summary'"]
+        if owner is not None:
+            raw_clauses.append(
+                history_owner_clause(params, bot_id=self.bot_id, user_id=owner)
+            )
+            summary_clauses.append(
+                history_owner_clause(summary_params, bot_id=self.bot_id, user_id=owner)
+            )
 
         with self._backend.engine.connect() as conn:
             raw_rows = conn.execute(
@@ -64,9 +99,10 @@ class ShortTermMessageReadsMixin:
                     SELECT id, role, content, timestamp, session_id,
                            author_entity_type, author_entity_id
                     FROM {self._backend._messages_table_name}
-                    WHERE role = 'summary'
+                    WHERE {' AND '.join(summary_clauses)}
                     ORDER BY timestamp ASC
                 """),
+                summary_params,
             ).fetchall()
 
         merged = [
@@ -142,6 +178,8 @@ class ShortTermMessageReadsMixin:
         self,
         since_minutes: int | None = None,
         include_summaries: bool = True,
+        *,
+        user_id: str | None = None,
     ) -> list:
         """Get messages with smart summary filtering.
 
@@ -157,32 +195,41 @@ class ShortTermMessageReadsMixin:
             since_minutes: If provided, only return messages from the last N seconds.
                           When None, returns all messages (token budget handles windowing).
             include_summaries: If True, include summary rows and exclude summarized messages.
+            user_id: TASK-1774 — when given, only that user's sessions (raw
+                rows and summaries). ``None`` reads the whole bot partition;
+                request context assembly never passes ``None``
+                (``HistoryManager.load_history`` fails closed first).
 
         Returns:
             List of Message objects.
         """
         from ..models.message import Message
 
+        params: dict = {}
+        owner = (
+            history_owner_clause(params, bot_id=self.bot_id, user_id=user_id)
+            if user_id is not None
+            else None
+        )
         with self._backend.engine.connect() as conn:
             if include_summaries:
                 # Smart filtering: summaries + unsummarized messages
+                clauses = [
+                    "((role = 'summary') OR"
+                    " (role != 'summary' AND (summarized IS NULL OR summarized = FALSE)))"
+                ]
+                if since_minutes is not None:
+                    params["cutoff"] = time.time() - since_minutes
+                    clauses.append("(timestamp >= :cutoff OR role = 'summary')")
+                if owner is not None:
+                    clauses.append(owner)
                 sql = f"""
                     SELECT id, role, content, timestamp, session_id,
                            author_entity_type, author_entity_id
                     FROM {self._backend._messages_table_name}
-                    WHERE
-                        (role = 'summary')
-                        OR
-                        (role != 'summary' AND (summarized IS NULL OR summarized = FALSE))
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY timestamp ASC
                 """
-                params: dict = {}
-
-                if since_minutes is not None:
-                    cutoff = time.time() - since_minutes
-                    sql += " AND (timestamp >= :cutoff OR role = 'summary')"
-                    params["cutoff"] = cutoff
-
-                sql += " ORDER BY timestamp ASC"
                 rows = conn.execute(text(sql), params).fetchall()
 
                 return [
@@ -207,6 +254,10 @@ class ShortTermMessageReadsMixin:
                 if since_minutes is not None:
                     cutoff = time.time() - since_minutes
                     stmt = stmt.where(self._backend.messages_table.c.timestamp >= cutoff)
+                if owner is not None:
+                    stmt = stmt.where(text(owner).bindparams(
+                        owner_bot=params["owner_bot"], owner_user=params["owner_user"],
+                    ))
 
                 with Session(self._backend.engine) as session:
                     rows = session.execute(stmt).fetchall()

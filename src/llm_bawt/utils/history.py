@@ -149,10 +149,14 @@ class HistoryManager:
         db_backend: "ShortTermMemoryManager | None" = None,
         bot_id: str = "nova",
         settings_getter: Callable[[str, Any], Any] | None = None,
+        user_id: str | None = None,
     ):
         self.client = client
         self.config = config
         self.bot_id = bot_id
+        # TASK-1774: a bot's message partition holds every user's history;
+        # DB reads are limited to this user's sessions (see load_history).
+        self.user_id = user_id
         self.messages = []
         self._db_backend = db_backend
         self._settings_getter = settings_getter
@@ -188,6 +192,12 @@ class HistoryManager:
     ):
         self.messages = []
 
+        # TASK-1774: without a user there is no safe slice of the bot's shared
+        # partition. Refuse visibly rather than serve every user's history.
+        if self._db_backend and not self.user_id:
+            self._warn_userless_history_load()
+            return
+
         # TASK-284 (reverted design): session threads are PROVENANCE METADATA
         # ONLY — a queryable session_id for restoring a conversation, never a
         # context boundary. Context is built from the CONTINUOUS message
@@ -205,7 +215,8 @@ class HistoryManager:
             if callable(scoped_loader):
                 try:
                     scoped = scoped_loader(
-                        since_minutes=since_minutes, session_id=session_id
+                        since_minutes=since_minutes, session_id=session_id,
+                        user_id=self.user_id,
                     )
                     if scoped is not None:
                         self.messages = scoped
@@ -229,7 +240,7 @@ class HistoryManager:
         if self._db_backend:
             try:
                 self.messages = self._db_backend.get_messages(
-                    since_minutes=since_minutes,
+                    since_minutes=since_minutes, user_id=self.user_id,
                 )
                 logger.debug(f"Loaded {len(self.messages)} messages from PostgreSQL short-term memory")
                 return
@@ -258,6 +269,21 @@ class HistoryManager:
             logger.debug(f"Loading history from {since_minutes} seconds ago ({len(self.messages)} messages)")
             cutoff = time.time() - since_minutes
             self.messages = [msg for msg in self.messages if msg.timestamp >= cutoff]
+
+    def _warn_userless_history_load(self) -> None:
+        request_id = None
+        try:
+            from ..service.logging import get_request_id
+
+            request_id = get_request_id()
+        except Exception:  # CLI/standalone: no service request context
+            pass
+        logger.warning(
+            "History load refused for bot=%s request=%s: no user_id, so the "
+            "bot's shared history cannot be scoped (TASK-1774); context has "
+            "no history",
+            self.bot_id, request_id,
+        )
 
     def save_history(self):
         """Persist message history to the history file."""
