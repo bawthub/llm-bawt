@@ -106,12 +106,12 @@ def test_repair_keeps_background_entries_without_double_counting(rig):
     assert rig[1].repair(PROVIDER).spent_usd == Decimal("1.5")
 
 
-def test_unpriced_background_call_fails_closed(rig):
+def test_unpriced_background_call_is_counted_as_uncounted_not_free(rig):
     rig[1].set_anchor(PROVIDER, Decimal("50"))
     _recorder(rig)(_response())
     assert _counter(rig) == (Decimal(0), 1)
     balance, reason = anchored_balance(rig[1].read(PROVIDER), None)
-    assert balance is None and "no recorded cost" in reason
+    assert reason is None and (balance.remaining_usd, balance.unpriced_turns) == (50.0, 1)
 
 
 def test_daily_spend_splits_chat_from_maintenance(rig):

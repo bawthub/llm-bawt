@@ -71,7 +71,7 @@ def test_anchored_balance_is_one_row_read_with_every_field_set():
     assert balance.model_dump() == {
         "amount_usd": 100.0, "remaining_usd": 97.5, "used_usd": 2.5,
         "as_of": int(NOW.timestamp()), "source": "bawt_recorded_estimate",
-        "updated_at": (NOW + timedelta(minutes=5)).timestamp(),
+        "updated_at": (NOW + timedelta(minutes=5)).timestamp(), "unpriced_turns": 0,
     }
 
 
@@ -79,9 +79,17 @@ def test_no_anchor_is_no_balance_not_a_fabricated_zero():
     assert anchored_balance(None, NOW) == (None, None)
 
 
-def test_unpriced_turn_fails_closed_instead_of_charging_a_guess():
-    balance, reason = anchored_balance(_row(unpriced=2), None)
-    assert balance is None and "2 API turn(s)" in reason
+def test_unpriced_turn_degrades_to_an_estimate_instead_of_charging_a_guess():
+    # TASK-1821's live shape: $135 anchor, $82.40 recorded, one turn cut off uncosted.
+    balance, reason = anchored_balance(_row(anchor="135", spent="82.40", unpriced=1), None)
+    assert reason is None
+    assert (balance.remaining_usd, balance.used_usd, balance.unpriced_turns) == (pytest.approx(52.60), 82.40, 1)
+    assert balance.source == "bawt_recorded_estimate"
+
+
+def test_key_change_still_voids_a_balance_with_unpriced_turns():
+    balance, reason = anchored_balance(_row(unpriced=1), NOW + timedelta(seconds=1))
+    assert balance is None and "key changed" in reason
 
 
 def test_key_reconnected_after_anchor_voids_the_balance():
@@ -365,6 +373,23 @@ def test_balance_update_for_an_anchored_turn_carries_the_committed_counter(monke
     assert update["provider"] == "anthropic_api" and "refresh" not in update
     assert update["balance"]["remaining_usd"] == 96.0
     assert update["updated_at"] == update["balance"]["updated_at"]
+
+
+def test_balance_update_after_an_uncosted_turn_pushes_the_estimate_not_null(monkeypatch):
+    from llm_bawt.service.usage import balance as balance_module
+
+    class Store:
+        def __init__(self, _engine):
+            pass
+
+        def read(self, _provider):
+            return _row(anchor="135", spent="82.40", unpriced=1)
+
+    monkeypatch.setattr(balance_module, "ApiBalanceStore", Store)
+    monkeypatch.setattr(usage_registry.get_adapter("anthropic_api"), "credential_connected_at", lambda: None)
+    update = balance_update_for_turn(object(), '{"access_path": {"key": "anthropic-api"}}')
+    assert update["balance"]["remaining_usd"] == pytest.approx(52.60)
+    assert update["balance"]["unpriced_turns"] == 1
 
 
 @pytest.mark.parametrize("usage", [None, "not json", {"total_cost_usd": 1},

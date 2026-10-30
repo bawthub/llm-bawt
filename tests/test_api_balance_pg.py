@@ -132,13 +132,13 @@ def test_only_turns_after_the_anchor_on_a_balance_path_count(rig):
 
 
 @pytest.mark.parametrize("bad_cost", [None, -1, "NaN", "Infinity", True, "abc"])
-def test_unpriced_turn_fails_closed_until_it_is_priced(rig, bad_cost):
+def test_unpriced_turn_is_an_uncounted_estimate_until_it_is_priced(rig, bad_cost):
     rig[1].set_anchor(PROVIDER, Decimal("100"))
     _turn(rig, _usage(1))
     turn = _turn(rig, _usage(bad_cost))
     assert _counter(rig) == (Decimal(1), 1)
     balance, reason = anchored_balance(rig[1].read(PROVIDER), None)
-    assert balance is None and "no recorded cost" in reason
+    assert reason is None and (balance.remaining_usd, balance.unpriced_turns) == (99.0, 1)
     _finish(rig, turn, _usage(bad_cost))  # replay stays one unpriced turn
     assert _counter(rig) == (Decimal(1), 1)
     _finish(rig, turn, _usage(0.75))

@@ -17,7 +17,10 @@ the credential used. Charges and anchor writes serialize on one per-provider
 transaction lock.
 
 A counted turn with no recorded cost is never charged a guess. It increments
-``unpriced_turns`` and the balance reports as unknown until it is set again.
+``unpriced_turns``, which the balance carries so readers show the remainder as
+an estimate with that many uncounted turns (TASK-1821). Such turns are mostly
+interrupted ones: their usage covers only the last model iteration, so pricing
+it would understate the cost and hide that the turn is uncounted.
 
 The turn-log scan (``backfill_ledger``) exists only for schema creation,
 migration and repair. It is never on the read path.
@@ -387,13 +390,13 @@ def anchored_balance(row: BalanceRow | None, connected_at: datetime | None) -> t
     if connected_at is not None and row.anchor_at < connected_at:
         # A replaced key may bill another account: never keep counting silently.
         return None, "API key changed after the balance was set; set the balance again"
-    if row.unpriced_turns:
-        return None, (f"{row.unpriced_turns} API turn(s) since the balance was set have no recorded cost;"
-                      " set the balance again")
+    # Unpriced turns degrade the balance to an estimate, never void it: a turn
+    # cut off before its cost arrived must not blank the balance until re-entry.
     return UsageBalance(
         amount_usd=float(row.anchor_usd), remaining_usd=float(row.anchor_usd - row.spent_usd),
         used_usd=float(row.spent_usd), as_of=int(row.anchor_at.timestamp()),
         source="bawt_recorded_estimate", updated_at=row.updated_at.timestamp(),
+        unpriced_turns=int(row.unpriced_turns or 0),
     ), None
 
 

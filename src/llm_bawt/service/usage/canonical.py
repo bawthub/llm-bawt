@@ -71,8 +71,10 @@ class UsageBalance(BaseModel):
     """Prepaid API credit (see ``usage.balance``).
 
     ``bawt_recorded_estimate``: a user-set anchor minus recorded turn costs
-    since; every field is set. ``provider_reported``: only ``remaining_usd``
-    is known; the deposit, debits and anchor time stay None, never invented.
+    since; every field is set, and ``unpriced_turns`` counts turns since the
+    anchor with no recorded cost (the remainder excludes them, so it is an
+    upper bound). ``provider_reported``: only ``remaining_usd`` is known; the
+    deposit, debits and anchor time stay None, never invented.
     """
 
     amount_usd: float | None
@@ -81,6 +83,7 @@ class UsageBalance(BaseModel):
     as_of: int | None  # unix seconds; the anchor is stamped on the server
     source: str = "bawt_recorded_estimate"  # bawt_recorded_estimate | provider_reported
     updated_at: float | None = None  # fractional unix seconds; orders turn_complete updates
+    unpriced_turns: int = 0  # bawt_recorded_estimate only: counted turns with no recorded cost
 
 
 class ProviderUsage(BaseModel):
