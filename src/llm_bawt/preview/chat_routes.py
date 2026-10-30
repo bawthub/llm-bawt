@@ -45,28 +45,11 @@ def register_chat_routes(
             raise HTTPException(status_code=410, detail="Preview session deleted")
         return row
 
-    def session_info(row: dict) -> dict:
-        meta = dict(row.get("session_metadata") or {})
-        meta.setdefault("title", None)
-        meta.setdefault("title_source", "default")
-        meta.setdefault("agent_session_keys", {})
-        meta.setdefault("forked_from", None)
-        return {
-            "id": row["id"], "bot_id": row["bot_id"], "user_id": row["user_id"],
-            "started_at": str(row.get("started_at") or ""),
-            "ended_at": str(row["ended_at"]) if row.get("ended_at") else None,
-            "archived_at": str(row["archived_at"]) if row.get("archived_at") else None,
-            "last_activity_at": row.get("last_activity_at"),
-            "first_message_at": row.get("first_message_at"),
-            "message_count": int(row.get("message_count") or 0),
-            "turn_count": int(row.get("turn_count") or 0),
-            "first_user_message": row.get("first_user_message"),
-            "last_user_message": row.get("last_user_message"),
-            "last_assistant_message": row.get("last_assistant_message"),
-            "last_assistant_at": row.get("last_assistant_at"),
-            "summary": row.get("summary"), "status": row["status"],
-            "session_metadata": meta,
-        }
+    def session_info(row: dict):
+        # Keep legacy title/archival normalization identical to stable chat.
+        from ..service.routes.sessions import _to_info
+
+        return _to_info(row)
 
     @router.get("/v1/sessions")
     async def sessions(

@@ -106,6 +106,26 @@ def test_history_requires_owned_session_before_any_read(preview, monkeypatch):
                       params={"bot_id": BOT}).status_code == 422
 
 
+def test_legacy_titled_session_uses_canonical_metadata_normalization(preview, monkeypatch):
+    client, _ = preview
+    from llm_bawt.mcp_server import storage as storage_module
+
+    row = {"id": "legacy", "bot_id": BOT, "user_id": USER,
+           "status": "archived", "started_at": "2026-01-01T00:00:00Z",
+           "archived_at": "2026-01-03T00:00:00Z",
+           "session_metadata": {"title": "Older conversation"}}
+    monkeypatch.setattr(storage_module, "get_storage", lambda: SimpleNamespace(
+        list_sessions=AsyncMock(return_value=[row]),
+    ))
+    response = client.get("/v1/sessions", headers=MARKED,
+                          params={"bot_id": BOT, "user": USER})
+    assert response.status_code == 200
+    metadata = response.json()["sessions"][0]["session_metadata"]
+    assert metadata["title"] == "Older conversation"
+    assert metadata["title_source"] == "user"
+    assert metadata["archived_at"] == row["archived_at"]
+
+
 def test_session_details_returns_continuity_envelope(preview, monkeypatch):
     client, _ = preview
     from llm_bawt.mcp_server import storage as storage_module
