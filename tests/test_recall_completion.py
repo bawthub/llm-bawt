@@ -293,6 +293,24 @@ async def test_synthesizer_maps_empty_completion_detail(monkeypatch, status, det
 
 
 @pytest.mark.asyncio
+async def test_error_detail_read_stops_one_byte_past_its_bound():
+    from llm_bawt.recall.http import _ERROR_BODY_LIMIT, _detail_code
+
+    pulled = 0
+
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal pulled
+            for _ in range(4 * _ERROR_BODY_LIMIT):
+                pulled += 1
+                yield b" "
+
+    response = httpx.Response(502, stream=Trickle())
+    assert await _detail_code(response, {"recall_empty_completion": "empty_response"}) is None
+    assert pulled == _ERROR_BODY_LIMIT + 1
+
+
+@pytest.mark.asyncio
 async def test_runner_rejects_model_overrun(utility):
     _, client, _ = utility
     client.query_bounded.return_value = "unbounded output " * 2000

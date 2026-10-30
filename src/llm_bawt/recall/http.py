@@ -54,7 +54,9 @@ async def _detail_code(response: httpx.Response, error_details: dict[str, str]) 
     """The caller's code for a known error ``detail``; None for anything else."""
     body = bytearray()
     try:
-        async for chunk in response.aiter_bytes(chunk_size=_ERROR_BODY_LIMIT):
+        # One byte past the limit is enough to know the body is too big; a larger
+        # chunk would pull up to twice the limit off the wire first.
+        async for chunk in response.aiter_bytes(chunk_size=_ERROR_BODY_LIMIT + 1):
             body.extend(chunk)
             if len(body) > _ERROR_BODY_LIMIT:
                 return None
