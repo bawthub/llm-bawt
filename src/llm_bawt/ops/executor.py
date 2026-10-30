@@ -293,8 +293,8 @@ class DockerExecutor(Executor):
     def process_health(self) -> tuple[int, int, float | None, bool]:
         """The reconciler's own live child count, slot cap and interpreter pin.
 
-        No Docker or DB reads; the health HTTP handler receives only the
-        sample published by the reconciliation loop.
+        The reconciler loop verifies its own image via Docker; the health HTTP
+        handler receives only the published sample and never touches Docker.
         """
         launcher = self._launchers[EXECUTION_PROCESS]
         live, oldest = launcher.child_stats()

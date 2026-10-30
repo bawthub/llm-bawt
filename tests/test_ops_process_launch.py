@@ -245,7 +245,7 @@ def run(request_path, sha):
 def rig(tmp_path):
     client = _Client(_export(_ops(**{"worker.py": FAKE_WORKER})))
     launcher = ProcessLauncher(client=lambda: client, python=sys.executable, python_image_id=PY_IMAGE,
-                               kill_grace=0, boot_id=lambda: "boot-1")
+                               own_image=lambda: (PY_IMAGE, []), kill_grace=0, boot_id=lambda: "boot-1")
     root = tmp_path / "receipts"
     root.mkdir()
     base = {"worker_image": IMAGE_ID, "receipt_volume": "v", "receipt_root": str(root)}
@@ -303,9 +303,68 @@ def test_prepare_refuses_without_an_immutable_interpreter_identity(rig):
     assert exc.value.code == "worker_runtime_incompatible"
 
 
+def test_interpreter_pin_matches_the_running_image_id_or_a_reported_digest(rig):
+    launcher, settings, _, _ = rig
+    digest = "example.invalid/ops@sha256:" + "d" * 64
+    launcher._python_image_id = digest
+    launcher._own_image = lambda: (PY_IMAGE, [digest])
+    assert launcher.interpreter_pinned()
+    assert launcher._verified_interpreter() == PY_IMAGE
+    assert launcher.execution_settings(settings)["python_image_id"] == digest
+    launcher.preflight({**settings, "python_image_id": digest})
+
+
+@pytest.mark.parametrize("reported", [
+    ("sha256:" + "c" * 64, []),
+    (PY_IMAGE, ["example.invalid/other@sha256:" + "d" * 64]),
+])
+def test_interpreter_pin_refuses_a_wrong_running_image_or_unreported_digest(rig, reported):
+    launcher, settings, _, _ = rig
+    if reported[0] == PY_IMAGE:
+        launcher._python_image_id = "example.invalid/ops@sha256:" + "d" * 64
+    launcher._own_image = lambda: reported
+    assert not launcher.interpreter_pinned()
+    with pytest.raises(WorkerLaunchError) as exc:
+        launcher.execution_settings(settings)
+    assert exc.value.code == "worker_runtime_incompatible"
+    with pytest.raises(WorkerLaunchError) as exc:
+        launcher.preflight({**settings, "python_image_id": launcher._python_image_id})
+    assert exc.value.code == "worker_code_drift"
+
+
+def test_interpreter_pin_fails_closed_when_inspection_is_unavailable(rig):
+    launcher, settings, _, _ = rig
+    launcher._own_image = lambda: (_ for _ in ()).throw(OSError("Docker unavailable"))
+    assert not launcher.interpreter_pinned()
+    with pytest.raises(WorkerLaunchError, match="cannot inspect"):
+        launcher.execution_settings(settings)
+
+
+def test_running_container_image_inspection_uses_the_full_image_id(monkeypatch):
+    digest = "example.invalid/ops@sha256:" + "d" * 64
+    monkeypatch.setenv("HOSTNAME", "reconciler-id")
+    monkeypatch.delenv("LLM_BAWT_OPS_APP_CONTAINER", raising=False)
+
+    class Images:
+        def get(self, ref):
+            assert ref == PY_IMAGE
+            return type("Image", (), {"id": PY_IMAGE, "attrs": {"RepoDigests": [digest]}})()
+
+    class Containers:
+        def get(self, ref):
+            assert ref == "reconciler-id"
+            return type("Container", (), {"attrs": {"Image": PY_IMAGE}})()
+
+    client = type("Client", (), {"images": Images(), "containers": Containers()})()
+    launcher = ProcessLauncher(client=lambda: client, python_image_id=digest)
+    assert launcher.interpreter_pinned()
+    assert launcher._verified_interpreter() == PY_IMAGE
+
+
 def test_a_bundle_that_does_not_import_is_runtime_incompatible(tmp_path):
     client = _Client(_export(_ops(**{"worker.py": b"import nonexistent_module_xyz\n"})))
-    launcher = ProcessLauncher(client=lambda: client, python_image_id=PY_IMAGE)
+    launcher = ProcessLauncher(client=lambda: client, python_image_id=PY_IMAGE,
+                               own_image=lambda: (PY_IMAGE, []))
     with pytest.raises(WorkerLaunchError) as exc:
         launcher.execution_settings({"worker_image": IMAGE_ID, "receipt_root": str(tmp_path)})
     assert exc.value.code == "worker_runtime_incompatible"
@@ -393,7 +452,7 @@ def test_a_lost_process_job_carries_the_launcher_diagnostics(rig):
 def _fresh(rig):
     launcher, settings, root, client = rig
     return ProcessLauncher(client=lambda: client, python=sys.executable, python_image_id=PY_IMAGE,
-                           kill_grace=0, boot_id=lambda: "boot-2"), settings, root
+                           own_image=lambda: (PY_IMAGE, []), kill_grace=0, boot_id=lambda: "boot-2"), settings, root
 
 
 def test_a_held_worker_lock_is_alive(rig):

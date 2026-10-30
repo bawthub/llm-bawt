@@ -279,12 +279,14 @@ class ProcessLauncher(WorkerLauncher):
     def __init__(self, *, client: Callable[[], Any], python: str | None = None,
                  python_image_id: str | None = None, popen=subprocess.Popen,
                  kill_grace: float | None = None, boot_id: Callable[[], str] = _boot_id,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 own_image: Callable[[], tuple[str, list[str]]] | None = None):
         self._client = client
         self._python = python or sys.executable
         # The interpreter's identity: the reconciler's own immutable image.
         self._python_image_id = (python_image_id if python_image_id is not None
                                  else os.getenv("LLM_BAWT_OPS_RECONCILER_IMAGE", ""))
+        self._own_image = own_image or self._inspect_own_image
         self._popen = popen
         self._kill_grace = (kill_grace if kill_grace is not None
                             else float(os.getenv("LLM_BAWT_OPS_WORKER_KILL_GRACE", "10")))
@@ -298,15 +300,46 @@ class ProcessLauncher(WorkerLauncher):
 
     # -- prepare / preflight --------------------------------------------------
 
+    def _inspect_own_image(self) -> tuple[str, list[str]]:
+        """Inspect the interpreter image actually running this reconciler."""
+        owner = os.getenv("LLM_BAWT_OPS_APP_CONTAINER") or os.getenv("HOSTNAME", "")
+        if not owner:
+            raise ValueError("the reconciler's container identity is missing")
+        container = self._client().containers.get(owner)
+        image_id = container.attrs["Image"]
+        image = self._client().images.get(image_id)
+        if image.id != image_id:
+            raise ValueError("the running container's image cannot be verified")
+        return image_id, image.attrs.get("RepoDigests") or []
+
+    def _verified_interpreter(self) -> str:
+        """The configured immutable ref must resolve to our running image ID."""
+        ref = self._python_image_id or ""
+        if not re.fullmatch(r"(?:sha256:|[^\s]+@sha256:)[0-9a-f]{64}", ref):
+            raise WorkerLaunchError("worker_runtime_incompatible",
+                                    "configure LLM_BAWT_OPS_RECONCILER_IMAGE as immutable image ID or digest")
+        try:
+            image_id, digests = self._own_image()
+        except Exception as exc:
+            raise WorkerLaunchError("worker_runtime_incompatible",
+                                    "cannot inspect the reconciler's running image") from exc
+        if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id or "")
+                or (ref != image_id and ref not in digests)):
+            raise WorkerLaunchError("worker_runtime_incompatible",
+                                    "the configured interpreter image does not match the running reconciler")
+        return image_id
+
     def interpreter_pinned(self) -> bool:
-        """Read-only prerequisite; no bundle export or Docker call."""
-        return bool(re.fullmatch(r"(?:sha256:|[^\s]+@sha256:)[0-9a-f]{64}", self._python_image_id or ""))
+        """Read-only health check of the configured reference against Docker."""
+        try:
+            self._verified_interpreter()
+            return True
+        except WorkerLaunchError:
+            return False
 
     def execution_settings(self, settings: dict) -> dict:
         """The process-mode pins for a snapshot: bundle, launcher and interpreter."""
-        if not self.interpreter_pinned():
-            raise WorkerLaunchError("worker_runtime_incompatible",
-                                    "configure LLM_BAWT_OPS_RECONCILER_IMAGE as immutable image ID or digest")
+        self._verified_interpreter()
         image_id = self._image_id(settings["worker_image"])
         return {"code_digest": self._ensure_bundle(settings["receipt_root"], image_id),
                 "launcher_digest": LAUNCHER_DIGEST, "python_image_id": self._python_image_id}
@@ -317,6 +350,10 @@ class ProcessLauncher(WorkerLauncher):
             raise WorkerLaunchError("worker_code_drift", "the process launcher changed since approval")
         if settings.get("python_image_id") != self._python_image_id:
             raise WorkerLaunchError("worker_code_drift", "the ops service image changed since approval")
+        try:
+            self._verified_interpreter()
+        except WorkerLaunchError as exc:
+            raise WorkerLaunchError("worker_code_drift", "the approved interpreter no longer matches the running image") from exc
         path = self._bundle_path(settings["receipt_root"], self._image_id(settings["worker_image"]),
                                  settings.get("code_digest", ""))
         try:
