@@ -50,9 +50,12 @@ class JsonKeys:
 Treatment = Keep | Null | Actor | JsonKeys
 KEEP, NULL, ACTOR = Keep(), Null(), Actor()
 
+# Same rule as bot_tags.facade: private = ``private`` tag OR
+# include_in_global_search = false.
 PRIVATE_BOTS_SQL = (
     "SELECT bot_slug FROM public.bot_profile_tags "
-    f"WHERE tag_slug = '{BehaviorTag.PRIVATE.value}'"
+    f"WHERE tag_slug = '{BehaviorTag.PRIVATE.value}' "
+    "UNION SELECT slug FROM public.bot_profiles WHERE NOT include_in_global_search"
 )
 
 
@@ -240,7 +243,8 @@ def _select_expr(column: str, treatment: Treatment) -> str:
         return f"CASE WHEN {quoted} IS NULL THEN NULL ELSE '{SEED_ACTOR}' END AS {quoted}"
     keys = ", ".join(f"'{key}'" for key in treatment.keys)
     return (
-        f"CASE WHEN {quoted} IS NULL THEN NULL ELSE COALESCE("
+        f"CASE WHEN {quoted} IS NULL THEN NULL "
+        f"WHEN jsonb_typeof({quoted}::jsonb) <> 'object' THEN '{{}}'::jsonb ELSE COALESCE("
         f"(SELECT jsonb_object_agg(k, v) FROM jsonb_each({quoted}::jsonb) AS e(k, v) "
         f"WHERE k IN ({keys})), '{{}}'::jsonb) END AS {quoted}"
     )

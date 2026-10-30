@@ -89,13 +89,20 @@ def _plant(store):
             INSERT INTO bot_tag_catalog (slug, name, description, kind, capabilities, system, created_at, updated_at)
             VALUES ('private', 'Private', '', 'behavior', '[]', true, now(), now())
             ON CONFLICT (slug) DO NOTHING"""))
-        for slug in ("seed_public", "seed_secret"):
+        for slug in ("seed_public", "seed_secret", "seed_hidden"):
             conn.execute(BotProfile.__table__.insert().values(
                 slug=slug, name=slug, description="", system_prompt="prompt", harness="chat",
                 nextcloud_config={"password": "x"},
                 agent_backend_config={"effort": "high", "session_key": "sk-1"},
+                include_in_global_search=slug != "seed_hidden",
                 created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
             ))
+        # JSON null (not SQL NULL) must not break the key filter.
+        conn.execute(BotProfile.__table__.insert().values(
+            slug="seed_jsonnull", name="seed_jsonnull", description="", system_prompt="prompt",
+            harness="chat", agent_backend_config=text("'null'::jsonb"),
+            created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        ))
         conn.execute(text("""
             INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_at, assigned_by)
             VALUES ('seed_secret', 'private', now(), 'someone@example.com')"""))
@@ -112,6 +119,8 @@ def _plant(store):
 def _assert_export(store):
     bots = {row["slug"]: row for row in _rows(store, "bot_profiles")}
     assert "seed_secret" not in bots
+    assert "seed_hidden" not in bots  # column-only private bot
+    assert bots["seed_jsonnull"]["agent_backend_config"] in ({}, "{}")
     public = bots["seed_public"]
     assert public["nextcloud_config"] is None and public["last_session_id"] is None
     config = public["agent_backend_config"]
