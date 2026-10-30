@@ -11,11 +11,16 @@ from pathlib import Path
 
 import pytest
 
+from llm_bawt.approval_policies import REQ_RESPONDED
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.approval_continuations import dispatch_mcp_result_continuation
 from llm_bawt.service.inter_bot_claims import continuation_author, validate_inter_bot_claim
 from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage, McpToolResultContinuation
 from tests.test_mcp_approval_continuations import FakeService, _ready_row, _store
+from tests.test_turn_admission import FakeService as AdmissionService
+from tests.test_turn_admission import FakeTurnStore as AdmissionTurnStore
+from tests.test_turn_admission import _harness_claim
+from tests.test_turn_admission import _store as _admission_store
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "llm_bawt" / "service"
 MCP = AuthorReference("system", "approval-continuation:mcp")
@@ -64,6 +69,38 @@ def test_claim_whose_payload_disagrees_with_row_kind_is_refused():
     service = WriterService(store, mutate=lambda r: setattr(r, "continuation_payload", None))
     with pytest.raises(ValueError, match="Invalid or stale"):
         asyncio.run(dispatch_mcp_result_continuation(service, store, _ready_row(store)))
+    assert service.authors == []
+
+
+class HarnessWriterService(AdmissionService):
+    """The writers' validation and author choice inside a real harness dispatch."""
+
+    def __init__(self, store, mutate=None):
+        super().__init__(store, AdmissionTurnStore(busy=None))
+        self.mutate = mutate
+        self.authors = []
+
+    async def chat_completion_stream(self, request):
+        if self.mutate:
+            self.mutate(request)
+        self.authors.append(_writer_author(self, request))
+        async for chunk in super().chat_completion_stream(request):
+            yield chunk
+
+
+def test_harness_continuation_dispatch_is_stamped_system_harness():
+    store = _admission_store()
+    service = HarnessWriterService(store)
+    asyncio.run(dispatch_mcp_result_continuation(service, store, _harness_claim(store, REQ_RESPONDED)))
+    assert service.authors == [HARNESS]
+
+
+def test_payload_injected_on_harness_claim_is_refused():
+    """Adding a payload to a harness claim must not yield an MCP stamp."""
+    store = _admission_store()
+    service = HarnessWriterService(store, mutate=lambda r: setattr(r, "continuation_payload", _payload()))
+    with pytest.raises(ValueError, match="Invalid or stale"):
+        asyncio.run(dispatch_mcp_result_continuation(service, store, _harness_claim(store, REQ_RESPONDED)))
     assert service.authors == []
 
 
