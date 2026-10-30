@@ -56,6 +56,22 @@ def validate_inter_bot_claim(service: Any, request: Any):
     return None
 
 
+def continuation_author(request: Any):
+    """The first-party system author of an app-written continuation turn (TASK-1807).
+
+    Keyed only on the Python-only approval claim, never on a request body field
+    or on message text. The kind is the claimed row's: the claim validator
+    (``validate_inter_bot_claim``, run before any writer) binds payload presence
+    to ``row.request_kind``.
+    """
+    if getattr(request, "_internal_approval_claim", None) is None:
+        return None
+    from ..message_authorship import AuthorReference
+
+    kind = "mcp" if getattr(request, "continuation_payload", None) is not None else "harness"
+    return AuthorReference.system(f"approval-continuation:{kind}")
+
+
 def turn_admission_claim(service: Any, request: Any, *, store: Any = None):
     """The trusted producer claim checked inside the turn's admission transaction.
 

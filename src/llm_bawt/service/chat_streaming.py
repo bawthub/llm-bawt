@@ -21,7 +21,7 @@ from ..bots import (
     StreamingTTSScrubber,
     should_scrub_for_tts,
 )
-from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
+from .inter_bot_claims import continuation_author, turn_admission_claim, validate_inter_bot_claim
 from .session_lifecycle.bridge_reset import BridgeSessionResetMixin
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
@@ -107,7 +107,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         bot_id = request.bot_id or self._default_bot
         user_id = request.user or self.config.DEFAULT_USER
         from ..message_authorship import AuthorReference
-        user_author = inter_bot_author or AuthorReference.user(user_id)
+        user_author = inter_bot_author or continuation_author(request) or AuthorReference.user(user_id)
         local_mode = not request.augment_memory
 
         # Immutable automation/routing endpoints use disposable request-local

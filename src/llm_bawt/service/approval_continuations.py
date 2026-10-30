@@ -161,6 +161,8 @@ def validate_approval_continuation_claim(service, request, claim, *, store=None)
             or row.turn_id != request.parent_turn_id
             or approval_delivery_session(service, row) != request.session_id
             or request.inter_bot_delivery_id is not None
+            # TASK-1807: continuation_author reads the kind from payload presence.
+            or (request.continuation_payload is not None) != (row.request_kind == KIND_MCP)
             or any(getattr(request, key) != value for key, value in _continuation_identity(row).items())
             or row.continuation_next_attempt_at is None
             or _as_aware_utc(row.continuation_next_attempt_at) < _utcnow() - timedelta(seconds=120)):

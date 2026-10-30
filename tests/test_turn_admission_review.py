@@ -132,17 +132,19 @@ def test_stale_stream_cannot_consume_successor_reservation(monkeypatch):
     from sqlalchemy import event
     from sqlmodel import Session
 
-    from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage
+    from llm_bawt.service.schemas import ChatCompletionRequest, ChatMessage, McpToolResultContinuation
     from llm_bawt.service.turn_admission import AdmissionFenceLost, turn_request_extensions
     from llm_bawt.service.turn_logs import TurnLog, TurnLogStore
 
     approvals = base._store()
     old = base._mcp_claim(approvals)
     identity = continuations._continuation_identity(old)
+    # An MCP claim always carries its payload, as dispatch builds it (TASK-1807).
     request = ChatCompletionRequest(
         messages=[ChatMessage(role="user", content="result")],
         bot_id=old.bot_id, user=old.user_id, parent_turn_id=old.turn_id,
         session_id="session-1", **identity,
+        continuation_payload=McpToolResultContinuation(**continuations.continuation_payload_from_row(old)),
     )
     request._internal_approval_claim = (old.id, old.continuation_claim_token)
     service = base.FakeService(approvals, base.FakeTurnStore(busy=None))

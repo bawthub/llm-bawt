@@ -18,7 +18,7 @@ from agent_bridge.maintenance import is_new_command
 from ..bots import get_bot, strip_emotes
 from ..inter_bot_reply_channel import append_request_reply_channel_note
 from .chat_message_text import last_user_text, message_content_text
-from .inter_bot_claims import turn_admission_claim, validate_inter_bot_claim
+from .inter_bot_claims import continuation_author, turn_admission_claim, validate_inter_bot_claim
 from .ordinary_turn_queue import admit_ordinary_agent_turn
 from .turn_admission import turn_start_extensions
 from .logging import RequestContext, generate_request_id, get_service_logger
@@ -97,7 +97,7 @@ class ChatNonStreamMixin:
         bot_id = request.bot_id or self._default_bot
         user_id = request.user or self.config.DEFAULT_USER
         from ..message_authorship import AuthorReference
-        user_author = inter_bot_author or AuthorReference.user(user_id)
+        user_author = inter_bot_author or continuation_author(request) or AuthorReference.user(user_id)
         local_mode = not request.augment_memory
 
         # Resolve model using shared bot/config logic
