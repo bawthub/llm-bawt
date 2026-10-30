@@ -63,31 +63,68 @@ def test_file_mode_keeps_one_file_per_user(tmp_path) -> None:
     assert [m.content for m in alice_again.messages] == ["alice secret"]
 
 
-@pytest.mark.parametrize("first,second", [("a@b", "a_b"), ("a/b", "a_b"), ("a%40b", "a@b")])
-def test_distinct_users_never_share_a_file(tmp_path, first, second) -> None:
-    owner = _manager(tmp_path, first)
+def _manager_for(tmp_path, bot_id, user_id) -> HistoryManager:
+    config = SimpleNamespace(HISTORY_FILE=str(tmp_path / "chat-history"))
+    client = SimpleNamespace(console=_Console())
+    return HistoryManager(client, config, bot_id=bot_id, user_id=user_id)
+
+
+@pytest.mark.parametrize("first,second", [
+    (("dash", "a@b"), ("dash", "a_b")),
+    (("dash", "a/b"), ("dash", "a_b")),
+    (("dash", "a%40b"), ("dash", "a@b")),
+    (("a", "b__c"), ("a__b", "c")),
+    (("a", "b"), ("a__b", None)),
+    (("a", "b+c"), ("a+b", "c")),
+])
+def test_distinct_owners_never_share_a_file(tmp_path, first, second) -> None:
+    owner = _manager_for(tmp_path, *first)
     owner.messages = [Message(role="user", content="first secret", timestamp=1.0)]
     owner.save_history()
 
-    other = _manager(tmp_path, second)
+    other = _manager_for(tmp_path, *second)
     assert other.history_file != owner.history_file
     other.load_history()
     assert other.messages == []
 
 
-@pytest.mark.parametrize("user", ["../../etc/x", "..", "a/../../b", "x\x00y", "/abs"])
-def test_file_name_cannot_escape_the_history_dir(tmp_path, user) -> None:
+@pytest.mark.parametrize("user", ["../../etc/x", "..", "a/../../b", "x\x00y", "/abs", "\u00e9" * 128])
+def test_file_name_is_fixed_and_inside_the_owner_dir(tmp_path, user) -> None:
     from pathlib import Path
 
-    m = _manager(tmp_path, user)
-    path = Path(m.history_file)
-    assert path.parent == tmp_path
-    assert "\x00" not in path.name and "/" not in path.name
+    path = Path(_manager_for(tmp_path, "dash", user).history_file)
+    assert path.parent == tmp_path / "chat-history.by-owner"
+    assert len(path.name) == 64 + len(".json")
 
 
-@pytest.mark.parametrize("user", ["nick", "alice-2", "voicetest_loopy", "a.b"])
-def test_plain_ids_keep_a_readable_name(tmp_path, user) -> None:
-    assert _manager(tmp_path, user).history_file.endswith(f"history_dash__{user}.json")
+def test_userless_legacy_name_is_unchanged(tmp_path) -> None:
+    assert _manager_for(tmp_path, "spark", None).history_file == str(tmp_path / "chat-history_spark")
+
+
+def test_owner_key_encoding_is_pinned() -> None:
+    from llm_bawt.utils.history import owner_file_key
+
+    assert owner_file_key("dash", "nick") == (
+        "50f80ca7e66d770eecc6898b5936debd2127d262616a9a85a17758b4e0cdeec9"
+    )
+
+
+def test_foreign_owner_file_is_refused_and_untouched(tmp_path) -> None:
+    bob = _manager_for(tmp_path, "dash", "bob")
+    from pathlib import Path
+
+    path = Path(bob.history_file)
+    path.parent.mkdir(parents=True)
+    foreign = json.dumps({"owner": ["dash", "alice"], "messages": [
+        {"role": "user", "content": "alice secret", "timestamp": 1.0}]})
+    path.write_text(foreign)
+
+    bob.load_history()
+    assert bob.messages == []
+    bob.add_message("user", "bob text")
+    bob.save_history()
+    bob.clear_history()
+    assert path.read_text() == foreign
 
 
 class _Stop(Exception):

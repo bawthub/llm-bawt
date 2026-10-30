@@ -1,5 +1,5 @@
 import os
-from urllib.parse import quote
+import hashlib
 import json
 import time
 import logging
@@ -25,13 +25,16 @@ logger = logging.getLogger(__name__)
 _TOOL_RESULT_PREFIXES = ("[Tool Results]", "[Tools used:")
 
 
-def _file_safe(value: str) -> str:
-    """Filename-safe, injective form of a user id (TASK-1774 per-user files).
+def owner_file_key(bot_id: str, user_id: str) -> str:
+    """Fixed-length, injective file key for one (bot, user) history owner.
 
-    Percent-encoding with no safe characters: distinct ids never share a
-    file ('a@b' -> 'a%40b', 'a_b' -> 'a_b') and '/' can't leave the dir.
+    TASK-1774: the JSON array encoding of the tuple is unambiguous for any
+    strings, so distinct owners have distinct SHA-256 preimages. The hex
+    name is always 64 chars (under NAME_MAX) and no input byte reaches the
+    path. The encoding is pinned; changing it orphans every per-user file.
     """
-    return quote(value, safe="")
+    preimage = json.dumps([bot_id, user_id], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(preimage.encode("ascii")).hexdigest()
 
 
 def _is_tool_result_system(msg) -> bool:
@@ -170,7 +173,10 @@ class HistoryManager:
         self.messages = []
         self._db_backend = db_backend
         self._settings_getter = settings_getter
-        
+        self._file_owner = [bot_id, user_id] if user_id else None
+        # Set when the on-disk file belongs to someone else; blocks writes.
+        self._file_owner_mismatch = False
+
         # Use per-bot history files for local mode
         if config.HISTORY_FILE:
             # Get the base path and insert bot_id
@@ -178,11 +184,17 @@ class HistoryManager:
             dir_name = os.path.dirname(base_path)
             file_name = os.path.basename(base_path)
             name, ext = os.path.splitext(file_name)
-            # Create bot-specific filename: history.json -> history_spark.json.
-            # TASK-1774: with a user, one file per (bot, user):
-            # history_spark__alice.json, so users never share a file.
-            owner = f"{bot_id}__{_file_safe(user_id)}" if user_id else bot_id
-            self.history_file = os.path.join(dir_name, f"{name}_{owner}{ext}")
+            # Userless (legacy CLI) file: history.json -> history_spark.json.
+            # TASK-1774: with a user, one file per (bot, user) in a sibling
+            # directory named after the base, keyed by owner_file_key. Names
+            # there can never equal a legacy name, and the file records its
+            # owner so a mismatch fails closed on load, save and clear.
+            if user_id:
+                self.history_file = os.path.join(
+                    dir_name, f"{file_name}.by-owner", f"{owner_file_key(bot_id, user_id)}.json",
+                )
+            else:
+                self.history_file = os.path.join(dir_name, f"{name}_{bot_id}{ext}")
         else:
             self.history_file = None
             
@@ -274,9 +286,12 @@ class HistoryManager:
             return
         try:
             with open(self.history_file, "r", encoding="utf-8") as f:
-                message_dicts = json.load(f)
-                self.messages = [Message.from_dict(msg) for msg in message_dicts]
-                logger.debug(f"Loaded {len(self.messages)} messages from history file.")
+                data = json.load(f)
+            message_dicts = self._owned_message_dicts(data)
+            if message_dicts is None:
+                return
+            self.messages = [Message.from_dict(msg) for msg in message_dicts]
+            logger.debug(f"Loaded {len(self.messages)} messages from history file.")
         except UnicodeDecodeError as e:
             self.client.console.print(f"[bold red]Error loading history:[/bold red] Unable to decode file. Ensure it is saved in UTF-8 format. ({e})")
         except json.JSONDecodeError as e:
@@ -288,6 +303,34 @@ class HistoryManager:
             logger.debug(f"Loading history from {since_minutes} seconds ago ({len(self.messages)} messages)")
             cutoff = time.time() - since_minutes
             self.messages = [msg for msg in self.messages if msg.timestamp >= cutoff]
+
+    def _owned_message_dicts(self, data: Any) -> list | None:
+        """Messages from a history file, or None if it isn't this owner's."""
+        if self._file_owner is None:
+            return data if isinstance(data, list) else []
+        if isinstance(data, dict) and data.get("owner") == self._file_owner:
+            messages = data.get("messages")
+            return messages if isinstance(messages, list) else []
+        self._file_owner_mismatch = True
+        self.messages = []
+        logger.warning(
+            "History file %s does not belong to bot=%s user=%s; refusing to "
+            "load, save or clear it (TASK-1774)",
+            self.history_file, self.bot_id, self.user_id,
+        )
+        return None
+
+    def _file_owned_or_absent(self) -> bool:
+        if self._file_owner_mismatch:
+            return False
+        if self._file_owner is None or not os.path.exists(self.history_file):
+            return True
+        try:
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = None
+        return self._owned_message_dicts(data) is not None
 
     def _warn_userless_history_load(self) -> None:
         request_id = None
@@ -312,11 +355,16 @@ class HistoryManager:
             
         if not self.history_file:
             return
+        if not self._file_owned_or_absent():
+            return
         try:
             message_dicts = [msg.to_dict() for msg in self.messages]
+            payload: Any = message_dicts
+            if self._file_owner is not None:
+                payload = {"owner": self._file_owner, "messages": message_dicts}
             os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
             with open(self.history_file, "w", encoding="utf-8") as f:
-                json.dump(message_dicts, f, indent=2, ensure_ascii=False)
+                json.dump(payload, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self.client.console.print(f"[bold red]Error saving history:[/bold red] {e}")
 
@@ -922,6 +970,8 @@ class HistoryManager:
                 # Fall through to file-based clearing
         
         if self.history_file and os.path.exists(self.history_file):
+            if not self._file_owned_or_absent():
+                return
             try:
                 os.remove(self.history_file)
                 self.client.console.print("[bold red]History cleared.[/bold red]")
