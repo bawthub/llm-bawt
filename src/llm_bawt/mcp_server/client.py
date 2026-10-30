@@ -435,7 +435,7 @@ class MemoryClient(
         self._ensure_initialized()
         if self.server_url:
             result = self._call_server(
-                "get_messages_for_summary",
+                "messages_get_for_summary",
                 {"bot_id": self.bot_id, "summary_id": summary_id},
             )
             return result if isinstance(result, list) else []
@@ -449,7 +449,7 @@ class MemoryClient(
         if self.server_url:
             return int(
                 self._call_server(
-                    "mark_messages_recalled",
+                    "messages_mark_recalled",
                     {"bot_id": self.bot_id, "message_ids": message_ids},
                 )
             )
@@ -760,7 +760,7 @@ class MemoryClient(
         self._ensure_initialized()
         
         if self.server_url:
-            return self._call_server("list_recent", {"bot_id": self.bot_id, "n": n})
+            return self._call_server("memory_list_recent", {"bot_id": self.bot_id, "n": n})
         
         # Embedded mode
         storage = self._get_storage()
@@ -785,7 +785,7 @@ class MemoryClient(
         self._ensure_initialized()
         
         if self.server_url:
-            return self._call_server("supersede_memory", {
+            return self._call_server("memory_supersede", {
                 "bot_id": self.bot_id,
                 "old_memory_id": old_memory_id,
                 "new_memory_id": new_memory_id,

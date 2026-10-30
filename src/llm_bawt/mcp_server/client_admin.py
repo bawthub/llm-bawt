@@ -26,7 +26,7 @@ class MemoryClientAdminMixin:
         self._ensure_initialized()
         if self.server_url:
             return self._call_server(
-                "list_memories",
+                "memory_list_high_importance",
                 {"bot_id": self.bot_id, "limit": limit, "min_importance": min_importance},
             )
         storage = self._get_storage()
@@ -45,7 +45,7 @@ class MemoryClientAdminMixin:
         self._ensure_initialized()
         if self.server_url:
             return self._call_server(
-                "preview_messages_since_minutes",
+                "messages_preview_since_minutes",
                 {"bot_id": self.bot_id, "minutes": minutes},
             )
         storage = self._get_storage()
