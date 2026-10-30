@@ -96,6 +96,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_schema_convergence_pg.py::",
     "test_schema_full_store_pg.py::",
     "test_preview_seed_allowlist_pg.py::",
+    "test_preview_schema_init_pg.py::",
     "test_preview_credential_publisher_pg.py::",
     "test_talk_reply_outbox_pg.py::",
     "test_working_memory_pg.py::",

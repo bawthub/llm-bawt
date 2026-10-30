@@ -96,3 +96,6 @@ cython_debug/
 .logs/
 .vscode/
 storage/
+
+# TASK-1802: preview profile secret and seed artifact (never committed)
+.preview/
