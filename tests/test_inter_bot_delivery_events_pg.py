@@ -220,6 +220,21 @@ def test_an_ordinary_chat_send_belongs_to_its_user(ledger, monkeypatch):
     assert event["summary"] == f"You → {target} · failed"
 
 
+def test_a_cancelled_ordinary_chat_send_gets_one_user_receipt(ledger, monkeypatch):
+    from llm_bawt.utils.config import config
+
+    monkeypatch.setattr(config, "DEFAULT_USER", f"someone-else-{ledger.tag}", raising=False)
+    sender, target = ledger.bot(), ledger.bot()
+    record, _ = _send(ledger, sender, target, author=AuthorReference.user(ledger.user),
+                      producer="ordinary", user_message_id=str(uuid.uuid4()),
+                      metadata={"ordinary_chat": {"session_id": f"s-{ledger.tag}"}})
+    assert _events(ledger, record.id) == []
+    assert ledger.deliveries.cancel(record.id) is not None
+    (event,) = _events(ledger, record.id)
+    assert event["visibility"] == "user_feed" and event["user_id"] == ledger.user
+    assert event["summary"] == f"You → {target} · cancelled"
+
+
 def test_competing_multi_row_cancels_never_deadlock_on_the_event_lock(ledger):
     """A holds X's receipt staged while it waits on Y; B cancels Y and commits.
 
