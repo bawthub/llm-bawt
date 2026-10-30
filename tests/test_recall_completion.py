@@ -85,11 +85,13 @@ class _AmbiguousBareKey(Exception):
     pass
 
 
-def test_budget_reads_the_endpoint_ref_not_the_ambiguous_bare_key(utility):
-    """TASK-1795: one model on two access paths made the bare key ambiguous."""
+def test_budget_reads_the_built_endpoint_ref_not_the_requested_string(utility):
+    """TASK-1795: one model on two access paths made the bare key ambiguous.
+    The budget follows the endpoint the client was built from, even when the
+    setting itself is a bare key only the background harness disambiguates."""
     service, client, resolver = utility
-    resolver.return_value = "shared-model@first-path"
-    service._get_background_client.return_value = (client, "shared-model")
+    resolver.return_value = "shared-model"
+    service._get_background_client.return_value = (client, "shared-model@first-path")
 
     def by_ref(name):
         if name == "shared-model":

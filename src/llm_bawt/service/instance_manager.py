@@ -614,9 +614,12 @@ class InstanceManagerMixin:
         # One client per endpoint: the same model on two access paths (a
         # primary and its backup) must not share a client.
         cache_key = f"{model_alias}@{model_def['access_path']}" if model_def.get("access_path") else model_alias
+        # TASK-1795: callers size budgets off the alias returned here. The bare
+        # model key is ambiguous once the model has a second access path, so
+        # they get the endpoint ref this client was built from.
         cached = self._bg_client_cache.get(cache_key)
         if cached is not None:
-            return cached, model_alias, model_def
+            return cached, cache_key, model_def
 
         try:
             client, kind = build_background_client(self.config, model_def, model_alias)
@@ -631,4 +634,4 @@ class InstanceManagerMixin:
         with self._bg_client_lock:
             client = self._bg_client_cache.setdefault(cache_key, client)
         log.info("Background client ready: %s (%s)", cache_key, kind)
-        return client, model_alias, model_def
+        return client, cache_key, model_def

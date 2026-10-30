@@ -63,6 +63,21 @@ def test_cached_by_canonical_model_key(job_model):
     assert cls.call_count == 1
 
 
+def test_alias_is_the_endpoint_ref_once_the_model_has_an_access_path(job_model):
+    """TASK-1795: callers size budgets off this alias; a bare key is ambiguous
+    once the model is on two access paths, and summaries fell to 6000 tokens."""
+    from llm_bawt.memory.summarization_limits import UNKNOWN_MODEL_LIMITS, resolve_summarization_limits
+
+    svc = _make_service({"type": "openai", "model_id": "up", "model_key": "shared",
+                         "access_path": "path-a"})
+    svc.config.get_model_context_window = lambda ref: {"shared@path-a": 1_000_000}[ref]
+    with patch("llm_bawt.clients.openai_client.OpenAIClient", return_value=MagicMock()):
+        first = svc._resolve_background_client()
+        cached = svc._resolve_background_client()
+    assert first[1] == cached[1] == "shared@path-a"
+    assert resolve_summarization_limits(svc.config, first[1]) != UNKNOWN_MODEL_LIMITS
+
+
 def test_agent_only_endpoint_still_rejected(job_model):
     """A model whose chat-harness type is not a plain client still falls back."""
     svc = _make_service({"type": "claude-code", "model_id": "x", "model_key": "x"})

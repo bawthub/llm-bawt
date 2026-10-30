@@ -71,13 +71,15 @@ def complete_utility(
         raise HTTPException(status_code=422, detail="Configured model has no direct API client")
     if timeout_seconds is not None:
         try:
-            validate_model_budget(request, service.config, requested_model)
+            # The endpoint ref the client was built from (TASK-1795), not the
+            # request string re-resolved under another harness.
+            validate_model_budget(request, service.config, model_alias)
         except BudgetUnavailable as error:
             # A configuration fault, not a bad request: fail visibly (TASK-1795).
             from .maintenance_health import maintenance_health
             maintenance_health().record_failure(
-                job, "budget_unavailable", f"no model budget for {requested_model}: {error}",
-                model=requested_model, provider=None, credential=None)
+                job, "budget_unavailable", f"no model budget for {model_alias}: {error}",
+                model=model_alias, provider=None, credential=None)
             raise HTTPException(status_code=503, detail="recall_model_budget_unavailable") from None
 
     try:

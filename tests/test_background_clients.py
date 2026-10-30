@@ -356,8 +356,9 @@ def test_spending_limit_falls_back_to_a_non_xai_backup_end_to_end(monkeypatch, b
         out = client.query(messages=[Message(role="user", content="x")],
                            plaintext_output=True, stream=False)
 
-    assert alias == "primary" and out == "from backup"
-    assert mf.served_model(client, alias) == "backup"
+    # TASK-1795: the alias is the endpoint ref, never the (possibly ambiguous) bare key.
+    assert alias == "primary@xai-chat" and out == "from backup"
+    assert mf.served_model(client, alias) == "backup@anthropic-api"
     assert sdk.messages.create.call_args.kwargs["model"] == "up-anthropic-api"
 
 
