@@ -85,6 +85,8 @@ def test_undeclared_bridge_port_is_still_probed():
 def test_prod_container_without_any_probe_port_is_reported():
     containers = [_container("claude-code-bridge", ["llm-bawt_default"])]
     assert prod_targets(containers) == ([], ["claude-code-bridge"])
+    containers[0]["State"]["Running"] = False
+    assert prod_targets(containers)[1] == ["claude-code-bridge (stopped)"]
 
 
 def test_bound_ports_count():
@@ -102,3 +104,40 @@ def test_parse_ports():
 
 def _service(c):
     return c["Config"]["Labels"][probes.SERVICE_LABEL]
+
+
+class _Done:
+    def __init__(self, returncode, stdout=""):
+        self.returncode, self.stdout = returncode, stdout
+
+
+def _network(monkeypatch, containers, ports="8681"):
+    import types
+
+    monkeypatch.setenv(probes.TARGETS_ENV, "db=db.invalid:5432")
+    if ports is None:
+        monkeypatch.delenv(probes.PORTS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(probes.PORTS_ENV, ports)
+    monkeypatch.setattr(probes, "_project_containers", lambda: containers)
+    # Every probe is unreachable; the prod cluster has no preview role.
+    monkeypatch.setattr(probes, "_run", lambda *a, **k: _Done(0, "0") if a[0] == "pgq" else _Done(1))
+    assert isinstance(probes.network, types.FunctionType)
+    return probes.network()
+
+
+def test_network_passes_when_everything_is_covered(monkeypatch, capsys):
+    assert _network(monkeypatch, _healthy()) is True
+    assert "FAIL" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("ports", [None, "", "86x1"])
+def test_network_fails_without_valid_probe_ports(monkeypatch, capsys, ports):
+    assert _network(monkeypatch, _healthy(), ports) is False
+    assert "FAIL network:" in capsys.readouterr().out
+
+
+def test_network_fails_on_uncovered_prod_container(monkeypatch, capsys):
+    containers = [*_healthy(), _container("claude-code-bridge", ["llm-bawt_default"], ip="")]
+    assert _network(monkeypatch, containers) is False
+    assert "FAIL network: every prod container probed ['claude-code-bridge']" in capsys.readouterr().out

@@ -128,7 +128,8 @@ def prod_targets(containers: list[dict], extra_ports: set[int] = frozenset()) ->
         ips = [n.get("IPAddress") for n in (c["NetworkSettings"].get("Networks") or {}).values()]
         mine = [(f"prod {service}", ip, port) for ip in ips if ip for port in ports]
         if not mine:
-            uncovered.append(service)
+            # A stopped container has no address; say so rather than "uncovered".
+            uncovered.append(service if (c.get("State") or {}).get("Running") else f"{service} (stopped)")
         targets.extend(mine)
     return targets, uncovered
 
