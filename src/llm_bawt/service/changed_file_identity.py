@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 UNRESOLVED_REPO_KEY = "workspace"
 
 
+def _nonempty(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 class WorkspaceIdentityResolver:
     """Map an absolute capture path to the contract-v3 identity fields."""
 
@@ -64,7 +68,9 @@ class WorkspaceIdentityResolver:
         repo_id = resolved.get("repoId")
         workspace_id = resolved.get("workspaceId")
         kind = resolved.get("kind")
-        if not (isinstance(repo_id, str) and isinstance(workspace_id, str)
+        relative = resolved.get("relativePath")
+        # A malformed 200 is unresolved, never a half-resolved identity.
+        if not (_nonempty(repo_id) and _nonempty(workspace_id) and _nonempty(relative)
                 and kind in ("canonical", "isolated")):
             return cls.unresolved()
         repo_name = next(
@@ -79,7 +85,6 @@ class WorkspaceIdentityResolver:
                  if isinstance(w, dict) and w.get("id") == workspace_id),
                 None,
             )
-        relative = resolved.get("relativePath")
         return {
             "repo_key": workspace_id,
             "identity_status": "resolved",
@@ -87,6 +92,6 @@ class WorkspaceIdentityResolver:
             "workspace_repo_name": repo_name if isinstance(repo_name, str) else None,
             "workspace_id": workspace_id,
             "workspace_kind": kind,
-            "repo_relative_path": relative if isinstance(relative, str) else None,
+            "repo_relative_path": relative,
             "git_base_sha": base_sha if isinstance(base_sha, str) else None,
         }

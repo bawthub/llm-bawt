@@ -270,7 +270,12 @@ def test_isolated_payload_carries_base_sha_and_name():
 @pytest.mark.parametrize("payload", [
     {"resolved": None},
     {"resolved": {"repoId": "r", "workspaceId": "w", "kind": "weird"}},
-    {"resolved": {"workspaceId": "w", "kind": "canonical"}},
+    {"resolved": {"workspaceId": "w", "kind": "canonical", "relativePath": "a"}},
+    {"resolved": {"repoId": "", "workspaceId": "w", "kind": "canonical", "relativePath": "a"}},
+    {"resolved": {"repoId": "r", "workspaceId": " ", "kind": "canonical", "relativePath": "a"}},
+    {"resolved": {"repoId": "r", "workspaceId": "w", "kind": "canonical"}},
+    {"resolved": {"repoId": "r", "workspaceId": "w", "kind": "canonical", "relativePath": ""}},
+    {"resolved": {"repoId": "r", "workspaceId": "w", "kind": "canonical", "relativePath": 7}},
     "not-a-dict",
 ])
 def test_unusable_payloads_are_unresolved(payload):
