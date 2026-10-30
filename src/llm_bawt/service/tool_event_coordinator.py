@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+import uuid
 from typing import Any
 
 from agent_bridge.tool_results import payload_from_event
@@ -83,3 +85,36 @@ class ToolEventCoordinator:
             public["result_meta"]["skill_context_tokens"] = skill_tokens
         public["_tool_persisted"] = True
         return public
+
+    def record_completed(
+        self,
+        details: list[dict[str, Any]],
+        *,
+        turn_id: str | None,
+        trigger_message_id: str | None,
+        bot_id: str | None,
+        user_id: str | None,
+    ) -> None:
+        """Persist calls an in-process tool loop already ran (TASK-1775).
+
+        Non-streaming chat turns run ``query_with_tools`` to completion and
+        only hand back per-call details; replay each as start + end so they
+        land through the same writer as live calls.
+        """
+        for detail in details:
+            call_id = detail.get("call_id") or f"call-{uuid.uuid4().hex}"
+            arguments = detail.get("parameters", detail.get("arguments"))
+            base = {
+                "_type": "tool_event",
+                "turn_id": turn_id,
+                "trigger_message_id": trigger_message_id,
+                "bot_id": bot_id,
+                "user_id": user_id,
+                "tool_name": detail.get("tool") or "unknown",
+                "arguments": arguments if isinstance(arguments, dict) else {},
+                "call_id": call_id,
+                "iteration": int(detail.get("iteration") or 1),
+                "ts": time.time(),
+            }
+            self.start({**base, "event": "tool_start"})
+            self.end({**base, "event": "tool_end", "result": detail.get("result") or ""})

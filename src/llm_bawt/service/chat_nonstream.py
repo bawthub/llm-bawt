@@ -505,6 +505,22 @@ class ChatNonStreamMixin:
                         turn_execution=turn_execution,
                         task_turn_capability=task_turn_capability,
                     )
+                    # Agent bridges report their calls through the bridge
+                    # event path; chat bots ran llm-bawt's own tool loop,
+                    # which nothing else records (TASK-1775).
+                    if tool_call_details and not _is_agent:
+                        from .tool_event_coordinator import ToolEventCoordinator
+
+                        try:
+                            ToolEventCoordinator(self._turn_log_store.engine).record_completed(
+                                tool_call_details,
+                                turn_id=turn_log_id,
+                                trigger_message_id=trigger_message_id,
+                                bot_id=bot_id,
+                                user_id=user_id,
+                            )
+                        except Exception:
+                            log.exception("Failed to record tool calls for turn %s", turn_log_id)
 
                 # Splice the injected seed into the logged prompt so the turn
                 # log reflects what the harness session received: [system,

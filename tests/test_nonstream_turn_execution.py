@@ -437,3 +437,33 @@ def test_agent_client_threads_request_local_identity_into_backend_config() -> No
     assert captured["turn_execution"] is marker
     assert captured["task_turn_capability"] == "cap"
     assert "turn_execution" not in client._bot_config  # shared config untouched
+
+
+@pytest.mark.parametrize("model_type,recorded", [("openai", True), ("claude-code", False)])
+def test_chat_bot_nonstream_tool_calls_are_recorded(_isolate, monkeypatch, model_type, recorded) -> None:
+    """TASK-1775: stream=false chat-bot tool calls reach tool_call_records
+    through ToolEventCoordinator; agent turns keep the bridge event path."""
+    from llm_bawt.service.tool_event_coordinator import ToolEventCoordinator
+
+    starts: list[dict] = []
+    ends: list[dict] = []
+    monkeypatch.setattr(ToolEventCoordinator, "start", lambda self, e: starts.append(e) or e)
+    monkeypatch.setattr(ToolEventCoordinator, "end", lambda self, e: ends.append(e) or e)
+    monkeypatch.setattr(
+        "llm_bawt.service.tool_event_coordinator.ToolCallStore", lambda _engine: object()
+    )
+    details = [{"tool": "web_search", "parameters": {"query": "iceland"},
+                "result": "Found 5 results", "iteration": 1}]
+    service = _service(Mock(return_value=("done", "ctx", details)), model_type=model_type)
+    asyncio.run(service.chat_completion(_claimed(_request())))
+
+    if not recorded:
+        assert starts == [] and ends == []
+        return
+    turn_id = service._finalize_turn.call_args.kwargs["turn_id"]
+    assert [(e["event"], e["tool_name"], e["turn_id"]) for e in starts + ends] == [
+        ("tool_start", "web_search", turn_id), ("tool_end", "web_search", turn_id),
+    ]
+    assert starts[0]["arguments"] == {"query": "iceland"}
+    assert starts[0]["call_id"] == ends[0]["call_id"]
+    assert ends[0]["result"] == "Found 5 results"
