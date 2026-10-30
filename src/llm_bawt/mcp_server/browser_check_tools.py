@@ -31,6 +31,14 @@ from .task_association import current_task_turn_context
 
 _MINT_PATH = "/internal/auth/browser-check-session"
 
+# TASK-1794: with sign-in sessions off there is nothing to mint, and the UI
+# needs no session. A 401 then means "no user selected", not "sign in".
+_SESSIONS_OFF = (
+    "no browser-check session is needed: sign-in sessions are off on this "
+    "deployment. Open the UI directly (a 401 code=user_required means no user "
+    "is selected, not a login); for curl, send the user-subject cookie or header."
+)
+
 
 def _config() -> tuple[str, str] | None:
     base = os.getenv("BAWTHUB_BROWSER_CHECK_INTERNAL_URL", "").strip().rstrip("/")
@@ -54,7 +62,7 @@ async def browser_check_session() -> dict[str, Any]:
     """
     config = _config()
     if config is None:
-        return {"error": "browser checks are not configured on this deployment"}
+        return {"error": f"browser checks are not configured; {_SESSIONS_OFF}"}
     base, origin = config
     host = _host(origin)
     if not host:
@@ -71,6 +79,9 @@ async def browser_check_session() -> dict[str, Any]:
             response.raise_for_status()
             minted = response.json()
     except httpx.HTTPStatusError as error:
+        if error.response.status_code == 404:
+            # The mint route answers 404 whenever sessions are off.
+            return {"error": _SESSIONS_OFF, "status": 404}
         try:
             payload = error.response.json()
         except Exception:

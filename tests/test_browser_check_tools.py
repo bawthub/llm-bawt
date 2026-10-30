@@ -83,8 +83,16 @@ def test_without_a_trusted_turn_nothing_is_requested(rig):
 
 def test_unconfigured_deployment_refuses(rig, monkeypatch):
     monkeypatch.delenv("BAWTHUB_BROWSER_CHECK_INTERNAL_URL")
-    assert "not configured" in _call()["error"]
+    error = _call()["error"]
+    assert "not configured" in error and "sessions are off" in error
     assert rig["requests"] == []
+
+
+def test_sessions_off_404_explains_no_session_needed(rig):
+    rig["status"] = 404
+    result = _call()
+    assert result["status"] == 404
+    assert "sessions are off" in result["error"] and "user_required" in result["error"]
 
 
 def test_bawthub_refusal_is_reported(rig):
