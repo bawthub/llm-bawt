@@ -346,16 +346,28 @@ def test_other_profiles_do_not_model_hardening():
 
 # ── ci_publish: verification of the CI publish run ─────────────────────────
 
+TRIGGER_ID = "123456"
+# A workflow_run run's own head_sha is the branch head when it was queued, not
+# the commit it built (live: publish 41075630797 for CI 41074381903).
+QUEUED_HEAD = "4" * 40
+
+
 class PublishGitHub:
-    def __init__(self, *, run=None, receipt=None, artifact="pocket-tts-publish-receipt-1",
+    def __init__(self, *, run=None, receipt=None, trigger=None, artifact="pocket-tts-publish-receipt-1",
                  filename="publish-receipt.json"):
         api = "https://api.github.com/repos/bawthub/bawthub"
         run = {"status": "completed", "conclusion": "success",
                "path": POCKET_DEPLOY["workflow_path"] + "@refs/heads/main", "head_branch": "main",
-               "event": "workflow_run", "head_sha": SOURCE, "run_attempt": 1,
+               "event": "workflow_run", "head_sha": QUEUED_HEAD, "run_attempt": 1,
                "repository": {"full_name": "bawthub/bawthub"}, "html_url": "https://run", **(run or {})}
+        trigger = {"status": "completed", "conclusion": "success",
+                   "path": POCKET_DEPLOY["trigger_workflow_path"] + "@refs/heads/main", "head_branch": "main",
+                   "event": "push", "head_sha": SOURCE, "run_attempt": 1,
+                   "repository": {"full_name": "bawthub/bawthub"},
+                   "head_repository": {"full_name": "bawthub/bawthub"}, **(trigger or {})}
         receipt = {"schema": "bawthub.image-publish-receipt/v1", "repository": "bawthub/bawthub",
                    "workflow_run_id": RUN_ID, "workflow_run_attempt": "1", "source_sha": SOURCE,
+                   "trigger_run_id": TRIGGER_ID,
                    "image_repository": POCKET_REPO, "digest": DIGEST, "status": "complete", **(receipt or {})}
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zf:
@@ -363,6 +375,7 @@ class PublishGitHub:
         self.seen = []
         self.routes = {
             f"{api}/actions/runs/{RUN_ID}": _Resp(body=json.dumps(run).encode()),
+            f"{api}/actions/runs/{TRIGGER_ID}": _Resp(body=json.dumps(trigger).encode()),
             f"{api}/actions/runs/{RUN_ID}/artifacts?name={artifact}": _Resp(body=json.dumps({"artifacts": [
                 {"name": artifact, "expired": False, "archive_download_url": f"{api}/zip"}]}).encode()),
             f"{api}/zip": _Resp(302, location="https://blob.example/signed"),
@@ -388,6 +401,7 @@ def test_verify_publish_binds_run_sha_and_digest():
     assert release["binding"] == BINDING_CI_PUBLISH and release["image_ref"] == POCKET_REF
     assert release["source_sha"] == SOURCE and release["version"] == f"sha-{SOURCE}"
     assert release["workflow_run_id"] == RUN_ID and release["workflow_run_attempt"] == "1"
+    assert release["trigger_run_id"] == TRIGGER_ID and release["trigger_sha"] == SOURCE
     assert "release_run_id" not in release
 
 
@@ -402,7 +416,18 @@ def test_verify_publish_reads_the_latest_attempt_artifact_only():
 @pytest.mark.parametrize("gh, message", [
     ({"run": {"event": "workflow_dispatch"}}, "event"),
     ({"run": {"event": "push"}}, "event"),
-    ({"run": {"head_sha": "3" * 40}}, "head_sha"),
+    ({"trigger": {"head_sha": "3" * 40}}, "trigger run .* head_sha"),
+    ({"trigger": {"event": "pull_request"}}, "event"),
+    ({"trigger": {"head_branch": "feature"}}, "branch"),
+    ({"trigger": {"conclusion": "failure"}}, "conclusion"),
+    ({"trigger": {"status": "in_progress"}}, "status"),
+    ({"trigger": {"path": POCKET_DEPLOY["workflow_path"]}}, "workflow path"),
+    ({"trigger": {"repository": {"full_name": "evil/bawthub"}}}, "repository"),
+    ({"trigger": {"head_repository": {"full_name": "evil/bawthub"}}}, "head_repository"),
+    ({"receipt": {"trigger_run_id": None}}, "trigger_run_id"),
+    ({"receipt": {"trigger_run_id": 123456}}, "trigger_run_id"),
+    ({"receipt": {"trigger_run_id": RUN_ID}}, "trigger_run_id"),
+    ({"receipt": {"trigger_run_id": "../x"}}, "trigger_run_id"),
     ({"run": {"head_branch": "feature"}}, "branch"),
     ({"run": {"conclusion": "failure"}}, "conclusion"),
     ({"run": {"path": ".github/workflows/release-prod.yml"}}, "workflow path"),
@@ -470,6 +495,8 @@ def test_pocket_seeds_ship_disabled_and_validate():
         assert validate_spec(SEED[slug]["command_script"])["container_name"] == "bawthub-pocket-tts-1"
         assert spec["compose_config"]["adopt_files"] == ["docker-compose.yml", "docker-compose.pocket.yml"]
     assert POCKET_DEPLOY["binding"] == BINDING_CI_PUBLISH
+    assert POCKET_DEPLOY["trigger_workflow_path"] == ".github/workflows/ci.yml"
+    assert "trigger_workflow_path" not in POCKET["bawthub.rollback-pocket-tts"]
     assert set(json.loads(SEED["bawthub.deploy-pocket-tts"]["args_schema_json"])["properties"]) == set(PUBLISH_ARGS)
 
 
@@ -478,6 +505,10 @@ def test_pocket_seeds_ship_disabled_and_validate():
     lambda s: s.update(health_probe={"type": "tcp"}),
     lambda s: s["compose_config"].update(profile="privileged"),
     lambda s: s["compose_config"].update(adopt_files=["/etc/compose.yml"]),
+    lambda s: s.pop("trigger_workflow_path"),
+    lambda s: s.update(trigger_workflow_path="../ci.yml"),
+    lambda s: s.update(trigger_workflow_path=None),
+    lambda s: s.pop("binding"),  # a release_run row never names a trigger workflow
 ])
 def test_pocket_spec_drift_is_refused_by_validation(mutate):
     spec = copy.deepcopy(POCKET_DEPLOY)

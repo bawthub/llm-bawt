@@ -208,7 +208,7 @@ class GitHubReleaseVerifier(ReleaseVerifier):
             raise ReleaseVerificationError(f"GitHub branch {branch} did not resolve to exactly one commit")
         return sha
 
-    def _run(self, spec, run_id, event):
+    def _run(self, spec, run_id, event, workflow_path=None):
         """The pinned workflow's completed, successful run of ``event`` on the canonical branch."""
         self._token = self._fixed_token if self._fixed_token is not None else _stored_release_token()
         if not self._token:
@@ -219,7 +219,7 @@ class GitHubReleaseVerifier(ReleaseVerifier):
         checks = {
             "status": (run.get("status"), "completed"),
             "conclusion": (run.get("conclusion"), "success"),
-            "workflow path": ((run.get("path") or "").split("@")[0], spec["workflow_path"]),
+            "workflow path": ((run.get("path") or "").split("@")[0], workflow_path or spec["workflow_path"]),
             "branch": (run.get("head_branch"), spec["canonical_branch"]),
             "event": (run.get("event"), event),
             "repository": ((run.get("repository") or {}).get("full_name"), repo),
@@ -233,10 +233,10 @@ class GitHubReleaseVerifier(ReleaseVerifier):
         _require_args(args, _PUBLISH_ARGS)
         repo, run_id, sha = spec["github_repository"], args["workflow_run_id"], args["source_sha"]
         # A workflow_run run always executes the default branch's workflow
-        # file, and its head_sha is the triggering CI push run's commit.
+        # file, but its own head_sha is the branch head when it was queued, not
+        # the commit it built. The source SHA is proven on the triggering CI
+        # push run the receipt names (below).
         run = self._run(spec, run_id, "workflow_run")
-        if run.get("head_sha") != sha:
-            raise ReleaseVerificationError(f"workflow run {run_id} head_sha is {run.get('head_sha')!r}, expected {sha!r}")
         attempt = str(run.get("run_attempt") or "").strip()
         if not attempt.isdigit():
             raise ReleaseVerificationError(f"workflow run {run_id} has no run attempt")
@@ -251,10 +251,20 @@ class GitHubReleaseVerifier(ReleaseVerifier):
         for key, want in expected.items():
             if receipt.get(key) != want:
                 raise ReleaseVerificationError(f"publish receipt {key} is {receipt.get(key)!r}, expected {want!r}")
+        trigger_id = receipt.get("trigger_run_id")
+        if not (isinstance(trigger_id, str) and trigger_id.isdigit()) or trigger_id == run_id:
+            raise ReleaseVerificationError(f"publish receipt trigger_run_id is {trigger_id!r}, expected a CI run id")
+        trigger = self._run(spec, trigger_id, "push", spec["trigger_workflow_path"])
+        if trigger.get("head_sha") != sha:
+            raise ReleaseVerificationError(
+                f"trigger run {trigger_id} head_sha is {trigger.get('head_sha')!r}, expected {sha!r}")
+        if (trigger.get("head_repository") or {}).get("full_name") != repo:
+            raise ReleaseVerificationError(f"trigger run {trigger_id} head_repository is not {repo!r}")
         version = f"sha-{sha}"
         return {"binding": BINDING_CI_PUBLISH, "github_repository": repo, "workflow_run_id": run_id,
                 "workflow_run_attempt": attempt, "workflow_run_url": run.get("html_url", ""),
-                "workflow_path": spec["workflow_path"], "trigger_sha": sha, "source_sha": sha,
+                "workflow_path": spec["workflow_path"], "trigger_run_id": trigger_id,
+                "trigger_workflow_path": spec["trigger_workflow_path"], "trigger_sha": sha, "source_sha": sha,
                 "version": version, "tag": version, "digest": args["digest"],
                 "image_repository": spec["image_repository"],
                 "image_ref": f"{spec['image_repository']}@{args['digest']}", "receipt_status": "complete",

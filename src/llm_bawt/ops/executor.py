@@ -203,7 +203,7 @@ def validate_image_spec(spec: dict) -> dict:
     ``compose_config`` (TASK-1518) is required for deploy and optional for
     rollback, which never checks it: a rollback must stay possible."""
     allowed = {"action", "stop_grace_seconds", "health_timeout_seconds", "compose_config", "health_probe",
-               "binding", *_IMAGE_SPEC_PATTERNS}
+               "binding", "trigger_workflow_path", *_IMAGE_SPEC_PATTERNS}
     if set(spec) - allowed or set(_IMAGE_SPEC_PATTERNS) - set(spec):
         raise ValueError(f"image spec requires exactly {sorted(allowed)} "
                          "(stop_grace_seconds, health_probe and binding optional, compose_config required for deploy)")
@@ -211,6 +211,14 @@ def validate_image_spec(spec: dict) -> dict:
     # publish run whose receipt names the digest.
     if spec.get("binding", BINDING_RELEASE_RUN) not in IMAGE_BINDINGS:
         raise ValueError("image spec binding must be one of " + ", ".join(sorted(IMAGE_BINDINGS)))
+    # A ci_publish run is a workflow_run: its source SHA is proven on the
+    # triggering CI push run, whose workflow file is pinned here too.
+    if (spec.get("binding") == BINDING_CI_PUBLISH) != ("trigger_workflow_path" in spec):
+        raise ValueError("trigger_workflow_path is required for, and only for, binding ci_publish")
+    if "trigger_workflow_path" in spec and not (
+            isinstance(spec["trigger_workflow_path"], str)
+            and re.fullmatch(_IMAGE_SPEC_PATTERNS["workflow_path"], spec["trigger_workflow_path"])):
+        raise ValueError("image spec trigger_workflow_path is invalid")
     if "health_probe" in spec:
         validate_health_probe(spec["health_probe"])
     if spec["action"] == DEPLOY_ACTION and "compose_config" not in spec:

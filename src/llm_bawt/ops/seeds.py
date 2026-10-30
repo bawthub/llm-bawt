@@ -767,7 +767,8 @@ _POCKET_SEEDS: list[dict[str, Any]] = [
         "executor_kind": EXECUTOR_DOCKER,
         "target_host": "",
         "working_directory": None,
-        "command_script": _spec(action="deploy_image", binding="ci_publish", **_POCKET_TARGET),
+        "command_script": _spec(action="deploy_image", binding="ci_publish",
+                                trigger_workflow_path=".github/workflows/ci.yml", **_POCKET_TARGET),
         "args_schema_json": _schema(
             {
                 "workflow_run_id": {"type": "string", "pattern": "^[0-9]{1,20}$"},
