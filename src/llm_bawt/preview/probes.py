@@ -46,6 +46,8 @@ ALLOWED_MOUNT_DESTINATIONS = ("/var/lib/postgresql/data", "/data", "/seed", "/ru
 # docker host, ...) come from the operator at run time, never from source:
 # ``label=host:port`` entries separated by ``;``.
 TARGETS_ENV = "LLM_BAWT_PREVIEW_PROBE_TARGETS"
+# Ports prod services listen on without declaring them (e.g. the agent bridges).
+PORTS_ENV = "LLM_BAWT_PREVIEW_PROBE_PORTS"
 PROJECT_ENV = "COMPOSE_PROJECT_NAME"
 DEFAULT_PROJECT = "llm-bawt"
 # Generic: no route to the internet either.
@@ -96,19 +98,39 @@ def parse_targets(value: str | None) -> list[tuple[str, str, int]]:
     return targets
 
 
-def prod_targets(containers: list[dict]) -> list[tuple[str, str, int]]:
-    """Every address and exposed TCP port of the project's non-preview containers."""
-    targets = []
-    for c in containers:
+def parse_ports(value: str | None) -> set[int]:
+    """``8642,8681`` -> {8642, 8681}; raises ValueError if malformed."""
+    parts = [part.strip() for part in (value or "").split(",") if part.strip()]
+    if not all(part.isdigit() and 0 < int(part) < 65536 for part in parts):
+        raise ValueError(f"malformed probe ports {value!r}")
+    return {int(part) for part in parts}
+
+
+def _declared_ports(c: dict) -> set[int]:
+    keys = [*(c["Config"].get("ExposedPorts") or {}), *((c.get("HostConfig") or {}).get("PortBindings") or {})]
+    return {int(k.split("/")[0]) for k in keys if k.endswith("/tcp")}
+
+
+def prod_targets(containers: list[dict], extra_ports: set[int] = frozenset()) -> tuple[list[tuple[str, str, int]], list[str]]:
+    """Every address of the project's non-preview containers x every known prod port.
+
+    A container need not declare the port it listens on (the bridges EXPOSE
+    nothing), so each address is probed on the union of every port any
+    project container declares or binds plus ``extra_ports`` (operator
+    config). Returns ``(targets, uncovered)``; ``uncovered`` names prod
+    services that yielded no target at all, which the probe must fail.
+    """
+    prod = [c for c in containers if not topology.is_preview_service(_service(c))]
+    ports = sorted(set(extra_ports).union(*(_declared_ports(c) for c in containers)))
+    targets, uncovered = [], []
+    for c in prod:
         service = _service(c)
-        if topology.is_preview_service(service):
-            continue
-        ports = sorted(int(p.split("/")[0]) for p in (c["Config"].get("ExposedPorts") or {}) if p.endswith("/tcp"))
-        for net in (c["NetworkSettings"].get("Networks") or {}).values():
-            ip = net.get("IPAddress")
-            for port in ports if ip else ():
-                targets.append((f"prod {service}", ip, port))
-    return targets
+        ips = [n.get("IPAddress") for n in (c["NetworkSettings"].get("Networks") or {}).values()]
+        mine = [(f"prod {service}", ip, port) for ip in ips if ip for port in ports]
+        if not mine:
+            uncovered.append(service)
+        targets.extend(mine)
+    return targets, uncovered
 
 
 def inventory_findings(containers: list[dict]) -> list[tuple[bool, str]]:
@@ -212,11 +234,14 @@ def seed() -> bool:
 def network() -> bool:
     try:
         extra = parse_targets(os.environ.get(TARGETS_ENV))
+        ports = parse_ports(os.environ.get(PORTS_ENV))
     except ValueError as exc:
-        return _report(False, f"network: {TARGETS_ENV}: {exc}")
+        return _report(False, f"network: {exc}")
     ok = _report(bool(extra), f"network: {TARGETS_ENV} names the install's non-Compose prod surfaces")
-    found = prod_targets(_project_containers())
+    ok &= _report(bool(ports), f"network: {PORTS_ENV} names the undeclared prod ports")
+    found, uncovered = prod_targets(_project_containers(), ports)
     ok &= _report(bool(found), f"network: production containers of project {_project()!r} found")
+    ok &= _report(not uncovered, f"network: every prod container probed {uncovered or ''}")
     for label, host, port in [*found, *extra, INTERNET_TARGET]:
         # A throwaway container on the preview network: same reachability as
         # any preview service, without exec into one of them.

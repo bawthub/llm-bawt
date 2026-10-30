@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from llm_bawt.preview import probes, topology
-from llm_bawt.preview.probes import inventory_findings, parse_targets, prod_targets
+from llm_bawt.preview.probes import inventory_findings, parse_ports, parse_targets, prod_targets
 
 
 def _container(service, networks, *, running=True, ports=None, exposed=None, ip="172.30.0.5"):
@@ -68,9 +68,36 @@ def test_parse_targets():
 
 
 def test_prod_targets_cover_non_preview_addresses_and_ports():
-    targets = prod_targets(_healthy())
-    assert targets and {label for label, _, _ in targets} == {"prod app"}
+    targets, uncovered = prod_targets(_healthy())
+    assert targets and {label for label, _, _ in targets} == {"prod app"} and uncovered == []
     assert {port for _, _, port in targets} == {8642}
+
+
+def test_undeclared_bridge_port_is_still_probed():
+    # Codex r2 cmvvdv0kl00xj0mpd3nanq9ui: the bridges EXPOSE nothing.
+    containers = [*_healthy(), _container("claude-code-bridge", ["llm-bawt_default"], ip="172.30.0.9")]
+    targets, uncovered = prod_targets(containers, {8681})
+    assert ("prod claude-code-bridge", "172.30.0.9", 8681) in targets
+    assert ("prod claude-code-bridge", "172.30.0.9", 8642) in targets  # any project port, any prod address
+    assert uncovered == []
+
+
+def test_prod_container_without_any_probe_port_is_reported():
+    containers = [_container("claude-code-bridge", ["llm-bawt_default"])]
+    assert prod_targets(containers) == ([], ["claude-code-bridge"])
+
+
+def test_bound_ports_count():
+    c = _container("app", ["llm-bawt_default"])
+    c["HostConfig"]["PortBindings"] = {"8001/tcp": [{"HostPort": "8001"}]}
+    assert {p for _, _, p in prod_targets([c])[0]} == {8001}
+
+
+def test_parse_ports():
+    assert parse_ports("8681, 8682") == {8681, 8682}
+    assert parse_ports(None) == set()
+    with pytest.raises(ValueError):
+        parse_ports("86x1")
 
 
 def _service(c):
