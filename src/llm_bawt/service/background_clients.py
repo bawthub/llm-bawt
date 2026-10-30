@@ -162,10 +162,13 @@ class LocalBridgeFactory(BackgroundClientFactory):
 
 
 class GrokFactory(BackgroundClientFactory):
+    """The xAI Responses client is not valid for chat-completions endpoints."""
+
     name = "xai"
 
     def accepts(self, model_def: dict) -> bool:
-        return model_def.get("type") == "grok"
+        return (model_def.get("type") == "grok"
+                and model_def.get("protocol") in (None, "responses"))
 
     def build(self, config: Any, model_def: dict, alias: str) -> Any:
         from ..clients.grok_client import GrokClient
@@ -214,7 +217,7 @@ class ChatCompletionsFactory(BackgroundClientFactory):
 
     def accepts(self, model_def: dict) -> bool:
         return (model_def.get("protocol") == "chat-completions"
-                and model_def.get("type") == "openai-compatible")
+                and model_def.get("type") in ("openai-compatible", "grok"))
 
     def build(self, config: Any, model_def: dict, alias: str) -> Any:
         from ..clients.openai_client import OpenAIClient

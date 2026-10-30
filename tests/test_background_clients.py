@@ -48,7 +48,7 @@ EXPECTED = {
     "openai-oauth": None,
     "openai-responses": "responses",
     "openrouter-anthropic": "anthropic-messages",
-    "xai-chat": "xai",
+    "xai-chat": "chat-completions",
     "xai-responses": "xai",
     "zai-oauth": None,
 }
@@ -94,6 +94,44 @@ def test_chat_endpoint_keeps_priority_over_background_only_ones():
     cfg = _config(_catalog(models={"xai-chat": "shared", "xai-responses": "shared",
                                    "anthropic-api": "shared"}))
     assert bc.resolve_background_model(cfg, "shared")["access_path"] == "xai-chat"
+
+
+def test_xai_chat_utility_uses_chat_completions_without_reasoning_effort():
+    """The catalog's chat endpoint must not inherit the Responses-only effort knob."""
+    from llm_bawt.service.instance_manager import InstanceManagerMixin
+    from llm_bawt.service.schemas import RawCompletionRequest
+    from llm_bawt.service.utility_completion import complete_utility
+
+    cfg = _config(_catalog(paths=[
+        ("xai-chat", "xai", "chat-completions", "api-key", None, "https://x.example/v1"),
+    ]))
+    cfg.NO_STREAM = False
+    cfg.VERBOSE = False
+    cfg.SYSTEM_MESSAGE = None
+    cfg.TOP_P = 1.0
+    cfg.get_model_max_tokens = lambda alias: 100
+    sdk = MagicMock()
+    sdk.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="served over chat"))], usage=None)
+    sdk.responses.create.side_effect = AssertionError("chat endpoint must not call Responses API")
+    svc = InstanceManagerMixin.__new__(InstanceManagerMixin)
+    svc.config = cfg
+    svc._bg_client_cache, svc._bg_client_lock = {}, threading.Lock()
+    svc._maintenance_reasoning_effort = lambda: "high"
+
+    with patch("llm_bawt.service.providers.registry.access_path_adapter",
+               return_value=_adapter("xk", "xai")), \
+         patch("llm_bawt.clients.openai_client.OpenAI", return_value=sdk), \
+         patch("llm_bawt.clients.responses_client.OpenAI", return_value=sdk), \
+         patch("llm_bawt.service.utility_completion.get_service", return_value=svc):
+        result = complete_utility(RawCompletionRequest(prompt="hello", model="m-xai-chat"))
+
+    assert result.content == "served over chat"
+    sdk.chat.completions.create.assert_called_once()
+    payload = sdk.chat.completions.create.call_args.kwargs
+    assert payload["messages"][-1] == {"role": "user", "content": "hello"}
+    assert "reasoning" not in payload and "reasoning_effort" not in payload
+    sdk.responses.create.assert_not_called()
 
 
 def test_oauth_chat_endpoint_falls_through_to_an_api_key_one():
@@ -298,8 +336,8 @@ def test_spending_limit_falls_back_to_a_non_xai_backup_end_to_end(monkeypatch, b
     monkeypatch.setattr("llm_bawt.runtime_settings.RuntimeSettingsResolver", resolver)
 
     owners = {"xai-chat": _adapter("xk", "xai"), "anthropic-api": _adapter("ak", "anthropic-api")}
-    grok = MagicMock()
-    grok.return_value.query.side_effect = _SpendError()
+    chat = MagicMock()
+    chat.return_value.query.side_effect = _SpendError()
     sdk = MagicMock()
     sdk.messages.create.return_value = SimpleNamespace(content=[SimpleNamespace(type="text", text="from backup")])
 
@@ -311,7 +349,7 @@ def test_spending_limit_falls_back_to_a_non_xai_backup_end_to_end(monkeypatch, b
     with patch("llm_bawt.service.providers.registry.access_path_adapter",
                side_effect=lambda cfg, key: owners.get(key)), \
          patch("llm_bawt.service.providers.base.CredentialStore") as store, \
-         patch("llm_bawt.clients.grok_client.GrokClient", grok), \
+         patch("llm_bawt.clients.openai_client.OpenAIClient", chat), \
          patch("llm_bawt.clients.anthropic_messages_client.Anthropic", return_value=sdk):
         store.return_value.load.return_value = None
         client, alias = svc._get_background_client(job="memory_extraction", allow_fallback=True)
