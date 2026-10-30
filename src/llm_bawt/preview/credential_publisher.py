@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import text
 
 from llm_bawt.bawthub_auth.token_export import publish
@@ -32,6 +34,7 @@ EXPORT_ENV = "PREVIEW_CREDENTIAL_CAPABILITY_EXPORT_FILE"
 EXPORT_UID_ENV = "PREVIEW_CREDENTIAL_CAPABILITY_EXPORT_UID"
 ACTIVATION_ENVS = (RUN_ENV, PROVIDER_ENV, ENDPOINT_ENV, EXPIRY_ENV, EXPORT_ENV)
 RENEW_SECONDS = 120  # shorter than the capability's 600-second lifetime
+log = logging.getLogger(__name__)
 
 
 class ActivationUnavailable(ValueError):
@@ -48,9 +51,13 @@ def configured_grant(env: Mapping[str, str], now: int) -> tuple[PreviewGrant, Pa
     try:
         if str(UUID(run_id)) != run_id or not endpoint.isdecimal() or not expiry.isdecimal():
             raise ValueError("bad Preview activation fields")
+        expiry_at = int(expiry)
+        # Validate the complete shape even when the configured run has expired.
+        # The caller revokes stale grants instead of taking production offline.
+        parse_at = now if expiry_at > now else expiry_at - 1
         grant = PreviewGrant.parse({"run_id": run_id, "provider": provider,
-                                    "endpoint_id": int(endpoint), "expires_at": int(expiry)}, now)
-    except (ValueError, AttributeError, OverflowError) as exc:
+                                    "endpoint_id": int(endpoint), "expires_at": expiry_at}, parse_at)
+    except (ValueError, AttributeError, OverflowError, HTTPException) as exc:
         raise ActivationUnavailable("Preview credential activation invalid") from exc
     file = Path(raw_file)
     if not file.is_absolute() or file.is_dir():
@@ -72,6 +79,17 @@ def _upsert_grant(engine: Any, grant: PreviewGrant | None) -> None:
                 {"key": GRANT_KEY, "value": json.dumps(grant.__dict__)})
 
 
+def _revoke(engine: Any, file: Path, env: Mapping[str, str], reason: str) -> None:
+    """Withdraw database authority first; an unreadable volume cannot keep it valid."""
+    _upsert_grant(engine, None)
+    try:
+        publish(file, None, env, uid_env=EXPORT_UID_ENV)
+    except OSError:
+        log.warning("Preview credential %s; export file could not be removed", reason)
+    else:
+        log.warning("Preview credential %s; grant withdrawn", reason)
+
+
 def activate(engine: Any, catalog: Any, env: Mapping[str, str] | None = None,
              *, now: int | None = None) -> Path | None:
     """At production startup: write the exactly selected grant or revoke it.
@@ -90,7 +108,16 @@ def activate(engine: Any, catalog: Any, env: Mapping[str, str] | None = None,
             publish(Path(raw_file), None, env, uid_env=EXPORT_UID_ENV)
         return None
     grant, file = selected
-    _provider_for_endpoint(catalog, grant)
+    if grant.expires_at <= now:
+        _revoke(engine, file, env, "run expired")
+        return None
+    try:
+        _provider_for_endpoint(catalog, grant)
+    except HTTPException as exc:
+        if exc.status_code != 403:
+            raise ActivationUnavailable("Preview credential model catalog unavailable") from exc
+        _revoke(engine, file, env, "endpoint no longer authorized")
+        return None
     # Check write permissions before authorizing the DB grant. A missing export
     # must not leave an active grant behind (which would serve a leaked bearer).
     file.parent.mkdir(parents=True, exist_ok=True)
@@ -121,8 +148,12 @@ def refresh(engine: Any, catalog: Any, file: Path, env: Mapping[str, str],
         payload = json.dumps({**grant.__dict__, "capability": capability}, separators=(",", ":"))
         publish(file, payload, env, uid_env=EXPORT_UID_ENV)
         return True
-    except Exception:
-        publish(file, None, env, uid_env=EXPORT_UID_ENV)
+    except Exception as exc:
+        log.warning("Preview credential renewal refused (%s)", type(exc).__name__)
+        try:
+            publish(file, None, env, uid_env=EXPORT_UID_ENV)
+        except OSError:
+            log.warning("Preview credential renewal refused; export file could not be removed")
         return False
 
 

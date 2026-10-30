@@ -4,7 +4,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 
 from llm_bawt.preview import credential_gateway as gateway
 from llm_bawt.preview import credential_publisher as publisher
@@ -84,14 +83,57 @@ def test_refresh_renews_capability_and_revocation_removes_file(setup):
     assert not path.exists()
 
 
-def test_wrong_provider_or_endpoint_never_publishes(setup):
+def test_removed_endpoint_revokes_and_does_not_block_production_startup(setup, caplog):
     engine, catalog, env, path = setup
-    env[publisher.PROVIDER_ENV] = "openai_chatgpt"
-    with pytest.raises(HTTPException) as error:
-        publisher.activate(engine, catalog, env, now=NOW)
-    assert error.value.status_code == 403
+    publisher.activate(engine, catalog, env, now=NOW)
+    catalog.resolve_endpoint = lambda *_args, **_kwargs: (_ for _ in ()).throw(LookupError())
+    assert publisher.activate(engine, catalog, env, now=NOW + 1) is None
     assert broker.GRANT_KEY not in engine.rows
     assert not path.exists()
+    assert "endpoint no longer authorized" in caplog.text
+
+
+def test_expired_run_revokes_and_does_not_block_production_startup(setup, caplog):
+    engine, catalog, env, path = setup
+    publisher.activate(engine, catalog, env, now=NOW)
+    assert publisher.activate(engine, catalog, env, now=NOW + 1801) is None
+    assert broker.GRANT_KEY not in engine.rows
+    assert not path.exists()
+    assert "run expired" in caplog.text
+
+
+def test_renewal_logs_refusal_even_if_export_volume_disappears(setup, monkeypatch, caplog):
+    engine, catalog, env, path = setup
+    publisher.activate(engine, catalog, env, now=NOW)
+    original = publisher.publish
+
+    def broken_withdraw(file, token, environ, **kwargs):
+        if token is None:
+            raise OSError("volume gone")
+        return original(file, token, environ, **kwargs)
+
+    monkeypatch.setattr(publisher, "publish", broken_withdraw)
+    engine.rows.pop(broker.GRANT_KEY)
+    assert publisher.refresh(engine, catalog, path, env, now=NOW + 1) is False
+    assert "renewal refused" in caplog.text
+    assert "export file could not be removed" in caplog.text
+    assert "volume gone" not in caplog.text
+
+
+def test_wrong_provider_never_publishes(setup):
+    engine, catalog, env, path = setup
+    env[publisher.PROVIDER_ENV] = "openai_chatgpt"
+    assert publisher.activate(engine, catalog, env, now=NOW) is None
+    assert broker.GRANT_KEY not in engine.rows
+    assert not path.exists()
+
+
+def test_malformed_provider_refuses_before_database_write(setup):
+    engine, catalog, env, _ = setup
+    env[publisher.PROVIDER_ENV] = "not-a-provider"
+    with pytest.raises(publisher.ActivationUnavailable):
+        publisher.activate(engine, catalog, env, now=NOW)
+    assert not engine.writes
 
 
 def test_partial_configuration_refuses_before_database_write(setup):
