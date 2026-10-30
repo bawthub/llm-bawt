@@ -251,7 +251,14 @@ def load_steer_jumper(conn, held_head, config):
               SELECT 1 FROM inter_bot_deliveries w
               WHERE w.target_bot_id=d.target_bot_id AND w.lane='normal'
                 AND w.status='QUEUED' AND w.ordinal < d.ordinal
-                AND COALESCE(w.payload_json->>'prefer_steer', 'true') <> 'false'
+                -- Only a plain ready wait row is exempt; a reset, scheduled
+                -- prompt or delayed row of the author still fences.
+                AND NOT (
+                    COALESCE(w.payload_json->>'prefer_steer', 'true') = 'false'
+                    AND COALESCE(w.session_policy, 'continue') = 'continue'
+                    AND w.metadata_json->'prompt_schedule' IS NULL
+                    AND w.available_at <= CURRENT_TIMESTAMP
+                )
                 AND w.sender_bot_id = d.sender_bot_id
                 AND w.author_entity_type IS NOT DISTINCT FROM d.author_entity_type
                 AND w.author_entity_id IS NOT DISTINCT FROM d.author_entity_id

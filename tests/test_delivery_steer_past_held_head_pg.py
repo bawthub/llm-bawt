@@ -130,6 +130,7 @@ def test_a_sender_never_passes_its_own_earlier_non_waiting_row(gated):
     with deliveries.engine.begin() as conn:
         conn.execute(sa_text("UPDATE inter_bot_deliveries SET session_policy='reset_without_history'"
                              " WHERE id=:id"), {"id": reset.id})
+    _wait_for_turn_end(deliveries, reset)  # Codex r1 B: a false-preference reset still fences
     same = _from_same_sender(gated, held, bot, "C: same sender")
     _, other = _enqueue(gated, bot, "D: other sender")
     _open(gated.store, bot)
