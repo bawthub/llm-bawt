@@ -690,15 +690,18 @@ class MemoryClient(
         """Extract facts from conversation messages.
         
         Args:
-            messages: List of message dicts with role/content.
+            messages: Message dicts with role/content and unique IDs on human turns.
             store: Whether to persist extracted facts as memories.
             use_llm: Whether to use LLM extraction (vs heuristics).
-            
+
         Returns:
             List of extracted MemoryResult objects.
         """
+        from llm_bawt.memory.extraction.service import MemoryExtractionService
+
+        MemoryExtractionService.require_source_ids(messages)
         self._ensure_initialized()
-        
+
         if self.server_url:
             if not self.user_id:
                 raise ValueError("user_id is required for extract_facts")

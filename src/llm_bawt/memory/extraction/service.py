@@ -266,7 +266,24 @@ class MemoryExtractionService:
     @staticmethod
     def _is_command(content: str) -> bool:
         """A slash command is control input, never a source of user facts."""
-        return bool(re.match(r"^/[a-z][\w-]*(?:\s|$)", content.strip(), re.IGNORECASE))
+        return isinstance(content, str) and bool(
+            re.match(r"^/[a-z][\w-]*(?:\s|$)", content.strip(), re.IGNORECASE)
+        )
+
+    @classmethod
+    def require_source_ids(cls, messages: list[dict]) -> None:
+        """Reject public extraction requests that cannot identify human sources."""
+        eligible = [
+            msg for msg in extraction_input(messages)
+            if not (msg.get("role") == "user" and cls._is_command(msg.get("content", "")))
+        ]
+        all_ids = [msg.get("id") for msg in eligible]
+        for msg in eligible:
+            if msg.get("role") != "user":
+                continue
+            source_id = msg.get("id")
+            if not isinstance(source_id, str) or not source_id or all_ids.count(source_id) != 1:
+                raise ValueError("facts_extract requires each human message to have a unique id")
 
     def _format_conversation(self, messages: list[dict]) -> str:
         """Label human turns with their exact, eligible IDs for source selection."""

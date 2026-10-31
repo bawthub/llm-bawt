@@ -61,7 +61,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "working_memory_list": "Read your own working-memory items for the current user from trusted turn identity; open only unless include_archived.",
     "working_memory_create": "Add an item. idempotency_key: a fresh UUID per create, reused only to retry it. Open-item cap 20. initiative_link points at a task; no next_action/blockers.",
     "working_memory_update": "CAS edit: stale expected_revision returns the current item, writes nothing. Omitted fields stay; clear nulls listed fields. done|cancelled archives.",
-    "facts_extract": "Extract facts from supplied role/content messages; store=true persists them. bot_id and user_id are required scopes.",
+    "facts_extract": "Extract facts from supplied messages. Human turns require unique id plus role/content; missing/ambiguous IDs error. store=true persists them; bot_id and user_id are required scopes.",
     "system_stats": "Read bot_id's memory and message statistics.",
     "system_run_maintenance": "Run selected memory maintenance operations for bot_id; dry_run=false applies changes.",
     "profile": "Structured profile attributes, not semantic memory. action: summary|list|get|set|delete; entity_type: user|bot. set/delete mutate.",

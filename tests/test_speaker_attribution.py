@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from llm_bawt.mcp_result_envelope import is_mcp_result_envelope
 from llm_bawt.memory.extraction.service import MemoryExtractionService
 from llm_bawt.memory.speaker_attribution import BOT, TOOL, USER, speaker_of
@@ -231,6 +233,35 @@ def test_unidentified_or_duplicate_human_turns_cannot_be_sources():
         {"id": "same", "role": "user", "content": "I have a Powerwall"},
         {"id": "same", "role": "assistant", "content": "Confirmed"},
     ]) == []
+
+
+def test_public_extraction_requires_source_ids_for_human_turns():
+    service = MemoryExtractionService()
+    with pytest.raises(ValueError, match="human message.*id"):
+        service.require_source_ids([{"role": "user", "content": "I have a Powerwall"}])
+    with pytest.raises(ValueError, match="human message.*id"):
+        service.require_source_ids([
+            {"id": "same", "role": "user", "content": "I have a Powerwall"},
+            {"id": "same", "role": "assistant", "content": "Confirmed"},
+        ])
+    service.require_source_ids([
+        {"role": "user", "content": "/new"},
+        {"id": "bot", "role": "user", "author_entity_type": "bot", "content": "Bot note"},
+        {"id": "human", "role": "user", "content": "I have a Powerwall"},
+    ])
+
+
+def test_public_extraction_entrypoints_error_on_missing_human_id():
+    import asyncio
+    from llm_bawt.mcp_server.client import MemoryClient
+    from llm_bawt.mcp_server.server import extract_facts
+
+    messages = [{"role": "user", "content": "I have a Powerwall"}]
+    client = MemoryClient.__new__(MemoryClient)
+    with pytest.raises(ValueError, match="human message.*id"):
+        client.extract_facts(messages, store=False)
+    with pytest.raises(ValueError, match="human message.*id"):
+        asyncio.run(extract_facts(messages, bot_id="example", user_id="example", store=False))
 
 
 def test_heuristic_fallback_cites_only_the_matching_human_turn():

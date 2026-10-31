@@ -424,7 +424,8 @@ async def extract_facts(
     """Extract facts from conversation messages (LLM-based).
 
     Args:
-        messages: List of message dicts with role/content.
+        messages: Message dicts with role/content and unique IDs on human turns;
+                  missing/ambiguous human IDs raise ValueError before extraction.
         bot_id: Bot namespace (required).
         user_id: User ID for profile attribute extraction (required).
         store: Whether to persist extracted facts.
@@ -437,8 +438,10 @@ async def extract_facts(
         raise ValueError("bot_id is required for extract_facts")
     if not user_id:
         raise ValueError("user_id is required for extract_facts")
+    from llm_bawt.memory.extraction.service import MemoryExtractionService
     from llm_bawt.mcp_server.extraction import extract_facts_from_messages
-    
+
+    MemoryExtractionService.require_source_ids(messages)
     facts = await extract_facts_from_messages(
         messages=messages,
         use_llm=use_llm,
