@@ -50,6 +50,15 @@ def test_prompt_resolver_renders_memory_maintenance_prompt() -> None:
     assert "intent phrase" in rendered
 
 
+def test_memory_intent_system_prompt_is_registry_owned() -> None:
+    resolver = PromptResolver()
+    definition = resolver.definition_for("memory.maintenance.intent_system")
+    assert definition is not None
+    assert "short intent phrase" in resolver.render(
+        key="memory.maintenance.intent_system", variables={},
+    )
+
+
 def test_scoped_commit_prompt_is_catalog_owned_and_renders_runtime_scope() -> None:
     resolver = PromptResolver()
     definition = resolver.definition_for("chat.scoped_commit")

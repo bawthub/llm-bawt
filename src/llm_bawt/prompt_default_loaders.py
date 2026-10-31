@@ -73,6 +73,12 @@ def load_memory_maintenance_intent_content_only() -> str:
     return INTENT_PROMPT_CONTENT_ONLY
 
 
+def load_memory_maintenance_intent_system() -> str:
+    from .memory.maintenance import INTENT_SYSTEM_PROMPT
+
+    return INTENT_SYSTEM_PROMPT
+
+
 def load_agents_task_spec() -> str:
     from .agent_backends.prompts import TASK_SPEC_PROMPT
 

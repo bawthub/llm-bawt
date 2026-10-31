@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import event, text
 
 from llm_bawt.memory import embeddings
-from llm_bawt.memory import embedding_repair
+from llm_bawt.memory import embedding_repair, maintenance
 from llm_bawt.memory.embedding_repair import EmbeddingRepair
 from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
 from llm_bawt.runtime_settings import BotProfileStore
@@ -266,6 +266,81 @@ def test_private_bot_is_unread_and_report_never_creates_progress(memory_rig):
     assert result["excluded"] and not server.calls
     assert tuple(_row(backend, memory_id)) == (False, False)
     with backend.engine.connect() as conn:
-        assert conn.execute(text("""
-            SELECT count(*) FROM memory_embedding_repair_progress WHERE bot_id=:bot_id
-        """), {"bot_id": slug}).scalar_one() == 0
+        if conn.execute(text("SELECT to_regclass('memory_embedding_repair_progress')")).scalar():
+            assert conn.execute(text("""
+                SELECT count(*) FROM memory_embedding_repair_progress WHERE bot_id=:bot_id
+            """), {"bot_id": slug}).scalar_one() == 0
+
+
+def test_embed_client_non_http_exception_degrades_to_null(monkeypatch):
+    def closed_client():
+        raise RuntimeError("client is closed")
+
+    monkeypatch.setattr(embeddings, "_get_client", closed_client)
+    outcome = embeddings.embed_with_status(["a fact"], "fixture-model")
+    assert outcome.vectors is None and outcome.failure == "transient"
+    assert embeddings.generate_embedding("a fact", "fixture-model") is None
+
+
+def test_meaning_update_failure_clears_old_vector_and_uses_current_sources(memory_rig, monkeypatch):
+    _slug, server, backend, repair, _store = memory_rig
+    memory_id = str(uuid.uuid4())
+    server.code = 200
+    backend.add_memory(memory_id, "original content", intent="old intent", stakes="old stakes")
+    assert _row(backend, memory_id).meaning_ok
+    texts = []
+
+    def reject_embedding(body, _model):
+        texts.append(body)
+        return None
+
+    monkeypatch.setattr(embeddings, "generate_embedding", reject_embedding)
+    assert maintenance.update_memory_meaning(backend, memory_id, stakes="new stakes")
+    assert texts == ["old intent | new stakes"]
+    assert not _row(backend, memory_id).meaning_ok
+    assert repair.repair_bot(backend.bot_id)["repaired_meaning"] == 1
+
+
+def test_meaning_fields_backfill_failure_invalidates_previous_vector(memory_rig, monkeypatch):
+    _slug, server, backend, repair, _store = memory_rig
+    memory_id = str(uuid.uuid4())
+    server.code = 200
+    backend.add_memory(memory_id, "feels important", intent="keep in mind")
+    assert _row(backend, memory_id).meaning_ok
+    texts = []
+
+    def reject_embedding(body, _model):
+        texts.append(body)
+        return None
+
+    monkeypatch.setattr(embeddings, "generate_embedding", reject_embedding)
+    assert maintenance.backfill_meaning_fields(backend, batch_size=1)["updated"] == 1
+    assert texts and "emotional" in texts[0]
+    assert not _row(backend, memory_id).meaning_ok
+    assert repair.repair_bot(backend.bot_id)["repaired_meaning"] == 1
+
+
+def test_intent_backfill_clears_stale_meaning_vector(memory_rig, monkeypatch):
+    _slug, server, backend, repair, _store = memory_rig
+    memory_id = str(uuid.uuid4())
+    server.code = 200
+    backend.add_memory(memory_id, "I collect postcards")
+    assert _row(backend, memory_id).meaning_ok
+    real_resolver = maintenance.get_prompt_resolver
+
+    class Resolver:
+        def render(self, *, key, variables):
+            if key == "memory.maintenance.intent_system":
+                return "registered intent instructions"
+            return real_resolver().render(key=key, variables=variables)
+
+    monkeypatch.setattr(maintenance, "get_prompt_resolver", lambda: Resolver())
+
+    class IntentClient:
+        def query(self, *, messages, **_kwargs):
+            assert messages[0].content == "registered intent instructions"
+            return "share a hobby"
+
+    assert maintenance.backfill_intent_with_llm(backend, IntentClient(), batch_size=1)["updated"] == 1
+    assert not _row(backend, memory_id).meaning_ok
+    assert repair.repair_bot(backend.bot_id)["repaired_meaning"] == 1

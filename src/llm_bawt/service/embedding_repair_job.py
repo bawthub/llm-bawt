@@ -62,9 +62,9 @@ async def run_embedding_repair_loop(config, engine, stop: threading.Event) -> No
             log.exception("embedding repair pass failed; retrying after backoff")
             backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
         try:
-            await asyncio.wait_for(asyncio.to_thread(stop.wait, backoff), timeout=backoff + 5)
-        except asyncio.TimeoutError:
-            continue
+            # Shutdown cancels this task after setting stop; no default-executor
+            # worker needs to stay parked for the entire backoff interval.
+            await asyncio.sleep(backoff)
         except asyncio.CancelledError:
             stop.set()
             raise

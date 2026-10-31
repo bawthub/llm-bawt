@@ -99,6 +99,11 @@ def embed_with_status(texts: list[str], model_name: str) -> EmbedOutcome:
         except httpx.RequestError as exc:
             last_err = exc
             continue
+        except Exception as exc:
+            # Preserve the hot-path contract: closed clients, invalid URL
+            # configuration, etc. degrade to non-vector search, not a 500.
+            last_err = exc
+            break
 
         if resp.status_code == 200:
             try:

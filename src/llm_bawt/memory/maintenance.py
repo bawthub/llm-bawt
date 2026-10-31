@@ -49,6 +49,11 @@ What was the user's probable intent in sharing this? Describe it in a brief phra
 
 Respond with ONLY the intent phrase, nothing else."""
 
+INTENT_SYSTEM_PROMPT = (
+    "You are a helpful assistant that analyzes conversation intent. "
+    "Respond with only a short intent phrase."
+)
+
 
 @dataclass
 class MaintenanceResult:
@@ -285,12 +290,37 @@ def update_memory_meaning(
     when processing MEANING_UPDATE tasks.
     """
     from sqlalchemy import text
-    from .embeddings import generate_embedding
+    from .embeddings import generate_embedding, meaning_text
 
     with backend.engine.connect() as conn:
-        # Build dynamic update
         updates = ["updated_at = CURRENT_TIMESTAMP"]
         params: dict[str, Any] = {"id": memory_id}
+        meaning_changed = any(
+            value is not None for value in (intent, stakes, emotional_charge, recurrence_keywords)
+        )
+        guard = ""
+        if meaning_changed:
+            current = conn.execute(text(f"""
+                SELECT content, intent, stakes, emotional_charge, recurrence_keywords
+                FROM {backend._memories_table_name} WHERE id = :id
+            """), {"id": memory_id}).mappings().first()
+            conn.commit()  # No transaction/row lock spans the embedding request.
+            if current is None:
+                return False
+            guard = """
+                AND content = :old_content
+                AND intent IS NOT DISTINCT FROM :old_intent
+                AND stakes IS NOT DISTINCT FROM :old_stakes
+                AND emotional_charge IS NOT DISTINCT FROM :old_emotional_charge
+                AND recurrence_keywords IS NOT DISTINCT FROM CAST(:old_keywords AS jsonb)
+            """
+            params.update({
+                "old_content": current["content"], "old_intent": current["intent"],
+                "old_stakes": current["stakes"],
+                "old_emotional_charge": current["emotional_charge"],
+                "old_keywords": (json.dumps(current["recurrence_keywords"])
+                                 if current["recurrence_keywords"] is not None else None),
+            })
 
         if intent is not None:
             updates.append("intent = :intent")
@@ -308,26 +338,32 @@ def update_memory_meaning(
             updates.append("tags = CAST(:tags AS jsonb)")
             params["tags"] = json.dumps(updated_tags)
 
-        # Regenerate meaning embedding if any meaning field changed
-        if any(x is not None for x in [intent, stakes, emotional_charge, recurrence_keywords]):
-            parts = [intent or "", stakes or "", " ".join(recurrence_keywords or [])]
-            meaning_text = " | ".join([p for p in parts if p])
-            if meaning_text:
-                try:
-                    emb = generate_embedding(meaning_text, backend.embedding_model)
-                    if emb:
-                        updates.append("meaning_embedding = :meaning_embedding")
-                        params["meaning_embedding"] = f"[{','.join(str(x) for x in emb)}]"
-                        updates.append("meaning_updated_at = CURRENT_TIMESTAMP")
-                except Exception as e:
-                    logger.warning(f"Could not regenerate meaning embedding: {e}")
+        if meaning_changed:
+            body = meaning_text(
+                current["content"],
+                intent if intent is not None else current["intent"],
+                stakes if stakes is not None else current["stakes"],
+                emotional_charge if emotional_charge is not None else current["emotional_charge"],
+                recurrence_keywords if recurrence_keywords is not None else current["recurrence_keywords"],
+            )
+            try:
+                emb = generate_embedding(body, backend.embedding_model)
+            except Exception as exc:
+                logger.warning("Could not regenerate meaning embedding: %s", exc)
+                emb = None
+            # Never retain a vector for fields changed during an outage.
+            updates.extend([
+                "meaning_embedding = :meaning_embedding",
+                "meaning_updated_at = CASE WHEN :meaning_embedding IS NULL "
+                "THEN NULL ELSE CURRENT_TIMESTAMP END",
+            ])
+            params["meaning_embedding"] = f"[{','.join(str(x) for x in emb)}]" if emb else None
 
-        sql = text(f"""
+        result = conn.execute(text(f"""
             UPDATE {backend._memories_table_name}
             SET {', '.join(updates)}
-            WHERE id = :id
-        """)
-        result = conn.execute(sql, params)
+            WHERE id = :id {guard}
+        """), params)
         conn.commit()
         return result.rowcount > 0
 
@@ -343,7 +379,7 @@ def backfill_meaning_fields(backend: Any, batch_size: int = 100) -> dict:
     """
     import re
     from sqlalchemy import text
-    from .embeddings import generate_embedding
+    from .embeddings import generate_embedding, meaning_text
 
     updated = 0
     errors = []
@@ -377,7 +413,8 @@ def backfill_meaning_fields(backend: Any, batch_size: int = 100) -> dict:
             LIMIT :limit
         """)
         rows = conn.execute(sql, {"limit": batch_size}).fetchall()
-        
+        conn.commit()  # Do not hold a transaction across embedding calls.
+
         for row in rows:
             try:
                 tags = row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else ["misc"])
@@ -390,54 +427,40 @@ def backfill_meaning_fields(backend: Any, batch_size: int = 100) -> dict:
                 emotional_charge = infer_emotion(content, importance)
                 recurrence_keywords = infer_recurrence(content, tags)
                 
-                # Generate meaning embedding (include intent if present)
-                parts = [existing_intent or "", stakes, " ".join(recurrence_keywords)]
-                meaning_text = " | ".join([p for p in parts if p])
-                meaning_emb = None
+                body = meaning_text(
+                    content, existing_intent, stakes, emotional_charge, recurrence_keywords,
+                )
                 try:
-                    meaning_emb = generate_embedding(meaning_text, backend.embedding_model)
-                except Exception:
-                    pass
-                
-                # Update the memory (do NOT overwrite intent)
-                if meaning_emb:
-                    update_sql = text(f"""
-                        UPDATE {backend._memories_table_name}
-                        SET stakes = :stakes,
-                            emotional_charge = :emotional_charge,
-                            recurrence_keywords = CAST(:recurrence_keywords AS jsonb),
-                            meaning_embedding = :meaning_embedding,
-                            meaning_updated_at = CURRENT_TIMESTAMP,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = :id
-                    """)
-                    conn.execute(update_sql, {
-                        "id": row.id,
-                        "stakes": stakes,
-                        "emotional_charge": emotional_charge,
-                        "recurrence_keywords": json.dumps(recurrence_keywords),
-                        "meaning_embedding": f"[{','.join(str(x) for x in meaning_emb)}]",
-                    })
-                else:
-                    update_sql = text(f"""
-                        UPDATE {backend._memories_table_name}
-                        SET stakes = :stakes,
-                            emotional_charge = :emotional_charge,
-                            recurrence_keywords = CAST(:recurrence_keywords AS jsonb),
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = :id
-                    """)
-                    conn.execute(update_sql, {
-                        "id": row.id,
-                        "stakes": stakes,
-                        "emotional_charge": emotional_charge,
-                        "recurrence_keywords": json.dumps(recurrence_keywords),
-                    })
-                updated += 1
+                    meaning_emb = generate_embedding(body, backend.embedding_model)
+                except Exception as exc:
+                    logger.warning("Could not backfill meaning embedding: %s", exc)
+                    meaning_emb = None
+
+                # A failed embed must leave NULL, not the vector for old fields.
+                result = conn.execute(text(f"""
+                    UPDATE {backend._memories_table_name}
+                    SET stakes = :stakes,
+                        emotional_charge = :emotional_charge,
+                        recurrence_keywords = CAST(:recurrence_keywords AS jsonb),
+                        meaning_embedding = :meaning_embedding,
+                        meaning_updated_at = CASE WHEN :meaning_embedding IS NULL
+                            THEN NULL ELSE CURRENT_TIMESTAMP END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id AND content = :old_content
+                      AND intent IS NOT DISTINCT FROM :old_intent AND stakes IS NULL
+                """), {
+                    "id": row.id, "old_content": row.content,
+                    "old_intent": existing_intent, "stakes": stakes,
+                    "emotional_charge": emotional_charge,
+                    "recurrence_keywords": json.dumps(recurrence_keywords),
+                    "meaning_embedding": (f"[{','.join(str(x) for x in meaning_emb)}]"
+                                          if meaning_emb else None),
+                })
+                updated += result.rowcount
+                conn.commit()
             except Exception as e:
+                conn.rollback()
                 errors.append(f"{row.id}: {e}")
-        
-        conn.commit()
     
     return {"updated": updated, "errors": errors, "remaining": len(rows) == batch_size}
 
@@ -547,7 +570,9 @@ def backfill_intent_with_llm(
                 
                 system_msg = Message(
                     role="system",
-                    content="You are a helpful assistant that analyzes conversation intent. Respond with only a short intent phrase."
+                    content=get_prompt_resolver().render(
+                        key="memory.maintenance.intent_system", variables={},
+                    ),
                 )
                 user_msg = Message(role="user", content=prompt)
                 
@@ -562,14 +587,18 @@ def backfill_intent_with_llm(
                 if len(intent) > 50:  # Sanity check
                     intent = intent[:50]
                 
-                # Update the memory
+                # The old meaning vector describes the old intent. Leave it
+                # NULL for the bounded repair, never searchable as stale data.
                 update_sql = text(f"""
                     UPDATE {backend._memories_table_name}
-                    SET intent = :intent, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = :id
+                    SET intent = :intent, meaning_embedding = NULL,
+                        meaning_updated_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id AND intent IS NULL AND content = :old_content
                 """)
-                conn.execute(update_sql, {"id": row.id, "intent": intent})
-                updated += 1
+                result = conn.execute(update_sql, {
+                    "id": row.id, "intent": intent, "old_content": row.content,
+                })
+                updated += result.rowcount
                 
             except Exception as e:
                 errors.append(f"{row.id}: {e}")

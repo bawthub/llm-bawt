@@ -62,6 +62,7 @@ from .prompt_default_loaders import (
     load_memory_extraction_update,
     load_memory_extraction_update_system,
     load_memory_maintenance_intent_content_only,
+    load_memory_maintenance_intent_system,
     load_memory_maintenance_intent_with_context,
     load_ops_quiesce_end_turn_new_turn,
     load_ops_quiesce_end_turn_no_receipt,
@@ -184,6 +185,12 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="memory_maintenance",
         required_vars=("fact",),
         loader=load_memory_maintenance_intent_content_only,
+    ),
+    "memory.maintenance.intent_system": PromptDefinition(
+        key="memory.maintenance.intent_system",
+        title="Memory Intent Inference System",
+        category="memory_maintenance",
+        loader=load_memory_maintenance_intent_system,
     ),
     "chat.tts_output_instructions": PromptDefinition(
         key="chat.tts_output_instructions",
