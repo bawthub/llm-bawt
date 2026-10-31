@@ -285,7 +285,7 @@ def fence_consumption(conn, *, turn_id: str, claim: AdmissionClaim | None) -> st
     """
     if claim is not None and not claim.fence(conn):
         raise AdmissionFenceLost(f"claim for turn '{turn_id}' is no longer held")
-    lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+    lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
     row = conn.execute(
         sa_text("SELECT status, ended_at, request_json FROM turn_logs WHERE id=:id" + lock),
         {"id": turn_id},
@@ -341,7 +341,7 @@ def write_reservation(
     )
     # A re-arm starts a new attempt on the same row: carry the prior attempt's
     # audits and history forward (TASK-1232 r2-M1, TASK-1234 Fix 2).
-    lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+    lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
     prior = conn.execute(sa_text(
         "SELECT request_json, status, end_reason, error_text, created_at, ended_at"
         " FROM turn_logs WHERE id=:id" + lock
@@ -447,7 +447,7 @@ def release_reservation(
         else:
             if not bot_id or not trigger_message_id:
                 return False
-            lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+            lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
             row = conn.execute(sa_text(
                 "SELECT status, ended_at, bot_id, trigger_message_id, request_json,"
                 " stream, agent_session_key, agent_request_id, response_text"
@@ -567,7 +567,7 @@ def _lock_open_reservation(conn, session: Session, turn_id: str, *, owner: str |
         conn.execute(sa_text(
             "SELECT 1 FROM tool_approval_requests WHERE continuation_claim_token=:owner" + lock
         ), {"owner": head_owner})
-    row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+    row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
     if row is None or row.status != RESERVED or row.ended_at is not None:
         return None  # consumed or ended since the head read
     locked = _reservation_payload(row.request_json)
@@ -658,7 +658,7 @@ _ROW_COLUMNS = (
     "id, status, agent_session_key, agent_request_id, agent_backend, agent_steer_caps, request_json"
 )
 _OPEN_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE bot_id=:bot AND ended_at IS NULL ORDER BY created_at, id"
-_LOCK_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE id = ANY(:ids) ORDER BY id FOR UPDATE"
+_LOCK_ROWS = f"SELECT {_ROW_COLUMNS} FROM turn_logs WHERE id = ANY(:ids) ORDER BY id FOR NO KEY UPDATE"
 
 
 def activate_hold(

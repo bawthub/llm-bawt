@@ -243,13 +243,13 @@ class OrphanTurnsStep(RecoveryStep):
         with scope.engine.begin() as conn:
             lock_target(conn, candidate["bot_id"])
             # Re-check every exclusion under the admission lock and row lock.
-            lock = " FOR UPDATE OF t" if conn.dialect.name == "postgresql" else ""
+            lock = " FOR NO KEY UPDATE OF t" if conn.dialect.name == "postgresql" else ""
             still = conn.execute(sa_text(_OPEN_STARTED + " AND t.id = :id" + lock),
                                  {**self._params(scope), "id": turn_id}).first()
             if still is None or turn_id in set(turn_executions.active_ids()):
                 return None
             with Session(bind=conn) as session:
-                row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+                row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
                 audit = {"cause": "orphaned_by_restart", **scope.stamp.as_dict(), "probe": result.audit()}
                 if result.stranded_result is not None:
                     audit["stranded_result"] = result.stranded_result

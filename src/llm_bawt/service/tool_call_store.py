@@ -256,11 +256,10 @@ class ToolCallStore:
         if self.engine is None:
             return None
         with Session(self.engine) as session:
-            # Serialize starts with parent termination, including late/replayed
-            # starts arriving after the terminal event.
-            from .turn_logs import TurnLog
-            parent = (session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
-                      if turn_id else None)
+            # The turn row must not be a prerequisite for publishing a tool
+            # start: a concurrent terminal writer can hold it while waiting on
+            # session/usage effects, even though the bridge is still executing.
+            # Reconcile after this commit; terminal writers sweep after theirs.
             row = None
             if turn_id and call_id:
                 row = session.exec(
@@ -284,13 +283,14 @@ class ToolCallStore:
             row.text_offset = text_offset
             row.tool_use_id = tool_use_id
             row.parent_tool_use_id = parent_tool_use_id
-            if parent is not None and parent.ended_at is not None and row.ended_at is None and row.result_text is None:
-                row.ended_at = parent.ended_at.replace(tzinfo=timezone.utc).timestamp()
-                row.result_complete = False
             session.add(row)
             session.commit()
-            session.refresh(row)
-            return row.id
+            record_id = row.id
+        if turn_id and record_id is not None:
+            from .turn_termination import reconcile_finished_tool
+
+            reconcile_finished_tool(self.engine, turn_id=turn_id, record_id=record_id)
+        return record_id
 
     def mark_approval_status(
         self,

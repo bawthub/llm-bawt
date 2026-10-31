@@ -738,3 +738,113 @@ def test_requeue_metadata_merge_is_ignored_when_stop_cancels(pg_turns):
         assert status == "CANCELLED" and after == before
     finally:
         _drop_sender(deliveries, sender)
+
+
+@pytest.mark.integration
+def test_tool_start_does_not_wait_on_a_locked_parent_turn(pg_turns):
+    """A tool-start FK can coexist with an app writer's non-key row lock."""
+    from llm_bawt.service.tool_event_coordinator import ToolEventCoordinator
+
+    turns, bot = pg_turns
+    turn_id = _open(turns, bot)
+    user_id = turns.get_turn(turn_id).user_id
+    outcome = []
+    done = threading.Event()
+
+    def start():
+        try:
+            outcome.append(ToolEventCoordinator(turns.engine).start({
+                "turn_id": turn_id, "bot_id": bot, "user_id": user_id,
+                "call_id": "review-tool", "tool_name": "tasks_reviews_add", "event": "tool_start",
+            }))
+        except Exception as exc:
+            outcome.append(exc)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=start)
+    try:
+        with turns.engine.begin() as holder:
+            holder.execute(sa_text("SELECT id FROM turn_logs WHERE id=:id FOR NO KEY UPDATE"), {"id": turn_id})
+            worker.start()
+            # timing-ok: a hang guard while the holder deliberately keeps its lock
+            assert done.wait(10), "tool start waited for the turn-row lock"
+            assert outcome and isinstance(outcome[0], dict)
+            assert outcome[0]["_tool_persisted"] is True
+            assert turns.get_turn(turn_id).ended_at is None
+        worker.join(10)
+        assert not worker.is_alive()
+    finally:
+        with turns.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM tool_call_records WHERE turn_id=:id"), {"id": turn_id})
+
+
+@pytest.mark.integration
+def test_tool_start_first_is_interrupted_when_parent_commits_after_start(pg_turns, monkeypatch):
+    """The terminal post-commit sweep catches a start paused before recheck."""
+    from llm_bawt.service import turn_termination
+    from llm_bawt.service.tool_call_store import ToolCallStore
+
+    turns, bot = pg_turns
+    turn_id = _open(turns, bot)
+    user_id = turns.get_turn(turn_id).user_id
+    started = threading.Event()
+    resume = threading.Event()
+    original = turn_termination.reconcile_finished_tool
+
+    def paused_recheck(engine, *, turn_id, record_id=None):
+        if record_id is not None:
+            started.set()
+            # timing-ok: a guarded handoff, not a wall-clock performance assertion
+            assert resume.wait(10)
+        return original(engine, turn_id=turn_id, record_id=record_id)
+
+    monkeypatch.setattr(turn_termination, "reconcile_finished_tool", paused_recheck)
+    worker = threading.Thread(target=lambda: ToolCallStore(turns.engine).save_start(
+        turn_id=turn_id, bot_id=bot, user_id=user_id, call_id="review-tool",
+        tool_name="tasks_reviews_add",
+    ))
+    try:
+        worker.start()
+        # timing-ok: a guarded handoff, not a wall-clock performance assertion
+        assert started.wait(10)
+        turns.update_turn(turn_id=turn_id, status="ok", end_reason="stop")
+    finally:
+        resume.set()
+        worker.join(10)
+        assert not worker.is_alive()
+    try:
+        calls = turns.get_tool_calls_for_turn(turn_id)
+        assert len(calls) == 1 and calls[0].ended_at is not None
+        assert calls[0].result_complete is False
+        ended_at = calls[0].ended_at
+        ToolCallStore(turns.engine).save_start(
+            turn_id=turn_id, bot_id=bot, user_id=user_id, call_id="review-tool",
+            tool_name="tasks_reviews_add",
+        )
+        assert turns.get_tool_calls_for_turn(turn_id)[0].ended_at == ended_at
+    finally:
+        with turns.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM tool_call_records WHERE turn_id=:id"), {"id": turn_id})
+
+
+@pytest.mark.integration
+def test_tool_start_after_parent_terminal_is_interrupted_by_recheck(pg_turns):
+    """The start-side recheck catches a terminal before its insert."""
+    from llm_bawt.service.tool_call_store import ToolCallStore
+
+    turns, bot = pg_turns
+    turn_id = _open(turns, bot)
+    user_id = turns.get_turn(turn_id).user_id
+    try:
+        turns.update_turn(turn_id=turn_id, status="ok", end_reason="stop")
+        ToolCallStore(turns.engine).save_start(
+            turn_id=turn_id, bot_id=bot, user_id=user_id, call_id="late-review",
+            tool_name="tasks_reviews_add",
+        )
+        calls = turns.get_tool_calls_for_turn(turn_id)
+        assert len(calls) == 1 and calls[0].ended_at is not None
+        assert calls[0].result_complete is False
+    finally:
+        with turns.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM tool_call_records WHERE turn_id=:id"), {"id": turn_id})

@@ -568,7 +568,7 @@ def stamp_turn_exit(conn, turn_id: str, record: Mapping[str, Any]) -> bool:
     from .turn_termination import dump_payload, turn_payload  # keeps this module's import closure DB-only
 
     row = conn.execute(sa_text(
-        "SELECT request_json, agent_request_id, agent_backend FROM turn_logs WHERE id=:id FOR UPDATE"
+        "SELECT request_json, agent_request_id, agent_backend FROM turn_logs WHERE id=:id FOR NO KEY UPDATE"
     ), {"id": turn_id}).mappings().first()
     if row is None or not row["agent_request_id"] or row["agent_request_id"] != record.get("request_id") or (
             row["agent_backend"] and str(record.get("backend") or "").lower() != row["agent_backend"].lower()):

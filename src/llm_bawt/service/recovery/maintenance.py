@@ -107,7 +107,7 @@ class UnresolvedToolsStep(RecoveryStep):
     async def apply(self, scope: SweepScope, candidate: dict[str, Any], plan: Plan) -> dict[str, Any] | None:
         def write() -> dict[str, Any] | None:
             with Session(scope.engine) as session:
-                turn = session.exec(select(TurnLog).where(TurnLog.id == candidate["turn_id"]).with_for_update()).first()
+                turn = session.exec(select(TurnLog).where(TurnLog.id == candidate["turn_id"]).with_for_update(key_share=True)).first()
                 if turn is None or turn.ended_at is None:
                     return None
                 interrupt_unresolved_tools(session, turn.id, turn.ended_at)

@@ -39,6 +39,7 @@ from .turn_admission import (
     reserve_turn,
 )
 from .turn_gates import GateActor, ensure_gate_schema, gate_blocks, pin_member_request
+from .turn_termination import reconcile_finished_tool_safely
 
 logger = logging.getLogger(__name__)
 
@@ -369,7 +370,7 @@ class TurnLogStore:
         if self.engine is None:
             raise TurnExecutionCancelled("turn admission database is unavailable")
         with Session(self.engine) as session:
-            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             if (row is None or row.ended_at is not None
                     or row.status not in {"pending", "streaming"}
                     or (row.agent_request_id is not None and row.agent_request_id != request_id)):
@@ -407,7 +408,7 @@ class TurnLogStore:
         if self.engine is None:
             return
         with Session(self.engine) as session:
-            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             if row is None:
                 logger.debug("update_turn: no row with id=%s", turn_id)
                 return
@@ -470,9 +471,8 @@ class TurnLogStore:
                 row.question_id = question_id
             if parent_turn_id is not None:
                 row.parent_turn_id = parent_turn_id
-            # Stamp completion exactly once, on the first terminal transition.
-            # Covers every terminal writer (streaming finalize, _finalize_turn,
-            # abort route) since they all funnel through update_turn.
+            # Stamp completion once: streaming, finalization and abort writers
+            # all funnel through update_turn.
             if row.ended_at is None and _is_terminal(status, end_reason):
                 row.ended_at = _terminal_ended_at(row.created_at, latency_ms)
             elif (
@@ -487,10 +487,13 @@ class TurnLogStore:
                 # finalization is authoritative and should also repair ended_at.
                 row.ended_at = _terminal_ended_at(row.created_at, latency_ms)
             session.add(row)
-            if row.ended_at is not None:
+            finished = row.ended_at is not None
+            if finished:
                 from .turn_terminal_effects import record_terminal_effects
                 record_terminal_effects(session, row)
             session.commit()
+        if finished:
+            reconcile_finished_tool_safely(self.engine, turn_id=turn_id)
 
     def update_partial_response(
         self, *, turn_id: str, response_text: str, reasoning: str | None = None

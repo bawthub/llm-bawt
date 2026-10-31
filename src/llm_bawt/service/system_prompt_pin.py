@@ -651,7 +651,7 @@ class SystemPromptPinStore:
         rendered_sha = prompt_sha256(rendered)
         with self.engine.begin() as conn:
             turn = conn.execute(
-                text("SELECT request_json, created_at FROM turn_logs WHERE id=:id FOR UPDATE"),
+                text("SELECT request_json, created_at FROM turn_logs WHERE id=:id FOR NO KEY UPDATE"),
                 {"id": turn_id},
             ).first()
             if turn is None:
@@ -798,7 +798,7 @@ class SystemPromptPinStore:
             return False
         with self.engine.begin() as conn:
             turn = conn.execute(
-                text("SELECT request_json FROM turn_logs WHERE id=:id FOR UPDATE"),
+                text("SELECT request_json FROM turn_logs WHERE id=:id FOR NO KEY UPDATE"),
                 {"id": turn_id},
             ).first()
             metadata = conn.execute(
@@ -874,7 +874,7 @@ class SystemPromptPinStore:
         }
         with self.engine.begin() as conn:
             turn = conn.execute(  # lock order: turn row, then session row
-                text("SELECT request_json FROM turn_logs WHERE id=:id FOR UPDATE"), {"id": turn_id},
+                text("SELECT request_json FROM turn_logs WHERE id=:id FOR NO KEY UPDATE"), {"id": turn_id},
             ).first()
             found = conn.execute(
                 text("SELECT 1 FROM sessions WHERE id=:sid FOR UPDATE"), {"sid": session_id},

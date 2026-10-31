@@ -44,7 +44,7 @@ class DeliveryLeaseRecovery:
         return list(released)
 
     @staticmethod
-    def _settle_stopped_turn(conn: Connection, turn_id: str) -> None:
+    def _settle_stopped_turn(conn: Connection, turn_id: str) -> bool:
         """Settle a stopped delivery's open turn in the caller's transaction."""
         from sqlmodel import Session, select
 
@@ -52,11 +52,12 @@ class DeliveryLeaseRecovery:
         from .service.turn_termination import settle_open_turn
 
         with Session(bind=conn) as session:
-            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
-            if row is not None:
-                settle_open_turn(session, row, audit_key="user_stop", now=datetime.now(timezone.utc), audit={
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
+            return bool(row is not None and settle_open_turn(
+                session, row, audit_key="user_stop", now=datetime.now(timezone.utc), audit={
                     "bridge_state": "lease_expired", "confirmed": False, "by": "recover_expired",
-                })
+                },
+            ))
 
     @staticmethod
     def recover_expired(store, *, live_owner: str | None = None) -> list[DeliveryRecord]:
@@ -71,6 +72,7 @@ class DeliveryLeaseRecovery:
             return []
         from .service.session_lifecycle.recovery import NewSessionRecovery
         recovered: list[DeliveryRecord] = []
+        settled_turn_ids: list[str] = []
         orphan = (" OR (d.delivery_mode='turn' AND t.ended_at IS NOT NULL"
                   " AND d.claim_owner IS DISTINCT FROM :live_owner)") if live_owner else ""
         with store.engine.begin() as conn:
@@ -156,7 +158,8 @@ class DeliveryLeaseRecovery:
                 if user_stopped:
                     # TASK-1232 P4: a user Stop ends the turn too. Settling only
                     # the delivery leaves an open turn blocking later messages.
-                    DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"])
+                    if DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"]):
+                        settled_turn_ids.append(row["turn_id"])
                 if updated["status"] == QUEUED and is_turn:
                     conn.execute(sa_text("""
                         UPDATE turn_logs SET status='reserved', ended_at=NULL,
@@ -164,4 +167,7 @@ class DeliveryLeaseRecovery:
                         WHERE id=:turn_id AND ended_at IS NULL
                     """), {"turn_id": row["turn_id"]})
                 recovered.append(DeliveryRecord.from_mapping(updated))
+        from .service.turn_termination import reconcile_finished_tool_safely
+        for turn_id in settled_turn_ids:
+            reconcile_finished_tool_safely(store.engine, turn_id=turn_id)
         return recovered

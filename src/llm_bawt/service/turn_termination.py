@@ -7,6 +7,7 @@ success/error output. A later canonical result can still replace that unknown.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import update
@@ -24,6 +25,40 @@ def interrupt_unresolved_tools(session: Session, turn_id: str, ended_at: datetim
         .where(ToolCallRecord.result_text.is_(None))
         .values(ended_at=ended_at.timestamp(), result_complete=False)
     )
+
+
+def reconcile_finished_tool(engine, *, turn_id: str, record_id: int | None = None) -> None:
+    """Finish a start that raced its parent without locking the parent row.
+
+    A start commits before reading the terminal state; a terminal writer sweeps
+    again after its own commit. Whichever commits last observes the other. A
+    real result always wins over this provisional interrupted marker.
+    """
+    from .turn_logs import TurnLog
+
+    with Session(engine) as session:
+        ended_at = session.exec(select(TurnLog.ended_at).where(TurnLog.id == turn_id)).first()
+        if ended_at is None:
+            return
+        statement = (
+            update(ToolCallRecord)
+            .where(ToolCallRecord.turn_id == turn_id)
+            .where(ToolCallRecord.ended_at.is_(None))
+            .where(ToolCallRecord.result_text.is_(None))
+            .values(ended_at=ended_at.timestamp(), result_complete=False)
+        )
+        if record_id is not None:
+            statement = statement.where(ToolCallRecord.id == record_id)
+        session.execute(statement)
+        session.commit()
+
+
+def reconcile_finished_tool_safely(engine, *, turn_id: str) -> None:
+    """Reconcile after the terminal commit; never relabel that commit as failed."""
+    try:
+        reconcile_finished_tool(engine, turn_id=turn_id)
+    except Exception:
+        logging.getLogger(__name__).exception("post-commit tool reconciliation failed for turn=%s", turn_id)
 
 
 # TASK-1232 r2-M1: the ONE list of request_json keys a rewrite must preserve.
@@ -130,7 +165,7 @@ def stamp_abort_cause(row, cause: str | None) -> None:
 
 
 def settle_open_turn(session: Session, row, *, audit_key: str, audit: dict, now: datetime) -> bool:
-    """The one fenced settle for an open turn the caller holds FOR UPDATE.
+    """The one fenced settle for an open turn held FOR NO KEY UPDATE.
 
     First writer wins: a row that already ended is left untouched (False).
     Every abort-class settle ends ``aborted``/``aborted``, the only pair the
@@ -182,7 +217,7 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
             TurnLog.id != current_turn_id,
             TurnLog.created_at < current.created_at,
             TurnLog.id.not_in(turn_executions.active_ids()),
-        ).with_for_update()).all()
+        ).with_for_update(key_share=True)).all()
         now = datetime.now(timezone.utc)
         result = []
         for row in rows:
@@ -210,6 +245,13 @@ def reap_unowned_turns(store, bot_id: str, current_turn_id: str) -> list[dict]:
                 record_terminal_effects(session, row)
             result.append({"id": row.id, "user_id": row.user_id, "usage": row.token_usage_json})
         session.commit()
+    for reaped in result:
+        try:
+            reconcile_finished_tool(store.engine, turn_id=reaped["id"])
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "post-commit tool reconciliation failed for turn=%s", reaped["id"],
+            )
     # turn_complete for each reaped turn pushes its committed balance (TASK-1461).
     from .usage.balance import balance_update_for_turn
     return [{"id": r["id"], "user_id": r["user_id"],
@@ -226,7 +268,7 @@ class TurnAbortCoordinator:
         from .turn_logs import TurnLog
 
         with Session(self.store.engine) as session:
-            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             if row is None or row.ended_at is not None or row.status not in ("pending", "streaming", "cancelling"):
                 return False
             if row.status == "cancelling":
@@ -256,7 +298,7 @@ class TurnAbortCoordinator:
         from .turn_logs import TurnLog
 
         with Session(self.store.engine) as session:
-            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             if row is None:
                 return False
             now = datetime.now(timezone.utc)
@@ -268,13 +310,20 @@ class TurnAbortCoordinator:
                 row.request_json = dump_payload(payload)
                 session.add(row)
             session.commit()
-            return settled
+        if settled:
+            try:
+                reconcile_finished_tool(self.store.engine, turn_id=turn_id)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "post-commit tool reconciliation failed for turn=%s", turn_id,
+                )
+        return settled
 
     def record_outcome(self, turn_id: str, outcome: str) -> None:
         from .turn_logs import TurnLog
 
         with Session(self.store.engine) as session:
-            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update()).first()
+            row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
             if row is None:
                 return
             payload = turn_payload(row.request_json)

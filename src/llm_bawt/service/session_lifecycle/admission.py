@@ -29,7 +29,7 @@ def accept_session_binding(
         lock_target(conn, bot_id)
         if claim is not None and not claim.fence(conn):
             raise AdmissionFenceLost(f"claim for turn '{turn_id}' no longer held")
-        lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+        lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
         current = conn.execute(text("""
             SELECT created_at FROM turn_logs
             WHERE id=:id AND bot_id=:bot AND user_id=:user
