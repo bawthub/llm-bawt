@@ -7,6 +7,8 @@ A unique container ID is retained and removed in fixture teardown.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import json
 import os
 import re
 import shutil
@@ -28,6 +30,74 @@ PORT = "55439"
 # container doesn't inherit that affinity, so the cpuset arrives here instead.
 CPUSET_ENV = "LLM_BAWT_TEST_PG_CPUSET"
 _CPUSET = re.compile(r"\d+(?:,\d+)*")
+_GATE_ENV = "OPS_GATE_SANDBOX"
+_BINDING_ENV = "OPS_GATE_PG_BINDING"
+_BINDING_KEYS = {"schema", "job_id", "repo", "sha", "mode", "jobs"}
+_PG_KEYS = {"image", "socket_dir", "port", "user", "database"}
+
+
+def isolated_gate_socket() -> Path | None:
+    """Accept only this checked-out commit's worker-owned private PG binding.
+
+    The ordinary gate still owns its Docker container. In an isolated ops gate,
+    the trusted worker owns PostgreSQL and the test process has no Docker socket.
+    Both environment fields must be present together; never fall back or skip.
+    """
+    marker = os.environ.get(_GATE_ENV)
+    binding = os.environ.get(_BINDING_ENV)
+    if marker is None and binding is None:
+        return None
+    if marker != "1" or not binding:
+        raise RuntimeError("private PostgreSQL binding requires the isolated gate marker and file")
+    path = Path(binding)
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError("private PostgreSQL binding path is not an absolute regular file")
+    try:
+        if not path.is_file() or path.stat().st_size > 8192:
+            raise ValueError("not a bounded regular file")
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("private PostgreSQL binding file is missing or invalid") from exc
+    if not isinstance(data, dict) or set(data) != _BINDING_KEYS:
+        raise RuntimeError("private PostgreSQL binding has an invalid schema")
+    jobs = data["jobs"]
+    job = jobs.get("private-pg") if isinstance(jobs, dict) and set(jobs) == {"private-pg"} else None
+    if (data["schema"] != "ops.gate.pg/v1" or data["repo"] != "llm-bawt"
+            or data["mode"] != "unix"
+            or not isinstance(data["job_id"], str)
+            or re.fullmatch(r"[0-9a-f]{32}", data["job_id"]) is None
+            or not isinstance(data["sha"], str)
+            or re.fullmatch(r"[0-9a-f]{40}", data["sha"]) is None
+            or not isinstance(job, dict) or set(job) != _PG_KEYS
+            or job["image"] != IMAGE or job["port"] != PORT
+            or job["user"] != "test_user" or job["database"] != "llm_bawt_test"
+            or not isinstance(job["socket_dir"], str)):
+        raise RuntimeError("private PostgreSQL binding has an invalid sidecar identity")
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"],
+                                cwd=Path(__file__).resolve().parents[1],
+                                capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("private PostgreSQL binding could not verify the checked-out commit") from exc
+    if data["sha"] != commit:
+        raise RuntimeError("private PostgreSQL binding does not match the checked-out commit")
+    socket = Path(job["socket_dir"])
+    if not socket.is_absolute() or not socket.is_dir():
+        raise RuntimeError("private PostgreSQL binding has no private Unix socket directory")
+    return socket.resolve(strict=True)
+
+
+@contextmanager
+def verified_socket(socket: Path):
+    with private_cluster_socket(socket, None, PORT):
+        # This connection is checked by the suite-wide DBAPI boundary.
+        engine = create_engine(private_url(socket, "postgres"))
+        try:
+            with engine.connect() as conn:
+                assert conn.exec_driver_sql("SELECT current_database()").scalar_one() == "postgres"
+            yield
+        finally:
+            engine.dispose()
 
 
 def cpuset_args() -> list[str]:
@@ -46,6 +116,13 @@ def private_url(socket: Path, database: str) -> URL:
 
 @pytest.fixture(scope="session")
 def private_pg(tmp_path_factory):
+    external_socket = isolated_gate_socket()
+    if external_socket is not None:
+        if not (external_socket / f".s.PGSQL.{PORT}").exists():
+            raise RuntimeError("private PostgreSQL cluster socket is not running")
+        with verified_socket(external_socket):
+            yield external_socket
+        return
     if shutil.which("docker") is None:
         pytest.skip("private pgvector acceptance needs Docker on this test runner")
     root = tmp_path_factory.mktemp("private-pgvector")
@@ -81,15 +158,8 @@ def private_pg(tmp_path_factory):
             time.sleep(0.2)
         else:
             pytest.fail("private pgvector container did not become ready")
-        with private_cluster_socket(socket, None, PORT):
-            # This connection is checked by the suite-wide DBAPI boundary.
-            engine = create_engine(private_url(socket, "postgres"))
-            try:
-                with engine.connect() as conn:
-                    assert conn.exec_driver_sql("SELECT current_database()").scalar_one() == "postgres"
-                yield socket
-            finally:
-                engine.dispose()
+        with verified_socket(socket):
+            yield socket
     finally:
         # SIGTERM lets PostgreSQL unlink its socket/lock; force-removal leaves
         # root-owned socket files in pytest's temp tree and breaks its cleanup.
