@@ -16,7 +16,8 @@ from ...bot_tags.errors import BotTagError, GrantLocked, TagSetChanged
 from ...bot_tags.store import BotTagStore
 from ...bot_tags.vocabulary import API_ASSIGNER
 from ...bot_types import normalize_bot_type
-from ...runtime_settings import RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
+from ...runtime_settings import BotAlreadyExists, BotProfileNotFound, RuntimeSetting, purge_bot_data, cleanup_orphaned_bot_data
+from ...bot_create_transaction import BotCreateTransaction
 from ...orphan_partitions import PartitionExecutionHalted
 from ..providers.base import CREDENTIAL_SETTING_PREFIXES, is_credential_setting_key
 from ...working_memory.contracts import WorkingMemoryError
@@ -82,7 +83,7 @@ def _refuse_credential_key(key: str) -> None:
         )
 
 
-def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]]) -> None:
+def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]], *, conn=None) -> None:
     """Refuse a setting write that a feature gate forbids, before anything is stored.
 
     ``working_memory_enabled`` (TASK-1281, docs/WORKING_MEMORY.md 7) is bot-scoped;
@@ -97,7 +98,7 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]])
             # One writer for API credit: the per-provider counter (TASK-1461).
             raise HTTPException(status_code=400, detail="Set API balances with PUT /v1/usage/{provider}/balance")
         try:
-            policy.validate_setting_write(scope_type, scope_id, key, value)
+            policy.validate_setting_write(scope_type, scope_id, key, value, conn=conn)
         except WorkingMemoryError as exc:
             raise HTTPException(status_code=400, detail=exc.message) from exc
 
@@ -257,6 +258,8 @@ async def _persist_bot_profile(
     payload: dict[str, object],
     *,
     create_only: bool,
+    runtime_settings: dict[str, object] | None = None,
+    require_existing: bool = False,
 ) -> BotProfileResponse:
     service = get_service()
     store = get_bot_profile_store(service.config)
@@ -270,7 +273,10 @@ async def _persist_bot_profile(
     if create_only and previous is not None:
         raise HTTPException(status_code=409, detail=f"Bot '{slug}' already exists")
 
+    requested_model = payload.get("default_model") if create_only else None
     _validate_profile_payload(payload)
+    if requested_model is not None and payload.get("default_model") != requested_model:
+        raise HTTPException(status_code=422, detail="default_model must match the chosen endpoint")
 
     # Resolve the avatar to a self-hosted ``data:`` URL at write time so the
     # chat UI never fetches an avatar from a CDN at runtime. Only recompute
@@ -296,8 +302,26 @@ async def _persist_bot_profile(
     # Provider health is probed here, before the save's transaction, so no
     # network call runs under the bot's admission lock (TASK-1302 A1′).
     route_gate = ProfileRouteGate.for_payload(service.config, store.engine, payload)
+    guard = ProfileSaveGuard(ProfileSwitchGate(), route_gate)
     try:
-        profile = store.upsert(payload, guard=ProfileSaveGuard(ProfileSwitchGate(), route_gate))
+        if create_only:
+            # Initialize the settings table before opening the one write
+            # transaction; schema bootstrap can issue DDL on a fresh install.
+            settings_store = get_runtime_settings_store(service.config)
+            if settings_store.engine is None:
+                raise HTTPException(status_code=503, detail="Runtime settings DB unavailable")
+            profile = BotCreateTransaction(store).create(
+                payload, runtime_settings or {}, guard,
+                lambda conn, writes: _validate_setting_writes(store.engine, writes, conn=conn),
+            )
+        else:
+            profile = store.upsert(payload, guard=guard, require_existing=require_existing)
+    except BotAlreadyExists as existing:
+        raise HTTPException(status_code=409, detail=str(existing)) from existing
+    except BotProfileNotFound as missing:
+        raise HTTPException(status_code=404, detail=str(missing)) from missing
+    except HTTPException:
+        raise
     except SystemGateRefused as refused:  # a switch onto a held runtime; nothing written
         raise HTTPException(status_code=refused.status_code, detail=str(refused))
     except RouteIneligible as refused:  # a new route with no usable credential; nothing written
@@ -636,7 +660,8 @@ def list_bot_profiles(
 async def create_bot(request: BotCreateRequest):
     """Create a new bot profile. Returns 409 when slug already exists."""
     payload = _request_to_profile_payload(request.slug, request)
-    return await _persist_bot_profile(payload, create_only=True)
+    return await _persist_bot_profile(payload, create_only=True,
+                                      runtime_settings=request.runtime_settings)
 
 
 @router.get("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])
@@ -656,9 +681,9 @@ def get_bot_profile(slug: str):
 
 @router.put("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])
 async def upsert_bot_profile(slug: str, request: BotProfileUpsertRequest):
-    """Create or update a bot personality profile."""
+    """Update an existing bot personality profile; POST owns creation."""
     payload = _request_to_profile_payload(slug, request)
-    return await _persist_bot_profile(payload, create_only=False)
+    return await _persist_bot_profile(payload, create_only=False, require_existing=True)
 
 
 @router.patch("/v1/bots/{slug}/profile", response_model=BotProfileResponse, tags=["System"])

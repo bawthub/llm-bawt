@@ -8,3 +8,11 @@ def sanitize_table_name(bot_id: str) -> str:
     if not sanitized:
         sanitized = "default"
     return sanitized
+
+
+def lock_bot_storage(conn, storage_id: str) -> None:
+    """Serialize create/purge of any slugs that share a partition identity."""
+    from sqlalchemy import text
+
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('bot-storage'), hashtext(:id))"),
+                 {"id": storage_id})

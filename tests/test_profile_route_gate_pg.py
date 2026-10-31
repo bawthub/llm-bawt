@@ -21,13 +21,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from llm_bawt.memory.model_catalog_migration import migrate_model_catalog
-from llm_bawt.runtime_settings import BotProfileStore
+from llm_bawt.runtime_settings import BotProfileStore, RuntimeSettingsStore
+from llm_bawt.prompt_registry import PromptTemplateStore
+from llm_bawt.service.schemas_bots import BotCreateRequest, BotProfileUpsertRequest
 from llm_bawt.service import profile_route_gate
-from llm_bawt.service.routes import settings
+from llm_bawt.service.routes import bot_profile_validation, settings
 from llm_bawt.service.turn_admission import activate_hold, lock_target
+from llm_bawt.utils.bot_partition import lock_bot_storage, sanitize_table_name
 from llm_bawt.service.turn_gates import GateScope, GateSpec, ensure_gate_schema
 from tests.pg_lock_wait import wait_blocked_by
 
@@ -53,12 +56,13 @@ def _connection(state: str, detail: str | None = None) -> dict:
 @pytest.fixture
 def rig(private_app_pg, monkeypatch):
     store = BotProfileStore(private_app_pg)
+    assert RuntimeSettingsStore(private_app_pg).engine is not None
     assert store.engine is not None
     ensure_gate_schema(store.engine)
     migrate_model_catalog(store.engine)
     tag = uuid.uuid4().hex[:12]
-    ctx = SimpleNamespace(store=store, engine=store.engine, owner=f"job-route-{tag}",
-                          bots=[], endpoints={}, models=[])
+    ctx = SimpleNamespace(store=store, engine=store.engine, config=private_app_pg,
+                          owner=f"job-route-{tag}", bots=[], endpoints={}, models=[])
 
     with ctx.engine.begin() as conn:
         for name, (path_key, _harness, _backend) in _ROUTES.items():
@@ -142,6 +146,8 @@ def rig(private_app_pg, monkeypatch):
                           " (SELECT id FROM system_gates WHERE owner_id=:o)"), {"o": ctx.owner})
         conn.execute(text("DELETE FROM system_gates WHERE owner_id=:o"), {"o": ctx.owner})
         for slug in ctx.bots:
+            conn.execute(text("DELETE FROM runtime_settings WHERE scope_type='bot' AND scope_id=:b"), {"b": slug})
+            conn.execute(text("DELETE FROM bot_profile_tags WHERE bot_slug=:b"), {"b": slug})
             conn.execute(text("DELETE FROM bot_profiles WHERE slug=:b"), {"b": slug})
         for model_key in ctx.models:
             conn.execute(text("DELETE FROM models WHERE key=:k"), {"k": model_key})
@@ -300,3 +306,304 @@ def test_a_route_missing_from_the_snapshot_is_refused_not_probed_under_the_lock(
             gate.check(conn, None, row)
         row.endpoint_id = rig.endpoints["local"]
         gate.check(conn, None, row)  # a credential-free route needs no snapshot
+
+
+def _put(rig, slug, *, name="Changed"):
+    return asyncio.run(settings.upsert_bot_profile(slug, BotProfileUpsertRequest(
+        name=name, system_prompt="Fixture persona", **rig.route("local"),
+    )))
+
+
+def test_legacy_put_refuses_missing_profile_without_creating_any_data(rig):
+    slug = rig.new_slug()
+    with pytest.raises(HTTPException) as refused:
+        _put(rig, slug)
+    assert refused.value.status_code == 404
+    assert rig.store.get(slug) is None
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM bot_profile_tags WHERE bot_slug=:b"),
+                            {"b": slug}).scalar_one() == 0
+        assert conn.execute(text("SELECT count(*) FROM runtime_settings "
+                                 "WHERE scope_type='bot' AND scope_id=:b"),
+                            {"b": slug}).scalar_one() == 0
+
+
+def test_legacy_put_does_not_resurrect_profile_deleted_while_waiting_on_lock(rig):
+    slug = rig.bot("local")
+    outcome: list[object] = []
+    with rig.engine.connect() as conn:
+        txn = conn.begin()
+        lock_target(conn, slug)
+
+        def stale_update():
+            try:
+                outcome.append(_put(rig, slug))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=stale_update)
+        worker.start()
+        holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        wait_blocked_by(rig.engine, holder_pid, worker)
+        conn.execute(text("DELETE FROM bot_profiles WHERE slug=:b"), {"b": slug})
+        txn.commit()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], HTTPException) and outcome[0].status_code == 404
+    assert rig.store.get(slug) is None
+
+
+def test_legacy_put_keeps_existing_profile_update(rig):
+    slug = rig.bot("local")
+    updated = _put(rig, slug, name="Still editable")
+    assert updated.name == "Still editable"
+    assert rig.store.get(slug).name == "Still editable"
+
+
+def _create(rig, slug, *, tags=None, runtime_settings=None, **fields):
+    return asyncio.run(settings.create_bot(BotCreateRequest(
+        slug=slug, name="New", system_prompt="Fixture persona",
+        tags=[] if tags is None else tags,
+        runtime_settings={} if runtime_settings is None else runtime_settings,
+        **rig.route("local"), **fields,
+    )))
+
+
+def test_complete_create_commits_profile_tags_and_only_explicit_settings(rig):
+    slug = rig.new_slug()
+    created = _create(rig, slug, tags=["private"],
+                      runtime_settings={"history_scope": "inline", "working_memory_enabled": None},
+                      prompt_override_id=None)
+    with rig.engine.connect() as conn:
+        assert created.slug == slug
+        assert created.prompt_override_id is None
+        assert conn.execute(text("SELECT tag_slug FROM bot_profile_tags WHERE bot_slug=:b"),
+                            {"b": slug}).scalars().all() == ["private"]
+        assert conn.execute(text("SELECT key, value_json FROM runtime_settings "
+                                 "WHERE scope_type='bot' AND scope_id=:b ORDER BY key"),
+                            {"b": slug}).all() == [
+                                ("history_scope", '"inline"'),
+                                ("session_memory_continuity", "true"),
+                            ]
+        assert conn.execute(text("SELECT include_in_global_search FROM bot_profiles WHERE slug=:b"),
+                            {"b": slug}).scalar_one() is False
+
+
+def test_create_rolls_back_profile_and_tags_if_late_setting_fails(rig):
+    slug = rig.new_slug()
+    with pytest.raises(HTTPException) as refused:
+        _create(rig, slug, tags=["private"],
+                runtime_settings={"history_scope": "inline", "compact_context": object()})
+    assert refused.value.status_code == 422
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM bot_profiles WHERE slug=:b"),
+                            {"b": slug}).scalar_one() == 0
+        assert conn.execute(text("SELECT count(*) FROM bot_profile_tags WHERE bot_slug=:b"),
+                            {"b": slug}).scalar_one() == 0
+        assert conn.execute(text("SELECT count(*) FROM runtime_settings "
+                                 "WHERE scope_type='bot' AND scope_id=:b"),
+                            {"b": slug}).scalar_one() == 0
+
+
+def test_create_db_setting_failure_rolls_back_flushed_profile_tags_and_audit(rig):
+    slug = rig.new_slug()
+
+    def fail_setting_write(_conn, _cursor, statement, _params, _context, _many):
+        if statement.startswith("INSERT INTO runtime_settings"):
+            raise RuntimeError("synthetic settings write failure")
+
+    event.listen(rig.engine, "before_cursor_execute", fail_setting_write)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic settings write failure"):
+            _create(rig, slug, tags=["private"], runtime_settings={"compact_context": True})
+    finally:
+        event.remove(rig.engine, "before_cursor_execute", fail_setting_write)
+    with rig.engine.connect() as conn:
+        for sql in (
+            "SELECT count(*) FROM bot_profiles WHERE slug=:b",
+            "SELECT count(*) FROM bot_profile_tags WHERE bot_slug=:b",
+            "SELECT count(*) FROM bot_profile_changes WHERE bot_slug=:b",
+            "SELECT count(*) FROM runtime_settings WHERE scope_type='bot' AND scope_id=:b",
+        ):
+            assert conn.execute(text(sql), {"b": slug}).scalar_one() == 0
+
+
+def test_create_only_checks_existing_slug_after_bot_lock(rig):
+    slug = rig.new_slug()
+    outcome: list[object] = []
+    with rig.engine.connect() as conn:
+        txn = conn.begin()
+        lock_target(conn, slug)
+
+        def competing_create():
+            try:
+                outcome.append(_create(rig, slug, runtime_settings={"history_scope": "none"}))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=competing_create)
+        worker.start()
+        holder_pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        wait_blocked_by(rig.engine, holder_pid, worker)
+        conn.execute(text(
+            "INSERT INTO bot_profiles (slug,name,description,system_prompt,harness,endpoint_id,"
+            "default_model,requires_memory,voice_optimized,uses_tools,uses_search,"
+            "uses_home_assistant,created_at,updated_at) "
+            "SELECT :b,'Existing','','Fixture persona','chat',e.id,m.key,true,false,false,"
+            "false,false,now(),now() "
+            "FROM model_endpoints e JOIN models m ON m.id=e.model_id WHERE e.id=:e"
+        ), {"b": slug, "e": rig.endpoints["local"]})
+        txn.commit()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], HTTPException) and outcome[0].status_code == 409
+    assert rig.store.get(slug).name == "Existing"
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM runtime_settings "
+                                 "WHERE scope_type='bot' AND scope_id=:b"),
+                            {"b": slug}).scalar_one() == 0
+
+
+@pytest.mark.parametrize("overrides", [
+    {"unknown_setting": True},
+    {"maintenance_model": True},
+    {"bot_send_wait_seconds": 30},  # global-only
+    {"include_summaries": True},  # request flag, not a bot runtime row
+    {"history_scope": "unsupported"},
+    {"working_memory_enabled": True},  # protected/private bot
+])
+def test_create_rejects_invalid_overrides_without_profile_or_tags(rig, overrides):
+    slug = rig.new_slug()
+    with pytest.raises(HTTPException) as refused:
+        _create(rig, slug, tags=["private"], runtime_settings=overrides)
+    assert refused.value.status_code in {400, 422}
+    assert rig.store.get(slug) is None
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM bot_profile_tags WHERE bot_slug=:b"),
+                            {"b": slug}).scalar_one() == 0
+
+
+def test_create_rejects_storage_alias_of_registered_bot(rig):
+    existing = rig.new_slug()
+    rig.store.upsert({"slug": existing, **rig.route("local")})
+    # Removing hyphens yields a *different* slug but the same partition ID.
+    alias = existing.replace("-", "")
+    with pytest.raises(HTTPException) as refused:
+        _create(rig, alias, runtime_settings={"history_scope": "none"})
+    assert refused.value.status_code == 409
+    assert rig.store.get(alias) is None
+    assert rig.store.get(existing) is not None
+
+
+def test_create_rejects_retained_audit_identity_without_profile(rig):
+    deleted = rig.new_slug()
+    alias = deleted.replace("-", "")
+    with rig.engine.begin() as conn:
+        conn.execute(text("INSERT INTO bot_profile_changes (bot_slug,changed_by,changes) "
+                          "VALUES (:b,'fixture','{}'::jsonb)"), {"b": deleted})
+    with pytest.raises(HTTPException) as refused:
+        _create(rig, alias)
+    assert refused.value.status_code == 409
+    assert rig.store.get(alias) is None
+    with rig.engine.begin() as conn:
+        conn.execute(text("DELETE FROM bot_profile_changes WHERE bot_slug=:b"), {"b": deleted})
+
+
+def test_create_normalizes_slug_before_writing_bot_settings(rig):
+    slug = rig.new_slug()
+    created = _create(rig, f"  {slug.upper()}  ", runtime_settings={"history_scope": "none"})
+    assert created.slug == slug
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT scope_id FROM runtime_settings WHERE key='history_scope' "
+                                 "AND scope_type='bot' AND scope_id=:b"),
+                            {"b": slug}).scalar_one() == slug
+
+
+def test_create_refuses_reusing_profileless_tag_or_settings_identity(rig):
+    first = rig.new_slug()
+    second = rig.new_slug()
+    with rig.engine.begin() as conn:
+        conn.execute(text("INSERT INTO bot_profile_tags (bot_slug,tag_slug) VALUES (:b,'private')"),
+                     {"b": first})
+        conn.execute(text("INSERT INTO runtime_settings (scope_type,scope_id,key,value_json,updated_at) "
+                          "VALUES ('bot',:b,'history_scope','\"none\"',now())"), {"b": second})
+    for slug in (first, second):
+        with pytest.raises(HTTPException) as refused:
+            _create(rig, slug, runtime_settings={"history_scope": "inline"})
+        assert refused.value.status_code == 409
+        assert rig.store.get(slug) is None
+    with rig.engine.connect() as conn:
+        assert conn.execute(text("SELECT tag_slug FROM bot_profile_tags WHERE bot_slug=:b"),
+                            {"b": first}).scalar_one() == "private"
+        assert conn.execute(text("SELECT value_json FROM runtime_settings "
+                                 "WHERE scope_type='bot' AND scope_id=:b"),
+                            {"b": second}).scalar_one() == '"none"'
+
+
+def test_create_persona_selection_is_validated_before_commit(rig):
+    assert PromptTemplateStore(rig.config).engine is not None
+    invalid = rig.new_slug()
+    with pytest.raises(HTTPException) as refused:
+        _create(rig, invalid, prompt_override_id=2_000_000_000)
+    assert refused.value.status_code == 422
+    assert rig.store.get(invalid) is None
+
+    valid = rig.new_slug()
+    with rig.engine.begin() as conn:
+        persona = conn.execute(text(
+            "INSERT INTO prompt_templates (key, scope_type, scope_id, category, format, body, "
+            "created_at, updated_at) VALUES (:k,'global','*','persona','plain_text',"
+            "'Fixture persona',now(),now()) RETURNING id"
+        ), {"k": f"persona-test-{valid}"}).scalar_one()
+    try:
+        created = _create(rig, valid, prompt_override_id=persona)
+        assert created.prompt_override_id == persona
+    finally:
+        with rig.engine.begin() as conn:
+            conn.execute(text("DELETE FROM prompt_templates WHERE id=:id"), {"id": persona})
+
+
+@pytest.mark.parametrize("route_fields", [
+    {},
+    {"endpoint_id": None},
+    {"harness": "codex", "agent_backend": "codex"},
+])
+def test_create_requires_compatible_real_endpoint(rig, monkeypatch, route_fields):
+    monkeypatch.setattr(settings, "_validate_profile_payload", bot_profile_validation._validate_profile_payload)
+    monkeypatch.setattr(bot_profile_validation, "get_service", settings.get_service)
+    slug = rig.new_slug()
+    kwargs = {**rig.route("local"), **route_fields} if route_fields else {}
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(settings.create_bot(BotCreateRequest(
+            slug=slug, name="New", system_prompt="Fixture persona", tags=[], **kwargs,
+        )))
+    assert refused.value.status_code == 422
+    assert rig.store.get(slug) is None
+
+
+def test_create_rejects_conflicting_requested_model_without_writing(rig, monkeypatch):
+    slug = rig.new_slug()
+    monkeypatch.setattr(settings, "_validate_profile_payload",
+                        lambda payload: payload.update(default_model="selected-endpoint-model"))
+    with pytest.raises(HTTPException) as refused:
+        _create(rig, slug, default_model="different-model")
+    assert refused.value.status_code == 422
+    assert rig.store.get(slug) is None
+
+
+def test_create_requires_explicit_tags_name_and_system_prompt():
+    with pytest.raises(Exception):
+        BotCreateRequest(slug="fixture", name="Example", system_prompt="Fixture persona")
+    with pytest.raises(Exception):
+        BotCreateRequest(slug="fixture", name="   ", system_prompt="Fixture persona", tags=[])
+    with pytest.raises(Exception):
+        BotCreateRequest(slug="  ", name="Example", system_prompt="Fixture persona", tags=[])
+    with pytest.raises(Exception):
+        BotCreateRequest(slug="fixture", name="Example", system_prompt="", tags=[])
+    with pytest.raises(Exception):
+        BotCreateRequest(slug="fixture", name="Example", system_prompt="   ", tags=[])
+    with pytest.raises(Exception):
+        BotCreateRequest(slug="fixture", name="Example", system_prompt="Fixture persona",
+                         tags=[], unexpected_field="ignored-before")

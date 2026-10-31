@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -148,6 +149,14 @@ class ProfileWriteGuard(Protocol):
     def check(self, conn: Any, previous: ProfileRuntime | None, row: BotProfile) -> None: ...
 
 
+class BotAlreadyExists(ValueError):
+    """A create-only write lost the per-bot lock to an existing profile."""
+
+
+class BotProfileNotFound(ValueError):
+    """An update-only write found no profile under the per-bot lock."""
+
+
 class BotProfileStore:
     """DB access for bot personality profiles."""
 
@@ -238,9 +247,13 @@ class BotProfileStore:
             return list(session.exec(select(BotProfile).order_by(BotProfile.slug)).all())
 
     def upsert(self, profile: BotProfile | dict[str, Any], *,
-               guard: ProfileWriteGuard | None = None) -> BotProfile:
-        """Create or update one profile. ``guard`` (see :class:`ProfileWriteGuard`)
-        locks before the row is read and checks the staged row before commit."""
+               guard: ProfileWriteGuard | None = None,
+               session: Session | None = None, create_only: bool = False,
+               require_existing: bool = False) -> BotProfile:
+        """Write under the bot lock; a borrowed session defers commit.
+
+        Check creation/update preconditions under the lock, not a stale probe.
+        """
         if self.engine is None:
             raise RuntimeError("Bot profiles DB unavailable")
 
@@ -260,7 +273,8 @@ class BotProfileStore:
         from .bot_tags.vocabulary import API_ASSIGNER
 
         now = datetime.now(timezone.utc)
-        with Session(self.engine) as session:
+        borrowed = session is not None
+        with (nullcontext(session) if borrowed else Session(self.engine)) as session:
             if guard is not None:
                 guard.lock(session.connection(), slug)
             # Every profile write reads the row under the bot's tag lock (the one
@@ -268,6 +282,17 @@ class BotProfileStore:
             # below can't pass on a row another upsert is about to change.
             lock_bot(session.connection(), slug)
             row = session.exec(select(BotProfile).where(BotProfile.slug == slug)).first()
+            if require_existing and row is None:
+                raise BotProfileNotFound(f"Bot '{slug}' not found")
+            if create_only:
+                if row is not None:
+                    raise BotAlreadyExists(f"Bot '{slug}' already exists")
+                # Profile-only deletion can leave identity tags; never inherit them.
+                existing_tags = session.connection().execute(text(
+                    "SELECT EXISTS (SELECT 1 FROM bot_profile_tags WHERE bot_slug=:slug)"
+                ), {"slug": slug}).scalar_one()
+                if existing_tags:
+                    raise BotAlreadyExists(f"Bot '{slug}' has retained tags; choose a different slug")
             previous = ProfileRuntime.of(row) if row is not None else None
             # Under the lock, before any write: a stale read refuses here (TASK-1521).
             profile_changes.check_preconditions(row, payload)
@@ -280,7 +305,7 @@ class BotProfileStore:
                     slug=slug,
                     name=str(payload.get("name") or slug.title()),
                     description=str(payload.get("description") or ""),
-                    system_prompt=str(payload.get("system_prompt") or "You are a helpful assistant."),
+                    system_prompt=str(payload.get("system_prompt") or ""),
                     prompt_override_id=payload.get("prompt_override_id"),
                     requires_memory=bool(payload.get("requires_memory", True)),
                     voice_optimized=bool(payload.get("voice_optimized", False)),
@@ -388,8 +413,9 @@ class BotProfileStore:
             profile_changes.record_change(
                 session.connection(), slug, before, profile_changes.snapshot(session.connection(), row),
                 payload, default_by=API_ASSIGNER)
-            session.commit()
-            session.refresh(row)
+            if not borrowed:
+                session.commit()
+                session.refresh(row)
             return row
 
     def delete(self, slug: str) -> bool:
@@ -428,7 +454,7 @@ class BotProfileStore:
                 "slug": slug,
                 "name": bot_data.get("name", str(slug).title()),
                 "description": bot_data.get("description", ""),
-                "system_prompt": bot_data.get("system_prompt", "You are a helpful assistant."),
+                "system_prompt": bot_data.get("system_prompt", ""),
                 "requires_memory": bot_data.get("requires_memory", True),
                 "voice_optimized": bot_data.get("voice_optimized", False),
                 "tts_mode": bot_data.get("tts_mode", False),

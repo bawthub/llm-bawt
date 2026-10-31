@@ -54,6 +54,17 @@ def _request_to_profile_payload(
     ):
         if field_name in request.model_fields_set:
             payload[field_name] = getattr(request, field_name)
+    if isinstance(request, BotCreateRequest):
+        from ...bot_tags import BehaviorTag
+        from ...bot_tags.vocabulary import API_ASSIGNER
+
+        payload["tags"] = request.tags
+        payload["tags_assigned_by"] = API_ASSIGNER
+        private = BehaviorTag.PRIVATE in request.tags
+        if ("include_in_global_search" in request.model_fields_set
+                and request.include_in_global_search is private):
+            raise HTTPException(status_code=422, detail=(
+                "include_in_global_search must equal 'private' not in tags when both are sent"))
     return payload
 
 

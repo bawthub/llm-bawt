@@ -202,9 +202,23 @@ class BotProfilePatchRequest(BaseModel):
 
 
 class BotCreateRequest(BotProfileUpsertRequest):
-    """Request payload for creating a new bot profile."""
+    """Complete, create-only bot configuration; no placeholder or silent extras."""
 
-    slug: str
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    system_prompt: str = Field(min_length=1)
+    prompt_override_id: int | None = None
+    tags: list[str] = Field(description="Full tag set; [] is an explicit empty set")
+    runtime_settings: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("slug", "name", "system_prompt")
+    @classmethod
+    def _nonblank_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Bot slug, name, and system_prompt cannot be blank")
+        return value
 
 
 class BotProfileListResponse(BaseModel):

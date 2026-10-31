@@ -102,7 +102,8 @@ class WorkingMemoryPolicy:
         if is_protected(bot_id, self.engine):
             raise WorkingMemoryError("protected_bot", "working memory is not available for this bot")
 
-    def validate_setting_write(self, scope_type: str, scope_id: str, key: str, value: Any) -> None:
+    def validate_setting_write(self, scope_type: str, scope_id: str, key: str, value: Any,
+                               *, conn=None) -> None:
         """Refuse an invalid ``working_memory_enabled`` write before any row is applied (7)."""
         if key != SETTING_KEY:
             return
@@ -112,7 +113,7 @@ class WorkingMemoryPolicy:
             raise WorkingMemoryError("invalid_setting", f"{SETTING_KEY} must be true or false")
         if not value:
             return
-        policy = self.describe(scope_id)
+        policy = self.describe(scope_id, conn=conn)
         if policy.protected:
             raise WorkingMemoryError("invalid_setting", f"{SETTING_KEY} cannot be enabled for a protected bot")
         if not policy.exists or policy.backend != SUPPORTED_BACKEND:
