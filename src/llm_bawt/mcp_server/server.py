@@ -475,6 +475,7 @@ async def update_memory(
     content: str | None = None,
     tags: list[str] | None = None,
     importance: float | None = None,
+    source_message_ids: list[str] | None = None,
 ) -> dict | None:
     """Update an existing memory.
 
@@ -483,6 +484,7 @@ async def update_memory(
         content: New content (optional).
         tags: New tags (optional).
         importance: New importance score (optional).
+        source_message_ids: New human-message provenance (optional; None retains old sources).
         bot_id: Bot namespace.
 
     Returns:
@@ -496,6 +498,7 @@ async def update_memory(
         content=content,
         tags=tags,
         importance=importance,
+        source_message_ids=source_message_ids,
     )
     return memory.to_dict() if memory else None
 

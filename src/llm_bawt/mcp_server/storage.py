@@ -346,6 +346,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         content: str | None = None,
         tags: list[str] | None = None,
         importance: float | None = None,
+        source_message_ids: list[str] | None = None,
     ) -> Memory | None:
         """Update an existing memory."""
         backend = self._get_backend(bot_id, provision_schema=True)
@@ -359,6 +360,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         new_content = content if content is not None else current.content
         new_tags = tags if tags is not None else current.tags
         new_importance = importance if importance is not None else current.importance
+        new_sources = source_message_ids if source_message_ids is not None else current.source_message_ids
         
         # Re-generate embedding if content changed
         embedding = None
@@ -371,13 +373,15 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             tags=new_tags,
             importance=new_importance,
             embedding=embedding,
+            source_message_ids=new_sources,
         )
-        
+
         return Memory(
             id=memory_id,
             content=new_content,
             tags=new_tags,
             importance=new_importance,
+            source_message_ids=new_sources,
         )
 
     async def delete_memory(

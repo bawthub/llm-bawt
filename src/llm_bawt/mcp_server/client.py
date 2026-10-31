@@ -468,6 +468,7 @@ class MemoryClient(
         content: str | None = None,
         importance: float | None = None,
         tags: list[str] | None = None,
+        source_message_ids: list[str] | None = None,
     ) -> MemoryResult | None:
         """Update an existing memory.
         
@@ -476,7 +477,8 @@ class MemoryClient(
             content: New content (if updating).
             importance: New importance score.
             tags: New tags list.
-            
+            source_message_ids: Human-message sources for the new fact; None preserves existing sources.
+
         Returns:
             Updated MemoryResult or None if not found.
         """
@@ -489,9 +491,10 @@ class MemoryClient(
                 "content": content,
                 "importance": importance,
                 "tags": tags,
+                "source_message_ids": source_message_ids,
             })
             return MemoryResult.from_dict(result) if result else None
-        
+
         # Embedded mode
         storage = self._get_storage()
         result = _run_async(
@@ -501,6 +504,7 @@ class MemoryClient(
                 content=content,
                 importance=importance,
                 tags=tags,
+                source_message_ids=source_message_ids,
             )
         )
         return MemoryResult.from_dict(result.to_dict()) if result else None

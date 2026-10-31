@@ -114,7 +114,7 @@ def test_mcp_storage_unprocessed_adapter_carries_authorship():
 def test_extraction_input_excludes_bot_delivery():
     llm = _Recorder()
     MemoryExtractionService(llm_client=llm).extract_from_conversation(
-        [NICK, DELIVERY, REPLY])
+        [dict(NICK, id="human"), DELIVERY, REPLY])
     assert len(llm.prompts) == 1
     assert "third dog" in llm.prompts[0]
     assert "Gavel may approve" not in llm.prompts[0]
@@ -131,7 +131,7 @@ def test_mixed_window_drops_tool_result_and_its_source_id():
     class _OneFact(_Recorder):
         def query(self, messages, plaintext_output=True, **kwargs):
             self.prompts.append(messages[-1].content)
-            return '{"facts": [{"content": "A new pet", "tags": ["fact"], "importance": 0.9}]}'
+            return '{"facts": [{"content": "A new pet", "tags": ["fact"], "importance": 0.9, "source_message_ids": ["human"]}]}'
 
     llm = _OneFact()
     facts = MemoryExtractionService(llm_client=llm).extract_from_conversation(
@@ -154,7 +154,7 @@ def test_tool_result_summary_is_not_labeled_user():
 def test_fact_sources_never_cite_bot_delivery():
     class _OneFact(_Recorder):
         def query(self, messages, plaintext_output=True, **kwargs):
-            return '{"facts": [{"content": "User adopted a third dog", "tags": ["fact"], "importance": 0.9}]}'
+            return '{"facts": [{"content": "User adopted a third dog", "tags": ["fact"], "importance": 0.9, "source_message_ids": ["n1"]}]}'
 
     facts = MemoryExtractionService(llm_client=_OneFact()).extract_from_conversation(
         [dict(DELIVERY, id="d1"), dict(NICK, id="n1"), dict(REPLY, id="r1")])
@@ -173,6 +173,145 @@ def test_heuristic_extraction_ignores_bot_delivery():
     facts = MemoryExtractionService(llm_client=None).extract_from_conversation(
         [DELIVERY], use_llm=False)
     assert facts == []
+
+
+def test_mixed_window_fact_cites_only_its_supporting_human_message():
+    class _PowerwallFact(_Recorder):
+        def query(self, messages, plaintext_output=True, **kwargs):
+            self.prompts.append(messages[-1].content)
+            return json.dumps({"facts": [{"content": "User has a Powerwall setup using Grafana on Unraid",
+                "tags": ["fact"], "importance": 0.8, "source_message_ids": ["powerwall"]}]})
+
+    llm = _PowerwallFact()
+    facts = MemoryExtractionService(llm_client=llm).extract_from_conversation([
+        {"id": "bot", "role": "user", "author_entity_type": "bot", "content": "I use Grafana"},
+        {"id": "earlier", "role": "user", "content": "I prefer short replies"},
+        {"id": "reply", "role": "assistant", "content": "Is the Powerwall in Grafana?"},
+        {"id": "reset", "role": "user", "content": "/new"},
+        {"id": "powerwall", "role": "user", "content": "yes powerwall uses grafana its deployed on unraid"},
+    ])
+    assert len(facts) == 1
+    assert facts[0].source_message_ids == ["powerwall"]
+    assert "[USER ID: powerwall]" in llm.prompts[0]
+    assert "[USER ID: earlier]" in llm.prompts[0]
+    assert "[USER ID: reset]" not in llm.prompts[0]
+    assert "I use Grafana" not in llm.prompts[0]
+
+
+def test_extraction_drops_missing_or_ineligible_source_instead_of_guessing():
+    class _BadSources(_Recorder):
+        def query(self, messages, plaintext_output=True, **kwargs):
+            return json.dumps({"facts": [
+                {"content": "Unsupported", "source_message_ids": ["assistant"]},
+                {"content": "Unknown", "source_message_ids": ["missing"]},
+                {"content": "Reset", "source_message_ids": ["reset"]},
+                {"content": "Missing provenance"},
+                {"content": "Mixed provenance", "source_message_ids": ["human", "assistant"]},
+                {"content": "Supported", "source_message_ids": ["human"]},
+            ]})
+
+    facts = MemoryExtractionService(llm_client=_BadSources()).extract_from_conversation([
+        {"id": "assistant", "role": "assistant", "content": "I have a Powerwall"},
+        {"id": "reset", "role": "user", "content": "/new"},
+        {"id": "human", "role": "user", "content": "I have a Powerwall"},
+    ])
+    assert [(f.content, f.source_message_ids) for f in facts] == [("Supported", ["human"])]
+
+
+def test_unidentified_or_duplicate_human_turns_cannot_be_sources():
+    class _OneFact(_Recorder):
+        def query(self, messages, plaintext_output=True, **kwargs):
+            return '{"facts": [{"content": "User has a Powerwall", "source_message_ids": ["same"]}]}'
+
+    service = MemoryExtractionService(llm_client=_OneFact())
+    assert service.extract_from_conversation([
+        {"role": "user", "content": "I have a Powerwall"},
+    ]) == []
+    assert service.extract_from_conversation([
+        {"id": "same", "role": "user", "content": "I have a Powerwall"},
+        {"id": "same", "role": "assistant", "content": "Confirmed"},
+    ]) == []
+
+
+def test_heuristic_fallback_cites_only_the_matching_human_turn():
+    facts = MemoryExtractionService().extract_from_conversation([
+        {"id": "a", "role": "user", "content": "I prefer quiet rooms"},
+        {"id": "bot", "role": "assistant", "content": "I work at ExampleCorp"},
+        {"id": "reset", "role": "user", "content": "/new"},
+        {"id": "b", "role": "user", "content": "I work at ExampleCorp"},
+    ], use_llm=False)
+    assert facts
+    assert {tuple(f.source_message_ids) for f in facts} == {("a",), ("b",)}
+
+
+def test_action_planner_cannot_invent_provenance_for_a_new_fact():
+    from llm_bawt.memory.extraction.service import ExtractedFact
+
+    extracted = ExtractedFact("User prefers tea", ["preference"], 0.8, ["human"])
+    response = json.dumps({"actions": [
+        {"action": "ADD", "fact": {"content": "User prefers tea"}},
+        {"action": "ADD", "fact": {"content": "User owns a jet", "source_message_ids": ["human"]}},
+    ]})
+    actions = MemoryExtractionService()._parse_action_response(response, [extracted])
+    assert len(actions) == 1
+    assert actions[0].fact is extracted
+
+
+def test_memory_update_preserves_or_replaces_sources_without_clearing(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from llm_bawt.mcp_server.storage import Memory, MemoryStorage
+
+    recorded = []
+    storage = MemoryStorage.__new__(MemoryStorage)
+    storage.config = SimpleNamespace(MEMORY_EMBEDDING_MODEL="unused", VERBOSE=False)
+    storage._get_backend = lambda *args, **kwargs: SimpleNamespace(
+        add_memory=lambda **kwargs: recorded.append(kwargs))
+    async def get_existing(*_args):
+        return Memory("existing", "Old fact", source_message_ids=["original"])
+    monkeypatch.setattr(storage, "get_memory", get_existing)
+    monkeypatch.setattr("llm_bawt.mcp_server.storage.generate_embedding", lambda *a, **k: [])
+
+    kept = asyncio.run(storage.update_memory("existing", content="Same source"))
+    replaced = asyncio.run(storage.update_memory(
+        "existing", content="New supported fact", source_message_ids=["new-human"]))
+    assert recorded[0]["source_message_ids"] == ["original"]
+    assert recorded[1]["source_message_ids"] == ["new-human"]
+    assert kept.source_message_ids == ["original"]
+    assert replaced.source_message_ids == ["new-human"]
+
+
+def test_memory_client_update_sends_sources_in_embedded_and_server_modes():
+    from types import SimpleNamespace
+    from llm_bawt.mcp_server.client import MemoryClient
+    from llm_bawt.mcp_server.storage import Memory
+
+    seen = []
+    async def fake_update(**kwargs):
+        seen.append(("embedded", kwargs))
+        return Memory("m", "Updated", source_message_ids=kwargs["source_message_ids"])
+
+    embedded = MemoryClient.__new__(MemoryClient)
+    embedded._initialized = True
+    embedded.bot_id = "example"
+    embedded.server_url = None
+    embedded._storage = SimpleNamespace(update_memory=fake_update)
+    result = embedded.update_memory("m", content="Updated", source_message_ids=["human"])
+    assert result.source_message_ids == ["human"]
+    assert seen[-1][1]["source_message_ids"] == ["human"]
+
+    remote = MemoryClient.__new__(MemoryClient)
+    remote._initialized = True
+    remote.bot_id = "example"
+    remote.server_url = "http://example.invalid"
+    remote._call_server = lambda name, payload: (
+        seen.append((name, payload)),
+        {"id": "m", "content": "Updated", "source_message_ids": payload["source_message_ids"]},
+    )[1]
+    result = remote.update_memory("m", content="Updated", source_message_ids=["human"])
+    assert result.source_message_ids == ["human"]
+    assert seen[-1][0] == "memory_update"
+    assert seen[-1][1]["source_message_ids"] == ["human"]
 
 
 def test_summary_labels_bot_speaker():

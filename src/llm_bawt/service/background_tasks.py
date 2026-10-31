@@ -666,6 +666,7 @@ class BackgroundTasksMixin:
                                     content=fact.content,
                                     importance=fact.importance,
                                     tags=fact.tags,
+                                    source_message_ids=fact.source_message_ids[:5],
                                 )
                                 total_stored += 1
                             elif action.action == "DELETE" and action.target_memory_id:

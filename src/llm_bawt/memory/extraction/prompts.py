@@ -87,18 +87,18 @@ Output: {{"facts": []}}
 
 Input:
 User: Hi
-Assistant: Hey Nick! Good to see you again. How's that Python project going?
+Assistant: Good to see you again! How's that Python project going?
 
 Output: {{"facts": []}}
-(Assistant recalled "Nick" and "Python project" from memory - these are NOT new facts from the user)
+(Assistant recalled "Python project" from memory - this is NOT a new fact from the user)
 
 Input:
-User: I'm Nick, nice to meet you
-Assistant: Nice to meet you too, Nick!
+User: My name is Alex, nice to meet you
+Assistant: Nice to meet you too, Alex!
 
 Output:
 ```json
-{{"facts": [{{"content": "User's name is Nick", "tags": ["fact"], "importance": 1.0, "profile_attribute": {{"category": "fact", "key": "name"}}}}]}}
+{{"facts": [{{"content": "User's name is Alex", "tags": ["fact"], "importance": 1.0, "profile_attribute": {{"category": "fact", "key": "name"}}}}]}}
 ```
 (Note: Name is ALWAYS importance 1.0 and MUST have profile_attribute)
 
@@ -165,9 +165,9 @@ Output only valid JSON:"""
 
 
 def get_fact_extraction_prompt(conversation: str) -> str:
-  """Get the fact extraction prompt with the conversation filled in."""
+  """Resolve the sourced fact extraction prompt at call time."""
   return get_prompt_resolver().render(
-    key="memory.extraction.fact",
+    key="memory.extraction.fact.sourced",
     variables={"conversation": conversation},
   )
 
@@ -420,7 +420,7 @@ Return a JSON object with these EXACT keys:
 
 ## CRITICAL RULES:
 1. **ALWAYS extract the user's name** into the "name" field if it appears ANYWHERE in the data
-2. The "name" field should be JUST the name (e.g., "Nick"), not a sentence
+2. The "name" field should be JUST the name (e.g., "Alex"), not a sentence
 3. Use the user's name or "he"/"she" based on available context — NEVER use "they/them" as a default
 4. Be concise - 1-3 sentences per field max
 5. Merge duplicates, resolve contradictions (prefer recent/specific info)
@@ -430,11 +430,11 @@ Return a JSON object with these EXACT keys:
 ## Example:
 ```json
 {{
-  "name": "Nick",
-  "identity": "Software developer in Ohio. Single, has a dog.",
-  "preferences": "He prefers direct, honest conversation. Values privacy and dislikes cold weather.",
-  "interests": "He enjoys literature, poetry, piano, Souls-like games, and Hytale.",
-  "context": "Currently working on an LLM chatbot with Nextcloud integration."
+  "name": "Alex",
+  "identity": "Software developer in Riverton. Lives with a dog.",
+  "preferences": "Prefers concise answers and enjoys warm weather.",
+  "interests": "Enjoys gardening and board games.",
+  "context": "Currently planning a community garden."
 }}
 ```'''
 

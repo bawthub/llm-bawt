@@ -6,7 +6,6 @@ Uses LLM to extract facts and handle memory updates/conflicts.
 import json
 import logging
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Protocol
@@ -142,24 +141,35 @@ class MemoryExtractionService:
         """
         # Bot-origin deliveries are another bot's speech, never user facts
         # (TASK-1724). With no human turn left there is nothing to extract.
-        messages = extraction_input(messages or [])
+        messages = [
+            msg for msg in extraction_input(messages or [])
+            if not (msg.get("role") == "user" and self._is_command(msg.get("content", "")))
+        ]
         if not human_user_turns_present(messages):
             return []
 
-        # Collect message IDs for source linking
-        message_ids = [msg.get("id", str(uuid.uuid4())) for msg in messages]
-        
-        # Format conversation for the prompt
+        # A duplicate ID is ambiguous even when one of its turns is human.
+        all_ids = [msg.get("id") for msg in messages]
+        eligible_ids = {
+            msg["id"] for msg in messages
+            if msg.get("role") == "user" and isinstance(msg.get("id"), str)
+            and msg["id"] and all_ids.count(msg["id"]) == 1
+        }
+        # Only uniquely identified user turns can provide provenance. Assistant
+        # context can remain, but no fact may cite it or an invented ID.
+        messages = [msg for msg in messages if msg.get("role") != "user" or msg.get("id") in eligible_ids]
+        if not any(msg.get("role") == "user" for msg in messages):
+            return []
+
         conversation_text = self._format_conversation(messages)
-        
+
         if use_llm and self.llm_client:
             try:
-                return self._extract_with_llm(conversation_text, message_ids)
+                return self._extract_with_llm(conversation_text, eligible_ids)
             except Exception as e:
                 logger.warning(f"LLM extraction failed, falling back to heuristics: {e}")
-                return self._extract_with_heuristics(messages, message_ids)
-        else:
-            return self._extract_with_heuristics(messages, message_ids)
+                return self._extract_with_heuristics(messages)
+        return self._extract_with_heuristics(messages)
     
     def extract_from_summary(
         self,
@@ -198,7 +208,7 @@ class MemoryExtractionService:
 
         # Heuristic fallback: treat summary as a single user message
         fake_messages = [{"role": "user", "content": summary_text, "id": summary_id}]
-        return self._extract_with_heuristics(fake_messages, [summary_id])
+        return self._extract_with_heuristics(fake_messages)
 
     @staticmethod
     def summary_has_extractable_content(summary_text: str | None) -> bool:
@@ -253,28 +263,29 @@ class MemoryExtractionService:
         facts = self._parse_extraction_response(response, [summary_id])
         return [self._enrich_meaning(f) for f in facts]
 
+    @staticmethod
+    def _is_command(content: str) -> bool:
+        """A slash command is control input, never a source of user facts."""
+        return bool(re.match(r"^/[a-z][\w-]*(?:\s|$)", content.strip(), re.IGNORECASE))
+
     def _format_conversation(self, messages: list[dict]) -> str:
-        """Format messages into a conversation string for the prompt.
-        
-        Uses clear labels to help the LLM distinguish user vs assistant content.
-        """
+        """Label human turns with their exact, eligible IDs for source selection."""
         lines = []
         for msg in messages:
             role = msg.get("role", "unknown").lower()
             content = msg.get("content", "")
-            # Use very explicit labels
             if role == "user":
-                lines.append(f"[USER SAID]: {content}")
+                lines.append(f"[USER ID: {msg['id']}]: {content}")
             elif role == "assistant":
-                lines.append(f"[ASSISTANT/BOT SAID - IGNORE FOR EXTRACTION]: {content}")
+                lines.append(f"[ASSISTANT]: {content}")
             else:
                 lines.append(f"[{role.upper()}]: {content}")
         return "\n".join(lines)
-    
+
     def _extract_with_llm(
         self,
         conversation_text: str,
-        message_ids: list[str],
+        eligible_ids: set[str],
     ) -> list[ExtractedFact]:
         """Use LLM to extract facts from the conversation."""
         from ...models.message import Message
@@ -297,13 +308,15 @@ class MemoryExtractionService:
         )
         
         # Parse JSON response
-        facts = self._parse_extraction_response(response, message_ids)
+        facts = self._parse_extraction_response(response, [], eligible_ids=eligible_ids)
         return [self._enrich_meaning(f) for f in facts]
-    
+
     def _parse_extraction_response(
         self,
         response: str,
         message_ids: list[str],
+        *,
+        eligible_ids: set[str] | None = None,
     ) -> list[ExtractedFact]:
         """Parse the LLM response into ExtractedFact objects."""
         _require_completion(response)
@@ -340,7 +353,19 @@ class MemoryExtractionService:
                 content = raw_fact.get("content", "").strip()
                 if not content:
                     continue
-                
+                if eligible_ids is not None:
+                    sources = raw_fact.get("source_message_ids")
+                    if (not isinstance(sources, list) or not sources or len(sources) > 5
+                            or any(not isinstance(source, str) or source not in eligible_ids
+                                   for source in sources)):
+                        logger.info("[MemExtract] Dropped fact without valid human source IDs")
+                        continue
+                    source_ids = list(dict.fromkeys(sources))
+                else:
+                    # Summary extraction has exactly one summary source, not
+                    # individual human turns. Preserve that separate contract.
+                    source_ids = message_ids.copy()
+
                 raw_tags = raw_fact.get("tags") or []
                 if isinstance(raw_tags, str):
                     raw_tags = [raw_tags]
@@ -375,7 +400,7 @@ class MemoryExtractionService:
                     content=content,
                     tags=tags,
                     importance=importance,
-                    source_message_ids=message_ids.copy(),
+                    source_message_ids=source_ids,
                     meaning=meaning,
                     profile_attribute=profile_attr,
                 ))
@@ -411,7 +436,6 @@ class MemoryExtractionService:
     def _extract_with_heuristics(
         self,
         messages: list[dict],
-        message_ids: list[str],
     ) -> list[ExtractedFact]:
         """
         Extract facts using simple heuristics (fallback when LLM unavailable).
@@ -461,7 +485,7 @@ class MemoryExtractionService:
                             content=fact_content,
                             tags=[tag],
                             importance=importance,
-                            source_message_ids=message_ids.copy(),
+                            source_message_ids=[msg["id"]],
                         ))
         # Attach lightweight meaning heuristics
         return [self._enrich_meaning(f) for f in facts]
@@ -609,9 +633,6 @@ class MemoryExtractionService:
             for fact in new_facts:
                 if fact.content.lower().strip() == content_lower:
                     return fact
-                # Also try partial match for slight LLM rewording
-                if len(content_lower) > 20 and content_lower[:20] in fact.content.lower():
-                    return fact
             return None
         
         # Try to extract JSON from the response (look for code blocks first)
@@ -640,24 +661,12 @@ class MemoryExtractionService:
                     
                     # Try to match back to original fact (preserves intent from extraction)
                     original = find_original_fact(content)
-                    if original:
-                        fact = original
-                    else:
-                        # Fallback: create new fact with heuristic meaning
-                        tags = fact_data.get("tags") or fact_data.get("memory_type") or []
-                        if isinstance(tags, str):
-                            tags = [tags]
-                        tags = [t.strip().lower() for t in tags if t]
-                        if not tags:
-                            tags = ["misc"]
-                        fact = ExtractedFact(
-                            content=content,
-                            tags=tags,
-                            importance=float(fact_data.get("importance", 0.5)),
-                            source_message_ids=fact_data.get("source_message_ids", []),
-                        )
-                        fact = self._enrich_meaning(fact)
-                    
+                    if original is None:
+                        # The action model cannot create a fact with invented
+                        # source IDs; it may only act on an extracted fact.
+                        continue
+                    fact = original
+
                     actions.append(MemoryAction(
                         action="ADD",
                         fact=fact,
@@ -670,24 +679,10 @@ class MemoryExtractionService:
                     
                     # Try to match back to original fact (preserves intent from extraction)
                     original = find_original_fact(content)
-                    if original:
-                        fact = original
-                    else:
-                        # Fallback: create new fact with heuristic meaning
-                        tags = fact_data.get("tags") or fact_data.get("memory_type") or []
-                        if isinstance(tags, str):
-                            tags = [tags]
-                        tags = [t.strip().lower() for t in tags if t]
-                        if not tags:
-                            tags = ["misc"]
-                        fact = ExtractedFact(
-                            content=content,
-                            tags=tags,
-                            importance=float(fact_data.get("importance", 0.5)),
-                            source_message_ids=fact_data.get("source_message_ids", []),
-                        )
-                        fact = self._enrich_meaning(fact)
-                    
+                    if original is None:
+                        continue
+                    fact = original
+
                     actions.append(MemoryAction(
                         action="UPDATE",
                         fact=fact,

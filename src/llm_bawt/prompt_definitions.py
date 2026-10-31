@@ -56,6 +56,7 @@ from .prompt_default_loaders import (
     load_injected_skills_preamble,
     load_media_prompt_expansion_video,
     load_memory_extraction_fact,
+    load_memory_extraction_fact_sourced,
     load_memory_extraction_fact_system,
     load_memory_extraction_summary,
     load_memory_extraction_summary_system,
@@ -124,6 +125,13 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="memory_extraction",
         required_vars=("conversation",),
         loader=load_memory_extraction_fact,
+    ),
+    "memory.extraction.fact.sourced": PromptDefinition(
+        key="memory.extraction.fact.sourced",
+        title="Fact Extraction With Source Messages",
+        category="memory_extraction",
+        required_vars=("conversation",),
+        loader=load_memory_extraction_fact_sourced,
     ),
     "memory.extraction.update": PromptDefinition(
         key="memory.extraction.update",

@@ -19,6 +19,12 @@ def load_memory_extraction_fact() -> str:
     return FACT_EXTRACTION_PROMPT_TEMPLATE
 
 
+def load_memory_extraction_fact_sourced() -> str:
+    from .memory.extraction.sourced_prompt import SOURCED_FACT_EXTRACTION_PROMPT
+
+    return SOURCED_FACT_EXTRACTION_PROMPT
+
+
 def load_memory_extraction_update() -> str:
     from .memory.extraction.prompts import MEMORY_UPDATE_PROMPT_TEMPLATE
 
