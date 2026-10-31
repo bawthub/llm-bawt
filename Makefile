@@ -343,8 +343,8 @@ test-pg-acceptance: ## Private networkless PostgreSQL; one container per run/wor
 test-offline-integration: ## Real local sockets/threads, no DB or service
 	$(TEST_RUNNER) offline-integration
 
-test-sdk-probe: ## Opt-in installed SDK CLI vs fake localhost providers
-	$(TEST_RUNNER) sdk-probe
+test-sdk-probe: ## Opt-in installed SDK CLI vs fake localhost providers; optional NODES=tests/...
+	$(TEST_RUNNER) sdk-probe $(NODES)
 
 test-all: ## Exhaustive fail-closed offline gate: unit + private PG + local integration
 	$(TEST_RUNNER) offline

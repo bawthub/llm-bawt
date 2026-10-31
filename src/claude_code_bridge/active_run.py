@@ -71,6 +71,7 @@ from agent_bridge.steer_contract import (
     render_interrupt,
 )
 
+from .mcp_reconnect import McpReconnectMonitor
 from .run_teardown import RunTeardown
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,7 @@ class ClaudeActiveRun:
     _finishing: bool = False
     # Clone of the SDK frame buffer, taken when the consumer stops.
     _teardown_frames: Any = None
+    _mcp_monitor: McpReconnectMonitor | None = field(default=None, repr=False)
 
     async def steer(
         self,
@@ -748,6 +750,9 @@ class ClaudeActiveRun:
         """
         from claude_agent_sdk import ResultMessage, UserMessage
 
+        if self._mcp_monitor is None:
+            self._mcp_monitor = McpReconnectMonitor(self.client)
+            self._mcp_monitor.start()
         handle = _sdk_query_handle(self.client)
         if handle is None:
             self.lifecycle_supported = False
@@ -894,6 +899,8 @@ class ClaudeActiveRun:
         to clone.
         """
         self._completed.set()
+        if self._mcp_monitor is not None:
+            self._mcp_monitor.stop()
         if self._teardown_frames is None:
             handle = _sdk_query_handle(self.client)
             if handle is not None:

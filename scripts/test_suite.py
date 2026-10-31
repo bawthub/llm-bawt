@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 from tests.suite_manifest import PG_SELECTORS
 
@@ -459,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
                                            "offline", "target", "profile", "coverage", "stress",
                                            "timing-report", "service", "paid"))
     parser.add_argument("node", nargs="*",
-                        help="target: explicit tests/... node IDs; stress: test files instead of the changed ones")
+                        help="target/sdk-probe: explicit tests/... node IDs; stress: changed test files")
     parser.add_argument("--keyword", help="profile only: pytest -k expression")
     parser.add_argument("--stress-base", default=STRESS_BASE_DEFAULT,
                         help="stress: stress test files changed since this ref forked")
@@ -470,19 +471,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.suite in {"service", "paid"}:
         parser.error("external CLI/LLM tests are disabled until an independently provisioned "
                      "isolated service and credential scope can be verified; never use live :8642")
-    if args.node and args.suite not in {"target", "stress"}:
-        parser.error("node IDs require the target or stress suite")
+    if args.node and args.suite not in {"target", "sdk-probe", "stress"}:
+        parser.error("node IDs require the target, sdk-probe or stress suite")
     if args.everything and (args.suite != "stress" or args.node):
         parser.error("--all is only for the stress suite, without files")
     if args.suite == "stress" and any(not is_test_file(node) or ".." in node for node in args.node):
         parser.error("stress files must be tests/.../test_*.py files")
     if args.keyword and args.suite != "profile":
         parser.error("--keyword is only supported for unit profiling")
-    if args.suite == "target" and (not args.node or any(
+    if args.suite == "target" and not args.node:
+        parser.error("target requires one or more safe tests/... node IDs")
+    if args.suite in {"target", "sdk-probe"} and any(
         not node.startswith("tests/") or ".." in node or node.startswith("-")
         for node in args.node
-    )):
-        parser.error("target requires one or more safe tests/... node IDs")
+    ):
+        parser.error(f"{args.suite} requires safe tests/... node IDs")
     try:
         wait = lock_wait_seconds()
         # The wait is the runner's own setting; the tests it launches never inherit it.
@@ -507,14 +510,22 @@ def main(argv: list[str] | None = None) -> int:
             elif args.suite == "offline-integration":
                 run(LOCAL, "--require-no-skips", *parallel("load"))
             elif args.suite == "sdk-probe":
-                os.environ.update({
+                with patch.dict(os.environ, {
                     "RUN_CLAUDE_OAUTH_SDK_PROBE": "1",
                     "RUN_COMPACT_SDK_PROBE": "1",
                     "RUN_PROXY_SDK_PROBE": "1",
                     "RUN_WORKER_LIVENESS_SDK_PROBE": "1",
                     "RUN_SYSTEM_PROMPT_PIN_SDK_PROBE": "1",
-                })
-                run(SDK, "--require-no-skips")
+                    "RUN_MCP_RECONNECT_SDK_PROBE": "1",
+                }):
+                    if args.node:
+                        requested = collect("", *args.node)
+                        selected = collect(SDK, *args.node, allow_empty=True)
+                        if not selected or requested != selected:
+                            raise RuntimeError(f"sdk-probe targets must all be isolated SDK probes: "
+                                               f"{sorted(requested - selected)}")
+                        print(f"SDK probe selection: {len(selected)} tests", flush=True)
+                    run(SDK, "--require-no-skips", *args.node)
             elif args.suite == "profile":
                 run(UNIT, "--durations=0", *(["-k", args.keyword] if args.keyword else []))
             elif args.suite == "timing-report":
