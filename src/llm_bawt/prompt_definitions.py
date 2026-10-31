@@ -21,6 +21,7 @@ from .chat_prompt_defaults import (
     RESPONSE_STYLE_TLDR,
     RUNTIME_CONTEXT_TEMPLATE,
     SCOPED_COMMIT_PROMPT,
+    SYSTEM_PROMPT_REFINE_INSTRUCTION,
     SESSION_SEED_ACK,
     TURN_CUTOFF_NOTICE,
     SESSION_SEED_BRIEFING,
@@ -206,6 +207,13 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
         category="chat",
         required_vars=(),
         loader=lambda: TTS_OUTPUT_INSTRUCTIONS,
+    ),
+    "chat.system_prompt_refine_instruction": PromptDefinition(
+        key="chat.system_prompt_refine_instruction",
+        title="Refine System Prompt Instruction",
+        category="chat",
+        required_vars=(),
+        loader=lambda: SYSTEM_PROMPT_REFINE_INSTRUCTION,
     ),
     "chat.scoped_commit": PromptDefinition(
         key="chat.scoped_commit",

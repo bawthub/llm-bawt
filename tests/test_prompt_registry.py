@@ -75,6 +75,39 @@ def test_scoped_commit_prompt_is_catalog_owned_and_renders_runtime_scope() -> No
     assert "Do not amend or push" in rendered
 
 
+def test_chat_system_prompt_refine_instruction_is_registered_and_seeded() -> None:
+    key = "chat.system_prompt_refine_instruction"
+    expected = (
+        "As an expert prompt engineer, refine the following prompt to be clearer, "
+        "more precise, better structured, and more effective at achieving its goal, "
+        "while preserving every detail of the original meaning, intent, constraints, "
+        "and requirements with zero additions, omissions, or changes in substance."
+    )
+    resolver = PromptResolver()
+    definition = resolver.definition_for(key)
+    assert definition is not None
+    assert definition.category == "chat"
+    assert definition.required_vars == ()
+    assert definition.default_body() == expected
+    assert resolver.render(key=key, variables={}) == expected
+
+    store = PromptTemplateStore.__new__(PromptTemplateStore)
+    store.config = None
+    store.connection_url = "sqlite://test-refine"
+    store.engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(
+        store.engine,
+        tables=[PromptTemplate.__table__, PromptTemplateVersion.__table__],
+    )
+    first = store.seed_defaults()
+    assert key in first["seeded_keys"]
+    seeded = store.get_exact(key)
+    assert seeded is not None
+    assert seeded.body == expected
+    assert seeded.required_vars_json is None
+    assert store.seed_defaults()["created"] == 0
+
+
 def test_agent_global_prompt_explains_playwright_artifact_workflow() -> None:
     assert "browser_take_screenshot` without `filename`" in AGENT_GLOBAL_PROMPT
     assert "returned `original`, `preview`, or `thumb` URL" in AGENT_GLOBAL_PROMPT

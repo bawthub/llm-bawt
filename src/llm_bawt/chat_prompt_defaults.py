@@ -172,6 +172,14 @@ AGENT_GLOBAL_PROMPT = (
     "secrets or credential files."
 )
 
+SYSTEM_PROMPT_REFINE_INSTRUCTION = (
+    "As an expert prompt engineer, refine the following prompt to be clearer, "
+    "more precise, better structured, and more effective at achieving its goal, "
+    "while preserving every detail of the original meaning, intent, constraints, "
+    "and requirements with zero additions, omissions, or changes in substance."
+)
+
+
 SCOPED_COMMIT_PROMPT = (
     "Commit only the changes from the selected conversation scope summarized below.\n\n"
     "Scoped files:\n"
