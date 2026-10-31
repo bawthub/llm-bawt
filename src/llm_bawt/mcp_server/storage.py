@@ -350,38 +350,27 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
     ) -> Memory | None:
         """Update an existing memory."""
         backend = self._get_backend(bot_id, provision_schema=True)
-        
-        # Get current memory
-        current = await self.get_memory(memory_id, bot_id)
-        if not current:
-            return None
-        
-        # Update with new values
-        new_content = content if content is not None else current.content
-        new_tags = tags if tags is not None else current.tags
-        new_importance = importance if importance is not None else current.importance
-        new_sources = source_message_ids if source_message_ids is not None else current.source_message_ids
-        
-        # Re-generate embedding if content changed
-        embedding = None
-        if content is not None:
-            embedding = generate_embedding(new_content, self.config.MEMORY_EMBEDDING_MODEL, verbose=self.config.VERBOSE)
-        
-        backend.add_memory(
-            memory_id=memory_id,
-            content=new_content,
-            tags=new_tags,
-            importance=new_importance,
-            embedding=embedding,
-            source_message_ids=new_sources,
+        stored = backend.update_memory(
+            memory_id,
+            content=content,
+            tags=tags,
+            importance=importance,
+            source_message_ids=source_message_ids,
         )
-
+        if stored is None:
+            return None
         return Memory(
-            id=memory_id,
-            content=new_content,
-            tags=new_tags,
-            importance=new_importance,
-            source_message_ids=new_sources,
+            id=stored["id"],
+            content=stored["content"],
+            tags=stored["tags"] or ["misc"],
+            importance=stored["importance"],
+            source_message_ids=stored["source_message_ids"] or [],
+            access_count=stored["access_count"],
+            created_at=stored["created_at"],
+            last_accessed=stored["last_accessed"],
+            intent=stored["intent"],
+            stakes=stored["stakes"],
+            emotional_charge=stored["emotional_charge"],
         )
 
     async def delete_memory(

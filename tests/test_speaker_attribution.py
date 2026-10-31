@@ -288,25 +288,30 @@ def test_action_planner_cannot_invent_provenance_for_a_new_fact():
     assert actions[0].fact is extracted
 
 
-def test_memory_update_preserves_or_replaces_sources_without_clearing(monkeypatch):
+def test_memory_update_preserves_or_replaces_sources_without_clearing():
     import asyncio
     from types import SimpleNamespace
-    from llm_bawt.mcp_server.storage import Memory, MemoryStorage
+    from llm_bawt.mcp_server.storage import MemoryStorage
 
     recorded = []
     storage = MemoryStorage.__new__(MemoryStorage)
-    storage.config = SimpleNamespace(MEMORY_EMBEDDING_MODEL="unused", VERBOSE=False)
-    storage._get_backend = lambda *args, **kwargs: SimpleNamespace(
-        add_memory=lambda **kwargs: recorded.append(kwargs))
-    async def get_existing(*_args):
-        return Memory("existing", "Old fact", source_message_ids=["original"])
-    monkeypatch.setattr(storage, "get_memory", get_existing)
-    monkeypatch.setattr("llm_bawt.mcp_server.storage.generate_embedding", lambda *a, **k: [])
 
+    def fake_update(memory_id, **kwargs):
+        recorded.append(kwargs)
+        return {
+            "id": memory_id, "content": kwargs["content"], "tags": ["fact"],
+            "importance": 0.5, "source_message_ids": (
+                ["original"] if kwargs["source_message_ids"] is None
+                else kwargs["source_message_ids"]),
+            "access_count": 0, "created_at": None, "last_accessed": None,
+            "intent": None, "stakes": None, "emotional_charge": None,
+        }
+
+    storage._get_backend = lambda *args, **kwargs: SimpleNamespace(update_memory=fake_update)
     kept = asyncio.run(storage.update_memory("existing", content="Same source"))
     replaced = asyncio.run(storage.update_memory(
         "existing", content="New supported fact", source_message_ids=["new-human"]))
-    assert recorded[0]["source_message_ids"] == ["original"]
+    assert recorded[0]["source_message_ids"] is None
     assert recorded[1]["source_message_ids"] == ["new-human"]
     assert kept.source_message_ids == ["original"]
     assert replaced.source_message_ids == ["new-human"]

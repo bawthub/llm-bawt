@@ -192,6 +192,120 @@ class PostgreSQLSemanticMemoryMixin:
                 conn.rollback()
                 logger.error(f"Failed to add memory {memory_id}: {e}")
 
+    def update_memory(
+        self,
+        memory_id: str,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        importance: float | None = None,
+        source_message_ids: list[str] | None = None,
+    ) -> dict | None:
+        """Patch an existing row, excluding itself from duplicate detection.
+
+        Do not hold a database lock across embedding HTTP calls. A stale snapshot
+        fails visibly instead of overwriting a newer edit or returning invented
+        state. An unavailable embedder clears vectors only when content changes.
+        """
+        with self.engine.connect() as conn:
+            original = conn.execute(text(f"""
+                SELECT content, intent, stakes, emotional_charge,
+                       recurrence_keywords, updated_at
+                FROM {self._memories_table_name} WHERE id = :id
+            """), {"id": memory_id}).mappings().first()
+        if original is None:
+            return None
+
+        changed = content is not None and content != original["content"]
+        if content is not None and not content.strip():
+            raise ValueError("memory content cannot be blank")
+        if tags is not None:
+            tags = [tag.strip().lower() for tag in tags
+                    if isinstance(tag, str) and tag.strip()] or ["misc"]
+        embedding = meaning_embedding = None
+        if changed:
+            from .embeddings import generate_embedding, meaning_text
+
+            try:
+                embedding = generate_embedding(content, self.embedding_model)
+            except Exception as exc:
+                logger.warning("Could not regenerate content embedding: %s", exc)
+            try:
+                meaning_embedding = generate_embedding(
+                    meaning_text(content, original["intent"], original["stakes"],
+                                 original["emotional_charge"],
+                                 original["recurrence_keywords"]),
+                    self.embedding_model,
+                )
+            except Exception as exc:
+                logger.warning("Could not regenerate meaning embedding: %s", exc)
+
+        params = {
+            "id": memory_id, "old_content": original["content"],
+            "old_updated_at": original["updated_at"],
+            "content": content, "changed": changed,
+            "tags_provided": tags is not None,
+            "tags": json.dumps(tags) if tags is not None else None,
+            "importance": importance,
+            "sources_provided": source_message_ids is not None,
+            "sources": (json.dumps(source_message_ids)
+                        if source_message_ids is not None else None),
+            "embedding": (f"[{','.join(str(x) for x in embedding)}]"
+                          if embedding else None),
+            "meaning_embedding": (f"[{','.join(str(x) for x in meaning_embedding)}]"
+                                  if meaning_embedding else None),
+        }
+        with self.engine.begin() as conn:
+            if changed:
+                threshold = getattr(self.config, "MEMORY_DEDUP_SIMILARITY", 0.85)
+                # A prior embedding outage leaves NULL vectors. Exact matches
+                # still count even when this edit has a valid new embedding.
+                exact = conn.execute(text(f"""
+                    SELECT id FROM {self._memories_table_name}
+                    WHERE id <> :id AND LOWER(content) = LOWER(:content) LIMIT 1
+                """), params).first()
+                is_duplicate = exact is not None
+                if not is_duplicate and embedding:
+                    similar = conn.execute(text(f"""
+                        SELECT id, 1 - (embedding <=> :embedding) AS similarity
+                        FROM {self._memories_table_name}
+                        WHERE id <> :id AND embedding IS NOT NULL
+                        ORDER BY embedding <=> :embedding LIMIT 1
+                    """), params).first()
+                    is_duplicate = similar is not None and similar.similarity > threshold
+                if is_duplicate:
+                    raise ValueError("memory update conflicts with another duplicate")
+
+            updated = conn.execute(text(f"""
+                UPDATE {self._memories_table_name}
+                SET content = COALESCE(:content, content),
+                    tags = CASE WHEN :tags_provided THEN CAST(:tags AS jsonb) ELSE tags END,
+                    importance = COALESCE(:importance, importance),
+                    source_message_ids = CASE WHEN :sources_provided
+                        THEN CAST(:sources AS jsonb) ELSE source_message_ids END,
+                    embedding = CASE WHEN :changed THEN :embedding ELSE embedding END,
+                    meaning_embedding = CASE WHEN :changed
+                        THEN :meaning_embedding ELSE meaning_embedding END,
+                    meaning_updated_at = CASE WHEN :changed
+                        THEN CASE WHEN :meaning_embedding IS NULL THEN NULL
+                                  ELSE CURRENT_TIMESTAMP END
+                        ELSE meaning_updated_at END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id AND content = :old_content
+                  AND updated_at IS NOT DISTINCT FROM :old_updated_at
+                RETURNING id, content, tags, importance, source_message_ids,
+                          access_count, created_at, last_accessed,
+                          intent, stakes, emotional_charge
+            """), params).mappings().first()
+            if updated is None:
+                exists = conn.execute(text(f"""
+                    SELECT 1 FROM {self._memories_table_name} WHERE id = :id
+                """), params).first()
+                if exists is not None:
+                    raise RuntimeError("memory changed concurrently; retry the update")
+                return None
+            return dict(updated)
+
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a specific memory.
         

@@ -471,7 +471,7 @@ async def update_memory(
     importance: float | None = None,
     source_message_ids: list[str] | None = None,
 ) -> dict | None:
-    """Patch a memory; omitted fields remain unchanged. Missing IDs return None.
+    """Patch a memory; omitted fields remain unchanged. Unknown memory_id returns None.
 
     Args:
         source_message_ids: Replacement human-message IDs; None retains prior sources.
