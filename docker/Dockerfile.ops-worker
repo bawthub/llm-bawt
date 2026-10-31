@@ -1,6 +1,7 @@
 # TASK-861: standalone stdlib-only worker. No app imports, package install, SSH,
 # systemd, source bind mounts, DB credentials, or network access at runtime.
-# Supply an operator-verified Python base image ID/digest already on the daemon.
+# Supply an operator-verified local Python base tag or qualified repo@sha256 digest;
+# BuildKit cannot resolve a bare sha256 image ID in FROM (TASK-1831).
 # TASK-997: image_deploy.py is the stdlib-only digest deploy/rollback module the
 # worker imports for the fixed deploy_image/rollback_image actions.
 ARG OPS_PYTHON_BASE

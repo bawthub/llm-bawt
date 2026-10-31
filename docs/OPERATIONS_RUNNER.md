@@ -452,9 +452,12 @@ An operator setting up a new installation must:
    app mounts and networks. Verify the daemon is the one owning the target
    containers. Do not infer host bind paths from `/app/src` in a bridge.
 2. Build `docker/Dockerfile.ops-worker` with `OPS_PYTHON_BASE` set to an
-   operator-verified local Python image ID/digest. It COPYs `worker.py` and
-   `image_deploy.py`; no pip/uv/apt install is required. Record the immutable image ID
-   (or published digest) as `LLM_BAWT_OPS_WORKER_IMAGE`. Mutable tags are rejected.
+   operator-verified local Python image **tag** (check its image ID before build)
+   or fully qualified `repository@sha256:...` reference. A bare `sha256:<image-id>`
+   passed to `FROM` fails under BuildKit: it is interpreted as a registry image
+   named `sha256` (TASK-1831). The Dockerfile COPYs worker modules; no pip/uv/apt
+   install is required. Record the built worker's immutable image ID (or published
+   digest) as `LLM_BAWT_OPS_WORKER_IMAGE`; a mutable tag is refused at dispatch.
 3. Choose a dedicated per-stack volume name and set
    `LLM_BAWT_OPS_RECEIPT_VOLUME`. Set `LLM_BAWT_OPS_RECONCILER_IMAGE` to the
    verified existing CPU app image ID/digest. These are topology configuration,
@@ -471,9 +474,14 @@ An operator setting up a new installation must:
    and separately authorize recreation of an existing reconciler to add the mount.
    Adapt the source mount/network for a baked image or alternate DB network.
 5. With explicit deployment permission, recreate **only** app and the new
-   ops-reconciler service. A restart alone cannot add mounts/environment. Never
-   restart bridges/Redis as part of this setup. Applying the override/building
-   images/creating volumes is an operator action, not performed by tests.
+   ops-reconciler service. Confirm the declared dependencies are already healthy,
+   then name both services with `docker compose up -d --no-deps app ops-reconciler`
+   (append the deployed Compose overlays before `up`). Without `--no-deps`, an
+   authorized worker repin also recreated Redis and interrupted the bridges
+   (TASK-1831). A restart alone cannot add mounts/environment. A dependency
+   change requires separate authorization; never recreate bridges/Redis as an
+   implicit side effect. Applying the override/building images/creating volumes
+   is an operator action, not performed by tests.
 6. Verify both submitter containers' inspected `Mounts` contain the configured
    writable named volume at the exact configured root. The executor performs
    this check itself using `HOSTNAME` (or `LLM_BAWT_OPS_APP_CONTAINER` if the
@@ -731,8 +739,12 @@ pocket-tts worker. They seed **disabled** with `require_approval` policies.
   `llm-bawt.ops.hardened-profile="1"`.
 
 Activation order:
-1. Rebuild the worker and confirm both labels. Nick approves the
-   `LLM_BAWT_OPS_WORKER_IMAGE` repin; then recreate app and ops-reconciler.
+1. Rebuild the worker with a verified local base tag or qualified image digest
+   (not a bare sha256 image ID) and confirm both labels. The operator approves
+   the `LLM_BAWT_OPS_WORKER_IMAGE` repin; after verifying dependencies are healthy,
+   recreate **only** app and ops-reconciler with `docker compose up -d --no-deps
+   app ops-reconciler` (using the deployed Compose overlays). Check that source is
+   at a clean published HEAD before any bind-mounted service recreation.
 2. Immediately after the repin, PATCH every frontend image row with
    `health_probe {"type":"http_exec","port":3000,"path":"/api/health"}`, and
    re-file any pending frontend cards. Until that PATCH lands, the new worker
