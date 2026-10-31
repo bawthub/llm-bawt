@@ -17,7 +17,8 @@ from types import SimpleNamespace
 
 import anyio
 import pytest
-from claude_agent_sdk import ResultMessage
+from claude_agent_sdk import AssistantMessage, ResultMessage, UserMessage
+from claude_agent_sdk._internal.message_parser import parse_message
 from claude_agent_sdk._internal.query import Query
 
 from agent_bridge.steer_contract import STEER_RUN_FINISHING
@@ -185,6 +186,103 @@ async def test_lifecycle_less_sdk_closes_steering_at_its_result_too():
     with pytest.raises(RuntimeError, match=f"^{STEER_RUN_FINISHING}$"):
         await run.steer("stop", priority="now", origin="user", framed_message="NOW[stop]")
     assert client.interrupted is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("raw_reader", [False, True], ids=["sdk-reader", "raw-reader"])
+@pytest.mark.parametrize("stale_kind", ["task-notification", "hook-response"])
+@pytest.mark.parametrize("own_origin", [None, {"kind": "human"}], ids=["unmarked-prompt", "human-prompt"])
+async def test_nonhuman_result_does_not_finish_the_current_prompt(
+    raw_reader, stale_kind, own_origin,
+):
+    """A background completion may arrive before the SDK's own prompt starts."""
+    stale = {**_result(""), "origin": {"kind": stale_kind}}
+    own_user = {
+        "type": "user", "session_id": "s", "origin": own_origin,
+        "message": {"role": "user", "content": "the current prompt"},
+    }
+    own_assistant = {
+        "type": "assistant", "session_id": "s",
+        "message": {"role": "assistant", "model": "test-model", "content": [
+            {"type": "text", "text": "working on the current prompt"},
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pwd"}},
+        ]},
+    }
+    tool_response = {
+        "type": "user", "session_id": "s",
+        "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "done"},
+        ]},
+    }
+    frames = [
+        {**own_user, "origin": {"kind": stale_kind}}, stale,
+        own_user, own_assistant, tool_response,
+        {**_result("the actual answer"), "origin": own_origin},
+    ]
+
+    if raw_reader:
+        client = _FakeClient()
+        for frame in frames:
+            client._query.frames.put_nowait(frame)
+    else:
+        class _Plain:
+            async def receive_messages(self):
+                for frame in frames:
+                    yield parse_message(frame)
+
+        client = _Plain()
+    run = ClaudeActiveRun(client=client, request_id="current-prompt")
+    yielded = await _consume_until_result(run)
+
+    assert _results(yielded) == ["the actual answer"]
+    assert any(isinstance(msg, AssistantMessage) for msg in yielded)
+    assert any(isinstance(msg, UserMessage) and msg.content == "the current prompt" for msg in yielded)
+    assert any(isinstance(msg, UserMessage) and isinstance(msg.content, list) for msg in yielded)
+    assert run._finishing is True
+
+
+@pytest.mark.anyio
+async def test_stale_result_does_not_consume_interrupt_boundary_or_queued_steer():
+    client = _FakeClient()
+    run = _run(client)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    await asyncio.sleep(0)  # enable lifecycle support before writing the queued steer
+    run._expected_interrupt_results = 1
+    await _next(run, "follow-up", CMD, origin="bot")
+    for frame in (
+        {**_result(""), "origin": {"kind": "task-notification"}},
+        _result("interrupted"),
+        _lifecycle(CMD, "started"),
+        _lifecycle(CMD, "completed"),
+        _result("replacement answer"),
+    ):
+        client._query.frames.put_nowait(frame)
+    yielded = await asyncio.wait_for(consumer, 1)
+
+    assert _results(yielded) == ["interrupted", "replacement answer"]
+    assert not run.has_unstarted_command()
+    assert run._expected_interrupt_results == 0
+    assert run._deferred_result is None
+
+
+@pytest.mark.anyio
+async def test_stale_result_cannot_be_released_by_a_rejected_queued_steer():
+    client = _FakeClient()
+    run = _run(client)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    await asyncio.sleep(0)
+    await _next(run, "queued note", CMD, origin="bot")
+    for frame in (
+        {**_result(""), "origin": {"kind": "task-notification"}},
+        _lifecycle(CMD, "discarded"),
+        _result("own answer"),
+    ):
+        client._query.frames.put_nowait(frame)
+
+    yielded = await asyncio.wait_for(consumer, 1)
+    assert _results(yielded) == ["own answer"]
+    assert run._deferred_result is None
+    assert run._finishing is True
 
 
 # --- reconciling buffered lifecycle frames before teardown settles -----------

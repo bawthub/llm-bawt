@@ -122,6 +122,18 @@ def _sdk_query_handle(client: Any) -> Any | None:
     return handle if isinstance(handle, Query) else None
 
 
+def _nonhuman_result_origin(message: Any) -> str | None:
+    """Return the SDK origin kind when a result belongs to an injected message.
+
+    The SDK may drain an older background notification's result before it
+    starts this run's own prompt. Only an explicit non-human origin is stale;
+    the run's own result has no origin or ``kind=human``.
+    """
+    origin = getattr(message, "origin", None)
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return kind if kind not in (None, "human") else None
+
+
 def _buffered_frames(handle: Any) -> int | None:
     """Frames the SDK reader has queued but ``messages()`` has not taken yet.
 
@@ -757,8 +769,16 @@ class ClaudeActiveRun:
         if handle is None:
             self.lifecycle_supported = False
             async for msg in self.client.receive_messages():
-                if isinstance(msg, ResultMessage) and self._expected_interrupt_results <= 0:
-                    msg = self._finish(msg)
+                if isinstance(msg, ResultMessage):
+                    stale_kind = _nonhuman_result_origin(msg)
+                    if stale_kind is not None:
+                        logger.info(
+                            "Ignoring injected SDK result: request=%s origin=%s",
+                            self.request_id, stale_kind,
+                        )
+                        continue
+                    if self._expected_interrupt_results <= 0:
+                        msg = self._finish(msg)
                 yield msg
             return
 
@@ -802,6 +822,14 @@ class ClaudeActiveRun:
             msg = parse_message(data)
             if msg is None:
                 continue
+            if isinstance(msg, ResultMessage):
+                stale_kind = _nonhuman_result_origin(msg)
+                if stale_kind is not None:
+                    logger.info(
+                        "Ignoring injected SDK result: request=%s origin=%s",
+                        self.request_id, stale_kind,
+                    )
+                    continue
             if isinstance(msg, UserMessage) and self._expected_interrupt_results > 0:
                 _relabel_interrupted_tool_results(msg)
             if isinstance(msg, ResultMessage) and self._expected_interrupt_results <= 0:
