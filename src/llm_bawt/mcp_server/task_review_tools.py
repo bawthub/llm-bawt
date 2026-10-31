@@ -194,7 +194,7 @@ async def add_task_review(
         findings: Optional, in order (max 40). BLOCKER needs REQUEST_CHANGES
             and failure_scenario; line needs file.
         rechecks_review_id: Your r1's id; records this as its one r2 (signed turn, idempotency_key).
-        resolutions: r2 r1 findings; Blockers FIXED or WITHDRAWN before APPROVE.
+        resolutions: r2 resolutions for r1 findings; Blockers FIXED or WITHDRAWN before APPROVE.
             IMPLEMENTATION FIXED needs revision; DESIGN FIXED may instead use
             a 1-2000 character note without revision. Revision: bare 7-64 hex
             Git SHA or ops-catalog:<slug>@v<positive-version>#sha256:<64-hex>.
