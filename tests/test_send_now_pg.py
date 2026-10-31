@@ -145,6 +145,38 @@ def test_busy_target_takes_the_stamped_row_as_a_steer(gated):
 
 
 @pytest.mark.integration
+def test_composer_steer_refused_under_quiesce_can_enqueue_then_send_now(gated):
+    from llm_bawt.service.system_gate_admission import SteerGateRefused, check_steer
+
+    bot = gated.bot()
+    deliveries, bot_row = _enqueue(gated, bot, "bot callback")
+    turn = _open(gated.store, bot)
+    _owner, gate = _quiesce(gated, bot)
+    engine = gated.store.engine
+
+    with pytest.raises(SteerGateRefused) as refused:
+        check_steer(engine, bot, turn_id=turn)
+    assert refused.value.code == "system_held"
+    # The frontend's ordinary completion fallback enqueues this exact user row.
+    user = _user_chat(gated, deliveries, bot)
+    assert _claim(deliveries, bot) is None
+    assert _row(deliveries, user.id)["status"] == "QUEUED"
+    stamp_send_now(engine, user.id, "nick")
+    claimed = deliveries.claim_next(bot, claim_owner="worker", steer_capable=frozenset({"now", "next"}))
+    assert claimed and claimed.id == user.id and claimed.status == "STEERING"
+    assert claimed.target_turn_id == turn
+    assert check_steer(engine, bot, turn_id=turn, send_now=claimed.id) is None
+    with pytest.raises(SteerGateRefused):
+        check_steer(engine, bot, turn_id=turn, send_now=bot_row.id)
+    assert _row(deliveries, bot_row.id)["status"] == "QUEUED"
+    with engine.connect() as conn:
+        audit = gate_escalations(conn, gate.id)
+    assert [(a["subject"], a["outcome"], a["turn_id"]) for a in audit] == [
+        (user.id, "steer_admitted", turn),
+    ]
+
+
+@pytest.mark.integration
 def test_steer_check_passes_only_the_stamped_generations(gated):
     from llm_bawt.service.system_gate_admission import SteerGateRefused, check_steer
 

@@ -84,11 +84,12 @@ class DeliveryClaim:
                 ):
                     return None
                 if store._explicit_stop_requested(conn, head["turn_id"]):
-                    DeliveryTransitionEvents.stage(conn, conn.execute(sa_text("""
-                        UPDATE inter_bot_deliveries SET status='CANCELLED',
-                            next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
+                    settlement, reason_code = store._stopped_turn_settlement(conn, head["turn_id"])
+                    DeliveryTransitionEvents.stage(conn, conn.execute(sa_text(f"""
+                        UPDATE inter_bot_deliveries SET {settlement},
+                            next_retry_at=NULL, updated_at=now()
                         WHERE id=:id AND status='QUEUED' RETURNING *
-                    """), {"id": head["id"]}).mappings().first(), reason_code="user_stop")
+                    """), {"id": head["id"]}).mappings().first(), reason_code=reason_code)
                     return None
                 from .service.approval_fanout import claim_fence
 

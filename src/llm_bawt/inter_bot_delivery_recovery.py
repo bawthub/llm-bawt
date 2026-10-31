@@ -104,8 +104,11 @@ class DeliveryLeaseRecovery:
                         if ambiguous:
                             recovered.append(ambiguous)
                         continue
-                if is_turn and store._explicit_stop_requested(conn, row["turn_id"]):
-                    assignments = "status='CANCELLED', claim_token=NULL, claim_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, last_error='Stopped by user'"
+                user_stopped = is_turn and store._explicit_stop_requested(conn, row["turn_id"])
+                if user_stopped:
+                    settlement, reason_code = store._stopped_turn_settlement(conn, row["turn_id"])
+                    assignments = (f"{settlement}, claim_token=NULL, claim_owner=NULL, "
+                                   "lease_expires_at=NULL, next_retry_at=NULL")
                 elif is_turn and row.get("turn_ended_at") is not None:
                     success = (
                         row.get("turn_status") in ("ok", "completed")
@@ -149,11 +152,10 @@ class DeliveryLeaseRecovery:
                 updated = conn.execute(sa_text(
                     f"UPDATE inter_bot_deliveries SET {assignments}, updated_at=now() WHERE id=:id RETURNING *"
                 ), {"id": row["id"]}).mappings().one()
-                DeliveryTransitionEvents.stage(conn, updated, reason_code="lease_recovery")
-                if updated["status"] == "CANCELLED" and is_turn:
-                    # TASK-1232 P4: a user Stop ends the turn too. Cancelling
-                    # only the delivery left the row open, and admission
-                    # blocked every later message (the 2026-10-21 deadlock).
+                DeliveryTransitionEvents.stage(conn, updated, reason_code=reason_code if user_stopped else "lease_recovery")
+                if user_stopped:
+                    # TASK-1232 P4: a user Stop ends the turn too. Settling only
+                    # the delivery leaves an open turn blocking later messages.
                     DeliveryLeaseRecovery._settle_stopped_turn(conn, row["turn_id"])
                 if updated["status"] == QUEUED and is_turn:
                     conn.execute(sa_text("""

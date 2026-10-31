@@ -1,12 +1,13 @@
-"""Sender notices for cancelled deliveries (TASK-1327 D2).
+"""Sender notices for cancelled or user-stopped deliveries (TASK-1327/1822).
 
-A delivery that is cancelled before it runs used to vanish silently: its
-sender never learned the work would not happen. This leader-only pump gives
-every eligible CANCELLED row exactly one notice DELIVERY to its sender. That
-covers every cancel writer: user Stop, the queue hold's Cancel all, the cancel
-API and recovery. It runs on each dispatcher pass.
+An unstarted cancellation gets a notice that work will not run; a delivery
+stopped after a bound run began gets a separate notice that work may already
+have happened. This leader-only pump gives each eligible terminal row exactly
+one notice DELIVERY to its sender, covering user Stop, queue-hold Cancel all,
+the cancel API and recovery. It runs on each dispatcher pass.
 
-* Eligible (``_PENDING``): bot-authored, sender is not the target, not itself
+* Eligible (``_PENDING``): CANCELLED or a DELIVERED row stamped
+  ``stopped_after_start``, bot-authored, sender is not the target, not itself
   a notice (so a cancelled notice is never notified about), and not a
   scheduled prompt (its receipt belongs to the scheduling API). Rows sent by
   or to a private bot (a ``private`` tag, the legacy column false, or no
@@ -70,10 +71,11 @@ MODES = (NOTIFY, REPORT, OFF)
 _NOTIFIED, _SKIPPED, _GONE = "notified", "skipped", "gone"
 
 # The one eligibility predicate, shared by the candidate read, the locked
-# re-check, the one-time backfill, the report and the partial index (whose
-# predicate must be a literal, so the private exclusion stays out of it).
+# re-check, the one-time backfill and report. The original cancel partial
+# index exists on deployed DBs; a separate partial index covers started stops.
 _PENDING = f"""
-    status='CANCELLED' AND cancel_notified_at IS NULL
+    (status='CANCELLED' OR (status='DELIVERED' AND metadata_json->>'stopped_after_start'='true'))
+    AND cancel_notified_at IS NULL
     AND author_entity_type='bot' AND sender_bot_id <> target_bot_id
     AND message_kind IS DISTINCT FROM '{NOTICE_KIND}'
     AND metadata_json->'prompt_schedule' IS NULL
@@ -91,6 +93,12 @@ _RELATIONS = {
     "ix_inter_bot_delivery_cancel_notice": f"""
         CREATE INDEX IF NOT EXISTS ix_inter_bot_delivery_cancel_notice
         ON inter_bot_deliveries (updated_at, ordinal) WHERE {_PENDING}
+    """,
+    "ix_inter_bot_delivery_stopped_notice": """
+        CREATE INDEX IF NOT EXISTS ix_inter_bot_delivery_stopped_notice
+        ON inter_bot_deliveries (updated_at, ordinal)
+        WHERE status='DELIVERED' AND metadata_json->>'stopped_after_start'='true'
+          AND cancel_notified_at IS NULL
     """,
 }
 
@@ -252,11 +260,12 @@ class CancelNoticePump:
 
     def _enqueue_notice(self, conn, row, user: str) -> DeliveryRecord:
         sender = row["sender_bot_id"]
+        started = (row.get("metadata_json") or {}).get("stopped_after_start") is True
         message = notice_text(sender, {
             "delivery_id": row["id"], "target_bot_id": row["target_bot_id"],
             "task_id": row["task_id"] or "none", "reason": row["last_error"] or "not recorded",
             "excerpt": excerpt(row["message"]),
-        })
+        }, started=started)
         record, _ = self.store.enqueue(
             sender_bot_id=SYSTEM_BOT_ID, target_bot_id=sender, message=message,
             idempotency_key=f"{NOTICE_KEY_PREFIX}{row['id']}", message_kind=NOTICE_KIND,
@@ -280,18 +289,18 @@ def excerpt(message: str | None) -> str:
     return flat if len(flat) <= EXCERPT_CHARS else flat[:EXCERPT_CHARS - 1] + "…"
 
 
-def notice_text(bot_id: str, variables: dict[str, Any]) -> str:
-    """The registry body of ``deliveries.cancel_notice`` for ``bot_id``, rendered.
+def notice_text(bot_id: str, variables: dict[str, Any], *, started: bool = False) -> str:
+    """Render the appropriate sender notice from the live prompt registry.
 
-    Raises when the registry fails, the body is blank or it no longer renders.
-    The seed is never sent in its place (prompt rule): the caller's
-    transaction rolls back, so the row stays unstamped and is retried.
+    The seed is never sent in place of a missing/blank body. The caller's
+    transaction then rolls back, leaving the row unstamped for retry.
     """
     from ..prompt_registry import get_prompt_resolver
-    from .delivery_cancel_notice_prompt import PROMPT_KEY
+    from .delivery_cancel_notice_prompt import PROMPT_KEY, STARTED_PROMPT_KEY
 
+    key = STARTED_PROMPT_KEY if started else PROMPT_KEY
     rendered = get_prompt_resolver().render(
-        key=PROMPT_KEY, variables=variables, scope_type="bot", scope_id=bot_id)
+        key=key, variables=variables, scope_type="bot", scope_id=bot_id)
     if not (rendered or "").strip():
-        raise ValueError(f"prompt {PROMPT_KEY} rendered blank for {bot_id}")
+        raise ValueError(f"prompt {key} rendered blank for {bot_id}")
     return rendered

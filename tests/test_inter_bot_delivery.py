@@ -920,6 +920,26 @@ def test_explicit_stop_cancels_only_the_claimed_delivery(delivery_store):
     assert next_claim and next_claim.id == following.id
 
 
+def test_stop_after_agent_run_started_records_delivery_and_stop_notice_state(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "work that the agent began")
+    claim = store.claim_next(target, claim_owner="worker", steer_capable=False)
+    assert claim and store.mark_transport_accepted(original.id, claim.claim_token or "")
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE turn_logs SET agent_request_id=:request_id, status='streaming'
+            WHERE id=:id
+        """), {"id": original.turn_id, "request_id": "req_started_agent"})
+    _request_stop_for_delivery(store, original.turn_id)
+
+    delivered = store.cancel_stopped_claim(original.id, claim.claim_token or "")
+    assert delivered and delivered.status == "DELIVERED"
+    assert delivered.delivered_at is not None
+    assert delivered.metadata["stopped_after_start"] is True
+    assert delivered.last_error == "Stopped by user after it ran"
+    assert store.requeue(original.id, claim.claim_token or "", "late", delay_seconds=0) is None
+
+
 def test_stopped_delivery_lease_recovery_does_not_requeue(delivery_store):
     store, sender, target = delivery_store
     original, _ = _enqueue(store, sender, target, "stop during app failure")
@@ -938,13 +958,28 @@ def test_queued_stopped_delivery_cannot_resurrect_when_claimed(delivery_store):
     original, _ = _enqueue(store, sender, target, "stop before reclaim")
     claim = store.claim_next(target, claim_owner="old-owner", steer_capable=True)
     with store.engine.begin() as conn:
-        conn.execute(sa_text("UPDATE turn_logs SET status='streaming' WHERE id=:id"), {"id": original.turn_id})
+        conn.execute(sa_text("UPDATE turn_logs SET status='streaming', agent_request_id='req_started' WHERE id=:id"),
+                     {"id": original.turn_id})
     assert store.mark_transport_accepted(original.id, claim.claim_token or "")
     queued = store.requeue(original.id, claim.claim_token or "", "transient", delay_seconds=0)
     assert queued.status == QUEUED
     _request_stop_for_delivery(store, original.turn_id)
     assert store.claim_next(target, claim_owner="new-owner", steer_capable=True) is None
-    assert store.get(original.id).status == "CANCELLED"
+    settled = store.get(original.id)
+    assert settled.status == "DELIVERED" and settled.metadata["stopped_after_start"] is True
+
+
+def test_requeue_of_stopped_started_claim_records_delivery(delivery_store):
+    store, sender, target = delivery_store
+    original, _ = _enqueue(store, sender, target, "stop after work started")
+    claim = store.claim_next(target, claim_owner="old-owner", steer_capable=False)
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET status='streaming', agent_request_id='req_started' WHERE id=:id"),
+                     {"id": original.turn_id})
+    _request_stop_for_delivery(store, original.turn_id)
+    settled = store.requeue(original.id, claim.claim_token or "", "stopped", delay_seconds=0)
+    assert settled.status == "DELIVERED" and settled.metadata["stopped_after_start"] is True
+    assert settled.delivered_at is not None
 
 
 def test_accepted_run_beyond_retention_dead_letters_without_replay(delivery_store):
@@ -1402,7 +1437,8 @@ def test_stop_on_finished_orphan_then_lease_expiry_settles_turn_and_drains(deliv
     _expire_lease(store, original.id)
     store.recover_expired()
     stopped = store.get(original.id)
-    assert (stopped.status, stopped.last_error) == ("CANCELLED", "Stopped by user")
+    assert (stopped.status, stopped.last_error) == ("DELIVERED", "Stopped by user after it ran")
+    assert stopped.delivered_at is not None and stopped.metadata["stopped_after_start"] is True
     _assert_turn_user_stopped(store, original.turn_id)
     next_claim = store.claim_next(target, claim_owner="new-app", steer_capable=False)
     assert next_claim and next_claim.id == following.id

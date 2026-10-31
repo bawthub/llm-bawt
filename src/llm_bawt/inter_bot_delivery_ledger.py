@@ -278,17 +278,21 @@ class DeliveryTransitionEvents:
             except Exception:  # noqa: BLE001 - fail closed to audit-only
                 logger.exception("delivery event bot visibility unavailable; recording audit-only")
                 visible = False
+        stopped_after_start = record.status == "DELIVERED" and record.metadata.get("stopped_after_start") is True
         payload = {"phase": record.status}
         if reason_code and _REASON_CODE.fullmatch(reason_code):
             payload["reason_code"] = reason_code
+        if stopped_after_start:
+            payload["stopped_after_start"] = True
         emitter.append(
             conn,
             event_key=f"inter_bot:{record.id}:{record.status}:{record.revision}",
             kind="inter_bot_delivery", source="delivery",
             user_id=audience.user_id,
-            tone=_TONES.get(record.status, "info"),
+            tone="warning" if stopped_after_start else _TONES.get(record.status, "info"),
             summary=f"{'You' if user_authored else origin} → {record.target_bot_id}"
-                    f"{' (scheduled)' if scheduled else ''} · {record.status.lower()}"[:500],
+                    f"{' (scheduled)' if scheduled else ''} · "
+                    f"{'stopped after it ran' if stopped_after_start else record.status.lower()}"[:500],
             bot_id=audience.bot_id, actor_type=record.author_entity_type or "bot",
             actor_id=(record.author_entity_id or record.sender_bot_id)[:128],
             subject_type="delivery", subject_id=record.id,

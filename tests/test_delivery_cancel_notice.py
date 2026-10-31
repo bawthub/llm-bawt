@@ -9,7 +9,9 @@ import pytest
 from llm_bawt import runtime_setting_resolution
 from llm_bawt.prompt_definitions import DEFAULT_PROMPT_DEFINITIONS
 from llm_bawt.service import delivery_cancel_notice as cn
-from llm_bawt.service.delivery_cancel_notice_prompt import DEFAULT_CANCEL_NOTICE, PROMPT_KEY
+from llm_bawt.service.delivery_cancel_notice_prompt import (
+    DEFAULT_CANCEL_NOTICE, DEFAULT_STARTED_NOTICE, PROMPT_KEY, STARTED_PROMPT_KEY,
+)
 from llm_bawt.setting_definitions import SETTING_DEFINITIONS
 
 VARS = {"delivery_id": "d-1", "target_bot_id": "loopy", "task_id": "TASK-9",
@@ -44,6 +46,11 @@ def test_the_prompt_is_registered_with_every_variable_the_notice_renders():
     assert definition.default_body() == DEFAULT_CANCEL_NOTICE
     rendered = DEFAULT_CANCEL_NOTICE.format(**VARS)
     assert all(value in rendered for value in VARS.values())
+    started = DEFAULT_PROMPT_DEFINITIONS[STARTED_PROMPT_KEY]
+    assert set(started.required_vars) == set(VARS)
+    assert started.default_body() == DEFAULT_STARTED_NOTICE
+    assert "stopped by user after it ran" in DEFAULT_STARTED_NOTICE.format(**VARS)
+    assert "before it ran" not in DEFAULT_STARTED_NOTICE
 
 
 @pytest.mark.parametrize("failure", ["blank", "none", "error"])

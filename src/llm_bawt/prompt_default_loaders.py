@@ -151,6 +151,12 @@ def load_deliveries_cancel_notice() -> str:
     return DEFAULT_CANCEL_NOTICE
 
 
+def load_deliveries_stopped_after_start_notice() -> str:
+    from .service.delivery_cancel_notice_prompt import DEFAULT_STARTED_NOTICE
+
+    return DEFAULT_STARTED_NOTICE
+
+
 def load_approvals_approved_guidance() -> str:
     from .service.approval_continuation_prompts import APPROVED_GUIDANCE
 

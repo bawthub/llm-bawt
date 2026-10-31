@@ -134,6 +134,17 @@ def _record(**overrides):
     return DeliveryRecord.from_mapping(base)
 
 
+def test_started_stop_event_has_an_explicit_marker():
+    import json
+
+    record = _record(status="DELIVERED", metadata_json=json.dumps({"stopped_after_start": True}),
+                     last_error="Stopped by user after it ran")
+    event = delivery_event(record, default_user="owner")
+    assert event["stopped_after_start"] is True
+    assert event["last_error"] == "Stopped by user after it ran"
+    assert delivery_event(_record(status="DELIVERED"), default_user="owner")["stopped_after_start"] is False
+
+
 @pytest.mark.parametrize("metadata", [
     {},
     {"ordinary_chat": {"session_id": "s"}},

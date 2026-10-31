@@ -100,6 +100,29 @@ def test_each_cancelled_bot_delivery_gets_exactly_one_notice(notices):
 
 
 @pytest.mark.integration
+def test_stopped_started_delivery_notifies_sender_without_claiming_it_never_ran(notices):
+    sender, target = notices.bot(), notices.bot()
+    started = _send(notices, sender, target, "please check the migration")
+    with notices.deliveries.engine.begin() as conn:
+        conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries SET status='DELIVERED', delivered_at=now(),
+                last_error='Stopped by user after it ran',
+                metadata_json=jsonb_set(metadata_json, '{stopped_after_start}', 'true'::jsonb),
+                updated_at=now()
+            WHERE id=:id
+        """), {"id": started.id})
+
+    first = notices.pump.run_pass()
+    assert len(first.notified) == 1 and first.errors == 0
+    [notice] = _notices_for(notices, started.id)
+    assert "stopped by user after it ran" in notice["message"].lower()
+    assert "nothing was done" not in notice["message"].lower()
+    assert "before it ran" not in notice["message"].lower()
+    assert _stamp(notices, started.id) is not None
+    assert notices.pump.run_pass().notified == []
+
+
+@pytest.mark.integration
 def test_a_cancelled_notice_produces_no_further_notice(notices):
     sender, target = notices.bot(), notices.bot()
     source = _send(notices, sender, target)
@@ -276,10 +299,10 @@ def test_report_and_off_modes_write_nothing(notices, monkeypatch, mode):
 def _failing_for(monkeypatch, failing: set[str]):
     real = cn.notice_text
 
-    def notice_text(bot_id, variables):
+    def notice_text(bot_id, variables, *, started=False):
         if variables["delivery_id"] in failing:
             raise RuntimeError("prompt registry down")
-        return real(bot_id, variables)
+        return real(bot_id, variables, started=started)
 
     monkeypatch.setattr(cn, "notice_text", notice_text)
 

@@ -384,6 +384,29 @@ class InterBotDeliveryStore:
 
         return isinstance(audit, dict) and audit.get("source") in USER_STOP_SOURCES
 
+    @staticmethod
+    def _stopped_turn_settlement(conn, turn_id: str) -> tuple[str, str]:
+        """A started run was delivered, even when the user stopped it mid-work.
+
+        Transport acceptance alone is not evidence of a run: it is stamped
+        before the stream generator starts. A bound agent request or saved
+        response proves the target actually began work; an unstarted
+        reservation remains cancellable with the original notice semantics.
+        """
+        started = conn.execute(sa_text("""
+            SELECT agent_request_id IS NOT NULL OR NULLIF(response_text, '') IS NOT NULL
+            FROM turn_logs WHERE id=:turn_id
+        """), {"turn_id": turn_id}).scalar_one_or_none()
+        if started:
+            return (
+                "status='DELIVERED', delivered_at=COALESCE(delivered_at, now()), "
+                "metadata_json=jsonb_set(COALESCE(metadata_json, '{}'::jsonb), "
+                "'{stopped_after_start}', 'true'::jsonb), "
+                "last_error='Stopped by user after it ran'",
+                "user_stop_after_start",
+            )
+        return "status='CANCELLED', last_error='Stopped by user'", "user_stop"
+
     def cancel_stopped_claim(self, delivery_id: str, claim_token: str) -> DeliveryRecord | None:
         """Fence an explicitly stopped delivery, but never an unrelated steer."""
         if self.engine is None or not claim_token:
@@ -396,15 +419,16 @@ class InterBotDeliveryStore:
             """), {"id": delivery_id, "claim": claim_token}).mappings().first()
             if not row or row["delivery_mode"] != "turn" or not self._explicit_stop_requested(conn, row["turn_id"]):
                 return None
-            cancelled = conn.execute(sa_text("""
-                UPDATE inter_bot_deliveries SET status='CANCELLED',
+            settlement, reason_code = self._stopped_turn_settlement(conn, row["turn_id"])
+            stopped = conn.execute(sa_text(f"""
+                UPDATE inter_bot_deliveries SET {settlement},
                     lease_expires_at=NULL, claim_token=NULL, claim_owner=NULL,
-                    next_retry_at=NULL, last_error='Stopped by user', updated_at=now()
+                    next_retry_at=NULL, updated_at=now()
                 WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim
                 RETURNING *
             """), {"id": delivery_id, "claim": claim_token}).mappings().first()
-            DeliveryTransitionEvents.stage(conn, cancelled, reason_code="user_stop")
-        return DeliveryRecord.from_mapping(cancelled) if cancelled else None
+            DeliveryTransitionEvents.stage(conn, stopped, reason_code=reason_code)
+        return DeliveryRecord.from_mapping(stopped) if stopped else None
 
     def claim_next(
         self, target_bot_id: str, *, claim_owner: str, steer_capable: bool | frozenset[str],
@@ -581,13 +605,13 @@ class InterBotDeliveryStore:
             WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token FOR UPDATE
         """), values).mappings().first()
         if claim and claim["delivery_mode"] == "turn" and cls._explicit_stop_requested(conn, claim["turn_id"]):
-            row = conn.execute(sa_text("""
-                UPDATE inter_bot_deliveries SET status='CANCELLED', lease_expires_at=NULL,
-                    claim_token=NULL, claim_owner=NULL, next_retry_at=NULL,
-                    last_error='Stopped by user', updated_at=now()
+            settlement, reason_code = cls._stopped_turn_settlement(conn, claim["turn_id"])
+            row = conn.execute(sa_text(f"""
+                UPDATE inter_bot_deliveries SET {settlement}, lease_expires_at=NULL,
+                    claim_token=NULL, claim_owner=NULL, next_retry_at=NULL, updated_at=now()
                 WHERE id=:id AND status='DISPATCHING' AND claim_token=:claim_token RETURNING *
             """), values).mappings().first()
-            DeliveryTransitionEvents.stage(conn, row, reason_code="user_stop")
+            DeliveryTransitionEvents.stage(conn, row, reason_code=reason_code)
             return DeliveryRecord.from_mapping(row) if row else None
         mode_reset = (
             ", delivery_mode=NULL, target_turn_id=NULL, transport_accepted_at=NULL"

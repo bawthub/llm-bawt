@@ -122,6 +122,25 @@ def test_a_cancel_appends_one_receipt(ledger):
     assert [e["payload"]["phase"] for e in _events(ledger, record.id)] == ["QUEUED", "CANCELLED"]
 
 
+def test_a_started_stop_receipt_is_a_warning_not_a_success(ledger):
+    record, _ = _send(ledger, ledger.bot(), ledger.bot())
+    with ledger.deliveries.engine.begin() as conn:
+        row = conn.execute(sa_text("""
+            UPDATE inter_bot_deliveries
+            SET status='DELIVERED', delivered_at=now(), last_error='Stopped by user after it ran',
+                metadata_json=jsonb_set(COALESCE(metadata_json, '{}'::jsonb),
+                                        '{stopped_after_start}', 'true'::jsonb),
+                revision=revision+1, updated_at=now()
+            WHERE id=:id RETURNING *
+        """), {"id": record.id}).mappings().one()
+        DeliveryTransitionEvents.stage(conn, row, reason_code="user_stop_after_start")
+    (stopped,) = [e for e in _events(ledger, record.id) if e["payload"]["phase"] == "DELIVERED"]
+    assert stopped["tone"] == "warning"
+    assert stopped["payload"] == {"phase": "DELIVERED", "reason_code": "user_stop_after_start",
+                                  "stopped_after_start": True}
+    assert "stopped after it ran" in stopped["summary"]
+
+
 def test_a_replayed_enqueue_appends_nothing_new(ledger):
     sender, target = ledger.bot(), ledger.bot()
     first, _ = _send(ledger, sender, target, idempotency_key=f"evt-{ledger.tag}")

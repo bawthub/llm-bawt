@@ -211,7 +211,7 @@ class SystemEventEmitter:
             type(self).failed_appends += 1
             logger.error("system event rejected: invalid display projection (key=%s)", event_key)
             return None
-        if payload and (set(payload) - {"phase", "requester", "operation", "reason_code"}):
+        if payload and (set(payload) - {"phase", "requester", "operation", "reason_code", "stopped_after_start"}):
             type(self).failed_appends += 1
             logger.error("system event rejected: unallowlisted payload keys (key=%s)", event_key)
             return None

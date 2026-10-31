@@ -43,6 +43,7 @@ from .prompt_default_loaders import (
     load_chat_steer_interrupt_replacement,
     load_chat_steer_next_aside,
     load_deliveries_cancel_notice,
+    load_deliveries_stopped_after_start_notice,
     load_global_recall_guidance,
     load_inter_bot_reply_channel_async,
     load_inter_bot_restart_retry_continue,
@@ -641,8 +642,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "{reason} is the recorded cancel reason and {excerpt} the message's "
             "first 200 characters. It must say the message will not be delivered "
             "and that a user-stopped message is not to be resent automatically. "
-            "A blank body or one that no longer renders falls back to the seed. "
-            "Sender-bot overrides supported."
+            "A blank body or one that no longer renders leaves the delivery "
+            "unstamped for retry. Sender-bot overrides supported."
+        )},
+    ),
+    "deliveries.stopped_after_start_notice": PromptDefinition(
+        key="deliveries.stopped_after_start_notice",
+        title="Stopped Started Delivery Notice",
+        category="agent_execution",
+        required_vars=("delivery_id", "target_bot_id", "task_id", "reason", "excerpt"),
+        loader=load_deliveries_stopped_after_start_notice,
+        metadata={"notes": (
+            "Notifies a sender that the user's Stop ended a delivery after its "
+            "target actually began running. Never say no work was done or that "
+            "the message was cancelled before delivery; partial effects are possible. "
+            "Do not resend automatically. Sender-bot overrides supported."
         )},
     ),
     "ops.quiesce_receipt": PromptDefinition(
