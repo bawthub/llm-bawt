@@ -395,24 +395,26 @@ async def lifespan(app):
     home_audio_worker = HomeAudioWorker(config, HomeAudioStore(model_engine))
     home_audio_worker.start()
 
-    try:
-        yield
-    finally:
-        log.info("lifespan shutdown: started")
-        # TASK-1311: every phase runs even when an earlier one raises (a dead
-        # leadership lock session once aborted the whole teardown here).
-        failed = await run_shutdown_phases(
-            shutdown_phases(
-                service, scheduler=scheduler, redis_subscriber=redis_subscriber,
-                home_audio_worker=home_audio_worker,
-            ),
-            log=log,
-        )
-        set_service(None)
-        if failed:
-            log.warning("lifespan shutdown: complete with failed phase(s): %s", ", ".join(failed))
-        else:
-            log.info("lifespan shutdown: complete")
+    from ..bot_access.refresh import policy_refresh_async_lifecycle
+    async with policy_refresh_async_lifecycle(model_engine):
+        try:
+            yield
+        finally:
+            log.info("lifespan shutdown: started")
+            # TASK-1311: every phase runs even when an earlier one raises (a dead
+            # leadership lock session once aborted the whole teardown here).
+            failed = await run_shutdown_phases(
+                shutdown_phases(
+                    service, scheduler=scheduler, redis_subscriber=redis_subscriber,
+                    home_audio_worker=home_audio_worker,
+                ),
+                log=log,
+            )
+            set_service(None)
+            if failed:
+                log.warning("lifespan shutdown: complete with failed phase(s): %s", ", ".join(failed))
+            else:
+                log.info("lifespan shutdown: complete")
 
 
 BACKGROUND_TASK_ATTRIBUTES = (

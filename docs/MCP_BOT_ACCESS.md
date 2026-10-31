@@ -2,14 +2,41 @@
 
 The registered callable is the enforcement boundary for ordinary and approved
 MCP execution. An ordinary call also checks before approval processing, so a
-denied target does not create an approval request. Approval execution re-reads
-current policy; approval is not a private-data grant.
+denied target does not create an approval request. Approval execution checks
+current in-memory policy again; approval is not a private-data grant.
 
 ## Policy and callers
 
-`bot_access.BotPolicyResolver(engine).resolve(caller=None)` reads a fresh,
-bounded, read-only bot-tag snapshot (`bot_tags.TagSnapshot`, TASK-1329: every
-profile with its tags, plus the catalog, in one statement). No code names a bot:
+`bot_access.BotPolicyResolver(engine).resolve(caller=None)` uses a validated,
+immutable process-local snapshot; **neither authorization stage reads policy
+from the database or fills a cold cache** (TASK-1907). App and MCP lifespans own
+one background refresher per process/engine, including approved execution,
+HTTP and stdio. The background read uses `bot_tags.TagSnapshot` (TASK-1329:
+every profile with its tags and catalog in one read-only statement).
+
+Nick selected **bounded revocation delay**, not immediate global revocation:
+- Freshness expires **five seconds from before the snapshot read**, including
+  connection/read latency. An observed notification invalidates the old view
+  immediately and requests refresh. Cold, failed, expired or disconnected views
+  fail closed; requests never fall back to stale data or query on a miss.
+- Profile create/delete/privacy, tag assignments (including grants), and catalog
+  membership changes publish a schema-scoped PG transactional notification.
+  Borrowed-session writes notify only after the owning transaction commits;
+  rollbacks notify nobody. No bot identities enter the notification payload.
+- Background reconciliation every two seconds repairs lost hints and direct SQL
+  changes. This is not TTL-only invalidation or a per-write revision check.
+- The deadline uses Linux `CLOCK_BOOTTIME`, including host/process suspension
+  and independent of wall-clock/NTP steps. Platforms without a suspend-aware
+  clock fail closed (`snapshot_clock`), rather than weaken the bound.
+- Final admission checks freshness again after asynchronous ownership work;
+  pending and approved retries reauthorize. Already admitted work may finish.
+  Stale grants can therefore be admitted for up to five seconds after an
+  unobserved change; there is no immediate-revocation or in-flight-drain claim.
+- Diagnostics expose bounded reason/state, freshness remaining and refresh/failure
+  counts, never row values, bot identities or raw database errors. No reader
+  registration, global reader locks, durable lease or trigger schema is added.
+
+No code names a bot:
 a bot is private when it carries the `private` tag, or while the legacy
 `include_in_global_search=false` column still says so; a bot with no profile row
 is private. An absent/invalid policy or tag snapshot, unknown trusted caller, or
@@ -62,6 +89,17 @@ profile, context and session tools authorize before executing their handler.
 `self_fwd` authorizes its source. Session IDs are checked against the explicit
 bot; session get/close also bind ownership in SQL. Private-bot session operations
 pin the trusted user except for the allowlisted service-self filters above.
+For the exact durable conversation in an existing verified turn capability,
+its matching bot/user tuple supplies session ownership in memory at both
+stages. This is not an SDK `session_key`, and service-signed arbitrary arguments
+do not establish ownership. Other explicit sessions retain the existing
+`sessions(bot_id,user_id)` lookup: that exception remains unapproved pending
+Nick's decision and is **not** a zero-database-reads-all-writes claim. In
+particular runtime `/new` history persistence uses `MemoryClient` service
+identity and can supply a successor session internally, so the agent-turn
+shortcut alone does not eliminate that path's explicit-session lookup. Seed
+transcript construction is distinct from conversation history persistence.
+
 Session and source discovery lists use positive SQL
 filters before LIMIT/counts. Receipt get/list constrain BOTH sender and target
 before materializing rows, without routing guarded reads through operator REST.

@@ -14,7 +14,8 @@ adapters in `src/llm_bawt/mcp_server/find_tools.py`. Tests:
 
 - **Trusted caller only.** The caller comes from the verified MCP identity,
   never from an argument. No verified caller means `unavailable(caller_unavailable)`.
-- **Scope is resolved fresh on every call** from the current bot-access policy.
+- **Scope is reauthorized on every call** from the bounded-freshness in-memory
+  bot-access snapshot (five-second maximum age; see `MCP_BOT_ACCESS.md`).
   It only narrows: a bot partition is readable only if the policy grants it,
   rows must belong to a session pinned to the caller's user and in a live
   status (`active` or `archived`), and the row's effective author must match

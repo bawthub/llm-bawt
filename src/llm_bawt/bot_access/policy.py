@@ -1,16 +1,16 @@
 """Live positive bot policy; independent of MCP, retrieval, and storage."""
 from __future__ import annotations
 
-import asyncio
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Literal, Mapping
 
-from llm_bawt.bot_tags import BehaviorTag, TagPolicyUnavailable, TagSnapshot, read_snapshot_rows
+from llm_bawt.bot_tags import BehaviorTag, TagPolicyUnavailable, TagSnapshot
 from llm_bawt.bot_tags.vocabulary import is_canonical_bot_slug
 from llm_bawt.utils.bot_partition import sanitize_table_name
-from llm_bawt.utils.bounded_worker import BoundedWorker
+from .snapshot import PolicySnapshot, SnapshotUnavailable, policy_snapshot
 
 
 class BotAccessError(RuntimeError):
@@ -74,6 +74,14 @@ class BotAccess:
     caller: TrustedCaller | None
     partitions: Mapping[str, str]
     tags: TagSnapshot
+    _current: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+
+    def assert_current(self) -> None:
+        if self._current is not None:
+            try:
+                self._current()
+            except SnapshotUnavailable:
+                raise BotAccessError("policy_unavailable") from None
 
     @property
     def private_bots(self) -> frozenset[str]:
@@ -95,6 +103,7 @@ class BotAccess:
 
     def require_target(self, bot_id: str) -> str:
         """Targeted per-bot tools: readable bots, or the caller itself."""
+        self.assert_current()
         if self.caller is not None:
             self.caller.validate()
         if not isinstance(bot_id, str):
@@ -115,6 +124,7 @@ class BotAccess:
         An explicit filter only narrows that set: a bot outside it (private,
         no_global_search or unknown) is the same indistinguishable denial.
         """
+        self.assert_current()
         if self.caller is not None:
             self.caller.validate()
         user = self.caller.user_id if self.caller is not None else None
@@ -137,34 +147,27 @@ class BotAccess:
         )
 
 
-_POLICY_WORKER = BoundedWorker(4, "bot-policy")
-
-
 class BotPolicyResolver:
-    """Fresh read per invocation, with bounded work and no cached fallback."""
+    """Memory-only caller views; lifecycle refresh owns all policy DB work."""
 
     def __init__(self, engine):
         self.engine = engine
+        self.snapshot = policy_snapshot(engine) if engine is not None else PolicySnapshot()
 
     async def resolve(self, caller: TrustedCaller | None = None) -> BotAccess:
-        try:
-            async with asyncio.timeout(3):
-                return await _POLICY_WORKER.run(self.resolve_sync, caller)
-        except BotAccessError:
-            raise
-        except Exception:
-            raise BotAccessError("policy_unavailable") from None
+        return self.resolve_sync(caller)
 
     def resolve_sync(self, caller: TrustedCaller | None = None) -> BotAccess:
-        """For synchronous embedded service callers, never an async MCP handler."""
         if caller is not None:
             caller.validate()
         try:
-            return self._compile(read_snapshot_rows(self.engine), caller)
-        except BotAccessError:
-            raise
-        except Exception:
+            policy = self.snapshot.get()
+        except SnapshotUnavailable:
             raise BotAccessError("policy_unavailable") from None
+        if caller is not None and caller.bot_id not in policy.partitions:
+            raise BotAccessError("caller_unavailable")
+        return replace(policy, caller=caller,
+                       _current=lambda: self.snapshot.require_current(policy))
 
     @staticmethod
     def _compile(rows, caller: TrustedCaller | None) -> BotAccess:

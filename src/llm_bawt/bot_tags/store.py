@@ -17,6 +17,8 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from llm_bawt.bot_policy_events import policy_changed
+
 from . import catalog, grants
 from .errors import TagConflict, TagNotFound, TagValidationError
 from .vocabulary import TAG_SLUG, BehaviorTag, is_canonical_bot_slug
@@ -223,6 +225,7 @@ class BotTagStore:
             """), values).scalar_one_or_none()
             if created is None:
                 raise TagConflict(f"bot tag {values['slug']!r} already exists")
+            policy_changed(conn)
             return self._get(conn, created)
 
     def update_role(self, slug: str, changes: Mapping[str, object]) -> CatalogTag:
@@ -238,6 +241,7 @@ class BotTagStore:
             self._lock_role(conn, slug)
             if new_slug != slug:
                 self._rename(conn, slug, new_slug)
+                policy_changed(conn)
                 slug = new_slug
             if "prompt_key" in values:
                 self._require_free_prompt_key(conn, values["prompt_key"], slug)
@@ -317,6 +321,7 @@ class BotTagStore:
                                       "remove those assignments first")
                 conn.execute(text("DELETE FROM bot_tag_catalog WHERE slug = :slug"),
                              {"slug": slug})
+                policy_changed(conn)
         except IntegrityError as exc:
             # An assignment committed between the check and the delete: the FK
             # (ON DELETE RESTRICT) is the guarantee, this is its message.
@@ -353,6 +358,7 @@ class BotTagStore:
                     UPDATE bot_profiles SET include_in_global_search = TRUE, updated_at = now()
                     WHERE slug = :bot
                 """), {"bot": bot})
+            policy_changed(conn)
             return AssignmentRemoved(tag, bot, has_profile)
 
     # --- helpers -----------------------------------------------------------

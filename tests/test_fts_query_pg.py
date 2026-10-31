@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import pytest
 from sqlalchemy import create_engine, event, text
 
-from llm_bawt.bot_access import BotPolicyResolver
+from tests.bot_policy_helpers import warm_policy_resolver
 from llm_bawt.mcp_server.message_search import CrossBotMessageSearcher, OperatorMessageScope
 from llm_bawt.memory.message_tsv import INDEX, ensure_message_tsv
 from llm_bawt.memory.postgresql_messages import PostgreSQLMessageMixin
@@ -124,7 +124,7 @@ def test_partitions_are_the_only_scope(engine):
 
 
 def test_operator_fts_uses_the_same_parser(engine):
-    access = BotPolicyResolver(engine).resolve_sync(None)
+    access = warm_policy_resolver(engine).resolve_sync(None)
     scope = OperatorMessageScope.from_access(access)
     searcher = CrossBotMessageSearcher(engine, lambda rows, _source: rows)
     rows = searcher.search_operator("fts", "TASK-1281", scope, n_results=50, role_filter=None,
@@ -134,7 +134,7 @@ def test_operator_fts_uses_the_same_parser(engine):
 
 def test_stored_vector_never_leaves_sql(engine):
     """Nick 2026-10-24: every bot gets content_tsv only if it never reaches a model."""
-    access = BotPolicyResolver(engine).resolve_sync(None)
+    access = warm_policy_resolver(engine).resolve_sync(None)
     searcher = CrossBotMessageSearcher(engine, lambda rows, _source: rows)
     backend = PostgreSQLMessageMixin()
     backend.engine = engine

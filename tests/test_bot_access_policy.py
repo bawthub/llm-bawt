@@ -19,7 +19,13 @@ def resolver(rows=ROWS):
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.execute.return_value.mappings.return_value = rows
-    return BotPolicyResolver(engine)
+    policy = BotPolicyResolver(engine)
+    try:
+        compiled = policy._compile(rows, None)
+        policy.snapshot.install(compiled, 1, float("inf"), policy.snapshot.generation())
+    except BotAccessError:
+        policy.snapshot.invalidate("snapshot_validation")
+    return policy
 
 
 def caller(bot="private_fixture", user="user_a", **kwargs):
@@ -90,18 +96,24 @@ def test_policy_and_principal_are_immutable():
 
 
 @pytest.mark.asyncio
-async def test_live_read_no_stale_fallback_and_database_error_is_sanitized():
+async def test_background_refresh_no_stale_fallback_and_database_error_is_sanitized():
+    from llm_bawt.bot_access.refresh import PolicyRefresher
+
     policy = resolver()
+    refresher = PolicyRefresher(policy.engine)
+    assert refresher.refresh()
     first = await policy.resolve()
     assert first.require_target("public-fixture") == "public-fixture"
     conn = policy.engine.connect.return_value.__enter__.return_value
     conn.execute.return_value.mappings.return_value = [
         dict(row, include_in_global_search=False) for row in ROWS
     ]
+    assert refresher.refresh()
     second = await policy.resolve()
     with pytest.raises(BotAccessError, match="^access_denied$"):
         second.require_target("public-fixture")
     policy.engine.connect.side_effect = RuntimeError("sensitive backend detail")
+    assert not refresher.refresh()
     with pytest.raises(BotAccessError, match="^policy_unavailable$") as failure:
         await policy.resolve()
     assert failure.value.__cause__ is None

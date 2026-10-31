@@ -116,3 +116,52 @@ def test_userless_operator_history_route_uses_real_signed_mcp(monkeypatch, signe
         assert seen[0][0]["session_id"] == "owned"
         assert seen[0][1].kind == "service" and seen[0][1].user_id is None
     assert current_bot_access() is None
+
+
+@pytest.mark.usefixtures("signer")
+def test_runtime_history_write_real_service_transport_has_zero_policy_reads(monkeypatch):
+    from unittest.mock import Mock
+    from llm_bawt.bot_access import BotPolicyResolver
+    from llm_bawt.bot_access.refresh import PolicyRefresher
+    from llm_bawt.mcp_server import server as tools
+
+    engine = Mock()
+    owner = PolicyRefresher(engine)
+    rows = [{"slug": "fixture_owner", "include_in_global_search": False}]
+    monkeypatch.setattr("llm_bawt.bot_access.refresh.read_snapshot_rows", lambda _: rows)
+    assert owner.refresh()
+    server = CatalogFastMCP("runtime-history", bot_policy_resolver=BotPolicyResolver(engine),
+        stateless_http=True, json_response=True,
+        approval_store_provider=lambda: FakeStore(None, []))
+    stored = []
+
+    async def store(**kwargs):
+        stored.append((kwargs, current_bot_access().caller))
+        return SimpleNamespace(to_dict=lambda: {"id": "fixture-message"})
+
+    monkeypatch.setattr(tools, "_get_storage", lambda: SimpleNamespace(add_message=store))
+    ownership = Mock(return_value=("fixture_owner", "user_a"))
+    monkeypatch.setattr(server.bot_access, "_session_owner", ownership)
+    server.add_tool(tools.add_message, name="messages_add")
+    server.mark_tools_registered()
+    with TestClient(BotAccessMiddleware(server.streamable_http_app()),
+                    base_url="http://localhost:8000") as http:
+        def urlopen(request, **kwargs):
+            response = http.post("/mcp", content=request.data, headers=dict(request.header_items()))
+            response.raise_for_status()
+            return io.BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        client = MemoryClient(SimpleNamespace(), bot_id="fixture_owner", user_id="user_a",
+                              server_url="http://localhost:8000")
+        client.add_message("user", "/new")
+        ownership.assert_not_called()
+        # The lifecycle can supply a successor internally even for bare /new.
+        # Its service signature is NOT a task-turn owner attestation. Preserve
+        # and disclose the two existing explicit-session fallback lookups.
+        client.add_message("user", "/new", session_id="fixture-successor")
+        assert ownership.call_count == 2
+    assert len(stored) == 2
+    assert all(caller.kind == "service" for _, caller in stored)
+    assert stored[1][0]["session_id"] == "fixture-successor"
+    assert engine.mock_calls == []  # BOTH policy authorization stages, both writes

@@ -14,7 +14,8 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text
 
-from llm_bawt.bot_access import BotPolicyResolver, TrustedCaller
+from llm_bawt.bot_access import TrustedCaller
+from tests.bot_policy_helpers import warm_policy_resolver
 from llm_bawt.bot_tags import catalog
 from llm_bawt.memory.message_tsv import ensure_message_tsv
 from llm_bawt.retrieval import find as find_mod
@@ -65,7 +66,7 @@ class World:
                          {"p": public, "s": bot})
 
     def access(self, caller="pub", user=USER):
-        return BotPolicyResolver(self.engine).resolve_sync(TrustedCaller(caller, user, "turn"))
+        return warm_policy_resolver(self.engine).resolve_sync(TrustedCaller(caller, user, "turn"))
 
     def raw(self, caller="pub", user=USER, *, trigger_id=None, fill=True, **request) -> str:
         return self.finder.find(self.access(caller, user), FindRequest(**request),

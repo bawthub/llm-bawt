@@ -294,6 +294,7 @@ class BotProfileStore:
                 if existing_tags:
                     raise BotAlreadyExists(f"Bot '{slug}' has retained tags; choose a different slug")
             previous = ProfileRuntime.of(row) if row is not None else None
+            previous_searchable = row.include_in_global_search if row is not None else None
             # Under the lock, before any write: a stale read refuses here (TASK-1521).
             profile_changes.check_preconditions(row, payload)
             before = profile_changes.snapshot(session.connection(), row)
@@ -413,6 +414,9 @@ class BotProfileStore:
             profile_changes.record_change(
                 session.connection(), slug, before, profile_changes.snapshot(session.connection(), row),
                 payload, default_by=API_ASSIGNER)
+            if previous is None or previous_searchable != row.include_in_global_search:
+                from .bot_policy_events import policy_changed
+                policy_changed(session.connection())
             if not borrowed:
                 session.commit()
                 session.refresh(row)
@@ -431,6 +435,8 @@ class BotProfileStore:
             if not row:
                 return False
             session.delete(row)
+            from .bot_policy_events import policy_changed
+            policy_changed(session.connection())
             session.commit()
             return True
 

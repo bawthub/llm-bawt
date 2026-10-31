@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine, text
 
-from llm_bawt.bot_access import BotAccessError, BotPolicyResolver, TrustedCaller
+from llm_bawt.bot_access import BotAccessError, TrustedCaller
+from tests.bot_policy_helpers import warm_policy_resolver
 from llm_bawt.bot_access.provenance import MemoryProvenance, ScopedMessageAuthority
 from llm_bawt.bot_tags import catalog
 from llm_bawt.memory.postgresql_memories import PostgreSQLSemanticMemoryMixin
@@ -73,7 +74,7 @@ def add_memory(rig, id, sources, *, partition="publicfixture", vector="[1,0,0]")
 
 def eligibility(rig, bot="public-fixture"):
     caller = TrustedCaller("private_fixture", "user_a", "service")
-    scope = BotPolicyResolver(rig.engine).resolve_sync(caller).aggregate_scope(require_user=True)
+    scope = warm_policy_resolver(rig.engine).resolve_sync(caller).aggregate_scope(require_user=True)
     return MemoryProvenance(ScopedMessageAuthority.for_partition(scope, bot))
 
 
@@ -221,7 +222,7 @@ async def test_userless_service_session_storage_filters_without_losing_bot_owner
             return manager
 
     storage = Storage()
-    access = BotPolicyResolver(rig.engine).resolve_sync(TrustedCaller("private_fixture", None, "service"))
+    access = warm_policy_resolver(rig.engine).resolve_sync(TrustedCaller("private_fixture", None, "service"))
     with bind_bot_access(access):
         assert (await storage.get_session("priv", "private_fixture"))["user_id"] == "user_a"
         assert await storage.get_session("pub", "private_fixture") is None
@@ -236,7 +237,7 @@ async def test_userless_service_session_storage_filters_without_losing_bot_owner
             await storage.list_sessions("public-fixture")
         with pytest.raises(BotAccessError):
             await storage.list_sessions("")
-    bound = BotPolicyResolver(rig.engine).resolve_sync(TrustedCaller("private_fixture", "user_b", "service"))
+    bound = warm_policy_resolver(rig.engine).resolve_sync(TrustedCaller("private_fixture", "user_b", "service"))
     with bind_bot_access(bound):
         assert await storage.get_session("priv", "private_fixture") is None
         assert await storage.close_session("priv", "private_fixture") is False

@@ -15,7 +15,8 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import SQLModel
 
-from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
+from llm_bawt.bot_access import BotAccessError
+from tests.bot_policy_helpers import warm_policy_resolver
 from llm_bawt.bot_access.policy import TrustedCaller
 from llm_bawt.bot_tags import BehaviorTag, BotTags, sql_allowed
 from llm_bawt.bot_tags.vocabulary import BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, MIGRATION_ASSIGNER
@@ -221,7 +222,7 @@ def test_a_completely_empty_schema_gets_every_table_and_copies_nothing(rig):
 
 def private_everywhere(rig, slug: str) -> bool:
     """Private in the resolver, the SQL fragment and the storage set, or in none."""
-    access = BotPolicyResolver(rig.engine).resolve_sync(TrustedCaller("fixture-caller", "owner", "turn"))
+    access = warm_policy_resolver(rig.engine).resolve_sync(TrustedCaller("fixture-caller", "owner", "turn"))
     try:
         access.require_target(slug)
         readable = True

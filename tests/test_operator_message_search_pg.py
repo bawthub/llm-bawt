@@ -12,7 +12,8 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text
 
-from llm_bawt.bot_access import BotAccessError, BotPolicyResolver, TrustedCaller
+from llm_bawt.bot_access import BotAccessError, TrustedCaller
+from tests.bot_policy_helpers import warm_policy_resolver
 from llm_bawt.mcp_server.message_search import CrossBotMessageSearcher, OperatorMessageScope
 from llm_bawt.mcp_server.storage import MemoryStorage
 from llm_bawt.memory.message_tsv import ensure_message_tsv
@@ -101,7 +102,7 @@ def engine(private_app_pg):
 
 def search(engine, *, mode="trgm", query="needle", author=None, in_bot=None,
            limit=100, sort_by="relevance"):
-    access = BotPolicyResolver(engine).resolve_sync(None)
+    access = warm_policy_resolver(engine).resolve_sync(None)
     scope = OperatorMessageScope.from_access(access, author=author, in_bot=in_bot)
     searcher = CrossBotMessageSearcher(engine, lambda rows, source: rows)
     return searcher.search_operator(mode, query, scope, n_results=limit, role_filter=None,
@@ -165,6 +166,7 @@ def test_policy_failure_is_not_an_empty_or_unrestricted_search(engine):
 
 def production_search(engine, *, mode, **kwargs):
     """Through MemoryStorage, so the real author hydrator runs (Codex r1 blocker)."""
+    warm_policy_resolver(engine)
     storage = MemoryStorage.__new__(MemoryStorage)
     storage.engine = engine
     return asyncio.run(storage.search_messages_operator("needle", mode=mode, n_results=100, **kwargs))
@@ -210,6 +212,6 @@ def test_missing_engine_is_source_unavailable_not_500():
 
 
 def test_trusted_caller_cannot_use_operator_scope(engine):
-    access = BotPolicyResolver(engine).resolve_sync(TrustedCaller("peer", "user_b", "service"))
+    access = warm_policy_resolver(engine).resolve_sync(TrustedCaller("peer", "user_b", "service"))
     with pytest.raises(BotAccessError, match="caller_unavailable"):
         OperatorMessageScope.from_access(access)

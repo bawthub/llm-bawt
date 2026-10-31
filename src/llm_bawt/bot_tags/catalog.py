@@ -12,6 +12,8 @@ from collections.abc import Iterable, Mapping
 
 from sqlalchemy import text
 
+from llm_bawt.bot_policy_events import policy_changed
+
 from .errors import TagSetChanged, TagValidationError
 from .vocabulary import (
     API_ASSIGNER, BEHAVIOR_TAGS, LEGACY_FLAG_ASSIGNER, LEGACY_PRIVATE_TAGS, MIGRATION_ASSIGNER,
@@ -130,6 +132,7 @@ def seed(conn) -> None:
                    (EXCLUDED.name, EXCLUDED.description, 'behavior', TRUE, NULL::varchar,
                     '[]'::jsonb)
         """), {"slug": str(tag.slug), "name": tag.name, "description": tag.description})
+    policy_changed(conn)
 
 
 def migrate_legacy_flag(conn) -> int:
@@ -145,6 +148,7 @@ def migrate_legacy_flag(conn) -> int:
         WHERE p.include_in_global_search = false AND btrim(p.slug) <> ''
         ON CONFLICT DO NOTHING
     """), {"by": MIGRATION_ASSIGNER, "tags": [str(t) for t in LEGACY_PRIVATE_TAGS]})
+    policy_changed(conn)
     return int(result.rowcount or 0)
 
 
@@ -154,6 +158,7 @@ def assign(conn, bot_slug: str, tags: Iterable[str], by: str | None) -> None:
             INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_by)
             VALUES (:bot, :tag, :by) ON CONFLICT DO NOTHING
         """), {"bot": bot_slug, "tag": str(tag), "by": by})
+    policy_changed(conn)
 
 
 def unassign(conn, bot_slug: str, tags: Iterable[str]) -> None:
@@ -161,6 +166,7 @@ def unassign(conn, bot_slug: str, tags: Iterable[str]) -> None:
         DELETE FROM bot_profile_tags
         WHERE bot_slug = :bot AND tag_slug = ANY(CAST(:tags AS text[]))
     """), {"bot": bot_slug, "tags": [str(t) for t in tags]})
+    policy_changed(conn)
 
 
 def has_assignment(conn, bot_slug: str, tag: BehaviorTag) -> bool:

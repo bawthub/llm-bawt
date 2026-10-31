@@ -14,7 +14,7 @@ from llm_bawt.bot_access.service import SERVICE_SELF_TOOLS, is_service_self
 from llm_bawt.utils.bounded_worker import BoundedWorker
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.db import get_shared_engine
-from .bot_access_identity import trusted_caller
+from .bot_access_identity import trusted_caller, trusted_session_owner
 from .bot_access_manifest import AGGREGATE_TOOLS, BOT_TARGET_TOOLS, GUARDED_TOOLS
 
 _invocation: ContextVar[tuple[str, dict] | None] = ContextVar("bot_access_invocation", default=None)
@@ -109,10 +109,14 @@ class ToolBotAccess:
         # Session IDs cannot override the explicit bot namespace. This early
         # check reads ownership only; scoped storage binds get/close SQL too.
         if target is not None and values.get("session_id"):
-            try:
-                owner = await _METADATA_WORKER.run(self._session_owner, values["session_id"])
-            except Exception:
-                raise BotAccessError("source_unavailable") from None
+            owner = trusted_session_owner(values["session_id"], access.caller)
+            if owner is None:
+                # Other explicit sessions still need their authoritative owner;
+                # this unchanged fallback is not a zero-read-all-writes claim.
+                try:
+                    owner = await _METADATA_WORKER.run(self._session_owner, values["session_id"])
+                except Exception:
+                    raise BotAccessError("source_unavailable") from None
             if owner is not None and (owner[0] != target or (
                 target in access.private_bots and not service_filter
                 and owner[1] != access.caller.user_id
@@ -120,6 +124,9 @@ class ToolBotAccess:
                 raise BotAccessError("access_denied")
             if owner is None and name == "messages_add":
                 raise BotAccessError("access_denied")
+        # Ownership work can yield; do not admit an expired/invalidated view
+        # captured before that await. Approved execution uses this same check.
+        access.assert_current()
         return access
 
     def _session_owner(self, session_id):

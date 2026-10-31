@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 
 # Suppress noisy MCP library session lifecycle logging BEFORE the FastMCP
 # import so its own logger inherits the WARNING level.
@@ -38,8 +39,21 @@ _allowed_hosts = [
 _allowed_origins = [f"http://{h}" for h in _allowed_hosts]
 
 
+@asynccontextmanager
+async def _policy_lifespan(_server):
+    # Covers standalone HTTP, stdio and the in-process MCP event loop. The
+    # FastAPI process also owns a reference for approved server-side execution.
+    from llm_bawt.bot_access.refresh import policy_refresh_async_lifecycle
+    from llm_bawt.utils.config import Config
+    from llm_bawt.utils.db import get_shared_engine
+
+    async with policy_refresh_async_lifecycle(get_shared_engine(Config())):
+        yield {}
+
+
 mcp = CatalogFastMCP(
     "bawthub",
+    lifespan=_policy_lifespan,
     json_response=True,
     stateless_http=True,
     transport_security=TransportSecuritySettings(

@@ -43,6 +43,28 @@ def trusted_caller(name: str, arguments: dict) -> TrustedCaller | None:
         raise BotAccessError("caller_unavailable") from None
 
 
+def trusted_session_owner(session_id: str, caller: TrustedCaller | None):
+    """Existing verified conversation capability, never an SDK session key.
+
+    trusted_caller() has already checked all supplied identities agree. This
+    shortcut proves only the exact conversation the app bound before minting;
+    a signed service invocation alone does not prove arbitrary row ownership.
+    """
+    raw = _raw_turn_capability.get()
+    if raw is None:
+        raw = current_task_turn_capability()
+    if raw is None or caller is None:
+        return None
+    try:
+        turn = open_task_turn_context(raw)
+    except Exception:
+        raise BotAccessError("caller_unavailable") from None
+    if (session_id == turn.session_id and caller.bot_id == turn.bot_id
+            and caller.user_id == turn.user_id):
+        return turn.bot_id, turn.user_id
+    return None
+
+
 def strict_header(scope: dict, header: str) -> str | None:
     values = [value for key, value in scope.get("headers", [])
               if key.lower() == header.lower().encode("ascii")]
