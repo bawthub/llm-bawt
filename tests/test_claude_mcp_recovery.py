@@ -77,6 +77,41 @@ def test_failed_reconnect_is_retried_after_server_recovers():
     assert client.reconnects == ["bawthub", "bawthub"]
 
 
+def test_pending_catalog_without_tools_reconnects_after_two_checks():
+    client = _Client([{"bawthub": "pending"}])
+
+    async def main():
+        live = ClaudeActiveRun(client=client, request_id="req")
+        messages = live.messages()
+        await anext(messages)
+        try:
+            await asyncio.wait_for(client.reconnected.wait(), timeout=46)  # virtual clock
+        finally:
+            live.mark_completed()
+            await messages.aclose()
+
+    virtual_run(main())
+    assert client.status_calls >= 2
+    assert client.reconnects == ["bawthub"]
+
+
+def test_transient_pending_catalog_is_not_reconnected():
+    client = _Client([{"bawthub": "pending"}, {"bawthub": "connected"}])
+
+    async def main():
+        live = ClaudeActiveRun(client=client, request_id="req")
+        messages = live.messages()
+        await anext(messages)
+        await client.checked.wait()
+        await asyncio.sleep(31)  # virtual clock: observe at least two checks
+        live.mark_completed()
+        await messages.aclose()
+
+    virtual_run(main())
+    assert client.status_calls >= 2
+    assert client.reconnects == []
+
+
 def test_sse_transport_reconnects_but_http_connected_server_is_unchanged():
     client = _Client([{"bawthub": "connected", "stream": "failed"}])
     virtual_run(_drive(client))

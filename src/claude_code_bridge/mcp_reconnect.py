@@ -33,6 +33,7 @@ class McpReconnectMonitor:
         )
         self._retry_at: dict[str, float] = {}
         self._retry_delay: dict[str, int] = {}
+        self._pending_checks: dict[str, int] = {}
         self._warned: set[str] = set()
         self._status_warning = False
         self._task: asyncio.Task[None] | None = None
@@ -70,7 +71,19 @@ class McpReconnectMonitor:
                 name = server.get("name")
                 if name not in self._remote_names:
                     continue
-                if server.get("status") != "failed":
+                state = server.get("status")
+                if state == "pending" and not server.get("tools"):
+                    # A lost SSE stream can remain pending without tools rather
+                    # than becoming failed. Let one check pass for the CLI's own
+                    # retry, then reconnect through its control plane.
+                    count = self._pending_checks.get(name, 0) + 1
+                    self._pending_checks[name] = count
+                    if count < 2:
+                        continue
+                elif state == "failed":
+                    self._pending_checks.pop(name, None)
+                else:
+                    self._pending_checks.pop(name, None)
                     self._retry_at.pop(name, None)
                     self._retry_delay.pop(name, None)
                     self._warned.discard(name)
@@ -83,7 +96,7 @@ class McpReconnectMonitor:
                         self._client.reconnect_mcp_server(name),
                         timeout=_CONTROL_TIMEOUT_SECONDS,
                     )
-                    logger.info("MCP server reconnected: %s", name)
+                    logger.info("MCP server reconnect accepted: %s", name)
                     self._retry_at.pop(name, None)
                     self._retry_delay.pop(name, None)
                     self._warned.discard(name)

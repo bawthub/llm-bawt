@@ -181,11 +181,22 @@ def test_cli_restores_mcp_catalog_mid_turn_after_local_server_restarts(tmp_path:
 
         client.get_mcp_status = record_status
         reconnects = []
+        reconnect_outcomes = []
+        first_reconnect_finished = asyncio.Event()
         original_reconnect = client.reconnect_mcp_server
 
         async def record_reconnect(name):
             reconnects.append(name)
-            return await original_reconnect(name)
+            try:
+                result = await original_reconnect(name)
+            except Exception as exc:
+                reconnect_outcomes.append(type(exc).__name__)
+                raise
+            else:
+                reconnect_outcomes.append("success")
+                return result
+            finally:
+                first_reconnect_finished.set()
 
         client.reconnect_mcp_server = record_reconnect
         live = ClaudeActiveRun(client=client, request_id="probe")
@@ -219,25 +230,15 @@ def test_cli_restores_mcp_catalog_mid_turn_after_local_server_restarts(tmp_path:
             offline.set()
             await first_failed.wait()
             await second_request.wait()
-            # HTTP CLI transitions connected → pending → failed on its own
-            # after a lost tool call. SSE may remain pending while its internal
-            # retry loop runs; explicitly fail the disconnected SSE connection
-            # if it has not reached failed after a bounded wait.
-            forced = False
-            for _ in range(60):
-                failed = _status_of(await client.get_mcp_status())
-                if failed.get("status") == "failed":
-                    break
-                await asyncio.sleep(.5)
-            else:
-                assert transport == "sse" and failed.get("status") == "pending", failed
-                assert not failed.get("tools"), failed
-                forced = True
-                with pytest.raises(Exception, match="(?i)(mcp|connect|failed)"):
-                    await client.reconnect_mcp_server("probe")
-                failed = _status_of(await client.get_mcp_status())
-            assert failed.get("status") == "failed", failed
-            assert not failed.get("tools"), failed
+            # Keep the service offline until the monitor itself attempts a
+            # reconnect: HTTP can become failed; SSE can remain pending without
+            # tools. No test-side reconnect is allowed in this proof.
+            await first_reconnect_finished.wait()
+            missing = _status_of(await client.get_mcp_status())
+            assert missing.get("status") in {"failed", "pending"}, missing
+            assert not missing.get("tools"), missing
+            assert reconnects == ["probe"], reconnects
+            assert reconnect_outcomes[0] != "success", reconnect_outcomes
             await service.start()  # same URL, new FastMCP process state
             # The monitor's control requests run while a model request is open.
             # It must observe failure, recover and repopulate this same CLI.
@@ -256,10 +257,9 @@ def test_cli_restores_mcp_catalog_mid_turn_after_local_server_restarts(tmp_path:
             assert not results[1].is_error
             assert "PONG_FROM_RESTARTED_SERVER" in str(results[1].content)
             assert service.calls == 1
-            assert len(reconnects) >= (2 if forced else 1), reconnects
-            assert reconnects[-1] == "probe"  # active monitor, not the test fixture
-            assert "failed" in statuses, statuses
-            assert "connected" in statuses, statuses
+            assert reconnects == ["probe", "probe"], reconnects  # both from monitor
+            assert reconnect_outcomes[-1] == "success", reconnect_outcomes
+            assert missing["status"] in statuses and "connected" in statuses, statuses
         finally:
             live.mark_completed()
             await client.disconnect()
