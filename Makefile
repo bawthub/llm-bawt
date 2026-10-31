@@ -314,16 +314,19 @@ endif  # not Windows
 .PHONY: lint format typecheck test test-cov test-integration test-pg-acceptance test-all test-offline-integration test-sdk-probe test-profile test-target test-snapshot test-stress test-timing-report test-sweep gate gate-receipt test-service test-paid
 
 # Every scenario enters the same locked runner; CI calls these targets too.
-TEST_RUNNER := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory python -m scripts.test_suite
+# Dev tools share that locked, isolated env: the shared .venv has no dev extra
+# (no ruff/mypy) and must not be re-synced from a target (TASK-1666).
+DEV_ENV := uv run --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory
+TEST_RUNNER := $(DEV_ENV) python -m scripts.test_suite
 
 lint: ## Lint with ruff
-	uv run ruff check src/
+	$(DEV_ENV) ruff check src/
 
 format: ## Format with ruff
-	uv run ruff format src/
+	$(DEV_ENV) ruff format src/
 
 typecheck: ## Type-check with mypy
-	uv run mypy src/
+	$(DEV_ENV) mypy src/
 
 test: ## Fast hermetic unit suite; enforce setup+call+teardown <1s
 	$(TEST_RUNNER) unit
