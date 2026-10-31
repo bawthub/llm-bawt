@@ -188,12 +188,16 @@ async def add_task_review(
         verdict: APPROVE, APPROVE_WITH_CHANGES, REQUEST_CHANGES, or COMMENT.
         body: Non-empty review text; for an approval without notes use a short rationale.
         bot_id: Your own bot ID, sent as actor context, not as a review author field.
-        target_revision: Optional description digest or commit/revision reference.
+        target_revision: Optional description digest or commit reference. For an
+            ops catalog revision, use the same canonical tagged reference as FIXED.revision.
         idempotency_key: Stable key to safely retry the same submission.
         findings: Optional, in order (max 40). BLOCKER needs REQUEST_CHANGES
             and failure_scenario; line needs file.
         rechecks_review_id: Your r1's id; records this as its one r2 (signed turn, idempotency_key).
         resolutions: r2 only, settling r1 findings; Blockers FIXED or WITHDRAWN before APPROVE.
+            FIXED.revision accepts a bare 7-64 hex Git SHA or
+            ops-catalog:<slug>@v<positive-version>#sha256:<64-hex-command-script-hash>.
+            Catalog evidence is format-validated, not checked for existence.
 
     Returns:
         The review receipt as returned by BawtHub, or an error dict. This does
@@ -287,7 +291,10 @@ async def resolve_review_finding(
         finding_id: Finding to settle.
         resolution: FIXED needs revision, DEFERRED needs task; only the reviewer withdraws.
         bot_id: Your own bot ID.
-        revision: Fix commit SHA.
+        revision: Bare 7-64 hex Git SHA or canonical
+            ops-catalog:<slug>@v<positive-version>#sha256:<64-hex-command-script-hash>.
+            The case-sensitive slug matches [A-Za-z0-9][A-Za-z0-9._-]{0,127};
+            only hex is lowercased. Format validation does not prove existence.
         task: Existing follow-up task.
         note: Optional reason.
 
