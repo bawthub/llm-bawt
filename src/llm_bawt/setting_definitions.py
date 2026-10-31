@@ -390,6 +390,19 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
             "chat still runs. 0 disables the hold."
         ),
     ),
+    "memory_embedding_repair_mode": SettingDefinition(
+        key="memory_embedding_repair_mode",
+        type="str",
+        default="report",
+        applies_to=(),  # GLOBAL-ONLY; never inherit a bot override.
+        storage=STORAGE_RUNTIME_SETTING,
+        label="Missing memory embedding repair",
+        help=(
+            "report counts missing content and meaning vectors without writing; "
+            "repair runs bounded private-safe backfill every 15 minutes. "
+            "Unknown values fail closed to report."
+        ),
+    ),
     "delivery_cancel_notice_mode": SettingDefinition(
         key="delivery_cancel_notice_mode",
         type="str",

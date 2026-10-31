@@ -344,7 +344,7 @@ def regenerate_embeddings(
     bot_id: str = Depends(get_effective_bot_id),
     client=Depends(require_memory_client),
 ):
-    """Regenerate embeddings for all memories."""
+    """Run one bounded content-and-meaning embedding repair pass."""
     try:
         result = client.regenerate_embeddings()
 
@@ -361,7 +361,9 @@ def regenerate_embeddings(
             updated=result.get("updated", 0),
             failed=result.get("failed", 0),
             embedding_dim=result.get("embedding_dim"),
-            message=f"Updated {result.get('updated', 0)} embeddings",
+            message=(f"Checked {result.get('examined', 0)} of up to 25 rows; "
+                     f"updated {result.get('updated', 0)} embeddings. "
+                     "Run again to continue any remaining repairs."),
         )
     except Exception as e:
         log.error(f"Failed to regenerate embeddings for bot '{bot_id}': {e}")

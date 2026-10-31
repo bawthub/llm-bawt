@@ -151,7 +151,11 @@ class MemoryClientAdminMixin:
                 {"bot_id": self.bot_id, "batch_size": batch_size},
             )
         storage = self._get_storage()
-        backend = storage.get_backend(self.bot_id, provision_schema=True)
+        from llm_bawt.memory.embedding_repair import _eligible
+
+        if not _eligible(self.bot_id, storage.engine):
+            return {"error": "bot excluded from embedding repair", "updated": 0, "failed": 0}
+        backend = storage.get_backend(self.bot_id, provision_schema=False)
         return backend.regenerate_embeddings(batch_size=batch_size)
 
     def consolidate_memories(self, dry_run: bool = True, similarity_threshold: float | None = None) -> dict[str, Any]:

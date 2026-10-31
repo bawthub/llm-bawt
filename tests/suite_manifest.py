@@ -9,6 +9,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_recall_tool_args_pg.py::",
     "test_bot_access_pg.py::",
     "test_bot_tags_pg.py::",
+    "test_embedding_repair_pg.py::",
     "test_bot_tag_api_pg.py::",
     "test_bot_grants_pg.py::",
     "test_ops_approvals_pg.py::",

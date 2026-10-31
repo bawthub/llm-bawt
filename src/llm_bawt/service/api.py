@@ -316,6 +316,15 @@ async def lifespan(app):
         log.info("Scheduler started (maintenance interval=%ss; prompt sweep=5s)",
                  config.SCHEDULER_CHECK_INTERVAL_SECONDS)
 
+    # TASK-1843: report-only by default. Enabled repair is bounded, fenced and
+    # runs DB/HTTP off-loop; the stop event also fences in-flight thread writes.
+    from .embedding_repair_job import run_embedding_repair_loop
+    service._embedding_repair_stop = _threading.Event()
+    service._embedding_repair_task = asyncio.create_task(
+        run_embedding_repair_loop(config, model_engine, service._embedding_repair_stop),
+        name="memory-embedding-repair",
+    )
+
     # TASK-1220: register every MCP tool now, before approvals can execute.
     # A lazy import at approval time loads the live bind-mounted tree into a
     # process holding older modules. A failure degrades (approved generic calls
@@ -407,6 +416,7 @@ async def lifespan(app):
 
 
 BACKGROUND_TASK_ATTRIBUTES = (
+    "_embedding_repair_task",
     "_system_event_outbox_task",
     "_tool_persist_task",
     "_mcp_continuation_task",
@@ -429,6 +439,8 @@ def shutdown_phases(service, *, scheduler, redis_subscriber, home_audio_worker) 
     shutdown is never counted as a delivery failure.
     """
     phases: list = [("home audio worker", home_audio_worker.stop)]
+    if hasattr(service, "_embedding_repair_stop"):
+        phases.append(("embedding repair stop", service._embedding_repair_stop.set))
     if scheduler:
         phases.append(("scheduler", scheduler.stop))
     dispatcher = service._inter_bot_dispatcher

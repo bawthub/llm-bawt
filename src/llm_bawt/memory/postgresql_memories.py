@@ -64,10 +64,11 @@ class PostgreSQLSemanticMemoryMixin:
                 logger.debug(f"Could not generate embedding: {e}")
         if meaning_embedding is None:
             try:
-                from .embeddings import generate_embedding
-                meaning_text_parts = [intent or "", stakes or "", "emotional" if emotional_charge else "", " ".join(recurrence_keywords or [])]
-                meaning_text = " | ".join([p for p in meaning_text_parts if p])
-                meaning_embedding = generate_embedding(meaning_text or content, self.embedding_model, verbose=getattr(self.config, 'VERBOSE', False))
+                from .embeddings import generate_embedding, meaning_text
+                meaning_embedding = generate_embedding(
+                    meaning_text(content, intent, stakes, emotional_charge, recurrence_keywords),
+                    self.embedding_model, verbose=getattr(self.config, 'VERBOSE', False),
+                )
             except Exception as e:
                 logger.debug(f"Could not generate meaning embedding: {e}")
         if meaning_embedding:
@@ -122,13 +123,28 @@ class PostgreSQLSemanticMemoryMixin:
                             tags = CAST(:tags AS jsonb),
                             importance = :importance,
                             source_message_ids = :source_ids,
-                            embedding = COALESCE(:embedding, embedding),
+                            embedding = CASE WHEN content IS DISTINCT FROM :content
+                                THEN :embedding ELSE COALESCE(:embedding, embedding) END,
                             intent = :intent,
                             stakes = :stakes,
                             emotional_charge = :emotional_charge,
                             recurrence_keywords = CAST(:recurrence_keywords AS jsonb),
-                            meaning_embedding = COALESCE(:meaning_embedding, meaning_embedding),
-                            meaning_updated_at = COALESCE(:meaning_updated_at, meaning_updated_at),
+                            meaning_embedding = CASE WHEN
+                                content IS DISTINCT FROM :content
+                                OR intent IS DISTINCT FROM :intent
+                                OR stakes IS DISTINCT FROM :stakes
+                                OR emotional_charge IS DISTINCT FROM :emotional_charge
+                                OR recurrence_keywords IS DISTINCT FROM CAST(:recurrence_keywords AS jsonb)
+                                THEN :meaning_embedding
+                                ELSE COALESCE(:meaning_embedding, meaning_embedding) END,
+                            meaning_updated_at = CASE WHEN
+                                content IS DISTINCT FROM :content
+                                OR intent IS DISTINCT FROM :intent
+                                OR stakes IS DISTINCT FROM :stakes
+                                OR emotional_charge IS DISTINCT FROM :emotional_charge
+                                OR recurrence_keywords IS DISTINCT FROM CAST(:recurrence_keywords AS jsonb)
+                                THEN :meaning_updated_at
+                                ELSE COALESCE(:meaning_updated_at, meaning_updated_at) END,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = :id
                     """)
@@ -754,6 +770,9 @@ class PostgreSQLSemanticMemoryMixin:
                         MIN(created_at) as oldest,
                         MAX(created_at) as newest,
                         AVG(importance) as avg_importance,
+                        COUNT(*) FILTER (WHERE embedding IS NULL) AS missing_content_embeddings,
+                        COUNT(*) FILTER (WHERE meaning_embedding IS NULL) AS missing_meaning_embeddings,
+                        COUNT(*) FILTER (WHERE embedding IS NULL OR meaning_embedding IS NULL) AS missing_any_embeddings,
                         pg_total_relation_size('{self._memories_table_name}') as size_bytes
                     FROM {self._memories_table_name}
                 """)
@@ -785,6 +804,9 @@ class PostgreSQLSemanticMemoryMixin:
                         "newest_timestamp": mem_row.newest.isoformat() if mem_row and mem_row.newest else None,
                         "avg_importance": float(mem_row.avg_importance) if mem_row and mem_row.avg_importance else 0.0,
                         "storage_size_bytes": mem_row.size_bytes if mem_row else 0,
+                        "missing_content_embeddings": mem_row.missing_content_embeddings if mem_row else 0,
+                        "missing_meaning_embeddings": mem_row.missing_meaning_embeddings if mem_row else 0,
+                        "missing_any_embeddings": mem_row.missing_any_embeddings if mem_row else 0,
                     },
                     "messages": {
                         "total_count": msg_row.total if msg_row else 0,
@@ -799,99 +821,23 @@ class PostgreSQLSemanticMemoryMixin:
                 return {"error": str(e)}
 
     def regenerate_embeddings(self, batch_size: int = 50) -> dict:
-        """Regenerate embeddings for all memories that don't have them.
-        
-        This is useful after installing sentence-transformers or when
-        switching embedding models. Also handles dimension migration.
-        
-        Args:
-            batch_size: Number of memories to process at once
-            
-        Returns:
-            Dict with counts of updated and failed memories
+        """Repair both missing vectors in a bounded pass; never alter schema.
+
+        This manual entry point deliberately refuses private and inactive bots,
+        just like the recurring repair. A subsequent call continues at the saved
+        cursor; no permanently bad row can stall the rest of the queue.
         """
-        try:
-            from .embeddings import generate_embeddings_batch, get_embedding_dimension
-        except ImportError:
-            return {"error": "sentence-transformers not installed", "updated": 0, "failed": 0}
-        
-        # Check if we need to alter the column dimension
-        actual_dim = get_embedding_dimension(self.embedding_model)
-        
-        updated = 0
-        failed = 0
-        
-        with self.engine.connect() as conn:
-            # First, check and alter column dimension if needed
-            try:
-                check_dim_sql = text(f"""
-                    SELECT atttypmod 
-                    FROM pg_attribute 
-                    WHERE attrelid = '{self._memories_table_name}'::regclass 
-                    AND attname = 'embedding'
-                """)
-                result = conn.execute(check_dim_sql).first()
-                if result:
-                    current_dim = result[0]
-                    if current_dim != actual_dim and current_dim > 0:
-                        logger.debug(f"Migrating embedding dimension from {current_dim} to {actual_dim}")
-                        # Drop index, alter column, recreate index
-                        conn.execute(text(f"DROP INDEX IF EXISTS idx_{self._memories_table_name}_embedding"))
-                        conn.execute(text(f"ALTER TABLE {self._memories_table_name} ALTER COLUMN embedding TYPE vector({actual_dim})"))
-                        conn.execute(text(f"""
-                            CREATE INDEX idx_{self._memories_table_name}_embedding 
-                            ON {self._memories_table_name} 
-                            USING hnsw (embedding vector_cosine_ops)
-                        """))
-                        # Clear existing embeddings since they're wrong dimension
-                        conn.execute(text(f"UPDATE {self._memories_table_name} SET embedding = NULL"))
-                        conn.commit()
-            except Exception as e:
-                logger.debug(f"Could not check/alter embedding dimension: {e}")
-            
-            # Get all memories without embeddings
-            fetch_sql = text(f"""
-                SELECT id, content 
-                FROM {self._memories_table_name}
-                WHERE embedding IS NULL
-                ORDER BY importance DESC
-                LIMIT :limit
-            """)
-            
-            while True:
-                rows = conn.execute(fetch_sql, {"limit": batch_size}).fetchall()
-                if not rows:
-                    break
-                
-                # Extract texts and IDs
-                ids = [row.id for row in rows]
-                texts = [row.content for row in rows]
-                
-                # Generate embeddings in batch
-                embeddings = generate_embeddings_batch(texts, self.embedding_model)
-                
-                # Update each memory
-                for mem_id, embedding in zip(ids, embeddings):
-                    if embedding:
-                        try:
-                            update_sql = text(f"""
-                                UPDATE {self._memories_table_name}
-                                SET embedding = :embedding
-                                WHERE id = :id
-                            """)
-                            conn.execute(update_sql, {
-                                "id": mem_id,
-                                "embedding": str(embedding),
-                            })
-                            updated += 1
-                        except Exception as e:
-                            logger.error(f"Failed to update embedding for {mem_id}: {e}")
-                            failed += 1
-                    else:
-                        failed += 1
-                
-                conn.commit()
-                logger.debug(f"Regenerated embeddings: {updated} updated, {failed} failed")
-        
-        return {"updated": updated, "failed": failed, "embedding_dim": actual_dim}
+        from .embedding_repair import EmbeddingRepair
+
+        repaired = EmbeddingRepair(self.config, self.engine).repair_bot(
+            self.bot_id, limit=min(batch_size, 25),
+        )
+        if repaired.get("excluded") or repaired["busy"] or repaired["dimension_mismatch"]:
+            reason = ("bot excluded from embedding repair" if repaired.get("excluded") else
+                      "embedding repair already running" if repaired["busy"] else
+                      "embedding dimension mismatch; explicit schema migration required")
+            return {"error": reason, "updated": 0, "failed": 0}
+        return {**repaired, "embedding_dim": self.embedding_dim,
+                "updated": repaired["repaired_content"] + repaired["repaired_meaning"],
+                "failed": repaired["permanent_failures"] + repaired["transient_failures"]}
 

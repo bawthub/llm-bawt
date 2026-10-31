@@ -20,8 +20,27 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
+from typing import Literal
 
 import httpx
+
+
+@dataclass(frozen=True)
+class EmbedOutcome:
+    vectors: list[list[float]] | None
+    failure: Literal["transient", "permanent"] | None = None
+
+
+def meaning_text(
+    content: str, intent: str | None, stakes: str | None,
+    emotional_charge: float | None, recurrence_keywords: list[str] | None,
+) -> str:
+    """One representation for both new and repaired meaning vectors."""
+    parts = [intent or "", stakes or "", "emotional" if emotional_charge else "",
+             " ".join(recurrence_keywords or [])]
+    return " | ".join(part for part in parts if part) or content
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,45 +87,52 @@ def _log_outage(msg: str) -> None:
         logger.warning(msg)
 
 
-def _embed(texts: list[str], model_name: str) -> list[list[float]] | None:
-    """POST texts to the bridge /embed endpoint with bounded retry.
-
-    Returns a list of vectors (one per input text, same order) or ``None`` on
-    persistent failure. ``texts`` must be non-empty.
-    """
+def embed_with_status(texts: list[str], model_name: str) -> EmbedOutcome:
+    """Expose permanent 4xx separately from temporary bridge failures."""
     payload = {"texts": texts, "model": model_name}
     last_err: Exception | str | None = None
+    failure: Literal["transient", "permanent"] = "transient"
 
-    for attempt in range(_MAX_ATTEMPTS):
+    for _ in range(_MAX_ATTEMPTS):
         try:
             resp = _get_client().post("/embed", json=payload)
-        except Exception as e:  # connect/read/pool timeouts, conn refused, etc.
-            last_err = e
+        except httpx.RequestError as exc:
+            last_err = exc
             continue
 
         if resp.status_code == 200:
-            data = resp.json()
-            embeddings = data.get("embeddings")
-            if not isinstance(embeddings, list) or len(embeddings) != len(texts):
-                last_err = (
-                    f"malformed /embed response: got "
-                    f"{len(embeddings) if isinstance(embeddings, list) else type(embeddings)} "
-                    f"vectors for {len(texts)} texts"
-                )
-                break  # a well-formed 200 that's wrong won't fix itself on retry
-            return embeddings
+            try:
+                embeddings = resp.json().get("embeddings")
+            except (ValueError, AttributeError, TypeError):
+                embeddings = None
+            if isinstance(embeddings, list) and len(embeddings) == len(texts) and all(
+                isinstance(vector, list) and len(vector) == EMBED_DIM
+                and all(isinstance(value, (int, float)) for value in vector)
+                for vector in embeddings
+            ):
+                return EmbedOutcome(embeddings)
+            last_err = "malformed /embed response"
+            break
 
-        # 4xx (except 408/429) is a client error that won't change on retry.
         if 400 <= resp.status_code < 500 and resp.status_code not in (408, 429):
-            last_err = f"/embed HTTP {resp.status_code}: {resp.text[:200]}"
+            last_err = f"/embed HTTP {resp.status_code}"
+            failure = "permanent"
             break
         last_err = f"/embed HTTP {resp.status_code}"
 
-    _log_outage(
-        f"Embedding service unavailable at {LOCAL_MODEL_EMBED_URL} "
-        f"({last_err}); memory ops will degrade to non-vector search until it recovers"
-    )
-    return None
+    if failure == "permanent":
+        _log_outage(f"Embedding request rejected by {LOCAL_MODEL_EMBED_URL} ({last_err})")
+    else:
+        _log_outage(
+            f"Embedding service unavailable at {LOCAL_MODEL_EMBED_URL} "
+            f"({last_err}); memory ops will degrade to non-vector search until it recovers"
+        )
+    return EmbedOutcome(None, failure)
+
+
+def _embed(texts: list[str], model_name: str) -> list[list[float]] | None:
+    """Compatibility for callers that degrade to None on any embed failure."""
+    return embed_with_status(texts, model_name).vectors
 
 
 def generate_embedding(
