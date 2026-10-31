@@ -117,15 +117,18 @@ inside a container.
 belong to `AUTHOR`: they must chain back to HEAD through only `AUTHOR`'s
 recorded edits (`turn_changed_files`, via `pgq`), every link an exact sha256
 match. If one turn edits, commits, then edits the same file again, its single
-row spans the committed bytes. That gap can cross an intermediate commit only
-when its recorded before-bytes match a first-parent ancestor's blob, all later
-recorded edits of that path are in the chain, and every intervening path-changing
-commit has `AUTHOR`'s canonical trailer and was committed after the turn began
-(with a 5-second clock-skew allowance). A foreign commit, missing trailer,
-path-touching merge, unmatched later edit or unverifiable history refuses. Git
-commit times/trailers assume cooperative bots; unrecorded edits within a turn
-remain outside the proof. Line-level attribution (`commit-recon`) is not accepted
-as proof: it can credit you with identical text somewhere else. Each file is
+row spans the committed bytes. That gap can cross exactly one path-changing
+first-parent commit when its parent blob matches the recorded before-bytes,
+all later recorded edits of that path are in the chain, and the commit has
+`AUTHOR`'s canonical trailer and was made after the turn began (with a 5-second
+clock-skew allowance). Unrelated commits on other paths may follow. A second
+path-changing commit, including a second honest commit within the same turn,
+requires a fresh recorded row or a manual PATCHES trial. A foreign commit,
+missing trailer, path-touching merge, unmatched later edit or unverifiable
+history refuses. Git commit times/trailers assume cooperative bots; unrecorded
+edits within a turn remain outside the proof. Line-level attribution
+(`commit-recon`) is not accepted as proof: it can credit you with identical text
+somewhere else. Each file is
 read once; the ownership proof and the patch use those same bytes, so a write
 that lands during the run is simply not in the patch. Symlinks are refused (use
 `PATCHES`). Edit tracked files only

@@ -266,7 +266,8 @@ def test_paths_accepts_an_own_commit_between_edits_in_one_turn(repo, root, tmp_p
     current = (repo / "app.py").read_bytes()
     provenance = tmp_path / "provenance.json"
     provenance.write_text(json.dumps({
-        "rows": f"snark,app.py,modified,{sha(initial)},{sha(current)},f,{started}\n",
+        "rows": (f"snark,app.py,modified,{sha(b'old bytes')},{sha(initial)},f,{started - 3600}\n"
+                 f"snark,app.py,modified,{sha(initial)},{sha(current)},f,{started}\n"),
     }))
     suite = check("import pathlib,sys; sys.exit(0 if 'z = 2' in pathlib.Path('app.py').read_text() else 3)")
 
@@ -340,6 +341,25 @@ def test_paths_refuses_stale_author_row_after_a_later_author_commit(repo, root, 
 
     assert (code, receipt["status"]) == (snap.EXIT_REFUSED, "refused"), receipt
     assert receipt["patches"] == []
+
+
+@REAL_GIT
+def test_checkpoint_refuses_stale_row_after_a_second_commit_without_a_new_edit_row(repo):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    committed = (repo / "app.py").read_bytes()
+    owned_commit(repo, "snark", "first checkpoint")
+    (repo / "app.py").write_text("a = 1\nx = 3\nz = 1\n")
+    owned_commit(repo, "snark", "later unrecorded commit")
+    (repo / "app.py").write_bytes(committed)  # another unrecorded rollback
+    check = snap.OwnershipCheck("snark", [row("snark", sha(initial), sha(committed), started)])
+
+    ok, _ = check.chain("app.py", sha(head_bytes(repo, "app.py")), sha(committed),
+                        git=snap.Git(repo), head_rev=git(repo, "rev-parse", "HEAD").strip())
+
+    assert not ok
 
 
 @REAL_GIT

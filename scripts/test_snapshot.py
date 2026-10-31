@@ -229,8 +229,9 @@ class OwnershipCheck:
     Byte chain: starting from the working-tree bytes, each step must be an AUTHOR
     edit whose recorded ``after`` equals the current bytes; its ``before`` becomes
     the next target, until HEAD's bytes are reached. A single turn can span a
-    commit: its earlier bytes may instead be an ancestor's blob if every
-    intervening change to this path is an AUTHOR commit after the turn began.
+    commit: its earlier bytes may instead be the parent blob of exactly one
+    path-changing AUTHOR commit made after the turn began. Other commits can
+    follow, but another path-changing commit has no recorded post-commit edit.
     All later recorded edits must participate in the chain, and a foreign row
     always refuses. This trusts cooperative bots' commit trailers and recorded
     edits; an unrecorded edit inside one turn is already outside the proof.
@@ -252,20 +253,21 @@ class OwnershipCheck:
         used: list[EditRow] = []
         checkpoint = False
         while target != head_sha:
+            if used and git is not None and target is not _UNKNOWN:
+                start = min(row.ts for row in used)
+                # An older turn may end at the same bytes as the committed
+                # parent. Prefer a verified checkpoint before following that
+                # unrelated historical row, but never skip a newer edit.
+                if all(row in used for row in rows if row.ts >= start):
+                    checkpoint = committed_checkpoint(git, head_rev, path, target,
+                                                      head_sha, self.author, start)
+                    if checkpoint:
+                        break
             step = next((row for row in mine if row.ts <= limit and row not in used
                          and row.after_key() == target), None)
             if step is None:
-                if used and git is not None and target is not _UNKNOWN:
-                    start = min(row.ts for row in used)
-                    # A stale earlier turn's after-bytes may equal today's
-                    # working tree. Do not let that row jump over a newer edit.
-                    if all(row in used for row in rows if row.ts >= start):
-                        checkpoint = committed_checkpoint(git, head_rev, path, target,
-                                                          head_sha, self.author, start)
-                if not checkpoint:
-                    where = "the current bytes" if not used else f"the bytes before {self.author}'s edit"
-                    return False, f"{where} were not produced by any recorded {self.author} edit"
-                break
+                where = "the current bytes" if not used else f"the bytes before {self.author}'s edit"
+                return False, f"{where} were not produced by any recorded {self.author} edit"
             used.append(step)
             target, limit = step.before_key(), step.ts
             if len(used) > 200:
@@ -286,10 +288,12 @@ def committed_checkpoint(git: Git, head_rev: str, path: str, before: object,
 
     ``turn_changed_files`` collapses a turn's edits into one before/after row.
     When that turn commits halfway through, its before-blob predates HEAD even
-    though the after-blob is the captured working tree. Only first-parent,
-    path-changing, AUTHOR-attributed commits made after the row began can bridge
-    that gap. Git timestamps and trailers are cooperative attribution, not a
-    security boundary against an operator who can forge local commits.
+    though the after-blob is the captured working tree. Exactly one first-parent,
+    path-changing, AUTHOR-attributed commit made after the row began can bridge
+    that gap. A second path change could be an unrecorded later commit followed
+    by an unrecorded rollback to the old row's after-bytes, so it must refuse.
+    Git timestamps and trailers are cooperative attribution, not a security
+    boundary against an operator who can forge local commits.
     """
     if before is _UNKNOWN or (before is not None and
                              (not isinstance(before, str) or not re.fullmatch(r"[0-9a-f]{64}", before))):
@@ -322,9 +326,10 @@ def committed_checkpoint(git: Git, head_rev: str, path: str, before: object,
                 or len(trailer_lines) != 1 or trailer_lines[0] not in alternatives
                 or parts[-1] != trailer_lines[0]):
             return False
-        if parent_sha == before:  # nearest matching first-parent ancestor
-            return True
-        current = parent_sha
+        # Only one path-changing commit may bridge a collapsed edit row. A
+        # second commit could postdate that turn and be followed by a rollback
+        # to its old after-bytes with no newly recorded edit.
+        return parent_sha == before
     return False
 
 
