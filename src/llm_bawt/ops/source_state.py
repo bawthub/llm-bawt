@@ -379,6 +379,16 @@ class _Steps:
         others = [] if not paths else _records(self.git("ls-files", "-z", "--others", "--directory",
                                                         "--no-empty-directory", "--", *paths, fresh=True))
         cache = [p for p in others if PYCACHE_DIR in p.split("/")]
+        # --directory collapses a retired package to e.g. src/oldpkg/, hiding
+        # whether it holds only ignored __pycache__ files or real stray source.
+        collapsed = [p for p in others if p.endswith("/") and p not in cache]
+        for i in range(0, len(collapsed), HASH_CHUNK):
+            chunk = collapsed[i:i + HASH_CHUNK]
+            expanded = _records(self.git("ls-files", "-z", "--others", "--", *chunk, fresh=True))
+            for directory in chunk:
+                members = [p for p in expanded if p.startswith(directory)]
+                if members and all(PYCACHE_DIR in p.split("/") for p in members):
+                    cache.append(directory)
         stray = [p for p in others if p not in cache]
         if stray:
             raise SourceStateError("source_untracked", stray)

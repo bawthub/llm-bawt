@@ -287,6 +287,53 @@ def test_bytecode_tolerance_never_covers_other_untracked_files(repo, tmp_path):
     assert refused(repo, tmp_path, bytecode_ok=True).code == "source_untracked"
 
 
+def _retire_package_with_cache(repo, name="oldpkg"):
+    package = repo / "src" / name
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    commit(repo, "add package")
+    cache = package / "__pycache__"
+    cache.mkdir()
+    (cache / "__init__.cpython-test.pyc").write_bytes(b"leftover")
+    (package / "__init__.py").unlink()
+    commit(repo, "retire package")
+    assert f"src/{name}/" in git(
+        repo, "ls-files", "--others", "--directory", "--no-empty-directory", "--", "src"
+    ).splitlines()
+    return package
+
+
+def test_retired_package_cache_is_bytecode_not_stray_source(repo, tmp_path):
+    _retire_package_with_cache(repo)
+    caught = refused(repo, tmp_path)
+    assert caught.code == "source_bytecode_unsafe" and caught.names == ["src/oldpkg/"]
+    assert check(repo, tmp_path, bytecode_ok=True)[0] == git(repo, "rev-parse", "HEAD").strip()
+
+
+def test_retired_package_with_ignored_stray_file_still_refuses(repo, tmp_path):
+    (repo / ".gitignore").write_text("storage/\n__pycache__/\n*.pth\n*.egg-info/\n")
+    commit(repo, "ignore pth")
+    package = _retire_package_with_cache(repo)
+    (package / "evil.pth").write_text("import os\n")
+    caught = refused(repo, tmp_path, bytecode_ok=True)
+    assert caught.code == "source_untracked" and caught.names == ["src/oldpkg/"]
+
+
+def test_each_retired_directory_is_classified_independently(repo, tmp_path):
+    _retire_package_with_cache(repo, "old")
+    package = _retire_package_with_cache(repo, "oldpkg")
+    nested = package / "sub"
+    nested.mkdir()
+    (nested / "evil.py").write_text("import os\n")
+    caught = refused(repo, tmp_path, bytecode_ok=True)
+    assert caught.code == "source_untracked" and caught.names == ["src/oldpkg/"]
+
+
+def test_retired_directory_with_glob_characters_is_matched_literally(repo, tmp_path):
+    _retire_package_with_cache(repo, "old[abc]")
+    assert check(repo, tmp_path, bytecode_ok=True)[0] == git(repo, "rev-parse", "HEAD").strip()
+
+
 # ── tree entries ────────────────────────────────────────────────────────────
 
 def test_a_tracked_symlink_into_a_data_mount_refuses(repo, tmp_path):
