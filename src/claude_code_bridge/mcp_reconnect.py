@@ -97,6 +97,7 @@ class McpReconnectMonitor:
                         timeout=_CONTROL_TIMEOUT_SECONDS,
                     )
                     logger.info("MCP server reconnect accepted: %s", name)
+                    self._pending_checks.pop(name, None)
                     self._retry_at.pop(name, None)
                     self._retry_delay.pop(name, None)
                     self._warned.discard(name)

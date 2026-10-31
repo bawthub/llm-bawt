@@ -95,6 +95,23 @@ def test_pending_catalog_without_tools_reconnects_after_two_checks():
     assert client.reconnects == ["bawthub"]
 
 
+def test_accepted_reconnect_gives_pending_catalog_another_grace_poll():
+    client = _Client([{"bawthub": "pending"}])
+
+    async def main():
+        live = ClaudeActiveRun(client=client, request_id="req")
+        messages = live.messages()
+        await anext(messages)
+        await client.reconnected.wait()
+        await asyncio.sleep(16)  # virtual clock: next 15s status check
+        live.mark_completed()
+        await messages.aclose()
+
+    virtual_run(main())
+    assert client.status_calls >= 3
+    assert client.reconnects == ["bawthub"]
+
+
 def test_transient_pending_catalog_is_not_reconnected():
     client = _Client([{"bawthub": "pending"}, {"bawthub": "connected"}])
 
