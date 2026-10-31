@@ -26,6 +26,7 @@ from sqlalchemy import event, text
 from llm_bawt.memory.model_catalog_migration import migrate_model_catalog
 from llm_bawt.runtime_settings import BotProfileStore, RuntimeSettingsStore
 from llm_bawt.prompt_registry import PromptTemplateStore
+from llm_bawt.profiles import ProfileManager
 from llm_bawt.service.schemas_bots import BotCreateRequest, BotProfileUpsertRequest
 from llm_bawt.service import profile_route_gate
 from llm_bawt.service.routes import bot_profile_validation, settings
@@ -540,6 +541,42 @@ def test_create_refuses_reusing_profileless_tag_or_settings_identity(rig):
         assert conn.execute(text("SELECT value_json FROM runtime_settings "
                                  "WHERE scope_type='bot' AND scope_id=:b"),
                             {"b": second}).scalar_one() == '"none"'
+
+
+@pytest.mark.parametrize("table,insert", [
+    ("prompt_templates", "INSERT INTO prompt_templates "
+     "(key,scope_type,scope_id,format,body,created_at,updated_at) "
+     "VALUES ('fixture','bot',:b,'plain_text','Retained',now(),now())"),
+    ("prompt_template_versions", "INSERT INTO prompt_template_versions "
+     "(key,scope_type,scope_id,version,body,created_at) "
+     "VALUES ('fixture','bot',:b,1,'Retained',now())"),
+    ("entity_profiles", "INSERT INTO entity_profiles "
+     "(entity_type,entity_id,created_at,updated_at) VALUES ('BOT',:b,now(),now())"),
+    ("entity_profile_attributes", "INSERT INTO entity_profile_attributes "
+     "(entity_type,entity_id,category,key,value,confidence,created_at,updated_at) "
+     "VALUES ('BOT',:b,'fact','fixture','\"Retained\"'::json,1,now(),now())"),
+])
+@pytest.mark.parametrize("use_alias", [False, True])
+def test_create_refuses_retained_prompt_and_entity_identity(rig, table, insert, use_alias):
+    assert PromptTemplateStore(rig.config).engine is not None
+    assert ProfileManager(rig.config).engine is not None
+    slug = rig.new_slug()
+    # Check both exact orphan reuse and a distinct slug sharing its partition identity.
+    alias = slug.replace("-", "") if use_alias else slug
+    if use_alias:
+        rig.bots.append(alias)  # fixture must clean up a buggy create before the guard is fixed
+    with rig.engine.begin() as conn:
+        conn.execute(text(insert), {"b": slug})
+    try:
+        with pytest.raises(HTTPException) as refused:
+            _create(rig, alias)
+        assert refused.value.status_code == 409
+        assert rig.store.get(alias) is None
+    finally:
+        with rig.engine.begin() as conn:
+            qualifier = "scope_type='bot'" if table.startswith("prompt_") else "entity_type::text='BOT'"
+            column = "scope_id" if table.startswith("prompt_") else "entity_id"
+            conn.execute(text(f"DELETE FROM {table} WHERE {qualifier} AND {column}=:b"), {"b": slug})
 
 
 def test_create_persona_selection_is_validated_before_commit(rig):

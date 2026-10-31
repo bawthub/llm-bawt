@@ -43,6 +43,10 @@ class BotCreateTransaction:
             ("bot_profile_tags", "bot_slug", None),
             ("bot_profile_changes", "bot_slug", None),
             ("runtime_settings", "scope_id", "scope_type='bot'"),
+            ("prompt_templates", "scope_id", "scope_type='bot'"),
+            ("prompt_template_versions", "scope_id", "scope_type='bot'"),
+            ("entity_profiles", "entity_id", "entity_type::text IN ('BOT','bot')"),
+            ("entity_profile_attributes", "entity_id", "entity_type::text IN ('BOT','bot')"),
         )
         for table, column, qualifier in identities:
             if table not in tables:
