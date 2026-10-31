@@ -4,6 +4,7 @@ import json
 import logging
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from fastapi import APIRouter, HTTPException, Query
@@ -824,12 +825,22 @@ async def delete_bot_profile(
 
 @router.post("/v1/bots/{slug}/purge-data", tags=["System"])
 def purge_bot_data_endpoint(slug: str):
-    """Purge all data for a bot (messages, memories, settings, etc.) without deleting the profile."""
+    """Purge bot-owned conversation/configuration data without deleting its profile."""
     service = get_service()
     normalized_slug = slug.strip().lower()
     if not normalized_slug:
         raise HTTPException(status_code=400, detail="Invalid slug")
-    result = purge_bot_data(service.config, normalized_slug)
+    try:
+        result = purge_bot_data(service.config, normalized_slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"{exc}. Nothing was deleted.") from exc
+    except IntegrityError as exc:
+        # The purge connection rolls its transaction back before propagating.
+        # Do not leak SQL parameters or imply that a partial purge committed.
+        raise HTTPException(
+            status_code=409,
+            detail="Purge blocked by dependent records. Nothing was deleted.",
+        ) from exc
     if "error" in result:
         raise HTTPException(status_code=503, detail=result["error"])
     return result

@@ -480,11 +480,13 @@ class BotProfileStore:
 
 
 def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
-    """Delete all data for a bot from the database.
+    """Purge exact-bot conversation/configuration data, with or without a profile.
 
-    Drops the per-bot dynamic tables (_messages, _memories, _forgotten_messages)
-    and removes rows from every shared table that references this bot.
-    Does NOT delete the bot_profiles row — call BotProfileStore.delete() for that.
+    Delete partition rows, sessions, bot-typed entity data and bot-owned jobs.
+    Preserve bot_profiles itself, cross-bot delivery receipts, completed session
+    outbox history, profile-change audit and runs owned by shared/other jobs.
+    A retained job-run status is historical metadata, not proof of cancellation.
+    Shared content-addressed blobs are not exclusively owned by this bot.
     """
     import re as _re
 
@@ -528,6 +530,16 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
                 )
                 result["deleted_rows"][parent] = r.rowcount
 
+            # Messages have a non-cascading session FK. Never delete another
+            # bot's messages to force removal: a foreign reference must roll
+            # back the whole purge. Profile pointers use ON DELETE SET NULL.
+            if "sessions" in prompt_purge.tables:
+                r = conn.execute(
+                    _text("DELETE FROM sessions WHERE bot_id=:s"),
+                    {"s": normalized},
+                )
+                result["deleted_rows"]["sessions"] = r.rowcount
+
             # 2. runtime_settings
             r = conn.execute(
                 _text("DELETE FROM runtime_settings WHERE scope_type='bot' AND scope_id=:s"),
@@ -537,14 +549,14 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
 
             # 3. entity_profile_attributes (before entity_profiles — no FK cascade)
             r = conn.execute(
-                _text("DELETE FROM entity_profile_attributes WHERE entity_type::text='bot' AND entity_id=:s"),
+                _text("DELETE FROM entity_profile_attributes WHERE entity_type::text IN ('BOT','bot') AND entity_id=:s"),
                 {"s": normalized},
             )
             result["deleted_rows"]["entity_profile_attributes"] = r.rowcount
 
             # 4. entity_profiles
             r = conn.execute(
-                _text("DELETE FROM entity_profiles WHERE entity_type::text='bot' AND entity_id=:s"),
+                _text("DELETE FROM entity_profiles WHERE entity_type::text IN ('BOT','bot') AND entity_id=:s"),
                 {"s": normalized},
             )
             result["deleted_rows"]["entity_profiles"] = r.rowcount
@@ -565,6 +577,15 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
                 {"s": normalized},
             )
             result["deleted_rows"]["prompt_templates"] = r.rowcount
+
+            # Legacy overflow payloads have no FK/cascade. Select ownership
+            # through the records before deleting them; shared blobs stay put.
+            if "tool_call_result_payloads" in prompt_purge.tables:
+                r = conn.execute(_text(
+                    "DELETE FROM tool_call_result_payloads WHERE tool_call_record_id IN "
+                    "(SELECT id FROM tool_call_records WHERE bot_id=:s)"
+                ), {"s": normalized})
+                result["deleted_rows"]["tool_call_result_payloads"] = r.rowcount
 
             # 9. tool_call_records
             r = conn.execute(
