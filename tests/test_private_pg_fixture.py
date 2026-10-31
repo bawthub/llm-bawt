@@ -12,6 +12,8 @@ from tests import private_postgres as pg
 
 
 def test_docker_launch_failure_removes_fixture_socket(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPS_GATE_SANDBOX", raising=False)
+    monkeypatch.delenv("OPS_GATE_PG_BINDING", raising=False)
     monkeypatch.setattr(pg.shutil, "which", lambda name: "/usr/bin/docker")
     commands = []
 
@@ -32,6 +34,8 @@ def test_docker_launch_failure_removes_fixture_socket(monkeypatch, tmp_path):
 
 
 def test_interrupted_launch_stops_only_matching_owned_container(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPS_GATE_SANDBOX", raising=False)
+    monkeypatch.delenv("OPS_GATE_PG_BINDING", raising=False)
     monkeypatch.setattr(pg.shutil, "which", lambda name: "/usr/bin/docker")
     commands = []
     token = None
