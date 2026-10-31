@@ -196,6 +196,28 @@ def test_message_without_attachments_still_carries_empty_list(app_factory):
     assert data["messages"][0]["attachments"] == []
 
 
+def test_system_authored_user_role_keeps_history_visible_and_provenance(app_factory):
+    system = _msg("m1", content="continuation notice", ts=1.0)
+    system["author"] = {
+        "entity_type": "system", "entity_id": "approval-continuation:mcp",
+        "status": "canonical", "display_name": "System", "color": "slate",
+    }
+    human = _msg("m2", content="hello", ts=2.0)
+    client, _, _ = app_factory([system, human])
+
+    response = client.get("/v1/history")
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["messages"]] == ["m1", "m2"]
+    assert response.json()["messages"][0]["role"] == "user"
+    assert response.json()["messages"][0]["author"] == system["author"] | {
+        "avatar": None, "avatar_render": None,
+    }
+
+    search = client.post("/v1/history/search?query=continuation")
+    assert search.status_code == 200, search.text
+    assert search.json()["messages"][0]["author"]["entity_type"] == "system"
+
+
 def test_history_returns_persisted_interrupt_anchor(app_factory):
     msgs = [
         _msg("source-1", content="start", ts=1.0),

@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 class MessageAuthor(BaseModel):
     """Canonical message author, independent from protocol role."""
 
-    entity_type: Literal["user", "bot"] | None = None
+    # Trusted continuation notices persist as system authors even when their protocol role is user.
+    entity_type: Literal["user", "bot", "system"] | None = None
     entity_id: str | None = None
     status: Literal["canonical", "legacy", "unknown"] = "canonical"
     display_name: str = "Unknown participant"
