@@ -11,7 +11,13 @@ current in-memory policy again; approval is not a private-data grant.
 immutable process-local snapshot; **neither authorization stage reads policy
 from the database or fills a cold cache** (TASK-1907). App and MCP lifespans own
 one background refresher per process/engine, including approved execution,
-HTTP and stdio. The background read uses `bot_tags.TagSnapshot` (TASK-1329:
+HTTP and stdio. A standalone embedded `MemoryClient(server_url=None)` acquires
+and warms the same lifecycle at construction, before any operations; use it as
+a context manager or call `close()` to release its reference (a GC finalizer
+also releases it). The last owner stops the worker and invalidates its view;
+closing one client does not dispose shared storage/pools or stop other owners.
+No cross-bot request starts a worker or performs a lazy policy read.
+The background read uses `bot_tags.TagSnapshot` (TASK-1329:
 every profile with its tags and catalog in one read-only statement).
 
 Nick selected **bounded revocation delay**, not immediate global revocation:

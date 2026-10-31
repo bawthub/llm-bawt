@@ -11,6 +11,7 @@ while maintaining the same API surface.
 from __future__ import annotations
 
 import logging
+import weakref
 from typing import Any, TYPE_CHECKING
 
 from llm_bawt.utils.config import Config
@@ -81,7 +82,35 @@ class MemoryClient(
         self.server_url = server_url
         self._storage: MemoryStorage | None = None
         self._initialized = False
-        
+        self._policy_finalizer = None
+        if not self.server_url:
+            # Standalone embedded clients have no FastAPI/FastMCP lifespan.
+            # Acquire/warm at construction, never on a cross-bot cache miss or
+            # inside a message-write method. References share one process owner.
+            from llm_bawt.bot_access.refresh import policy_refresh_lifecycle
+            from llm_bawt.utils.db import get_shared_engine
+
+            engine = get_shared_engine(config)
+            if engine is not None:
+                context = policy_refresh_lifecycle(engine)
+                owner = context.__enter__()
+                self._policy_finalizer = weakref.finalize(
+                    self, context.__exit__, None, None, None)
+                if owner is not None:
+                    owner.ready.wait(3)
+
+    def close(self) -> None:
+        """Release this client's policy owner, not the shared storage/DB pool."""
+        finalizer = self._policy_finalizer
+        if finalizer is not None and finalizer.alive:
+            finalizer()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
     def _ensure_initialized(self) -> None:
         """Lazy initialization of storage layer."""
         if self._initialized:

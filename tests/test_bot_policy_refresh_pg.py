@@ -202,6 +202,51 @@ def test_cross_process_privacy_revocation_and_raw_sql_reconciliation(world):
     assert process.exitcode == 0
 
 
+def test_standalone_embedded_client_real_resolver_owns_initialization_and_teardown(world, monkeypatch):
+    from sqlalchemy import event
+    from unittest.mock import AsyncMock
+    from llm_bawt.bot_access.snapshot import policy_snapshot
+    from llm_bawt.mcp_server import storage as storage_module
+    from llm_bawt.mcp_server.client import MemoryClient
+
+    monkeypatch.setattr(db, "get_shared_engine", lambda *_a, **_k: world.engine)
+    monkeypatch.setattr(storage_module, "get_shared_engine", lambda *_a, **_k: world.engine)
+    storage = storage_module.MemoryStorage(SimpleNamespace())
+    storage.list_memory_sources = AsyncMock(return_value=[])
+    storage.search_memories = AsyncMock(return_value=[])
+    monkeypatch.setattr(storage_module, "get_storage", lambda: storage)
+    # No FastAPI/FastMCP lifespan and NO resolver/snapshot mocking or external
+    # cache installation: construction itself owns the real background worker.
+    first = MemoryClient(SimpleNamespace(), bot_id="fixture_owner", user_id="fixture_user")
+    second = MemoryClient(SimpleNamespace(), bot_id="fixture_owner", user_id="fixture_user")
+    snapshot = policy_snapshot(world.engine)
+    request_reads = []
+    caller_thread = threading.get_ident()
+
+    def query(_conn, _cursor, sql, *_args):
+        if threading.get_ident() == caller_thread:
+            request_reads.append(sql)
+
+    event.listen(world.engine, "before_cursor_execute", query)
+    try:
+        assert snapshot.diagnostics()["state"] == "ready"
+        assert first.list_memory_sources() == []
+        assert first.search_memory_source("fixture_peer", "fixture query") == []
+        first.close()
+        first.close()  # idempotent; second client still owns the shared worker
+        assert snapshot.diagnostics()["state"] == "ready"
+        assert second.list_memory_sources() == []
+        assert request_reads == []
+    finally:
+        first.close()
+        second.close()
+        event.remove(world.engine, "before_cursor_execute", query)
+    assert snapshot.diagnostics()["state"] == "snapshot_stopped"
+    with MemoryClient(SimpleNamespace(), bot_id="fixture_owner", user_id="fixture_user") as restarted:
+        assert restarted.list_memory_sources() == []
+    assert snapshot.diagnostics()["state"] == "snapshot_stopped"
+
+
 def test_lifecycle_reference_count_and_startup_recovery(world):
     with policy_refresh_lifecycle(world.engine) as first:
         assert first.ready.wait(10)
