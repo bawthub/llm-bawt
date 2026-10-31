@@ -421,18 +421,9 @@ async def extract_facts(
     store: bool = True,
     use_llm: bool = True,
 ) -> list[dict]:
-    """Extract facts from conversation messages (LLM-based).
-
-    Args:
-        messages: Message dicts with role/content and unique IDs on human turns;
-                  missing/ambiguous human IDs raise ValueError before extraction.
-        bot_id: Bot namespace (required).
-        user_id: User ID for profile attribute extraction (required).
-        store: Whether to persist extracted facts.
-        use_llm: Whether to use LLM extraction (falls back to heuristics if False).
-
-    Returns:
-        List of extracted memory dicts.
+    """Extract facts from messages. Human turns need role/content/unique id;
+    missing or duplicate IDs raise ValueError. bot_id and user_id are required.
+    store=True persists; use_llm=False uses heuristics.
     """
     if not bot_id:
         raise ValueError("bot_id is required for extract_facts")
@@ -480,18 +471,10 @@ async def update_memory(
     importance: float | None = None,
     source_message_ids: list[str] | None = None,
 ) -> dict | None:
-    """Update an existing memory.
+    """Patch a memory; omitted fields remain unchanged. Missing IDs return None.
 
     Args:
-        memory_id: ID of memory to update.
-        content: New content (optional).
-        tags: New tags (optional).
-        importance: New importance score (optional).
-        source_message_ids: New human-message provenance (optional; None retains old sources).
-        bot_id: Bot namespace.
-
-    Returns:
-        Updated memory dict, or None if not found.
+        source_message_ids: Replacement human-message IDs; None retains prior sources.
     """
     logger.debug("MCP tool invoked: tools/update_memory bot_id=%s memory_id=%s", bot_id, memory_id)
     storage = _get_storage()
