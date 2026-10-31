@@ -56,6 +56,9 @@ from .prompt_default_loaders import (
     load_injected_skills_entry,
     load_injected_skills_preamble,
     load_media_prompt_expansion_video,
+    load_refine_default_instruction,
+    load_refine_system_guard,
+    load_refine_user_frame,
     load_memory_extraction_fact,
     load_memory_extraction_fact_sourced,
     load_memory_extraction_fact_system,
@@ -920,5 +923,25 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "the clip seconds, {aspect_ratio} e.g. 16:9."
             ),
         },
+    ),
+    "refine.system_guard": PromptDefinition(
+        key="refine.system_guard",
+        title="Text Refinement System Guard",
+        category="refine",
+        loader=load_refine_system_guard,
+    ),
+    "refine.default_instruction": PromptDefinition(
+        key="refine.default_instruction",
+        title="Text Refinement Default Instruction",
+        category="refine",
+        loader=load_refine_default_instruction,
+    ),
+    "refine.user_frame": PromptDefinition(
+        key="refine.user_frame",
+        title="Text Refinement User Framing",
+        category="refine",
+        required_vars=("instruction", "text_json"),
+        loader=load_refine_user_frame,
+        metadata={"notes": "Target text is encoded as a JSON string and inserted only after one-pass variable rendering."},
     ),
 }

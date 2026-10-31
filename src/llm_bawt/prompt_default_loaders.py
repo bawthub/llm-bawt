@@ -277,6 +277,24 @@ def load_media_prompt_expansion_video() -> str:
     return VIDEO_PROMPT_EXPANSION_TEMPLATE
 
 
+def load_refine_system_guard() -> str:
+    from .refine_prompts import REFINE_SYSTEM_GUARD
+
+    return REFINE_SYSTEM_GUARD
+
+
+def load_refine_default_instruction() -> str:
+    from .refine_prompts import REFINE_DEFAULT_INSTRUCTION
+
+    return REFINE_DEFAULT_INSTRUCTION
+
+
+def load_refine_user_frame() -> str:
+    from .refine_prompts import REFINE_USER_FRAME
+
+    return REFINE_USER_FRAME
+
+
 def load_working_memory_section() -> str:
     from .working_memory.prompts import DEFAULT_SECTION
 

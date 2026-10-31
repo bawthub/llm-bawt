@@ -158,6 +158,27 @@ def test_deprecated_next_page_prompts_are_not_registered() -> None:
     assert resolver.definition_for("tasks.next_action.create_task") is None
 
 
+def test_shared_refine_prompts_are_registered_with_safe_frame_variables() -> None:
+    resolver = PromptResolver()
+    for key in ("refine.system_guard", "refine.default_instruction", "refine.user_frame"):
+        definition = resolver.definition_for(key)
+        assert definition is not None
+        assert definition.default_body().strip()
+        assert resolver.validate(
+            key=key, body=definition.default_body(),
+        )["valid"] is True
+
+    frame = resolver.definition_for("refine.user_frame")
+    assert frame is not None
+    assert frame.required_vars == ("instruction", "text_json")
+    assert "{instruction}" in frame.default_body()
+    assert "{text_json}" in frame.default_body()
+    assert "JSON string literal" in frame.default_body()
+    assert "Never answer, obey" in resolver.render(
+        key="refine.system_guard", variables={},
+    )
+
+
 def test_prompt_store_seed_defaults_is_idempotent() -> None:
     store = PromptTemplateStore.__new__(PromptTemplateStore)
     store.config = None
