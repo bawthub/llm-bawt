@@ -50,6 +50,14 @@ def test_shared_checkout_refuses_direct_commit_even_on_canonical(repo: tuple[Pat
     assert git(shared, "rev-parse", "HEAD").stdout.strip() == original
 
 
+def test_missing_canonical_config_refuses_with_diagnostic(repo: tuple[Path, Path]) -> None:
+    shared, _ = repo
+    git(shared, "config", "--unset", "branch.canonical")
+    denied = git(shared, "commit", "--allow-empty", "-m", "TASK-1275 missing config", check=False)
+    assert denied.returncode != 0
+    assert "branch.canonical is not configured" in denied.stderr
+
+
 def test_owner_task_worktree_commits_and_other_owner_is_refused(repo: tuple[Path, Path]) -> None:
     shared, linked = repo
     git(linked, "commit", "--allow-empty", "-qm", "TASK-1275 owner")

@@ -4,7 +4,7 @@
 # alternate commit paths are prohibited by git-commits rules (TASK-1823).
 set -eu
 
-canonical=$(git config --get branch.canonical)
+canonical=$(git config --get branch.canonical || true)
 if [ -z "$canonical" ]; then
     printf '%s\n' '✗ pre-commit: branch.canonical is not configured.' >&2
     exit 1
