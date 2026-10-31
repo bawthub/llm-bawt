@@ -795,43 +795,9 @@ def reload_bots():
     }
 
 
-@router.delete("/v1/bots/{slug}/profile", tags=["System"])
-async def delete_bot_profile(
-    slug: str,
-    purge: bool = Query(False, description="Also purge all bot data (messages, memories, settings, etc.)"),
-):
-    """Delete a bot personality profile. Pass ?purge=true to also wipe all associated data."""
-    service = get_service()
-    store = get_bot_profile_store(service.config)
-    if store.engine is None:
-        raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
-
-    deleted = store.delete(slug)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Bot profile not found")
-
-    normalized_slug = slug.strip().lower()
-    _reload_bot_registry()
-    _reload_service_model_catalog(service)
-    _invalidate_bot_instance_cache(service, normalized_slug)
-    _clear_session_model_overrides(service, bot_id=normalized_slug)
-
-    response: dict = {"success": True, "slug": normalized_slug}
-    if purge:
-        response["purge"] = purge_bot_data(service.config, normalized_slug)
-    await _publish_bot_profile_changed(service, normalized_slug)
-    return response
-
-
-@router.post("/v1/bots/{slug}/purge-data", tags=["System"])
-def purge_bot_data_endpoint(slug: str):
-    """Purge bot-owned conversation/configuration data without deleting its profile."""
-    service = get_service()
-    normalized_slug = slug.strip().lower()
-    if not normalized_slug:
-        raise HTTPException(status_code=400, detail="Invalid slug")
+def _purge_bot_data_or_raise(config, slug: str):
     try:
-        result = purge_bot_data(service.config, normalized_slug)
+        result = purge_bot_data(config, slug)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=f"{exc}. Nothing was deleted.") from exc
     except IntegrityError as exc:
@@ -844,6 +810,51 @@ def purge_bot_data_endpoint(slug: str):
     if "error" in result:
         raise HTTPException(status_code=503, detail=result["error"])
     return result
+
+
+@router.delete("/v1/bots/{slug}/profile", tags=["System"])
+async def delete_bot_profile(
+    slug: str,
+    purge: bool = Query(False, description="Also purge all bot data (messages, memories, settings, etc.)"),
+):
+    """Delete a bot personality profile. Pass ?purge=true to also wipe all associated data."""
+    service = get_service()
+    store = get_bot_profile_store(service.config)
+    if store.engine is None:
+        raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
+
+    normalized_slug = slug.strip().lower()
+    purge_result = None
+    if purge:
+        if store.get(normalized_slug) is None:
+            raise HTTPException(status_code=404, detail="Bot profile not found")
+        # A guard/FK refusal must leave the definition and caches intact too.
+        purge_result = _purge_bot_data_or_raise(service.config, normalized_slug)
+
+    deleted = store.delete(slug)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Bot profile not found")
+
+    _reload_bot_registry()
+    _reload_service_model_catalog(service)
+    _invalidate_bot_instance_cache(service, normalized_slug)
+    _clear_session_model_overrides(service, bot_id=normalized_slug)
+
+    response: dict = {"success": True, "slug": normalized_slug}
+    if purge:
+        response["purge"] = purge_result
+    await _publish_bot_profile_changed(service, normalized_slug)
+    return response
+
+
+@router.post("/v1/bots/{slug}/purge-data", tags=["System"])
+def purge_bot_data_endpoint(slug: str):
+    """Purge bot-owned conversation/configuration data without deleting its profile."""
+    service = get_service()
+    normalized_slug = slug.strip().lower()
+    if not normalized_slug:
+        raise HTTPException(status_code=400, detail="Invalid slug")
+    return _purge_bot_data_or_raise(service.config, normalized_slug)
 
 
 @router.post("/v1/bots/cleanup-orphans", tags=["System"])
