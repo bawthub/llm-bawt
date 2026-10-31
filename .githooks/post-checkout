@@ -1,27 +1,14 @@
 #!/bin/sh
-# Loud warning when HEAD leaves the canonical branch.
-#
-# Git has no native pre-checkout hook, so we can't *block* the switch —
-# but we can make it impossible to miss. Combined with pre-commit, the
-# practical harm (committing on the wrong branch) is contained.
-#
-# Args from git: $1=prev-HEAD, $2=new-HEAD, $3=1 if branch checkout (else file checkout)
+# TASK-1275: warn on branch switches in the shared checkout, not on a
+# legitimate task branch in a linked worktree. Checkout itself cannot block.
+[ "$3" = "1" ] || exit 0
 
-[ "$3" = "1" ] || exit 0   # file-level checkouts: ignore
+git_dir=$(git rev-parse --path-format=absolute --git-dir) || exit 1
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir) || exit 1
+canonical=$(git config --get branch.canonical) || exit 1
+current=$(git symbolic-ref --short -q HEAD || printf 'detached')
 
-canonical=$(git config branch.canonical 2>/dev/null || echo "master")
-current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-
-if [ "$current" != "$canonical" ]; then
-    cat >&2 <<EOF
-
-  ⚠️  WARNING: now on branch '$current' (canonical = '$canonical').
-
-      Live containers see this repo's working tree.
-      Stay here only as long as you need to. Commits here will be
-      blocked by pre-commit unless you bypass with --no-verify.
-
-EOF
+if [ "$git_dir" = "$common_dir" ] && [ "$current" != "$canonical" ]; then
+    printf '\n⚠️  Shared checkout switched to %s (canonical: %s).\n' "$current" "$canonical" >&2
+    printf '%s\n' '    Live services read this tree. Return it to canonical; direct commits are refused.' >&2
 fi
-
-exit 0

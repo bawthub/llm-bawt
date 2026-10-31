@@ -1,35 +1,50 @@
 #!/bin/sh
-# Block commits unless on the repo's canonical branch.
-#
-# Background: this repo's source is bind-mounted into running Docker
-# containers (llm-bawt-app, codex-bridge, claude-code-bridge, etc.).
-# Switching branches mid-flight swaps the source the running services
-# see — and committing on the wrong branch routinely strands work where
-# nobody expects it. This hook is a backstop for both problems.
-#
-# The canonical branch is read from `git config branch.canonical`
-# (default: master). To unblock a one-off commit on a non-canonical
-# branch, pass `--no-verify`. To change the canonical branch:
-#     git config branch.canonical <new-branch>
+# TASK-1275: direct commits belong in the owner's task worktree, not the
+# canonical checkout that live services read. This is a cooperative backstop;
+# alternate commit paths are prohibited by git-commits rules (TASK-1823).
+set -eu
 
-canonical=$(git config branch.canonical 2>/dev/null || echo "master")
-current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-
-if [ -z "$current" ] || [ "$current" = "HEAD" ]; then
-    echo "✗ pre-commit: detached HEAD — refusing to commit." >&2
-    echo "  Switch to '$canonical' first: git switch $canonical" >&2
+canonical=$(git config --get branch.canonical)
+if [ -z "$canonical" ]; then
+    printf '%s\n' '✗ pre-commit: branch.canonical is not configured.' >&2
     exit 1
 fi
 
-if [ "$current" != "$canonical" ]; then
-    echo "✗ pre-commit: blocked." >&2
-    echo "  current branch:    $current" >&2
-    echo "  canonical branch:  $canonical" >&2
-    echo "" >&2
-    echo "  This repo is bind-mounted into live containers. Commits stay" >&2
-    echo "  on '$canonical'. To bypass once: git commit --no-verify ..." >&2
-    echo "  To change the rule:               git config branch.canonical <name>" >&2
+git_dir=$(git rev-parse --path-format=absolute --git-dir)
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+if [ "$git_dir" = "$common_dir" ]; then
+    printf '%s\n' '✗ pre-commit: direct git commit in the shared canonical checkout is refused.' >&2
+    printf '%s\n' '  Start your task with bawt-wt and commit in its worktree instead.' >&2
     exit 1
 fi
 
-exit 0
+repo=$(basename "$(dirname "$common_dir")")
+worktree=$(basename "$(git rev-parse --show-toplevel)")
+prefix=".wt-$repo-"
+case "$worktree" in
+    "$prefix"*) owner=${worktree#"$prefix"} ;;
+    *) owner= ;;
+esac
+case "$owner" in
+    ''|*[!a-z0-9-]*|-*|*-) owner= ;;
+esac
+
+branch=$(git symbolic-ref --short -q HEAD || true)
+if [ -z "$branch" ]; then
+    # Git temporarily detaches HEAD while replaying a task branch. A user
+    # resolving a rebase conflict may legitimately run git commit there.
+    for state in rebase-merge rebase-apply; do
+        if [ -f "$git_dir/$state/head-name" ]; then
+            IFS= read -r ref < "$git_dir/$state/head-name" || true
+            case "$ref" in refs/heads/*) branch=${ref#refs/heads/} ;; esac
+            break
+        fi
+    done
+fi
+
+if [ -z "$owner" ] || [ "$branch" = "$canonical" ] ||
+   ! printf '%s\n' "$branch" | grep -Eq "^${owner}/TASK-[1-9][0-9]*-[a-z0-9]+(-[a-z0-9]+)*$"; then
+    printf '%s\n' '✗ pre-commit: commit only on your own task branch in .wt-<repo>-<bot>.' >&2
+    printf '  worktree: %s  owner: %s  branch: %s\n' "$worktree" "${owner:-unknown}" "${branch:-detached}" >&2
+    exit 1
+fi
