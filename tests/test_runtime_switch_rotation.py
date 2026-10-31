@@ -156,7 +156,8 @@ def test_runtime_switch_pointer_and_all_rotations_rollback_together(engine, monk
 
 
 def _persist(monkeypatch, previous, profile, *, rotate=None):
-    store = SimpleNamespace(engine=object(), get=lambda _slug: previous, upsert=lambda _p, *, guard: profile)
+    store = SimpleNamespace(engine=object(), get=lambda _slug: previous,
+                            upsert=lambda _p, *, guard, require_existing=False: profile)
     subscriber = SimpleNamespace(
         publish_global_config_event=AsyncMock(return_value="1-0"),
         publish_tool_event=AsyncMock(return_value="2-0"),
