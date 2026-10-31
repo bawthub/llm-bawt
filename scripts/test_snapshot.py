@@ -11,8 +11,9 @@ removes the worktree on every exit path, including failure and interrupt.
 
 PATHS builds the patch from this checkout's working tree (BASE must be HEAD) and
 refuses a path unless its uncommitted bytes provably belong to AUTHOR: they must
-chain back to HEAD through only AUTHOR's recorded edits. Each file is read once;
-ownership is proved on those bytes and the patch is built from exactly them.
+chain back to HEAD through only AUTHOR's recorded edits, or through a verified
+intermediate AUTHOR commit on that path. Each file is read once; ownership is
+proved on those bytes and the patch is built from exactly them.
 
 Run it on the test host (echo), never inside a bridge container. It reads the
 canonical repository only: its working tree, index, HEAD, branches and stash
@@ -176,6 +177,16 @@ class Receipt:
 _UNKNOWN = object()
 
 
+def committed_blob_sha(git: Git, rev: str, path: str) -> object:
+    """Return a byte hash, None for an absent path, or UNKNOWN on Git errors."""
+    result = git.run("cat-file", "blob", f"{rev}:{path}", check=False)
+    if result.returncode == 0:
+        return sha256(result.stdout)
+    listed = git.run("ls-tree", "-z", "--full-tree", rev, "--", f":(literal){path}",
+                     check=False)
+    return None if listed.returncode == 0 and not listed.stdout else _UNKNOWN
+
+
 @dataclass(frozen=True)
 class EditRow:
     """One turn's recorded before/after bytes for one file (turn_changed_files)."""
@@ -217,9 +228,12 @@ class OwnershipCheck:
 
     Byte chain: starting from the working-tree bytes, each step must be an AUTHOR
     edit whose recorded ``after`` equals the current bytes; its ``before`` becomes
-    the next target, until HEAD's bytes are reached. No other bot may have touched
-    the path since the first step. Every link is an exact sha256 match, so the
-    proof covers every byte. Anything else is a refusal; the tool never guesses.
+    the next target, until HEAD's bytes are reached. A single turn can span a
+    commit: its earlier bytes may instead be an ancestor's blob if every
+    intervening change to this path is an AUTHOR commit after the turn began.
+    All later recorded edits must participate in the chain, and a foreign row
+    always refuses. This trusts cooperative bots' commit trailers and recorded
+    edits; an unrecorded edit inside one turn is already outside the proof.
     (Line-level attribution such as commit-recon's is evidence for a human, not
     proof: it can credit AUTHOR with identical text in a different place.)
     """
@@ -228,19 +242,30 @@ class OwnershipCheck:
         self.author = author
         self.rows = rows
 
-    def chain(self, path: str, head_sha: str | None, current_sha: str | None) -> tuple[bool, str]:
+    def chain(self, path: str, head_sha: str | None, current_sha: str | None,
+              git: Git | None = None, head_rev: str = "HEAD") -> tuple[bool, str]:
         rows = [row for row in self.rows if row.path == path]
         mine = sorted((row for row in rows if row.bot_id == self.author),
                       key=lambda row: row.ts, reverse=True)
         target: object = current_sha
         limit = float("inf")
         used: list[EditRow] = []
+        checkpoint = False
         while target != head_sha:
             step = next((row for row in mine if row.ts <= limit and row not in used
                          and row.after_key() == target), None)
             if step is None:
-                where = "the current bytes" if not used else f"the bytes before {self.author}'s edit"
-                return False, f"{where} were not produced by any recorded {self.author} edit"
+                if used and git is not None and target is not _UNKNOWN:
+                    start = min(row.ts for row in used)
+                    # A stale earlier turn's after-bytes may equal today's
+                    # working tree. Do not let that row jump over a newer edit.
+                    if all(row in used for row in rows if row.ts >= start):
+                        checkpoint = committed_checkpoint(git, head_rev, path, target,
+                                                          head_sha, self.author, start)
+                if not checkpoint:
+                    where = "the current bytes" if not used else f"the bytes before {self.author}'s edit"
+                    return False, f"{where} were not produced by any recorded {self.author} edit"
+                break
             used.append(step)
             target, limit = step.before_key(), step.ts
             if len(used) > 200:
@@ -251,7 +276,56 @@ class OwnershipCheck:
         others = sorted({row.bot_id for row in rows if row.bot_id != self.author and row.ts >= start})
         if others:
             return False, f"also edited by {', '.join(others)} during {self.author}'s edits"
-        return True, f"byte chain: {len(used)} recorded {self.author} edit(s) from HEAD"
+        suffix = " via committed checkpoint" if checkpoint else ""
+        return True, f"byte chain: {len(used)} recorded {self.author} edit(s) from HEAD{suffix}"
+
+
+def committed_checkpoint(git: Git, head_rev: str, path: str, before: object,
+                         head_sha: str | None, author: str, started: float) -> bool:
+    """Prove the gap between an exact recorded before-blob and committed HEAD.
+
+    ``turn_changed_files`` collapses a turn's edits into one before/after row.
+    When that turn commits halfway through, its before-blob predates HEAD even
+    though the after-blob is the captured working tree. Only first-parent,
+    path-changing, AUTHOR-attributed commits made after the row began can bridge
+    that gap. Git timestamps and trailers are cooperative attribution, not a
+    security boundary against an operator who can forge local commits.
+    """
+    if before is _UNKNOWN or (before is not None and
+                             (not isinstance(before, str) or not re.fullmatch(r"[0-9a-f]{64}", before))):
+        return False
+    if head_sha is not None and not re.fullmatch(r"[0-9a-f]{64}", head_sha):
+        return False
+    history = git.run("log", "--first-parent", "--full-history", "--format=%H", "-n", "201",
+                      head_rev, "--", f":(literal){path}", check=False)
+    if history.returncode:
+        return False
+    expected = f"Co-Authored-By: {author} (claude-code) <{author}@bots.bawt.local>"
+    alternatives = {expected, expected.replace("(claude-code)", "(codex)")}
+    current = head_sha
+    for commit in history.stdout.decode(errors="replace").splitlines()[:200]:
+        metadata = git.run("show", "-s", "--format=%P%n%ct%n%B", commit, check=False)
+        if metadata.returncode:
+            return False
+        parts = metadata.stdout.decode(errors="replace").rstrip("\n").splitlines()
+        if len(parts) < 3 or len(parts[0].split()) != 1:
+            return False  # root or path-touching merge; no ambiguous parent
+        parent = parts[0].strip()
+        child_sha = committed_blob_sha(git, commit, path)
+        parent_sha = committed_blob_sha(git, parent, path)
+        if child_sha is _UNKNOWN or parent_sha is _UNKNOWN or child_sha != current:
+            return False  # unreadable blob or history skipped a path change
+        if child_sha == parent_sha:
+            continue
+        trailer_lines = [line for line in parts[2:] if line.lower().startswith("co-authored-by:")]
+        if (not parts[1].isdigit() or int(parts[1]) < started - 5
+                or len(trailer_lines) != 1 or trailer_lines[0] not in alternatives
+                or parts[-1] != trailer_lines[0]):
+            return False
+        if parent_sha == before:  # nearest matching first-parent ancestor
+            return True
+        current = parent_sha
+    return False
 
 
 def find_tool(name: str, override: str | None) -> str | None:
@@ -653,7 +727,7 @@ def check_args(args: argparse.Namespace) -> None:
 
 
 def check_ownership(args: argparse.Namespace, git: Git,
-                    captured: dict[str, Captured]) -> dict[str, str]:
+                    captured: dict[str, Captured], head_rev: str) -> dict[str, str]:
     if args.provenance_file:
         payload = json.loads(args.provenance_file.read_text())
         rows = rows_from_csv(payload["rows"], args.repo.name) if "rows" in payload else None
@@ -665,8 +739,10 @@ def check_ownership(args: argparse.Namespace, git: Git,
     verdicts: dict[str, str] = {}
     refused = []
     for path, item in sorted(captured.items()):
-        head = git.blob("HEAD", path)
-        ok, why = check.chain(path, sha256(head) if head is not None else None, item.sha)
+        head_sha = committed_blob_sha(git, head_rev, path)
+        if head_sha is _UNKNOWN:
+            raise Refused(f"PATHS cannot read committed bytes at {head_rev}:{path}")
+        ok, why = check.chain(path, head_sha, item.sha, git=git, head_rev=head_rev)
         verdicts[path] = why
         if not ok:
             refused.append(f"  {path}: {why}")
@@ -698,7 +774,7 @@ def execute(args: argparse.Namespace, receipt: Receipt, run_dir: Path) -> int:
             raise Refused("PATHS diffs this checkout's working tree, so BASE must be its HEAD")
         receipt.paths = validate_paths(git, args.path)
         captured = capture_paths(repo, receipt.paths)
-        receipt.ownership = check_ownership(args, git, captured)
+        receipt.ownership = check_ownership(args, git, captured, receipt.base)
         generated = run_dir / "paths.patch"
         build_paths_patch(git, receipt.base, captured, generated)
         sources = [generated]

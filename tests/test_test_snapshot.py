@@ -249,6 +249,155 @@ def test_paths_carries_untracked_and_deleted_files_into_the_snapshot(repo, root,
     assert set(receipt["ownership"]) == {"app.py", "new.py", "old.py"}
 
 
+def owned_commit(repo: Path, bot: str, message: str, path: str = "app.py") -> None:
+    git(repo, "add", path)
+    git(repo, "commit", "-q", "-m", message, "-m",
+        f"Co-Authored-By: {bot} (claude-code) <{bot}@bots.bawt.local>")
+
+
+@REAL_GIT
+def test_paths_accepts_an_own_commit_between_edits_in_one_turn(repo, root, tmp_path):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    owned_commit(repo, "snark", "intermediate committed bytes")
+    (repo / "app.py").write_text("a = 1\nx = 2\nz = 2\n")
+    current = (repo / "app.py").read_bytes()
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({
+        "rows": f"snark,app.py,modified,{sha(initial)},{sha(current)},f,{started}\n",
+    }))
+    suite = check("import pathlib,sys; sys.exit(0 if 'z = 2' in pathlib.Path('app.py').read_text() else 3)")
+
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance), suite=suite)
+
+    assert (code, receipt["status"], receipt["suite_exit"]) == (0, "passed", 0), receipt
+    assert "committed checkpoint" in receipt["ownership"]["app.py"]
+    assert receipt["files"] == ["M\tapp.py"]
+    assert_no_snapshot_left(repo, root)
+
+
+@REAL_GIT
+def test_paths_accepts_a_new_file_committed_mid_turn(repo, root, tmp_path):
+    started = time.time()
+    (repo / "new.py").write_text("stage = 1\n")
+    owned_commit(repo, "snark", "introduce new file", "new.py")
+    (repo / "new.py").write_text("stage = 2\n")
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({
+        "rows": f"snark,new.py,added,,{sha((repo / 'new.py').read_bytes())},f,{started}\n",
+    }))
+
+    code, receipt = run_cli(repo, root, "--path", "new.py", "--author", "snark",
+                            "--provenance-file", str(provenance), suite=check("pass"))
+
+    assert (code, receipt["status"], receipt["files"]) == (0, "passed", ["M\tnew.py"]), receipt
+    assert "committed checkpoint" in receipt["ownership"]["new.py"]
+
+
+@REAL_GIT
+def test_paths_refuses_a_foreign_commit_as_an_intermediate_checkpoint(repo, root, tmp_path):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    owned_commit(repo, "al", "foreign intermediate commit")
+    (repo / "app.py").write_text("a = 1\nx = 2\nz = 2\n")
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({
+        "rows": f"snark,app.py,modified,{sha(initial)},{sha((repo / 'app.py').read_bytes())},f,{started}\n",
+    }))
+
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+
+    assert (code, receipt["status"]) == (snap.EXIT_REFUSED, "refused"), receipt
+    assert receipt["patches"] == []
+
+
+@REAL_GIT
+def test_paths_refuses_stale_author_row_after_a_later_author_commit(repo, root, tmp_path):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    committed = (repo / "app.py").read_bytes()
+    owned_commit(repo, "snark", "first author commit")
+    (repo / "app.py").write_text("a = 1\nx = 3\nz = 1\n")
+    later = (repo / "app.py").read_bytes()
+    owned_commit(repo, "snark", "second author commit")
+    (repo / "app.py").write_bytes(committed)  # unrecorded rollback of the second commit
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({
+        "rows": (f"snark,app.py,modified,{sha(initial)},{sha(committed)},f,{started}\n"
+                 f"snark,app.py,modified,{sha(committed)},{sha(later)},f,{started + 1}\n"),
+    }))
+
+    code, receipt = run_cli(repo, root, "--path", "app.py", "--author", "snark",
+                            "--provenance-file", str(provenance))
+
+    assert (code, receipt["status"]) == (snap.EXIT_REFUSED, "refused"), receipt
+    assert receipt["patches"] == []
+
+
+@REAL_GIT
+def test_checkpoint_allows_an_unrelated_commit_after_the_authors_commit(repo):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    committed = (repo / "app.py").read_bytes()
+    owned_commit(repo, "snark", "author checkpoint")
+    (repo / "old.py").write_text("unrelated = True\n")
+    owned_commit(repo, "al", "unrelated followup", "old.py")
+
+    assert snap.committed_checkpoint(snap.Git(repo), git(repo, "rev-parse", "HEAD").strip(),
+                                     "app.py", sha(initial), sha(committed), "snark", started)
+
+
+@REAL_GIT
+def test_checkpoint_refuses_missing_trailer_and_backdated_commit(repo):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    committed = (repo / "app.py").read_bytes()
+    git(repo, "commit", "-qam", "no co-author trailer")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    check = snap.committed_checkpoint
+    assert not check(snap.Git(repo), head, "app.py", sha(initial), sha(committed),
+                     "snark", started)
+    # Another bot's edit row cannot make a bare commit count as this author's.
+    git(repo, "reset", "-q", "HEAD^")
+    owned_commit(repo, "snark", "late checkpoint")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    assert not check(snap.Git(repo), head, "app.py", sha(initial), sha(committed),
+                     "snark", started + 3600)
+
+
+@REAL_GIT
+def test_checkpoint_refuses_a_foreign_row_within_the_author_turn(repo):
+    initial = head_bytes(repo, "app.py")
+    assert initial is not None
+    started = time.time()
+    x2(repo)
+    committed = (repo / "app.py").read_bytes()
+    owned_commit(repo, "snark", "own checkpoint")
+    (repo / "app.py").write_text("a = 1\nx = 2\nz = 2\n")
+    current = (repo / "app.py").read_bytes()
+    check = snap.OwnershipCheck("snark", [
+        row("snark", sha(initial), sha(current), started),
+        row("al", sha(committed), "f" * 64, started + 1),
+    ])
+
+    ok, _ = check.chain("app.py", sha(committed), sha(current), git=snap.Git(repo),
+                        head_rev=git(repo, "rev-parse", "HEAD").strip())
+
+    assert not ok
+
+
 @REAL_GIT
 def test_paths_refuses_another_bots_edit_without_creating_a_snapshot(repo, root, tmp_path):
     x2(repo)

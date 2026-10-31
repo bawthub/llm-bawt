@@ -116,10 +116,18 @@ inside a container.
 **Ownership.** `PATHS` refuses a file unless its uncommitted bytes provably
 belong to `AUTHOR`: they must chain back to HEAD through only `AUTHOR`'s
 recorded edits (`turn_changed_files`, via `pgq`), every link an exact sha256
-match. Line-level attribution (`commit-recon`) is not accepted as proof: it can
-credit you with identical text somewhere else. Each file is read once; the
-ownership proof and the patch use those same bytes, so a write that lands
-during the run is simply not in the patch. Symlinks are refused (use
+match. If one turn edits, commits, then edits the same file again, its single
+row spans the committed bytes. That gap can cross an intermediate commit only
+when its recorded before-bytes match a first-parent ancestor's blob, all later
+recorded edits of that path are in the chain, and every intervening path-changing
+commit has `AUTHOR`'s canonical trailer and was committed after the turn began
+(with a 5-second clock-skew allowance). A foreign commit, missing trailer,
+path-touching merge, unmatched later edit or unverifiable history refuses. Git
+commit times/trailers assume cooperative bots; unrecorded edits within a turn
+remain outside the proof. Line-level attribution (`commit-recon`) is not accepted
+as proof: it can credit you with identical text somewhere else. Each file is
+read once; the ownership proof and the patch use those same bytes, so a write
+that lands during the run is simply not in the patch. Symlinks are refused (use
 `PATCHES`). Edit tracked files only
 with Edit/Write: a turn's record of a file runs from the bytes before its first
 Edit/Write in that turn to the bytes after its last, so a Bash edit outside that
