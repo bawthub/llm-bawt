@@ -285,6 +285,167 @@ async def test_stale_result_cannot_be_released_by_a_rejected_queued_steer():
     assert run._finishing is True
 
 
+@pytest.mark.anyio
+async def test_now_steer_interrupt_of_injected_notification_finishes_on_host_result():
+    """Installed CLI frame order: notification interrupt, then replacement host success."""
+    client = _FakeClient()
+    run = _run(client)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    await asyncio.sleep(0)
+    await run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
+    client._query.frames.put_nowait({
+        "type": "system", "subtype": "task_notification", "task_id": "t1",
+        "status": "completed", "summary": "notification finished",
+        "output_file": "", "uuid": "notification-1", "session_id": "s",
+    })
+    client._query.frames.put_nowait({
+        **_result(""), "subtype": "error_during_execution",
+        "origin": {"kind": "task-notification"},
+    })
+    client._query.frames.put_nowait(_result("host replacement answer"))
+    client._query.frames.put_nowait(None)
+
+    yielded = await asyncio.wait_for(consumer, 1)
+    assert _results(yielded) == ["", "host replacement answer"]
+    assert run._finishing is True  # not an EOF after swallowing the host result
+    assert run._expected_interrupt_results == 0
+
+
+@pytest.mark.anyio
+async def test_injected_result_before_replacement_query_returns_is_still_drained():
+    client = _FakeClient()
+    run = _run(client)
+    query_entered, release_query, boundary_seen = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event()
+    )
+    original_query = client.query
+
+    async def paused_query(prompt):
+        if isinstance(prompt, str):
+            query_entered.set()
+            await release_query.wait()
+        else:
+            await original_query(prompt)
+
+    client.query = paused_query
+
+    async def consume():
+        seen = []
+        async for msg in run.messages():
+            if isinstance(msg, ResultMessage):
+                seen.append(msg)
+                if run.consume_replaced_result(msg):
+                    boundary_seen.set()
+                    continue
+                return seen
+        return seen
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    steering = asyncio.create_task(run.steer(
+        "redirect", priority="now", origin="user", framed_message="NOW[redirect]",
+    ))
+    await asyncio.wait_for(query_entered.wait(), 1)
+    client._query.frames.put_nowait({
+        "type": "system", "subtype": "task_notification", "task_id": "t1",
+        "status": "completed", "summary": "notification finished",
+        "output_file": "", "uuid": "notification-1", "session_id": "s",
+    })
+    client._query.frames.put_nowait({
+        **_result(""), "subtype": "error_during_execution",
+        "origin": {"kind": "task-notification"},
+    })
+    await asyncio.wait_for(boundary_seen.wait(), 1)
+    assert not steering.done()  # query transport has not accepted the replacement yet
+    release_query.set()
+    await asyncio.wait_for(steering, 1)
+    client._query.frames.put_nowait(_result("replacement answer"))
+    yielded = await asyncio.wait_for(consumer, 1)
+    assert _results(yielded) == ["", "replacement answer"]
+    assert run._finishing is True
+
+
+@pytest.mark.anyio
+async def test_stale_notification_success_does_not_steal_real_human_interrupt():
+    client = _FakeClient()
+    run = _run(client)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    await asyncio.sleep(0)
+    await run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
+    for frame in (
+        {"type": "system", "subtype": "task_notification", "task_id": "t1",
+         "status": "completed", "summary": "notification finished",
+         "output_file": "", "uuid": "notification-1", "session_id": "s"},
+        {**_result("old task"), "origin": {"kind": "task-notification"}},
+        _result("human interrupted"),
+        _result("human replacement"),
+    ):
+        client._query.frames.put_nowait(frame)
+    yielded = await asyncio.wait_for(consumer, 1)
+    assert _results(yielded) == ["human interrupted", "human replacement"]
+    assert run._finishing is True
+    assert run._pending_now_interrupts == 0
+
+
+@pytest.mark.anyio
+async def test_ambiguous_injected_interrupt_fails_visibly():
+    client = _FakeClient()
+    run = _run(client)
+    run._expected_interrupt_results = run._pending_now_interrupts = 2
+    run._injected_notification_active = True
+    result = parse_message({
+        **_result(""), "subtype": "error_during_execution",
+        "origin": {"kind": "task-notification"},
+    })
+    with pytest.raises(RuntimeError, match="ambiguous_injected_interrupt_boundary"):
+        run._injected_interrupt_boundary(result, "task-notification")
+
+
+@pytest.mark.anyio
+async def test_injected_interrupt_without_notification_frame_fails_visibly():
+    run = _run(_FakeClient())
+    run._expected_interrupt_results = run._pending_now_interrupts = 1
+    result = parse_message({
+        **_result(""), "subtype": "error_during_execution",
+        "origin": {"kind": "task-notification"},
+    })
+    with pytest.raises(RuntimeError, match="unattributed_injected_interrupt_boundary"):
+        run._injected_interrupt_boundary(result, "task-notification")
+
+
+@pytest.mark.anyio
+async def test_unknown_injected_interrupt_origin_fails_visibly():
+    run = _run(_FakeClient())
+    run._expected_interrupt_results = run._pending_now_interrupts = 1
+    result = parse_message({
+        **_result(""), "subtype": "error_during_execution",
+        "origin": {"kind": "hook-response"},
+    })
+    with pytest.raises(RuntimeError, match="unsupported_injected_interrupt_origin"):
+        run._injected_interrupt_boundary(result, "hook-response")
+
+
+@pytest.mark.anyio
+async def test_fallback_reader_drains_injected_interrupt_boundary():
+    class _Plain:
+        async def receive_messages(self):
+            for frame in (
+                {"type": "system", "subtype": "task_notification", "task_id": "t1",
+                 "status": "completed", "summary": "notification finished",
+                 "output_file": "", "uuid": "notification-1", "session_id": "s"},
+                {**_result(""), "subtype": "error_during_execution",
+                 "origin": {"kind": "task-notification"}},
+                _result("human replacement"),
+            ):
+                yield parse_message(frame)
+
+    run = ClaudeActiveRun(client=_Plain(), request_id="fallback-reader")
+    run._expected_interrupt_results = run._pending_now_interrupts = 1
+    yielded = await _consume_until_result(run)
+    assert _results(yielded) == ["", "human replacement"]
+    assert run._finishing is True
+
+
 # --- reconciling buffered lifecycle frames before teardown settles -----------
 
 

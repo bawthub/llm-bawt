@@ -194,6 +194,10 @@ class ClaudeActiveRun:
     request_id: str
     _steer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _expected_interrupt_results: int = 0
+    # Arm alongside the now-steer interrupt, before the CLI can emit its
+    # result; the replacement query may not have returned yet (TASK-1879).
+    _pending_now_interrupts: int = 0
+    _injected_notification_active: bool = False
     _completed: asyncio.Event = field(default_factory=asyncio.Event)
     _steer_timeout_s: float = field(default=8.0, repr=False)
     # command_uuid -> last lifecycle state for ``next`` injections.
@@ -685,6 +689,27 @@ class ClaudeActiveRun:
         self._finishing = True
         return result
 
+    def _injected_interrupt_boundary(self, result: Any, origin_kind: str) -> bool:
+        """Recognize a CLI-interrupted background notification, not a stale completion.
+
+        The installed CLI can interrupt an injected notification after a host
+        query is queued. Its non-human error result is the now-steer's missing
+        boundary; the subsequent human result must finish the replacement.
+        Require the notification's system frame and a pending now-steer intent.
+        With missing provenance or multiple interrupts the result is not
+        attributable, so fail visibly rather than guess which one it consumed.
+        """
+        if getattr(result, "subtype", None) != "error_during_execution" or not self._pending_now_interrupts:
+            return False
+        if origin_kind != "task-notification":
+            raise RuntimeError("unsupported_injected_interrupt_origin")
+        if not self._injected_notification_active:
+            raise RuntimeError("unattributed_injected_interrupt_boundary")
+        if self._expected_interrupt_results != 1 or self._pending_now_interrupts != 1:
+            raise RuntimeError("ambiguous_injected_interrupt_boundary")
+        logger.info("Draining interrupted injected notification: request=%s", self.request_id)
+        return True
+
     def note_lifecycle(self, command_uuid: str, state: str) -> None:
         """Record a CLI ``command_lifecycle`` frame for our injected commands."""
         if command_uuid not in self._commands:
@@ -761,6 +786,7 @@ class ClaudeActiveRun:
         ends the run, so steering closes as it is yielded (TASK-1344).
         """
         from claude_agent_sdk import ResultMessage, UserMessage
+        from claude_agent_sdk.types import TaskNotificationMessage
 
         if self._mcp_monitor is None:
             self._mcp_monitor = McpReconnectMonitor(self.client)
@@ -769,13 +795,21 @@ class ClaudeActiveRun:
         if handle is None:
             self.lifecycle_supported = False
             async for msg in self.client.receive_messages():
+                if isinstance(msg, TaskNotificationMessage):
+                    self._injected_notification_active = True
                 if isinstance(msg, ResultMessage):
                     stale_kind = _nonhuman_result_origin(msg)
                     if stale_kind is not None:
-                        logger.info(
-                            "Ignoring injected SDK result: request=%s origin=%s",
-                            self.request_id, stale_kind,
-                        )
+                        boundary = self._injected_interrupt_boundary(msg, stale_kind)
+                        if stale_kind == "task-notification":
+                            self._injected_notification_active = False
+                        if boundary:
+                            yield msg  # the response consumer drains this boundary
+                        else:
+                            logger.info(
+                                "Ignoring injected SDK result: request=%s origin=%s",
+                                self.request_id, stale_kind,
+                            )
                         continue
                     if self._expected_interrupt_results <= 0:
                         msg = self._finish(msg)
@@ -790,9 +824,12 @@ class ClaudeActiveRun:
             # a taken lifecycle frame having been recorded already.
             self._frames_taken += 1
             self._frame_progress.set()
-            if isinstance(data, dict) and data.get("type") == "system" and data.get("subtype") == "init":
-                capabilities = data.get("capabilities")
-                self._cli_capabilities = set(capabilities) if isinstance(capabilities, list) else set()
+            if isinstance(data, dict) and data.get("type") == "system":
+                if data.get("subtype") == "init":
+                    capabilities = data.get("capabilities")
+                    self._cli_capabilities = set(capabilities) if isinstance(capabilities, list) else set()
+                elif data.get("subtype") == "task_notification":
+                    self._injected_notification_active = True
             if isinstance(data, dict) and data.get("type") == "command_lifecycle":
                 self.note_lifecycle(
                     str(data.get("command_uuid") or ""), str(data.get("state") or "")
@@ -825,10 +862,16 @@ class ClaudeActiveRun:
             if isinstance(msg, ResultMessage):
                 stale_kind = _nonhuman_result_origin(msg)
                 if stale_kind is not None:
-                    logger.info(
-                        "Ignoring injected SDK result: request=%s origin=%s",
-                        self.request_id, stale_kind,
-                    )
+                    boundary = self._injected_interrupt_boundary(msg, stale_kind)
+                    if stale_kind == "task-notification":
+                        self._injected_notification_active = False
+                    if boundary:
+                        yield msg  # the response consumer drains this boundary
+                    else:
+                        logger.info(
+                            "Ignoring injected SDK result: request=%s origin=%s",
+                            self.request_id, stale_kind,
+                        )
                     continue
             if isinstance(msg, UserMessage) and self._expected_interrupt_results > 0:
                 _relabel_interrupted_tool_results(msg)
@@ -865,6 +908,7 @@ class ClaudeActiveRun:
 
             self.steering_attempted = True
             self._expected_interrupt_results += 1
+            self._pending_now_interrupts += 1
             interrupted = False
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self._steer_timeout_s
@@ -902,6 +946,7 @@ class ClaudeActiveRun:
                 self._expected_interrupt_results = max(
                     0, self._expected_interrupt_results - 1
                 )
+                self._pending_now_interrupts = max(0, self._pending_now_interrupts - 1)
                 if interrupted:
                     try:
                         await self._tear_down()
@@ -948,6 +993,8 @@ class ClaudeActiveRun:
                 del self._escalated_pending[command_uuid]
             return False
         self._expected_interrupt_results -= 1
+        if self._pending_now_interrupts:
+            self._pending_now_interrupts -= 1
         return True
 
     async def _tear_down(self) -> None:
