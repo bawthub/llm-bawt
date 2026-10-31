@@ -26,7 +26,8 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, ClassVar
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, ClassVar
 
 import httpx
 
@@ -96,6 +97,22 @@ def _retry_status(
         "productive_idle_seconds": getattr(exc, "productive_idle_seconds", None),
         "elapsed_seconds": getattr(exc, "elapsed_seconds", None),
     }
+
+
+@dataclass(frozen=True)
+class PreparedCall:
+    """Request-local credentials/routing, never reread from mutable adapter cache."""
+
+    bearer: str = field(repr=False)
+    base_url: str
+    body: dict = field(repr=False)
+    headers: tuple[tuple[str, str], ...] = field(repr=False)
+    reasoning_codec: Any = field(repr=False)
+    identity: tuple[str, ...] | None
+
+    @property
+    def credential_scope(self) -> str:
+        return retry_mod.credential_scope(self.bearer, self.base_url)
 
 
 class ProviderAdapter(ABC):
@@ -216,6 +233,27 @@ class ProviderAdapter(ABC):
         """Opt in only where native checkpoint replay has been verified."""
         return False
 
+    def retry_auth_identity(self, base_url: str) -> tuple[str, ...] | None:
+        """Opt in only for a known broker account, never an anonymous auth failure."""
+        return None
+
+    async def prepare_call(self, anthropic_body, upstream_model, context) -> PreparedCall:
+        from .. import translate
+
+        bearer, base_url = await self.authorize()
+        # Capture all cache-derived values before another await can rotate them.
+        codec = self.reasoning_codec(upstream_model, base_url)
+        identity = self.retry_auth_identity(base_url)
+        body = translate.anthropic_to_responses(
+            anthropic_body, upstream_model, reasoning_codec=codec,
+            allowed_skill_names=context.skill_names if context else (),
+        )
+        body = self.prepare_request(body, context)
+        headers = tuple((self.extra_headers(body, context) or {}).items())
+        prepared = PreparedCall(bearer, base_url, body, headers, codec, identity)
+        await self.start()
+        return prepared
+
     async def call(
         self,
         anthropic_body: dict,
@@ -231,7 +269,6 @@ class ProviderAdapter(ABC):
         # Local imports keep the module import-graph trivial (the proxy
         # subpackage imports adapters, which imports openai, which is heavy).
         from .. import stream as stream_mod
-        from .. import translate
         from ..continuation import validated_replay
 
         call_started = time.perf_counter()
@@ -240,20 +277,19 @@ class ProviderAdapter(ABC):
         # the adapter's cached token and re-authorize. Response body is also
         # built ONCE so prompt_cache_key / session_id / account-id stay stable
         # across retries (load-bearing for cache routing).
-        bearer, base_url = await self.authorize()
-        await self.start()
+        lease = context.retry_lease if context is not None else None
+        prepared = (lease.prepared_call if lease is not None else None)
+        if prepared is None:
+            prepared = await self.prepare_call(anthropic_body, upstream_model, context)
         assert self._responses_client is not None
-        reasoning_codec = self.reasoning_codec(upstream_model, base_url)
-        responses_body = translate.anthropic_to_responses(
-            anthropic_body,
-            upstream_model,
-            reasoning_codec=reasoning_codec,
-            allowed_skill_names=context.skill_names if context else (),
-        )
-        responses_body = self.prepare_request(responses_body, context)
+        bearer, base_url = prepared.bearer, prepared.base_url
+        reasoning_codec = prepared.reasoning_codec
+        responses_body = prepared.body
         original_body = responses_body
         continuation_prefix = None
-        headers = self.extra_headers(responses_body, context) or None
+        headers = dict(prepared.headers) or None
+        if lease is not None:
+            lease.record_authorization(prepared.identity, prepared.credential_scope)
         client = self._responses_client.with_options(
             api_key=bearer,
             base_url=base_url,
@@ -274,7 +310,6 @@ class ProviderAdapter(ABC):
         )
 
         state = TranslatorState()
-        lease = context.retry_lease if context is not None else None
         policy = lease.policy if lease is not None else self.retry_policy(upstream_model, context)
         route_attempt = context.attempt if lease is not None else 0
         # Per Al #4: the on_usage callback wired into context.record_usage
@@ -372,6 +407,17 @@ class ProviderAdapter(ABC):
                         initial_exc
                     ),
                 )
+                if lease is not None:
+                    if lease.recovery_sample:
+                        decision = retry_mod.RetryDecision(
+                            False, reason="auth_recovery_sample_failed", final_error_type="api_error",
+                        )
+                    if (bucket is retry_mod.FailureBucket.F_AUTH_BROKER and not decision.retry
+                            and (retry_mod._extract_status_code(initial_exc) == 401
+                                 or isinstance(initial_exc, retry_mod.BrokerAuthorizationError))):
+                        lease.mark_auth_failure()
+                    elif bucket is not retry_mod.FailureBucket.F_AUTH_BROKER or not decision.retry:
+                        lease.clear_auth_failure()
                 policy.record_decision(bucket, decision)
                 logger.warning(
                     "proxy_retry request_id=%s bot_id=%s boundary=open "
@@ -397,8 +443,12 @@ class ProviderAdapter(ABC):
                     if bucket is retry_mod.FailureBucket.F_AUTH_BROKER:
                         if hasattr(self, "_cached_expires_at"):
                             self._cached_expires_at = 0  # type: ignore[attr-defined]
-                        bearer, base_url = await self.authorize()
-                        if self.reasoning_codec(upstream_model, base_url) != reasoning_codec:
+                        refreshed = await self.prepare_call(anthropic_body, upstream_model, context)
+                        bearer, base_url = refreshed.bearer, refreshed.base_url
+                        if (refreshed.reasoning_codec != reasoning_codec
+                                or refreshed.identity != prepared.identity):
+                            if lease is not None:
+                                lease.clear_auth_failure()
                             if context is not None:
                                 context.report_status({"state": "failed", "provider": context.provider})
                             yield _final_error_frame(
@@ -406,7 +456,9 @@ class ProviderAdapter(ABC):
                                 "Reasoning account scope changed during authorization; start a new request",
                             )
                             return
-                        headers = self.extra_headers(responses_body, context) or None
+                        headers = dict(refreshed.headers) or None
+                        if lease is not None:
+                            lease.record_authorization(refreshed.identity, refreshed.credential_scope)
                         client = self._responses_client.with_options(
                             api_key=bearer, base_url=base_url,
                             set_default_headers=headers,
@@ -483,6 +535,13 @@ class ProviderAdapter(ABC):
                 retry_after_s=retry_after,
                 permanent_error_type=permanent_type,
             )
+            if lease is not None:
+                # A recovery sample never enters continuation/internal retries.
+                if lease.recovery_sample:
+                    decision = retry_mod.RetryDecision(
+                        False, reason="auth_recovery_sample_failed", final_error_type="api_error",
+                    )
+                lease.clear_auth_failure()  # stream failures are not initial auth proof
             policy.record_decision(bucket, decision)
             logger.warning(
                 "proxy_retry request_id=%s bot_id=%s boundary=stream "

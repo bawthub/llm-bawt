@@ -183,14 +183,15 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
                 timeout=25.0,
             )
             if resp.is_error:
-                raise RuntimeError(
+                error = retry_mod.BrokerAuthorizationError if resp.status_code >= 500 else RuntimeError
+                raise error(
                     f"ChatGPT token broker returned {resp.status_code}: "
                     f"{(resp.text or '')[:200]}"
                 )
             payload = resp.json()
             token = payload.get("access_token")
             if not token:
-                raise RuntimeError(
+                raise retry_mod.BrokerAuthorizationError(
                     f"ChatGPT token broker returned state={payload.get('state')} "
                     f"with no access_token"
                 )
@@ -204,7 +205,7 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
                 payload.get("expires_at"),
             )
         except httpx.HTTPError as e:
-            raise RuntimeError(f"ChatGPT token broker unreachable: {e}") from e
+            raise retry_mod.BrokerAuthorizationError(f"ChatGPT token broker unreachable: {e}") from e
 
     # ── ProviderAdapter ──────────────────────────────────────────────────
     async def authorize(self) -> tuple[str, str]:
@@ -219,9 +220,14 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
             # the lock so a burst of parallel streams performs one broker call.
             async with self._authorize_lock:
                 if not self._cache_valid():
-                    token, account_id, expires_at = await asyncio.to_thread(
-                        self._fetch_broker_token
-                    )
+                    try:
+                        token, account_id, expires_at = await asyncio.to_thread(
+                            self._fetch_broker_token
+                        )
+                    except retry_mod.BrokerAuthorizationError as exc:
+                        base_url = os.getenv(API_BASE_ENV) or DEFAULT_API_BASE
+                        exc.identity = self.retry_auth_identity(base_url)
+                        raise
                     self._cached_token = token
                     self._cached_account_id = account_id
                     # Broker contract: Unix epoch SECONDS. Be tolerant of an
@@ -241,6 +247,17 @@ class OpenAIChatGPTAdapter(ProviderAdapter):
         base_url = os.getenv(API_BASE_ENV) or DEFAULT_API_BASE
         assert self._cached_token is not None
         return self._cached_token, base_url
+
+    def retry_auth_identity(self, base_url: str) -> tuple[str, ...] | None:
+        if not self._cached_account_id:
+            return None
+        account_scope = hashlib.sha256(self._cached_account_id.encode()).hexdigest()
+        return self.name, base_url, account_scope
+
+    async def prepare_auth_recovery(self, body, upstream_model, context):
+        # Only drop our local cache; the app remains the sole OAuth refresher.
+        self._cached_expires_at = 0
+        return await self.prepare_call(body, upstream_model, context)
 
     def reasoning_codec(self, upstream_model: str, base_url: str):
         from ..reasoning import ReasoningCodec

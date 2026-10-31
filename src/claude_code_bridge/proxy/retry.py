@@ -157,7 +157,7 @@ class RetryPolicy:
         return self._attempts_used
 
     def start_attempt(self) -> int:
-        """Consume one attempt slot. Returns the new attempt number (1-based)."""
+        """Charge a slot; exceeding the normal cap requires a lease recovery grant."""
         self._attempts_used += 1
         return self._attempts_used
 
@@ -185,13 +185,29 @@ class RetryAdmissionError(RuntimeError):
     """The proxy must reject a duplicate or exhausted call before sampling."""
 
 
+class BrokerAuthorizationError(RuntimeError):
+    """Typed broker unavailability, never inferred from arbitrary error text."""
+
+    identity: tuple[str, ...] | None = None
+
+
+def credential_scope(bearer: str, base_url: str) -> str:
+    """An in-memory comparison only; never retain or log a credential value."""
+    return hashlib.sha256(json.dumps([base_url, bearer]).encode()).hexdigest()
+
+
 @dataclass(slots=True)
 class _BudgetEntry:
     policy: RetryPolicy
     generation: int = 0
     active: bool = False
     tool_committed: bool = False
+    output_committed: bool = False
     successful: bool = False
+    auth_identity: tuple[str, ...] | None = None
+    credential_scope: str | None = None
+    auth_failed: bool = False
+    auth_recovery_used: bool = False
 
 
 class RetryLease:
@@ -206,6 +222,47 @@ class RetryLease:
         self._entry = entry
         self._generation = generation
         self.policy = entry.policy
+        self.auth_probe = entry.auth_failed
+        self.recovery_sample = False
+        self.prepared_call: Any = None
+
+    def record_authorization(self, identity: tuple[str, ...] | None, scope: str) -> None:
+        with self._registry._lock:
+            entry = self._registry._current(self)
+            if entry is not None:
+                entry.auth_identity, entry.credential_scope = identity, scope
+
+    def mark_auth_failure(
+        self, identity: tuple[str, ...] | None = None, scope: str | None = None,
+    ) -> None:
+        with self._registry._lock:
+            entry = self._registry._current(self)
+            if entry is not None:
+                if entry.auth_identity is None and identity is not None:
+                    entry.auth_identity, entry.credential_scope = identity, scope
+                entry.auth_failed = entry.auth_identity is not None
+
+    def clear_auth_failure(self) -> None:
+        with self._registry._lock:
+            entry = self._registry._current(self)
+            if entry is not None:
+                entry.auth_failed = False
+
+    def grant_auth_recovery(self, identity: tuple[str, ...] | None, scope: str) -> None:
+        """One extra sample, not a reset; check ownership again after broker await."""
+        with self._registry._lock:
+            entry = self._registry._current(self)
+            if (entry is None or not entry.auth_failed or entry.auth_recovery_used
+                    or entry.tool_committed or entry.output_committed
+                    or entry.policy._terminal or identity is None
+                    or identity != entry.auth_identity or scope == entry.credential_scope):
+                raise RetryAdmissionError("Auth recovery requires new same-account credentials")
+            entry.auth_recovery_used = True  # spent before sampling; never refunded
+            entry.auth_failed = False
+            self.recovery_sample = True
+
+    def mark_output_committed(self) -> None:
+        self._registry._mark(self, output=True)
 
     def mark_tool_committed(self) -> None:
         self._registry._mark(self, tool=True)
@@ -222,8 +279,10 @@ class RetryBudgetRegistry:
 
     The bridge's request id is stable across the SDK's HTTP resends and unique
     to a send. Direct clients lacking that header use a local RetryPolicy and
-    do not fill this registry. Only the bridge's turn-final clear releases tool
-    tombstones; a new body (e.g. containing a tool result) is a different call.
+    do not fill this registry. Turn-final clear releases tool/failed-output and
+    spent-auth-recovery tombstones; a new body (e.g. a tool result) is a new call.
+    Typed pre-output auth failure may probe the broker under the SAME lease and
+    admit ONE extra sample after verified same-account credential recovery.
     """
 
     def __init__(self, *, max_entries: int = 4096) -> None:
@@ -244,7 +303,7 @@ class RetryBudgetRegistry:
 
     def acquire(
         self, request_id: str, fingerprint: str,
-        policy_factory: Callable[[], RetryPolicy],
+        policy_factory: Callable[[], RetryPolicy], *, allow_auth_probe: bool = False,
     ) -> RetryLease:
         """Reject duplicate sampling or a spent budget atomically."""
         key = (request_id, fingerprint)
@@ -259,7 +318,14 @@ class RetryBudgetRegistry:
                 raise RetryAdmissionError("Identical model call already running")
             if entry.tool_committed:
                 raise RetryAdmissionError("Completed or partial tool call cannot be replayed")
-            if not entry.policy.available:
+            if entry.output_committed:
+                raise RetryAdmissionError("Partial model output cannot be replayed")
+            if entry.auth_recovery_used:
+                raise RetryAdmissionError("Proxy auth recovery allowance already spent")
+            if entry.auth_failed:
+                if not allow_auth_probe or entry.policy._terminal:
+                    raise RetryAdmissionError("Proxy authorization recovery unavailable")
+            elif not entry.policy.available:
                 raise RetryAdmissionError("Proxy retry budget exhausted")
             self._generation += 1
             entry.generation = self._generation
@@ -274,12 +340,18 @@ class RetryBudgetRegistry:
             and entry.generation == lease._generation else None
         )
 
-    def _mark(self, lease: RetryLease, *, tool: bool = False, success: bool = False) -> None:
+    def _mark(
+        self, lease: RetryLease, *, tool: bool = False,
+        output: bool = False, success: bool = False,
+    ) -> None:
         with self._lock:
             entry = self._current(lease)
             if entry is not None:
                 entry.tool_committed |= tool
+                entry.output_committed |= output
                 entry.successful |= success
+                if tool or output:
+                    entry.auth_failed = False
 
     def _release(self, lease: RetryLease) -> None:
         with self._lock:
@@ -287,11 +359,11 @@ class RetryBudgetRegistry:
             if entry is None:
                 return  # stale finalizer cannot clear a subsequent owner
             entry.active = False
-            if entry.successful and not entry.tool_committed:
+            if entry.successful and not entry.tool_committed and not entry.auth_recovery_used:
                 self._entries.pop(lease._key)
 
     def clear_request(self, request_id: str) -> None:
-        """Drop this turn's completed-tool tombstones and spent policies."""
+        """Drop this turn's side-effect/recovery tombstones and spent policies."""
         with self._lock:
             for key in [key for key in self._entries if key[0] == request_id]:
                 del self._entries[key]
@@ -649,9 +721,9 @@ def decide(
             reason="rate_limit_backoff",
         )
 
-    # Bucket F — auth broker. ONE force-refresh retry allowed.
-    # The adapter must invoke authorize() with force=True next attempt; that
-    # coordination lives in the retry loop, not here.
+    # Bucket F — ONE local-cache-invalidated broker refetch, not OAuth refresh.
+    # The app remains the credential refresher; adapter coordination lives in
+    # the retry loop. A later SDK resend uses its separate one-sample allowance.
     if bucket is FailureBucket.F_AUTH_BROKER:
         if policy.attempt >= 2:
             return RetryDecision(
