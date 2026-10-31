@@ -200,6 +200,12 @@ def reset_skills_from_field(raw) -> dict | None:
     return value if _skills_clause(value) else None
 
 
+def reset_skill_tokens(skills: dict | None) -> int:
+    """Known injected skill tokens from the validated reset receipt; no refs means unknown."""
+    value = reset_skills_from_field(skills)
+    return _count(value.get("tokens")) if value else 0
+
+
 def format_seed_ack(stats: dict | None, skills: dict | None = None) -> str:
     """Bridge /new acknowledgement; the clean and seeded cases are :func:`format_reset_receipt`.
 

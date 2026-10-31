@@ -36,6 +36,7 @@ from agent_bridge.continuity import (
     format_seed_ack,
     post_continuity_receipt,
     render_seed_briefing,
+    reset_skill_tokens,
     seed_receipt,
     stats_from_messages,
 )
@@ -88,25 +89,33 @@ class ClaudeSessionMixin:
         stats: dict | None,
         *,
         context_window: int | None,
+        reset_skills: dict | None = None,
     ) -> dict:
-        """Represent reset context as a seed estimate or explicit clean zero."""
+        """Estimate reset history + known injected skills, not a provider measurement.
+
+        Other prompt sections and tool schemas have no reset-time count here;
+        the next provider/SDK usage snapshot supersedes this partial estimate.
+        """
         seeded = bool(stats and stats.get("seeded"))
-        resident_tokens = max(0, int((stats or {}).get("approx_tokens") or 0))
+        skill_tokens = reset_skill_tokens(reset_skills)
+        resident_tokens = max(0, int((stats or {}).get("approx_tokens") or 0)) + skill_tokens
+        if skill_tokens:
+            source = "session_seed_and_skills_estimate" if seeded else "session_skills_estimate"
+        else:
+            source = "session_seed_char_estimate" if seeded else "clean_session_reset"
         return {
             "input_tokens": resident_tokens,
             "cache_read_tokens": 0,
             "cache_creation_tokens": 0,
             "output_tokens": 0,
             "resident_tokens": resident_tokens,
-            "resident_source": (
-                "session_seed_char_estimate" if seeded else "clean_session_reset"
-            ),
+            "resident_source": source,
             "context_window": context_window,
             # Seeding writes a synthetic transcript; bare /new makes no provider
             # request, so its exact incremental cost is zero even though the
             # future resident-context size is estimated.
             "total_cost_usd": 0.0,
-            "usage_status": "estimated" if seeded else "reset",
+            "usage_status": "estimated" if seeded or skill_tokens else "reset",
         }
 
     async def _preprocess_new_command(
@@ -164,7 +173,7 @@ class ClaudeSessionMixin:
             text=self._format_seed_ack(seed_stats, reset_skills),
             model=model,
             token_usage=self._seed_usage_estimate(
-                seed_stats, context_window=context_window,
+                seed_stats, context_window=context_window, reset_skills=reset_skills,
             ),
             extra_raw={"new_session_ack": {
                 "thread_session_id": thread_session_id,

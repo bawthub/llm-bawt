@@ -191,7 +191,7 @@ class TestClaudeNewPreprocessing:
         return _Harness(), _Redis()
 
     @staticmethod
-    def _run(harness, redis, message, *, explicit_thread=False):
+    def _run(harness, redis, message, *, explicit_thread=False, reset_skills=None):
         return asyncio.run(harness._preprocess_new_command(
             message,
             explicit_thread=explicit_thread,
@@ -204,6 +204,7 @@ class TestClaudeNewPreprocessing:
             thread_session_id="thread-new",
             msg_id="redis-1",
             async_redis=redis,
+            reset_skills=reset_skills,
         ))
 
     def test_clean_reset_reports_zero_context_instead_of_stale_usage(self):
@@ -224,10 +225,34 @@ class TestClaudeNewPreprocessing:
             "usage_status": "reset",
         }
 
+    @pytest.mark.parametrize("skills,extra_tokens", [
+        ({"refs": ["llm-bawt"], "tokens": 4_200}, 4_200),
+        (None, 0),
+        ({"refs": ["llm-bawt"], "tokens": 0}, 0),
+        ({"refs": [], "tokens": 4_200}, 0),
+        ({"refs": ["llm-bawt"], "tokens": "4200"}, 0),
+    ])
+    def test_reset_estimate_counts_only_known_injected_skill_tokens(self, skills, extra_tokens):
+        from claude_code_bridge.session_ops import ClaudeSessionMixin
+
+        usage = ClaudeSessionMixin._seed_usage_estimate(
+            {"seeded": True, "approx_tokens": 1_234},
+            context_window=200_000, reset_skills=skills,
+        )
+        assert usage["resident_tokens"] == usage["input_tokens"] == 1_234 + extra_tokens
+        assert usage["resident_source"] == (
+            "session_seed_and_skills_estimate" if extra_tokens
+            else "session_seed_char_estimate"
+        )
+        assert usage["usage_status"] == "estimated"
+        assert usage["total_cost_usd"] == 0.0
+
     def test_new_with_message_defers_the_only_seed_to_cold_start(self):
         harness, redis = self._harness()
 
-        remaining = self._run(harness, redis, "/new continue here")
+        remaining = self._run(harness, redis, "/new continue here", reset_skills={
+            "refs": ["llm-bawt"], "tokens": 4_200,
+        })
 
         assert remaining == "continue here"
         assert len(harness.resets) == 1
@@ -261,6 +286,33 @@ class TestClaudeNewPreprocessing:
         # preprocessing returns; preprocessing never does.
         assert harness._publisher.done == []
         assert redis.acks == [("agent:commands", "claude-code-bridge", "redis-1")]
+
+    def test_bare_new_usage_includes_skills_without_history(self):
+        harness, redis = self._harness()
+
+        async def clean_seed(*_args, **_kwargs):
+            return {"clean_start": True, "session_id": None, "approx_tokens": 0}
+        harness._seed_new_session = clean_seed
+
+        assert self._run(harness, redis, "/new", reset_skills={
+            "refs": ["llm-bawt"], "tokens": 4_200,
+        }) is None
+        usage = harness.events[0][1]["token_usage"]
+        assert usage["resident_tokens"] == usage["input_tokens"] == 4_200
+        assert usage["resident_source"] == "session_skills_estimate"
+        assert usage["usage_status"] == "estimated"
+        assert usage["total_cost_usd"] == 0.0
+
+    def test_bare_new_usage_combines_seed_and_skills(self):
+        harness, redis = self._harness()
+
+        assert self._run(harness, redis, "/new", reset_skills={
+            "refs": ["llm-bawt"], "tokens": 4_200,
+        }) is None
+        usage = harness.events[0][1]["token_usage"]
+        assert usage["resident_tokens"] == usage["input_tokens"] == 5_434
+        assert usage["resident_source"] == "session_seed_and_skills_estimate"
+        assert usage["usage_status"] == "estimated"
 
     def test_explicit_thread_treats_new_as_literal_text(self):
         harness, redis = self._harness()
