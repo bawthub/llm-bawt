@@ -130,8 +130,8 @@ Resolution = Literal["FIXED", "DEFERRED", "WITHDRAWN"]
 
 
 class FindingResolutionInput(TypedDict):
-    # How a recheck settles one r1 finding: FIXED with the fix revision,
-    # DEFERRED to an existing task (never a Blocker), or WITHDRAWN.
+    # FIXED: revision, or DESIGN note without revision. DEFERRED: task (not
+    # a Blocker); WITHDRAWN: reviewer acknowledgement.
     finding_id: str
     resolution: Resolution
     revision: NotRequired[str | None]
@@ -194,10 +194,11 @@ async def add_task_review(
         findings: Optional, in order (max 40). BLOCKER needs REQUEST_CHANGES
             and failure_scenario; line needs file.
         rechecks_review_id: Your r1's id; records this as its one r2 (signed turn, idempotency_key).
-        resolutions: r2 only, settling r1 findings; Blockers FIXED or WITHDRAWN before APPROVE.
-            FIXED.revision accepts a bare 7-64 hex Git SHA or
-            ops-catalog:<slug>@v<positive-version>#sha256:<64-hex-command-script-hash>.
-            Catalog evidence is format-validated, not checked for existence.
+        resolutions: r2 r1 findings; Blockers FIXED or WITHDRAWN before APPROVE.
+            IMPLEMENTATION FIXED needs revision; DESIGN FIXED may instead use
+            a 1-2000 character note without revision. Revision: bare 7-64 hex
+            Git SHA or ops-catalog:<slug>@v<positive-version>#sha256:<64-hex>.
+            Catalog evidence is format-validated, not existence-checked.
 
     Returns:
         The review receipt as returned by BawtHub, or an error dict. This does
@@ -289,14 +290,16 @@ async def resolve_review_finding(
         task_id: Task ID or shortId.
         review_id: Review holding the finding.
         finding_id: Finding to settle.
-        resolution: FIXED needs revision, DEFERRED needs task; only the reviewer withdraws.
+        resolution: IMPLEMENTATION FIXED needs revision; DESIGN FIXED also
+            accepts a required note without revision. DEFERRED needs task;
+            only the reviewer withdraws.
         bot_id: Your own bot ID.
         revision: Bare 7-64 hex Git SHA or canonical
             ops-catalog:<slug>@v<positive-version>#sha256:<64-hex-command-script-hash>.
             The case-sensitive slug matches [A-Za-z0-9][A-Za-z0-9._-]{0,127};
             only hex is lowercased. Format validation does not prove existence.
         task: Existing follow-up task.
-        note: Optional reason.
+        note: Reason; required for DESIGN FIXED without revision (1-2000 chars).
 
     Returns:
         The updated finding as returned by BawtHub, or an error dict.
