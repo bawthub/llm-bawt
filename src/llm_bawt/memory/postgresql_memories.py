@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from llm_bawt.bot_access import BotAccessError
 from llm_bawt.bot_access.provenance import MemoryProvenance
+from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplicateError
 
 logger = logging.getLogger(__name__)
 
@@ -274,7 +275,7 @@ class PostgreSQLSemanticMemoryMixin:
                     """), params).first()
                     is_duplicate = similar is not None and similar.similarity > threshold
                 if is_duplicate:
-                    raise ValueError("memory update conflicts with another duplicate")
+                    raise MemoryUpdateDuplicateError("memory update conflicts with another duplicate")
 
             updated = conn.execute(text(f"""
                 UPDATE {self._memories_table_name}
@@ -302,7 +303,7 @@ class PostgreSQLSemanticMemoryMixin:
                     SELECT 1 FROM {self._memories_table_name} WHERE id = :id
                 """), params).first()
                 if exists is not None:
-                    raise RuntimeError("memory changed concurrently; retry the update")
+                    raise MemoryUpdateConflictError("memory changed concurrently; retry the update")
                 return None
             return dict(updated)
 

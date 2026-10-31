@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import text
 
 from llm_bawt.memory import embeddings
+from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplicateError
 from llm_bawt.mcp_server import storage as storage_module
 from llm_bawt.mcp_server.storage import MemoryStorage
 from tests.private_postgres import private_app_pg
@@ -100,12 +101,61 @@ def test_changed_content_updates_but_other_memory_duplicate_is_refused(memory_ri
     assert row(backend, memory_id)["embedding"] is not None
     assert row(backend, memory_id)["meaning_embedding"] is not None
 
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(MemoryUpdateDuplicateError, match="duplicate"):
         asyncio.run(storage.update_memory(
             memory_id, bot_id=bot_id, content="Other fact",
         ))
     assert row(backend, memory_id)["content"] == "Updated fact"
     assert row(backend, other_id)["content"] == "Other fact"
+
+
+def test_case_only_change_does_not_match_its_own_text(memory_rig):
+    storage, backend, bot_id = memory_rig
+    memory_id = str(uuid.uuid4())
+    backend.add_memory(memory_id, "A stable fact")
+
+    updated = asyncio.run(storage.update_memory(
+        memory_id, bot_id=bot_id, content="a stable fact",
+    ))
+    assert updated is not None and updated.content == "a stable fact"
+    assert row(backend, memory_id)["content"] == "a stable fact"
+
+
+def test_near_identical_update_does_not_match_its_own_vector(memory_rig, monkeypatch):
+    storage, backend, bot_id = memory_rig
+    memory_id = str(uuid.uuid4())
+    backend.add_memory(memory_id, "A stable fact")
+    original_embed = embeddings.generate_embedding
+
+    def similar_embed(content, *args, **kwargs):
+        return original_embed("A stable fact" if content == "A stable true fact" else content,
+                              *args, **kwargs)
+
+    monkeypatch.setattr(embeddings, "generate_embedding", similar_embed)
+    updated = asyncio.run(storage.update_memory(
+        memory_id, bot_id=bot_id, content="A stable true fact",
+    ))
+    assert updated is not None and updated.content == "A stable true fact"
+    assert row(backend, memory_id)["content"] == "A stable true fact"
+
+
+def test_competing_vector_rejects_update_even_when_text_differs(memory_rig, monkeypatch):
+    storage, backend, bot_id = memory_rig
+    memory_id, competitor_id = str(uuid.uuid4()), str(uuid.uuid4())
+    backend.add_memory(memory_id, "A stable fact")
+    backend.add_memory(competitor_id, "Competitor statement")
+    original_embed = embeddings.generate_embedding
+
+    def competitor_embed(content, *args, **kwargs):
+        return original_embed("Competitor statement" if content == "Rephrased competitor" else content,
+                              *args, **kwargs)
+
+    monkeypatch.setattr(embeddings, "generate_embedding", competitor_embed)
+    with pytest.raises(MemoryUpdateDuplicateError, match="duplicate"):
+        asyncio.run(storage.update_memory(
+            memory_id, bot_id=bot_id, content="Rephrased competitor",
+        ))
+    assert row(backend, memory_id)["content"] == "A stable fact"
 
 
 def test_unknown_id_returns_none_and_backend_error_is_not_hidden(memory_rig, monkeypatch):
@@ -157,7 +207,7 @@ def test_update_rejects_exact_duplicate_with_other_row_missing_vector(memory_rig
     monkeypatch.setattr(embeddings, "generate_embedding", embed)
     assert row(backend, other_id)["embedding"] is None
 
-    with pytest.raises(ValueError, match="duplicate"):
+    with pytest.raises(MemoryUpdateDuplicateError, match="duplicate"):
         asyncio.run(storage.update_memory(
             memory_id, bot_id=bot_id, content="Fact from an outage",
         ))
@@ -182,7 +232,7 @@ def test_concurrent_change_refuses_stale_update(memory_rig, monkeypatch):
         return embed(content, *args, **kwargs)
 
     monkeypatch.setattr(embeddings, "generate_embedding", change_after_read)
-    with pytest.raises(RuntimeError, match="changed concurrently"):
+    with pytest.raises(MemoryUpdateConflictError, match="changed concurrently"):
         asyncio.run(storage.update_memory(
             memory_id, bot_id=bot_id, content="Attempted overwrite",
         ))

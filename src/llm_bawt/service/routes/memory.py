@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from llm_bawt.memory.errors import MemoryUpdateConflictError, MemoryUpdateDuplicateError
+
 from ..dependencies import get_effective_bot_id, get_service, require_memory_client
 from ..logging import get_service_logger
 from ..schemas import (
@@ -230,6 +232,8 @@ def update_memory(
         )
     except HTTPException:
         raise
+    except (MemoryUpdateDuplicateError, MemoryUpdateConflictError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         log.error(f"Failed to update memory for bot '{bot_id}': {e}")
         raise HTTPException(status_code=500, detail=str(e))
