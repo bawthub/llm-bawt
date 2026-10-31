@@ -744,6 +744,7 @@ def test_requeue_metadata_merge_is_ignored_when_stop_cancels(pg_turns):
 def test_tool_start_does_not_wait_on_a_locked_parent_turn(pg_turns):
     """A tool-start FK can coexist with an app writer's non-key row lock."""
     from llm_bawt.service.tool_event_coordinator import ToolEventCoordinator
+    from llm_bawt.service.turn_admission import fence_consumption
 
     turns, bot = pg_turns
     turn_id = _open(turns, bot)
@@ -765,7 +766,9 @@ def test_tool_start_does_not_wait_on_a_locked_parent_turn(pg_turns):
     worker = threading.Thread(target=start)
     try:
         with turns.engine.begin() as holder:
-            holder.execute(sa_text("SELECT id FROM turn_logs WHERE id=:id FOR NO KEY UPDATE"), {"id": turn_id})
+            # Exercise the real admission writer's lock, not a hand-written lock
+            # that would still pass if fence_consumption regressed to FOR UPDATE.
+            assert fence_consumption(holder, turn_id=turn_id, claim=None) == "streaming"
             worker.start()
             # timing-ok: a hang guard while the holder deliberately keeps its lock
             assert done.wait(10), "tool start waited for the turn-row lock"
@@ -775,6 +778,44 @@ def test_tool_start_does_not_wait_on_a_locked_parent_turn(pg_turns):
         worker.join(10)
         assert not worker.is_alive()
     finally:
+        with turns.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM tool_call_records WHERE turn_id=:id"), {"id": turn_id})
+
+
+@pytest.mark.integration
+def test_reservation_delete_lock_excludes_concurrent_tool_start(pg_turns):
+    """A deleting reservation retains its stronger lock until commit."""
+    from sqlmodel import Session
+
+    from llm_bawt.service.tool_call_store import ToolCallStore
+    from llm_bawt.service.turn_admission import _LockedReservation, _lock_open_reservation
+
+    turns, bot = pg_turns
+    turn_id = f"turn-approval-{uuid.uuid4().hex}"
+    _reserve(turns, bot, turn_id)
+    outcome = []
+
+    def start():
+        try:
+            outcome.append(ToolCallStore(turns.engine).save_start(
+                turn_id=turn_id, bot_id=bot, user_id="nick", call_id="reserved-tool",
+                tool_name="tasks_reviews_add",
+            ))
+        except Exception as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=start)
+    try:
+        with turns.engine.begin() as holder, Session(bind=holder) as session:
+            assert isinstance(_lock_open_reservation(holder, session, turn_id), _LockedReservation)
+            worker.start()
+            _assert_waiting_on_holder(turns.engine, holder, worker)
+        worker.join(10)
+        assert not worker.is_alive() and len(outcome) == 1
+        assert not isinstance(outcome[0], Exception)
+    finally:
+        if worker.is_alive():
+            worker.join(10)
         with turns.engine.begin() as conn:
             conn.execute(sa_text("DELETE FROM tool_call_records WHERE turn_id=:id"), {"id": turn_id})
 

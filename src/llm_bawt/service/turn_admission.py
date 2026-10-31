@@ -447,7 +447,9 @@ def release_reservation(
         else:
             if not bot_id or not trigger_message_id:
                 return False
-            lock = " FOR NO KEY UPDATE" if conn.dialect.name == "postgresql" else ""
+            # Deletion changes the parent key: exclude concurrent tool-start FK checks
+            # between the no-tool-rows check and DELETE.
+            lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
             row = conn.execute(sa_text(
                 "SELECT status, ended_at, bot_id, trigger_message_id, request_json,"
                 " stream, agent_session_key, agent_request_id, response_text"
@@ -531,12 +533,14 @@ _PRODUCER_CHANGED = object()
 
 @dataclass(frozen=True)
 class _LockedReservation:
-    row: Any  # the TurnLog row, held FOR UPDATE
+    row: Any  # the TurnLog row, held FOR UPDATE when deleting; otherwise NO KEY UPDATE
     delivery_id: str | None
     owner: str | None
 
 
-def _lock_open_reservation(conn, session: Session, turn_id: str, *, owner: str | None = None):
+def _lock_open_reservation(
+    conn, session: Session, turn_id: str, *, owner: str | None = None, deleting: bool = True,
+):
     """Lock an open reservation in the admission lock order; write nothing.
 
     The one lock protocol for every revoke disposition: target lock → producer
@@ -567,7 +571,9 @@ def _lock_open_reservation(conn, session: Session, turn_id: str, *, owner: str |
         conn.execute(sa_text(
             "SELECT 1 FROM tool_approval_requests WHERE continuation_claim_token=:owner" + lock
         ), {"owner": head_owner})
-    row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(key_share=True)).first()
+    row = session.exec(select(TurnLog).where(TurnLog.id == turn_id).with_for_update(
+        key_share=not deleting,
+    )).first()
     if row is None or row.status != RESERVED or row.ended_at is not None:
         return None  # consumed or ended since the head read
     locked = _reservation_payload(row.request_json)
@@ -578,7 +584,7 @@ def _lock_open_reservation(conn, session: Session, turn_id: str, *, owner: str |
 
 def _revoke_reservation_once(conn, session: Session, turn_id: str, *, disposition: str,
                              audit: Mapping[str, Any]):
-    locked = _lock_open_reservation(conn, session, turn_id)
+    locked = _lock_open_reservation(conn, session, turn_id, deleting=disposition == "hold")
     if not isinstance(locked, _LockedReservation):
         return locked
     if disposition == "hold":
