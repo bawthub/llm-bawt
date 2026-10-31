@@ -278,7 +278,7 @@ class DeliveryTransitionEvents:
             except Exception:  # noqa: BLE001 - fail closed to audit-only
                 logger.exception("delivery event bot visibility unavailable; recording audit-only")
                 visible = False
-        stopped_after_start = record.status == "DELIVERED" and record.metadata.get("stopped_after_start") is True
+        stopped_after_start = record.stopped_after_start
         payload = {"phase": record.status}
         if reason_code and _REASON_CODE.fullmatch(reason_code):
             payload["reason_code"] = reason_code

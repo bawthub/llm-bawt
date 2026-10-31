@@ -179,6 +179,16 @@ async def _await_delivery(receipt: dict, wait_seconds: float) -> dict:
                 "error": current.get("last_error") or f"delivery {status.lower()}",
                 "content": ""}
     turn = await get_json(f"/v1/turn-logs/{current.get('turn_id')}") or {}
+    if (current.get("metadata") or {}).get("stopped_after_start") is True:
+        partial = turn.get("response") or ""
+        return {
+            **current,
+            "success": False, "dispatched": True,
+            "error": current.get("last_error") or "Stopped by user after it ran",
+            "content": "", "partial": bool(partial), "partial_content": partial,
+            "response_model": current.get("response_model") or turn.get("model"),
+            "turn_status": turn.get("status"),
+        }
     return {
         **current,
         "success": True,

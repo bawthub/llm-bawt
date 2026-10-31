@@ -299,6 +299,25 @@ def test_await_delivery_reads_reply_from_exact_turn(monkeypatch) -> None:
     assert result["turn_status"] == "ok"
 
 
+def test_await_delivery_reports_stopped_started_turn_as_failure(monkeypatch) -> None:
+    async def get_json(path: str):
+        if path == "/v1/turn-logs/turn-delivery-1":
+            return {"response": "partial work", "status": "aborted", "model": "m"}
+        return None
+
+    monkeypatch.setattr(server, "_get_json", get_json)
+    result = asyncio.run(tools._await_delivery({
+        "delivery_id": "delivery-1", "status": "DELIVERED",
+        "turn_id": "turn-delivery-1", "last_error": "Stopped by user after it ran",
+        "metadata": {"stopped_after_start": True},
+    }, 5.0))
+    assert result["success"] is False and result["dispatched"] is True
+    assert result["error"] == "Stopped by user after it ran"
+    assert result["content"] == ""
+    assert result["partial"] is True and result["partial_content"] == "partial work"
+    assert result["turn_status"] == "aborted"
+
+
 def test_await_delivery_timeout_is_in_flight_not_failure_to_dispatch(monkeypatch) -> None:
     async def get_json(_path: str):
         return {"status": "DISPATCHING"}

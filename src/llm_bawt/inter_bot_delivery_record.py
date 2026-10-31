@@ -130,6 +130,10 @@ class DeliveryRecord:
             raise ValueError("delivery author is required")
         return author
 
+    @property
+    def stopped_after_start(self) -> bool:
+        return self.status == "DELIVERED" and self.metadata.get("stopped_after_start") is True
+
     COMPACT_PREVIEW_CHARS = 120
     COMPACT_ERROR_CHARS = 200
 

@@ -88,6 +88,26 @@ def test_opt_in_preview_oldest_and_stable_retry(rig):
                             {"owner": rig.owner}).scalar_one() == 1
 
 
+def test_stopped_started_route_reports_stopped_on_retry(rig):
+    bot = min(rig.slugs)
+    rig.router.set_enabled(rig.owner, bot, True)
+    request = RouteRequest(user_id=rig.owner)
+    original = rig.router.route(request, message="route work", idempotency_key="stopped-route")
+    with rig.store.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET status='DELIVERED',
+                delivered_at=now(), last_error='Stopped by user after it ran',
+                metadata_json=jsonb_set(COALESCE(metadata_json, '{}'::jsonb),
+                                        '{stopped_after_start}', 'true'::jsonb)
+            WHERE id=:id
+        """), {"id": original["delivery_id"]})
+
+    retried = rig.router.route(request, message="route work", idempotency_key="stopped-route")
+    assert retried["duplicate"] is True
+    assert retried["delivery_status"] == "DELIVERED"
+    assert retried["state"] == "stopped"
+
+
 def test_revocation_prevents_unaccepted_claim_and_accepted_work_is_not_retargeted(rig):
     selected = min(rig.slugs)
     rig.router.set_enabled(rig.owner, selected, True)

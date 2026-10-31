@@ -469,8 +469,10 @@ class MessageRouter:
             if record:
                 result["delivery_status"] = record.status
                 result["turn_id"] = record.turn_id
-                result["state"] = {
-                    "QUEUED": "queued", "STEERING": "running", "DISPATCHING": "running",
-                    "DELIVERED": "succeeded", "FAILED": "failed", "CANCELLED": "cancelled",
-                }.get(record.status, "unknown")
+                result["state"] = (
+                    "stopped" if record.stopped_after_start else {
+                        "QUEUED": "queued", "STEERING": "running", "DISPATCHING": "running",
+                        "DELIVERED": "succeeded", "FAILED": "failed", "CANCELLED": "cancelled",
+                    }.get(record.status, "unknown")
+                )
         return result
