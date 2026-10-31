@@ -167,7 +167,7 @@ def test_another_app_server_version_fails_the_send_and_is_remembered(tmp_path):
     errors = [e["text"] for e in _published(bridge, AgentEventKind.ERROR)]
     assert len(errors) == 2
     for text in errors:
-        assert "codex app-server 0.158.0 is not the supported 0.157.1" in text
+        assert "codex app-server 0.158.0 is not the supported 0.163.0" in text
         assert "codex_transport=exec" in text
     assert steers == [{"ok": False, "error": "no_active_run"}]
     # Spawned once: the second send failed from the remembered verdict.

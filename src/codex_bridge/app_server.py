@@ -39,7 +39,7 @@ from .process_ledger import register_process
 
 logger = logging.getLogger(__name__)
 
-APP_SERVER_VERSION = "0.157.1"
+APP_SERVER_VERSION = "0.163.0"
 CLIENT_NAME = "llm_bawt_codex_bridge"
 CLIENT_VERSION = "1"
 

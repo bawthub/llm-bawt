@@ -2,7 +2,7 @@
 
 The client tests run the fake app-server (``tests/codex_app_server_fake``) as
 a real child process; the messages both sides wrote are checked against the
-pinned 0.157.1 schema.
+pinned 0.163.0 schema.
 """
 
 from __future__ import annotations

@@ -267,7 +267,7 @@ class Config(RuntimeTunables, BaseSettings):
             "The backend hides models whose minimal_client_version exceeds it, so "
             "this is the floor a listing may claim. Accepted value: a codex CLI "
             "version string (default: the CLI the agent-bridge image ships, "
-            "0.157.1); raise it when a newer model needs a newer client. "
+            "0.163.0); raise it when a newer model needs a newer client. "
             "Set via LLM_BAWT_CODEX_CLIENT_VERSION."
         ),
     )

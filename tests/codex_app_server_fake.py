@@ -5,11 +5,11 @@ JSON-RPC subset the bridge uses, over real stdin/stdout pipes, so the client
 is tested against a real child process: its pipes, EOF and exit. Everything
 the bridge writes is logged to ``FAKE_LOG`` and everything the fake writes to
 ``FAKE_SENT``; :func:`assert_matches_schema` checks both against the pinned
-0.157.1 schema in ``tests/fixtures/codex_app_server/``.
+0.163.0 schema in ``tests/fixtures/codex_app_server/``.
 
 Behaviour comes from the environment:
 
-``FAKE_VERSION``  version in the ``initialize`` userAgent (default 0.157.1)
+``FAKE_VERSION``  version in the ``initialize`` userAgent (default 0.163.0)
 ``FAKE_ARGV``     file the fake writes its argv to
 ``FAKE_MODE``     ``complete``: stream a reply, ask for an approval and wait
                   for the refusal, then complete. ``hold``: stream a delta and
@@ -27,7 +27,7 @@ import json
 import sys
 from pathlib import Path
 
-FIXTURES = Path(__file__).parent / "fixtures" / "codex_app_server" / "0.157.1"
+FIXTURES = Path(__file__).parent / "fixtures" / "codex_app_server" / "0.163.0"
 
 THREAD_ID = "thr-1"
 TURN_ID = "turn-1"
@@ -96,7 +96,7 @@ for line in sys.stdin:
     record(LOG, message)
     method, rid = message.get("method"), message.get("id")
     if method == "initialize":
-        version = os.environ.get("FAKE_VERSION", "0.157.1")
+        version = os.environ.get("FAKE_VERSION", "0.163.0")
         send({"id": rid, "result": {"userAgent": "llm_bawt_codex_bridge/" + version + " (Linux)"}})
     elif method in ("thread/start", "thread/resume"):
         send({"id": rid, "result": {"thread": {"id": THREAD}}})
