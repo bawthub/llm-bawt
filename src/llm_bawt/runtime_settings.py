@@ -156,6 +156,9 @@ class BotProfileStore:
     def __init__(self, config: Config):
         self.config = config
         self.engine = None
+        # Why a configured DB left ``engine`` None, for callers that must
+        # report it rather than read it as an empty table (TASK-1819).
+        self.init_error: str | None = None
         if not has_database_credentials(config):
             return
 
@@ -163,10 +166,12 @@ class BotProfileStore:
             from .utils.db import get_shared_engine
             self.engine = get_shared_engine(config)  # TASK-202: shared pool
             if self.engine is None:
+                self.init_error = "bot profiles DB URL unavailable"
                 return
             self._ensure_tables_exist()
         except Exception as e:
             self.engine = None
+            self.init_error = f"bot profiles DB unavailable: {e}"
             logger.warning("Bot profiles DB unavailable: %s", e)
 
     def _ensure_tables_exist(self) -> None:

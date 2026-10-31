@@ -6,6 +6,7 @@ Bot definitions are loaded exclusively from the database (bot_profiles table).
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,16 @@ _SYSTEM_PROMPTS: dict[str, str] = {}
 _RAW_BOT_DATA: dict[str, dict] = {}
 _FORCE_RELOAD: bool = False
 _LOADED: bool = False
+# Why the last load failed, or None. A failed load is never an empty registry:
+# the previous registry is kept and the load retried after a short backoff
+# (TASK-1819). An explicit invalidate retries at once.
+_LOAD_ERROR: str | None = None
+_RETRY_AFTER: float = 0.0
+_LOAD_RETRY_SECONDS = 15.0
+
+
+class BotRegistryUnavailable(RuntimeError):
+    """The bot profile database could not be read; distinct from zero bots."""
 
 
 # ── Named system prompts (code constants, not runtime config) ──────────
@@ -126,8 +137,9 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 def invalidate_bots_cache() -> None:
     """Force the next access to reload bots from DB."""
-    global _FORCE_RELOAD
+    global _FORCE_RELOAD, _RETRY_AFTER
     _FORCE_RELOAD = True
+    _RETRY_AFTER = 0.0
 
 
 def _check_reload() -> bool:
@@ -137,17 +149,29 @@ def _check_reload() -> bool:
     """
     global _FORCE_RELOAD, _LOADED
 
-    if _FORCE_RELOAD or not _LOADED:
+    if (_FORCE_RELOAD or not _LOADED) and time.monotonic() >= _RETRY_AFTER:
         _FORCE_RELOAD = False
         _load_bots_config()
         return True
     return False
 
 
+def bot_registry_error() -> str | None:
+    """Why the bot registry could not be loaded from the DB, or None when it was.
+
+    Callers that report the registry (``/v1/bots``) must not present an
+    unreadable DB as "no bots configured".
+    """
+    _check_reload()
+    return _LOAD_ERROR
+
+
 def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
     """Load all bot profiles from DB, keyed by slug.
 
-    Returns an empty dict if the database is unavailable.
+    Returns an empty dict only when this process has no database configured
+    (a remote CLI). A configured database that cannot be read raises
+    :class:`BotRegistryUnavailable`; it is never reported as zero bots.
     """
     store = None
     try:
@@ -165,8 +189,7 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
 
         store = BotProfileStore(config)
         if store.engine is None:
-            logger.warning("Bot profiles DB engine unavailable")
-            return {}
+            raise BotRegistryUnavailable(store.init_error or "bot profiles DB engine unavailable")
 
         rows = store.list_all()
         tags_by_bot = _load_bot_tags(store.engine)
@@ -213,9 +236,10 @@ def _load_db_bot_profiles() -> dict[str, dict[str, Any]]:
                 entry["agent_backend_config"] = row.agent_backend_config
             profiles[slug] = entry
         return profiles
+    except BotRegistryUnavailable:
+        raise
     except Exception as e:
-        logger.warning("Could not load DB bot profiles: %s", e)
-        return {}
+        raise BotRegistryUnavailable(f"could not read bot profiles: {e}") from e
     finally:
         if store is not None and getattr(store, "engine", None) is not None:
             try:
@@ -240,8 +264,23 @@ def _load_bots_config() -> None:
     This is the sole source of bot data — no YAML fallback.
     """
     global BUILTIN_BOTS, _DEFAULTS, _SYSTEM_PROMPTS, _RAW_BOT_DATA, _LOADED
+    global _LOAD_ERROR, _RETRY_AFTER, _FORCE_RELOAD
 
-    db_profiles = _load_db_bot_profiles()
+    # Named prompts are code constants and never depend on the DB read.
+    _SYSTEM_PROMPTS.clear()
+    _SYSTEM_PROMPTS.update(_BUILTIN_SYSTEM_PROMPTS)
+
+    try:
+        db_profiles = _load_db_bot_profiles()
+    except BotRegistryUnavailable as exc:
+        _LOAD_ERROR = str(exc)
+        _RETRY_AFTER = time.monotonic() + _LOAD_RETRY_SECONDS
+        _FORCE_RELOAD = True
+        logger.error(
+            "Bot registry load failed; keeping %d previously loaded bots, retrying in %.0fs: %s",
+            len(BUILTIN_BOTS), _LOAD_RETRY_SECONDS, exc,
+        )
+        return
 
     bots: dict[str, Bot] = {}
     raw_data: dict[str, dict] = {}
@@ -287,10 +326,10 @@ def _load_bots_config() -> None:
     BUILTIN_BOTS.update(bots)
     _RAW_BOT_DATA.clear()
     _RAW_BOT_DATA.update(raw_data)
-    _SYSTEM_PROMPTS.clear()
-    _SYSTEM_PROMPTS.update(_BUILTIN_SYSTEM_PROMPTS)
 
     _LOADED = True
+    _LOAD_ERROR = None
+    _RETRY_AFTER = 0.0
 
     logger.debug("Loaded %d bots from database", len(bots))
 

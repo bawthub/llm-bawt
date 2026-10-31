@@ -192,7 +192,7 @@ def test_database_connections_receive_deadman_timeouts() -> None:
         def close(self):
             executed.append("CLOSE")
 
-    connection = SimpleNamespace(cursor=lambda: Cursor())
+    connection = SimpleNamespace(cursor=lambda: Cursor(), commit=lambda: executed.append("COMMIT"))
     _configure_dbapi_connection(connection)
 
     assert executed == [
@@ -200,7 +200,11 @@ def test_database_connections_receive_deadman_timeouts() -> None:
         "SET lock_timeout = '5s'",
         "SET statement_timeout = '120s'",
         "SET idle_in_transaction_session_timeout = '30s'",
+        "SET tcp_keepalives_idle = 30",
+        "SET tcp_keepalives_interval = 10",
+        "SET tcp_keepalives_count = 3",
         "CLOSE",
+        "COMMIT",  # a pool rollback must not revert the policy (TASK-1819)
     ]
 
 

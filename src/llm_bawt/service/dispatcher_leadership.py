@@ -33,6 +33,8 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError, InvalidRequestError
 
+from ..utils.db import TCP_KEEPALIVE_CONNECT_ARGS
+
 logger = logging.getLogger(__name__)
 
 DISPATCHER_LOCK_NAME = "inter-bot-dispatcher"
@@ -49,10 +51,7 @@ PROBE_TIMEOUT_SECONDS = 20.0
 # write (the probe itself) may wait before the socket errors out.
 LOCK_SESSION_CONNECT_ARGS: dict[str, Any] = {
     "connect_timeout": 10,
-    "keepalives": 1,
-    "keepalives_idle": 30,
-    "keepalives_interval": 10,
-    "keepalives_count": 3,
+    **TCP_KEEPALIVE_CONNECT_ARGS,
     "tcp_user_timeout": 15_000,
 }
 

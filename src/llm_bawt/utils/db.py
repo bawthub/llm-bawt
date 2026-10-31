@@ -83,10 +83,30 @@ DEFAULT_POOL_RECYCLE_SECONDS = 1800
 DEFAULT_LOCK_TIMEOUT = "5s"
 DEFAULT_STATEMENT_TIMEOUT = "120s"
 DEFAULT_IDLE_TRANSACTION_TIMEOUT = "30s"
+# A silently dead peer (host power cut, NAT drop) is detected in about
+# idle + interval * count = 60s on both ends. Client side: libpq parameters
+# (psycopg2 forwards unknown connect kwargs). Server side: the same values as
+# session GUCs, so the backend of a vanished client exits and releases its
+# locks instead of lingering until the server's OS default (~2h) (TASK-1819).
+TCP_KEEPALIVE_IDLE_SECONDS = 30
+TCP_KEEPALIVE_INTERVAL_SECONDS = 10
+TCP_KEEPALIVE_COUNT = 3
+TCP_KEEPALIVE_CONNECT_ARGS: dict[str, Any] = {
+    "keepalives": 1,
+    "keepalives_idle": TCP_KEEPALIVE_IDLE_SECONDS,
+    "keepalives_interval": TCP_KEEPALIVE_INTERVAL_SECONDS,
+    "keepalives_count": TCP_KEEPALIVE_COUNT,
+}
 
 
 def _configure_dbapi_connection(dbapi_connection) -> None:
-    """Apply the per-session safety policy to a raw DB-API connection."""
+    """Apply the per-session safety policy to a raw DB-API connection.
+
+    The DB-API opens an implicit transaction for the first statement, and the
+    pool rolls a connection back when it is returned, which also reverts a
+    plain ``SET``. Commit, so the policy holds for the life of the session
+    rather than only its first checkout (TASK-1819).
+    """
     cursor = dbapi_connection.cursor()
     cursor.execute("SET timezone = 'UTC'")
     cursor.execute(f"SET lock_timeout = '{DEFAULT_LOCK_TIMEOUT}'")
@@ -95,7 +115,11 @@ def _configure_dbapi_connection(dbapi_connection) -> None:
         "SET idle_in_transaction_session_timeout = "
         f"'{DEFAULT_IDLE_TRANSACTION_TIMEOUT}'"
     )
+    cursor.execute(f"SET tcp_keepalives_idle = {TCP_KEEPALIVE_IDLE_SECONDS}")
+    cursor.execute(f"SET tcp_keepalives_interval = {TCP_KEEPALIVE_INTERVAL_SECONDS}")
+    cursor.execute(f"SET tcp_keepalives_count = {TCP_KEEPALIVE_COUNT}")
     cursor.close()
+    dbapi_connection.commit()
 
 
 def set_utc_on_connect(engine: Engine) -> None:
@@ -175,7 +199,7 @@ def build_engine(
     """
     from sqlalchemy import create_engine
 
-    connect_args: dict[str, Any] = {}
+    connect_args: dict[str, Any] = dict(TCP_KEEPALIVE_CONNECT_ARGS)
     if application_name:
         # psycopg2 forwards this to Postgres so it appears in pg_stat_activity.
         connect_args["application_name"] = application_name[:63]  # PG cap

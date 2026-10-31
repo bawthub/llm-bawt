@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ...bots import BotManager
+from ...bots import BotManager, bot_registry_error
 from ...steer_capabilities import bot_steer_caps
 from ...voice_resolution import global_default_voice, resolve_bot_voice
 from ..dependencies import get_service
@@ -189,9 +189,14 @@ def list_bots():
     """List available bots configured on the service."""
     service = get_service()
     bot_manager = BotManager(service.config)
+    listed = bot_manager.list_bots()
+    if bot_registry_error() and not listed:
+        # An unreadable DB is not "no bots": a 200 [] sends clients to first-run
+        # setup. The cause (DB error text) stays in the service log.
+        raise HTTPException(status_code=503, detail="Bot registry unavailable; retrying")
     global_voice = global_default_voice(service.config)
     bots = []
-    for bot in bot_manager.list_bots():
+    for bot in listed:
         voice = resolve_bot_voice(bot.default_voice, global_voice)
         bots.append(BotInfo(
             slug=bot.slug,

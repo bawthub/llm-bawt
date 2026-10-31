@@ -104,6 +104,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_env_import_pg.py::",
     "test_operator_freeze_pg.py::",
     "test_thread_agent_keys.py::TestAgentKeyEndpointLiveDB::",
+    "test_db_session_policy_pg.py::",
 )
 
 PG_SELECTORS = tuple("tests/" + suite.removesuffix("::") for suite in PG_ACCEPTANCE_SUITES)
