@@ -169,6 +169,7 @@ def test_take_clears_once_and_mints_one_invocation_bound_token(signer, monkeypat
         with _window(selected, request, llm, phase):
             tokens.append(service_codec._runtime_turn.get())
             envelope = principal.mint("messages_add", _arguments())
+            assert service_codec.open_service_native_selected(envelope, "messages_add", _arguments()) is True
             assert service_codec.open_service_session_owner(envelope, "messages_add", _arguments()) == (BOT, USER)
             # Invocation binding remains exact; unrelated tools gain no owner.
             with pytest.raises(Exception):
@@ -358,10 +359,13 @@ def test_concurrent_history_contexts_are_isolated_and_restore_parent(signer):
             for phase in ("initial", "final"):
                 with _window(selected, request, llm, phase, turn_id=turn):
                     barrier.wait(timeout=10)
+                    assert service_codec._runtime_native_selected.get() is True
                     seen.append(turn_codec.open_task_turn_context(service_codec._runtime_turn.get()).session_id)
                     barrier.wait(timeout=10)
                 assert service_codec._runtime_turn.get() == "parent"
+                assert service_codec._runtime_native_selected.get() is False
         assert service_codec._runtime_turn.get() is None
+        assert service_codec._runtime_native_selected.get() is False
         return seen
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -389,9 +393,9 @@ def test_native_nonstream_scopes_inside_executor_only(signer, monkeypatch, failu
     bind = service_codec.bind_service_turn
 
     @contextmanager
-    def track(capability):
+    def track(capability, **kwargs):
         try:
-            with bind(capability):
+            with bind(capability, **kwargs):
                 yield
         finally:
             exits.append((threading.get_ident(), service_codec._runtime_turn.get()))

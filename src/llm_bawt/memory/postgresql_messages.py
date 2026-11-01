@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..message_authorship import AuthorReference
 from ..retrieval.fts_query import FtsQuery
+from .message_store import _NativeSelectedOwnerConstraint, NativeSelectedOwnerDenied
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,14 @@ class PostgreSQLMessageMixin:
         reasoning: str | None = None,
         author: AuthorReference | None = None,
         extract_memory: bool = True,
+        *,
+        _native_selected_owner: _NativeSelectedOwnerConstraint | None = None,
     ) -> None:
         """Add a message through the extracted permanent-row store."""
+        if _native_selected_owner is not None:
+            if type(_native_selected_owner) is not _NativeSelectedOwnerConstraint:
+                raise NativeSelectedOwnerDenied()
+            _native_selected_owner.validate(session_id, self.bot_id)
         self._message_rows.upsert(
             message_id=message_id,
             role=role,
@@ -45,6 +52,8 @@ class PostgreSQLMessageMixin:
             reasoning=reasoning,
             author=author,
             extract_memory=extract_memory,
+            **({"_native_selected_owner": _native_selected_owner}
+               if _native_selected_owner is not None else {}),
         )
 
     def get_unprocessed_messages(self, limit: int = 100) -> list[dict]:

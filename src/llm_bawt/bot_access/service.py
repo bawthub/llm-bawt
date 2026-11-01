@@ -35,10 +35,11 @@ def is_service_self(access: BotAccess, target: str) -> bool:
 SERVICE_HEADER = "X-LLM-Bawt-MCP-Service"
 SERVICE_TTL_SECONDS = 120
 _runtime_turn: ContextVar[str | None] = ContextVar("mcp_runtime_service_turn", default=None)
+_runtime_native_selected: ContextVar[bool] = ContextVar("mcp_runtime_native_selected", default=False)
 
 
 @contextmanager
-def bind_service_turn(capability: str | None):
+def bind_service_turn(capability: str | None, *, _native_selected: bool = False):
     """Scope an EXISTING server-minted turn proof to runtime history writes.
 
     Never read this from MCP arguments or persist it on a cached MemoryClient.
@@ -46,9 +47,11 @@ def bind_service_turn(capability: str | None):
     approval-context header: runtime persistence remains a service operation.
     """
     token = _runtime_turn.set(capability)
+    native = _runtime_native_selected.set(_native_selected)
     try:
         yield
     finally:
+        _runtime_native_selected.reset(native)
         _runtime_turn.reset(token)
 
 
@@ -77,7 +80,18 @@ class ServicePrincipal:
             if (turn.session_id == arguments["session_id"]
                     and turn.bot_id == caller.bot_id == arguments.get("bot_id")
                     and turn.user_id == caller.user_id == arguments.get("user_id")):
-                payload["conversation_context"] = raw
+                # Blank writes perform no DML. Validate the supplied proof above,
+                # but retain authoritative guard lookups rather than bypassing the
+                # write-statement authorization which a blank write cannot run.
+                blank_native = _runtime_native_selected.get() and not arguments.get("content", "").strip()
+                if blank_native:
+                    # No owner shortcut, but do not extend the verified turn's
+                    # expiry merely because this invocation performs no DML.
+                    payload["conversation_expires_at"] = turn.issued_at + TASK_TURN_CONTEXT_TTL_SECONDS
+                else:
+                    payload["conversation_context"] = raw
+                    if _runtime_native_selected.get():
+                        payload["native_selected_history"] = True
         return _get_fernet().encrypt(json.dumps(payload, sort_keys=True).encode()).decode("ascii")
 
 
@@ -91,6 +105,13 @@ def _open_service(token: str, name: str, arguments: dict):
                 or payload.get("invocation") != canonical_invocation_hash(name, arguments)):
             raise ValueError("invalid service capability")
         expires = signer.extract_timestamp(token.encode("ascii")) + SERVICE_TTL_SECONDS
+        blank_native = "conversation_expires_at" in payload
+        if blank_native:
+            if (type(payload["conversation_expires_at"]) is not int
+                    or name != "messages_add" or arguments.get("content", "").strip()
+                    or "conversation_context" in payload or "native_selected_history" in payload):
+                raise ValueError("invalid conversation expiry")
+            expires = min(expires, payload["conversation_expires_at"])
         owner = None
         if "conversation_context" in payload:
             turn = open_task_turn_context(payload["conversation_context"])
@@ -101,9 +122,13 @@ def _open_service(token: str, name: str, arguments: dict):
                 raise ValueError("invalid service conversation")
             expires = min(expires, turn.issued_at + TASK_TURN_CONTEXT_TTL_SECONDS)
             owner = (turn.bot_id, turn.user_id)
+        native = "native_selected_history" in payload
+        if native and (payload["native_selected_history"] is not True or owner is None
+                       or not arguments.get("content", "").strip()):
+            raise ValueError("invalid native selected conversation")
         caller = TrustedCaller(payload["bot_id"], payload["user_id"], "service", expires)
         caller.validate()
-        return caller, owner
+        return caller, owner, native, blank_native
     except (InvalidToken, ValueError, TypeError, KeyError, UnicodeError, AttributeError):
         raise BotAccessError("caller_unavailable") from None
 
@@ -115,3 +140,14 @@ def open_service_capability(token: str, name: str, arguments: dict) -> TrustedCa
 def open_service_session_owner(token: str, name: str, arguments: dict):
     """Only the exact existing signed conversation, at BOTH authorization stages."""
     return _open_service(token, name, arguments)[1]
+
+
+def open_service_native_selected(token: str, name: str, arguments: dict) -> bool:
+    """Internal marker authenticated together with its exact conversation proof."""
+    return _open_service(token, name, arguments)[2]
+
+
+def open_service_runtime_history(token: str, name: str, arguments: dict) -> bool:
+    """Native writes AND blank fallbacks cannot be replayed as another class."""
+    opened = _open_service(token, name, arguments)
+    return opened[2] or opened[3]

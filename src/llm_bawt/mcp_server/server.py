@@ -395,7 +395,10 @@ async def add_message(
     if is_system_author_request(author_entity_type):  # TASK-1807: service-only
         trusted = fenced_system_author(author_entity_id, bot_id=bot_id)
         author_entity_type = author_entity_id = None
+    from .bot_access import current_native_selected_constraint
+
     storage = _get_storage()
+    constraint = current_native_selected_constraint()
     message = await storage.add_message(
         role=role,
         content=content,
@@ -409,6 +412,7 @@ async def add_message(
         author_entity_type=author_entity_type,
         author_entity_id=author_entity_id,
         trusted_author=trusted,
+        **({"_native_selected_owner": constraint} if constraint is not None else {}),
     )
     return message.to_dict()
 

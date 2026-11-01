@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from llm_bawt.bot_access import BotAccessError, TrustedCaller
 from llm_bawt.bot_access.service import (
     SERVICE_HEADER, open_service_capability, open_service_session_owner,
+    open_service_native_selected, open_service_runtime_history,
 )
 from llm_bawt.task_turn_context import (
     TASK_TURN_CONTEXT_HEADER, TASK_TURN_CONTEXT_TTL_SECONDS,
@@ -36,6 +37,10 @@ def trusted_caller(name: str, arguments: dict) -> TrustedCaller | None:
         service = _service_capability.get()
         if service is not None:
             identities.append(open_service_capability(service, name, arguments))
+            if open_service_runtime_history(service, name, arguments) and len(identities) != 1:
+                # Even matching approved/turn identities cannot launder this
+                # runtime-only proof into another caller class.
+                raise BotAccessError("caller_unavailable")
         for identity in identities:
             identity.validate()
         if len({(identity.bot_id, identity.user_id) for identity in identities}) > 1:
@@ -76,6 +81,22 @@ def trusted_session_owner(session_id: str, caller: TrustedCaller | None, *,
             and caller.user_id == turn.user_id):
         return turn.bot_id, turn.user_id
     return None
+
+
+def native_selected_constraint(name: str, arguments: dict, access):
+    """Private delivery only, after the same authorization used by both guards."""
+    service = _service_capability.get()
+    if service is None or not open_service_native_selected(service, name, arguments):
+        return None
+    caller = trusted_caller(name, arguments)  # revalidate class mixing/expiry
+    if caller is None or caller.kind != "service" or caller != access.caller:
+        raise BotAccessError("caller_unavailable")
+    from llm_bawt.memory.message_store import _NativeSelectedOwnerConstraint
+
+    return _NativeSelectedOwnerConstraint(
+        arguments["session_id"], caller.bot_id, caller.user_id,
+        caller.bot_id in access.private_bots,
+    )
 
 
 def strict_header(scope: dict, header: str) -> str | None:

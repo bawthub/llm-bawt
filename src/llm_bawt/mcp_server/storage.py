@@ -21,6 +21,8 @@ from typing import Any, TYPE_CHECKING
 
 from llm_bawt.memory.postgresql import PostgreSQLMemoryBackend
 from llm_bawt.memory.embeddings import generate_embedding
+from llm_bawt.memory.message_store import _NativeSelectedOwnerConstraint, NativeSelectedOwnerDenied
+from llm_bawt.bot_access import BotAccessError
 from llm_bawt.memory.short_term_message_reads import history_owner_clause
 from llm_bawt.message_authorship import (
     AuthorReference,
@@ -414,6 +416,7 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         author_entity_id: str | None = None,
         *,
         trusted_author: AuthorReference | None = None,
+        _native_selected_owner: _NativeSelectedOwnerConstraint | None = None,
     ) -> Message:
         """Add a message to conversation history.
 
@@ -437,6 +440,13 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         DB and stamped on the row. Resolution is best-effort: a failure logs and
         leaves ``session_id`` NULL rather than dropping the message.
         """
+        if _native_selected_owner is not None:
+            try:
+                if type(_native_selected_owner) is not _NativeSelectedOwnerConstraint:
+                    raise NativeSelectedOwnerDenied()
+                _native_selected_owner.validate(session_id, bot_id)
+            except NativeSelectedOwnerDenied:
+                raise BotAccessError("access_denied") from None
         provided = (str(message_id).strip() if message_id else "") or None
         message_id_final = provided or str(uuid.uuid4())
         ts = timestamp if timestamp is not None else time.time()
@@ -464,16 +474,23 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
                 )
 
         backend = self._get_backend(bot_id, provision_schema=True)
-        backend.add_message(
-            message_id=message_id_final,
-            role=role,
-            content=content,
-            timestamp=ts,
-            session_id=session_id,
-            attachments=attachments,
-            reasoning=reasoning,
-            author=author,
-        )
+        try:
+            backend.add_message(
+                message_id=message_id_final,
+                role=role,
+                content=content,
+                timestamp=ts,
+                session_id=session_id,
+                attachments=attachments,
+                reasoning=reasoning,
+                author=author,
+                **({"_native_selected_owner": _native_selected_owner}
+                   if _native_selected_owner is not None else {}),
+            )
+        except NativeSelectedOwnerDenied:
+            # Precise no-source/no-DML outcome, never fabricated Message success
+            # or raw DB details in the MCP authorization error.
+            raise BotAccessError("access_denied") from None
 
         # TASK-256: cheap auto-title from the first user message on a thread
         # still carrying the default title. Cosmetic + best-effort — the

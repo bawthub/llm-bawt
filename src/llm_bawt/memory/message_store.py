@@ -8,6 +8,7 @@ module owns only the two message tables and the permanent-row upsert contract.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -29,6 +30,7 @@ from sqlalchemy import (
     func,
     literal,
     or_,
+    select,
     text,
 )
 from sqlalchemy.engine import Engine
@@ -195,6 +197,30 @@ def get_forgotten_message_table(
     return table
 
 
+class NativeSelectedOwnerDenied(Exception):
+    """No authorized INSERT source row; no DML or successful write occurred."""
+
+
+@dataclass(frozen=True)
+class _NativeSelectedOwnerConstraint:
+    """Internal authenticated write predicate, not a caller-supplied identity."""
+
+    session_id: str
+    bot_id: str
+    user_id: str | None
+    require_user: bool
+
+    def validate(self, session_id: str | None, bot_id: str | None = None) -> None:
+        if (type(self) is not _NativeSelectedOwnerConstraint
+                or not isinstance(self.session_id, str) or not self.session_id
+                or not isinstance(self.bot_id, str) or not self.bot_id
+                or type(self.require_user) is not bool
+                or (self.user_id is not None and not isinstance(self.user_id, str))
+                or self.session_id != session_id
+                or (bot_id is not None and self.bot_id != bot_id)):
+            raise NativeSelectedOwnerDenied()
+
+
 class MessageRowStore:
     """Persist canonical rows while preserving stable-id upsert semantics."""
 
@@ -215,13 +241,23 @@ class MessageRowStore:
         reasoning: str | None = None,
         author: AuthorReference | None = None,
         extract_memory: bool = True,
+        _native_selected_owner: _NativeSelectedOwnerConstraint | None = None,
     ) -> None:
-        """Insert or refresh mutable fields atomically, without an existence read.
+        """Insert or refresh mutable fields atomically, without a separate SELECT.
 
+        Native-selected writes retain one sessions read inside INSERT...SELECT.
         Conflict updates preserve role/session/created_at. The incoming INSERT
         candidate must still satisfy DB column constraints, including on retry;
         unlike the former UPDATE branch, malformed immutable inputs can fail.
         """
+        if _native_selected_owner is not None:
+            if type(_native_selected_owner) is not _NativeSelectedOwnerConstraint:
+                raise NativeSelectedOwnerDenied()
+            _native_selected_owner.validate(session_id)
+            if not content or content.isspace():
+                # A constrained write must not silently skip its fresh predicate.
+                # Native blank service invocations instead use guard DB fallback.
+                raise NativeSelectedOwnerDenied()
         if not content or content.isspace():
             logger.warning("Skipping empty content for message ID: %s", message_id)
             return
@@ -256,7 +292,7 @@ class MessageRowStore:
             values.update(author_entity_type=author.entity_type, author_entity_id=author.entity_id)
         if not extract_memory:
             values.update(processed=True, summary_metadata=self._exclusion_metadata(dialect))
-        statement = insert(self.table).values(
+        incoming = dict(
             id=message_id, role=role, content=content, timestamp=timestamp,
             session_id=session_id, attachments=attachments if attachments is not None else [],
             reasoning=reasoning,
@@ -265,14 +301,41 @@ class MessageRowStore:
             processed=not extract_memory,
             **({"summary_metadata": {"extract_memory": False}} if not extract_memory else {}),
             created_at=datetime.now(timezone.utc),
-        ).on_conflict_do_update(index_elements=conflict, set_=values)
+        )
+        statement = insert(self.table)
+        if _native_selected_owner is not None:
+            owner = _native_selected_owner
+            # One necessary sessions relation read at the WRITE statement's
+            # snapshot. No lock/fence: a purge after that snapshot retains the
+            # baseline race. A stale source cannot reach even the conflict arm.
+            sessions = Table("sessions", MetaData(),
+                             Column("id", String(36)), Column("bot_id", String(64)),
+                             Column("user_id", String(100)))
+            predicate = and_(sessions.c.id == owner.session_id,
+                             sessions.c.bot_id == owner.bot_id)
+            if owner.require_user:
+                predicate = and_(predicate, sessions.c.user_id == owner.user_id)
+            source = select(*[
+                literal(value, type_=self.table.c[key].type).label(key)
+                for key, value in incoming.items()
+            ]).select_from(sessions).where(predicate)
+            statement = statement.from_select(list(incoming), source)
+        else:
+            statement = statement.values(**incoming)
+        statement = statement.on_conflict_do_update(index_elements=conflict, set_=values)
         with Session(self.engine) as session:
             try:
-                if not extract_memory:
-                    # RETURNING is part of the ONE DML statement, not an owner
-                    # or row-existence SELECT. Preserve Python's old malformed
-                    # truthy non-mapping failure BEFORE commit, rolling back all
-                    # updates. Falsy JSON values were normalized by the SQL CASE.
+                if _native_selected_owner is not None:
+                    # RETURNING belongs to this ONE DML statement. Check row
+                    # absence BEFORE metadata: JSON null is not a missing row.
+                    row = session.execute(
+                        statement.returning(self.table.c.summary_metadata)
+                    ).first()
+                    if row is None:
+                        raise NativeSelectedOwnerDenied()
+                    if not extract_memory and not isinstance(row[0], dict):
+                        raise TypeError("stored summary metadata must be a mapping")
+                elif not extract_memory:
                     metadata = session.execute(
                         statement.returning(self.table.c.summary_metadata)
                     ).scalar_one()

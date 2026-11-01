@@ -14,11 +14,17 @@ from llm_bawt.bot_access.service import SERVICE_SELF_TOOLS, is_service_self
 from llm_bawt.utils.bounded_worker import BoundedWorker
 from llm_bawt.utils.config import Config
 from llm_bawt.utils.db import get_shared_engine
-from .bot_access_identity import trusted_caller, trusted_session_owner
+from .bot_access_identity import trusted_caller, trusted_session_owner, native_selected_constraint
 from .bot_access_manifest import AGGREGATE_TOOLS, BOT_TARGET_TOOLS, GUARDED_TOOLS
 
 _invocation: ContextVar[tuple[str, dict] | None] = ContextVar("bot_access_invocation", default=None)
 _METADATA_WORKER = BoundedWorker(4, "bot-ownership")
+_native_selected_write: ContextVar = ContextVar("native_selected_write", default=None)
+
+
+def current_native_selected_constraint():
+    """Registered tool's authenticated constraint; never a public tool argument."""
+    return _native_selected_write.get()
 
 
 @contextmanager
@@ -54,9 +60,14 @@ class ToolBotAccess:
             raw = _invocation.get()
             received = raw[1] if raw is not None and raw[0] == name else dict(bound.arguments)
             access = await self.authorize(name, received, bound=bound)
-            with bind_bot_access(access):
-                result = fn(*bound.args, **bound.kwargs)
-                return await result if inspect.isawaitable(result) else result
+            constraint = native_selected_constraint(name, received, access)
+            token = _native_selected_write.set(constraint)
+            try:
+                with bind_bot_access(access):
+                    result = fn(*bound.args, **bound.kwargs)
+                    return await result if inspect.isawaitable(result) else result
+            finally:
+                _native_selected_write.reset(token)
 
         guarded.__signature__ = signature
         guarded.__annotations__ = inspect.get_annotations(fn, eval_str=True)

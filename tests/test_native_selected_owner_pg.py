@@ -40,6 +40,7 @@ def _receipt(sql):
     return {"application": len(sql), "pings": len(sql.pool_ping_sql),
             "total": len(sql.all_statements),
             "owner_selects": sum("SELECT bot_id, user_id FROM sessions" in s for s in sql),
+            "read_bearing_owner_dml": sum(s.lstrip().startswith("INSERT") and "FROM sessions" in s for s in sql),
             "selects": sum(s.lstrip().upper().startswith("SELECT") for s in sql.all_statements),
             "statements": sql.all_statements}
 
@@ -208,6 +209,12 @@ def test_actual_http_selected_native_history_sql(native_runtime, real_storage, r
         _record(record_property, role + "_append", sql)
         _owner_checks(sql, 0)
         assert sum("ON CONFLICT (bot_id, id)" in s for s in sql) == 1
+        # INSERT...SELECT is one READ-bearing DML statement, not zero reads.
+        owner_dml = [s for s in sql if s.lstrip().startswith("INSERT") and "FROM sessions" in s]
+        assert len(owner_dml) == 1
+        assert "sessions.id =" in owner_dml[0] and "sessions.bot_id =" in owner_dml[0]
+        assert "sessions.user_id =" in owner_dml[0]
+        assert "RETURNING" in owner_dml[0] and "FOR UPDATE" not in owner_dml[0]
         assert not any(s.startswith("SET ") for s in sql)
         if role == "assistant":
             assert len(sql.all_statements) == 2  # actual UPSERT + delegated ping
@@ -215,6 +222,8 @@ def test_actual_http_selected_native_history_sql(native_runtime, real_storage, r
             # Admission's actual session read primes an already-settled title.
             assert len(sql.all_statements) == (2 if title else 4), sql.all_statements
             assert any("UPDATE sessions" in s for s in sql) is (title is None), sql
+    assert len(whole.all_statements) == (24 if title else 26), whole.all_statements
+    assert _receipt(whole)["read_bearing_owner_dml"] == 2
     # Admission and context SELECTs remain in the WHOLE HTTP receipt; do not
     # sell the append optimization as a zero-SELECT whole request.
     assert any(s.lstrip().upper().startswith("SELECT") and s != "SELECT 1"

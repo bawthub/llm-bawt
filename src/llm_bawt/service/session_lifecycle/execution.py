@@ -185,7 +185,8 @@ class NativeSelectedHistory:
                               bot_id=bot_id, user_id=user_id, check_override=True)
         )
         self._next_phase = "final" if valid and phase == "initial" else "done"
-        return bind_service_turn(self.capability if valid else None)
+        return bind_service_turn(self.capability if valid else None,
+                                 _native_selected=valid and self.capability is not None)
 
 
 class NewSessionExecution:
