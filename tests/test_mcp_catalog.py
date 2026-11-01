@@ -438,13 +438,21 @@ async def test_real_mutation_still_passes_through_policy_gate(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_mcp_protocol_advertises_compact_catalog():
+async def test_mcp_protocol_advertises_compact_catalog(monkeypatch):
     from mcp.shared.memory import create_connected_server_and_client_session
+    from unittest.mock import Mock
+    from llm_bawt.utils import db
 
     # Exercises the MCP handler bound during FastMCP initialization, not just
-    # direct Python calls. No DB, model execution or external service involved.
+    # direct Python calls. The real lifespan runs too, but catalog discovery
+    # needs no policy DB. Explicitly model an unconfigured DB instead of letting
+    # host settings start a denied refresher and exhaust its readiness timeout.
+    # Real policy startup/teardown is covered by test_bot_policy_refresh_pg.py.
+    engine_factory = Mock(return_value=None)
+    monkeypatch.setattr(db, "get_shared_engine", engine_factory)
     async with create_connected_server_and_client_session(mcp) as session:
         result = await session.list_tools()
+    engine_factory.assert_called_once()
     assert len(result.tools) == len(TOOL_SUMMARIES)
     task = next(t for t in result.tools if t.name == "tasks_create")
     assert "Details: bawthub-mcp/" in task.description
