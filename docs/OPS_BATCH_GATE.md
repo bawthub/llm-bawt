@@ -163,6 +163,43 @@ Generic dispatch still refuses these queued snapshots. Focused disposable-PG
 coverage proves concurrent same-key replay/conflict, generic exclusion and
 revocation between creation and claim, without a runner or live identities.
 
+## Independent exact-commit source staging
+
+`ops/gate_source.py:staged_gate_source` is an unused context-managed staging
+helper for the future fixed runner. Only trusted code supplies the repository
+root and an owned, non-group/other-writable staging parent outside that root.
+It creates a new private directory, never a linked worktree or shared index.
+Dirty/staged/untracked source files and canonical Git config, hooks, credentials,
+remotes, alternates and parent history are not copied. Arbitrary **committed**
+secrets cannot be scrubbed while preserving exact source identity.
+
+Fixed system Git plumbing reads and hash-verifies the requested original commit,
+its complete tree closure and raw blobs under a default-deny environment, with
+replacement objects, lazy fetch, global/system config and hooks disabled. No
+repository code, checkout filter or template executes. Direct blob writes avoid
+`git archive`'s `export-ignore`/`export-subst` behavior and checkout EOL conversion.
+Unsupported symlinks, gitlinks, special files, non-UTF-8/unsafe/duplicate paths
+refuse before yielding. Explicit bounds refuse rather than truncate: 100,000
+files/tree entries, 512MiB file bytes, 64MiB per object and total tree metadata,
+64 tree levels and 4,095-byte relative paths.
+
+The fresh `.git` contains only newly written original commit/tree/blob objects,
+fixed minimal config, detached HEAD, a shallow boundary and a private index.
+Before yielding, the helper independently checks every exported path, raw blob
+hash and executable mode, exact file/directory inventory and private HEAD/tree.
+The source repository's files, index, refs and metadata remain unchanged. The
+context cleans its private stage on refusal, consumer failure and normal exit.
+
+The staging owner must keep the directory frozen while it is validated and
+handed to the sandbox; adversarial concurrent staging writers are unsupported.
+A future launcher must arrange unprivileged access and private scratch/mounts;
+this helper alone neither runs nor isolates repository code. Its result is an
+**initial source identity**, not an execution grant, toolchain/image attestation,
+trusted gate result or host receipt. No production path calls it or dispatches a
+runner. Focused scratch-Git tests cover metadata isolation, exact older commits,
+dirty exclusion, hostile filters/environment/replacements, link/path/size
+refusals, post-export tampering and partial-stage cleanup.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is
