@@ -33,7 +33,7 @@ from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPAT
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
 from .validation import canonical_json, validate_catalog
-from .worker_slots import process_spawn_hold_available, worker_slot_free
+from .worker_slots import process_spawn_held, process_spawn_hold_available, worker_slot_free
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +443,16 @@ class OpsStore:
             return 0
         with Session(self.engine) as session:
             return session.exec(select(func.count()).select_from(OpsJob).where(*self._job_filters(operation_slug, state))).one()
+
+    def process_spawns_held(self) -> bool:
+        """Plain authoritative read for a launcher holding its shared flock.
+
+        Deliberately no worker-slot advisory lock; failures propagate so the
+        spawn boundary defers rather than treating an unavailable DB as open.
+        """
+        self._require()
+        with self.engine.connect() as conn:
+            return process_spawn_held(conn)
 
     def claim_job(self, job_id, *, max_concurrent=None, hold_process_spawns=False,
                   process_child_count: int | None = None):

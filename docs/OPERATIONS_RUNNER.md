@@ -373,14 +373,39 @@ claims remain available.
 
 The hold persists across store/reconciler restarts and ends with the job's
 terminal-state commit, retaining its timestamp for forensics. The plain
-`process_spawn_held(conn)` read takes no advisory or row lock, for use by the
-future spawn-side flock fence. This is **not yet complete spawn/drain safety**:
-no current dispatcher requests a hold, no new operation is enabled, and neither
-initial/recovery spawn flock fencing nor the fixed fresh drain probe/self-config
-action is wired here. The future claim caller must retain the exclusive
-receipt-volume flock while supplying its fresh child observation and claiming;
-no Docker I/O runs inside the claim transaction. This slice alone does not
-permit ops-service recreation or a process pilot.
+`process_spawn_held(conn)` read takes no advisory or row lock for the spawn-side
+flock fence. This is **not yet complete spawn/drain safety**:
+no current dispatcher requests a hold, no new operation is enabled, and the
+fixed fresh drain probe/self-config action is not wired here. The future claim
+caller must retain the exclusive receipt-volume flock while supplying its
+fresh child observation and claiming; no Docker I/O runs inside the claim
+transaction. This prerequisite alone does not permit ops-service recreation
+or a process pilot.
+
+**Spawn-side fence (TASK-1169; no hold action enabled).** Both initial process
+launch and recovery respawn take `process-spawn.lock` in the configured receipt
+root with `LOCK_SH | LOCK_NB`. They then use the authoritative plain store read,
+without any worker-slot advisory lock, and retain the flock through revalidation,
+intent publication, Popen and child registration. A busy/unavailable lock, missing
+reader, unavailable database or active/unknown hold defers without a new spawn
+intent, attempt, receipt or abandonment. Recovery reports `deferred`/no state
+change, not LOST; the same request can proceed when the fence clears. Observing
+live children/worker locks and existing receipts never requires an open fence.
+The normal OpsService supplies its store reader; a separately constructed process
+executor must supply `spawn_hold_reader` explicitly or spawning fails closed.
+Readiness is not made unhealthy merely because a hold is active.
+
+**Dead-holder recovery remains an enabling-slice obligation.** A hold must not
+be dropped on a lease/TTL alone: an uncertain worker may still be swapping the
+reconciler. The existing reconciliation pump imports immutable terminal receipts
+(after its dispatch grace) and releases the effective hold with that terminal
+commit; uncertainty keeps the no-replay/forensic contract. Before a hold-taking
+self-config action is enabled, its implementation must name and test a persisted,
+bounded deadline and the recovery path that terminalizes a dead holder (including
+missing/unreadable receipts and failed restore). Worker timeouts alone do not
+prove a bound on receipt import or an unavailable reconciler. This is the open
+later-enabling question from the dormant ledger review, not an implemented
+recovery guarantee; no operation currently enables a hold or a process pilot.
 
 **Self-management (S4c).** The ops service identifies its own container by
 its full ID and Compose project/service labels. It looks the container up

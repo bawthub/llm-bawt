@@ -149,7 +149,7 @@ class OpsService:
             self._executors = {}
             return
         self.preparer = None
-        default = executor or DockerExecutor()
+        default = executor or DockerExecutor(spawn_hold_reader=store.process_spawns_held)
         self._executors = {default.kind(): default}
 
     def register_executor(self, executor):

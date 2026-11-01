@@ -310,7 +310,7 @@ def _stored_pull_auth() -> dict | None:
 class DockerExecutor(Executor):
     def __init__(self, *, client_factory=None, worker_image: str | None = None,
                  receipt_volume: str | None = None, receipt_root: str | None = None,
-                 pull_auth=None, render_api_factory=None):
+                 pull_auth=None, render_api_factory=None, spawn_hold_reader=None):
         self._client_factory = client_factory
         self._client = None
         self._own = None  # The ops service's own container identity (S4c).
@@ -329,7 +329,7 @@ class DockerExecutor(Executor):
         self._launchers = {
             EXECUTION_ISOLATED: ContainerLauncher(
                 client=lambda: self.client, get_worker=lambda name: self._get_worker(name)),
-            EXECUTION_PROCESS: ProcessLauncher(client=lambda: self.client),
+            EXECUTION_PROCESS: ProcessLauncher(client=lambda: self.client, spawn_hold_reader=spawn_hold_reader),
         }
 
     def supported_execution_modes(self):
@@ -906,6 +906,8 @@ class DockerExecutor(Executor):
             if liveness is Liveness.START_UNCONFIRMED:
                 return ReconcileResult("lost", output_tail=self._diagnostics(snapshot, directory, output_tail_bytes),
                                        error="worker start previously attempted without confirmation; not replayed")
+            if liveness is Liveness.DEFERRED:
+                return ReconcileResult(None)  # No attempt/receipt: leave the ledger nonterminal.
             if liveness is Liveness.STARTED:
                 return ReconcileResult("accepted")
             if liveness is Liveness.EXITED:

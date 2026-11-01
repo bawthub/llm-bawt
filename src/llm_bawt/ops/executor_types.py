@@ -12,6 +12,14 @@ class ExecutorError(RuntimeError):
     pass
 
 
+class SpawnDeferred(ExecutorError):
+    """No spawn attempt: retry through reconciliation after a transient fence.
+
+    Unlike an uncertain Popen/start, this consumes no attempt and must never
+    publish an abandonment/LOST result merely because the fence is busy.
+    """
+
+
 class QuiesceFenceUnsupported(ExecutorError):
     """The worker this executor would start provably cannot enforce the quiesce
     start fence (TASK-1169 S3). Definitive, unlike a fence that cannot be read

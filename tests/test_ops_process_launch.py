@@ -220,7 +220,7 @@ def run(request_path, sha):
     lock = (directory / "worker.lock").open("a")
     fcntl.flock(lock, fcntl.LOCK_EX)
     request = json.loads(request_path.read_text())
-    behavior = request["behavior"]
+    behavior = request.get("behavior", "ok")
     base = {"job_id": request["job_id"], "request_hash": sha, "accepted_at": _now(), "started_at": None}
     (directory / "env.json").write_text(json.dumps(dict(os.environ)))
     if behavior == "hang":
@@ -245,7 +245,8 @@ def run(request_path, sha):
 def rig(tmp_path):
     client = _Client(_export(_ops(**{"worker.py": FAKE_WORKER})))
     launcher = ProcessLauncher(client=lambda: client, python=sys.executable, python_image_id=PY_IMAGE,
-                               own_image=lambda: (PY_IMAGE, []), kill_grace=0, boot_id=lambda: "boot-1")
+                               own_image=lambda: (PY_IMAGE, []), kill_grace=0, boot_id=lambda: "boot-1",
+                               spawn_hold_reader=lambda: False)
     root = tmp_path / "receipts"
     root.mkdir()
     base = {"worker_image": IMAGE_ID, "receipt_volume": "v", "receipt_root": str(root)}
@@ -452,7 +453,8 @@ def test_a_lost_process_job_carries_the_launcher_diagnostics(rig):
 def _fresh(rig):
     launcher, settings, root, client = rig
     return ProcessLauncher(client=lambda: client, python=sys.executable, python_image_id=PY_IMAGE,
-                           own_image=lambda: (PY_IMAGE, []), kill_grace=0, boot_id=lambda: "boot-2"), settings, root
+                           own_image=lambda: (PY_IMAGE, []), kill_grace=0, boot_id=lambda: "boot-2",
+                           spawn_hold_reader=lambda: False), settings, root
 
 
 def test_a_held_worker_lock_is_alive(rig):

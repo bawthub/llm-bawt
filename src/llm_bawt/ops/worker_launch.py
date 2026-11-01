@@ -30,6 +30,7 @@ class Liveness(Enum):
     MISSING = "missing"                      # no worker exists for this job
     START_UNCONFIRMED = "start_unconfirmed"  # a start was attempted, never confirmed
     STARTED = "started"                      # an unstarted worker was started just now
+    DEFERRED = "deferred"                    # transient spawn fence; no attempt consumed
     EXITED = "exited"                        # the worker has ended
     ALIVE = "alive"                          # the worker is running
 

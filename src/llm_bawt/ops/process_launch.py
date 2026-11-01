@@ -37,9 +37,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .executor_types import ExecutorError
+from .executor_types import ExecutorError, SpawnDeferred
+from .process_spawn_fence import process_spawn_guard
 from .worker import atomic_json, utcnow
-from .worker_launch import ABANDONED, Liveness, WorkerLauncher, container_worker_name, refuse_recovery
+from .worker_launch import (ABANDONED, Liveness, RecoveryRefused, WorkerLauncher,
+                            container_worker_name, refuse_recovery)
 
 #: The files ``docker/Dockerfile.ops-worker`` copies to ``/ops/`` (pinned by a test).
 WORKER_FILES = frozenset({
@@ -280,13 +282,15 @@ class ProcessLauncher(WorkerLauncher):
                  python_image_id: str | None = None, popen=subprocess.Popen,
                  kill_grace: float | None = None, boot_id: Callable[[], str] = _boot_id,
                  clock: Callable[[], float] = time.monotonic,
-                 own_image: Callable[[], tuple[str, list[str]]] | None = None):
+                 own_image: Callable[[], tuple[str, list[str]]] | None = None,
+                 spawn_hold_reader: Callable[[], bool] | None = None):
         self._client = client
         self._python = python or sys.executable
         # The interpreter's identity: the reconciler's own immutable image.
         self._python_image_id = (python_image_id if python_image_id is not None
                                  else os.getenv("LLM_BAWT_OPS_RECONCILER_IMAGE", ""))
         self._own_image = own_image or self._inspect_own_image
+        self._spawn_hold_reader = spawn_hold_reader
         self._popen = popen
         self._kill_grace = (kill_grace if kill_grace is not None
                             else float(os.getenv("LLM_BAWT_OPS_WORKER_KILL_GRACE", "10")))
@@ -449,14 +453,16 @@ class ProcessLauncher(WorkerLauncher):
         attempt = int(intent.get("attempt") or 0)
         if attempt >= 2 or settings is None or not directory.is_dir() or (directory / ABANDONED).exists():
             return Liveness.START_UNCONFIRMED  # Fenced or spent: never revalidated, never respawned.
-        # A spawn was intended before, and its child may have outlived its
-        # dispatcher (own session): a refusal leaves side effects unknown.
-        refuse_recovery(revalidate, directory, prior_attempt=True)
         try:
-            # Nothing began executing: one respawn of the SAME request. The
-            # worker re-checks the start delay and the fence inside.
+            # Revalidate only once the spawn fence is open, under its shared
+            # lock. A deferred initial launch has no prior intent; a genuine
+            # recovery may have left a child behind, so its refusal is uncertain.
             self._spawn(job_id=job_id, settings=settings, directory=directory, digest=digest,
-                        attempt=attempt + 1)
+                        attempt=attempt + 1, revalidate=revalidate, prior_attempt=attempt > 0)
+        except SpawnDeferred:
+            return Liveness.DEFERRED
+        except RecoveryRefused:
+            raise
         except ExecutorError:
             return Liveness.START_UNCONFIRMED
         return Liveness.STARTED
@@ -473,29 +479,31 @@ class ProcessLauncher(WorkerLauncher):
             starts = [child.started_monotonic for child in self._children.values()]
         return len(starts), min(starts) if starts else None
 
-    def _spawn(self, *, job_id, settings, directory, digest, attempt):
-        self.preflight(settings)
-        bundle = self._bundle_path(settings["receipt_root"], self._image_id(settings["worker_image"]),
-                                   settings["code_digest"])
-        atomic_json(directory / "spawn-intent.json",
-                    {"attempt": attempt, "intended_at": utcnow(), "boot_id": self._boot_id()})
-        argv = [self._python, "-I", "-S", "-B", "-c", LAUNCHER, str(bundle), settings["code_digest"],
-                "--run", str(directory / "request.json"), digest]
-        try:
-            popen = self._popen(argv, cwd=str(directory), env=_scrubbed_env(), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
-                                start_new_session=True, preexec_fn=_set_limits)
-        except Exception as exc:
-            raise WorkerLaunchError("worker_unavailable", f"worker spawn failed: {type(exc).__name__}") from exc
-        atomic_json(directory / "spawn.json", {"attempt": attempt, "pid": popen.pid, "pgid": popen.pid})
-        child = _Child(popen, attempt, started_monotonic=self._clock())
-        with self._lock:
-            self._children[job_id] = child
-        deadline = (float(settings.get("start_delay_seconds") or 0) + float(settings["timeout_seconds"])
-                    + self._kill_grace)
-        threading.Thread(target=self._supervise, daemon=True,
-                         args=(job_id, child, directory, digest, deadline,
-                               int(settings["max_output_bytes"]))).start()
+    def _spawn(self, *, job_id, settings, directory, digest, attempt, revalidate=None, prior_attempt=False):
+        with process_spawn_guard(settings["receipt_root"], self._spawn_hold_reader):
+            refuse_recovery(revalidate, directory, prior_attempt=prior_attempt)
+            self.preflight(settings)
+            bundle = self._bundle_path(settings["receipt_root"], self._image_id(settings["worker_image"]),
+                                       settings["code_digest"])
+            atomic_json(directory / "spawn-intent.json",
+                        {"attempt": attempt, "intended_at": utcnow(), "boot_id": self._boot_id()})
+            argv = [self._python, "-I", "-S", "-B", "-c", LAUNCHER, str(bundle), settings["code_digest"],
+                    "--run", str(directory / "request.json"), digest]
+            try:
+                popen = self._popen(argv, cwd=str(directory), env=_scrubbed_env(), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+                                    start_new_session=True, preexec_fn=_set_limits)
+            except Exception as exc:
+                raise WorkerLaunchError("worker_unavailable", f"worker spawn failed: {type(exc).__name__}") from exc
+            atomic_json(directory / "spawn.json", {"attempt": attempt, "pid": popen.pid, "pgid": popen.pid})
+            child = _Child(popen, attempt, started_monotonic=self._clock())
+            with self._lock:
+                self._children[job_id] = child
+            deadline = (float(settings.get("start_delay_seconds") or 0) + float(settings["timeout_seconds"])
+                        + self._kill_grace)
+            threading.Thread(target=self._supervise, daemon=True,
+                             args=(job_id, child, directory, digest, deadline,
+                                   int(settings["max_output_bytes"]))).start()
 
     def _supervise(self, job_id, child, directory, digest, deadline, limit):
         streams = {"stdout": _Capped(child.popen.stdout, limit), "stderr": _Capped(child.popen.stderr, limit)}
