@@ -135,6 +135,34 @@ rows: the partial attempt index is used without a ledger sequential scan. Migrat
 interruption/rollback and key drift are covered separately. This is bounded-query
 evidence, not runner execution, SHIP proof or an operational throughput benchmark.
 
+## Dormant immutable request admission
+
+`ops/gate_admission.py:create_gate_job` is a create-only **internal, unused**
+adapter over the existing ops ledger. Trusted code must select the operation
+slug from configuration and obtain the opaque turn capability from authenticated
+request context; neither is a new tool/body identity or grant argument. The
+closed GatePlan still refuses BawtHub, arbitrary commands, paths and attempts.
+
+The canonical `llm-bawt.ops.gate-request/v1` payload binds the operation and plan
+to the capability's bot, user, turn, session and trigger message. The capability
+and issue time are never persisted. A valid reissued capability for that same
+turn can read the existing request. Another identity/workload with the same
+bounded idempotency key conflicts before returning a row. Identical replay is a
+read, even after a catalog edit or terminal result; it never rebuilds the stored
+snapshot or launches/retries anything. Concurrent creation uses the existing
+unique ledger key and snapshot check, not a second admission table or scheduler.
+
+New requests require an enabled, nondeleted, nonquiescing operation with a
+configured DB-owned grant. Creation does **not** check/authorize execution: the
+separate gate-only claim still rechecks the current catalog, caller restrictions
+and tag assignment atomically. Revocation after creation still denies claim.
+Persisted provenance is not a durable authorization token; the existing original
+capability TTL still applies to a separate claim. No production caller, claim,
+callback attachment, runner launch or host proof publication is enabled here.
+Generic dispatch still refuses these queued snapshots. Focused disposable-PG
+coverage proves concurrent same-key replay/conflict, generic exclusion and
+revocation between creation and claim, without a runner or live identities.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is
