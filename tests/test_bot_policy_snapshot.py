@@ -1,7 +1,8 @@
 """Isolated snapshot primitive only; no live bots, DB, worker or resolver wiring."""
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from threading import Barrier
+from types import MappingProxyType
 from unittest.mock import Mock
 
 import pytest
@@ -68,6 +69,77 @@ def test_expiry_does_not_refresh_or_extend_itself():
         "state": "snapshot_expired", "revision": 1, "lease_remaining_seconds": 0.0,
         "refreshes": 1, "failures": 0,
     }
+
+
+def test_unchanged_background_refresh_keeps_inflight_authority_current():
+    now = [0]
+    state = PolicySnapshot(clock=lambda: now[0])
+    original = view()
+    generation = state.generation()
+    assert state.install(original, 1, 5, generation)
+    now[0] = 2
+    assert state.install(view(), 2, 7, generation)
+    state.require_current(original)
+    assert state.get() is original
+    assert state.diagnostics()["revision"] == 2
+    assert state.diagnostics()["lease_remaining_seconds"] == 5
+
+
+def test_changed_refresh_revokes_inflight_authority_even_without_notification():
+    state = PolicySnapshot(clock=lambda: 0)
+    original = view()
+    assert state.install(original, 1, 5, state.generation())
+    assert state.install(view(private=True), 2, 7, state.generation())
+    with pytest.raises(SnapshotUnavailable, match="snapshot_revoked"):
+        state.require_current(original)
+
+
+@pytest.mark.parametrize("changed_field", ["tags", "column_private", "catalog", "partitions"])
+def test_each_policy_decision_input_change_replaces_identity(changed_field):
+    state = PolicySnapshot(clock=lambda: 0)
+    original = view()
+    assert state.install(original, 1, 5, state.generation())
+    if changed_field == "partitions":
+        changed = replace(original, partitions=MappingProxyType({
+            **original.partitions, "fixture-new": "fixturenew",
+        }))
+    elif changed_field == "tags":
+        changed = replace(original, tags=replace(original.tags, tags=MappingProxyType({
+            **original.tags.tags, "fixture-peer": frozenset({"no_global_search"}),
+        })))
+    elif changed_field == "column_private":
+        changed = replace(original, tags=replace(
+            original.tags, column_private=frozenset({"fixture-peer"})))
+    else:
+        changed = replace(original, tags=replace(
+            original.tags, catalog=original.tags.catalog | {"fixture-role"}))
+    assert state.install(changed, 2, 7, state.generation())
+    assert state.get() is changed
+    with pytest.raises(SnapshotUnavailable, match="snapshot_revoked"):
+        state.require_current(original)
+
+
+def test_successful_equal_refresh_does_not_revive_expired_authority():
+    now = [0]
+    state = PolicySnapshot(clock=lambda: now[0])
+    original = view()
+    assert state.install(original, 1, 5, state.generation())
+    now[0] = 5
+    with pytest.raises(SnapshotUnavailable, match="snapshot_expired"):
+        state.require_current(original)
+    assert state.install(view(), 2, 10, state.generation())
+    with pytest.raises(SnapshotUnavailable, match="snapshot_revoked"):
+        state.require_current(original)
+
+
+def test_notification_does_not_restore_old_authority_even_for_equal_policy():
+    state = PolicySnapshot(clock=lambda: 0)
+    original = view()
+    assert state.install(original, 1, 5, state.generation())
+    state.invalidate("snapshot_revoked")
+    assert state.install(view(), 2, 7, state.generation())
+    with pytest.raises(SnapshotUnavailable, match="snapshot_revoked"):
+        state.require_current(original)
 
 
 def test_late_refresh_cannot_restore_revoked_generation():

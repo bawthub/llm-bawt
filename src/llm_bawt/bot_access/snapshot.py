@@ -71,6 +71,16 @@ class PolicySnapshot:
                     or (self._installed is not None
                         and revision < self._installed.revision)):
                 return False
+            # Reconciliation validates fresh data but is not itself revocation.
+            # In-flight calls recheck this identity after ownership work yields;
+            # replacing an EQUAL policy would spuriously deny sessions_get (and
+            # other guarded tools) every time a healthy refresh races that await.
+            # Invalidation clears _installed, so equal data cannot revive an old
+            # generation. Changed policy, expiry and refresh failures still deny.
+            if (self._installed is not None
+                    and self._installed.deadline > self._clock()
+                    and self._installed.policy == policy):
+                policy = self._installed.policy
             self._installed = InstalledSnapshot(policy, revision, deadline, generation)
             self._reason = "ready"
             self._refreshes += 1

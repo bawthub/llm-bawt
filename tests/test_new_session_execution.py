@@ -198,6 +198,69 @@ def test_seed_record_is_skipped_without_a_durable_store():
     NewSessionExecution.record_seed(SimpleNamespace(_inter_bot_dispatcher=Mock()), None, [])
 
 
+@pytest.mark.asyncio
+async def test_successor_read_policy_failure_never_dispatches_provider_or_replays(monkeypatch):
+    """App acceptance isn't provider acceptance, but uncertainty stays fenced."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from llm_bawt.service.agent_new_rotation import prepare_delivery_new_binding
+    from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+    from llm_bawt.service.session_lifecycle.recovery import NewSessionRecovery
+
+    predecessor = {"thread_session_id": "fixture-predecessor", "thread_resume_id": "fixture-sdk"}
+    backend = SimpleNamespace(get_session=Mock(side_effect=RuntimeError(
+        "MCP tool sessions_get failed: Error executing tool sessions_get: policy_unavailable")))
+    llm_bawt = SimpleNamespace(history_manager=SimpleNamespace(_db_backend=backend))
+    provider = Mock()
+    rotation = Mock()
+    record = SimpleNamespace(
+        id="delivery-fixture", claim_token="claim-fixture", turn_id="turn-fixture",
+        transport_accepted_at=datetime.now(timezone.utc), session_policy="continue", metadata={},
+    )
+    ambiguous = SimpleNamespace(status="FAILED", metadata={"new_session_ambiguous": True})
+    store = Mock()
+    store.payload.return_value = {
+        "model": "fixture-model", "bot_id": "fixture_owner",
+        "inter_bot_delivery_id": record.id,
+        "messages": [{"role": "user", "content": "/new"}],
+    }
+    store.mark_transport_accepted.return_value = True
+    store.get.return_value = record
+    store.turn_state.return_value = ("error", datetime.now(timezone.utc))
+    service = SimpleNamespace(_maybe_rotate_agent_session=rotation, _resolve_thread_sdk_key=Mock())
+
+    async def chat(request):
+        prepare_delivery_new_binding(
+            service, llm_bawt, request, bot_id="fixture_owner", user_id="user_a",
+            user_prompt="/new", thread_binding=predecessor, backend_name="claude-code",
+        )
+        provider()
+        yield b"unreachable"
+
+    service.chat_completion_stream = chat
+    service._turn_log_store = SimpleNamespace(get_turn=lambda _: SimpleNamespace(
+        error_text="Agent turn setup failed: policy_unavailable"))
+    dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
+    dispatcher.service, dispatcher.store = service, store
+    dispatcher._heartbeat = AsyncMock()
+    dispatcher._await_turn_finalized = AsyncMock()
+    dispatcher._emit = AsyncMock()
+    mark = Mock(return_value=ambiguous)
+    monkeypatch.setattr(NewSessionRecovery, "mark_ambiguous", mark)
+    # Mock is not a context manager by default; use a harmless local scope.
+    from contextlib import nullcontext
+    store.engine.begin.return_value = nullcontext(object())
+    await dispatcher._dispatch(record)
+    backend.get_session.assert_called_once()
+    provider.assert_not_called()
+    rotation.assert_not_called()
+    store.requeue.assert_not_called()
+    mark.assert_called_once()
+    assert "accepted reset outcome is ambiguous" in mark.call_args.kwargs["reason"]
+    dispatcher._emit.assert_awaited_once_with(ambiguous)
+
+
 def test_policy_rejects_unknown_mode_before_side_effects():
     service = SimpleNamespace(_maybe_summarize_on_new=Mock(),
                               _maybe_rotate_agent_session=Mock())

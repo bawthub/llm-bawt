@@ -124,6 +124,43 @@ async def test_same_bot_other_user_session_still_denied_not_claimed_zero_read(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["preflight", "registered"])
+async def test_sessions_get_survives_unchanged_refresh_during_owner_lookup(monkeypatch, stage):
+    from llm_bawt.mcp_server import bot_access as module
+
+    owner, resolver = loaded(monkeypatch)
+    guard = ToolBotAccess(resolver)
+    calls = []
+
+    class Worker:
+        async def run(self, *_):
+            # A background reconciliation can complete during the ownership
+            # await. Identical validated policy is not a revocation.
+            assert owner.refresh()
+            return "fixture_owner", "user_a"
+
+    monkeypatch.setattr(module, "_METADATA_WORKER", Worker())
+
+    async def read(session_id, bot_id):
+        calls.append((session_id, bot_id))
+        return {"id": session_id, "bot_id": bot_id}
+
+    guarded = guard.register("sessions_get", read)
+    args = {"session_id": "fixture-session", "bot_id": "fixture_owner"}
+    envelope = ServicePrincipal("fixture_owner", "user_a").mint("sessions_get", args)
+    binding = _service_capability.set(envelope)
+    try:
+        with invocation_context("sessions_get", args):
+            if stage == "preflight":
+                await guard.preflight("sessions_get", args)
+                assert calls == []
+            else:
+                assert await guarded(**args) == {"id": "fixture-session", "bot_id": "fixture_owner"}
+    finally:
+        _service_capability.reset(binding)
+
+
+@pytest.mark.asyncio
 async def test_expiry_after_async_ownership_work_refuses_admission(monkeypatch):
     from llm_bawt.mcp_server import bot_access as module
 

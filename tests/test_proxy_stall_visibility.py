@@ -67,6 +67,44 @@ def test_request_with_no_output_item_times_out_as_first_output():
     virtual_clock.run_timing(run())
 
 
+@pytest.mark.parametrize("heading, phase, seconds", [
+    (False, "first_output", 60),
+    (True, "productive", 90),
+])
+def test_incident_heading_or_keepalive_silence_uses_existing_deadlines(heading, phase, seconds):
+    """TASK-1915: metadata traffic isn't generation or a running tool."""
+    async def run():
+        async def events():
+            yield NS(type="response.created")
+            yield NS(type="response.in_progress")
+            if heading:
+                yield NS(type="response.reasoning_summary_text.delta", delta="Reading fixture details")
+            while True:
+                await asyncio.sleep(10)
+                yield NS(type="keepalive")
+
+        statuses = []
+        seen = []
+        started = asyncio.get_running_loop().time()
+        stream = _stream(events(), statuses)
+        try:
+            with pytest.raises(ChatGPTEventTimeout) as error:
+                async for event in stream:
+                    seen.append(event.type)
+            assert error.value.phase == phase
+            assert asyncio.get_running_loop().time() - started == pytest.approx(seconds)
+            assert [s["state"] for s in statuses] == ["stalled"]
+            assert statuses[0]["productive_idle_seconds"] == 30
+            assert statuses[0]["message"] == (
+                "Model stopped responding" if heading else "Waiting on model; no output yet")
+            assert "keepalive" in seen
+            assert not any("function_call" in kind for kind in seen)
+        finally:
+            await stream.close()
+
+    virtual_clock.run(run(), follow=[chatgpt_transport])
+
+
 def test_first_output_telemetry_measures_item_not_headers():
     async def run():
         async def events():
