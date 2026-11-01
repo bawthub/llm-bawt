@@ -97,7 +97,7 @@ def _summary(task: dict, reviews: Any, project: Any, size: int) -> dict:
                                          ("id", "stage", "verdict", "actorId", "signedVia", "targetRevision", "round", "body", "createdAt")),
                                      "findingCount": len(row.get("findings") or []),
                                      "openBlockers": sum(1 for finding in row.get("findings") or []
-                                                         if finding.get("severity") == "BLOCKER" and not finding.get("resolution"))}
+                                                         if finding.get("severity") == "BLOCKER" and finding.get("resolution") in (None, "OPEN"))}
                                     for i, row in enumerate(reviews["reviews"][:RECENT_LIMIT])]}
     else:
         out["reviews"] = {"unavailable": True, "path": "/reviews"}

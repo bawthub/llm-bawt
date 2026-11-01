@@ -99,12 +99,13 @@ def test_compact_defaults_preserve_current_owner_blocker_next_action_and_counts(
         assert "tasks" not in task["project"]
 
 
-def test_recent_review_summary_keeps_revision_provenance_and_open_blocker_counts(monkeypatch):
+@pytest.mark.parametrize("unresolved", ["OPEN", None])
+def test_recent_review_summary_keeps_revision_provenance_and_open_blocker_counts(monkeypatch, unresolved):
     api = Api()
     api.reviews[0]["findings"] = [
-        {"severity": "BLOCKER", "resolution": None},
+        {"severity": "BLOCKER", "resolution": unresolved},
         {"severity": "BLOCKER", "resolution": "FIXED"},
-        {"severity": "NIT", "resolution": None},
+        {"severity": "NIT", "resolution": "OPEN"},
     ]
     install(monkeypatch, api)
     result = run(task_tools.get_task("TASK-1907"))
