@@ -364,6 +364,51 @@ def test_accepted_agent_new_seeds_outgoing_then_routes_to_fresh_thread(monkeypat
         assert service._update_turn_log.call_args.kwargs["status"] == "error"
 
 
+@pytest.mark.parametrize("row_kind", ["owned", "other_user", "missing"])
+def test_original_runtime_stream_passes_only_row_verified_service_context(monkeypatch, _isolate, row_kind):
+    """Actual chat coordinator + original worker, not an agent-tool assumption."""
+    from llm_bawt.bot_access.service import _runtime_turn
+    from llm_bawt.service.session_lifecycle.bridge_reset import BridgeSessionResetMixin
+    from llm_bawt.service.turn_stream_finalize import TurnStreamFinalizer
+    from llm_bawt.service.turn_stream_worker import TurnStreamWorker
+
+    service = _service(Mock())
+    llm = service._get_llm_bawt.return_value
+    llm.bot.slug = "caid"
+    llm.user_id = "nick"
+    row = {"id": "successor", "bot_id": "caid", "user_id": "nick", "session_metadata": {}}
+    if row_kind == "other_user":
+        row["user_id"] = "other_fixture_user"
+    llm.history_manager = SimpleNamespace(_db_backend=SimpleNamespace(
+        get_session=lambda _sid: row if row_kind != "missing" else None))
+    service._resolve_thread_sdk_key = BridgeSessionResetMixin._resolve_thread_sdk_key.__get__(service)
+    service._bind_agent_thread = BridgeSessionResetMixin._bind_agent_thread.__get__(service)
+    service._turn_log_store.get_turn = Mock(return_value=None)
+    seen = []
+
+    def prepare(*_a, **_kw):
+        seen.append((_runtime_turn.get(), llm._session_id_override))
+        raise RuntimeError("fixture stop after runtime history boundary")
+
+    llm.prepare_messages_for_query = prepare
+    monkeypatch.setattr(TurnStreamFinalizer, "_finalize", lambda *_a, **_kw: None)
+    monkeypatch.setattr(TurnStreamWorker, "_publish_unified", AsyncMock())
+    monkeypatch.setattr("llm_bawt.service.chat_streaming.ToolEventCoordinator", Mock())
+    monkeypatch.setattr("llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
+                        AsyncMock(return_value=("/new", [], [], None)))
+    request = _claimed(_request().model_copy(update={"stream": True, "session_id": "successor",
+        "messages": [ChatMessage(role="user", content="/new")],
+        "inter_bot_session_policy": "reset_without_history"}))
+
+    async def run():
+        return [chunk async for chunk in service.chat_completion_stream(request)]
+
+    asyncio.run(run())
+    assert seen == [("cap-token" if row_kind == "owned" else None, "successor")]
+    assert _isolate[0]["session_id"] == "successor"
+    service._maybe_rotate_agent_session.assert_not_called()
+
+
 @pytest.mark.parametrize("stream", [True, False], ids=["stream", "nonstream"])
 def test_post_admission_agent_setup_failure_closes_turn(monkeypatch, stream):
     service = _service(Mock(side_effect=AssertionError("bridge execution started")))

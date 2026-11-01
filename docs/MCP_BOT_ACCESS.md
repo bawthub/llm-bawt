@@ -98,12 +98,29 @@ pin the trusted user except for the allowlisted service-self filters above.
 For the exact durable conversation in an existing verified turn capability,
 its matching bot/user tuple supplies session ownership in memory at both
 stages. This is not an SDK `session_key`, and service-signed arbitrary arguments
-do not establish ownership. Other explicit sessions retain the existing
-`sessions(bot_id,user_id)` lookup: that exception remains unapproved pending
-Nick's decision and is **not** a zero-database-reads-all-writes claim. In
-particular runtime `/new` history persistence uses `MemoryClient` service
-identity and can supply a successor session internally, so the agent-turn
-shortcut alone does not eliminate that path's explicit-session lookup. Seed
+do not establish ownership.
+
+Runtime streaming history (including an internally supplied `/new` successor)
+uses service identity, not agent tool headers. SDK binding already fetches the
+session row. Only when that existing row's **id, bot and user** match the runtime
+binding does it mark the request-local binding as verified. The worker scopes
+the existing signed turn proof to its history writes; `MemoryClient` includes
+it inside the exact-invocation service envelope only for matching `messages_add`
+arguments. Both authorization stages revalidate both signatures, expiry and
+exact session/bot/user. Caller kind remains `service`, without supplying task or
+approval headers or bypassing approval policy. The context is cleared on success
+and failure, and never retained on a cached client. No owner query or new query
+was added to SDK binding. A token minted around an arbitrary selected session,
+a missing/mismatched row, or a raw owner tuple is **not** sufficient provenance.
+
+Other explicit-session callers retain the existing `sessions(bot_id,user_id)`
+lookup: this remains unapproved and is **not** a zero-database-reads-all-writes
+claim. These include native-chat `/new` without an agent turn proof, nonstream
+history persisted before proof minting, standalone/archive/service callers
+without a verified runtime binding, and approved replay. Approved execution
+reauthorizes with its server-owned caller and does not inherit runtime-service
+ownership proof. Lifecycle/SDK reads and storage's own work are separate from
+zero policy/ownership authorization SELECTs during a proven history write. Seed
 transcript construction is distinct from conversation history persistence.
 
 Session and source discovery lists use positive SQL

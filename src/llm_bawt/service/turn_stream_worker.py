@@ -36,6 +36,23 @@ class TurnStreamWorker(TurnStreamPublishMixin):
         self.ctx = ctx
 
     def _stream_to_queue(self):
+        # The app already minted this exact conversation proof after reset and
+        # binding. Keep it thread/request-local through history + finalization;
+        # never attach it to the cached MemoryClient or forward agent headers.
+        from ..bot_access.service import bind_service_turn
+
+        ctx = self.ctx
+        binding = ctx.thread_binding or {}
+        # Only a row ALREADY fetched and owner-checked by SDK binding proves
+        # ownership. A turn token minted around an arbitrary request.session_id
+        # or a missing row is not enough. This marker is internal, not a field
+        # copied from the chat request or stored on a cached client.
+        owner = (binding.get("thread_session_id"), ctx.bot_id, ctx.user_id)
+        capability = ctx.task_turn_capability if binding.get("_service_owner") == owner else None
+        with bind_service_turn(capability):
+            return self._stream_to_queue_with_context()
+
+    def _stream_to_queue_with_context(self):
         ctx = self.ctx
         _persist_publish_approval = self._persist_publish_approval
         _persist_publish_await = self._persist_publish_await

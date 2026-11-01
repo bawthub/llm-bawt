@@ -12,7 +12,9 @@ def test_worker_passes_attachment_enricher_to_terminal_coordinator() -> None:
     """The worker captures its mixin helper before rebinding ``self`` to the service."""
     import inspect
 
-    source = inspect.getsource(TurnStreamWorker._stream_to_queue)
+    wrapper = inspect.getsource(TurnStreamWorker._stream_to_queue)
+    assert "return self._stream_to_queue_with_context()" in wrapper
+    source = inspect.getsource(TurnStreamWorker._stream_to_queue_with_context)
     assert "_enrich_attachment_refs = self._enrich_attachment_refs" in source
     assert "TurnStreamFinalizer(" in source
     assert "enrich_attachment_refs=_enrich_attachment_refs" in source

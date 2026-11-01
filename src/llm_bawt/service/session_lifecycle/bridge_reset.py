@@ -259,6 +259,7 @@ class BridgeSessionResetMixin:
         """Populate ``thread_resume_id`` on a binding dict from the thread's
         stored ``agent_session_keys``. Shared by explicit and active paths."""
         sid = binding["thread_session_id"]
+        binding.pop("_service_owner", None)
         db_backend = getattr(llm_bawt.history_manager, "_db_backend", None)
         get_sess = getattr(db_backend, "get_session", None) if db_backend else None
         row = get_sess(sid) if callable(get_sess) else None
@@ -267,6 +268,14 @@ class BridgeSessionResetMixin:
             return binding
         from ..routes.sessions import resolve_agent_session_key
 
+        # Reuse this existing session read; NEVER infer row ownership merely
+        # from the requested id or the subsequently minted task-turn token.
+        bot_id = (getattr(llm_bawt.bot, "slug", None)
+                  or getattr(llm_bawt.bot, "name", ""))
+        user_id = getattr(llm_bawt, "user_id", None)
+        if (row.get("id") == sid and bot_id and user_id
+                and row.get("bot_id") == bot_id and row.get("user_id") == user_id):
+            binding["_service_owner"] = (sid, bot_id, user_id)
         metadata = row.get("session_metadata") or {}
         bc = getattr(getattr(llm_bawt, "client", None), "_bot_config", None) or {}
         resume = resolve_agent_session_key(

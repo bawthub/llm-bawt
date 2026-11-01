@@ -6,14 +6,13 @@ import json
 import time
 import uuid
 from contextlib import contextmanager
-from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
 
 from agent_bridge.mcp_call_context import canonical_invocation_hash
 from llm_bawt import task_turn_context as turn_codec
-from llm_bawt.bot_access import BotAccessError, BotPolicyResolver, TrustedCaller
+from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.context import current_bot_access
 from llm_bawt.bot_access import service as service_codec
 from llm_bawt.bot_access.service import ServicePrincipal
@@ -153,6 +152,89 @@ def test_service_envelope_is_purpose_expiry_and_invocation_bound(signer, change)
         service_codec.open_service_capability(token, name, arguments)
 
 
+@pytest.mark.parametrize("change", ["valid", "session", "user", "bot", "tool", "malformed", "expired"])
+def test_service_conversation_proof_requires_existing_exact_turn(signer, change):
+    session_id = str(uuid.uuid4())
+    args = {"bot_id": "private_fixture", "user_id": "user_a", "session_id": session_id}
+    capability = turn_codec.mint_task_turn_context(
+        session_id=session_id, turn_id="turn-" + uuid.uuid4().hex,
+        trigger_message_id=str(uuid.uuid4()), bot_id="private_fixture", user_id="user_a",
+    )
+    with service_codec.bind_service_turn(capability):
+        token = ServicePrincipal("private_fixture", "user_a").mint("messages_add", args)
+    body = json.loads(signer.decrypt(token.encode()))
+    assert body["conversation_context"] == capability
+    name = "messages_add"
+    if change in {"session", "user", "bot"}:
+        key = {"session": "session_id", "user": "user_id", "bot": "bot_id"}[change]
+        args = {**args, key: "other"}
+    elif change == "tool":
+        name = "messages_get"
+    elif change == "malformed":
+        body["conversation_context"] = {"session_id": session_id, "bot_id": "private_fixture"}
+    elif change == "expired":
+        raw = signer.decrypt(capability.encode())
+        body["conversation_context"] = signer.encrypt_at_time(
+            raw, int(time.time()) - turn_codec.TASK_TURN_CONTEXT_TTL_SECONDS - 1,
+        ).decode()
+    # Re-sign the outer exact invocation to test validation of the INNER proof,
+    # rather than only the already-tested invocation hash fence.
+    body["invocation"] = canonical_invocation_hash(name, args)
+    token = signer.encrypt(json.dumps(body).encode()).decode()
+    if change == "valid":
+        caller = service_codec.open_service_capability(token, name, args)
+        assert caller.kind == "service"  # no task/approval identity promotion
+        assert service_codec.open_service_session_owner(token, name, args) == ("private_fixture", "user_a")
+    else:
+        with pytest.raises(BotAccessError, match="caller_unavailable"):
+            service_codec.open_service_capability(token, name, args)
+    plain = ServicePrincipal("private_fixture", "user_a").mint("messages_add", {
+        "bot_id": "private_fixture", "user_id": "user_a", "session_id": session_id,
+    })
+    assert "conversation_context" not in json.loads(signer.decrypt(plain.encode()))
+
+
+@pytest.mark.asyncio
+async def test_service_conversation_proof_does_not_survive_as_approved_owner_authority(monkeypatch, signer):
+    from unittest.mock import Mock
+
+    session_id = str(uuid.uuid4())
+    args = {"bot_id": "private_fixture", "user_id": "user_a", "session_id": session_id}
+    proof = turn_codec.mint_task_turn_context(
+        session_id=session_id, turn_id="turn-" + uuid.uuid4().hex,
+        trigger_message_id=str(uuid.uuid4()), bot_id="private_fixture", user_id="user_a",
+    )
+    server = CatalogFastMCP("runtime-replay", bot_policy_resolver=Resolver())
+    calls = []
+
+    async def handler(bot_id: str, user_id: str, session_id: str):
+        calls.append(session_id)
+        return "ok"
+
+    server.add_tool(handler, name="messages_add")
+    server.mark_tools_registered()
+    ownership = Mock(return_value=("private_fixture", "user_b"))
+    monkeypatch.setattr(server.bot_access, "_session_owner", ownership)
+    with service_codec.bind_service_turn(proof):
+        token = ServicePrincipal("private_fixture", "user_a").mint("messages_add", args)
+    binding = _service_capability.set(token)
+    try:
+        # Immediate service invocation uses memory proof at both stages.
+        await server.bot_access.preflight("messages_add", args)
+        await server._tool_manager.call_tool("messages_add", args)
+        ownership.assert_not_called()
+        # Approved execution reauthorizes using its SERVER-OWNED caller; the
+        # stale service proof cannot bypass its authoritative ownership check.
+        with pytest.raises(Exception, match="access_denied"):
+            await server.call_approved_tool("messages_add", args,
+                expected_invocation_hash=canonical_invocation_hash("messages_add", args),
+                caller_context=ApprovedCallerContext(bot_id="private_fixture", user_id="user_a"))
+        ownership.assert_called_once_with(session_id)
+    finally:
+        _service_capability.reset(binding)
+    assert calls == [session_id]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("values", [[b""], [b"\xff"], [b"first", b"second"]])
 async def test_supplied_invalid_transport_identity_never_becomes_anonymous(values):
@@ -231,6 +313,44 @@ async def test_service_principal_never_bypasses_approval_and_raw_arguments_bind(
         finally:
             _service_capability.reset(token)
     assert calls == [("private_fixture", 3)]
+
+
+@pytest.mark.asyncio
+async def test_runtime_conversation_proof_keeps_service_approval_semantics(signer):
+    from agent_bridge.approval import ApprovalPolicy, MatcherType, PolicyAction
+    from tests.test_mcp_approval_interceptor import FakeStore
+
+    session_id = str(uuid.uuid4())
+    arguments = {"bot_id": "private_fixture", "user_id": "user_a", "session_id": session_id}
+    proof = turn_codec.mint_task_turn_context(
+        session_id=session_id, turn_id="turn-" + uuid.uuid4().hex,
+        trigger_message_id=str(uuid.uuid4()), bot_id="private_fixture", user_id="user_a",
+    )
+    calls = []
+    for action in (PolicyAction.ALLOW, PolicyAction.DENY, PolicyAction.REQUIRE_APPROVAL):
+        policy = ApprovalPolicy(id="p", tool_name="messages_add", matcher_type=MatcherType.ALWAYS, action=action)
+        store = FakeStore(policy, [])
+        server = CatalogFastMCP("runtime-approval", bot_policy_resolver=Resolver(),
+                                approval_store_provider=lambda: store)
+
+        async def handler(bot_id: str, user_id: str, session_id: str):
+            calls.append(current_bot_access().caller.kind)
+            return "ok"
+
+        server.add_tool(handler, name="messages_add")
+        with service_codec.bind_service_turn(proof):
+            credential = ServicePrincipal("private_fixture", "user_a").mint("messages_add", arguments)
+        binding = _service_capability.set(credential)
+        try:
+            result = await server.call_tool("messages_add", arguments)
+            if action is PolicyAction.DENY:
+                assert result["status"] == "denied"
+            elif action is PolicyAction.REQUIRE_APPROVAL:
+                assert result["status"] == "approval_context_missing"
+            assert not store.rows
+        finally:
+            _service_capability.reset(binding)
+    assert calls == ["service"]
 
 
 @pytest.mark.asyncio

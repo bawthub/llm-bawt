@@ -109,7 +109,8 @@ class ToolBotAccess:
         # Session IDs cannot override the explicit bot namespace. This early
         # check reads ownership only; scoped storage binds get/close SQL too.
         if target is not None and values.get("session_id"):
-            owner = trusted_session_owner(values["session_id"], access.caller)
+            owner = trusted_session_owner(values["session_id"], access.caller,
+                                          name=name, arguments=arguments)
             if owner is None:
                 # Other explicit sessions still need their authoritative owner;
                 # this unchanged fallback is not a zero-read-all-writes claim.

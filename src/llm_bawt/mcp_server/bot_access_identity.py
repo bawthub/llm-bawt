@@ -4,7 +4,9 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 from llm_bawt.bot_access import BotAccessError, TrustedCaller
-from llm_bawt.bot_access.service import SERVICE_HEADER, open_service_capability
+from llm_bawt.bot_access.service import (
+    SERVICE_HEADER, open_service_capability, open_service_session_owner,
+)
 from llm_bawt.task_turn_context import (
     TASK_TURN_CONTEXT_HEADER, TASK_TURN_CONTEXT_TTL_SECONDS,
     open_task_turn_context,
@@ -43,17 +45,28 @@ def trusted_caller(name: str, arguments: dict) -> TrustedCaller | None:
         raise BotAccessError("caller_unavailable") from None
 
 
-def trusted_session_owner(session_id: str, caller: TrustedCaller | None):
+def trusted_session_owner(session_id: str, caller: TrustedCaller | None, *,
+                          name: str | None = None, arguments: dict | None = None):
     """Existing verified conversation capability, never an SDK session key.
 
     trusted_caller() has already checked all supplied identities agree. This
     shortcut proves only the exact conversation the app bound before minting;
     a signed service invocation alone does not prove arbitrary row ownership.
     """
+    if caller is None:
+        return None
+    service = _service_capability.get()
+    if (caller.kind == "service" and service is not None and name == "messages_add"
+            and arguments is not None and session_id == arguments.get("session_id")):
+        owner = open_service_session_owner(service, name, arguments)
+        if owner is not None:
+            if owner != (caller.bot_id, caller.user_id):
+                raise BotAccessError("caller_unavailable")
+            return owner
     raw = _raw_turn_capability.get()
     if raw is None:
         raw = current_task_turn_capability()
-    if raw is None or caller is None:
+    if raw is None:
         return None
     try:
         turn = open_task_turn_context(raw)
