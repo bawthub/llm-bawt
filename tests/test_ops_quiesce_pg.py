@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from threading import Event
 from types import SimpleNamespace
@@ -28,6 +30,7 @@ from llm_bawt.ops.receipt_callback import QuiesceReceiptSender
 from llm_bawt.service.turn_admission import lock_target
 from llm_bawt.ops.worker_slots import WORKER_CONCURRENCY_ENV, live_worker_slots
 from llm_bawt.service.turn_gates import EXECUTION_EXIT_KEY, EXIT_SOURCES, GateActor, gate_blocks
+from tests.pg_lock_wait import wait_blocked_by
 from tests.test_ops_service import FakeExecutor, _op_data
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -237,6 +240,200 @@ def test_the_deadline_is_set_once(rig):
     rig.sql("UPDATE system_gates SET expires_at = now() - interval '1 second' WHERE id=:id", id=gate)
     rig.driver.step(job_id)
     assert rig.row(job_id)["quiesce_deadline_at"] == first
+
+
+# -- TASK-1169: DB wall-clock decisions after actual lock waits -----------------
+
+@contextmanager
+def _blocked_step(rig, job_id, *, driver=None, target=False, row_lock=None):
+    """Release the holder before joining the worker, including on assertion failure."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with rig.engine.begin() as holder:
+            pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            if target:
+                lock_target(holder, rig.bot)
+            elif row_lock == "job":
+                holder.execute(text("SELECT id FROM ops_jobs WHERE id=:id FOR UPDATE"), {"id": job_id})
+            elif row_lock == "gate":
+                holder.execute(text("SELECT id FROM system_gates WHERE owner_id=:id FOR UPDATE"),
+                               {"id": job_id})
+            else:
+                holder.execute(text("SELECT 1 FROM ops_operations WHERE slug=:s FOR UPDATE"),
+                               {"s": rig.slug})
+            future = pool.submit((driver or rig.driver).step, job_id)
+            try:
+                wait_blocked_by(rig.engine, pid, future, timeout=HANG_GUARD_S)
+                yield future, pid
+            finally:
+                holder.rollback()
+
+
+def _lapse_during_wait(rig, holder_pid):
+    """An expiry live at transaction start, but expired now; no TTL-sized sleep."""
+    with rig.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as observer:
+        started = observer.execute(text(
+            "SELECT xact_start FROM pg_stat_activity WHERE datname=current_database()"
+            " AND wait_event_type='Lock' AND :pid=ANY(pg_blocking_pids(pid))"
+        ), {"pid": holder_pid}).scalar_one()
+    expired, observed = rig.sql(
+        "SELECT CAST(:started AS timestamptz)"
+        " + (clock_timestamp() - CAST(:started AS timestamptz)) / 2, clock_timestamp()",
+        started=started).one()
+    assert started < expired < observed
+    return expired
+
+
+def test_fresh_clock_lapsed_during_lock_wait_rebuilds_with_late_turn(rig):
+    first_turn = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    first = rig.row(job_id)["quiesce_gate_id"]
+    deadline = rig.row(job_id)["quiesce_deadline_at"]
+    rig.end(first_turn)
+    with _blocked_step(rig, job_id) as (future, pid):
+        expired = _lapse_during_wait(rig, pid)
+        rig.sql("UPDATE system_gates SET expires_at=:at WHERE id=:id", at=expired, id=first)
+        assert not rig.held()
+        late = rig.turn()
+    assert future.result(timeout=HANG_GUARD_S).outcome == "holding"
+    job = rig.row(job_id)
+    second = job["quiesce_gate_id"]
+    assert second != first and job["state"] == JOB_QUIESCING
+    receipt = json.loads(job["quiesce_json"])
+    assert receipt["generations"] == [first, second]
+    assert [m["turn_id"] for m in receipt["roster"]] == [late]
+    assert job["quiesce_fence_json"] is None and rig.executor.dispatch_calls == []
+    assert job["quiesce_deadline_at"] == deadline
+    rig.end(late)
+    assert rig.service.get_job_status(job_id)["state"] == JOB_ACCEPTED
+    assert len(rig.executor.dispatch_calls) == 1
+    assert json.loads(rig.row(job_id)["quiesce_fence_json"])["generation"] == second
+
+
+def test_fresh_clock_lapsed_during_lock_wait_past_deadline_fails(rig):
+    first_turn = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    gate = rig.row(job_id)["quiesce_gate_id"]
+    rig.end(first_turn)
+    with _blocked_step(rig, job_id) as (future, pid):
+        expired = _lapse_during_wait(rig, pid)
+        rig.sql("UPDATE system_gates SET expires_at=:at WHERE id=:id", at=expired, id=gate)
+        rig.sql("UPDATE ops_jobs SET quiesce_deadline_at=:at WHERE id=:id", at=expired, id=job_id)
+    assert future.result(timeout=HANG_GUARD_S).outcome == "failed"
+    job = rig.row(job_id)
+    assert job["state"] == JOB_FAILED and job["error_text"].startswith("quiesce_lost:")
+    assert json.loads(job["quiesce_json"])["generations"] == [gate]
+    assert all(g["released_at"] is not None for g in rig.gates_of(job_id))
+    assert job["quiesce_fence_json"] is None and rig.executor.dispatch_calls == []
+
+
+def test_fresh_clock_final_cas_refuses_lapse_after_drain(rig, monkeypatch):
+    first_turn = rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    first = rig.row(job_id)["quiesce_gate_id"]
+    rig.end(first_turn)
+    original = rig.gates.drain_status
+    expire_once = True
+
+    def drain_then_lapse(conn, gate_id):
+        nonlocal expire_once
+        statuses = original(conn, gate_id)
+        if expire_once:
+            expire_once = False
+            assert all(s.drained for s in statuses)
+            # Same-transaction fixture mutation: model expiry after the drain
+            # observation without pretending a concurrent uncommitted lapse admits work.
+            conn.execute(text("UPDATE system_gates SET expires_at=now()"
+                              " + (clock_timestamp()-now()) / 2 WHERE id=:id"), {"id": gate_id})
+        return statuses
+
+    monkeypatch.setattr(rig.gates, "drain_status", drain_then_lapse)
+    rig.driver.margin_seconds = 0  # isolate liveness, not the independent positive-margin guard
+    assert rig.driver.step(job_id).outcome == "cas_retry"
+    job = rig.row(job_id)
+    assert job["state"] == JOB_QUIESCING and job["quiesce_gate_id"] == first
+    assert job["dispatched_at"] is None and job["quiesce_fence_json"] is None
+    assert json.loads(job["quiesce_json"])["phase"]["name"] == "dispatch_pending"
+    assert not rig.held() and rig.executor.dispatch_calls == []
+    late = rig.turn()
+    assert rig.driver.step(job_id).outcome == "holding"
+    job = rig.row(job_id)
+    assert job["quiesce_gate_id"] != first
+    assert [m["turn_id"] for m in json.loads(job["quiesce_json"])["roster"]] == [late]
+
+
+def test_fresh_clock_initial_lease_starts_after_target_wait(rig):
+    rig.turn()
+    job_id = rig.job()
+    with _blocked_step(rig, job_id, target=True) as (future, _):
+        released = rig.sql("SELECT clock_timestamp()").scalar_one()
+    assert future.result(timeout=HANG_GUARD_S).outcome == "opened"
+    [gate] = rig.gates_of(job_id)
+    assert rig.sql("SELECT expires_at FROM system_gates WHERE id=:id", id=gate["id"]).scalar_one() >= (
+        released + timedelta(seconds=rig.driver.gate_ttl_seconds))
+    job = rig.row(job_id)
+    receipt = json.loads(job["quiesce_json"])
+    assert datetime.fromisoformat(receipt["observed_at"]) >= released
+    assert job["quiesce_deadline_at"] >= released + timedelta(seconds=300)
+
+
+def test_fresh_clock_driver_lease_handoff_after_operation_wait(rig):
+    rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    other = QuiesceDriver(rig.engine, driver_id="driver-b", gates=rig.gates)
+    with _blocked_step(rig, job_id, driver=other) as (future, pid):
+        expired = _lapse_during_wait(rig, pid)
+        rig.sql("UPDATE ops_jobs SET quiesce_driver_lease_expires_at=:at WHERE id=:id",
+                at=expired, id=job_id)
+        released = rig.sql("SELECT clock_timestamp()").scalar_one()
+    assert future.result(timeout=HANG_GUARD_S).outcome == "holding"
+    job = rig.row(job_id)
+    assert job["quiesce_driver_id"] == "driver-b"
+    assert job["quiesce_driver_lease_expires_at"] >= released + timedelta(seconds=other.lease_seconds)
+    assert rig.driver.step(job_id).outcome == "not_owner"
+    assert rig.executor.dispatch_calls == []
+
+
+@pytest.mark.parametrize("row_lock", ["job", "gate"])
+def test_fresh_clock_renewal_starts_after_its_own_row_lock(rig, row_lock):
+    rig.turn()
+    job_id = rig.job()
+    assert rig.driver.step(job_id).outcome == "opened"
+    with _blocked_step(rig, job_id, row_lock=row_lock) as (future, _):
+        released = rig.sql("SELECT clock_timestamp()").scalar_one()
+    assert future.result(timeout=HANG_GUARD_S).outcome == "holding"
+    if row_lock == "job":
+        expires = rig.row(job_id)["quiesce_driver_lease_expires_at"]
+        ttl = rig.driver.lease_seconds
+    else:
+        [gate] = rig.gates_of(job_id)
+        expires = rig.sql("SELECT expires_at FROM system_gates WHERE id=:id", id=gate["id"]).scalar_one()
+        ttl = rig.driver.gate_ttl_seconds
+    assert expires >= released + timedelta(seconds=ttl)
+    assert rig.executor.dispatch_calls == []
+
+
+@pytest.mark.parametrize("expires_after_activation", [False, True])
+def test_fresh_clock_unopened_budget_is_rechecked_after_wait_boundaries(rig, monkeypatch,
+                                                                       expires_after_activation):
+    # Inject only the elapsed-budget observation, not gate/slot behavior: no
+    # wall-clock sleep is needed to prove cleanup on either side of activation.
+    job_id = rig.job()
+    observations = iter([False, False, True] if expires_after_activation else [False, True])
+    monkeypatch.setattr(rig.driver, "_open_expired", lambda *_: next(observations))
+    assert rig.driver.step(job_id).outcome == "failed"
+    job = rig.row(job_id)
+    assert job["error_text"].startswith("quiesce_timeout: the hold did not open")
+    assert job["quiesce_deadline_at"] is None and job["quiesce_fence_json"] is None
+    gates = rig.gates_of(job_id)
+    assert len(gates) == int(expires_after_activation)
+    assert all(g["released_at"] is not None for g in gates)
+    assert not rig.held() and rig.executor.dispatch_calls == []
+    if gates:
+        assert json.loads(job["quiesce_json"])["generations"] == [gates[0]["id"]]
 
 
 def test_terminal_jobs_gates_are_swept(rig):

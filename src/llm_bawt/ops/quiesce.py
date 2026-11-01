@@ -55,7 +55,7 @@ from sqlalchemy import text
 from ..inter_bot_delivery_ledger import DeliveryTransitionEvents
 from ..system_events import SystemEventEmitter
 from ..service.turn_admission import activate_hold
-from ..service.turn_gates import (GateScope, GateSpec, _LIVE, ensure_gate_schema, extend_gate, gate_drain_status,
+from ..service.turn_gates import (GateScope, GateSpec, ensure_gate_schema, extend_gate, gate_drain_status,
                                   release_gates)
 from .events import append_job_transition_by_id
 from .models import (JOB_CANCELLED, JOB_DISPATCHING, JOB_FAILED, JOB_QUIESCING, JOB_TERMINAL_STATES)
@@ -88,7 +88,7 @@ class TurnGates:
     """The admission-side gate operations the driver uses (injectable for tests)."""
 
     def activate(self, conn, spec: GateSpec, predecessor: int | None):
-        return activate_hold(conn, spec, predecessor=predecessor)
+        return activate_hold(conn, spec, predecessor=predecessor, fresh_clock=True)
 
     def drain_status(self, conn, gate_id: int) -> list[Any]:
         return gate_drain_status(conn, gate_id)
@@ -355,17 +355,27 @@ class QuiesceDriver:
             return self._hold(conn, job, snapshot)
 
     def _claim(self, conn, job_id: str):
+        # Acquire the job lock before evaluating any lease timestamp: an UPDATE's
+        # target expression can otherwise be evaluated before its row-lock wait.
+        conn.execute(text("SELECT id FROM ops_jobs WHERE id=:id FOR UPDATE"), {"id": job_id})
         return conn.execute(text(
             "UPDATE ops_jobs SET quiesce_driver_id=:me,"
-            " quiesce_driver_lease_expires_at=now() + (:lease * interval '1 second'),"
-            " last_reconcile_at=now()"
+            " quiesce_driver_lease_expires_at=clock_timestamp() + (:lease * interval '1 second'),"
+            " last_reconcile_at=clock_timestamp()"
             " WHERE id=:id AND state=:quiescing AND (quiesce_driver_id IS NULL"
-            "   OR quiesce_driver_id=:me OR quiesce_driver_lease_expires_at <= now())"
+            "   OR quiesce_driver_id=:me OR quiesce_driver_lease_expires_at <= clock_timestamp())"
             " RETURNING id, operation_slug, invocation_snapshot_json, quiesce_gate_id,"
-            "   quiesce_json, error_text, submitted_at, quiesce_deadline_at, now() AS db_now,"
-            "   now() >= quiesce_deadline_at AS past_deadline"
+            "   quiesce_json, error_text, submitted_at, quiesce_deadline_at, clock_timestamp() AS db_now,"
+            "   clock_timestamp() >= quiesce_deadline_at AS past_deadline"
         ), {"me": self.driver_id, "lease": float(self.lease_seconds), "id": job_id,
             "quiescing": JOB_QUIESCING}).mappings().first()
+
+    @staticmethod
+    def _observe(conn, job):
+        """Refresh decision/receipt time after waits, without moving a fixed deadline."""
+        at = conn.execute(text("SELECT clock_timestamp()")).scalar_one()
+        deadline = job["quiesce_deadline_at"]
+        return {**job, "db_now": at, "past_deadline": deadline is not None and at >= deadline}
 
     def _spec(self, job, snapshot) -> GateSpec:
         scope = GateScope.from_json(snapshot["quiesce"]["scope"])
@@ -386,7 +396,7 @@ class QuiesceDriver:
         sets = [f"{key}=:{key}" for key in values]
         if deadline_from is not None:
             sets.append("quiesce_deadline_at=COALESCE(quiesce_deadline_at,"
-                        " now() + (:timeout * interval '1 second'))")
+                        " clock_timestamp() + (:timeout * interval '1 second'))")
         result = conn.execute(text(f"UPDATE ops_jobs SET {', '.join(sets)} WHERE id=:id"),
                               {**values, "id": job_id, "timeout": deadline_from})
         if result.rowcount == 1 and "state" in values:
@@ -398,14 +408,14 @@ class QuiesceDriver:
         of submission fails: nothing else bounds a preflight that keeps failing
         or a slot that never frees, and its caller waits for the receipt."""
         return bool(conn.execute(text(
-            "SELECT now() >= CAST(:submitted AS timestamptz) + (:timeout * interval '1 second')"
+            "SELECT clock_timestamp() >= CAST(:submitted AS timestamptz) + (:timeout * interval '1 second')"
         ), {"submitted": job["submitted_at"],
             "timeout": float(snapshot["quiesce"]["timeout_seconds"])}).scalar())
 
-    def _fail_unopened(self, conn, job, note: str | None) -> StepResult:
+    def _fail_unopened(self, conn, job, note: str | None, *, receipt=None) -> StepResult:
         detail = f"; last: {note}" if note else ""
         return self._fail(conn, job, "quiesce_timeout: the hold did not open within quiesce_timeout_seconds"
-                                     f" of submission; no action submitted{detail}")
+                                     f" of submission; no action submitted{detail}", receipt=receipt)
 
     def note_unopened(self, job_id: str, error: str) -> StepResult:
         """Record why a not-yet-opened job cannot open (a preflight failure),
@@ -445,6 +455,9 @@ class QuiesceDriver:
                                           "quiesce_json": json.dumps(receipt)})
             return StepResult("waiting_slot")
         worker_slot = worker_slot_free(conn, snapshot, job_id=job["id"])
+        job = self._observe(conn, job)
+        if self._open_expired(conn, job, snapshot):
+            return self._fail_unopened(conn, job, job["error_text"])
         if worker_slot is False:
             # TASK-1169 S4b: before any hold, so nothing is held while it waits.
             receipt = self._receipt(job)
@@ -453,14 +466,20 @@ class QuiesceDriver:
                                           "quiesce_json": json.dumps(receipt)})
             return StepResult("waiting_slot")
         if worker_slot:
-            conn.execute(text("UPDATE ops_jobs SET worker_slot_at=COALESCE(worker_slot_at, now()) WHERE id=:id"),
-                         {"id": job["id"]})
+            conn.execute(text("UPDATE ops_jobs SET worker_slot_at=COALESCE(worker_slot_at, clock_timestamp())"
+                              " WHERE id=:id"), {"id": job["id"]})
         activated = self.gates.activate(conn, self._spec(job, snapshot), None)
+        job = self._observe(conn, job)
         receipt = self._receipt(job)
         receipt["generations"].append(activated.gate.id)
         receipt["roster"] = [{"turn_id": m.turn_id, "drained": None, "reason": None}
                              for m in activated.members]
         receipt["observed_at"] = _utc_iso(job["db_now"])
+        # Activation can itself wait for targets/turns. Never restart the
+        # unopened budget after that wait; a newly inserted gate is released
+        # by failure in this same transaction, never exposed as a live hold.
+        if self._open_expired(conn, job, snapshot):
+            return self._fail_unopened(conn, job, job["error_text"], receipt=receipt)
         timeout = int(snapshot["quiesce"]["timeout_seconds"])
         self._phase(job, receipt, "draining", deadline=job["db_now"] + timedelta(seconds=timeout))
         self._write(conn, job["id"], {"quiesce_gate_id": activated.gate.id, "error_text": None,
@@ -471,7 +490,10 @@ class QuiesceDriver:
     def _hold(self, conn, job, snapshot) -> StepResult:
         gate_id = job["quiesce_gate_id"]
         receipt = self._receipt(job)
-        if not extend_gate(conn, gate_id, owner_id=job["id"], ttl_seconds=self.gate_ttl_seconds):
+        # As with the job claim, decide liveness only after any row-lock wait.
+        conn.execute(text("SELECT id FROM system_gates WHERE id=:id FOR UPDATE"), {"id": gate_id})
+        if not extend_gate(conn, gate_id, owner_id=job["id"], ttl_seconds=self.gate_ttl_seconds, fresh=True):
+            job = self._observe(conn, job)
             if job["past_deadline"]:
                 return self._fail(conn, job, "quiesce_lost: the hold lapsed and the deadline has passed")
             activated = self.gates.activate(conn, self._spec(job, snapshot), gate_id)
@@ -480,6 +502,7 @@ class QuiesceDriver:
             self._write(conn, job["id"], {"quiesce_gate_id": gate_id, "quiesce_json": json.dumps(receipt)})
         statuses = list(self.gates.drain_status(conn, gate_id))
         escalations = _escalations(conn, gate_id)
+        job = self._observe(conn, job)
         receipt["roster"] = [_status_row(s, escalations.get(s.member_id)) for s in statuses]
         receipt["observed_at"] = _utc_iso(job["db_now"])
         if all(s.drained for s in statuses):
@@ -496,14 +519,17 @@ class QuiesceDriver:
         timeout = int(execution["timeout_seconds"])
         cover = int(execution["start_delay_seconds"]) + timeout + 2 * self.margin_seconds
         row = conn.execute(text(
-            "UPDATE system_gates SET expires_at=GREATEST(expires_at, now() + (:cover * interval '1 second'))"
-            f" WHERE id=:id AND owner_id=:owner AND {_LIVE}"
-            "   AND expires_at > now() + (:margin * interval '1 second')"
+            "UPDATE system_gates SET expires_at=GREATEST(expires_at,"
+            " clock_timestamp() + (:cover * interval '1 second'))"
+            " WHERE id=:id AND owner_id=:owner AND released_at IS NULL"
+            "   AND expires_at > clock_timestamp() + (:margin * interval '1 second')"
             " RETURNING expires_at - ((:timeout + :margin) * interval '1 second') AS start_not_after"
         ), {"cover": float(cover), "id": gate_id, "owner": job["id"],
             "margin": float(self.margin_seconds), "timeout": float(timeout)}).first()
+        job = self._observe(conn, job)
         if row is None:
-            # Renewed above, so only a concurrent release lands here; retry next step.
+            # Renewal/drain observation is not proof of current liveness: a
+            # lapse or lost margin also refuses dispatch. Rebuild next step.
             self._phase(job, receipt, "dispatch_pending")
             self._write(conn, job["id"], {"quiesce_json": json.dumps(receipt)})
             return StepResult("cas_retry")
@@ -515,16 +541,17 @@ class QuiesceDriver:
             "quiesce_fence_json": json.dumps(fence, sort_keys=True),
             "quiesce_json": json.dumps(receipt), "error_text": None,
         })
-        conn.execute(text("UPDATE ops_jobs SET dispatched_at=now() WHERE id=:id"), {"id": job["id"]})
+        conn.execute(text("UPDATE ops_jobs SET dispatched_at=clock_timestamp() WHERE id=:id"), {"id": job["id"]})
         return StepResult("dispatched", dispatch=True)
 
     def _fail(self, conn, job, error: str, *, receipt=None) -> StepResult:
+        job = self._observe(conn, job)
         receipt = receipt or self._receipt(job)
         receipt["outcome"] = error.split(":", 1)[0] if ":" in error else "failed"
         self._phase(job, receipt, "failed", detail=receipt["outcome"])
         self._write(conn, job["id"], {"state": JOB_FAILED, "error_text": error,
                                       "quiesce_json": json.dumps(receipt)})
-        conn.execute(text("UPDATE ops_jobs SET finished_at=now() WHERE id=:id"), {"id": job["id"]})
+        conn.execute(text("UPDATE ops_jobs SET finished_at=clock_timestamp() WHERE id=:id"), {"id": job["id"]})
         release_job_gates(conn, job["id"])
         return StepResult("failed")
 

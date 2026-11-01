@@ -168,6 +168,21 @@ action submitted. This bounds a preflight that keeps failing (its error is kept
 in `error_text` meanwhile) and a concurrency slot that never frees. The drain
 deadline after the hold opens is unchanged.
 
+**Fresh decisions across lock waits.** The quiesce driver uses the DB wall
+clock after operation/job/gate locks, rather than the transaction-start time,
+for lease claims and gate renewal. Activation starts a new gate's TTL after
+its admission/roster locks. Slot and activation waits do not restart the
+submission-to-open budget: expiry fails the unopened job and releases any gate
+created in that transaction. The drain deadline starts once, after initial
+activation, and is never renewed by a rebuilt generation. A lapsed generation
+must rebuild with late work and undrained predecessor members, or fail
+`quiesce_lost` if its fixed deadline passed. After drain observation, dispatch
+independently checks current gate liveness and margin before extending the
+protected interval; a lapse refuses dispatch (`dispatch_pending`), leaving the
+next ordinary step to rebuild/fail. All-drained-before-timeout ordering and
+immutable request/backend execution-exit evidence remain unchanged: old
+confirmed exit evidence is not invalid merely because time passed.
+
 ## Quiesce exit evidence: the run.status sweep (TASK-1233 B1 (b)/(c))
 
 A held member drains only on a confirmed `execution_exit` for its pinned
