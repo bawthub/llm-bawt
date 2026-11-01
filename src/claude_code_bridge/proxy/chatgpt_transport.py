@@ -340,7 +340,17 @@ class ChatGPTStream:
                 isinstance(delta, str) and not delta.strip()
             )
         if kind in {"response.output_item.added", "response.output_item.done"}:
-            return cls._item_type(event) in TOOL_ITEM_TYPES
+            item_type = cls._item_type(event)
+            if item_type in TOOL_ITEM_TYPES:
+                return True
+            if kind == "response.output_item.done" and item_type == "reasoning":
+                # Completed native reasoning is exported as a signature even
+                # without a summary delta. It is progress, not a keepalive;
+                # an empty marker alone must not keep renewing the watchdog.
+                item = getattr(event, "item", None)
+                native = (item.get("encrypted_content") if isinstance(item, dict)
+                          else getattr(item, "encrypted_content", None))
+                return isinstance(native, str) and bool(native.strip())
         return False
 
     @property
