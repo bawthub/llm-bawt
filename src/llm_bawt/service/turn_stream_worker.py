@@ -49,6 +49,14 @@ class TurnStreamWorker(TurnStreamPublishMixin):
         # copied from the chat request or stored on a cached client.
         owner = (binding.get("thread_session_id"), ctx.bot_id, ctx.user_id)
         capability = ctx.task_turn_capability if binding.get("_service_owner") == owner else None
+        chat_reset = getattr(ctx, "chat_reset", None)
+        if chat_reset is not None:
+            # Native /new has no agent proof or SDK binding. Its owner-bound
+            # rotation already committed; sign only that exact successor.
+            capability = chat_reset.service_turn_capability(
+                bot_id=ctx.bot_id, user_id=ctx.user_id, turn_id=ctx.turn_log_id,
+                trigger_message_id=ctx.trigger_message_id,
+            )
         with bind_service_turn(capability):
             return self._stream_to_queue_with_context()
 

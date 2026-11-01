@@ -61,6 +61,32 @@ class PreparedChatSession:
 
     session_id: str
     follow_up: str | None
+    # Set only after the owner-bound backend has COMMITTED this keyed rotation.
+    # Neither request.session_id nor a guessed deterministic successor is proof.
+    _service_owner: tuple[str, str, str] | None = None
+
+    def service_turn_capability(
+        self, *, bot_id: str, user_id: str, turn_id: str, trigger_message_id: str,
+    ) -> str | None:
+        """Reuse the existing signed format for this committed native reset only.
+
+        This remains inside runtime SERVICE envelopes, never agent/task headers.
+        A signing failure preserves the authoritative ownership-query fallback.
+        """
+        if self._service_owner != (self.session_id, bot_id, user_id):
+            return None
+        from ...task_turn_context import mint_task_turn_context
+
+        try:
+            return mint_task_turn_context(
+                session_id=self.session_id, bot_id=bot_id, user_id=user_id,
+                turn_id=turn_id, trigger_message_id=trigger_message_id,
+            )
+        except Exception:
+            from ..logging import get_service_logger
+
+            get_service_logger(__name__).warning("Could not sign committed chat reset context")
+            return None
 
 
 class NewSessionExecution:
@@ -107,9 +133,18 @@ class NewSessionExecution:
         )
         if successor != SessionResetLineage.delivery_successor_id(delivery_id):
             raise RuntimeError("chat /new did not bind its keyed successor")
+        # Rotation parameters come from the backend's captured owner, not the
+        # request. Only that exact owner can attest the committed successor.
+        # Unknown adapters retain the secure per-write ownership lookup.
+        owner = (
+            (successor, bot_id, user_id)
+            if (getattr(backend, "bot_id", None), getattr(backend, "user_id", None))
+            == (bot_id, user_id) else None
+        )
         return PreparedChatSession(
             session_id=successor,
             follow_up=NewSessionExecution.typed_follow_up(user_prompt),
+            _service_owner=owner,
         )
 
     @staticmethod

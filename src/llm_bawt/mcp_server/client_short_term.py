@@ -17,6 +17,14 @@ class _MCPShortTermManager:
     def __init__(self, memory_client: MemoryClient):
         self._memory_client = memory_client
 
+    @property
+    def bot_id(self) -> str:
+        return self._memory_client._service_principal.bot_id
+
+    @property
+    def user_id(self) -> str | None:
+        return self._memory_client._service_principal.user_id
+
     def add_message(
         self,
         role: str,

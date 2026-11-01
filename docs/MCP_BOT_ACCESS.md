@@ -113,11 +113,23 @@ and failure, and never retained on a cached client. No owner query or new query
 was added to SDK binding. A token minted around an arbitrary selected session,
 a missing/mismatched row, or a raw owner tuple is **not** sufficient provenance.
 
+Native-chat `/new` (including durable stream execution of a nonstream request)
+can instead attest its exact **committed keyed successor**. Only when the
+rotation backend's captured bot/user match the runtime caller does the prepared
+reset carry private owner provenance. The MCP history adapter exposes that
+identity from its immutable service principal, not mutable request arguments.
+After rotation succeeds, the worker signs the existing turn-context format for
+that successor and scopes it inside the existing service envelope. Native
+stream and nonstream executor history writes therefore use the same two-stage
+in-memory ownership checks. This token is not passed as an agent/task header or
+to the native model. An uncommitted/failed rotation, arbitrary selected session,
+unknown/mismatched backend owner, or signing failure retains the secure lookup.
+
 Other explicit-session callers retain the existing `sessions(bot_id,user_id)`
 lookup: this remains unapproved and is **not** a zero-database-reads-all-writes
-claim. These include native-chat `/new` without an agent turn proof, nonstream
-history persisted before proof minting, standalone/archive/service callers
-without a verified runtime binding, and approved replay. Approved execution
+claim. These include agent nonstream history persisted before proof minting,
+standalone/archive/service callers without a verified runtime binding, and
+approved replay. Approved execution
 reauthorizes with its server-owned caller and does not inherit runtime-service
 ownership proof. Lifecycle/SDK reads and storage's own work are separate from
 zero policy/ownership authorization SELECTs during a proven history write. Seed

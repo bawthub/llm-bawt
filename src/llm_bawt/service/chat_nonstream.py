@@ -356,7 +356,7 @@ class ChatNonStreamMixin:
 
                 bridge_event_callback = _bridge_event_callback
 
-            def _do_query():
+            def _do_query_with_context():
                 nonlocal cancelled
                 # Check if already cancelled before starting
                 if cancel_event.is_set():
@@ -554,6 +554,19 @@ class ChatNonStreamMixin:
                 )
 
                 return response
+
+            def _do_query():
+                # ContextVars must be bound INSIDE the executor thread. Native
+                # reset provenance exists before its first history write; no
+                # arbitrary selected session or pre-mint agent write qualifies.
+                from ..bot_access.service import bind_service_turn
+
+                capability = chat_reset.service_turn_capability(
+                    bot_id=bot_id, user_id=user_id, turn_id=turn_log_id,
+                    trigger_message_id=trigger_message_id,
+                ) if chat_reset is not None else None
+                with bind_service_turn(capability):
+                    return _do_query_with_context()
 
             try:
                 # In-process GPU inference is gone (local models run in
