@@ -13,6 +13,7 @@ from pydantic import Field
 
 from .server import mcp
 from .task_association import associate_current_task
+from .task_reads import ReadBudget, ReadCursor, ReadOffset, ReadPath, ReadVersion, read_task
 from .task_board_state import (
     _ARCHIVE,
     _FOCUS,
@@ -120,7 +121,7 @@ async def list_tasks(
         Each task is a lean row: shortId, title, status, priority,
         agentBotId, updatedAt and project name. Focused tasks also carry
         focusRank and focusedAt, archived tasks archivedAt.
-        Use tasks_get or tasks_get_context for full descriptions and steps.
+        Use tasks_get or tasks_get_context for compact briefings and explicit detail pages.
     """
     logger.debug(
         "MCP tool invoked: tools/list_tasks status=%s project=%s q=%s focused=%s archived=%s",
@@ -307,22 +308,28 @@ def _without_descriptions(payload: Any) -> Any:
 @mcp.tool(name="tasks_get")
 async def get_task(
     task_id: str,
+    path: ReadPath = None,
+    offset: ReadOffset = 0,
+    max_chars: ReadBudget = 8000,
+    cursor: ReadCursor = None,
+    version: ReadVersion = None,
 ) -> dict:
-    """Get full details of a single task by ID or shortId.
+    """Read a bounded task summary or a lossless detail page.
 
-    Args:
-        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
-
-    Returns:
-        Full task object with title, description, status, priority,
-        response, checkLinks, steps (ordered), project info, and dependencies.
-        Returns error dict if not found.
+    Default: owner/status/blocker, description/current response excerpts, current
+    and recent steps, recent reviews and exact detail paths. Excerpts are marked.
+    path is a JSON pointer under /task, /reviews or /project; e.g.
+    /task/description or /task/steps/0/output. /task pages the complete raw task.
+    Details return text (encoding=text or json), total_chars, next_offset and a
+    next call carrying the version guard. Follow next before joining text; a
+    changed version requires restarting at offset 0. /reviews also returns
+    next_page for the next backend review page, after reading all current chunks.
+    max_chars bounds the whole serialized reply (clamped to 2000-8000), not just
+    source text. offset counts characters. cursor applies only to /reviews.
+    No unbounded full-history mode exists; complete detail stays retrievable.
     """
-    logger.debug("MCP tool invoked: tools/get_task id=%s", task_id)
-    try:
-        return await _api_get(f"/tasks/{task_id}")
-    except httpx.HTTPStatusError as e:
-        return _http_error(e)
+    return await read_task(_api_get, task_id, tool="tasks_get", path=path,
+                           offset=offset, max_chars=max_chars, cursor=cursor, version=version)
 
 
 @mcp.tool(name="tasks_associate_current")
@@ -586,7 +593,7 @@ async def update_task(
                     "ok": True,
                     "updated": sorted(body.keys()),
                     "task": _compact_task(updated),
-                    "detail": "Use tasks_get for full task description, response, steps, and dependencies.",
+                    "detail": "Use tasks_get for a compact briefing; path=/task opens complete paginated detail.",
                 }
             if associate_current_turn:
                 try:

@@ -67,7 +67,47 @@ accounting, capability, and overflow recovery contract:
 the BawtHub task API. They call `LLM_BAWT_TASK_API_URL` plus `/api/tasks/...`
 internally.
 
-`tasks_reviews_list(task_id, limit=20, cursor=None)` reads a bounded, newest-first
+`tasks_get(task_id)` and `tasks_get_context(task_id)` return a compact structured
+briefing, **not the full historical task**. Current owner/status/blocker, response
+and description excerpts, running/next/recent steps, and three recent reviews are
+included. `tasks_get_context` also includes project instruction excerpts. Large
+fields carry `complete=false`, head/tail excerpts, `total_chars` and a detail path;
+collection summaries carry whole counts and the exact path. Small requested
+budgets can explicitly omit history while retaining current task state.
+
+Both tools accept the same bounded detail parameters:
+
+- `path`: JSON pointer under `/task`, `/reviews`, or `/project`. Examples:
+  `/task/description`, `/task/steps/0/output`, `/reviews/reviews/0/body`,
+  `/project/contextPrompt`. RFC 6901 escapes `~1` and `~0` address `/` and `~`.
+- `offset`: character offset, normally supplied by the returned `next` call.
+- `max_chars`: budget for the **whole serialized reply**, clamped to 2,000–8,000.
+  Escaping and non-ASCII data count toward that budget, not just source text.
+- `version`: selected-value SHA-256 from the first detail page. It is required
+  for nonzero offsets; changed values return `detail_changed`, never a mixed
+  snapshot. Restart that path at offset zero after a change.
+- `cursor`: existing opaque backend review cursor, only for `/reviews` paths.
+
+Details return `text`, `encoding` (`text` or `json`), `total_chars`, `offset`,
+`next_offset`, and an executable `{tool, arguments}` `next` descriptor. Follow
+`next` until `next_offset=null`, concatenate text, and decode JSON only when
+`encoding=json`. `/task` retrieves **every raw task field**, including unknown
+fields; `/task/steps` pages the complete ordered list without dropping a huge
+individual output. `/reviews` pages the complete raw review page (including
+findings and long bodies); after finishing its text chunks, follow `next_page`
+to the next backend review page. New backend pages have their own version.
+No unbounded `full=true` escape or harness-output exemption is provided.
+
+Compatibility: old `tasks_get` callers expecting the raw object should read
+`result.task` for current summary fields, or reconstruct `path=/task` explicitly.
+`tasks_get_context` now returns a dictionary rather than an unbounded markdown
+string. No internal Python callers depended on either old result shape; the
+BawtHub HTTP API, recall readers and approval continuation envelope are unchanged.
+Source publication does not activate these signatures: the MCP-serving app needs
+a separately authorized activation and fresh tool discovery. Old resumed SDKs
+can retain their old schemas; do not reset sessions/history as a workaround.
+
+`tasks_reviews_list(task_id, limit=20, cursor=None)` reads a bounded-row, newest-first
 page of task-owned reviews from `GET /api/tasks/tasks/{id}/reviews`; pass the
 returned opaque cursor to fetch the next page. `tasks_reviews_add(task_id,
 stage, verdict, body, bot_id, target_revision=None, idempotency_key=None)`

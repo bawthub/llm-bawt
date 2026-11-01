@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .server import mcp
+from .task_reads import ReadBudget, ReadCursor, ReadOffset, ReadPath, ReadVersion, read_task
 from .task_api import (
     API_PREFIX as _API_PREFIX,
     api_delete as _api_delete,
@@ -272,112 +273,25 @@ async def get_activity(
 @mcp.tool(name="tasks_get_context")
 async def get_task_context(
     task_id: str,
-) -> str:
-    """Get a formatted briefing document for a task.
+    path: ReadPath = None,
+    offset: ReadOffset = 0,
+    max_chars: ReadBudget = 8000,
+    cursor: ReadCursor = None,
+    version: ReadVersion = None,
+) -> dict:
+    """Read a bounded task/project briefing before starting work.
 
-    Combines task details, step checklist, dependencies, and the
-    parent project's context prompt into a single readable document.
-    Load this before starting work on a task.
-
-    Args:
-        task_id: Task ID (cuid) or shortId (e.g. "TASK-42").
-
-    Returns:
-        Formatted markdown text with everything you need to work
-        on the task. Returns error string if not found.
+    Same summary and lossless detail contract as tasks_get, with project
+    description/instructions included in the default briefing. This replaces
+    the unbounded markdown string with a structured summary. Excerpts carry
+    complete=false and an exact path, including oversized individual fields.
+    Read paths /task, /task/steps/0/output, /reviews, /project/contextPrompt
+    explicitly. Follow next (character offset + version) until next_offset is
+    null; concatenate text, then decode JSON only when encoding=json. A changed
+    version refuses continuation. Review pages also carry next_page.
+    max_chars caps the complete serialized reply at 2000-8000 characters.
+    No service activation or writes occur.
     """
-    logger.debug("MCP tool invoked: tools/get_task_context id=%s", task_id)
-    try:
-        task = await _api_get(f"/tasks/{task_id}")
-    except httpx.HTTPStatusError as e:
-        return f"Error fetching task: {e}"
-
-    if "error" in task:
-        return f"Task not found: {task_id}"
-
-    # Build formatted context document
-    lines: list[str] = []
-
-    # Task header
-    lines.append(f"# {task.get('shortId', '')} — {task.get('title', 'Untitled')}")
-    lines.append("")
-    lines.append(f"**Status:** {task.get('status', '?')}  ")
-    lines.append(f"**Priority:** {task.get('priority', '?')}  ")
-    if task.get("agentBotId"):
-        lines.append(f"**Assigned to:** {task['agentBotId']}  ")
-    if task.get("modelId"):
-        lines.append(f"**Model:** {task['modelId']}  ")
-    lines.append(f"**Created:** {task.get('createdAt', '?')}  ")
-    lines.append(f"**Updated:** {task.get('updatedAt', '?')}  ")
-    lines.append("")
-
-    # Description
-    if task.get("description"):
-        lines.append("## Description")
-        lines.append("")
-        lines.append(task["description"])
-        lines.append("")
-
-    # Dependencies
-    deps = task.get("dependsOn", [])
-    if deps:
-        lines.append("## Dependencies")
-        lines.append("")
-        for dep in deps:
-            status_icon = "✅" if dep.get("status") == "COMPLETED" else "⏳"
-            lines.append(f"- {status_icon} {dep.get('shortId', '?')} — {dep.get('title', '?')} ({dep.get('status', '?')})")
-        lines.append("")
-
-    # Steps
-    steps = task.get("steps", [])
-    if steps:
-        lines.append("## Steps")
-        lines.append("")
-        for step in steps:
-            status_map = {
-                "PENDING": "[ ]",
-                "RUNNING": "[~]",
-                "COMPLETED": "[x]",
-                "FAILED": "[!]",
-                "SKIPPED": "[-]",
-            }
-            checkbox = status_map.get(step.get("status", ""), "[ ]")
-            step_type = step.get("type", "")
-            type_label = f" ({step_type})" if step_type else ""
-            lines.append(f"- {checkbox} {step.get('title', '?')}{type_label}")
-            if step.get("output"):
-                # Indent output under step
-                for out_line in step["output"].split("\n"):
-                    lines.append(f"      {out_line}")
-        lines.append("")
-
-    # Existing response
-    if task.get("response"):
-        lines.append("## Previous Response")
-        lines.append("")
-        lines.append(task["response"])
-        lines.append("")
-
-    # Project context
-    project = task.get("project")
-    if project:
-        lines.append(f"## Project: {project.get('name', '?')}")
-        lines.append("")
-        # Fetch full project for context prompt
-        try:
-            full_project = await _api_get(f"/projects/{project['id']}")
-            if full_project.get("contextPrompt"):
-                lines.append("### Project Context")
-                lines.append("")
-                lines.append(full_project["contextPrompt"])
-                lines.append("")
-            if full_project.get("description"):
-                lines.append("### Project Description")
-                lines.append("")
-                lines.append(full_project["description"])
-                lines.append("")
-        except httpx.HTTPStatusError:
-            lines.append("_(Could not load project context)_")
-            lines.append("")
-
-    return "\n".join(lines)
+    return await read_task(_api_get, task_id, tool="tasks_get_context", path=path,
+                           offset=offset, max_chars=max_chars, cursor=cursor,
+                           version=version, include_project=True)

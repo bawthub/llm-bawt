@@ -172,7 +172,9 @@ async def test_catalog_token_budgets():
     # capped listing may not reach; the reason-privacy rule in-band): 4,439 (+36).
     # TASK-1719: schedule_wakeup (durable wake-ups; "instead of CronCreate"
     # in-band, since session-only harness timers die on /new and restarts): 4,499 (+60).
-    assert sum(descriptions) <= 4499, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1781: compact task defaults and lossless detail/next-page guidance:
+    # 4,546 (+47). Huge history now stays behind explicit bounded reads.
+    assert sum(descriptions) <= 4546, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -264,7 +266,9 @@ async def test_catalog_token_budgets():
     # CronCreate timers and hand-built /v1/prompt-schedules curls.
     # TASK-1774: messages_get user_id (context reads scoped to one user's
     # sessions; a bot's partition holds every user's history): 16,744 (+21).
-    assert total <= 16744, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1781: path/offset/budget/cursor/version on both task readers:
+    # 17,173 (+429), replacing unbounded 170k+ task dumps.
+    assert total <= 17173, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

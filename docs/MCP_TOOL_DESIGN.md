@@ -158,6 +158,39 @@ caller learns the outcome:
 (`ops.quiesce_end_turn.new_turn`, `ops.quiesce_end_turn.no_receipt`). This is
 a result field only; tool descriptions and schemas are unchanged.
 
+## Bounded task read results (TASK-1781)
+
+Task read defaults are bounded summaries, not raw records or all step outputs.
+`tasks_get` and `tasks_get_context` share the same explicit `path`, character
+`offset`, `max_chars`, review `cursor` and selected-value `version` contract.
+The default/max serialized payload budget is 8,000 ASCII-JSON characters (also
+an upper bound on UTF-8 bytes); the minimum requested budget is 2,000. Budget the
+whole envelope including JSON escaping, paths and continuation descriptors.
+FastMCP's duplicated text/structured transport is covered separately below
+24,000 bytes in regression fixtures. Oversized single-line description, step,
+review and output fields are paged losslessly, not discarded at row boundaries.
+
+`next={tool, arguments}` continues the selected value, with `next_offset` and a
+revision guard. `/reviews` additionally carries `next_page` for the existing
+backend review cursor: finish current chunks before advancing the backend page.
+Current owner/blocker/next-action excerpts remain in summaries; omitted history
+and incomplete fields are labeled and carry exact detail paths. `/task` can
+reconstruct the original raw record, preserving unknown fields. Changing source
+content refuses a continuation rather than silently joining different versions.
+See [MCP_SERVER.md](MCP_SERVER.md#notes-on-task-tools) for result-shape migration.
+
+Local discovery measured **116 tools, 4,546 description tokens and 17,173
+full-definition tokens** (+47/+429 over the previous 4,499/16,744 caps). Five
+typed detail arguments on each task reader buy complete bounded access in place
+of 170k+ character default dumps. No warnings or existing fields were removed;
+regression caps match this measured footprint. This is not live discovery or a
+provider billing measurement.
+
+This is a read-result contract, not TASK-1740's approved-operation continuation
+message frame. The latter's authorship, framing and editable guidance are not
+changed or reused as a paging protocol. Harness size enforcement remains intact.
+No service activation or fresh runtime discovery is implied by source tests.
+
 ## Provider loading caveat
 
 `claude_code_bridge/proxy/translate.py::_tools_to_responses` forwards supplied
