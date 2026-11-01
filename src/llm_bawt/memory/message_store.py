@@ -22,10 +22,14 @@ from sqlalchemy import (
     String,
     Table,
     Text,
-    insert,
-    select,
+    and_,
+    case,
+    cast,
+    column,
+    func,
+    literal,
+    or_,
     text,
-    update,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -212,63 +216,112 @@ class MessageRowStore:
         author: AuthorReference | None = None,
         extract_memory: bool = True,
     ) -> None:
-        """Insert one row or refresh mutable payload fields on an existing id."""
+        """Insert or refresh mutable fields atomically, without an existence read.
+
+        Conflict updates preserve role/session/created_at. The incoming INSERT
+        candidate must still satisfy DB column constraints, including on retry;
+        unlike the former UPDATE branch, malformed immutable inputs can fail.
+        """
         if not content or content.isspace():
             logger.warning("Skipping empty content for message ID: %s", message_id)
             return
 
+        dialect = self.engine.dialect.name
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+
+            # The model describes one partition; its physical inherited PK is
+            # (bot_id, id), with bot_id supplied by the partition's DB default.
+            conflict = [column("bot_id"), self.table.c.id]
+        elif dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+
+            conflict = [self.table.c.id]
+        else:
+            raise NotImplementedError(f"message upsert is unsupported for {dialect}")
+
+        values = {
+            "content": content,
+            # Inspect the STORED role, never a retry's requested role.
+            "timestamp": case(
+                (self.table.c.role == "user", self.table.c.timestamp),
+                else_=timestamp,
+            ),
+        }
+        if attachments is not None:
+            values["attachments"] = attachments
+        if reasoning is not None:
+            values["reasoning"] = reasoning
+        if author is not None:
+            values.update(author_entity_type=author.entity_type, author_entity_id=author.entity_id)
+        if not extract_memory:
+            values.update(processed=True, summary_metadata=self._exclusion_metadata(dialect))
+        statement = insert(self.table).values(
+            id=message_id, role=role, content=content, timestamp=timestamp,
+            session_id=session_id, attachments=attachments if attachments is not None else [],
+            reasoning=reasoning,
+            author_entity_type=(author.entity_type if author else None),
+            author_entity_id=(author.entity_id if author else None),
+            processed=not extract_memory,
+            **({"summary_metadata": {"extract_memory": False}} if not extract_memory else {}),
+            created_at=datetime.now(timezone.utc),
+        ).on_conflict_do_update(index_elements=conflict, set_=values)
         with Session(self.engine) as session:
             try:
-                existing = session.execute(
-                    select(self.table).where(self.table.c.id == message_id)
-                ).first()
-                if existing:
-                    values: dict = {"content": content}
-                    # TASK-1234: a user row's timestamp is first-write-wins, so
-                    # a retried delivery cannot reorder it after later replies.
-                    # Assistant partial->final upserts keep refreshing theirs.
-                    if existing.role != "user":
-                        values["timestamp"] = timestamp
-                    if not extract_memory:
-                        values["processed"] = True
-                        values["summary_metadata"] = {
-                            **(existing.summary_metadata or {}), "extract_memory": False,
-                        }
-                    if attachments is not None:
-                        values["attachments"] = attachments
-                    if reasoning is not None:
-                        values["reasoning"] = reasoning
-                    if author is not None:
-                        values["author_entity_type"] = author.entity_type
-                        values["author_entity_id"] = author.entity_id
-                    session.execute(
-                        update(self.table)
-                        .where(self.table.c.id == message_id)
-                        .values(**values)
-                    )
+                if not extract_memory:
+                    # RETURNING is part of the ONE DML statement, not an owner
+                    # or row-existence SELECT. Preserve Python's old malformed
+                    # truthy non-mapping failure BEFORE commit, rolling back all
+                    # updates. Falsy JSON values were normalized by the SQL CASE.
+                    metadata = session.execute(
+                        statement.returning(self.table.c.summary_metadata)
+                    ).scalar_one()
+                    if not isinstance(metadata, dict):
+                        raise TypeError("stored summary metadata must be a mapping")
                 else:
-                    session.execute(
-                        insert(self.table).values(
-                            id=message_id,
-                            role=role,
-                            content=content,
-                            timestamp=timestamp,
-                            session_id=session_id,
-                            attachments=attachments if attachments is not None else [],
-                            reasoning=reasoning,
-                            author_entity_type=(author.entity_type if author else None),
-                            author_entity_id=(author.entity_id if author else None),
-                            processed=not extract_memory,
-                            # Reuse existing message metadata for durable exclusion
-                            # provenance; processed alone also means "extracted".
-                            **({"summary_metadata": {"extract_memory": False}}
-                               if not extract_memory else {}),
-                            created_at=datetime.now(timezone.utc),
-                        )
-                    )
+                    session.execute(statement)
                 session.commit()
                 logger.debug("Added message %s to %s", message_id, self.table_name)
             except Exception:
                 session.rollback()
                 logger.exception("Failed to add message %s", message_id)
                 raise
+
+    def _exclusion_metadata(self, dialect: str):
+        """Shallow-merge exclusion, preserving the old `metadata or {}` contract.
+
+        Truthy non-objects are returned unchanged for validation/rollback above;
+        never silently repair malformed stored metadata into an eligible object.
+        """
+        metadata = self.table.c.summary_metadata
+        flag = {"extract_memory": False}
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import JSONB
+
+            stored = cast(metadata, JSONB)
+            object_ = func.jsonb_typeof(stored) == "object"
+            falsy = or_(
+                metadata.is_(None),
+                func.jsonb_typeof(stored) == "null",
+                stored.in_([literal(v, type_=JSONB) for v in (False, 0, "", [])]),
+            )
+            return case(
+                (object_, stored.op("||")(literal(flag, type_=JSONB))),
+                (falsy, literal(flag, type_=JSONB)),
+                else_=stored,
+            )
+        kind = func.json_type(metadata)
+        value = func.json_extract(metadata, "$")
+        falsy = or_(
+            metadata.is_(None),
+            kind.in_(["null", "false"]),
+            and_(kind.in_(["integer", "real"]), value == 0),
+            and_(kind == "text", value == ""),
+            and_(kind == "array", func.json_array_length(metadata) == 0),
+        )
+        encoded_flag = literal(flag, type_=JSON)
+        return case(
+            (kind == "object", func.json_patch(metadata, encoded_flag)),
+            (falsy, encoded_flag),
+            else_=metadata,
+        )
