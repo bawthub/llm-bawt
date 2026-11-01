@@ -76,6 +76,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_delivery_claim_gate_pg.py::",
     "test_delivery_shutdown_handoff_pg.py::",
     "test_ops_quiesce_pg.py::",
+    "test_ops_gate_receipt_pg.py::",
     "test_ops_preflight_deadline_pg.py::",
     "test_ops_competing_dispatch_pg.py::",
     "test_system_events_pg.py::",
