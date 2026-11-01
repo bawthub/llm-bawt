@@ -125,3 +125,78 @@ def test_post_checkout_warns_only_when_shared_checkout_leaves_canonical(repo: tu
     shared_result = subprocess.run(checkout_args, cwd=shared, text=True, capture_output=True)
     assert shared_result.returncode == 0
     assert "Shared checkout switched" in shared_result.stderr
+
+
+@pytest.mark.parametrize("owner,task", [("al", "1882"), ("al-test2", "18820")])
+def test_task_qualified_worktree_accepts_exact_owner_and_task(
+    repo: tuple[Path, Path], owner: str, task: str,
+) -> None:
+    shared, _ = repo
+    # Low-level worktree creation is confined to this disposable Git fixture.
+    linked = shared.parent / f".wt-service-{owner}-TASK-{task}"
+    git(shared, "worktree", "add", "-q", "-b", f"{owner}/TASK-{task}-hook", str(linked))
+    git(linked, "commit", "--allow-empty", "-qm", f"TASK-{task} matching task path")
+
+
+@pytest.mark.parametrize("basename,branch", [
+    (".wt-service-al-TASK-1882", "byte/TASK-1882-hook"),
+    (".wt-service-al-TASK-1882", "al/TASK-1883-hook"),
+    (".wt-service-al-TASK-1882", "al/TASK-18820-hook"),
+    (".wt-service-al-TASK-01882", "al/TASK-1882-hook"),
+    (".wt-service-al-TASK-0", "al/TASK-1882-hook"),
+    (".wt-service-al-TASK-", "al/TASK-1882-hook"),
+    (".wt-service--al-TASK-1882", "al/TASK-1882-hook"),
+    (".wt-service-al--TASK-1882", "al/TASK-1882-hook"),
+    (".wt-service-Al-TASK-1882", "al/TASK-1882-hook"),
+    (".wt-other-al-TASK-1882", "al/TASK-1882-hook"),
+    (".wt-service-al-TASK-1882-TASK-1882", "al/TASK-1882-hook"),
+    (".wt-service-al-TASK-1882", "al/TASK-1882-bad--slug"),
+    (".wt-service-al-TASK-1882", "al/task-1882-hook"),
+])
+def test_task_path_rejects_malformed_owner_task_or_branch(
+    repo: tuple[Path, Path], basename: str, branch: str,
+) -> None:
+    shared, _ = repo
+    linked = shared.parent / basename
+    git(shared, "worktree", "add", "-q", "-b", branch, str(linked))
+    original = git(linked, "rev-parse", "HEAD").stdout.strip()
+    denied = git(linked, "commit", "--allow-empty", "-m", "TASK-1882 invalid path", check=False)
+    assert denied.returncode != 0
+    assert "own task branch" in denied.stderr
+    assert git(linked, "rev-parse", "HEAD").stdout.strip() == original
+
+
+@pytest.mark.parametrize("state", ["rebase-merge", "rebase-apply"])
+def test_task_path_preserves_rebase_owner_and_exact_task(
+    repo: tuple[Path, Path], state: str,
+) -> None:
+    shared, _ = repo
+    linked = shared.parent / ".wt-service-al-TASK-1882"
+    git(shared, "worktree", "add", "-q", "-b", "al/TASK-1882-hook", str(linked))
+    git(linked, "switch", "-q", "--detach")
+    detached = git(linked, "commit", "--allow-empty", "-m", "TASK-1882 detached", check=False)
+    assert detached.returncode != 0
+    assert "own task branch" in detached.stderr
+    git_dir = Path(git(linked, "rev-parse", "--absolute-git-dir").stdout.strip())
+    rebase = git_dir / state
+    rebase.mkdir()
+    head_name = rebase / "head-name"
+    head_name.write_text("refs/heads/al/TASK-1882-hook\n")
+    git(linked, "commit", "--allow-empty", "-qm", "TASK-1882 resolved rebase")
+    original = git(linked, "rev-parse", "HEAD").stdout.strip()
+    for ref in ("byte/TASK-1882-hook", "al/TASK-1883-hook", "master", "not-a-ref"):
+        head_name.write_text(f"refs/heads/{ref}\n" if ref != "not-a-ref" else ref + "\n")
+        denied = git(linked, "commit", "--allow-empty", "-m", "TASK-1882 wrong rebase", check=False)
+        assert denied.returncode != 0
+        assert "own task branch" in denied.stderr
+        assert git(linked, "rev-parse", "HEAD").stdout.strip() == original
+
+
+def test_task_path_refuses_canonical_branch(repo: tuple[Path, Path]) -> None:
+    shared, _ = repo
+    linked = shared.parent / ".wt-service-al-TASK-1882"
+    git(shared, "worktree", "add", "-q", "-b", "al/TASK-1882-hook", str(linked))
+    git(linked, "switch", "-q", "--ignore-other-worktrees", "master")
+    denied = git(linked, "commit", "--allow-empty", "-m", "TASK-1882 canonical", check=False)
+    assert denied.returncode != 0
+    assert "own task branch" in denied.stderr
