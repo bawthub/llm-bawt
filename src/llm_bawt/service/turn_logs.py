@@ -91,6 +91,8 @@ class TurnLogStore:
 
         self._schema_guard.run(self.engine, "turn-log-store", bootstrap_turn_log_schema)
         ensure_gate_schema(self.engine)  # every admission here asks the system gate
+        from .session_resumption import ensure_schema as ensure_resumption_schema
+        ensure_resumption_schema(self.engine)
 
     def _backfill_trigger_message_ids(self) -> None:
         """One-time backfill: populate trigger_message_id for existing rows."""
@@ -346,14 +348,14 @@ class TurnLogStore:
 
     def accept_session_binding(
         self, *, turn_id: str, bot_id: str, user_id: str, session_id: str,
-        admission_claim: AdmissionClaim | None = None,
-    ) -> None:
-        """Fenced bot-wide pointer update after resolving the accepted thread."""
+        admission_claim: AdmissionClaim | None = None, record_resumption: bool = False,
+    ) -> dict | None:
+        """Fenced pointer update and optional atomic accepted-prompt receipt."""
         from .session_lifecycle.admission import accept_session_binding
 
-        accept_session_binding(
+        return accept_session_binding(
             self.engine, turn_id=turn_id, bot_id=bot_id, user_id=user_id,
-            session_id=session_id, claim=admission_claim,
+            session_id=session_id, claim=admission_claim, record_resumption=record_resumption,
         )
 
     def bind_agent_bridge(self, *, turn_id: str, backend: str, session_key: str, request_id: str,

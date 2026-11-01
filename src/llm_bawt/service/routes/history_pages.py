@@ -7,6 +7,7 @@ from ..logging import get_service_logger
 from ..schemas import HistoryClearResponse, HistoryMessage, HistoryResponse
 from .history_scheduler import hydrate_scheduler_for_page
 from .history_approval_notice import hydrate_approver_notices_for_page
+from .history_resumption import hydrate_resumptions_for_page
 
 read_router = APIRouter()
 mutation_router = APIRouter()
@@ -521,6 +522,9 @@ def _build_history_response(
     notices_by_id = hydrate_approver_notices_for_page(
         service, effective_bot_id, page_messages, origin_user_id
     )
+    resumptions_by_id = hydrate_resumptions_for_page(
+        service, effective_bot_id, page_messages, origin_user_id
+    )
     history_messages = []
     for msg in page_messages:
         message_id = str(msg.get("id") or "")
@@ -542,6 +546,7 @@ def _build_history_response(
             author=_message_author_payload(msg),
             scheduler=scheduler_by_id.get(message_id) if msg.get("role") == "user" else None,
             approval_notice=notices_by_id.get(message_id) if msg.get("role") == "user" else None,
+            session_resumption=resumptions_by_id.get(message_id) if msg.get("role") == "user" else None,
         ))
 
     oldest_timestamp = history_messages[0].timestamp if history_messages else None

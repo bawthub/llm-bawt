@@ -45,6 +45,17 @@ class ScheduledMessageOrigin(BaseModel):
     scheduled_for: str
 
 
+class SessionResumption(BaseModel):
+    """Committed accepted-prompt transition; display-only, never routing input."""
+
+    turn_id: str
+    session_id: str
+    previous_session_id: str
+    accepted_at: float
+    session_started_at: float | None = None
+    title: str | None = None
+
+
 class HistoryMessage(BaseModel):
     """A message in the conversation history.
 
@@ -79,6 +90,7 @@ class HistoryMessage(BaseModel):
     author: MessageAuthor
     scheduler: ScheduledMessageOrigin | None = None
     approval_notice: ApproverNotice | None = None
+    session_resumption: SessionResumption | None = None
 
 class HistoryResponse(BaseModel):
     """Response for conversation history.

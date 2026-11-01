@@ -15,8 +15,8 @@ from ..turn_admission import AdmissionFenceLost, lock_target
 
 def accept_session_binding(
     engine, *, turn_id: str, bot_id: str, user_id: str, session_id: str,
-    claim=None,
-) -> None:
+    claim=None, record_resumption: bool = False,
+) -> dict | None:
     """Stamp the admitted, current binding or refuse stale/lost work.
 
     ``claim`` is a trusted Python-only AdmissionClaim; public JSON is never an
@@ -45,4 +45,14 @@ def accept_session_binding(
         """), {"bot": bot_id, "started": current["created_at"], "id": turn_id}).first()
         if newer is not None:
             raise AdmissionFenceLost(f"turn '{turn_id}' was superseded before binding")
+        receipt = None
+        if record_resumption:
+            from ..session_resumption import record
+
+            trigger = conn.execute(text(
+                "SELECT trigger_message_id FROM turn_logs WHERE id=:id"
+            ), {"id": turn_id}).scalar_one_or_none()
+            receipt = record(conn, bot_id=bot_id, user_id=user_id, turn_id=turn_id,
+                             trigger_message_id=trigger, session_id=session_id)
         BotSessionState.accept(conn, bot_id=bot_id, session_id=session_id)
+    return receipt

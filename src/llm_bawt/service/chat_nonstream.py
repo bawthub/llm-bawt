@@ -497,10 +497,27 @@ class ChatNonStreamMixin:
                             and (_final_binding.get("explicit_thread")
                                  or not is_new_command(user_prompt))
                         ):
-                            self._turn_log_store.accept_session_binding(
+                            resumption = self._turn_log_store.accept_session_binding(
                                 turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
                                 session_id=_final_sid, admission_claim=admission_claim,
+                                record_resumption=bool(_final_binding.get("explicit_thread"))
+                                    and not is_new_command(user_prompt),
                             )
+                            if isinstance(resumption, dict):
+                                from .session_resumption import event as resumption_event
+
+                                try:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self._publish_nonstream_turn_event(
+                                            bot_id=bot_id, user_id=user_id,
+                                            event=resumption_event(resumption, bot_id=bot_id,
+                                                user_id=user_id, trigger_message_id=trigger_message_id),
+                                        ), loop,
+                                    ).result(timeout=5)
+                                except Exception as exc:
+                                    # Optional delivery cannot undo acceptance or
+                                    # stop inference; history owns the receipt.
+                                    log.debug("Session-resumption event publish failed: %s", exc)
 
                 from .session_continuity import record_session_continuity
                 if _is_agent:

@@ -38,10 +38,11 @@ def test_pristine_full_store_catalog(full_store_db, tmp_path):
     # + TASK-1661's approval_approver_fanout (InterBotDeliveryStore bootstraps it)
     # + TASK-1749's gate_escalations audit (TurnLogStore bootstraps it)
     # + TASK-1745's system_events ledger (OpsStore bootstraps it).
-    assert len(relations) == 60, sorted(relations)
+    # + TASK-1918's accepted-session display receipts (TurnLogStore bootstrap).
+    assert len(relations) == 61, sorted(relations)
     assert {"system_events", "system_gates", "gate_members", "gate_escalations", "bot_tag_catalog", "bot_profile_tags",
             "api_balance_ledger", "api_balances",
-            "bot_profile_changes", "approval_approver_fanout"} <= {key.split(".")[-1] for key in relations}
+            "bot_profile_changes", "approval_approver_fanout", "session_resumption_receipts"} <= {key.split(".")[-1] for key in relations}
     assert not any("schema_full_fixture" in key for _, key in catalog)
     assert catalog_tool["compare"](catalog, catalog) == []
     metadata["bootstrap_manifest"] = manifest

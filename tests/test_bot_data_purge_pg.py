@@ -37,6 +37,7 @@ def purge_db(private_pg, private_module_db, monkeypatch):
             "CREATE TABLE prompt_template_versions (scope_type TEXT, scope_id TEXT)",
             "CREATE TABLE prompt_templates (scope_type TEXT, scope_id TEXT)",
             "CREATE TABLE turn_logs (id TEXT PRIMARY KEY, bot_id TEXT)",
+            "CREATE TABLE session_resumption_receipts (bot_id TEXT, trigger_message_id TEXT, PRIMARY KEY(bot_id,trigger_message_id))",
             "CREATE TABLE tool_call_records (id INTEGER PRIMARY KEY, bot_id TEXT, turn_id TEXT REFERENCES turn_logs(id) ON DELETE SET NULL)",
             # The legacy payload store has no FK or cascade in the real schema.
             "CREATE TABLE tool_call_result_payloads (tool_call_record_id INTEGER PRIMARY KEY, content_text TEXT)",
@@ -86,6 +87,7 @@ def seed(engine, entity_type="BOT", keep_profile=False):
             conn.execute(text(f"INSERT INTO {table} VALUES (:type,'source'),('USER','source'),('user','source'),('BOT','dash')"),
                          {"type": entity_type})
         conn.exec_driver_sql("INSERT INTO turn_logs VALUES ('t-source','source'),('t-dash','dash')")
+        conn.exec_driver_sql("INSERT INTO session_resumption_receipts VALUES ('source','same-trigger'),('dash','same-trigger')")
         conn.exec_driver_sql("INSERT INTO tool_call_records VALUES (1,'source','t-source'),(2,'dash','t-dash')")
         conn.exec_driver_sql("INSERT INTO tool_call_result_payloads VALUES (1,'source payload'),(2,'dash payload')")
         conn.exec_driver_sql("INSERT INTO scheduled_jobs VALUES ('shared','*'),('own','source')")
@@ -111,11 +113,13 @@ def test_purge_removes_bot_profile_data_and_sessions_without_requiring_definitio
     seed(engine, entity_type, keep_profile)
     result = purge(" SOURCE ")
     assert result["deleted_rows"]["sessions"] == 3
+    assert result["deleted_rows"]["session_resumption_receipts"] == 1
     assert result["deleted_rows"]["entity_profiles"] == 1
     assert result["deleted_rows"]["entity_profile_attributes"] == 1
     with engine.connect() as conn:
         assert conn.exec_driver_sql("SELECT id FROM sessions").scalars().all() == ["s-dash"]
         assert conn.exec_driver_sql("SELECT id FROM messages").scalars().all() == ["m-dash"]
+        assert conn.exec_driver_sql("SELECT * FROM session_resumption_receipts").all() == [("dash", "same-trigger")]
         assert conn.exec_driver_sql("SELECT last_session_id FROM bot_profiles WHERE slug='dash'").scalar_one() == "s-dash"
         if keep_profile:
             assert conn.exec_driver_sql("SELECT last_session_id FROM bot_profiles WHERE slug='source'").scalar_one() is None

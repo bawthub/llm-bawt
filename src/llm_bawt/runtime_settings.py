@@ -546,6 +546,13 @@ def purge_bot_data(config: Config, slug: str) -> dict[str, Any]:
                 )
                 result["deleted_rows"]["sessions"] = r.rowcount
 
+            # Accepted-prompt display receipts follow exact-bot history ownership.
+            if "session_resumption_receipts" in prompt_purge.tables:
+                r = conn.execute(_text(
+                    "DELETE FROM session_resumption_receipts WHERE bot_id=:s"
+                ), {"s": normalized})
+                result["deleted_rows"]["session_resumption_receipts"] = r.rowcount
+
             # 2. runtime_settings
             r = conn.execute(
                 _text("DELETE FROM runtime_settings WHERE scope_type='bot' AND scope_id=:s"),

@@ -358,6 +358,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         bridge_reset_action: str | None = None
         bridge_prompt: str | None = None
         session_id: str = ""
+        session_resumption = None
         if is_agent_backend:
             try:
                 if thread_binding is None:
@@ -393,9 +394,11 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                     and ((thread_binding or {}).get("explicit_thread")
                          or not is_new_command(user_prompt))
                 ):
-                    self._turn_log_store.accept_session_binding(
+                    session_resumption = self._turn_log_store.accept_session_binding(
                         turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
                         session_id=session_id, admission_claim=admission_claim,
+                        record_resumption=bool((thread_binding or {}).get("explicit_thread"))
+                            and not is_new_command(user_prompt),
                     )
                 from .session_continuity import record_session_continuity
                 record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
@@ -569,6 +572,16 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             "tts_scrubbed": tts_scrub,
             "ts": time.time(),
         })
+
+        if isinstance(session_resumption, dict):
+            from .session_resumption import event as resumption_event
+
+            resumed = resumption_event(session_resumption, bot_id=bot_id,
+                                       user_id=user_id, trigger_message_id=trigger_message_id)
+            # turn_start has now supplied the canonical user anchor. Acceptance
+            # committed earlier; never derive this from the requested/viewed id.
+            await _turn_worker._publish_unified(resumed)
+            yield f"data: {json.dumps({**resumed, 'object': 'chat.completion.session_resumed'})}\n\n"
 
         # ── Durable approval handling (TASK-292/306 race hardening) ──
         # The approval row + its surfacing MUST NOT depend on the SSE async

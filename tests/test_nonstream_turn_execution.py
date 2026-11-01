@@ -108,6 +108,79 @@ def _isolate(monkeypatch):
         turn_executions.remove(turn_id)
 
 
+@pytest.mark.parametrize("stream,publish_fails", [(True, False), (False, False), (False, True)])
+def test_resumption_event_is_after_accepted_binding_and_user_anchor(monkeypatch, _isolate, stream, publish_fails):
+    import json
+    from llm_bawt.service.turn_stream_worker import TurnStreamWorker
+
+    order = []
+    receipt = {}
+    service = _service(Mock(return_value=("answer", "", [])))
+    service._bind_agent_thread.return_value = {
+        "thread_session_id": "old-thread", "explicit_thread": True,
+    }
+
+    def accept(**kwargs):
+        assert kwargs["record_resumption"] is True
+        order.append("accepted")
+        receipt.update(turn_id=kwargs["turn_id"], session_id="old-thread",
+                       previous_session_id="current", accepted_at=100.0,
+                       session_started_at=10.0, title="Earlier work")
+        return dict(receipt)
+
+    service._turn_log_store.accept_session_binding.side_effect = accept
+    from llm_bawt.message_authorship import AuthorReference
+    for module in ("chat_streaming", "chat_nonstream"):
+        monkeypatch.setattr(f"llm_bawt.service.{module}.validate_inter_bot_claim",
+                            lambda *_a: AuthorReference.bot("fixture-sender"))
+    events = []
+
+    async def publish(event):
+        events.append(event)
+        order.append(event["_type"])
+        if publish_fails and event["_type"] == "session_resumed":
+            raise RuntimeError("optional resumption publication failed")
+
+    async def nonstream_publish(**kw):
+        await publish(kw["event"])
+    service._publish_nonstream_turn_event = nonstream_publish
+    monkeypatch.setattr(TurnStreamWorker, "_publish_unified", lambda _worker, event: publish(event))
+    monkeypatch.setattr("llm_bawt.service.chat_streaming.ToolEventCoordinator", Mock())
+    monkeypatch.setattr("llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
+                        AsyncMock(return_value=("do the task", [], [], None)))
+    request = _claimed(_request().model_copy(update={"stream": stream, "session_id": "old-thread"}))
+
+    async def run():
+        if not stream:
+            await service.chat_completion(request)
+            return None
+        generator = service.chat_completion_stream(request)
+        try:
+            # Ignore the transport's initial connected comment. First data
+            # is committed metadata, before starting inference.
+            async for chunk in generator:
+                if chunk.startswith("data:"):
+                    return chunk
+        finally:
+            await generator.aclose()
+
+    chunk = asyncio.run(run())
+    assert any(event["_type"] == "session_resumed" for event in events), (chunk, order)
+    resumed = next(event for event in events if event["_type"] == "session_resumed")
+    assert resumed["session_resumption"] == receipt
+    assert resumed["session_id"] == "old-thread" and resumed["trigger_message_id"] == request.user_message_id
+    assert order.index("session_resumed") > order.index("accepted")
+    assert order.index("session_resumed") > order.index("turn_start")
+    if stream:
+        http = json.loads(chunk.removeprefix("data: ").strip())
+        assert http["object"] == "chat.completion.session_resumed"
+        assert http["session_resumption"] == receipt
+        service._get_llm_bawt.return_value.execute_llm_query.assert_not_called()
+    else:
+        # An unavailable optional metadata channel must not stop inference.
+        service._get_llm_bawt.return_value.execute_llm_query.assert_called_once()
+
+
 def test_agent_nonstream_turn_registers_execution_and_capability(_isolate) -> None:
     seen: dict = {}
 

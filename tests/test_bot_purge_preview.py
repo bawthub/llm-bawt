@@ -35,7 +35,8 @@ def db():
         for slug in ('source', 'other'):
             conn.execute(text("INSERT INTO bot_profiles(slug,updated_at,system_prompt) VALUES (:slug,'v1','private-prompt')"), {'slug': slug})
         for table in ('messages', 'memories', 'forgotten_messages', 'sessions', 'turn_logs',
-                      'tool_call_records', 'working_memory_items', 'turn_changed_files', 'tool_approval_requests'):
+                      'tool_call_records', 'working_memory_items', 'turn_changed_files', 'tool_approval_requests',
+                      'session_resumption_receipts'):
             conn.exec_driver_sql(f"INSERT INTO {table}(bot_id) VALUES ('source'),('other')")
         for table in ('runtime_settings', 'prompt_templates', 'prompt_template_versions', 'skill_assignments'):
             conn.exec_driver_sql(f"INSERT INTO {table}(scope_type,scope_id) VALUES ('bot','source'),('user','source'),('bot','other')")
@@ -67,6 +68,8 @@ def test_current_purge_ownership_retention_and_operational_subsets(db):
     assert rows['messages']['count'] == rows['sessions']['count'] == 1
     assert rows['entity_profiles']['count'] == rows['entity_profile_attributes']['count'] == 2
     assert rows['runtime_settings']['count'] == 1
+    assert rows['session_resumption_receipts']['count'] == 1
+    assert rows['session_resumption_receipts']['disposition'] == 'deleted'
     assert rows['job_runs']['count'] == 2  # ownership via parent, not run bot_id/status
     assert rows['shared_job_runs']['count'] == 2
     assert rows['shared_job_runs']['disposition'] == 'retained'
