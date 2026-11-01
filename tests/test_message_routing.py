@@ -43,7 +43,7 @@ def rig(monkeypatch):
                          {"slug": slug})
     catalog = ModelCatalog([ModelEndpoint(
         1, ModelIdentity(1, "route-test", "anthropic", "Test"),
-        AccessPath(1, "test-native", "anthropic", "anthropic-messages", None, "test"),
+        AccessPath(1, "anthropic-api", "anthropic", "anthropic-messages", None, "api-key"),
         "route-test",
     )])
     monkeypatch.setattr(BotManager, "list_bots", lambda self: bots)
@@ -482,7 +482,7 @@ def test_continue_rejects_changed_provider_binding_even_when_sdk_key_stays_same(
     with rig.store.engine.begin() as conn:
         conn.execute(text("""
             UPDATE sessions SET session_metadata=jsonb_set(session_metadata,
-                '{agent_session_key_models,claude_code}', '"route-test@test-native"'::jsonb)
+                '{agent_session_key_models,claude_code}', '"route-test@anthropic-api"'::jsonb)
             WHERE bot_id=:bot AND user_id=:owner
         """), {"bot": target, "owner": rig.owner})
     assert rig.store.claim_next(target, claim_owner="test", steer_capable=True) is None
@@ -615,12 +615,13 @@ def test_invalid_activity_timestamp_excludes_candidate_instead_of_ranking_as_nev
 def test_provider_resume_fence_uses_persisted_bridge_model_not_pinned_bot_default(rig):
     from llm_bawt.service.route_session_binding import check_provider_binding
 
+    # Both native routes are dispatchable, but their provider bindings differ.
     catalog = ModelCatalog([
         ModelEndpoint(1, ModelIdentity(1, "route-test", "anthropic", "Test"),
-                      AccessPath(1, "test-native", "anthropic", "anthropic-messages", None, "test"),
+                      AccessPath(1, "anthropic-api", "anthropic", "anthropic-messages", None, "api-key"),
                       "route-test"),
         ModelEndpoint(2, ModelIdentity(2, "other-test", "anthropic", "Other"),
-                      AccessPath(2, "other-native", "anthropic", "anthropic-messages", None, "test"),
+                      AccessPath(2, "anthropic-oauth", "anthropic", "anthropic-messages", None, "oauth"),
                       "other-test"),
     ])
     config = SimpleNamespace(ensure_model_catalog=lambda: catalog)
