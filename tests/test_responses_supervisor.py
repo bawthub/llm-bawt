@@ -131,7 +131,7 @@ def test_standard_adapter_supervised_recovery(monkeypatch, model, committed):
     virtual_clock.run_timing(run())
 
 
-def test_stall_log_reports_idle_event_types_without_payloads(caplog):
+def test_stall_log_reports_sanitized_idle_families_without_payloads(caplog):
     async def run():
         async def chatter():
             yield NS(type="response.output_text.delta", delta="secret-user-text")
@@ -146,8 +146,9 @@ def test_stall_log_reports_idle_event_types_without_payloads(caplog):
             await stream.close()
     with caplog.at_level("WARNING"):
         virtual_clock.run_timing(run())
-    assert "last_event='response.in_progress'" in caplog.text
-    assert "idle_events={'response.in_progress':" in caplog.text
+    assert "last_event='metadata'" in caplog.text
+    assert "idle_events={'metadata': 1}" in caplog.text
+    assert "response.in_progress" not in caplog.text
     assert "secret-user-text" not in caplog.text
     assert "secret-opaque-content" not in caplog.text
 
