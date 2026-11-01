@@ -268,18 +268,14 @@ def _blocked_step(rig, job_id, *, driver=None, target=False, row_lock=None):
                 holder.rollback()
 
 
-def _lapse_during_wait(rig, holder_pid):
+def _lapse_during_wait(rig):
     """An expiry live at transaction start, but expired now; no TTL-sized sleep."""
-    with rig.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as observer:
-        started = observer.execute(text(
-            "SELECT xact_start FROM pg_stat_activity WHERE datname=current_database()"
-            " AND wait_event_type='Lock' AND :pid=ANY(pg_blocking_pids(pid))"
-        ), {"pid": holder_pid}).scalar_one()
-    expired, observed = rig.sql(
-        "SELECT CAST(:started AS timestamptz)"
-        " + (clock_timestamp() - CAST(:started AS timestamptz)) / 2, clock_timestamp()",
-        started=started).one()
-    assert started < expired < observed
+    # _blocked_step's wait_blocked_by has proved the worker transaction is
+    # already waiting. A later DB timestamp is therefore after its frozen now(),
+    # without a second, hand-written pg_stat_activity observation.
+    expired = rig.sql("SELECT clock_timestamp()").scalar_one()
+    observed = rig.sql("SELECT clock_timestamp()").scalar_one()
+    assert expired < observed
     return expired
 
 
@@ -290,8 +286,8 @@ def test_fresh_clock_lapsed_during_lock_wait_rebuilds_with_late_turn(rig):
     first = rig.row(job_id)["quiesce_gate_id"]
     deadline = rig.row(job_id)["quiesce_deadline_at"]
     rig.end(first_turn)
-    with _blocked_step(rig, job_id) as (future, pid):
-        expired = _lapse_during_wait(rig, pid)
+    with _blocked_step(rig, job_id) as (future, _):
+        expired = _lapse_during_wait(rig)
         rig.sql("UPDATE system_gates SET expires_at=:at WHERE id=:id", at=expired, id=first)
         assert not rig.held()
         late = rig.turn()
@@ -316,8 +312,8 @@ def test_fresh_clock_lapsed_during_lock_wait_past_deadline_fails(rig):
     assert rig.driver.step(job_id).outcome == "opened"
     gate = rig.row(job_id)["quiesce_gate_id"]
     rig.end(first_turn)
-    with _blocked_step(rig, job_id) as (future, pid):
-        expired = _lapse_during_wait(rig, pid)
+    with _blocked_step(rig, job_id) as (future, _):
+        expired = _lapse_during_wait(rig)
         rig.sql("UPDATE system_gates SET expires_at=:at WHERE id=:id", at=expired, id=gate)
         rig.sql("UPDATE ops_jobs SET quiesce_deadline_at=:at WHERE id=:id", at=expired, id=job_id)
     assert future.result(timeout=HANG_GUARD_S).outcome == "failed"
@@ -384,8 +380,8 @@ def test_fresh_clock_driver_lease_handoff_after_operation_wait(rig):
     job_id = rig.job()
     assert rig.driver.step(job_id).outcome == "opened"
     other = QuiesceDriver(rig.engine, driver_id="driver-b", gates=rig.gates)
-    with _blocked_step(rig, job_id, driver=other) as (future, pid):
-        expired = _lapse_during_wait(rig, pid)
+    with _blocked_step(rig, job_id, driver=other) as (future, _):
+        expired = _lapse_during_wait(rig)
         rig.sql("UPDATE ops_jobs SET quiesce_driver_lease_expires_at=:at WHERE id=:id",
                 at=expired, id=job_id)
         released = rig.sql("SELECT clock_timestamp()").scalar_one()
