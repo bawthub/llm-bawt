@@ -131,6 +131,11 @@ def test_route_rejects_in_flight_duplicate_without_second_upstream_call(monkeypa
                 yield b'event: content_block_start\ndata: {"type":"content_block_start",'
                 yield (b'"index":0,"content_block":'
                        b'{"type":"tool_use","id":"tool-1","name":"work","input":{}}}\n\n')
+                # A valid completed call, not an unterminated tool start. The
+                # dispatch guard now withholds calls until final validation.
+                yield b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'
+                yield b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\n'
+                yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
         registry = RetryBudgetRegistry()
         adapter = Adapter()

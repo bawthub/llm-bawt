@@ -606,6 +606,7 @@ async def responses_to_anthropic_sse(
                 if state is not None:
                     state.terminal_event_seen = True
                 resp = getattr(event, "response", None)
+                explicit_stop = "max_tokens"
                 if resp is not None:
                     input_tokens, output_tokens, cache_read, cache_create = _extract_usage(resp)
                     if state is not None:
@@ -767,7 +768,11 @@ async def responses_to_anthropic_sse(
         # non-default terminal (max_tokens, content-filter refusal) outranks a
         # generic completion; a refusal content block outranks a plain
         # end_turn (the upstream still reports status=completed on refusals).
-        if saw_tool_use:
+        if explicit_stop == "max_tokens":
+            # Do not hide truncation behind a tool-use terminal. The shared
+            # route guard must see it before releasing executable tool blocks.
+            stop_reason = explicit_stop
+        elif saw_tool_use:
             stop_reason = "tool_use"
         elif explicit_stop is not None and explicit_stop != "end_turn":
             stop_reason = explicit_stop

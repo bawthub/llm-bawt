@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 _STOP_REASON_MAP = {
     "stop": "end_turn",
     "length": "max_tokens",
+    "max_tokens": "max_tokens",
+    "max_output_tokens": "max_tokens",
     "tool_calls": "tool_use",
     "function_call": "tool_use",
     "content_filter": "refusal",
@@ -310,10 +312,11 @@ async def chat_completions_to_anthropic_sse(
             )
             yield stop_frame(index)
 
-        stop_reason = (
-            "tool_use"
-            if tool_calls
-            else _STOP_REASON_MAP.get(finish_reason or "", "end_turn")
+        mapped_stop = _STOP_REASON_MAP.get(finish_reason or "", "end_turn")
+        # Length outranks tool presence: otherwise the shared route guard
+        # cannot distinguish truncated calls from a valid complete batch.
+        stop_reason = "max_tokens" if mapped_stop == "max_tokens" else (
+            "tool_use" if tool_calls else mapped_stop
         )
         uncached = max(prompt_tokens - cached_tokens, 0)
         logger.info(

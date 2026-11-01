@@ -9,12 +9,14 @@ in the workflows we care about, so they're not implemented yet.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import os
 import re
 import time
 import uuid
+from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Request
@@ -36,6 +38,7 @@ from .request_context import (
     valid_skill_names,
 )
 from .transport_policy import normalize_responses_transport
+from .tool_guard import ToolCallGuard, UnsafeToolCallError
 
 # Seconds of upstream silence before the proxy injects a keepalive ping.
 # Override with CLAUDE_CODE_BRIDGE_PROXY_PING_INTERVAL (0 disables).
@@ -163,6 +166,8 @@ async def _proxy_iter(
     )
     status_code: int | None = None
     lease = None
+    guard = ToolCallGuard()
+    adapter_stream = heartbeat_stream = None
     try:
         if budgets is not None and fingerprint is not None:
             # Acquire before authorization or sampling. The first attempt is
@@ -198,27 +203,30 @@ async def _proxy_iter(
         pending = b""
         saw_error = False
         saw_message_stop = False
-        async for chunk in with_heartbeat(
-            adapter.call(body, upstream_model, context), interval=_PING_INTERVAL
-        ):
-            if lease is None:
-                yield chunk
-                continue
+        adapter_stream = adapter.call(body, upstream_model, context)
+        heartbeat_stream = with_heartbeat(adapter_stream, interval=_PING_INTERVAL)
+        async for chunk in heartbeat_stream:
             pending += chunk
             while match := _SSE_BOUNDARY.search(pending):
                 frame, pending = pending[:match.end()], pending[match.end():]
-                if _output_committed(frame):
-                    lease.mark_output_committed()
-                if _tool_start(frame):
-                    lease.mark_tool_committed()
+                tool_start = _tool_start(frame)
+                if lease is not None:
+                    if _output_committed(frame):
+                        lease.mark_output_committed()
+                    if tool_start:
+                        # Retain the conservative no-replay tombstone even
+                        # while validation withholds the executable block.
+                        lease.mark_tool_committed()
                 event_lines = frame.splitlines()
                 if b"event: error" in event_lines:
                     saw_error = True
                 if b"event: message_stop" in event_lines:
                     saw_message_stop = True
-                yield frame
+                for safe_chunk in guard.feed(frame, tool_start=tool_start):
+                    yield safe_chunk
             if len(pending) > _MAX_UNFRAMED_BYTES:
                 raise RuntimeError("Proxy SSE frame exceeds safe buffer")
+        guard.finish()
         if lease is not None and pending.strip():
             raise RuntimeError("Incomplete proxy SSE frame")
         if lease is not None and not saw_error and not saw_message_stop:
@@ -246,6 +254,14 @@ async def _proxy_iter(
         context.report_status({"state": "failed", "provider": provider})
         OBSERVABILITY.record_error(provider, status_code)
         yield final_error_frame("authentication_error", str(e))
+    except UnsafeToolCallError as e:
+        status_code = 500
+        if lease is not None:
+            lease.clear_auth_failure()
+        OBSERVABILITY.record_error(provider, status_code)
+        context.report_status({"state": "failed", "provider": provider})
+        logger.warning("proxy_tool_rejected request_id=%s reason=%s", context.request_id, e)
+        yield final_error_frame("api_error", str(e))
     except RuntimeError as e:
         if lease is not None:
             lease.clear_auth_failure()
@@ -272,6 +288,14 @@ async def _proxy_iter(
         etype = _upstream_error_type(str(e), status_code)
         yield final_error_frame(etype, f"Proxy error: {e}")
     finally:
+        guard.close()
+        # A rejected terminal may leave an adapter pull in flight. Close both
+        # wrappers explicitly, including when heartbeat injection is disabled.
+        for source in (heartbeat_stream, adapter_stream):
+            close = getattr(source, "aclose", None)
+            if close is not None:
+                with suppress(Exception):
+                    await close()
         if lease is not None:
             lease.release()
         OBSERVABILITY.end(provider, account_scope)
@@ -322,6 +346,7 @@ async def _anthropic_sse_to_message(
     error frame.
     """
     buf = ""
+    decoder = codecs.getincrementaldecoder("utf-8")()
     message: dict[str, Any] | None = None
     blocks: dict[int, dict[str, Any]] = {}
     stop_reason: str | None = None
@@ -345,7 +370,10 @@ async def _anthropic_sse_to_message(
     async for chunk in source:
         if not chunk:
             continue
-        buf += chunk.decode("utf-8", "ignore")
+        # The guarded suffix can be replayed in byte chunks. Preserve UTF-8
+        # codepoints and CRLF boundaries split across those chunks.
+        buf += decoder.decode(chunk)
+        buf = buf.replace("\r\n", "\n")
         while "\n\n" in buf:
             block_text, buf = buf.split("\n\n", 1)
             if not block_text.strip():
