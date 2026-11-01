@@ -1,4 +1,4 @@
-# Exact-commit batch gate: inert contracts (TASK-1865)
+# Exact-commit batch gate: inert contracts and claim (TASK-1865)
 
 ## Implemented in this slice
 
@@ -44,12 +44,69 @@ permission. It does not retry, publish or push anything. The existing outbox
 must be running to enqueue; the durable delivery dispatcher must be available
 to execute the recipient's new turn.
 
+## Dormant atomic authorization/claim
+
+`ops_operations.execution_tag` is a nullable, DB-owned exact tag slug. It is
+included in operation API serialization, recorded revisions and snapshot
+content hashes. The normal OpsStore additive-column migration adds it as NULL;
+it does not populate/enable any grant, seed an operation, change approval
+policy or reinterpret legacy nongate execution. No live migration or source
+activation is part of this change. Deployment must use the existing explicit
+source/service activation process; an import alone never starts a gate.
+
+`ops/gate_claim.py` exposes an **internal, unused** snapshot builder and
+`OpsStore.claim_gate_job(job_id, turn_token=...)`. No route, tool, reconciler or
+production admission path calls it. Tests create synthetic ledger rows only.
+The generic claim and dispatcher refuse the gate snapshot marker, so a gate
+cannot accidentally execute the placeholder operation's Docker command.
+The gate-only snapshot has no executable spec and is not a regular ops
+approval snapshot. It is content integrity data, not an approval capability.
+
+A future trusted adapter must derive the opaque turn token from authenticated
+request context, never tool/body identity/tag arguments. The existing signed
+turn-capability verifier binds the stored caller bot, user, turn and snapshot
+session; the token itself is never persisted. There is no `required_tag`
+argument. This internal synchronous seam currently requires a valid original
+turn token at claim time (including its existing TTL). A future durable
+admission adapter must preserve authenticated provenance without treating a
+raw body or integrity hash as proof; that integration is not supplied here.
+
+The PostgreSQL claim transaction locks the current operation and job, uses
+`bot_tags.catalog.lock_bot`, then locks the caller profile, exact tag catalog
+row and assignment. Unknown/NULL/missing tags, missing profiles and private or
+inactive callers deny. It revalidates the strict stored GatePlan, exact
+operation revision/script hash, whole operation including execution_tag and
+snapshot content hash. A changed operation committed before claim denies,
+including a raw grant edit without a version bump. Existing tag revocation
+waits on the same advisory lock; assignment/profile row locks also fence their
+deletion. Revocation or operation edits waiting behind a winning transaction
+are prospective: they do not cancel the claimed invocation. A denial writes
+nothing, a winning QUEUED-to-DISPATCHING CAS appends only the existing ops
+transition, and rollback leaves no claim or transition.
+
+An additional transaction-scoped repo+SHA lock serializes even different
+operation rows. This seam is deliberately **first-attempt-only**: any prior
+nonqueued or dispatched job with that exact plan prevents another claim,
+regardless of terminal state. There is no bypass/attempt argument and no
+retirement implementation. LOST/timed_out without a dispatch timestamp also
+deny a second job. Legitimate retries remain unavailable until positive
+retirement and active-attempt/publication fencing are implemented. Existing
+operation concurrency caps are respected, but no runner or process-worker
+slot is allocated because nothing is dispatched.
+
+Focused disposable-PG tests observe real lock waits and commit both orderings
+of tag revocation and operation grant edits, competing same-job claims and
+cross-operation/cross-caller repo+SHA claims, plus snapshot/caller/plan drift,
+all terminal-state refusals, idempotency, rollback and no dispatch/callback.
+No live bots, model calls or production database are involved.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is
 `cmvwjnu39003e0mmkdlkmdor8`, rechecking r1
 `cmvwjipsd003a0mmke26d63tv`. Its two concrete findings were resolved at the
-**design** level, not by this inert contract:
+**design** level; the dormant claim now tests the first boundary below, not
+an executable gate pipeline:
 
 * Authorization linearizes at the PostgreSQL QUEUED-to-DISPATCHING claim.
   Lock the current operation, bot profile and tag assignment; compare the
@@ -64,9 +121,12 @@ The recorded security design r2 approval is
   state refuses. Active-attempt/job identity fences trusted publication so
   an old runner cannot overwrite newer proof.
 
-Neither rule is wired or claimed enforced for gates yet. The public Docker
-spec validator still rejects `batch_gate`; a synthetic internally-created
-ledger fixture is not an enabled gate executor.
+No production path uses the claim yet, and retry retirement/publication
+fences remain unimplemented. The public Docker spec validator still rejects
+`batch_gate`; a synthetic internally-created ledger fixture is not an enabled
+gate executor. Refused stored receipt callbacks must also be durably parked
+when actual admission/callback wiring lands; the current inert receipt seam's
+poison-row retries are not presented as a completed admission design.
 
 The future adapter must export only committed bytes with matching private
 Git HEAD; pin and verify source/toolchain/image/assets; run repository code

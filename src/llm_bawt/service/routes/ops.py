@@ -69,6 +69,8 @@ class OperationUpsert(BaseModel):
     quiesce_scope_json: str | None = None
     # TASK-1169 S4: where the worker runs; the store validates it per executor.
     execution_mode: str | None = None
+    # Inert gate-only grant configuration; no gate admission route is enabled.
+    execution_tag: str | None = Field(default=None, strict=True, max_length=64)
 
     actor: str | None = Field(default=None, max_length=128)
 

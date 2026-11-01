@@ -191,6 +191,12 @@ class OpsOperation(SQLModel, table=True):
     approval_prompt_prefix: str | None = Field(
         default=None, sa_column=Column(Text, nullable=True)
     )
+    # TASK-1865: DB-owned execution grant for the dormant gate-only claim.
+    # NULL is unconfigured (deny gates), not permission to use a caller's tag.
+    # Existing nongate dispatch does not interpret this field.
+    execution_tag: str | None = Field(
+        default=None, sa_column=Column(String(64), nullable=True),
+    )
     # Monotonic per-slug. Bumped on every ``update()``. Jobs snapshot this.
     version: int = Field(
         default=1, sa_column=Column(Integer, nullable=False, server_default="1"),
@@ -261,6 +267,7 @@ class OpsOperation(SQLModel, table=True):
             "risk_level": self.risk_level,
             "category": self.category,
             "approval_prompt_prefix": self.approval_prompt_prefix,
+            "execution_tag": self.execution_tag,
             "version": int(self.version or 1),
             "script_hash": self.script_hash,
             "created_at": _iso_utc(self.created_at),

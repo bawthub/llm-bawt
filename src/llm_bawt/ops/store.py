@@ -58,7 +58,7 @@ _OP_WRITABLE = {"slug", "title", "description", "enabled", "executor_kind", "tar
                 "args_defaults_json", "timeout_seconds", "start_delay_seconds", "max_output_bytes",
                 "max_concurrent", "risk_level", "category", "approval_prompt_prefix",
                 "quiesce_enabled", "quiesce_timeout_seconds", "quiesce_scope_json",
-                "execution_mode"}
+                "execution_mode", "execution_tag"}
 _ACTIVE_CLAIMED = (JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING)
 # Non-terminal states a terminal write may leave (QUIESCING: TASK-1233).
 _OPEN_STATES = (JOB_QUEUED, JOB_QUIESCING, *_ACTIVE_CLAIMED)
@@ -178,7 +178,7 @@ class OpsStore:
             ("ops_jobs", (("invocation_snapshot_json", "TEXT"), ("request_payload_json", "TEXT"),
                           ("caller_actor", "VARCHAR(128)"), *_JOB_QUIESCE_COLUMNS,
                           *_JOB_WORKER_SLOT_COLUMNS)),
-            ("ops_operations", _OP_QUIESCE_COLUMNS),
+            ("ops_operations", (*_OP_QUIESCE_COLUMNS, ("execution_tag", "VARCHAR(64)"))),
         ):
             existing = {c["name"] for c in inspect(conn).get_columns(table)}
             for name, kind in columns:
@@ -258,6 +258,10 @@ class OpsStore:
             raise ValueError("slug must be 1..128 letters, digits, dots, underscores or hyphens")
         if type(op.enabled) is not bool:
             raise ValueError("enabled must be boolean")
+        from ..bot_tags.vocabulary import TAG_SLUG
+        if op.execution_tag is not None and (
+                not isinstance(op.execution_tag, str) or not TAG_SLUG.fullmatch(op.execution_tag)):
+            raise ValueError("execution_tag must be a canonical tag slug or null")
         for field, low, high in (("timeout_seconds", 1, 86400), ("start_delay_seconds", 0, 86400),
                                  ("max_output_bytes", 1, 1048576), ("max_concurrent", 1, 1000)):
             value = getattr(op, field)
@@ -471,6 +475,15 @@ class OpsStore:
         return release_hold(self, job_id, receipt_root=receipt_root,
                             acquire_deadline=acquire_deadline, verifier=verifier)
 
+    def claim_gate_job(self, job_id, *, turn_token):
+        """Dormant gate-only authorization/CAS; no executor or production caller.
+
+        Caller identity comes from the existing signed turn capability, never
+        a supplied bot/tag. See gate_claim for first-attempt-only semantics.
+        """
+        from .gate_claim import claim_gate_job
+        return claim_gate_job(self, job_id, turn_token=turn_token)
+
     def claim_job(self, job_id, *, max_concurrent=None, hold_process_spawns=False,
                   process_child_count: int | None = None):
         """QUEUED -> DISPATCHING atomically, reserving its execution slots.
@@ -488,6 +501,8 @@ class OpsStore:
         job = self.get_job(job_id)
         if job is None or is_quiesce_snapshot(job.invocation_snapshot_json):
             return False
+        if job.invocation_snapshot_json and "gate_claim_schema" in json.loads(job.invocation_snapshot_json):
+            return False  # No generic claim bypass of the dormant gate boundary.
         with Session(self.engine) as session:
             op = self._lock_operation(session, job.operation_slug)
             if op is None or not op.enabled or op.soft_deleted_at is not None:

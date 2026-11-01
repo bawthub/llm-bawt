@@ -610,6 +610,8 @@ class OpsService:
             self.store.mark_terminal(job.id, state=JOB_LOST, error_text="legacy job has no immutable execution snapshot; not replayed")
             return
         snapshot = json.loads(job.invocation_snapshot_json)
+        if "gate_claim_schema" in snapshot:
+            return  # TASK-1865 contracts stay inert: no generic executor path.
         if (snapshot.get("spec") or {}).get("action") in APPROVAL_ONLY_ACTIONS and not job.approval_request_id:
             # Defense in depth (TASK-1474 C-c): only an approved request creates one.
             self.store.mark_terminal(job.id, state=JOB_FAILED,
