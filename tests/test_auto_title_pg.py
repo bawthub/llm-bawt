@@ -78,9 +78,13 @@ def test_guard_matches_old_metadata_eligibility_and_merge(real_storage, rig, met
     with capture_sql(rig.engine) as sql:
         changed = manager.try_set_session_auto_title(rig.session_id, "Candidate", user_id=rig.user)
     guarded_update_only(sql)
-    assert changed is bool(old_eligible(metadata))
+    known_title = isinstance(metadata, dict) and (
+        (metadata.get("title_source") or "default") != "default"
+        or (isinstance(metadata.get("title"), str) and bool(metadata["title"].strip()))
+    )
+    assert changed is bool(old_eligible(metadata) or known_title)
     actual = get_metadata(rig)
-    if not changed:
+    if not old_eligible(metadata):
         assert actual == metadata
     elif isinstance(metadata, dict) or metadata is None:
         # JSON null is a non-object operand, just like the existing || update.
@@ -178,18 +182,34 @@ def test_http_cannot_launder_missing_or_wrong_user_into_title_update(http_runtim
 
 def test_concurrent_first_titles_preserve_one_winner(real_storage, rig):
     manager = real_storage.get_short_term_manager(rig.bot)
-    barrier = threading.Barrier(2)
+    first_updated, second_started = threading.Event(), threading.Event()
 
-    def write(title):
-        barrier.wait(timeout=10)  # timing-ok: hang guard for real database writers
-        return manager.try_set_session_auto_title(rig.session_id, title, user_id=rig.user)
+    def before(_conn, _cursor, statement, parameters, *_args):
+        if "UPDATE sessions AS s" in statement and json.loads(parameters["patch"])["title"] == "Second":
+            second_started.set()
 
-    with capture_sql(rig.engine) as sql, ThreadPoolExecutor(max_workers=2) as executor:
-        changed = list(executor.map(write, ["First", "Second"]))
-    assert sorted(changed) == [False, True]
+    def after(_conn, _cursor, statement, parameters, *_args):
+        if "UPDATE sessions AS s" in statement and json.loads(parameters["patch"])["title"] == "First":
+            first_updated.set()  # first native UPDATE holds the session row lock
+            assert second_started.wait(timeout=10)  # timing-ok: second real DB writer hang guard
+
+    event.listen(rig.engine, "before_cursor_execute", before)
+    event.listen(rig.engine, "after_cursor_execute", after)
+    try:
+        with capture_sql(rig.engine) as sql, ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(manager.try_set_session_auto_title, rig.session_id, "First", user_id=rig.user)
+            assert first_updated.wait(timeout=10)  # timing-ok: first real DB writer hang guard
+            second = executor.submit(manager.try_set_session_auto_title, rig.session_id, "Second", user_id=rig.user)
+            assert first.result(timeout=10) is True  # timing-ok: native transaction hang guard
+            assert second.result(timeout=10) is True  # timing-ok: committed existing title evidence
+    finally:
+        event.remove(rig.engine, "before_cursor_execute", before)
+        event.remove(rig.engine, "after_cursor_execute", after)
     assert len(sql) == 2 and all(s.lstrip().startswith("UPDATE sessions") for s in sql), sql
     assert sql.pool_ping_sql == ["SELECT 1"] * 2
-    assert get_metadata(rig)["title"] in {"First", "Second"}
+    # The second transaction returns positive settlement evidence but must not
+    # overwrite the first candidate after waiting on its row lock.
+    assert get_metadata(rig)["title"] == "First"
 
 
 def test_user_rename_committed_before_waiting_auto_update_wins(real_storage, rig):
@@ -215,14 +235,17 @@ def test_user_rename_committed_before_waiting_auto_update_wins(real_storage, rig
         # Commit and release the row lock, allowing the competing UPDATE's
         # predicate to recheck the committed user title instead of stale state.
     try:
-        assert future.result(timeout=10) is False  # timing-ok: DB worker hang guard
+        assert future.result(timeout=10) is True  # timing-ok: committed user-title evidence
     finally:
         executor.shutdown(wait=True)
     assert get_metadata(rig) == {"title": "User rename", "title_source": "user", "keep": 1}
 
 
-def test_title_failure_rolls_back_without_affecting_message_commit(http_runtime, real_storage, rig):
+@pytest.mark.parametrize("already_titled", [False, True], ids=["untitled", "already-titled"])
+def test_title_failure_rolls_back_without_affecting_message_commit(http_runtime, real_storage, rig, already_titled):
     runtime = http_runtime
+    if already_titled:
+        set_metadata(rig, {"title": "Keep", "title_source": "user"})
     original = get_metadata(rig)
 
     def fail_title_commit(conn):
@@ -281,19 +304,36 @@ def test_no_title_dml_for_other_roles_slash_or_blank(http_runtime, rig, role, co
 
 def test_existing_titled_successive_http_writes_have_honest_cost(http_runtime, rig, record_property):
     set_metadata(rig, {"title": "User title", "title_source": "user", "keep": 1})
-    samples = []
+
+    def snapshot():
+        with rig.engine.connect() as conn:
+            return dict(conn.execute(text("SELECT *, xmin::text AS version FROM sessions WHERE id=:id"),
+                                     {"id": rig.session_id}).mappings().one())
+
+    original = snapshot()
+    samples, versions = [], []
     with service_codec.bind_service_turn(proof_for(rig)):
-        for content in ["First plain message", "Second plain message"]:
+        for number, content in enumerate(["First plain message", "Second plain message", "Third plain message"]):
             start = time.perf_counter()
             with capture_sql(rig.engine) as sql:
                 http_runtime.client.add_message("user", content, session_id=rig.session_id)
             samples.append({"seconds": time.perf_counter() - start, "application_statements": len(sql),
                             "application_selects": sum(s.lstrip().startswith("SELECT") for s in sql),
                             "pool_selects": len(sql.pool_ping_sql), "total_statements": len(sql.all_statements)})
-            assert len(sql) == 2 and sql[0].startswith("INSERT") and "UPDATE sessions AS s" in sql[1], sql
-            assert sql.pool_ping_sql == ["SELECT 1"] * 2
-            assert len(sql.all_statements) == 4
-            assert rig.session_id not in auto_title._settled_sessions
+            expected = 2 if number == 0 else 1
+            assert len(sql) == expected and sql[0].startswith("INSERT"), sql
+            if number == 0:
+                assert "UPDATE sessions AS s" in sql[1] and "RETURNING" in sql[1], sql
+            assert sql.pool_ping_sql == ["SELECT 1"] * expected
+            assert len(sql.all_statements) == 2 * expected
+            assert rig.session_id in auto_title._settled_sessions
+            current = snapshot()  # assertion reads, never part of the production write
+            versions.append(current.pop("version"))
+            assert current == {key: value for key, value in original.items() if key != "version"}
+    # Prove the cold operation really creates one MVCC row version (not a
+    # physical no-op), then no further session row update in steady state.
+    assert versions[0] != original["version"]
+    assert versions[0] == versions[1] == versions[2]
     record_property("titled_unknown_successive_write_receipt", json.dumps(samples))
     assert get_metadata(rig) == {"title": "User title", "title_source": "user", "keep": 1}
 

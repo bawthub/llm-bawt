@@ -629,45 +629,52 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin):
     def try_set_session_auto_title(
         self, session_id: str, title: str, *, user_id: str | None,
     ) -> bool:
-        """Cosmetically title an eligible owned thread in one guarded UPDATE.
+        """Return committed positive title evidence from one owner-pinned UPDATE.
 
-        The guard is rechecked under the row lock, so concurrent first writers
-        cannot replace a winner or a user rename. A zero-row result is not proof
-        that a thread exists or is settled. No lifecycle/active-state restriction
-        is added: an explicitly selected archived thread keeps its old behavior.
-        A supplied request user is always pinned; None preserves legacy bot-only
+        CASE eligibility is rechecked under the row lock. An existing title takes
+        the value-preserving branch: it still gets one physical UPDATE, but
+        RETURNING authenticates settlement so later calls can skip title DML.
+        Missing/wrong-owner rows never settle the memo. No lifecycle restriction
+        is added; supplied users stay pinned and None keeps legacy bot-only
         embedded behavior, not authority to bypass the existing MCP guards.
         """
         if not session_id or not title:
             return False
-        from ..sessions.auto_title import PYTHON_STRIP_CHARS
+        from ..sessions.auto_title import PYTHON_STRIP_CHARS, session_title_is_settled
 
         try:
             with self._backend.engine.begin() as conn:
-                result = conn.execute(text("""
+                row = conn.execute(text("""
                     UPDATE sessions AS s
-                    SET session_metadata =
-                        COALESCE(s.session_metadata, '{}'::jsonb) || CAST(:patch AS jsonb)
+                    SET session_metadata = CASE WHEN
+                        COALESCE(s.session_metadata -> 'title_source', 'null'::jsonb)
+                            IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb,
+                                '[]'::jsonb, '{}'::jsonb, '"default"'::jsonb)
+                        AND (
+                            COALESCE(s.session_metadata -> 'title', 'null'::jsonb)
+                                IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb,
+                                    '[]'::jsonb, '{}'::jsonb)
+                            OR CASE WHEN jsonb_typeof(s.session_metadata -> 'title') = 'string'
+                                THEN btrim(s.session_metadata ->> 'title', :strip_chars) = ''
+                                ELSE FALSE END
+                        )
+                        THEN COALESCE(s.session_metadata, '{}'::jsonb) || CAST(:patch AS jsonb)
+                        ELSE s.session_metadata END
                     WHERE s.id = :id AND s.bot_id = :owner_bot
                       AND (:owner_user IS NULL OR s.user_id = :owner_user)
-                      AND COALESCE(s.session_metadata -> 'title_source', 'null'::jsonb)
-                          IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb,
-                              '[]'::jsonb, '{}'::jsonb, '"default"'::jsonb)
-                      AND (
-                        COALESCE(s.session_metadata -> 'title', 'null'::jsonb)
-                            IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb,
-                                '[]'::jsonb, '{}'::jsonb)
-                        OR CASE WHEN jsonb_typeof(s.session_metadata -> 'title') = 'string'
-                            THEN btrim(s.session_metadata ->> 'title', :strip_chars) = ''
-                            ELSE FALSE END
-                      )
+                    RETURNING s.session_metadata
                 """), {
                     "id": session_id, "owner_bot": self.bot_id, "owner_user": user_id,
                     "patch": json.dumps({"title": title, "title_source": "auto"}),
                     "strip_chars": PYTHON_STRIP_CHARS,
-                })
-                changed = (result.rowcount or 0) > 0
-            return changed  # only report success after commit
+                }).first()
+            if row is None:
+                return False
+            metadata = row[0]
+            # Non-object roots always take the eligible legacy || branch; their
+            # resulting arrays count as a successful title attempt, as before.
+            # Truthy malformed titles inside objects remain retryable, not settled.
+            return not isinstance(metadata, dict) or session_title_is_settled(metadata)
         except Exception as e:
             logger.warning("auto-title update failed for session %s: %s", session_id, e)
             return False

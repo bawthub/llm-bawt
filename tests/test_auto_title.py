@@ -71,7 +71,7 @@ class FakeManager:
         meta = self.meta or {}
         source = (meta.get("title_source") or "default") if isinstance(meta, dict) else "default"
         if source != "default" or (isinstance(meta, dict) and (meta.get("title") or "").strip()):
-            return False
+            return True  # authenticated committed existing title evidence
         self.patches.append((session_id, {"title": title, "title_source": "auto"}))
         return True
 
@@ -116,9 +116,9 @@ class TestMaybeAutoTitle:
         mgr = FakeManager({"title": "My name", "title_source": "user"})
         maybe_auto_title(mgr, "s3", "should not retitle")
         assert mgr.patches == []
-        assert "s3" not in _settled_sessions  # zero rows may mean missing: retain retry
+        assert "s3" in _settled_sessions  # positive RETURNING evidence, never rowcount zero
         maybe_auto_title(mgr, "s3", "another attempt")
-        assert len(mgr.calls) == 2 and mgr.patches == []
+        assert len(mgr.calls) == 1 and mgr.patches == []
 
     def test_auto_titled_thread_untouched(self):
         mgr = FakeManager({"title": "Existing", "title_source": "auto"})

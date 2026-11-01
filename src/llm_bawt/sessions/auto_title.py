@@ -27,9 +27,10 @@ PYTHON_STRIP_CHARS = (
     "    　"
 )
 
-# Positive memo: a successful UPDATE or an already-required fetched row proved
-# this thread settled. A zero-row UPDATE may mean missing/wrong owner and must
-# remain retryable. Unknown titled threads incur another guarded no-op UPDATE.
+# Positive memo: committed UPDATE/RETURNING evidence or an already-required
+# fetched row proved settlement. Missing/wrong-owner rows remain retryable.
+# Cold already-titled rows receive one value-preserving physical UPDATE, not
+# another one on every subsequent write. This is cosmetic, never authority.
 _settled_sessions: set[str] = set()
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*")
@@ -72,6 +73,16 @@ def derive_thread_title(content: str, max_len: int = MAX_TITLE_LEN) -> str | Non
     return cut.rstrip(" ,.;:!?") + "…"
 
 
+def session_title_is_settled(metadata) -> bool:
+    """Recognize positive title evidence from a trusted stored object."""
+    meta = metadata or {}
+    if not isinstance(meta, dict):
+        return False
+    source = meta.get("title_source") or "default"
+    title = meta.get("title")
+    return source != "default" or bool(isinstance(title, str) and title.strip())
+
+
 def remember_session_title(row: dict | None) -> None:
     """Reuse an already-fetched row; never fetch solely to prime the memo.
 
@@ -79,14 +90,7 @@ def remember_session_title(row: dict | None) -> None:
     Missing/untitled/malformed-title rows stay retryable. The existing memo
     assumes a settled title is not reset to default during this process.
     """
-    if not row or not row.get("id"):
-        return
-    meta = row.get("session_metadata") or {}
-    if not isinstance(meta, dict):
-        return
-    source = meta.get("title_source") or "default"
-    title = meta.get("title")
-    if source != "default" or (isinstance(title, str) and title.strip()):
+    if row and row.get("id") and session_title_is_settled(row.get("session_metadata")):
         _settled_sessions.add(row["id"])
 
 
@@ -107,6 +111,6 @@ def maybe_auto_title(
         ok = manager.try_set_session_auto_title(session_id, title, user_id=user_id)
         if ok:
             _settled_sessions.add(session_id)
-            logger.info("auto-titled session %s: %r", session_id, title)
+            logger.info("session title settled for %s", session_id)
     except Exception as e:  # cosmetic feature — never break the write path
         logger.warning("auto-title failed for session %s: %s", session_id, e)
