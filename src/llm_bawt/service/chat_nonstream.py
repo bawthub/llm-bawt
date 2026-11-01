@@ -199,6 +199,14 @@ class ChatNonStreamMixin:
                 raise
             cancel_event, done_event = await self._start_generation(bot_id)
 
+        from .session_lifecycle.execution import NativeSelectedHistory
+
+        selected_history = NativeSelectedHistory.take(
+            request, llm_bawt, bot_id=bot_id, user_id=user_id,
+            turn_id=turn_log_id, trigger_message_id=trigger_message_id,
+            is_agent_backend=is_agent_backend, admission_claim=admission_claim,
+        )
+
         # TASK-709: resolve the durable session id BEFORE publishing turn_start
         # so external clients can route the lifecycle stream to the correct
         # thread without a follow-up DB fetch.
@@ -407,8 +415,14 @@ class ChatNonStreamMixin:
                 from contextlib import nullcontext
                 from ..bot_access.service import bind_service_turn
 
-                def history_context(binding, capability):
+                def history_context(binding, capability, *, phase):
                     if not _is_agent:
+                        if selected_history is not None:
+                            return selected_history.history_context(
+                                request, llm_bawt, phase=phase,
+                                bot_id=bot_id, user_id=user_id, turn_id=turn_log_id,
+                                trigger_message_id=trigger_message_id,
+                            )
                         return nullcontext()  # preserve the native reset scope
                     binding = binding or {}
                     owner = (binding.get("thread_session_id"), bot_id, user_id)
@@ -434,7 +448,7 @@ class ChatNonStreamMixin:
                     )
 
                 # The reply note stays outbound-only, never in stored history.
-                with history_context(thread_binding, initial_capability):
+                with history_context(thread_binding, initial_capability, phase="initial"):
                     prepared_messages = llm_bawt.prepare_messages_for_query(
                         user_prompt,
                         message_id=trigger_message_id,
@@ -568,7 +582,7 @@ class ChatNonStreamMixin:
                 # Reset preparation may have rebound the session. Use ONLY
                 # the final binding's verified owner and final agent proof;
                 # never carry the initial history authority across rotation.
-                with history_context(thread_binding, task_turn_capability):
+                with history_context(thread_binding, task_turn_capability, phase="final"):
                     self._finalize_turn(
                         llm_bawt=llm_bawt,
                         turn_id=turn_log_id,

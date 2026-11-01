@@ -89,6 +89,105 @@ class PreparedChatSession:
             return None
 
 
+@dataclass
+class NativeSelectedHistory:
+    """One HTTP admission row and ONE capability for two native history windows.
+
+    Never attached to a cached LLMBawt/MemoryClient, forwarded to inference, or
+    renewed from a stale row. An expired supplied token reaches the existing
+    service-envelope validation unchanged (and therefore fails closed).
+    """
+
+    owner: tuple[str, str, str]
+    capability: str | None
+    turn_id: str
+    trigger_message_id: str
+    _next_phase: str = "initial"
+
+    @staticmethod
+    def _matches(request: Any, llm_bawt: Any, owner: tuple, *,
+                 bot_id: str, user_id: str, check_override: bool) -> bool:
+        # No normalization here: disagreement with routing/principals disables
+        # only the shortcut, never changes the destination or admission rules.
+        if (not isinstance(owner, tuple) or len(owner) != 3
+                or not all(isinstance(value, str) and value and value == value.strip() for value in owner)
+                or owner != (getattr(request, "session_id", None), bot_id, user_id)
+                or getattr(request, "bot_id", None) not in (None, bot_id)
+                or getattr(request, "user", None) not in (None, user_id)):
+            return False
+        if any(getattr(request, name, None) for name in (
+            "_internal_inter_bot_sender_id", "_internal_approval_claim",
+            "inter_bot_delivery_id", "inter_bot_turn_id", "inter_bot_bridge_request_id",
+            "inter_bot_claim_token", "inter_bot_timeout_seconds", "inter_bot_session_policy",
+            "inter_bot_seed_session_id", "inter_bot_reset_only", "inter_bot_typed_follow_up",
+            "parent_turn_id", "answered_question_id", "continuation_payload",
+        )):
+            return False
+        model_type = llm_bawt.client.model_definition.get("type")
+        if not model_type or model_type in ("agent_backend", "claude-code"):
+            return False
+        if check_override and getattr(llm_bawt, "_session_id_override", None) != owner[0]:
+            return False
+        history = getattr(llm_bawt, "history_manager", None)
+        backend = getattr(history, "_db_backend", None)
+        # Unknown adapters have no captured owner; a request alone cannot attest
+        # one. The MCP adapter exposes its immutable ServicePrincipal here.
+        if (getattr(backend, "bot_id", None), getattr(backend, "user_id", None)) != owner[1:]:
+            return False
+        for target in (llm_bawt, history):
+            if (getattr(target, "bot_id", bot_id), getattr(target, "user_id", user_id)) != owner[1:]:
+                return False
+        memory_client = getattr(backend, "_memory_client", None)
+        if memory_client is not None:
+            from ...bot_access.service import ServicePrincipal
+
+            principal = getattr(memory_client, "_service_principal", None)
+            if (not isinstance(principal, ServicePrincipal)
+                    or (principal.bot_id, principal.user_id) != owner[1:]
+                    or (memory_client.bot_id, memory_client.user_id) != owner[1:]):
+                return False
+        return True
+
+    @classmethod
+    def take(cls, request: Any, llm_bawt: Any, *, bot_id: str, user_id: str,
+             turn_id: str, trigger_message_id: str, is_agent_backend: bool,
+             admission_claim: Any) -> NativeSelectedHistory | None:
+        """Consume after effective model/tuple and ordinary admission resolve."""
+        owner = getattr(request, "_http_selected_session_owner", None)
+        request._http_selected_session_owner = None
+        if (is_agent_backend or admission_claim is not None
+                or not cls._matches(request, llm_bawt, owner,
+                                    bot_id=bot_id, user_id=user_id, check_override=False)):
+            return None
+        from ...task_turn_context import mint_task_turn_context
+
+        try:
+            capability = mint_task_turn_context(
+                session_id=owner[0], bot_id=bot_id, user_id=user_id,
+                turn_id=turn_id, trigger_message_id=trigger_message_id,
+            )
+        except Exception:
+            from ..logging import get_service_logger
+
+            get_service_logger(__name__).warning("Could not sign HTTP selected history context")
+            capability = None  # no retry at the final window
+        return cls(owner, capability, turn_id, trigger_message_id)
+
+    def history_context(self, request: Any, llm_bawt: Any, *, phase: str,
+                        bot_id: str, user_id: str, turn_id: str, trigger_message_id: str):
+        """Validate the actual destination and lifecycle at EACH history window."""
+        from ...bot_access.service import bind_service_turn
+
+        valid = (
+            phase == self._next_phase and phase in ("initial", "final")
+            and (turn_id, trigger_message_id) == (self.turn_id, self.trigger_message_id)
+            and self._matches(request, llm_bawt, self.owner,
+                              bot_id=bot_id, user_id=user_id, check_override=True)
+        )
+        self._next_phase = "final" if valid and phase == "initial" else "done"
+        return bind_service_turn(self.capability if valid else None)
+
+
 class NewSessionExecution:
     @staticmethod
     def prepare_chat(

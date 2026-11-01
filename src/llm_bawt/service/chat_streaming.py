@@ -346,6 +346,14 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                 raise
             cancel_event, done_event = await self._start_generation(bot_id)
 
+        from .session_lifecycle.execution import NativeSelectedHistory
+
+        selected_history = NativeSelectedHistory.take(
+            request, llm_bawt, bot_id=bot_id, user_id=user_id,
+            turn_id=turn_log_id, trigger_message_id=trigger_message_id,
+            is_agent_backend=is_agent_backend, admission_claim=admission_claim,
+        )
+
         task_turn_capability: str | None = None
         bridge_reset_action: str | None = None
         bridge_prompt: str | None = None
@@ -452,6 +460,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             bridge_reset_action=bridge_reset_action,
             bridge_prompt=bridge_prompt,
             chat_reset=chat_reset,
+            selected_history=selected_history,
             task_turn_capability=task_turn_capability,
             cancel_event=cancel_event,
             done_event=done_event,

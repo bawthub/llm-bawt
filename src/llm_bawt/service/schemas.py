@@ -103,6 +103,9 @@ class ChatCompletionRequest(BaseModel):
     _internal_inter_bot_sender_id: str | None = PrivateAttr(default=None)
     # Python-only authority: never accepted from public request JSON.
     _internal_approval_claim: tuple[str, str] | None = PrivateAttr(default=None)
+    # Exact row returned by HTTP selected-thread admission, not a caller's id.
+    # Consumed once by native execution; serialization cannot carry authority.
+    _http_selected_session_owner: tuple[str, str, str] | None = PrivateAttr(default=None)
     inter_bot_turn_id: str | None = Field(default=None, description="Deterministic reserved turn id for a durable delivery.")
     inter_bot_bridge_request_id: str | None = Field(default=None, description="Deterministic bridge run id used to deduplicate transport retries.")
     inter_bot_claim_token: str | None = Field(default=None, description="Private dispatcher claim token; rejected unless it matches the durable delivery row.")
@@ -151,6 +154,14 @@ class ChatCompletionRequest(BaseModel):
                     "TASK-215 will gate animation work on this so we don't waste "
                     "compute when no one can see the animation.",
     )
+
+    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False):
+        # A copy is a new ingress/execution object, not another admission read.
+        # In particular, update= must never promote proof to a changed tuple.
+        copied = super().model_copy(update=update, deep=deep)
+        copied.__dict__.pop("_http_selected_session_owner", None)
+        copied._http_selected_session_owner = None
+        return copied
 
 
 class ChatCompletionChoice(BaseModel):

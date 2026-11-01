@@ -117,6 +117,17 @@ class TurnStreamWorker(TurnStreamPublishMixin):
         def _usage_so_far() -> dict | None:
             return self._resolve_turn_token_usage(llm_bawt, token_usage_holder[0])
 
+        def selected_history_context(phase):
+            from contextlib import nullcontext
+
+            selected = getattr(ctx, "selected_history", None)
+            if selected is None:
+                return nullcontext()  # existing agent/reset scope unchanged
+            return selected.history_context(
+                request, llm_bawt, phase=phase, bot_id=bot_id, user_id=user_id,
+                turn_id=turn_log_id, trigger_message_id=trigger_message_id,
+            )
+
         try:
             # Check if already cancelled before starting
             if cancel_event.is_set():
@@ -225,14 +236,15 @@ class TurnStreamWorker(TurnStreamPublishMixin):
             working_memory = WorkingMemoryTurn.begin(ctx)
             agent_context_suffix = working_memory.extend_suffix(agent_context_suffix)
 
-            messages = llm_bawt.prepare_messages_for_query(
-                user_prompt,
-                user_attachments=user_attachments or None,
-                message_id=trigger_message_id,
-                attachments=attachments_to_persist or None,
-                context_suffix=agent_context_suffix,
-                author=user_author,
-            )
+            with selected_history_context("initial"):
+                messages = llm_bawt.prepare_messages_for_query(
+                    user_prompt,
+                    user_attachments=user_attachments or None,
+                    message_id=trigger_message_id,
+                    attachments=attachments_to_persist or None,
+                    context_suffix=agent_context_suffix,
+                    author=user_author,
+                )
             outbound_task = (
                 ctx.bridge_prompt if ctx.bridge_prompt is not None else
                 ctx.chat_reset.follow_up if ctx.chat_reset is not None else None
@@ -1013,8 +1025,9 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 if "_logged_messages" in locals()
                 else (messages if "messages" in locals() else [])
             )
-            TurnStreamFinalizer(
-                ctx,
-                publish_event_direct=_publish_event_direct,
-                enrich_attachment_refs=_enrich_attachment_refs,
-            ).finalize(prepared_messages=prepared_messages)
+            with selected_history_context("final"):
+                TurnStreamFinalizer(
+                    ctx,
+                    publish_event_direct=_publish_event_direct,
+                    enrich_attachment_refs=_enrich_attachment_refs,
+                ).finalize(prepared_messages=prepared_messages)

@@ -948,10 +948,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         from ..dependencies import get_effective_bot_id
         from .sessions import _owned_session_or_404, _resolve_user
 
-        await _owned_session_or_404(
+        row = await _owned_session_or_404(
             request.session_id.strip(),
             get_effective_bot_id(request.bot_id),
             _resolve_user(request.user),
+        )
+        request._http_selected_session_owner = (
+            row.get("id"), row.get("bot_id"), row.get("user_id"),
         )
 
     if request.stream:
