@@ -404,18 +404,46 @@ class ChatNonStreamMixin:
                         backend_name=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
                     )
 
-                # Prepare messages with history and memory context. A claimed
-                # inter-bot delivery gets its reply-channel note on the outbound
-                # agent message only (never history), as on the stream path.
-                prepared_messages = llm_bawt.prepare_messages_for_query(
-                    user_prompt,
-                    message_id=trigger_message_id,
-                    author=user_author,
-                    context_suffix=(
-                        append_request_reply_channel_note(self, request, None)
-                        if _is_agent else None
-                    ),
-                )
+                from contextlib import nullcontext
+                from ..bot_access.service import bind_service_turn
+
+                def history_context(binding, capability):
+                    if not _is_agent:
+                        return nullcontext()  # preserve the native reset scope
+                    binding = binding or {}
+                    owner = (binding.get("thread_session_id"), bot_id, user_id)
+                    return bind_service_turn(
+                        capability if binding.get("_service_owner") == owner else None
+                    )
+
+                # Nonstream user history precedes reset preparation and agent
+                # proof minting. The SDK binding has ALREADY fetched/verified
+                # this exact row; sign that provenance without moving rotation
+                # or trusting a selected id. This early proof is history-only.
+                initial_capability = None
+                initial_binding = thread_binding or {}
+                initial_sid = initial_binding.get("thread_session_id")
+                if (_is_agent and initial_sid and initial_binding.get("_service_owner")
+                        == (initial_sid, bot_id, user_id)):
+                    from ..task_turn_context import mint_for_agent_turn
+
+                    initial_capability = mint_for_agent_turn(
+                        backend=str(getattr(llm_bawt.bot, "agent_backend", "") or ""),
+                        session_id=initial_sid, turn_id=turn_log_id,
+                        trigger_message_id=trigger_message_id, bot_id=bot_id, user_id=user_id,
+                    )
+
+                # The reply note stays outbound-only, never in stored history.
+                with history_context(thread_binding, initial_capability):
+                    prepared_messages = llm_bawt.prepare_messages_for_query(
+                        user_prompt,
+                        message_id=trigger_message_id,
+                        author=user_author,
+                        context_suffix=(
+                            append_request_reply_channel_note(self, request, None)
+                            if _is_agent else None
+                        ),
+                    )
 
                 # Log what we're sending to the LLM (verbose mode)
                 log.llm_context(prepared_messages)
@@ -537,28 +565,32 @@ class ChatNonStreamMixin:
                     cancelled = True
                     return ""
 
-                self._finalize_turn(
-                    llm_bawt=llm_bawt,
-                    turn_id=turn_log_id,
-                    response_text=response,
-                    tool_context=tool_context,
-                    tool_call_details=tool_call_details,
-                    prepared_messages=_logged_messages,
-                    user_prompt=user_prompt,
-                    model=model_alias,
-                    bot_id=bot_id,
-                    user_id=user_id,
-                    elapsed_ms=(time.time() - llm_start_time) * 1000,
-                    stream=False,
-                    assistant_message_id=assistant_message_id,
-                )
+                # Reset preparation may have rebound the session. Use ONLY
+                # the final binding's verified owner and final agent proof;
+                # never carry the initial history authority across rotation.
+                with history_context(thread_binding, task_turn_capability):
+                    self._finalize_turn(
+                        llm_bawt=llm_bawt,
+                        turn_id=turn_log_id,
+                        response_text=response,
+                        tool_context=tool_context,
+                        tool_call_details=tool_call_details,
+                        prepared_messages=_logged_messages,
+                        user_prompt=user_prompt,
+                        model=model_alias,
+                        bot_id=bot_id,
+                        user_id=user_id,
+                        elapsed_ms=(time.time() - llm_start_time) * 1000,
+                        stream=False,
+                        assistant_message_id=assistant_message_id,
+                    )
 
                 return response
 
             def _do_query():
                 # ContextVars must be bound INSIDE the executor thread. Native
-                # reset provenance exists before its first history write; no
-                # arbitrary selected session or pre-mint agent write qualifies.
+                # reset provenance covers its query; agent history separately
+                # scopes verified initial/final bindings, never a selected id.
                 from ..bot_access.service import bind_service_turn
 
                 capability = chat_reset.service_turn_capability(

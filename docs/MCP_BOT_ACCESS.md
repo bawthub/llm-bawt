@@ -125,11 +125,19 @@ in-memory ownership checks. This token is not passed as an agent/task header or
 to the native model. An uncommitted/failed rotation, arbitrary selected session,
 unknown/mismatched backend owner, or signing failure retains the secure lookup.
 
+Agent nonstream persistence uses the same already fetched exact SDK-owner
+provenance before its initial history write. It signs an early history-only
+proof without moving reset preparation or rotation. That scope ends before
+seed/reset/model execution. Final history separately uses the **final** binding
+and existing final agent proof, so initial ownership never carries across a
+rotation. Both scopes live inside the executor thread and clear on errors;
+they never mutate the cached MemoryClient. An arbitrary selected id or a later
+task token without a verified binding still requires authoritative lookup.
+
 Other explicit-session callers retain the existing `sessions(bot_id,user_id)`
 lookup: this remains unapproved and is **not** a zero-database-reads-all-writes
-claim. These include agent nonstream history persisted before proof minting,
-standalone/archive/service callers without a verified runtime binding, and
-approved replay. Approved execution
+claim. These include standalone/archive/service callers without a verified
+runtime binding and approved replay. Approved execution
 reauthorizes with its server-owned caller and does not inherit runtime-service
 ownership proof. Lifecycle/SDK reads and storage's own work are separate from
 zero policy/ownership authorization SELECTs during a proven history write. Seed
