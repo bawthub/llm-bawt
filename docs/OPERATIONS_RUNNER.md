@@ -371,8 +371,10 @@ and both ordinary/quiesce process-slot reservations share `ops-worker-slots`;
 process jobs wait without taking a slot or opening a turn gate. Other isolated
 claims remain available.
 
-The hold persists across store/reconciler restarts and ends with the job's
-terminal-state commit, retaining its timestamp for forensics. The plain
+The hold persists across store/reconciler restarts. Legacy dormant holds end
+with the job's terminal-state commit, retaining their timestamp for forensics;
+prepared recovery-policy holds below instead require explicit verified release.
+The plain
 `process_spawn_held(conn)` read takes no advisory or row lock for the spawn-side
 flock fence. This is **not yet complete spawn/drain safety**:
 no current dispatcher requests a hold, no new operation is enabled, and the
@@ -408,17 +410,60 @@ on every exit. This is an acquisition deadline only: it neither revokes an
 acquired owner's authority nor proves that a Docker mutation has stopped.
 It never changes a job, releases a durable hold, or supplies dead-holder recovery.
 
-**Dead-holder recovery remains an enabling-slice obligation.** A hold must not
-be dropped on a lease/TTL alone: an uncertain worker may still be swapping the
-reconciler. The existing reconciliation pump imports immutable terminal receipts
-(after its dispatch grace) and releases the effective hold with that terminal
-commit; uncertainty keeps the no-replay/forensic contract. Before a hold-taking
-self-config action is enabled, its implementation must name and test a persisted,
-bounded deadline and the recovery path that terminalizes a dead holder (including
-missing/unreadable receipts and failed restore). Worker timeouts alone do not
-prove a bound on receipt import or an unavailable reconciler. This is the open
-later-enabling question from the dormant ledger review, not an implemented
-recovery guarantee; no operation currently enables a hold or a process pilot.
+**Bounded UNKNOWN classification and durable quarantine (TASK-1169; dormant).**
+`prepare_process_spawn_hold` pins a full target container ID, Compose project/service
+labels and an aware absolute deadline once on a queued isolated job, **before**
+exclusive-acquisition retries. It does not take a hold. Retries/restarts read that
+same policy; it cannot be extended or retargeted. An expired policy cannot claim,
+and a prepared job cannot dispatch through the ordinary no-hold claim path. Any
+future enabled hold action must prepare this policy first; the legacy dormant
+ledger seam remains for its existing tests, not an alternative enabling path.
+
+Once claimed, a prepared hold blocks **all process-mode slot admission and
+initial/recovery spawns sharing this ledger/receipt root**, including after any
+terminal state. Other isolated operations, observations and readiness remain
+available. `classify_process_spawn_hold` is one bounded ledger step: before the
+persisted deadline it reports `waiting`; at/after it an open holder becomes
+`lost`/UNKNOWN, not replayed, and its quarantine remains durable. An already
+terminal holder without verified release is quarantined immediately, without
+rewriting its original result. A worker death, lost/unreadable receipt, timeout,
+failed/unverified restore, PID disappearance or an empty flock never proves safe
+resumption. A late original receipt cannot overwrite LOST or clear quarantine.
+
+**Explicit verified release boundary.** `release_process_spawn_hold` retains EX
+while a **trusted caller-supplied verifier** inspects outside the DB transaction,
+then commits one immutable release record. The lock root must match the job's
+immutable execution snapshot; an unrelated empty lock cannot substitute. There
+is no default verifier, endpoint,
+new approver role or enabled caller. The verifier must first establish the
+applicable **existing exact-action authority**, match this job and pinned original
+target identity, establish that no earlier accepted daemon mutation can still
+act on the affected reconciler, and verify the intended healthy target/replacement
+or a completed safe restore. A healthy-looking unrelated/reused-name target, raw
+success flag, empty flock or dead PID is insufficient. Missing authority, uncertain
+completion, unreadable receipts or failed verification must refuse and leave
+quarantine intact; do not update the DB manually to manufacture a release.
+
+The verifier returns identity-matched `verified_success`/`verified_restore`
+evidence bound to an existing terminal known-outcome authority job and its exact
+snapshot hash. Normal completion uses the original job; an UNKNOWN/LOST original
+requires a separately authorized, verified recovery action. Store checks prevent
+wrong-job/target/snapshot and unknown-authority releases; these checks consume
+verification, **do not replace it or grant action authority**. Release preserves
+the original terminal state, hold/deadline/target and quarantine stamps, plus an
+audit reference to the authority job/approval. A new authorized recovery action
+has its own acquisition deadline; it does not renew the original hold's deadline.
+
+**Honest limits before enabling:** these internal seams bound acquisition attempts
+and classification **when their existing driver runs**, not availability or
+recovery while every reconciler is unavailable. No pump invokes classification,
+no production verifier establishes the action-specific facts yet, and no
+hold-taking/self-config action or process pilot is enabled. Future enabling must
+wire the persisted policy, fixed fresh drain probe, isolated worker's exclusive
+fence, classification driver and authoritative exact-action verifier. An unresolved
+UNKNOWN quarantine intentionally blocks process work indefinitely until safe
+recovery is established; there is no TTL-only auto-clear or automatic-availability
+promise.
 
 **Self-management (S4c).** The ops service identifies its own container by
 its full ID and Compose project/service labels. It looks the container up

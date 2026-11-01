@@ -16,6 +16,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -442,3 +443,119 @@ def test_the_admission_only_app_creates_the_row_and_only_the_reconciler_runs_it(
     rig.services[0].get_job_status(job_id)  # The reconciler's per-job pass (reconcile_active_jobs).
     assert rig.job(job_id).state == JOB_ACCEPTED
     assert (calls, rig.executors[0].submits, rig.executors[1].submits, rig.creates()) == ([], 1, 0, 1)
+
+
+# Dormant recovery-policy holds: uncertainty terminalizes, quarantine does not.
+def _recovery_holder(rig):
+    from llm_bawt.ops.process_spawn_fence import exclusive_process_spawn_guard
+
+    target = {"container_id": rig.client.containers.rows[TARGET].id,
+              "compose_project": "test", "compose_service": "fake"}
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
+    job_id = rig.admit(rig.operation())
+    assert rig.stores[0].prepare_process_spawn_hold(job_id, target_identity=target, deadline_at=deadline)
+    with exclusive_process_spawn_guard(rig.root, acquire_deadline=deadline):
+        assert rig.stores[0].claim_job(job_id, hold_process_spawns=True, process_child_count=0)
+    return job_id, target
+
+
+def _recovery_process(rig):
+    preparer = OpsService(rig.stores[0], executor=FakeExecutor())
+    admission = OpsService(rig.stores[0], admission_only=True,
+                           preparer=SimpleNamespace(prepare=preparer.prepare_invocation))
+    return admission.dispatch_job(operation_slug=rig.operation(execution_mode="process"), args={"target": "a"},
+                                  idempotency_key=uuid.uuid4().hex)["id"]
+
+
+@pytest.mark.parametrize("receipt", ["missing", "unreadable"])
+def test_daemon_acceptance_then_worker_death_never_releases_recovery_quarantine(rig, receipt):
+    from llm_bawt.ops.executor_types import ExecutorError
+
+    job_id, _target = _recovery_holder(rig)
+    snapshot = json.loads(rig.job(job_id).invocation_snapshot_json)
+    rig.executors[0].dispatch(job_id=job_id, snapshot=snapshot)
+    rig.stores[0].mark_accepted(job_id)
+    # The fake daemon accepted a target operation; its completion is unknown
+    # even when the worker exits. This flag deliberately outlives the worker.
+    daemon_mutation_pending = threading.Event()
+    daemon_mutation_pending.set()
+    rig.client.containers.rows[DockerExecutor.worker_name(job_id)].status = "exited"
+    if receipt == "unreadable":
+        (rig.root / job_id / "receipt.json").write_text("{unreadable")
+        with pytest.raises(ExecutorError):
+            rig.executors[1].reconcile(job_id=job_id, snapshot=snapshot)
+    else:
+        result = rig.executors[1].reconcile(job_id=job_id, snapshot=snapshot)
+        assert result.state == JOB_LOST
+        rig.stores[1].mark_terminal(job_id, state=result.state)
+    rig.sql("UPDATE ops_jobs SET process_spawn_hold_deadline_at=now()-interval '1 second' WHERE id=:id", id=job_id)
+    assert rig.stores[1].classify_process_spawn_hold(job_id) == "quarantined"
+    # Distinct engine/restarted observer, not in-memory holder ownership.
+    assert rig.job(job_id).state == JOB_LOST and daemon_mutation_pending.is_set()
+    assert rig.stores[0].process_spawns_held() and rig.stores[1].process_spawns_held()
+    assert not rig.stores[1].claim_job(_recovery_process(rig))
+    assert rig.creates() == 1 and rig.client.containers.rows[DockerExecutor.worker_name(job_id)].starts == 1
+
+
+def test_deadline_classification_cannot_reopen_a_process_claim_waiting_on_slot_lock(rig):
+    job_id, _target = _recovery_holder(rig)
+    process_id = _recovery_process(rig)
+    rig.sql("UPDATE ops_jobs SET process_spawn_hold_deadline_at=now()-interval '1 second' WHERE id=:id", id=job_id)
+    blocker = rig.stores[0].engine.connect()
+    transaction = blocker.begin()
+    pid = blocker.execute(text("SELECT pg_backend_pid()")).scalar_one()
+    blocker.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": WORKER_SLOT_LOCK})
+    with ThreadPoolExecutor(1) as pool:
+        contender = pool.submit(rig.stores[1].claim_job, process_id)
+        try:
+            wait_blocked_by(rig.stores[0].engine, pid, contender)
+            assert rig.stores[0].classify_process_spawn_hold(job_id) == "quarantined"
+        finally:
+            transaction.commit()
+            blocker.close()
+        assert not contender.result(timeout=HANG_GUARD_S)
+    assert rig.job(process_id).state == JOB_QUEUED and rig.stores[1].process_spawns_held()
+
+
+def test_exclusive_release_serializes_verifiers_and_commits_one_immutable_audit(rig):
+    from llm_bawt.ops.executor_types import SpawnDeferred
+    from llm_bawt.ops.models import JOB_SUCCEEDED
+    from llm_bawt.ops.spawn_hold_recovery import VerifiedHoldOutcome
+
+    job_id, target = _recovery_holder(rig)
+    rig.stores[0].mark_terminal(job_id, state=JOB_LOST)
+    authority_id = rig.admit(rig.operation())
+    rig.stores[0].mark_terminal(authority_id, state=JOB_SUCCEEDED)
+    authority = rig.job(authority_id)
+    evidence = VerifiedHoldOutcome(job_id, target, authority_id,
+                                   hashlib.sha256(authority.invocation_snapshot_json.encode()).hexdigest(),
+                                   "verified_success")
+    entered, finish = threading.Event(), threading.Event()
+    calls = []
+
+    def verified(_job):
+        calls.append("verified")
+        entered.set()
+        assert finish.wait(HANG_GUARD_S)
+        return evidence
+
+    def release(store, verifier):
+        return store.release_process_spawn_hold(job_id, receipt_root=rig.root,
+                                                acquire_deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+                                                verifier=verifier)
+
+    with ThreadPoolExecutor(1) as pool:
+        winner = pool.submit(release, rig.stores[0], verified)
+        try:
+            assert entered.wait(HANG_GUARD_S)
+            with pytest.raises(SpawnDeferred):
+                release(rig.stores[1], lambda _job: pytest.fail("second verifier entered under active EX"))
+            assert rig.stores[1].process_spawns_held()
+        finally:
+            finish.set()
+        assert winner.result(timeout=HANG_GUARD_S)
+    assert calls == ["verified"] and not rig.stores[1].process_spawns_held()
+    audit = rig.job(job_id).process_spawn_hold_release_json
+    assert not release(rig.stores[1], lambda _job: pytest.fail("released hold must not reverify"))
+    assert rig.job(job_id).process_spawn_hold_release_json == audit and rig.job(job_id).state == JOB_LOST
+    assert rig.stores[1].claim_job(_recovery_process(rig))

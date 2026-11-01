@@ -73,6 +73,10 @@ _JOB_QUIESCE_COLUMNS = (
 _JOB_WORKER_SLOT_COLUMNS = (  # TASK-1169 process admission and self-config drain ledger.
     ("worker_slot_at", "TIMESTAMP WITH TIME ZONE"),
     ("process_spawn_hold_at", "TIMESTAMP WITH TIME ZONE"),
+    ("process_spawn_hold_deadline_at", "TIMESTAMP WITH TIME ZONE"),
+    ("process_spawn_hold_target_json", "TEXT"),
+    ("process_spawn_hold_quarantine_at", "TIMESTAMP WITH TIME ZONE"),
+    ("process_spawn_hold_release_json", "TEXT"),
 )
 _OP_QUIESCE_COLUMNS = (
     ("quiesce_enabled", "BOOLEAN NOT NULL DEFAULT false"),
@@ -454,6 +458,19 @@ class OpsStore:
         with self.engine.connect() as conn:
             return process_spawn_held(conn)
 
+    def prepare_process_spawn_hold(self, job_id, *, target_identity, deadline_at):
+        from .spawn_hold_recovery import prepare_hold
+        return prepare_hold(self, job_id, target_identity=target_identity, deadline_at=deadline_at)
+
+    def classify_process_spawn_hold(self, job_id):
+        from .spawn_hold_recovery import classify_hold
+        return classify_hold(self, job_id)
+
+    def release_process_spawn_hold(self, job_id, *, receipt_root, acquire_deadline, verifier):
+        from .spawn_hold_recovery import release_hold
+        return release_hold(self, job_id, receipt_root=receipt_root,
+                            acquire_deadline=acquire_deadline, verifier=verifier)
+
     def claim_job(self, job_id, *, max_concurrent=None, hold_process_spawns=False,
                   process_child_count: int | None = None):
         """QUEUED -> DISPATCHING atomically, reserving its execution slots.
@@ -492,7 +509,17 @@ class OpsStore:
                 return False  # Waiting on a slot only: no error_text, so the S1e deadline never runs.
             if worker_slot:
                 values["worker_slot_at"] = values["dispatched_at"]
-            result = session.execute(update(OpsJob).where(OpsJob.id == job_id, OpsJob.state == JOB_QUEUED)
+            conditions = [OpsJob.id == job_id, OpsJob.state == JOB_QUEUED]
+            if hold_process_spawns:
+                # A prepared policy's absolute budget cannot be renewed/bypassed
+                # by a stale queued reader. Legacy dormant ledger tests remain
+                # unchanged; any future enabled hold action must prepare first.
+                conditions.append(or_(OpsJob.process_spawn_hold_deadline_at.is_(None),
+                                      OpsJob.process_spawn_hold_deadline_at > func.current_timestamp()))
+            else:
+                # A prepared hold action must not run through ordinary dispatch.
+                conditions.append(OpsJob.process_spawn_hold_target_json.is_(None))
+            result = session.execute(update(OpsJob).where(*conditions)
                 .values(**values).execution_options(synchronize_session=False))
             if result.rowcount == 1:
                 append_job_transition(getattr(self, "events", None), session.connection(), session.get(OpsJob, job_id))

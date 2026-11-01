@@ -76,14 +76,16 @@ def _lock_worker_slots(conn) -> None:
 def process_spawn_held(conn) -> bool:
     """Plain ledger read: no advisory lock, usable by a spawn-side flock holder.
 
-    A terminal transition ends the hold in the same commit while retaining its
-    timestamp for forensics. Unknown nonterminal states fail closed.
+    Legacy dormant holds end on terminal state. A prepared recovery-policy
+    hold stays closed across terminalization until explicitly verified released.
+    Unknown nonterminal states fail closed; this read never takes a DB lock.
     """
     terminal = sorted(JOB_TERMINAL_STATES)
     states = ", ".join(f":t{i}" for i in range(len(terminal)))
     return conn.execute(text(
         "SELECT 1 FROM ops_jobs WHERE process_spawn_hold_at IS NOT NULL"
-        f" AND state NOT IN ({states}) LIMIT 1"
+        f" AND (state NOT IN ({states}) OR"
+        " (process_spawn_hold_target_json IS NOT NULL AND process_spawn_hold_release_json IS NULL)) LIMIT 1"
     ), {f"t{i}": state for i, state in enumerate(terminal)}).first() is not None
 
 

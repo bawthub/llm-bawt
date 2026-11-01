@@ -454,9 +454,22 @@ class OpsJob(SQLModel, table=True):
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
     # The isolated self-reconcile claim blocks new process slots while open.
-    # Retain the stamp for forensics; terminal state releases the hold atomically.
+    # Prepared recovery-policy holds also block after terminalization until an
+    # explicit identity-matched verified release. Legacy dormant holds unchanged.
     process_spawn_hold_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    process_spawn_hold_deadline_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    process_spawn_hold_target_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    process_spawn_hold_quarantine_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    process_spawn_hold_release_json: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
     )
 
     def to_api(self, *, include_output: bool = False) -> dict[str, Any]:
@@ -497,6 +510,23 @@ class OpsJob(SQLModel, table=True):
             ),
         }
         row["quiesce"] = _quiesce_api(self)
+        if self.process_spawn_hold_target_json is not None:
+            def decoded(raw):
+                try:
+                    return json.loads(raw) if raw is not None else None
+                except (ValueError, TypeError):
+                    return {"unreadable": True}
+            row["process_spawn_hold"] = {
+                "target_identity": decoded(self.process_spawn_hold_target_json),
+                "held_at": _iso_utc(self.process_spawn_hold_at),
+                "deadline_at": _iso_utc(self.process_spawn_hold_deadline_at),
+                "quarantine_at": _iso_utc(self.process_spawn_hold_quarantine_at),
+                "quarantined": (self.process_spawn_hold_at is not None
+                                and self.process_spawn_hold_release_json is None
+                                and (self.state in JOB_TERMINAL_STATES
+                                     or self.process_spawn_hold_quarantine_at is not None)),
+                "release": decoded(self.process_spawn_hold_release_json),
+            }
         # TASK-997: structured deploy/rollback record (None for ordinary ops),
         # so the UI never has to parse raw output for release state.
         row["deployment"] = parse_deployment(self.output_tail)
