@@ -788,9 +788,15 @@ def reload_bots():
 
     service = get_service()
     try:
-        request_policy_refresh(get_bot_profile_store(service.config).engine)
+        policy_result = request_policy_refresh(get_bot_profile_store(service.config).engine)
     except SnapshotUnavailable:
         raise HTTPException(status_code=503, detail="Bot access policy refresh unavailable") from None
+    if policy_result["status"] != "installed":
+        raise HTTPException(
+            status_code=504 if policy_result["status"] == "timeout" else 503,
+            detail={"message": "Bot access policy refresh unavailable",
+                    "bot_access_policy": "refresh_requested", "bot_access_policy_app": policy_result},
+        )
     _reload_bot_registry()
     _reload_service_model_catalog(service)
     cleared_instances = _invalidate_all_instance_cache(service)
@@ -798,6 +804,7 @@ def reload_bots():
     return {
         "status": "reloaded",
         "bot_access_policy": "refresh_requested",
+        "bot_access_policy_app": policy_result,
         "cleared_instances": cleared_instances,
         "cleared_session_model_overrides": cleared_session_overrides,
     }

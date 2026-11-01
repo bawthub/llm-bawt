@@ -1,5 +1,6 @@
 """Actual mutation decisions on disposable PG; no live profiles or services."""
 from dataclasses import replace
+import threading
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -13,6 +14,39 @@ from tests.test_bot_policy_refresh_pg import listen, notified
 from tests.test_bot_policy_refresh_pg import world as world
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_admin_recovery_reports_actual_local_load_without_request_policy_reads(world, monkeypatch, fail):  # noqa: F811
+    from llm_bawt.bot_access import refresh as module
+    from llm_bawt.bot_access.snapshot import SnapshotUnavailable
+
+    read = module.read_snapshot_rows
+    caller_thread = threading.get_ident()
+    read_threads = []
+    with module.policy_refresh_lifecycle(world.engine) as owner:
+        assert owner.ready.wait(10)
+        # Deliberately missed hint: no supported writer/notification helper.
+        with world.engine.begin() as conn:
+            conn.execute(text("UPDATE bot_profiles SET include_in_global_search=false WHERE slug='fixture_peer'"))
+        assert owner.snapshot.get().require_target("fixture_peer")
+
+        def tracked(engine):
+            read_threads.append(threading.get_ident())
+            if fail:
+                raise ValueError("sensitive fixture row detail")
+            return read(engine)
+
+        monkeypatch.setattr(module, "read_snapshot_rows", tracked)
+        result = module.request_policy_refresh(world.engine)
+        assert read_threads and caller_thread not in read_threads
+        if fail:
+            assert result == {"status": "failed", "reason": "snapshot_validation"}
+            with pytest.raises(SnapshotUnavailable, match="snapshot_validation"):
+                owner.snapshot.get()
+        else:
+            assert result == {"status": "installed"}
+            assert "fixture_peer" in owner.snapshot.get().private_bots
 
 
 def test_all_policy_input_mutations_update_two_consumer_decisions(world):  # noqa: F811 - pytest fixture
