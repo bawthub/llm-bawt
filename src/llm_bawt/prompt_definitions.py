@@ -87,6 +87,8 @@ from .prompt_default_loaders import (
     load_working_memory_section_unavailable,
 )
 
+from .ops.gate_receipt import DEFAULT_GATE_RECEIPT, GATE_RECEIPT_KEY
+
 COMPACT_SUMMARY_KEY = "agents.compaction_summary"
 
 
@@ -683,6 +685,18 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "target actually began running. Never say no work was done or that "
             "the message was cancelled before delivery; partial effects are possible. "
             "Do not resend automatically. Sender-bot overrides supported."
+        )},
+    ),
+    GATE_RECEIPT_KEY: PromptDefinition(
+        key=GATE_RECEIPT_KEY,
+        title="Batch Gate Terminal Wake",
+        category="agent_execution",
+        loader=lambda: DEFAULT_GATE_RECEIPT,
+        metadata={"notes": (
+            "TASK-1865 dormant direct gate callback framing on the existing ops "
+            "receipt outbox. JSON identifies the job and exact commit workload; "
+            "a wake is not verified host gate proof or SHIP authority. Never "
+            "automatically retry or push. Target-bot overrides supported."
         )},
     ),
     "ops.quiesce_receipt": PromptDefinition(

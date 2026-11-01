@@ -84,7 +84,15 @@ class QuiesceReceiptSender:
         # A read only: the reconciler already recorded the terminal state.
         receipt = self.ops.get_job_status(job_id, output_tail_bytes=OUTPUT_TAIL_BYTES,
                                           reconcile_if_active=False)
-        message = (receipt_prompt(bot_id) + "\n"
+        if "kind" in callback:
+            # Dormant TASK-1865 seam: no production admission path attaches it.
+            # The existing outbox/terminal ledger still own delivery and retry.
+            from .gate_receipt import frame_gate_receipt
+
+            prefix, receipt = frame_gate_receipt(job, callback, receipt)
+        else:
+            prefix = receipt_prompt(bot_id)  # Existing quiesce callbacks are unchanged.
+        message = (prefix + "\n"
                    + json.dumps(receipt, ensure_ascii=False, sort_keys=True, default=str))
         record, duplicate = self.deliveries.enqueue(
             sender_bot_id=SYSTEM_BOT_ID, target_bot_id=bot_id, message=message,
