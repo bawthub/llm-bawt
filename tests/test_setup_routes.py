@@ -292,7 +292,7 @@ def test_admin_writer_settles_first_bot_harness_on_every_route(access_path_key):
 
 @pytest.mark.parametrize(("catalog", "detail"), [
     (_catalog("openai-api", vendor="openai", protocol="chat-completions"),
-     "endpoint_id=7 is incompatible with harness=claude-code"),
+     "endpoint_id=7 access_path=openai-api is incompatible with harness=claude-code; choose a compatible model route"),
     (_catalog("xai-responses", vendor="xai", protocol="responses", endpoint_id=8),
      "Unknown model endpoint id: 7"),
 ])

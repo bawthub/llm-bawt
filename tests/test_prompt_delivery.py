@@ -97,9 +97,10 @@ def rig(tmp_path, monkeypatch):
     bot = bots.Bot(slug=BOT, name="Disposable", description="Test only", system_prompt="Test",
                    agent_backend="claude-code", harness="claude-code", default_model="first", endpoint_id=1)
     monkeypatch.setattr(bots.BotManager, "get_bot", lambda self, slug: bot if slug == BOT else None)
+    # Use a dispatch-supported native path; catalog/transport stay entirely local.
     catalog = ModelCatalog([
         ModelEndpoint(i, ModelIdentity(i, name, "anthropic", name),
-                      AccessPath(1, "test-native", "anthropic", "anthropic-messages", None, "test"), name)
+                      AccessPath(1, "anthropic-api", "anthropic", "anthropic-messages", None, "test"), name)
         for i, name in [(1, "first"), (2, "second")]
     ])
     config = SimpleNamespace(ensure_model_catalog=lambda: catalog)
@@ -172,8 +173,8 @@ def mutate(rig, job, run, *, lifecycle=None, cancel=False):
 
 
 def test_validator_actual_catalog_default_explicit_and_harness(rig):
-    assert resolve_prompt_target(rig.service, BOT, None, OWNER) == "first@test-native"
-    assert resolve_prompt_target(rig.service, BOT, "second", OWNER) == "second@test-native"
+    assert resolve_prompt_target(rig.service, BOT, None, OWNER) == "first@anthropic-api"
+    assert resolve_prompt_target(rig.service, BOT, "second", OWNER) == "second@anthropic-api"
     assert rig.bot.default_model == "first" and rig.bot.endpoint_id == 1
     with pytest.raises(ValueError, match="missing"):
         resolve_prompt_target(rig.service, "not-a-bot", None, OWNER)
@@ -192,7 +193,7 @@ def test_end_to_end_two_occurrences_sessions_model_authorship_and_completion(rig
     assert first_record.author == AuthorReference.user(OWNER)
     payload = rig.delivery.payload(first_record.id)
     assert payload["prefer_steer"] is False
-    assert payload["model"] == "second@test-native"
+    assert payload["model"] == "second@anthropic-api"
     assert payload["session_id"] == first_session != "personal"
     assert payload["messages"] == [{"role": "user", "content": "Literal saved prompt"}]
     # Real dispatcher drains the ordinary service generator; only inference is mocked.
@@ -299,7 +300,7 @@ def test_valid_claim_reads_bound_model_and_nonactive_thread(rig):
     with rig.engine.begin() as conn:
         head = load_claim_head(conn, BOT, rig.service.config)
         assert head["id"] == record.id
-        assert json.loads(head["payload_json"])["model"] == "second@test-native"
+        assert json.loads(head["payload_json"])["model"] == "second@anthropic-api"
     assert occurrence(rig, run).state == "queued"
 
 
@@ -410,7 +411,7 @@ def test_prompt_seed_only_reads_automation_owner_instance(rig):
     load = Mock()
     history = SimpleNamespace(load_history=load, build_context_payload=Mock(
         return_value=SimpleNamespace(seed_messages=[])))
-    instance = SimpleNamespace(bot_id=BOT, resolved_model_alias="second@test-native",
+    instance = SimpleNamespace(bot_id=BOT, resolved_model_alias="second@anthropic-api",
                                history_manager=history,
                                config_resolver=SimpleNamespace(resolve_config_setting=lambda key:
                                    SimpleNamespace(value="inline+summaries" if key == "history_scope" else 3000)))
@@ -500,7 +501,7 @@ def test_real_stream_coordinator_selects_isolated_prompt_instance(rig, monkeypat
     chunks = asyncio.run(collect())
     assert any("done." in chunk for chunk in chunks)
     assert contexts[0].llm_bawt is isolated
-    assert contexts[0].model_alias == "second@test-native"
+    assert contexts[0].model_alias == "second@anthropic-api"
     assert contexts[0].thread_binding["thread_session_id"] == payload["session_id"]
     assert contexts[0].thread_binding["explicit_thread"] is True
     service._turn_log_store.accept_session_binding.assert_called_once()
@@ -550,10 +551,10 @@ def test_prompt_instance_uses_override_without_personal_model_or_client_mutation
         }))
     monkeypatch.setattr(PromptLLMBawt, "_init_history", history)
     rig.service._session_model_overrides = {(BOT, OWNER): "personal-model"}
-    request = ChatCompletionRequest(bot_id=BOT, user=OWNER, model="second@test-native",
+    request = ChatCompletionRequest(bot_id=BOT, user=OWNER, model="second@anthropic-api",
                                     session_id="automation", messages=[{"role": "user", "content": "Test"}])
     model, instance = create_prompt_instance(rig.service, request)
-    assert model == "second@test-native"
+    assert model == "second@anthropic-api"
     assert instance.client._bot_config["model"] == "second"
     assert instance.client._bot_config["endpoint_id"] == 2
     assert instance.model_lifecycle is None
