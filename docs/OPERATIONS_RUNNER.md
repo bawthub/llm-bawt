@@ -362,6 +362,26 @@ as the claim or the quiesce open step.
 - Isolated jobs are not counted. Per-operation `max_concurrent` applies in
   both modes.
 
+**Self-config spawn-hold ledger (TASK-1169; dormant prerequisite).** An
+internal `claim_job(..., hold_process_spawns=True, process_child_count=0)` seam
+can claim an isolated Docker job and stamp `process_spawn_hold_at` in the same
+transaction. It refuses unknown/nonzero child counts, any active process slot,
+another open hold, process-mode jobs and quiesce snapshots. The hold decision
+and both ordinary/quiesce process-slot reservations share `ops-worker-slots`;
+process jobs wait without taking a slot or opening a turn gate. Other isolated
+claims remain available.
+
+The hold persists across store/reconciler restarts and ends with the job's
+terminal-state commit, retaining its timestamp for forensics. The plain
+`process_spawn_held(conn)` read takes no advisory or row lock, for use by the
+future spawn-side flock fence. This is **not yet complete spawn/drain safety**:
+no current dispatcher requests a hold, no new operation is enabled, and neither
+initial/recovery spawn flock fencing nor the fixed fresh drain probe/self-config
+action is wired here. The future claim caller must retain the exclusive
+receipt-volume flock while supplying its fresh child observation and claiming;
+no Docker I/O runs inside the claim transaction. This slice alone does not
+permit ops-service recreation or a process pilot.
+
 **Self-management (S4c).** The ops service identifies its own container by
 its full ID and Compose project/service labels. It looks the container up
 through `LLM_BAWT_OPS_APP_CONTAINER`, or `HOSTNAME`, which Docker sets to the

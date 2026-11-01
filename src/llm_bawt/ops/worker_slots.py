@@ -29,7 +29,8 @@ from typing import Any, Mapping
 from sqlalchemy import text
 
 from .execution_mode import EXECUTION_PROCESS, snapshot_execution_mode
-from .models import EXECUTOR_DOCKER, JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUIESCING, JOB_RUNNING
+from .models import (EXECUTOR_DOCKER, JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUIESCING, JOB_RUNNING,
+                     JOB_TERMINAL_STATES)
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +68,42 @@ def needs_worker_slot(snapshot: Mapping[str, Any]) -> bool:
     return snapshot_execution_mode(snapshot, kind) == EXECUTION_PROCESS
 
 
-def live_worker_slots(conn, *, exclude_job_id: str | None = None) -> int:
-    """How many jobs hold a worker slot now, under the slot lock on PostgreSQL."""
+def _lock_worker_slots(conn) -> None:
     if conn.dialect.name == "postgresql":
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": WORKER_SLOT_LOCK})
+
+
+def process_spawn_held(conn) -> bool:
+    """Plain ledger read: no advisory lock, usable by a spawn-side flock holder.
+
+    A terminal transition ends the hold in the same commit while retaining its
+    timestamp for forensics. Unknown nonterminal states fail closed.
+    """
+    terminal = sorted(JOB_TERMINAL_STATES)
+    states = ", ".join(f":t{i}" for i in range(len(terminal)))
+    return conn.execute(text(
+        "SELECT 1 FROM ops_jobs WHERE process_spawn_hold_at IS NOT NULL"
+        f" AND state NOT IN ({states}) LIMIT 1"
+    ), {f"t{i}": state for i, state in enumerate(terminal)}).first() is not None
+
+
+def process_spawn_hold_available(conn, *, child_count: int | None) -> bool:
+    """Check an isolated claim's drain evidence under the worker-slot lock.
+
+    The future self-config caller must supply a fresh child count observed
+    under its exclusive receipt-volume flock, retained through this claim.
+    No Docker I/O belongs in this transaction. Unknown counts never permit a
+    hold; this ledger prerequisite alone is not complete spawn/drain safety.
+    """
+    if type(child_count) is not int or child_count != 0:
+        return False
+    active_slots = live_worker_slots(conn)
+    return active_slots == 0 and not process_spawn_held(conn)
+
+
+def live_worker_slots(conn, *, exclude_job_id: str | None = None) -> int:
+    """How many jobs hold a worker slot now, under the slot lock on PostgreSQL."""
+    _lock_worker_slots(conn)
     states = ", ".join(f":s{i}" for i in range(len(WORKER_SLOT_STATES)))
     params: dict[str, Any] = {f"s{i}": state for i, state in enumerate(WORKER_SLOT_STATES)}
     params["exclude"] = exclude_job_id or ""
@@ -82,12 +115,16 @@ def live_worker_slots(conn, *, exclude_job_id: str | None = None) -> int:
 def worker_slot_free(conn, snapshot: Mapping[str, Any], *, job_id: str) -> bool | None:
     """None when the job needs no worker slot; else whether one is free for it.
 
-    A job that already holds a slot (a quiesce job past its open step) always
-    keeps it. Call inside the transition's own transaction, after the
-    operation-row lock, and set ``worker_slot_at`` in that same transaction.
+    A job that already holds a slot (a quiesce job past its open step) keeps
+    it unless a spawn hold is present (an inconsistent ledger fails closed).
+    Call inside the transition's own transaction, after the operation-row
+    lock, and set ``worker_slot_at`` in that same transaction.
     """
     if not needs_worker_slot(snapshot):
         return None
+    _lock_worker_slots(conn)
+    if process_spawn_held(conn):
+        return False
     held = conn.execute(text("SELECT worker_slot_at IS NOT NULL FROM ops_jobs WHERE id=:id"),
                         {"id": job_id}).scalar()
     if held:

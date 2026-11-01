@@ -26,13 +26,14 @@ from .events import append_job_transition, append_job_transition_by_id
 from .container_remove import ACTION as REMOVE_ACTION, validate_remove_schema  # TASK-1439 T2c
 from .executor import validate_spec
 from .release_spec import is_release_spec
-from .execution_mode import DEFAULT_EXECUTION_MODE, legacy_execution_mode, validate_execution_mode
+from .execution_mode import (DEFAULT_EXECUTION_MODE, EXECUTION_ISOLATED, legacy_execution_mode,
+                             snapshot_execution_mode, validate_execution_mode)
 from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPATCHING, JOB_FAILED, JOB_QUEUED,
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
 from .validation import canonical_json, validate_catalog
-from .worker_slots import worker_slot_free
+from .worker_slots import process_spawn_hold_available, worker_slot_free
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,10 @@ _JOB_QUIESCE_COLUMNS = (
     ("quiesce_fence_json", "TEXT"), ("quiesce_json", "TEXT"),
     ("receipt_callback_json", "TEXT"), ("receipt_callback_delivery_id", "VARCHAR(128)"),
 )
-_JOB_WORKER_SLOT_COLUMNS = (("worker_slot_at", "TIMESTAMP WITH TIME ZONE"),)  # TASK-1169 S4b
+_JOB_WORKER_SLOT_COLUMNS = (  # TASK-1169 process admission and self-config drain ledger.
+    ("worker_slot_at", "TIMESTAMP WITH TIME ZONE"),
+    ("process_spawn_hold_at", "TIMESTAMP WITH TIME ZONE"),
+)
 _OP_QUIESCE_COLUMNS = (
     ("quiesce_enabled", "BOOLEAN NOT NULL DEFAULT false"),
     ("quiesce_timeout_seconds", "INTEGER NOT NULL DEFAULT 600"),
@@ -440,9 +444,15 @@ class OpsStore:
         with Session(self.engine) as session:
             return session.exec(select(func.count()).select_from(OpsJob).where(*self._job_filters(operation_slug, state))).one()
 
-    def claim_job(self, job_id, *, max_concurrent=None):
-        """QUEUED -> DISPATCHING atomically, reserving a per-operation slot
-        and, for a process-mode job, a worker slot (TASK-1169 S4b).
+    def claim_job(self, job_id, *, max_concurrent=None, hold_process_spawns=False,
+                  process_child_count: int | None = None):
+        """QUEUED -> DISPATCHING atomically, reserving its execution slots.
+
+        ``hold_process_spawns`` is an internal, dormant self-config seam: an
+        isolated Docker claim can take the durable spawn hold only with no
+        process slots and a fresh zero child count. The future action must
+        hold the exclusive receipt-volume flock through this claim; no current
+        dispatcher enables it. This is not a substitute for spawn-side fencing.
 
         Never for a quiesce snapshot (TASK-1233 C5): only the quiesce driver
         may dispatch one, after its drain, through its own fenced CAS.
@@ -459,8 +469,15 @@ class OpsStore:
             if slot_cap_reached(slot_holders(conn, job.operation_slug), max_concurrent):
                 return False
             values = dict(state=JOB_DISPATCHING, dispatched_at=_utcnow(), host_unit_name=f"llm-bawt-ops-{job_id}", error_text=None)
-            worker_slot = worker_slot_free(conn, json.loads(job.invocation_snapshot_json), job_id=job_id) \
-                if job.invocation_snapshot_json else None
+            snapshot = json.loads(job.invocation_snapshot_json) if job.invocation_snapshot_json else {}
+            if hold_process_spawns:
+                kind = (snapshot.get("execution") or {}).get("executor_kind")
+                if (kind != EXECUTOR_DOCKER
+                        or snapshot_execution_mode(snapshot, kind) != EXECUTION_ISOLATED
+                        or not process_spawn_hold_available(conn, child_count=process_child_count)):
+                    return False
+                values["process_spawn_hold_at"] = values["dispatched_at"]
+            worker_slot = worker_slot_free(conn, snapshot, job_id=job_id) if snapshot else None
             if worker_slot is False:
                 return False  # Waiting on a slot only: no error_text, so the S1e deadline never runs.
             if worker_slot:

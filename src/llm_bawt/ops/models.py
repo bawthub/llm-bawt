@@ -453,6 +453,11 @@ class OpsJob(SQLModel, table=True):
     worker_slot_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # The isolated self-reconcile claim blocks new process slots while open.
+    # Retain the stamp for forensics; terminal state releases the hold atomically.
+    process_spawn_hold_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
 
     def to_api(self, *, include_output: bool = False) -> dict[str, Any]:
         import json

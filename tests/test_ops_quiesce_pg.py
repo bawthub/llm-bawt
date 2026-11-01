@@ -327,6 +327,29 @@ def test_a_full_worker_bound_waits_before_any_hold_then_takes_the_freed_slot(rig
     assert rig.row(job_id)["worker_slot_at"] is not None and rig.held()
 
 
+def test_spawn_hold_blocks_quiesce_before_worker_slot_or_turn_gate_opens(rig):
+    holder_slug = f"{rig.slug}-spawn-holder"
+    rig.store.create_operation(_op_data(slug=holder_slug, execution_mode="isolated"))
+    try:
+        holder = _admission(rig).dispatch_job(operation_slug=holder_slug, args={"target": "a"},
+                                             idempotency_key=uuid.uuid4().hex)["id"]
+        assert rig.store.claim_job(holder, hold_process_spawns=True, process_child_count=0)
+        rig.turn()
+        job_id = rig.job()
+        assert rig.driver.step(job_id).outcome == "waiting_slot"
+        row = rig.row(job_id)
+        assert row["worker_slot_at"] is None and row["quiesce_gate_id"] is None
+        assert rig.gates_of(job_id) == [] and not rig.held()
+        rig.store.mark_terminal(holder, state=JOB_SUCCEEDED)
+        assert rig.driver.step(job_id).outcome == "opened"
+        assert rig.row(job_id)["worker_slot_at"] is not None and rig.held()
+    finally:
+        for statement in ("DELETE FROM ops_jobs WHERE operation_slug=:s",
+                          "DELETE FROM ops_operation_revisions WHERE operation_slug=:s",
+                          "DELETE FROM ops_operations WHERE slug=:s"):
+            rig.sql(statement, s=holder_slug)
+
+
 def test_a_quiesce_job_keeps_its_worker_slot_and_a_claim_waits_without_an_error(rig, worker_bound):
     job_id = rig.job()
     assert rig.driver.step(job_id).outcome == "opened"

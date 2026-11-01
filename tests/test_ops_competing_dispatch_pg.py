@@ -247,6 +247,72 @@ def test_isolated_jobs_take_no_worker_slot(rig, monkeypatch):
     assert [rig.job(job_id).worker_slot_at for job_id in jobs] == [None, None]
 
 
+# ── 2c. Durable spawn holds share the process-slot transaction lock ───────
+
+def _admit_slot_claim(rig, mode):
+    # Ledger tests do not launch a child or require a pinned real interpreter.
+    preparer = OpsService(rig.stores[0], executor=FakeExecutor())
+    app = OpsService(rig.stores[1], admission_only=True,
+                     preparer=SimpleNamespace(prepare=preparer.prepare_invocation))
+    return app.dispatch_job(operation_slug=rig.operation(execution_mode=mode), args={"target": "a"},
+                            idempotency_key=uuid.uuid4().hex)["id"]
+
+
+@pytest.mark.parametrize("both_holds", [False, True])
+def test_spawn_hold_claims_serialize_against_process_claims_and_other_holds(rig, both_holds):
+    """Different operations cannot both publish a hold/process slot. Both
+    claimers reach the actual shared PostgreSQL lock before it is released;
+    barriers/observed lock waits replace sleeps and probabilistic ordering.
+    """
+    jobs = [_admit_slot_claim(rig, mode) for mode in
+            ("isolated", "isolated" if both_holds else "process")]
+    holder = rig.stores[0].engine.connect()
+    tx = holder.begin()
+    pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+    holder.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": WORKER_SLOT_LOCK})
+    with ThreadPoolExecutor(2) as pool:
+        claims = [pool.submit(store.claim_job, job_id, hold_process_spawns=hold,
+                              process_child_count=0 if hold else None)
+                  for store, job_id, hold in zip(rig.stores, jobs, (True, both_holds))]
+        try:
+            for claim in claims:
+                wait_blocked_by(rig.stores[0].engine, pid, claim)
+        finally:
+            tx.commit()
+            holder.close()
+        results = [claim.result(timeout=HANG_GUARD_S) for claim in claims]
+    assert sorted(results) == [False, True]
+    rows = [rig.job(job_id) for job_id in jobs]
+    for row, won in zip(rows, results):
+        assert row.state == (JOB_DISPATCHING if won else JOB_QUEUED)
+        if not won:
+            assert row.process_spawn_hold_at is None and row.worker_slot_at is None
+            assert row.dispatched_at is None and row.error_text is None
+    winner = rows[results.index(True)]
+    assert (winner.process_spawn_hold_at is not None) != (winner.worker_slot_at is not None)
+
+
+def test_terminal_hold_release_is_not_visible_before_commit(rig):
+    from llm_bawt.ops import JOB_SUCCEEDED
+    from llm_bawt.ops.worker_slots import process_spawn_held
+
+    job_id = rig.admit(rig.operation())
+    assert rig.stores[0].claim_job(job_id, hold_process_spawns=True, process_child_count=0)
+    stamp = rig.job(job_id).process_spawn_hold_at
+    process = _admit_slot_claim(rig, "process")
+    with rig.stores[0].engine.begin() as conn:
+        conn.execute(text("UPDATE ops_jobs SET state=:state WHERE id=:id"),
+                     {"state": JOB_SUCCEEDED, "id": job_id})
+        # The uncommitted terminal write must not let another process spawn.
+        assert not rig.stores[1].claim_job(process)
+        with rig.stores[1].engine.connect() as reader:
+            assert process_spawn_held(reader)
+    with rig.stores[1].engine.connect() as reader:
+        assert not process_spawn_held(reader)
+    assert rig.stores[1].claim_job(process)
+    assert rig.job(job_id).process_spawn_hold_at == stamp
+
+
 # ── 3. Crash after the claim, before any submission ─────────────────────────
 
 def test_a_claim_whose_dispatcher_died_before_submitting_is_lost_not_resubmitted(rig):
