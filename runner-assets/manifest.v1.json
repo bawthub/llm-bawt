@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "scope": "finite-offline-assets-only",
+  "platform": "linux-x86_64",
+  "files": [
+    {
+      "path": "tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790",
+      "sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d",
+      "size_bytes": 3613922,
+      "origin": "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken; expected SHA256 in tiktoken 0.12.0 openai_public.py; locked cp312 Linux x86_64 wheel SHA256 edde1ec917dfd21c1f2f8046b86348b0f54a2c0547f68149d8600859598769ad"
+    },
+    {
+      "path": "packages/media-types_13.0.0_all.deb",
+      "sha256": "0788e4b0b72db1bcf74a19cb24c3511e7770ad0b341f0f30e361701c3072f53e",
+      "size_bytes": 29336,
+      "origin": "https://deb.debian.org/debian/pool/main/m/media-types/media-types_13.0.0_all.deb; public HTTPS artifact acquired for this manifest, not host cache; no Debian signature-chain attestation claimed"
+    },
+    {
+      "path": "mime/mime.types",
+      "sha256": "db27e73f7ffc7779ef8196bc36bba4e11142f09c7c210e1e42d221d28cb90901",
+      "size_bytes": 78282,
+      "origin": "./etc/mime.types extracted from the pinned media-types_13.0.0_all.deb in this bundle; no maintainer scripts executed"
+    },
+    {
+      "path": "sources/llm-bawt/.github/workflows/tests.yml",
+      "sha256": "3fa2b9ec36391492a697903de6d1d6d61e83047d309adb4d0c52833f9a40baa4",
+      "size_bytes": 1528,
+      "origin": "git:llm-bawt@56d2f33808bdffd1eba294dc94e1a27615647c9f:.github/workflows/tests.yml"
+    },
+    {
+      "path": "sources/llm-bawt/.python-version",
+      "sha256": "7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d",
+      "size_bytes": 5,
+      "origin": "git:llm-bawt@56d2f33808bdffd1eba294dc94e1a27615647c9f:.python-version"
+    },
+    {
+      "path": "sources/llm-bawt/uv.lock",
+      "sha256": "2c6f1fea13c85be1f847fe7bd1f92ca68b73a618c7f6518ea4b47e34a4b1021e",
+      "size_bytes": 1000503,
+      "origin": "git:llm-bawt@56d2f33808bdffd1eba294dc94e1a27615647c9f:uv.lock"
+    },
+    {
+      "path": "sources/llm-bawt/Makefile",
+      "sha256": "87562853419093d2d23700794f91f2d426a09ec96554d65d7c0485777c614f73",
+      "size_bytes": 18380,
+      "origin": "git:llm-bawt@56d2f33808bdffd1eba294dc94e1a27615647c9f:Makefile"
+    },
+    {
+      "path": "sources/bawthub/.github/workflows/ci.yml",
+      "sha256": "6ce86562dc3f2c54eed9124206dd0651d32f6da8f1e40b329f82d8859faa3dff",
+      "size_bytes": 4941,
+      "origin": "git:bawthub@d9ca409d7dff0b6182dd637a0fbf35ed7191990d:.github/workflows/ci.yml"
+    },
+    {
+      "path": "sources/bawthub/.node-version",
+      "sha256": "73fb1b615e2043a933be1c0895cde4358036acc28d785692509b822aa53c761f",
+      "size_bytes": 8,
+      "origin": "git:bawthub@d9ca409d7dff0b6182dd637a0fbf35ed7191990d:.node-version"
+    },
+    {
+      "path": "sources/bawthub/frontend/package.json",
+      "sha256": "7d2dc8eb8e5274b2c6a89d535794665fd9f0bb22a2ca58da8349926fbeaf44ea",
+      "size_bytes": 3945,
+      "origin": "git:bawthub@d9ca409d7dff0b6182dd637a0fbf35ed7191990d:frontend/package.json"
+    },
+    {
+      "path": "sources/bawthub/frontend/pnpm-lock.yaml",
+      "sha256": "ab1b54db9450a176e4fbd383261d77cc4cfad5072d78ab280b02eea69323f61a",
+      "size_bytes": 322363,
+      "origin": "git:bawthub@d9ca409d7dff0b6182dd637a0fbf35ed7191990d:frontend/pnpm-lock.yaml"
+    },
+    {
+      "path": "sources/bawthub/uv.lock",
+      "sha256": "0f3830e2da9a9f83f5384d02d7ee078580e7d926819b566bc3b53cc605b7bf11",
+      "size_bytes": 287210,
+      "origin": "git:bawthub@d9ca409d7dff0b6182dd637a0fbf35ed7191990d:uv.lock"
+    },
+    {
+      "path": "sources/bawthub/scripts/check_home_assistant_types.sh",
+      "sha256": "329b4ab3391f99318bd7172a48acc2cbce39492099c6bb603ea5028f25fdf5b3",
+      "size_bytes": 420,
+      "origin": "git:bawthub@d9ca409d7dff0b6182dd637a0fbf35ed7191990d:scripts/check_home_assistant_types.sh"
+    }
+  ],
+  "tool_versions": {
+    "python": {
+      "match": "major_minor",
+      "version": "3.12",
+      "basis": "llm-bawt tests.yml/.python-version and BawtHub backend constraint; CI does NOT pin a Python patch/build"
+    },
+    "node": {
+      "match": "exact",
+      "version": "24.21.0",
+      "basis": "BawtHub .node-version used by CI"
+    },
+    "uv": {
+      "match": "exact",
+      "version": "0.10.8",
+      "basis": "BawtHub ci.yml binary version; llm-bawt setup-uv@v6 pins an action, NOT a uv binary version"
+    },
+    "corepack": {
+      "match": "exact",
+      "version": "0.36.0",
+      "basis": "BawtHub ci.yml global install"
+    },
+    "pnpm": {
+      "match": "exact",
+      "version": "10.32.1",
+      "basis": "BawtHub packageManager pnpm@10.32.1+sha512.a706938f0e89ac1456b6563eab4edf1d1faf3368d1191fc5c59790e96dc918e4456ab2e67d613de1043d2e8c81f87303e6b40d4ffeca9df15ef1ad567348f2be"
+    }
+  },
+  "limitations": [
+    "Finite asset bytes and declared version comparison only, NOT a runner-image/binary/platform attestation, offline dependency closure or SHIP gate receipt. Trust the manifest digest and freeze private staging out of band.",
+    "Only o200k_base is included; arbitrary model/tokenizer choices may require other assets. Tiktoken uses the SHA1 of the full upstream URL as a cache filename; the payload integrity pin is SHA256.",
+    "The MIME artifact is publicly sourced and content-pinned here, not verified through Debian signed release metadata. Origin strings are provenance notes, not cryptographic attestations.",
+    "Tool executables, Python wheels, pnpm packages/build scripts and native/Prisma binaries are NOT supplied or attested by this bundle. A copied host cache or node_modules is not immutable packaging proof.",
+    "Python patch/build is not pinned in the preserved CI. BawtHub precommit also needs Python3.14/pyright1.1.409/homeassistant2026.10.2 and dynamic extras; those isolated environments and other precommit downloads are outside this finite bundle.",
+    "No PostgreSQL image, sidecar, runner launch, durable gate callback, catalog, policy or service change is implemented. Existing 11193/11193 sandbox feasibility evidence is unchanged and does not authorize publication or activation."
+  ]
+}
