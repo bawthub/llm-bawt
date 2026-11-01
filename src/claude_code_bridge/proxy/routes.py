@@ -305,7 +305,7 @@ async def _proxy_iter(
             "session_hash=%s active_provider=%d active_account=%d queue_ms=%.1f "
             "setup_ms=%s upstream_ttfb_ms=%s first_output_ms=%s stream_ms=%.1f input=%d cached=%d "
             "output=%d cache_hit=%.1f%% status=%s errors_429_total=%d "
-            "errors_5xx_total=%d upstream_model=%s",
+            "errors_5xx_total=%d upstream_model=%s cache_create=%d serving_provider=%s",
             context.request_id,
             provider,
             context.account_hash,
@@ -326,6 +326,8 @@ async def _proxy_iter(
             errors_429,
             errors_5xx,
             upstream_model,
+            context.cache_creation_tokens,
+            json.dumps(context.serving_provider) if context.serving_provider is not None else "na",
         )
 
 

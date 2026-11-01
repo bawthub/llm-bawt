@@ -298,21 +298,26 @@ def test_openrouter_round_trip_preserves_nested_slashes(fake_upstream, monkeypat
 
 def test_usage_tap_computes_cache_hit(caplog):
     """cache_read / (input + cache_read + cache_create) — 150/200 = 75%."""
-    buf = _sse("glm-5.2").decode()
+    from claude_code_bridge.proxy.passthrough_telemetry import PassthroughTelemetry
+
+    telemetry = PassthroughTelemetry()
+    telemetry.feed(_sse("glm-5.2"), 12.0)
     with caplog.at_level("INFO"):
-        _remaining, logged = ZaiAdapter._tap_usage(buf, "glm-5.2", False)
-    assert logged is True
+        ZaiAdapter._log_usage(telemetry, "glm-5.2")
     assert "cache_hit=75.0%" in caplog.text
     assert "Z.AI usage" in caplog.text  # label preserved from pre-refactor
 
 
 def test_usage_tap_is_idempotent_and_bounded():
-    # Already-logged short-circuits.
-    assert ZaiAdapter._tap_usage("anything", "m", True) == ("anything", True)
-    # A flood with no usage line must not grow the buffer without bound.
-    junk = "x" * 70000
-    remaining, logged = ZaiAdapter._tap_usage(junk, "m", False)
-    assert len(remaining) <= 4096 and logged is True
+    from claude_code_bridge.proxy.passthrough_telemetry import PassthroughTelemetry
+
+    telemetry = PassthroughTelemetry()
+    telemetry.feed(_sse("m"), 12.0)
+    telemetry.feed(_sse("m"), 20.0)
+    assert telemetry.total_input == 200  # snapshots, not increments
+    telemetry.feed(b"x" * 70000, 30.0)
+    assert len(telemetry._line) <= 4096
+    assert not telemetry._data
 
 
 # --- local (Ollama / llama-server): keyless passthrough ------------------

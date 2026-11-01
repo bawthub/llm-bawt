@@ -104,6 +104,8 @@ class ProxyRequestContext:
     input_tokens: int = 0
     cached_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    serving_provider: str | None = None
     attempt: int = 0
     status_callback: ProxyStatusCallback | None = field(default=None, repr=False)
 
@@ -127,6 +129,7 @@ class ProxyRequestContext:
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.cached_tokens = cached_tokens
+        self.cache_creation_tokens = _created
 
     def report_status(self, status: dict[str, Any]) -> None:
         """Publish transient proxy progress without adding assistant text."""

@@ -28,12 +28,14 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import AsyncIterator, ClassVar
 
 import httpx
 
 from .base import ProviderAdapter
 from ..request_context import ProxyRequestContext
+from ..passthrough_telemetry import PassthroughTelemetry
 from ...provider_key_broker import (
     BrokerKeyError,
     BrokerKeyNotInstalled,
@@ -173,6 +175,9 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
         )
 
         client = await self.http_client()
+        upstream_started = time.perf_counter()
+        if context is not None and context.local_setup_ms is None:
+            context.local_setup_ms = (upstream_started - context.started_at) * 1000
         async with client.stream(
             "POST", url, json=body, headers=headers, timeout=_TIMEOUT
         ) as resp:
@@ -181,12 +186,11 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
                 raise RuntimeError(
                     f"{self.LABEL} upstream {resp.status_code}: {detail[:500]}"
                 )
-            # Best-effort usage tap: relay raw bytes untouched (the SDK
-            # consumes them), and on the side accumulate a decoded copy
-            # to extract the `message_start` usage block so we can see
-            # whether the upstream's context cache is actually hitting.
-            buf = ""
-            usage_logged = False
+            # Observe original bytes before the existing model-name rewrite.
+            # Keep reading usage through message_delta; late input/cache fields
+            # are common on compatible endpoints. Telemetry cannot alter flow.
+            telemetry = PassthroughTelemetry(context)
+            telemetry_enabled = True
             # The upstream echoes the bare model name ("glm-5.2") in
             # message_start. The SDK CLI validates that the response
             # model matches what it sent ("zai/glm-5.2"). Rewrite the
@@ -194,21 +198,22 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
             # response as malformed.
             bare_model_bytes = f'"model": "{upstream_model}"'.encode()
             full_model_bytes = f'"model": "{original_model}"'.encode()
-            async for chunk in resp.aiter_raw():
-                if not chunk:
-                    continue
-                if bare_model_bytes in chunk:
-                    chunk = chunk.replace(bare_model_bytes, full_model_bytes)
-                yield chunk
-                if usage_logged:
-                    continue
-                try:
-                    buf += chunk.decode("utf-8", "ignore")
-                    buf, usage_logged = self._tap_usage(
-                        buf, upstream_model, usage_logged
-                    )
-                except Exception:  # noqa: BLE001 — logging must never break the stream
-                    usage_logged = True
+            try:
+                async for chunk in resp.aiter_raw():
+                    if not chunk:
+                        continue
+                    if telemetry_enabled:
+                        try:
+                            telemetry.feed(chunk, (time.perf_counter() - upstream_started) * 1000)
+                        except Exception:  # noqa: BLE001 — telemetry cannot break the relay
+                            telemetry_enabled = False
+                    if bare_model_bytes in chunk:
+                        chunk = chunk.replace(bare_model_bytes, full_model_bytes)
+                    yield chunk
+            finally:
+                # Also retain observed usage on early disconnect/upstream error;
+                # counts are only what was supplied, not an estimate of billing.
+                self._log_usage(telemetry, upstream_model)
 
     def _supports_deferral(self, upstream_model: str) -> bool:
         """Hook so adapters can decide per-model (OpenRouter overrides)."""
@@ -249,48 +254,24 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
             )
 
     @classmethod
-    def _tap_usage(
-        cls, buf: str, upstream_model: str, already: bool
-    ) -> tuple[str, bool]:
-        """Scan buffered SSE for the message_start usage block and log it.
+    def _log_usage(cls, telemetry: PassthroughTelemetry, upstream_model: str) -> None:
+        """One final, metadata-only snapshot; missing fields are not proven zero."""
+        def count(field: str) -> str:
+            value = telemetry.usage.get(field)
+            return str(value) if value is not None else "na"
 
-        Returns (remaining_buffer, logged). Anthropic streams usage in the
-        first ``message_start`` event:
-            usage = {input_tokens, cache_creation_input_tokens,
-                     cache_read_input_tokens, output_tokens}
-        where ``input_tokens`` is the UNCACHED prompt portion. Cache hit % is
-        cache_read / (input + cache_read + cache_creation). If the upstream
-        doesn't populate the cache fields over its Anthropic endpoint they
-        read 0, which is itself the answer.
-        """
-        if already:
-            return buf, True
-        # Process complete SSE event blocks; keep any partial tail.
-        while "\n\n" in buf:
-            block, buf = buf.split("\n\n", 1)
-            if "message_start" not in block:
-                continue
-            for line in block.splitlines():
-                if not line.startswith("data:"):
-                    continue
-                try:
-                    evt = json.loads(line[5:].strip())
-                except json.JSONDecodeError:
-                    continue
-                usage = (evt.get("message") or {}).get("usage") or {}
-                uncached = int(usage.get("input_tokens") or 0)
-                cache_read = int(usage.get("cache_read_input_tokens") or 0)
-                cache_create = int(usage.get("cache_creation_input_tokens") or 0)
-                total_in = uncached + cache_read + cache_create
-                hit_pct = (cache_read / total_in * 100) if total_in else 0.0
-                logger.info(
-                    "%s usage model=%s input=%d cached=%d uncached=%d "
-                    "cache_create=%d cache_hit=%.1f%%",
-                    cls.LABEL, upstream_model, total_in, cache_read, uncached,
-                    cache_create, hit_pct,
-                )
-                return buf, True
-        # Cap buffer growth if message_start never shows a usage line.
-        if len(buf) > 65536:
-            return buf[-4096:], True
-        return buf, False
+        logger.info(
+            "%s usage model=%s input=%s cached=%s uncached=%s "
+            "cache_create=%s output=%s cache_hit=%s upstream_ttfb_ms=%s "
+            "first_output_ms=%s serving_provider=%s",
+            cls.LABEL, upstream_model,
+            telemetry.total_input if telemetry.usage.keys() & {
+                "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+            } else "na",
+            count("cache_read_input_tokens"), count("input_tokens"),
+            count("cache_creation_input_tokens"), count("output_tokens"),
+            f"{telemetry.cache_hit_pct:.1f}%" if telemetry.total_input else "na",
+            f"{telemetry.first_byte_ms:.1f}" if telemetry.first_byte_ms is not None else "na",
+            f"{telemetry.first_output_ms:.1f}" if telemetry.first_output_ms is not None else "na",
+            json.dumps(telemetry.serving_provider) if telemetry.serving_provider is not None else "na",
+        )
