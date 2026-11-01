@@ -153,7 +153,13 @@ def test_memory_schema_has_shared_and_per_sanitized_bot_scopes(monkeypatch) -> N
 
 
 def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> None:
-    from llm_bawt.service import changed_files_store, tool_call_store, turn_log_schema, turn_logs
+    from llm_bawt.service import (
+        changed_files_store,
+        session_resumption,
+        tool_call_store,
+        turn_log_schema,
+        turn_logs,
+    )
 
     engine = FakeEngine()
     create_calls: list[tuple[str, ...]] = []
@@ -162,7 +168,13 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
         assert bind is engine.connection
         create_calls.append(tuple(table.name for table in tables))
 
+    def fake_resumption_create_all(bind) -> None:
+        assert bind is engine.connection
+        create_calls.append(tuple(table.name for table in session_resumption._metadata.sorted_tables))
+
     monkeypatch.setattr(turn_log_schema.SQLModel.metadata, "create_all", fake_create_all)
+    monkeypatch.setattr(session_resumption._metadata, "create_all", fake_resumption_create_all)
+    session_resumption._guard.reset_for_tests()
     # The fake connection records DDL but is not an inspectable SQLAlchemy
     # connection. Report the current columns while testing bootstrap ordering.
     monkeypatch.setattr(
@@ -190,4 +202,5 @@ def test_turn_log_orchestration_does_not_repeat_nested_schema(monkeypatch) -> No
         ("tool_call_records", "tool_call_result_payloads"),
         ("turn_changed_files", "turn_diff_payloads"),
         ("turn_logs",),
+        ("session_resumption_receipts",),
     ]
