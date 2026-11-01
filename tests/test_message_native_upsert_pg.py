@@ -425,12 +425,11 @@ def test_real_http_title_and_omitted_session_reads_are_not_hidden(http_runtime, 
     runtime = http_runtime
     with service_codec.bind_service_turn(proof_for(rig)), capture_sql(rig.engine) as title_sql:
         runtime.history.add_message("user", "A plain untitled message", session_id=rig.session_id)
-    assert len(title_sql) == 3, title_sql
-    assert title_sql.pool_ping_sql == ["SELECT 1"] * 3
-    assert len(title_sql.all_statements) == 6
-    assert sum(s.lstrip().startswith("SELECT") for s in title_sql) == 1, title_sql
+    assert len(title_sql) == 2, title_sql
+    assert title_sql.pool_ping_sql == ["SELECT 1"] * 2
+    assert len(title_sql.all_statements) == 4
+    assert sum(s.lstrip().startswith("SELECT") for s in title_sql) == 0, title_sql
     assert sum(s.lstrip().startswith("INSERT") for s in title_sql) == 1, title_sql
-    assert any(s.lstrip().startswith("SELECT") and "sessions" in s for s in title_sql), title_sql
     assert any(s.lstrip().startswith("UPDATE") and "sessions" in s for s in title_sql), title_sql
     assert not any("SELECT bot_id, user_id FROM sessions" in s for s in title_sql), title_sql
     with service_codec.bind_service_turn(proof_for(rig)), capture_sql(rig.engine) as omitted_sql:

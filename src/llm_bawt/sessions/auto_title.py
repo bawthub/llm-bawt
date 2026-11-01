@@ -19,9 +19,17 @@ logger = logging.getLogger(__name__)
 
 MAX_TITLE_LEN = 60
 
-# Process-local memo of threads we've already titled (or confirmed
-# user/auto-titled). title_source only ever transitions default -> auto/user,
-# never back, so a stale entry is harmless — it just skips a lookup.
+# PostgreSQL btrim's default is only ASCII space, not Python str.strip().
+# Keep the existing title eligibility rule for all Python whitespace.
+PYTHON_STRIP_CHARS = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0 "
+    "           "
+    "    　"
+)
+
+# Positive memo: a successful UPDATE or an already-required fetched row proved
+# this thread settled. A zero-row UPDATE may mean missing/wrong owner and must
+# remain retryable. Unknown titled threads incur another guarded no-op UPDATE.
 _settled_sessions: set[str] = set()
 
 _FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*")
@@ -64,12 +72,31 @@ def derive_thread_title(content: str, max_len: int = MAX_TITLE_LEN) -> str | Non
     return cut.rstrip(" ,.;:!?") + "…"
 
 
-def maybe_auto_title(manager, session_id: str | None, content: str) -> None:
-    """Auto-title ``session_id`` from ``content`` if it's still untitled.
+def remember_session_title(row: dict | None) -> None:
+    """Reuse an already-fetched row; never fetch solely to prime the memo.
 
-    ``manager`` is a ``PostgreSQLShortTermManager`` (has ``get_session`` +
-    ``update_session_metadata``). Caller is responsible for only invoking on
-    user-role messages. Never raises.
+    This is cosmetic suppression only, not ownership or write authorization.
+    Missing/untitled/malformed-title rows stay retryable. The existing memo
+    assumes a settled title is not reset to default during this process.
+    """
+    if not row or not row.get("id"):
+        return
+    meta = row.get("session_metadata") or {}
+    if not isinstance(meta, dict):
+        return
+    source = meta.get("title_source") or "default"
+    title = meta.get("title")
+    if source != "default" or (isinstance(title, str) and title.strip()):
+        _settled_sessions.add(row["id"])
+
+
+def maybe_auto_title(
+    manager, session_id: str | None, content: str, *, user_id: str | None = None,
+) -> None:
+    """Derive and conditionally persist a title without a session pre-read.
+
+    The manager checks title eligibility and owner in one native UPDATE.
+    Caller invokes only after a successful user-role message write. Never raises.
     """
     if not session_id or session_id in _settled_sessions:
         return
@@ -77,17 +104,7 @@ def maybe_auto_title(manager, session_id: str | None, content: str) -> None:
         title = derive_thread_title(content)
         if title is None:
             return  # slash command / empty — leave the thread for a real message
-        row = manager.get_session(session_id)
-        if not row:
-            return
-        meta = row.get("session_metadata") or {}
-        source = (meta.get("title_source") or "default") if isinstance(meta, dict) else "default"
-        if source != "default" or (isinstance(meta, dict) and (meta.get("title") or "").strip()):
-            _settled_sessions.add(session_id)
-            return
-        ok = manager.update_session_metadata(
-            session_id, {"title": title, "title_source": "auto"}
-        )
+        ok = manager.try_set_session_auto_title(session_id, title, user_id=user_id)
         if ok:
             _settled_sessions.add(session_id)
             logger.info("auto-titled session %s: %r", session_id, title)

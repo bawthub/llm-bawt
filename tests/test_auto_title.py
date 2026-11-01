@@ -7,6 +7,7 @@ from llm_bawt.sessions.auto_title import (
     _settled_sessions,
     derive_thread_title,
     maybe_auto_title,
+    remember_session_title,
 )
 
 
@@ -63,12 +64,15 @@ class FakeManager:
     def __init__(self, meta):
         self.meta = meta
         self.patches = []
+        self.calls = []
 
-    def get_session(self, session_id):
-        return {"id": session_id, "session_metadata": self.meta}
-
-    def update_session_metadata(self, session_id, patch):
-        self.patches.append((session_id, patch))
+    def try_set_session_auto_title(self, session_id, title, *, user_id):
+        self.calls.append((session_id, title, user_id))
+        meta = self.meta or {}
+        source = (meta.get("title_source") or "default") if isinstance(meta, dict) else "default"
+        if source != "default" or (isinstance(meta, dict) and (meta.get("title") or "").strip()):
+            return False
+        self.patches.append((session_id, {"title": title, "title_source": "auto"}))
         return True
 
 
@@ -77,6 +81,23 @@ def _clear_memo():
     _settled_sessions.clear()
     yield
     _settled_sessions.clear()
+
+
+@pytest.mark.parametrize("meta,settled", [
+    (None, False), ({}, False), ({"title": " \t", "title_source": "default"}, False),
+    ({"title": 1}, False), ({"title": ["malformed"]}, False),
+    ({"title": "Known"}, True), ({"title_source": "user"}, True),
+    ({"title_source": "auto"}, True),
+])
+def test_reuse_only_settled_title_from_already_fetched_row(meta, settled):
+    remember_session_title({"id": "read-session", "session_metadata": meta})
+    assert ("read-session" in _settled_sessions) is settled
+
+
+def test_missing_fetched_row_never_primes_memo():
+    remember_session_title(None)
+    remember_session_title({})
+    assert not _settled_sessions
 
 
 class TestMaybeAutoTitle:
@@ -95,7 +116,9 @@ class TestMaybeAutoTitle:
         mgr = FakeManager({"title": "My name", "title_source": "user"})
         maybe_auto_title(mgr, "s3", "should not retitle")
         assert mgr.patches == []
-        assert "s3" in _settled_sessions  # settled — future calls skip the lookup
+        assert "s3" not in _settled_sessions  # zero rows may mean missing: retain retry
+        maybe_auto_title(mgr, "s3", "another attempt")
+        assert len(mgr.calls) == 2 and mgr.patches == []
 
     def test_auto_titled_thread_untouched(self):
         mgr = FakeManager({"title": "Existing", "title_source": "auto"})
@@ -119,14 +142,35 @@ class TestMaybeAutoTitle:
 
     def test_never_raises_on_broken_manager(self):
         class Broken:
-            def get_session(self, _):
+            def try_set_session_auto_title(self, *_args, **_kwargs):
                 raise RuntimeError("db down")
 
         maybe_auto_title(Broken(), "s7", "hello")  # must not raise
 
     def test_missing_session_noop(self):
         class Gone:
-            def get_session(self, _):
-                return None
+            def try_set_session_auto_title(self, *_args, **_kwargs):
+                return False
 
         maybe_auto_title(Gone(), "s8", "hello")  # no patch, no raise
+        assert "s8" not in _settled_sessions
+
+    def test_request_user_is_forwarded_to_atomic_guard(self):
+        mgr = FakeManager(None)
+        maybe_auto_title(mgr, "s9", "hello", user_id="second-user")
+        assert mgr.calls == [("s9", "hello", "second-user")]
+
+    def test_failed_cosmetic_update_is_retryable(self):
+        class FailsOnce(FakeManager):
+            def try_set_session_auto_title(self, *args, **kwargs):
+                if not self.calls:
+                    self.calls.append("failed")
+                    raise RuntimeError("transient title failure")
+                return super().try_set_session_auto_title(*args, **kwargs)
+
+        mgr = FailsOnce(None)
+        maybe_auto_title(mgr, "s10", "first", user_id="owner")
+        assert "s10" not in _settled_sessions
+        maybe_auto_title(mgr, "s10", "retry", user_id="owner")
+        assert mgr.patches == [("s10", {"title": "retry", "title_source": "auto"})]
+        assert "s10" in _settled_sessions

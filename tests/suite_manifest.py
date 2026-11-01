@@ -12,6 +12,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_native_reset_authorization_pg.py::",
     "test_agent_nonstream_authorization_pg.py::",
     "test_message_native_upsert_pg.py::",
+    "test_auto_title_pg.py::",
     "test_bot_tags_pg.py::",
     "test_embedding_repair_pg.py::",
     "test_memory_update_pg.py::",
