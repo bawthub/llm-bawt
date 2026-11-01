@@ -100,6 +100,41 @@ cross-operation/cross-caller repo+SHA claims, plus snapshot/caller/plan drift,
 all terminal-state refusals, idempotency, rollback and no dispatch/callback.
 No live bots, model calls or production database are involved.
 
+## Indexed prior-attempt history
+
+The first-attempt fence now uses a single indexed existence query with `LIMIT 1`,
+not a Python scan/JSON decode of every nonqueued ops job. `ops_jobs.gate_plan_key`
+is an internal, bounded identity derived from a strictly decoded GatePlan by
+`OpsStore.create_job`; callers cannot supply it. Nongate/invalid args get NULL.
+The claim verifies its own key against the strict stored plan. It still acquires
+the repo+SHA advisory lock **before** querying history, preserving the existing
+cross-operation race ordering and first-attempt-only semantics.
+
+A partial index contains only non-NULL keys whose row is nonqueued or has a
+dispatch timestamp. The predicate deliberately retains never-dispatched queued
+cancellations as permanent blockers; LOST/timeouts remain blockers too. No retry,
+retirement, admission, callback or executor path is enabled by this optimization.
+
+The ordinary additive OpsStore migration adds the nullable column and derives
+keys for **all** preexisting rows, including queued rows, in 128-row keyset pages
+within the schema transaction. Strict decoding handles old JSON order, whitespace
+and escaped strings exactly as the old scan did. Malformed/ordinary args stay
+NULL, and args/snapshots/state/events are not rewritten. Backfill runs only when
+the column is added, not on every startup or claim. On PostgreSQL the ADD COLUMN
+table lock lasts through backfill/index creation; failure rolls back together.
+Activation therefore includes a one-time blocking schema transaction and must be
+sequenced by the service owner; this source milestone performs **no live migration**.
+A mixed old/new gate writer is unsupported: an old writer lacks this derived key;
+gates remain dormant until the whole trusted path is deployed. Normal nongate
+writers and dispatch behavior are unchanged.
+
+Disposable-PG regressions retain the existing real claim/revocation lock races,
+prove old terminal rows still deny after migration, and inspect `EXPLAIN ANALYZE`
+on the actual lookup with 3,000 unrelated poisoned rows and 1,000 same-plan queued
+rows: the partial attempt index is used without a ledger sequential scan. Migration
+interruption/rollback and key drift are covered separately. This is bounded-query
+evidence, not runner execution, SHIP proof or an operational throughput benchmark.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is

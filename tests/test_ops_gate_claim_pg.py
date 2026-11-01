@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine, delete, text
+from sqlalchemy import create_engine, delete, event, text
 from sqlmodel import Session
 
 from llm_bawt import task_turn_context as codec
@@ -20,7 +20,8 @@ from llm_bawt.bot_tags import catalog
 from llm_bawt.bot_tags.store import BotTagStore
 from llm_bawt.ops.gate_claim import _claim, gate_claim_snapshot
 from llm_bawt.ops.gate_plan import GatePlan
-from llm_bawt.ops.models import JOB_TERMINAL_STATES
+from llm_bawt.ops.gate_history import GATE_HISTORY_INDEX, plan_key
+from llm_bawt.ops.models import JOB_TERMINAL_STATES, OpsJob
 from llm_bawt.ops.service import OpsService
 from llm_bawt.ops.store import OpsStore
 from llm_bawt.ops.validation import canonical_json
@@ -368,3 +369,125 @@ def test_repo_sha_claim_lock_prevents_second_job_even_across_operations(rig):
             holder.commit()
         assert claim.result(timeout=HANG_GUARD) is False
     assert rig.store.get_job(other.id).state == "queued"
+
+
+@pytest.mark.parametrize("key", [None, "caller-supplied", "different-plan"])
+def test_missing_or_drifted_internal_history_key_refuses_without_mutation(rig, key):
+    job = rig.job()
+    rig.sql("UPDATE ops_jobs SET gate_plan_key=:key WHERE id=:id", key=key, id=job.id)
+    _unchanged(rig, job)
+
+
+@pytest.mark.parametrize("state", ["queued", *sorted(JOB_TERMINAL_STATES)])
+def test_legacy_migration_recovers_plan_identity_without_rewriting_evidence(rig, state):
+    import json
+
+    prior = rig.job()
+    if state != "queued":
+        rig.store.mark_terminal(prior.id, state=state)
+    # Old formatting and escaped JSON must not evade the same-plan fence.
+    raw = json.dumps(dict(reversed(list(rig.plan.to_dict().items()))), indent=2).replace("llm", "\\u006clm")
+    rig.sql("UPDATE ops_jobs SET args_json=:raw WHERE id=:id", raw=raw, id=prior.id)
+    before = rig.store.get_job(prior.id).model_dump()
+    evidence = rig.events(prior.id)
+    with rig.engine.begin() as conn:
+        conn.execute(text(f"DROP INDEX {GATE_HISTORY_INDEX}"))
+        conn.execute(text("ALTER TABLE ops_jobs DROP COLUMN gate_plan_key"))
+        rig.store._migrate_add_columns(conn)
+        rig.store._migrate_add_columns(conn)
+    assert rig.store.get_job(prior.id).model_dump() == before
+    assert rig.events(prior.id) == evidence
+    candidate = rig.job()
+    if state == "queued":
+        assert rig.claim(candidate.id)  # A previous unclaimed queued row is not an attempt.
+    else:
+        _unchanged(rig, candidate)  # Includes never-dispatched cancelled/lost/timed_out.
+
+
+def test_prior_attempt_query_uses_partial_index_and_never_decodes_unrelated_history(rig):
+    prior = rig.job()
+    rig.store.mark_terminal(prior.id, state="lost")
+    candidate = rig.job()
+    # Non-gate poison args and many queued peers are absent from the partial
+    # attempt index. Raw fixture inserts deliberately bypass the store decoder.
+    rows = [{"id": uuid.uuid4().hex, "operation_slug": rig.op.slug,
+             "operation_version": rig.op.version, "operation_script_hash": rig.op.script_hash,
+             "display_args_json": "{}", "submitted_at": prior.submitted_at,
+             "args_json": "not-json" if n < 3000 else canonical_json(rig.plan.to_dict()),
+             "gate_plan_key": None if n < 3000 else plan_key(rig.plan),
+             "idempotency_key": uuid.uuid4().hex, "state": "lost" if n < 3000 else "queued"}
+            for n in range(4000)]
+    with rig.engine.begin() as conn:
+        conn.execute(OpsJob.__table__.insert(), rows)
+        conn.execute(text("ANALYZE ops_jobs"))
+    queries = []
+
+    def capture(conn, cursor, statement, parameters, context, many):
+        if statement.startswith("SELECT 1 FROM ops_jobs WHERE gate_plan_key="):
+            queries.append((statement, parameters))
+
+    event.listen(rig.engine, "before_cursor_execute", capture)
+    try:
+        _unchanged(rig, candidate)
+    finally:
+        event.remove(rig.engine, "before_cursor_execute", capture)
+    assert len(queries) == 1
+    statement, parameters = queries[0]
+    assert "LIMIT 1" in statement and "args_json" not in statement
+    with rig.engine.connect() as conn:
+        result = conn.exec_driver_sql("EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters).scalar_one()
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    plan_nodes = list(nodes(result[0]["Plan"]))
+    assert any(n.get("Index Name") == GATE_HISTORY_INDEX for n in plan_nodes), result
+    assert result[0]["Plan"]["Actual Rows"] == 1
+    assert not any(n["Node Type"] == "Seq Scan" and n.get("Relation Name") == "ops_jobs"
+                   for n in plan_nodes), result
+
+
+def test_existing_history_schema_bootstrap_does_not_wait_on_open_job_writer(rig):
+    job = rig.job()
+    with rig.engine.connect() as writer, rig.other.engine.begin() as bootstrap:
+        writer.begin()
+        try:
+            writer.execute(text("UPDATE ops_jobs SET error_text='fixture open writer' WHERE id=:id"),
+                           {"id": job.id})
+            # Hang guard, not a performance assertion. Repeated CREATE INDEX
+            # takes SHARE and conflicts with the writer's ROW EXCLUSIVE lock.
+            bootstrap.execute(text("SET LOCAL lock_timeout = '1s'"))
+            rig.store._migrate_add_columns(bootstrap)
+        finally:
+            writer.rollback()
+    assert rig.store.get_job(job.id).error_text is None
+
+
+def test_failed_pg_history_migration_rolls_back_column_and_partial_keys_together(rig, monkeypatch):
+    from llm_bawt.ops import gate_history
+
+    job = rig.job()
+    before = rig.store.get_job(job.id).model_dump()
+    real_decoder = gate_history.gate_plan_key
+    with rig.engine.begin() as conn:
+        conn.execute(text(f"DROP INDEX {GATE_HISTORY_INDEX}"))
+        conn.execute(text("ALTER TABLE ops_jobs DROP COLUMN gate_plan_key"))
+
+    def fail(_raw):
+        raise RuntimeError("fixture migration interruption")
+
+    try:
+        monkeypatch.setattr(gate_history, "gate_plan_key", fail)
+        with pytest.raises(RuntimeError, match="fixture migration interruption"), rig.engine.begin() as conn:
+            rig.store._migrate_add_columns(conn)
+        from sqlalchemy import inspect
+        with rig.engine.connect() as conn:
+            assert "gate_plan_key" not in {c["name"] for c in inspect(conn).get_columns("ops_jobs")}
+    finally:
+        monkeypatch.setattr(gate_history, "gate_plan_key", real_decoder)
+        with rig.engine.begin() as conn:
+            rig.store._migrate_add_columns(conn)
+    assert rig.store.get_job(job.id).model_dump() == before
+    assert rig.claim(job.id)

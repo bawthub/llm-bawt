@@ -30,13 +30,16 @@ from sqlalchemy import (
     Column,
     DateTime,
     Integer,
+    Index,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlmodel import Field, SQLModel
 
 from .image_deploy import parse_deployment
+from .gate_history import GATE_HISTORY_INDEX, GATE_HISTORY_PREDICATE
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +328,9 @@ class OpsJob(SQLModel, table=True):
     __tablename__ = "ops_jobs"
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_ops_jobs_idempotency_key"),
+        Index(GATE_HISTORY_INDEX, "gate_plan_key",
+              postgresql_where=text(GATE_HISTORY_PREDICATE),
+              sqlite_where=text(GATE_HISTORY_PREDICATE)),
     )
 
     id: str = Field(sa_column=Column(String(64), primary_key=True))
@@ -344,6 +350,9 @@ class OpsJob(SQLModel, table=True):
     # Validated caller args (post-JSON-Schema check) + a redacted variant for
     # UI / logs (fields marked ``x-sensitive`` in the schema are masked here).
     args_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
+    # TASK-1865: derived strict GatePlan identity, never supplied by the caller.
+    # NULL for nongates. The partial index contains only prior-attempt blockers.
+    gate_plan_key: str | None = Field(default=None, sa_column=Column(String(128), nullable=True))
     display_args_json: str = Field(
         default="{}", sa_column=Column(Text, nullable=False)
     )

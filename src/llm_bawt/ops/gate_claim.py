@@ -23,6 +23,7 @@ from ..bot_tags.vocabulary import BehaviorTag, TAG_SLUG
 from ..task_turn_context import TaskTurnContext, TaskTurnContextError, open_task_turn_context
 from .events import append_job_transition_by_id
 from .gate_plan import GatePlan
+from .gate_history import has_prior_attempt, plan_key
 from .models import JOB_DISPATCHING, JOB_QUEUED, OpsOperation
 from .store import slot_cap_reached, slot_holders
 from .validation import canonical_json
@@ -101,6 +102,7 @@ def _claim(conn, job_id: str, caller: TaskTurnContext, *, events=None) -> bool:
     except (ValueError, TypeError):
         return False
     if (canonical_json(snapshot) != canonical_json(_snapshot(operation, plan, caller))
+            or job["gate_plan_key"] != plan_key(plan)
             or job["operation_slug"] != operation.slug
             or job["operation_version"] != operation.version
             or job["operation_script_hash"] != operation.script_hash
@@ -132,15 +134,8 @@ def _claim(conn, job_id: str, caller: TaskTurnContext, *, events=None) -> bool:
     # rows. No terminal status is a runner-retirement fence in this slice.
     conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                  {"key": f"ops-gate:{plan.repository}:{plan.source_sha}"})
-    prior = conn.execute(text("SELECT args_json FROM ops_jobs WHERE id<>:id "
-                              "AND (state<>:queued OR dispatched_at IS NOT NULL)"),
-                         {"id": job_id, "queued": JOB_QUEUED})
-    for row in prior:
-        try:
-            if GatePlan.from_dict(json.loads(row[0])) == plan:
-                return False
-        except (ValueError, TypeError):
-            continue  # An ordinary nongate job has no gate-plan args.
+    if has_prior_attempt(conn, job_id=job_id, plan=plan):
+        return False
     if slot_cap_reached(slot_holders(conn, operation.slug), operation.max_concurrent):
         return False
     claimed = conn.execute(text("UPDATE ops_jobs SET state=:dispatching, dispatched_at=now(), "

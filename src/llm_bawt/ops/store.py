@@ -32,6 +32,7 @@ from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPAT
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
+from .gate_history import gate_plan_key, migrate_gate_history
 from .validation import canonical_json, validate_catalog
 from .worker_slots import process_spawn_held, process_spawn_hold_available, worker_slot_free
 
@@ -185,6 +186,7 @@ class OpsStore:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN{clause} {name} {kind}"))
         self._migrate_execution_mode(conn, clause)
+        migrate_gate_history(conn)
 
     @staticmethod
     def _migrate_execution_mode(conn, clause):
@@ -401,7 +403,7 @@ class OpsStore:
         payload = request_payload_json or canonical_json({"operation": operation.slug, "args": json.loads(args_json)})
         row = OpsJob(id=uuid.uuid4().hex, operation_slug=operation.slug,
             operation_version=operation.version, operation_script_hash=operation.script_hash,
-            args_json=args_json, display_args_json=display_args_json,
+            args_json=args_json, gate_plan_key=gate_plan_key(args_json), display_args_json=display_args_json,
             invocation_snapshot_json=invocation_snapshot_json, request_payload_json=payload,
             idempotency_key=idempotency_key, caller_actor=caller_actor, caller_bot_id=caller_bot_id,
             caller_user_id=caller_user_id, caller_turn_id=caller_turn_id, caller_session_key=caller_session_key,
