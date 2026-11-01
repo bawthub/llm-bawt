@@ -135,13 +135,16 @@ class ProtocolCompatibility:
             return (
                 access_path.vendor == "anthropic"
                 and access_path.protocol == "anthropic-messages"
+                and access_path.key in {"anthropic-api", "anthropic-oauth"}
             )
         if normalized == "claude-proxy":
-            if access_path.vendor == "anthropic":
-                return False
-            if access_path.vendor == "openai":
-                return access_path.key in {"openai-oauth", "openai-responses"}
-            return access_path.protocol in cls.PROXY_TARGETS
+            # Eligibility must use the same provider decision as dispatch:
+            # a supported protocol alone does not give the bridge an adapter.
+            return (
+                access_path.vendor != "anthropic"
+                and access_path.protocol in cls.PROXY_TARGETS
+                and ModelCatalog._provider_prefix(access_path) is not None
+            )
         if normalized == "background":
             return (
                 access_path.protocol in cls.BACKGROUND_PROTOCOLS

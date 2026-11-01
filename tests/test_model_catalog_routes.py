@@ -166,7 +166,7 @@ def test_access_paths_for_claude_code_backend_cover_native_and_proxy_routes():
     rows, connections, service = _list_access_paths(harness=None, agent_backend="claude-code")
     keys = [row["key"] for row in rows]
     # Everything the bridge can run natively or through its proxy; openai chat-completions it can't.
-    assert keys == [key for key, *_ in _PATH_ROWS if key != "openai-api"]
+    assert keys == [key for key, *_ in _PATH_ROWS if key not in {"openai-api", "local-llamacpp"}]
     connections.assert_called_once_with(service.config, keys)
     assert all(row["connection"] == {"key": row["key"]} for row in rows)
 

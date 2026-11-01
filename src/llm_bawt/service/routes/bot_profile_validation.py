@@ -184,6 +184,18 @@ def _validate_model_endpoint(payload: dict[str, object]) -> None:
     except IncompatibleModelError as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    backend = payload.get("agent_backend")
+    backend_harnesses = {
+        "claude-code": {"claude-code", "claude-proxy"},
+        "codex": {"codex"},
+    }
+    if backend in backend_harnesses and harness not in backend_harnesses[backend]:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"access_path={endpoint.access_path.key} with harness={harness} "
+                    f"cannot serve agent_backend={backend}; choose a compatible model route"),
+        )
+
     if not ProtocolCompatibility.is_compatible(harness, endpoint.access_path):
         sibling = _CLAUDE_HARNESS_SIBLING.get(harness)
         if sibling and ProtocolCompatibility.is_compatible(sibling, endpoint.access_path):
@@ -197,7 +209,8 @@ def _validate_model_endpoint(payload: dict[str, object]) -> None:
         else:
             raise HTTPException(
                 status_code=422,
-                detail=f"endpoint_id={endpoint_id} is incompatible with harness={harness}",
+                detail=(f"endpoint_id={endpoint_id} access_path={endpoint.access_path.key} "
+                        f"is incompatible with harness={harness}; choose a compatible model route"),
             )
 
     expected_backend = {

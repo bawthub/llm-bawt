@@ -62,6 +62,7 @@ def _list_endpoints(connections, **query):
             ("local-vllm", "local", "chat-completions", "none"),
             ("openai-api", "openai", "chat-completions", "api-key"),
             ("openai-oauth", "openai", "responses", "oauth"),
+            ("local-anthropic", "local", "anthropic-messages", "none"),
         ), start=1)
     ]
     engine = MagicMock()
@@ -86,7 +87,7 @@ _CONNECTIONS = {
 def test_endpoint_rows_carry_connection_eligibility_and_save_harness_for_claude_code():
     rows, probe = _list_endpoints(_CONNECTIONS, agent_backend="claude-code")
 
-    assert set(rows) == {"anthropic-api", "local-vllm", "openai-oauth"}
+    assert set(rows) == {"anthropic-api", "local-anthropic", "openai-oauth"}
     probe.assert_called_once()  # one probe for the whole list, after the filter
     assert sorted(probe.call_args.args[1]) == sorted(rows)
 
@@ -96,8 +97,8 @@ def test_endpoint_rows_carry_connection_eligibility_and_save_harness_for_claude_
     # The ChatGPT OAuth route runs a Claude bot through the proxy.
     assert rows["openai-oauth"]["harness"] == "claude-proxy"
     assert rows["openai-oauth"]["eligibility"] == {"eligible": True, "state": "ok", "reason": None}
-    assert rows["local-vllm"]["harness"] == "claude-proxy"
-    assert rows["local-vllm"]["eligibility"]["state"] == "local"
+    assert rows["local-anthropic"]["harness"] == "claude-proxy"
+    assert rows["local-anthropic"]["eligibility"]["state"] == "local"
 
 
 def test_endpoint_rows_for_codex_list_only_its_oauth_route():
@@ -109,7 +110,7 @@ def test_endpoint_rows_for_codex_list_only_its_oauth_route():
 
 def test_endpoint_rows_without_a_backend_carry_eligibility_but_no_harness():
     rows, _ = _list_endpoints(_CONNECTIONS)
-    assert set(rows) == {"anthropic-api", "local-vllm", "openai-api", "openai-oauth"}
+    assert set(rows) == {"anthropic-api", "local-vllm", "local-anthropic", "openai-api", "openai-oauth"}
     assert all("eligibility" in row and "harness" not in row for row in rows.values())
 
 
