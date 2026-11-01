@@ -1,28 +1,28 @@
 """Lifecycle-owned, change-triggered policy refresh, never request-side I/O.
 
-PG transactional notifications accelerate refresh across app/MCP processes.
-Reconciliation catches lost hints and direct SQL. A disconnected/failed refresh
-invalidates memory; a hung refresher cannot extend the five-second deadline.
+Load at startup/reconnect and on committed policy-change notifications only.
+There is no periodic policy read or expiry that requires one. Direct SQL and
+missed hints require the explicit admin refresh. Known invalidation, listener
+loss and load failure fail closed until a successful event-triggered load.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import select
+import socket
 import threading
 from contextlib import asynccontextmanager, contextmanager
 
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
-from llm_bawt.bot_policy_events import POLICY_CHANNEL
+from llm_bawt.bot_policy_events import POLICY_CHANNEL, policy_changed
 from llm_bawt.bot_tags import read_snapshot_rows
 from .policy import BotAccessError, BotPolicyResolver
 from .snapshot import SnapshotUnavailable, elapsed_clock, policy_snapshot
 
 logger = logging.getLogger(__name__)
-MAX_FRESHNESS_SECONDS = 5.0
-RECONCILE_SECONDS = 2.0
 
 
 def failure_reason(exc: Exception) -> str:
@@ -49,6 +49,8 @@ class PolicyRefresher:
         self._stop = threading.Event()
         self.ready = threading.Event()
         self._revision = 0
+        self._refresh_requested = False  # only a change seen during the load
+        self._wake: socket.socket | None = None
         self._thread = threading.Thread(target=self._run, name="bot-policy-refresh", daemon=True)
 
     def start(self) -> None:
@@ -57,6 +59,11 @@ class PolicyRefresher:
     def stop(self) -> None:
         self._stop.set()
         self.snapshot.invalidate("snapshot_stopped")
+        if self._wake is not None:
+            try:
+                self._wake.send(b"\0")
+            except OSError:  # the owner may already have closed its wake socket
+                pass
         self._thread.join(timeout=3)
 
     @staticmethod
@@ -72,7 +79,6 @@ class PolicyRefresher:
         """Called only by the background owner (or isolated test harness)."""
         if self._stop.is_set():
             return False
-        started = self.clock()
         generation = self.snapshot.generation()
         try:
             policy = BotPolicyResolver._compile(read_snapshot_rows(self.engine), None)
@@ -80,12 +86,13 @@ class PolicyRefresher:
             # that SELECT. Discard, invalidate and reread, never extend old data.
             if raw is not None and self._drain(raw, schema):
                 self.snapshot.invalidate("snapshot_revoked")
+                self._refresh_requested = True
                 return False
             if self._stop.is_set():
                 return False
             self._revision += 1
             installed = self.snapshot.install(
-                policy, self._revision, started + MAX_FRESHNESS_SECONDS, generation)
+                policy, self._revision, float("inf"), generation)
             if installed:
                 self.ready.set()
             return installed
@@ -94,31 +101,67 @@ class PolicyRefresher:
             return False
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                # LISTEN is established before the first snapshot on every
-                # connection incarnation. SQLAlchemy resets AUTOCOMMIT on close.
-                with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as listener:
-                    listener.exec_driver_sql(f"LISTEN {POLICY_CHANNEL}")
-                    schema = listener.execute(text("SELECT current_schema()")).scalar_one()
-                    raw = listener.connection.driver_connection
-                    self.snapshot.invalidate("snapshot_disconnected")
-                    due = self.clock()
-                    while not self._stop.is_set():
-                        now = self.clock()
-                        if now >= due:
-                            installed = self.refresh(raw, schema)
-                            due = self.clock() + (RECONCILE_SECONDS if installed else 0.1)
-                        timeout = min(0.25, max(0.0, due - self.clock()))
-                        if select.select([raw], [], [], timeout)[0]:
-                            if self._drain(raw, schema):
+        wake_reader, wake_writer = socket.socketpair()
+        self._wake = wake_writer
+        try:
+            while not self._stop.is_set():
+                try:
+                    # LISTEN precedes the first load on every connection
+                    # incarnation, so commits during that load cannot be lost.
+                    with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as listener:
+                        listener.exec_driver_sql(f"LISTEN {POLICY_CHANNEL}")
+                        schema = listener.execute(text("SELECT current_schema()")).scalar_one()
+                        raw = listener.connection.driver_connection
+                        self.snapshot.invalidate("snapshot_disconnected")
+                        refresh_requested = True
+                        while not self._stop.is_set():
+                            if refresh_requested:
+                                self._refresh_requested = False
+                                self.refresh(raw, schema)
+                                # Retry only for an actual notification racing
+                                # the read. Load failure waits for a new event or
+                                # admin refresh, and remains fail closed.
+                                refresh_requested = self._refresh_requested
+                                if refresh_requested:
+                                    continue
+                            # No timer or policy polling. The local socket only
+                            # wakes shutdown; PostgreSQL wakes policy changes or
+                            # connection loss.
+                            readable = select.select([raw, wake_reader], [], [])[0]
+                            if wake_reader in readable:
+                                break
+                            if raw in readable and self._drain(raw, schema):
                                 self.snapshot.invalidate("snapshot_revoked")
-                                due = self.clock()
-                    listener.exec_driver_sql(f"UNLISTEN {POLICY_CHANNEL}")
-            except Exception as exc:
-                self.snapshot.invalidate(failure_reason(exc))
-                self._stop.wait(0.5)
-        self.snapshot.invalidate("snapshot_stopped")
+                                refresh_requested = True
+                        listener.exec_driver_sql(f"UNLISTEN {POLICY_CHANNEL}")
+                except Exception as exc:
+                    self.snapshot.invalidate(failure_reason(exc))
+                    # Connection recovery, not periodic healthy policy reads.
+                    self._stop.wait(0.5)
+        finally:
+            self._wake = None
+            wake_reader.close()
+            wake_writer.close()
+            self.snapshot.invalidate("snapshot_stopped")
+
+
+def request_policy_refresh(engine) -> None:
+    """Admin-only manual fallback; invalidate locally and notify every listener.
+
+    Publication requests a reload; it is not a claim that any process installed
+    fresh policy. No policy SELECT/compile runs in this admin request.
+    """
+    if engine is None:
+        raise SnapshotUnavailable("snapshot_database")
+    snapshot = policy_snapshot(engine)
+    snapshot.invalidate("snapshot_revoked")
+    try:
+        with engine.begin() as conn:
+            policy_changed(conn)
+    except Exception as exc:
+        reason = failure_reason(exc)
+        snapshot.invalidate(reason)
+        raise SnapshotUnavailable(reason) from None
 
 
 # App and threaded MCP can share a process/engine; standalone MCP has its own.

@@ -1,9 +1,9 @@
 """Process-local immutable policy state; request paths perform no I/O.
 
-Only the background refresh owner may install a validated snapshot.
-Notifications request refresh and periodic reconciliation repairs missed hints.
-Expiry bounds stale admissions during outages; it does not promise immediate
-revocation. Deadlines are measured before the database read, never at install.
+Only the background refresh owner may install a validated snapshot. Runtime
+snapshots are event-invalidated, with no periodic refresh or implicit expiry.
+Explicit finite deadlines remain supported by this primitive, but the runtime
+owner does not use them as a hidden requirement for polling.
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ _REASONS = frozenset({
 def elapsed_clock() -> float:
     """Suspend-aware elapsed time, independent of NTP/wall-clock changes.
 
-    Fail closed on platforms without a suspend-aware clock rather than silently
-    making the five-second bound exclude process/host suspension.
+    Explicit finite deadlines must include process/host suspension. Fail closed
+    on platforms without this clock rather than silently weakening that bound.
     """
     if not hasattr(time, "CLOCK_BOOTTIME"):
         raise SnapshotUnavailable("snapshot_clock")

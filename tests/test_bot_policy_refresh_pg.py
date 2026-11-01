@@ -170,7 +170,7 @@ def receive(pipe):
     return pipe.recv()
 
 
-def test_cross_process_privacy_revocation_and_raw_sql_reconciliation(world):
+def test_cross_process_privacy_revocation_and_explicit_raw_sql_recovery(world):
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=reader_process, args=(world.url, world.schema, child))
@@ -184,12 +184,14 @@ def test_cross_process_privacy_revocation_and_raw_sql_reconciliation(world):
         assert receive(parent) == ("installed", True)
         parent.send(False)
         assert receive(parent) == ("waiting", False)
-        # Bypass helpers, hence no notification: periodic background
-        # reconciliation still refreshes; this is not request-side cache fill.
+        # Bypass helpers, hence no notification. An explicit admin refresh is
+        # the documented recovery, never a periodic/request-side policy read.
         with world.engine.begin() as conn:
             conn.execute(text("DELETE FROM bot_profile_tags WHERE bot_slug='fixture_peer'"))
             conn.execute(text("UPDATE bot_profiles SET include_in_global_search=true "
                               "WHERE slug='fixture_peer'"))
+        from llm_bawt.bot_access.refresh import request_policy_refresh
+        request_policy_refresh(world.engine)
         assert receive(parent) == ("installed", False)
     finally:
         if process.is_alive():

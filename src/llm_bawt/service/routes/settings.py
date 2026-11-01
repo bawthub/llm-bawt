@@ -782,14 +782,22 @@ def _patch_payload(existing, request: BotProfilePatchRequest) -> dict[str, objec
 
 @router.post("/v1/admin/reload-bots", tags=["Admin"])
 def reload_bots():
-    """Force reload bot registry from DB + YAML."""
+    """Reload bot registry and explicitly request policy refresh in app/MCP."""
+    from ...bot_access.refresh import request_policy_refresh
+    from ...bot_access.snapshot import SnapshotUnavailable
+
     service = get_service()
+    try:
+        request_policy_refresh(get_bot_profile_store(service.config).engine)
+    except SnapshotUnavailable:
+        raise HTTPException(status_code=503, detail="Bot access policy refresh unavailable") from None
     _reload_bot_registry()
     _reload_service_model_catalog(service)
     cleared_instances = _invalidate_all_instance_cache(service)
     cleared_session_overrides = _clear_session_model_overrides(service)
     return {
         "status": "reloaded",
+        "bot_access_policy": "refresh_requested",
         "cleared_instances": cleared_instances,
         "cleared_session_model_overrides": cleared_session_overrides,
     }

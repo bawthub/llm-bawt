@@ -199,19 +199,23 @@ def test_failed_refresh_sanitizes_and_recovers_without_request_reads(monkeypatch
     assert resolver.resolve_sync().require_target("fixture_peer") == "fixture_peer"
 
 
-@pytest.mark.parametrize("elapsed", [5, 6, 600])
-def test_read_latency_and_process_suspension_count_toward_five_second_bound(monkeypatch, elapsed):
+@pytest.mark.parametrize("elapsed", [5, 6, 600, 86400])
+def test_runtime_policy_does_not_expire_or_reload_when_clock_advances(monkeypatch, elapsed):
     now = [0.0]
     owner = PolicyRefresher(Mock(), clock=lambda: now[0])
     owner.snapshot._clock = lambda: now[0]
-
-    def read(_):
-        now[0] += elapsed
-        return ROWS
-
+    read = Mock(return_value=ROWS)
     monkeypatch.setattr("llm_bawt.bot_access.refresh.read_snapshot_rows", read)
-    assert not owner.refresh()
-    with pytest.raises(SnapshotUnavailable):
+    assert owner.refresh()
+    policy = owner.snapshot.get()
+    now[0] += elapsed
+    for _ in range(8):
+        assert owner.snapshot.get() is policy
+        assert BotPolicyResolver(owner.engine).resolve_sync().require_target("fixture_peer")
+    read.assert_called_once_with(owner.engine)
+    assert owner.snapshot.diagnostics()["refreshes"] == 1
+    owner.snapshot.invalidate("snapshot_revoked")
+    with pytest.raises(SnapshotUnavailable, match="snapshot_revoked"):
         owner.snapshot.get()
 
 
@@ -275,7 +279,7 @@ async def test_approved_retry_reauthorizes_against_real_memory_snapshot(monkeypa
     assert owner.engine.mock_calls == []
 
 
-def test_event_refresh_occurs_without_waiting_for_reconciliation(monkeypatch):
+def test_event_refresh_occurs_without_any_reconciliation_timer(monkeypatch):
     from llm_bawt.bot_access import refresh as module
 
     engine = MagicMock()
@@ -302,4 +306,4 @@ def test_event_refresh_occurs_without_waiting_for_reconciliation(monkeypatch):
 
     monkeypatch.setattr(module.select, "select", wake)
     owner._run()
-    assert len(reads) == 2  # clock stayed zero; 2s reconciliation never fired
+    assert len(reads) == 2  # startup, then the actual event; no timer

@@ -10,8 +10,8 @@ def policy_changed(conn) -> None:
     This SELECT calls PostgreSQL's notification writer; it reads no policy,
     ownership or revision table. PostgreSQL coalesces identical notifications
     within a transaction. The payload scopes listeners to the owned schema and
-    never includes bot identities. Background reconciliation is the lost-hint
-    backstop, not a request-side read.
+    never includes bot identities. Direct SQL/missed hints require the explicit
+    admin reload; there is no periodic policy reconciliation.
     """
     if conn.dialect.name == "postgresql":
         conn.execute(text("SELECT pg_notify(:channel, current_schema())"),

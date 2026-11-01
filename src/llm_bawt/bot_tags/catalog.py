@@ -117,8 +117,9 @@ def ensure_schema(conn) -> None:
 def seed(conn) -> None:
     """Upsert behaviour rows from code. Roles are operator data: none are
     seeded and existing role rows are never touched. No assignments."""
+    changed = False
     for tag in BEHAVIOR_TAGS:
-        conn.execute(text("""
+        result = conn.execute(text("""
             INSERT INTO bot_tag_catalog (slug, name, description, kind, system)
             VALUES (:slug, :name, :description, 'behavior', TRUE)
             ON CONFLICT (slug) DO UPDATE
@@ -132,7 +133,9 @@ def seed(conn) -> None:
                    (EXCLUDED.name, EXCLUDED.description, 'behavior', TRUE, NULL::varchar,
                     '[]'::jsonb)
         """), {"slug": str(tag.slug), "name": tag.name, "description": tag.description})
-    policy_changed(conn)
+        changed = changed or bool(result.rowcount)
+    if changed:
+        policy_changed(conn)
 
 
 def migrate_legacy_flag(conn) -> int:
@@ -148,25 +151,30 @@ def migrate_legacy_flag(conn) -> int:
         WHERE p.include_in_global_search = false AND btrim(p.slug) <> ''
         ON CONFLICT DO NOTHING
     """), {"by": MIGRATION_ASSIGNER, "tags": [str(t) for t in LEGACY_PRIVATE_TAGS]})
-    policy_changed(conn)
+    if result.rowcount:
+        policy_changed(conn)
     return int(result.rowcount or 0)
 
 
 def assign(conn, bot_slug: str, tags: Iterable[str], by: str | None) -> None:
+    changed = False
     for tag in tags:
-        conn.execute(text("""
+        result = conn.execute(text("""
             INSERT INTO bot_profile_tags (bot_slug, tag_slug, assigned_by)
             VALUES (:bot, :tag, :by) ON CONFLICT DO NOTHING
         """), {"bot": bot_slug, "tag": str(tag), "by": by})
-    policy_changed(conn)
+        changed = changed or bool(result.rowcount)
+    if changed:
+        policy_changed(conn)
 
 
 def unassign(conn, bot_slug: str, tags: Iterable[str]) -> None:
-    conn.execute(text("""
+    result = conn.execute(text("""
         DELETE FROM bot_profile_tags
         WHERE bot_slug = :bot AND tag_slug = ANY(CAST(:tags AS text[]))
     """), {"bot": bot_slug, "tags": [str(t) for t in tags]})
-    policy_changed(conn)
+    if result.rowcount:
+        policy_changed(conn)
 
 
 def has_assignment(conn, bot_slug: str, tag: BehaviorTag) -> bool:
@@ -240,11 +248,13 @@ def replace_assignments(conn, bot_slug: str, tags: object, by: str | None) -> bo
 
     wanted = validate_assignment_set(conn, tags)
     check_grant_membership(conn, bot_slug, wanted)
-    conn.execute(text("""
+    removed = conn.execute(text("""
         DELETE FROM bot_profile_tags
         WHERE bot_slug = :bot AND NOT (tag_slug = ANY(CAST(:tags AS text[])))
     """), {"bot": bot_slug, "tags": sorted(wanted)})
     assign(conn, bot_slug, sorted(wanted), by)
+    if removed.rowcount:
+        policy_changed(conn)
     return str(BehaviorTag.PRIVATE) not in wanted
 
 
