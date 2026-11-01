@@ -395,6 +395,19 @@ The normal OpsService supplies its store reader; a separately constructed proces
 executor must supply `spawn_hold_reader` explicitly or spawning fails closed.
 Readiness is not made unhealthy merely because a hold is active.
 
+**Exclusive acquisition seam (TASK-1169; dormant).**
+`exclusive_process_spawn_guard(..., acquire_deadline=<aware absolute datetime>)`
+makes one `LOCK_EX | LOCK_NB` attempt on the same receipt-volume path. A busy or
+unavailable fence raises `SpawnDeferred`; an expired acquisition budget raises
+`SpawnFenceDeadlineExceeded`, including expiry during acquisition. A future
+caller retries through its existing driver with the **same persisted deadline**,
+not a fresh budget per attempt or restart. There is no blocking retry loop or
+new scheduler, and no production caller currently invokes this helper. The
+exclusive flock is retained through the caller's critical section and released
+on every exit. This is an acquisition deadline only: it neither revokes an
+acquired owner's authority nor proves that a Docker mutation has stopped.
+It never changes a job, releases a durable hold, or supplies dead-holder recovery.
+
 **Dead-holder recovery remains an enabling-slice obligation.** A hold must not
 be dropped on a lease/TTL alone: an uncertain worker may still be swapping the
 reconciler. The existing reconciliation pump imports immutable terminal receipts
