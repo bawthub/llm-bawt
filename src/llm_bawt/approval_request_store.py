@@ -204,6 +204,7 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
         *,
         status: str | None = None,
         bot_id: str | None = None,
+        user_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[ToolApprovalRequest]:
@@ -215,6 +216,8 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                 stmt = stmt.where(ToolApprovalRequest.status == status)
             if bot_id:
                 stmt = stmt.where(ToolApprovalRequest.bot_id == bot_id)
+            if user_id is not None:
+                stmt = stmt.where(ToolApprovalRequest.user_id == user_id)
             stmt = (
                 stmt.order_by(
                     ToolApprovalRequest.created_at.desc(), ToolApprovalRequest.id
@@ -224,7 +227,7 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
             )
             return list(session.exec(stmt).all())
 
-    def count_requests(self, *, status=None, bot_id=None):
+    def count_requests(self, *, status=None, bot_id=None, user_id=None):
         if self.engine is None:
             raise ApprovalStoreUnavailable("Approval database unavailable")
         with Session(self.engine) as session:
@@ -233,6 +236,8 @@ class ApprovalRequestStoreMixin(OrchestrationApprovalStoreMixin, McpApprovalStor
                 stmt = stmt.where(ToolApprovalRequest.status == status)
             if bot_id:
                 stmt = stmt.where(ToolApprovalRequest.bot_id == bot_id)
+            if user_id is not None:
+                stmt = stmt.where(ToolApprovalRequest.user_id == user_id)
             return session.exec(stmt).one()
 
     def prepare_harness_continuation(self, request_id):

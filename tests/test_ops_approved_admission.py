@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -377,7 +377,7 @@ _IMPORT_INVARIANT = textwrap.dedent('''
     routes._store = lambda: approvals
     routes.get_turn_log_store = lambda: SimpleNamespace(engine=engine)
     for row in (ok, missing, ok):
-        asyncio.run(routes.resolve_approval(row.id, routes.ResolveRequest(decision="approve")))
+        asyncio.run(routes.resolve_approval(row.id, routes.ResolveRequest(decision="approve", user_id="user")))
     # Reconciler: one tick admits both (one job, one dispatch failure).
     OpsReconciler(service, admission=ApprovedOpsAdmission(approvals, service)).tick()
     assert approvals.get_request(ok.id).result_json and approvals.get_request(missing.id).result_json

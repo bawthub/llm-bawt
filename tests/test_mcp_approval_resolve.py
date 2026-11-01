@@ -201,7 +201,7 @@ def test_resolve_route_reconciles_original_tool_record_and_fanout(monkeypatch):
     with TestClient(app) as client:
         response = client.post(
             f"/v1/chat/approvals/{row.id}/resolve",
-            json={"decision": "approve", "resolved_by": "nick"},
+            json={"user_id": "nick", "decision": "approve", "resolved_by": "nick"},
         )
 
     assert response.status_code == 200
@@ -287,7 +287,7 @@ def test_resolve_route_for_ops_run_marks_card_and_fanout_without_result(monkeypa
     app.include_router(routes.router)
     with TestClient(app) as client:
         response = client.post(f"/v1/chat/approvals/{row.id}/resolve",
-                               json={"decision": "approve", "resolved_by": "nick"})
+                               json={"user_id": "nick", "decision": "approve", "resolved_by": "nick"})
 
     assert response.status_code == 200
     payload = response.json()

@@ -293,7 +293,7 @@ def test_the_loser_of_a_race_gets_the_winners_decision(ops, monkeypatch):
 def test_the_person_route_refuses_a_bot_resolver_name(ops, resolver):
     request_id = ops.card()
     response = ops.api.client.post(f"/v1/chat/approvals/{request_id}/resolve",
-                                   json={"decision": "approve", "resolved_by": resolver})
+                                   json={"user_id": USER, "decision": "approve", "resolved_by": resolver})
     assert response.status_code == 400 and _code(response) == "reserved_resolver"
     assert ops.store.get_request(request_id).status == REQ_PENDING
 

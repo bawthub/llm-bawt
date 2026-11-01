@@ -103,6 +103,21 @@ schema bootstrap.
 
 ## Resolution and rollout
 
+Approval request list/count and result reads accept optional `user_id` scope.
+When supplied (including an empty string), it is applied before pagination/counts;
+a foreign result returns the same 404 as a missing request. Omission retains the
+trusted LAN/internal unscoped read contract. BawtHub binds its trusted request user
+through the declared OpenAPI fields; these fields are scope, not new authentication.
+
+The human `/v1/chat/approvals/{request_id}/resolve` route requires a nonempty,
+non-sentinel `user_id` exactly matching the stored owner, including terminal retries.
+A missing/foreign owner returns 403 before resolution, execution or fanout.
+`resolved_by` defaults to that owner and, if supplied, must match it; `bot:` remains
+reserved. There is no body flag or empty-user internal bypass. Delegated bots use
+the existing signed-turn `/v1/ops-approvals/{request_id}/resolve` authority; trusted
+in-process coordinators continue resolving their recorded requests through the
+store. Scripts using the human route must now supply the actual owner's identity.
+
 Resolve atomically chooses a terminal decision once. MCP approval claims execute
 stored arguments (operations use immutable snapshots), record outcomes, and queue
 server-owned continuations. Execution/dispatch uncertainty is represented in the

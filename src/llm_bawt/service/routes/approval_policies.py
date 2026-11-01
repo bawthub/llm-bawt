@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from agent_bridge.approval import evaluate
 from ...approval_validation import candidate_policy
+from ...approval_mcp_store import _SENTINEL_IDENTITIES
 from ...agent_backends.agent_bridge import get_agent_subscriber
 from ...mcp_server import registry as mcp_registry
 from ...mcp_server.approval_interceptor import ApprovedCallerContext
@@ -93,7 +94,7 @@ class PolicyUpsert(BaseModel):
 class ResolveRequest(BaseModel):
     decision: str = Field(..., description="'approve', 'deny', 'cancel', or 'respond'")
     bot_id: str = Field("", description="Bot slug (for tab fanout)")
-    user_id: str = Field("", description="User id (for tab fanout)")
+    user_id: str = Field("", description="Approval owner id, bound by the trusted caller; required to resolve")
     resolved_by: str | None = None
     # 'respond' only: the user's own guidance sent to the agent instead of the
     # canned refusal. Optional — empty falls back to a neutral "not run" note.
@@ -511,18 +512,19 @@ async def resolve_mcp_card(store, row, *, outcome: str, message: str, resolved_b
 
 
 @router.get("/v1/tool-approval-requests", tags=["Approval Policies"])
-def list_requests(status: str | None = None, bot_id: str | None = None, limit: int = 50, offset: int = 0):
+def list_requests(status: str | None = None, bot_id: str | None = None, limit: int = 50, offset: int = 0,
+                  user_id: str | None = None):
     store = _store()
     limit, offset = min(max(limit, 1), 200), max(offset, 0)
-    rows = store.list_requests(status=status, bot_id=bot_id, limit=limit, offset=offset)
+    rows = store.list_requests(status=status, bot_id=bot_id, user_id=user_id, limit=limit, offset=offset)
     return {"requests": [r.to_api() for r in rows],
-            "total": store.count_requests(status=status, bot_id=bot_id), "limit": limit, "offset": offset}
+            "total": store.count_requests(status=status, bot_id=bot_id, user_id=user_id), "limit": limit, "offset": offset}
 
 
 @router.get("/v1/tool-approval-requests/{request_id}/result", tags=["Approval Policies"])
-def request_result(request_id: str):
+def request_result(request_id: str, user_id: str | None = None):
     row = _store().get_request(request_id)
-    if row is None:
+    if row is None or (user_id is not None and user_id != row.user_id):
         raise HTTPException(status_code=404, detail="Approval request not found")
     return _stored_mcp_resolution(row)
 
@@ -541,16 +543,24 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
     instead of the canned refusal — for correcting false-positive gates with
     bespoke guidance. Idempotent on already-resolved.
     """
-    # The bot prefix marks a grant holder's decision (routes/ops_approvals.py);
-    # a body can't claim one (TASK-1609).
-    if (body.resolved_by or "").strip().lower().startswith(BOT_RESOLVER_PREFIX):
-        raise HTTPException(status_code=400, detail={
-            "code": "reserved_resolver",
-            "message": f"resolved_by may not start with {BOT_RESOLVER_PREFIX!r}"})
     store = _store()
     row = store.get_request(request_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"No approval request id={request_id}")
+    # Browser callers bind this scope at the existing trusted identity boundary.
+    # Missing/legacy sentinel identities never imply internal resolver authority.
+    # Delegated bots use ops_approvals.py; in-process owners use the store directly.
+    if (not body.user_id.strip() or body.user_id.strip().lower() in _SENTINEL_IDENTITIES
+            or body.user_id != row.user_id):
+        raise HTTPException(status_code=403, detail="Approval owner mismatch")
+    # The bot prefix marks a grant holder's decision; a body can't claim one.
+    if (body.resolved_by or "").strip().lower().startswith(BOT_RESOLVER_PREFIX):
+        raise HTTPException(status_code=400, detail={
+            "code": "reserved_resolver",
+            "message": f"resolved_by may not start with {BOT_RESOLVER_PREFIX!r}"})
+    if body.resolved_by is not None and body.resolved_by != body.user_id:
+        raise HTTPException(status_code=403, detail="Resolver must match approval owner")
+    resolved_by = body.user_id
 
     decision = (body.decision or "").strip().lower()
     if decision in ("approve", "approved", "allow"):
@@ -579,7 +589,7 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
         new_status = {"approve": REQ_APPROVED, "deny": REQ_DENIED,
                       "cancel": REQ_CANCELLED, "respond": REQ_RESPONDED}[outcome]
         row = store.resolve_request(
-            request_id, status=new_status, resolved_by=body.resolved_by,
+            request_id, status=new_status, resolved_by=resolved_by,
             message=message, continuation_owner="none",
         )
         if row is None:
@@ -599,7 +609,7 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
         # MCP approvals are server-owned: execute the exact stored invocation
         # once, persist its actual result, and never ask the model to re-issue.
         result, _final = await resolve_mcp_card(
-            store, row, outcome=outcome, message=message, resolved_by=body.resolved_by,
+            store, row, outcome=outcome, message=message, resolved_by=resolved_by,
         )
         return result
 
@@ -621,7 +631,7 @@ async def resolve_approval(request_id: str, body: ResolveRequest):
 
     prompt = continuation_prompt(expected_status, expected_message)
     row = store.resolve_request(
-        request_id, status=new_status, resolved_by=body.resolved_by, message=message,
+        request_id, status=new_status, resolved_by=resolved_by, message=message,
         continuation_owner="server" if body.dispatch_continuation else "client",
     )
     if row is None:

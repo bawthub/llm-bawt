@@ -447,7 +447,8 @@ def _approve_via_route(approvals, request_id, monkeypatch, decision="approve"):
     app = FastAPI()
     app.include_router(routes.router)
     with TestClient(app) as client:
-        response = client.post(f"/v1/chat/approvals/{request_id}/resolve", json={"decision": decision})
+        response = client.post(f"/v1/chat/approvals/{request_id}/resolve", json={
+            "user_id": approvals.get_request(request_id).user_id, "decision": decision})
     assert response.status_code == 200
     return response.json()
 
@@ -757,7 +758,7 @@ def test_lone_admitter_that_stalls_past_the_window_creates_no_job(system, approv
 
     store, service, executor, _ = system
     approvals, row = approved_ops
-    approved = approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
+    approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")
     restore = _stall_before_job_creation(
         approvals, lambda: _backdate_resolution(approvals, row.id, 601))
     try:
@@ -774,7 +775,7 @@ def test_lone_admitter_that_stalls_past_the_window_creates_no_job(system, approv
 def test_execution_fence_renews_a_held_claim_and_refuses_a_lost_one(system, approved_ops):
     from datetime import datetime, timedelta, timezone
     from llm_bawt.approval_policies import (
-        ApprovalPersistError, ExecutionDeadlinePassed, ToolApprovalRequest, REQ_APPROVED)
+        ApprovalPersistError, ExecutionDeadlinePassed, REQ_APPROVED)
 
     approvals, row = approved_ops
     approvals.resolve_request(row.id, status=REQ_APPROVED, continuation_owner="server")

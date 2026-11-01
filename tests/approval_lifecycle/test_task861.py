@@ -247,20 +247,20 @@ def test_resolve_obeys_persisted_winner_and_error_payload(client, store, monkeyp
         return {"status": "failed", "error": "tool failure"}
 
     monkeypatch.setattr(registry, "mcp", SimpleNamespace(call_approved_tool=execute))
-    response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "approve"}).json()
+    response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": "approve"}).json()
     assert response["status"] == "denied" and response["ok"] is False
     assert called == []
     other = record(store, request_id="other")
-    response = client.post(f"/v1/chat/approvals/{other.id}/resolve", json={"decision": "approve"}).json()
+    response = client.post(f"/v1/chat/approvals/{other.id}/resolve", json={"user_id": "test-user", "decision": "approve"}).json()
     assert response["execution_state"] == EXEC_FAILED and response["ok"] is False
-    client.post(f"/v1/chat/approvals/{other.id}/resolve", json={"decision": "approve"})
+    client.post(f"/v1/chat/approvals/{other.id}/resolve", json={"user_id": "test-user", "decision": "approve"})
     assert len(called) == 1
 
 
 def test_admin_resolve_defaults_durable_server_owner_and_retries_no_duplicate(client, store):
     row = harness(store)
-    first = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "respond", "message": "original"}).json()
-    second = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "approve", "message": "changed", "dispatch_continuation": False}).json()
+    first = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": "respond", "message": "original"}).json()
+    second = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": "approve", "message": "changed", "dispatch_continuation": False}).json()
     assert first["server_dispatched"] is True
     assert first["continuation_prompt"] is None
     assert second["status"] == "responded" and second["continuation_owner"] == "server"
@@ -279,9 +279,9 @@ def test_orchestration_approval_first_decision_wins_without_grant_or_continuatio
         operations_snapshot={"release": {"version": "1.2.3"}},
     )
     assert created
-    first_reply = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": first}).json()
+    first_reply = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": first}).json()
     second = "deny" if first == "approve" else "approve"
-    second_reply = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": second}).json()
+    second_reply = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": second}).json()
     assert first_reply["status"] == second_reply["status"] == expected
     assert first_reply["continuation_prompt"] is None and not first_reply["server_dispatched"]
     assert second_reply["already_resolved"]
@@ -293,7 +293,7 @@ def test_orchestration_approval_first_decision_wins_without_grant_or_continuatio
 
 def test_client_owner_gets_explicit_grant_failure_not_success(client, store):
     row = harness(store)
-    response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "approve", "dispatch_continuation": False})
+    response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": "approve", "dispatch_continuation": False})
     assert response.status_code == 503
     saved = store.get_request(row.id)
     assert saved.status == REQ_APPROVED and saved.grant_state == "failed"
@@ -436,12 +436,12 @@ def test_harness_resolve_renders_bot_scope_before_committing(client, store, monk
     monkeypatch.setattr(routes, "build_continuation_prompt", render)
     with pytest.raises(ValueError, match="Prompt database unavailable"):
         client.post(f"/v1/chat/approvals/{row.id}/resolve",
-                    json={"decision": "approve", "dispatch_continuation": False})
+                    json={"user_id": "test-user", "decision": "approve", "dispatch_continuation": False})
     assert store.get_request(row.id).status == "pending"
     assert store.get_request(row.id).grant_state != "sent"
 
     response = client.post(f"/v1/chat/approvals/{row.id}/resolve",
-                           json={"decision": "approve", "dispatch_continuation": False})
+                           json={"user_id": "test-user", "decision": "approve", "dispatch_continuation": False})
     assert response.status_code == 503  # No bridge for grant delivery in this fixture.
     assert calls == [("pending", "test-bot"), ("pending", "test-bot")]
     assert store.get_request(row.id).status == REQ_APPROVED
@@ -464,7 +464,7 @@ def test_harness_resolve_reconciles_concurrent_winner(
 
     monkeypatch.setattr(store, "resolve_request", competing_resolve)
     response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={
-        "decision": requested_decision, "message": "losing guidance",
+        "user_id": "test-user", "decision": requested_decision, "message": "losing guidance",
         "dispatch_continuation": False,
     })
     assert response.status_code == 200
@@ -494,7 +494,7 @@ def test_client_owner_approved_prompt_carries_complete_stored_arguments(client, 
 
     monkeypatch.setattr(routes, "_subscriber", lambda: Subscriber())
     response = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={
-        "decision": "approve", "dispatch_continuation": False,
+        "user_id": "test-user", "decision": "approve", "dispatch_continuation": False,
     })
     assert response.status_code == 200
     assert json.dumps(original_args, ensure_ascii=False, sort_keys=True) in response.json()["continuation_prompt"]
@@ -509,9 +509,9 @@ def test_client_owner_retries_do_not_regrant_or_change_response(client, store, m
             grants.append(kwargs)
 
     monkeypatch.setattr(routes, "_subscriber", lambda: Subscriber())
-    body = {"decision": "approve", "dispatch_continuation": False}
+    body = {"user_id": "test-user", "decision": "approve", "dispatch_continuation": False}
     first = client.post(f"/v1/chat/approvals/{row.id}/resolve", json=body).json()
-    second = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"decision": "deny"}).json()
+    second = client.post(f"/v1/chat/approvals/{row.id}/resolve", json={"user_id": "test-user", "decision": "deny"}).json()
     assert len(grants) == 1
     assert first["continuation_prompt"] == second["continuation_prompt"]
     assert first["server_dispatched"] is False and second["status"] == "approved"
@@ -528,7 +528,7 @@ def test_uncertain_grant_is_not_silently_retried(client, store, monkeypatch):
             raise RuntimeError("response lost after send")
 
     monkeypatch.setattr(routes, "_subscriber", lambda: Subscriber())
-    body = {"decision": "approve", "dispatch_continuation": False}
+    body = {"user_id": "test-user", "decision": "approve", "dispatch_continuation": False}
     assert client.post(f"/v1/chat/approvals/{row.id}/resolve", json=body).status_code == 503
     assert client.post(f"/v1/chat/approvals/{row.id}/resolve", json=body).status_code == 503
     assert len(grants) == 1 and store.get_request(row.id).grant_state == "uncertain"
