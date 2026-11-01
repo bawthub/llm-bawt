@@ -57,6 +57,7 @@ def record(store, *, request_id="fixture-request", user=OWNER, bot="fixture-bot"
             **fields, session_key=f"{bot}:{user}", operations_snapshot=None,
             invocation_hash=canonical_invocation_hash("fixture_tool", args)))
     if kind == "orchestration":
+        fields.pop("policy_id")  # Coordinator-owned requests have no policy argument.
         return store.record_orchestration_request(**fields, operations_snapshot={"fixture": True})[0]
     return store.record_request(**fields, session_id="fixture-session")
 
