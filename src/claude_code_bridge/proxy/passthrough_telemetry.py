@@ -19,13 +19,10 @@ _USAGE_FIELDS = (
 )
 
 
-class PassthroughTelemetry:
-    def __init__(self, context: ProxyRequestContext | None = None) -> None:
-        self.context = context
-        self.usage: dict[str, int] = {}
-        self.serving_provider: str | None = None
-        self.first_byte_ms: float | None = None
-        self.first_output_ms: float | None = None
+class SSEObserver:
+    """Shared bounded framing only; subclasses consume data or fixed skip codes."""
+
+    def __init__(self) -> None:
         self._line = bytearray()
         self._data: list[bytes] = []
         self._size = 0
@@ -38,16 +35,14 @@ class PassthroughTelemetry:
         delimiters/UTF-8) are supported. Oversize/malformed events are skipped,
         resynchronizing at the next blank line without retaining their bodies.
         """
-        if chunk and self.first_byte_ms is None:
-            self.first_byte_ms = elapsed_ms
-            if self.context is not None and self.context.upstream_ttfb_ms is None:
-                self.context.upstream_ttfb_ms = elapsed_ms
         offset = 0
         while offset < len(chunk):
             end = chunk.find(b"\n", offset)
             part = chunk[offset:] if end < 0 else chunk[offset:end]
-            self._size += len(part)
+            self._size = min(_MAX_EVENT_BYTES + 1, self._size + len(part))
             if self._size > _MAX_EVENT_BYTES:
+                if not self._discarding:
+                    self._skip("oversize", elapsed_ms)
                 self._discarding = True
                 self._data.clear()
                 # Keep only the bounded current line, so it cannot be mistaken
@@ -68,7 +63,38 @@ class PassthroughTelemetry:
                 self._discarding = False
             elif not self._discarding and line.startswith(b"data:"):
                 self._data.append(line[5:].removeprefix(b" "))
+            elif not self._discarding and line.startswith(b":"):
+                self._skip("comment", elapsed_ms)
             offset = end + 1
+
+    def _skip(self, reason: str, elapsed_ms: float) -> None:
+        pass
+
+    def _observe(self, data: bytes, elapsed_ms: float) -> None:
+        raise NotImplementedError
+
+    def clear(self) -> None:
+        self._line.clear()
+        self._data.clear()
+        self._size = 0
+        self._discarding = False
+
+
+class PassthroughTelemetry(SSEObserver):
+    def __init__(self, context: ProxyRequestContext | None = None) -> None:
+        super().__init__()
+        self.context = context
+        self.usage: dict[str, int] = {}
+        self.serving_provider: str | None = None
+        self.first_byte_ms: float | None = None
+        self.first_output_ms: float | None = None
+
+    def feed(self, chunk: bytes, elapsed_ms: float) -> None:
+        if chunk and self.first_byte_ms is None:
+            self.first_byte_ms = elapsed_ms
+            if self.context is not None and self.context.upstream_ttfb_ms is None:
+                self.context.upstream_ttfb_ms = elapsed_ms
+        super().feed(chunk, elapsed_ms)
         self._sync_context()
 
     def _observe(self, data: bytes, elapsed_ms: float) -> None:

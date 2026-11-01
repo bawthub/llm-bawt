@@ -22,6 +22,8 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from .responses_progress import ResponsesProgress
+
 logger = logging.getLogger(__name__)
 LITE_HEADER = "x-openai-internal-codex-responses-lite"
 TURN_HEADER = "x-codex-turn-state"
@@ -245,6 +247,7 @@ class ChatGPTResponsesTransport:
                 if response is not None:
                     session.turn_state = session.turn_state or response.headers.get(TURN_HEADER)
                 stream.response = response
+                stream.progress.attach_http(stream.http)
                 stream.http_iterator = stream.http.__aiter__()
             else:
                 metadata = request.setdefault("client_metadata", {})
@@ -303,6 +306,9 @@ class ChatGPTStream:
         self.complete = self.closed = self.event_seen = False
         self.attempt = max(1, int(getattr(context, "attempt", 1) or 1))
         self.started_at = time.monotonic()
+        self.progress = ResponsesProgress(
+            self.started_at, context, self.attempt, clock=lambda: time.monotonic(),
+        )
         self.last_transport_activity_at = self.started_at
         self.last_productive_activity_at = self.started_at
         # TASK-1079: a retry attempt starts "in trouble" (the adapter already
@@ -358,6 +364,7 @@ class ChatGPTStream:
         return "sse" if self.transport == "websocket" else None
 
     def _timeout(self, phase: str, now: float) -> ChatGPTEventTimeout:
+        self.progress.report("stall", self.transport)
         fallback = self.fallback_transport
         if self.transport == "websocket":
             # Preserve sticky turn state, but force the safe outer retry onto a
@@ -431,6 +438,7 @@ class ChatGPTStream:
 
     def _report_stall_notice(self, now: float) -> None:
         """Tell the UI the upstream has gone quiet; keep waiting on it."""
+        self.progress.report("stall", self.transport)
         self.stall_noticed = True
         self.trouble_reported = True
         idle = max(0.0, now - self.last_productive_activity_at)
@@ -474,7 +482,12 @@ class ChatGPTStream:
         if self.http is not None:
             return await anext(self.http_iterator)
         raw = await self.session.socket.recv()
-        payload = json.loads(raw)
+        try:
+            payload = json.loads(raw)
+        except (ValueError, RecursionError):
+            self.progress.received_ws(raw, None)
+            raise
+        self.progress.received_ws(raw, payload)
         if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
             raise ValueError("Invalid Responses WebSocket event")
         return _event_object(payload)
@@ -524,7 +537,6 @@ class ChatGPTStream:
             self.event_seen = True
             self.last_transport_activity_at = now
             kind = getattr(event, "type", "")
-            self.last_event_kind = str(kind)[:80]
             if kind == "response.metadata" and not self.session.turn_state:
                 headers = getattr(event, "headers", None)
                 if isinstance(headers, SimpleNamespace):
@@ -537,11 +549,14 @@ class ChatGPTStream:
             if kind in TERMINALS:
                 self.complete = True
             productive = self._observe(event, now)
+            self.last_event_kind = self.progress.decoded(event, productive)
             if not productive:
                 label = self.last_event_kind
                 if label not in self.idle_event_counts and len(self.idle_event_counts) >= 16:
                     label = "other"
-                self.idle_event_counts[label] = self.idle_event_counts.get(label, 0) + 1
+                self.idle_event_counts[label] = min(
+                    2**31 - 1, self.idle_event_counts.get(label, 0) + 1,
+                )
             if productive:
                 self.idle_event_counts.clear()
                 self.last_productive_activity_at = now
@@ -575,7 +590,10 @@ class ChatGPTStream:
             if self.http is not None:
                 await self.http.close()
         finally:
-            await self.owner.release(self)
+            try:
+                await self.owner.release(self)
+            finally:
+                self.progress.report("close", self.transport, self.complete)
 
     aclose = close
 

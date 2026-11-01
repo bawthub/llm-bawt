@@ -51,7 +51,11 @@ class ResponsesSSEStream(ChatGPTStream):
         except ChatGPTEventTimeout as exc:
             self._opening_timeout = exc
             return
+        except BaseException:
+            self.progress.report("close", self.transport)
+            raise
         self.response = getattr(self.http, "response", None)
+        self.progress.attach_http(self.http)
         self.http_iterator = self.http.__aiter__()
 
     async def __anext__(self):
@@ -67,10 +71,13 @@ class ResponsesSSEStream(ChatGPTStream):
         if self.closed:
             return
         self.closed = True
-        if self.http is not None:
-            close = getattr(self.http, "close", None) or getattr(self.http, "aclose", None)
-            if close is not None:
-                await close()
+        try:
+            if self.http is not None:
+                close = getattr(self.http, "close", None) or getattr(self.http, "aclose", None)
+                if close is not None:
+                    await close()
+        finally:
+            self.progress.report("close", self.transport, self.complete)
 
     aclose = close
 

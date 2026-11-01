@@ -495,6 +495,9 @@ class ProviderAdapter(ABC):
                     reasoning_codec=reasoning_codec,
                     allowed_skill_names=context.skill_names if context else (),
                 ):
+                    progress = getattr(upstream_stream, "progress", None)
+                    if progress is not None:
+                        progress.feed("exported", chunk)
                     yield chunk
             except (asyncio.CancelledError, GeneratorExit):
                 raise
