@@ -91,8 +91,11 @@ async def adapter_source(mode, reason):
             yield chunk
 
 
-@pytest.mark.parametrize("mode", ["native", "cc", "responses"])
-@pytest.mark.parametrize("reason", ["tool_use", "length", "max_tokens", "max_output_tokens"])
+@pytest.mark.parametrize("mode,reason", [
+    (mode, reason)
+    for mode in ["native", "cc", "responses"]
+    for reason in ["tool_use", "length", "max_tokens", "max_output_tokens"]
+] + [("native", "model_context_window_exceeded")])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("budgeted", [False, True])
 def test_routes_block_truncation_and_preserve_valid_calls(monkeypatch, mode, reason, stream, budgeted):

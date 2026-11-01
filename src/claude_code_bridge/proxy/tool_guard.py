@@ -49,8 +49,10 @@ class ToolCallGuard:
             self.close()
             yield frame
             return
-        if self._stop_reason in {"max_tokens", "length", "max_output_tokens"}:
-            raise UnsafeToolCallError("Upstream truncated tool calls at its output limit; no tool calls forwarded")
+        if self._stop_reason in {
+            "max_tokens", "length", "max_output_tokens", "model_context_window_exceeded",
+        }:
+            raise UnsafeToolCallError("Upstream truncated tool calls at its output/context limit; no tool calls forwarded")
         self._held.write(frame)
         if event == "message_stop":
             if self._stop_reason is None:
