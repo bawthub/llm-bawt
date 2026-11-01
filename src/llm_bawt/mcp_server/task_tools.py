@@ -184,7 +184,7 @@ async def tasks_board(
     q: str | None = None,
     project: str | None = None,
     priority: str | None = None,
-    limit: int = 20,
+    limit: int = 5,
     rows: BoardRows | None = None,
 ) -> dict:
     """The task board as data: the lanes BawtHub's /tasks/board lays out.
@@ -205,12 +205,12 @@ async def tasks_board(
         q: Search over TASK-ID, title, project name and bot.
         project: Project id (cuid), or "none" for unassigned tasks.
         priority: One priority, e.g. HIGH.
-        limit: Rows per lane (default 20, max 50); counts stay whole.
+        limit: Rows per lane (default 5, max 50); counts stay whole.
         rows: "active" sends cards only for open columns (kanban: Blocked,
               To do, Doing, Review); drawers and closed lanes (Backlog,
               Done, Archived) keep their counts with rowsOmitted. "all"
-              sends every lane's cards. Default: "active" without q, "all"
-              with q.
+              sends every lane's cards, including completed/history matches.
+              Default: "active", even when q is supplied.
 
     Returns:
         Dict with view, updated, q, filters, rows, now and lanes: every
@@ -221,7 +221,7 @@ async def tasks_board(
         blockedReason).
         Use tasks_get_context for one task's description and steps.
     """
-    rows_scope = rows or ("all" if q else "active")
+    rows_scope = rows or "active"
     params = {
         key: value
         for key, value in (

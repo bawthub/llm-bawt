@@ -64,13 +64,13 @@ def test_forwards_the_board_params_and_returns_the_reply(monkeypatch: pytest.Mon
         view="status", updated="24h", bot="alpha", q="board", project="none", priority="HIGH", limit=5,
     ))
 
-    assert result == {**BOARD, "view": "status", "updated": "24h", "rows": "all"}
+    assert result == {**BOARD, "view": "status", "updated": "24h", "rows": "active"}
     [request] = requests
     assert request.method == "GET"
     assert request.url.path == "/api/tasks/board"
     assert dict(request.url.params) == {
         "view": "status", "updated": "24h", "bot": "alpha", "q": "board",
-        "project": "none", "priority": "HIGH", "limit": "5", "rows": "all",
+        "project": "none", "priority": "HIGH", "limit": "5", "rows": "active",
     }
 
 
@@ -80,15 +80,16 @@ def test_defaults_send_the_row_limit_and_active_rows(monkeypatch: pytest.MonkeyP
     requests = _stub(monkeypatch)
 
     assert _run(task_tools.tasks_board()) == BOARD
-    assert dict(requests[0].url.params) == {"limit": "20", "rows": "active"}
+    assert dict(requests[0].url.params) == {"limit": "5", "rows": "active"}
 
 
 @pytest.mark.parametrize("kwargs,sent", [
-    ({"q": "popup"}, "all"),
+    ({"q": "popup"}, "active"),
+    ({"q": "popup", "rows": "all"}, "all"),
     ({"q": "popup", "rows": "active"}, "active"),
     ({"rows": "all"}, "all"),
 ])
-def test_rows_follow_q_unless_given(monkeypatch: pytest.MonkeyPatch, kwargs: dict, sent: str) -> None:
+def test_search_does_not_include_closed_rows_without_explicit_opt_in(monkeypatch: pytest.MonkeyPatch, kwargs: dict, sent: str) -> None:
     requests = _stub(monkeypatch)
 
     _run(task_tools.tasks_board(**kwargs))

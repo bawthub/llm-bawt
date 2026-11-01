@@ -72,7 +72,7 @@ TOOL_SUMMARIES: dict[str, str] = {
     "sessions_get_or_create_active": "Get/create active session: required bot_id/user_id.",
     "sessions_rotate": "Rotate required bot_id's active thread: archive/create successor, not provider-context reset.",
     "tasks_list": f"Lean task rows; active work: tasks_board(q=). Literal q, project_id='none' unassigned. One status: {_TASK_STATUS_GUIDE}. Omitted excludes DELETED. focused=true: the user's ranked focus list; archived=false hides archived; tasks_update edits both.",
-    "tasks_board": "Start here for active work: q=<keyword>, small limit. Lanes as /tasks/board draws them: shown/older counts, compact rows. Without q only open columns carry rows (rows=all for every lane). Args mirror the board URL.",
+    "tasks_board": "Start here for active work: q=<keyword>. Default 5 rows per open lane, including searches; counts stay whole. Completed/history cards require rows=all. Increase limit explicitly for more cards (max 50 per lane). Args mirror the board URL.",
     "tasks_search_semantic": "Semantic task search by concept; try tasks_board(q=) first. mode reports keyword fallback. Exact filters: tasks_list.",
     "tasks_get": "Read task, steps, dependencies, response by cuid/TASK-N.",
     "tasks_get_context": "Read task/project briefing by cuid/TASK-N before work.",
