@@ -51,6 +51,14 @@ class UsageAdapter(ABC):
         return {"balance_supported": bool(self.balance_mode),
                 "manual_balance_supported": self.balance_mode == BALANCE_ANCHOR}
 
+    def report_identity(self):
+        """Optional source identity: never reuse a report across source/account changes.
+
+        Most providers have one fixed source. Dual manual/native reporters can
+        return a non-secret credential fingerprint, read on each request.
+        """
+        return None
+
     # -- helpers for subclasses ------------------------------------------
 
     def _base(self, **overrides) -> ProviderUsage:

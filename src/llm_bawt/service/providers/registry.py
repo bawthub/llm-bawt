@@ -32,6 +32,7 @@ from .github_deploy import (
 from .openai_key import OpenAIKeyAdapter
 from .openrouter import OpenRouterAdapter
 from .xai import XaiAdapter
+from .xai_management import XaiManagementAdapter
 from .bridge_keys import KimiCodingKeyAdapter, MoonshotKeyAdapter, ZaiKeyAdapter
 from .search_keys import SEARCH_KEY_ADAPTERS
 from .x import XAdapter
@@ -51,6 +52,7 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     ChatGPTAppAdapter.id: ChatGPTAppAdapter,
     OpenRouterAdapter.id: OpenRouterAdapter,
     XaiAdapter.id: XaiAdapter,
+    XaiManagementAdapter.id: XaiManagementAdapter,
     OpenAIKeyAdapter.id: OpenAIKeyAdapter,
     AnthropicKeyAdapter.id: AnthropicKeyAdapter,
     AnthropicAdminAdapter.id: AnthropicAdminAdapter,

@@ -21,6 +21,15 @@ from tests.stored_provider_keys import stub_stored_keys
 NOW = datetime(2026, 10, 25, 16, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def no_xai_management_connection(monkeypatch):
+    # These are the legacy/manual balance fixtures. Reporting-credential states
+    # are isolated explicitly in test_xai_management.py, never read from runtime.
+    from llm_bawt.service.usage.adapters.xai import XaiUsageAdapter
+
+    monkeypatch.setattr(XaiUsageAdapter, "_management_connection", lambda _self: None)
+
+
 def _row(*, anchor="100", spent="2.5", unpriced=0, anchor_at=NOW):
     return BalanceRow("anthropic_api", Decimal(anchor), anchor_at, Decimal(spent), unpriced,
                       anchor_at + timedelta(minutes=5))

@@ -31,7 +31,8 @@ The registry currently includes:
 - `anthropic_api` (`anthropic-api` prepaid balance, anchor mode)
 - `zai`
 - `openai_chatgpt`
-- `xai` (`xai-chat`/`xai-responses` prepaid balance, anchor mode)
+- `xai` (`xai-chat`/`xai-responses` prepaid balance from the separate
+  `xai-management` connection when configured; manual anchor otherwise)
 - `openai_api` (`openai-api`/`openai-responses` prepaid balance, anchor mode)
 - `openrouter` (`openrouter-anthropic` prepaid balance, anchor mode: its credit
   endpoint needs a management key, and the connected key is an inference key)
@@ -123,6 +124,61 @@ report cannot hold up spend. Without the Admin key, the adapter sums the
 source debits the balance; the per-turn counter does. Failed report reads are
 unavailable, never silently replaced with zero spend or a different account's
 subscription quota.
+
+## xAI prepaid balance (TASK-1942)
+
+Connect **xAI management (balance reporting)** as a separate provider account
+(`xai-management`), not as the `xai` inference key. The existing Providers
+accounts UI accepts its masked management-key field; no team/deployment ID is
+hardcoded. `POST /v1/providers/xai-management/connect/api-key` uses the existing
+`{"api_key": "<management key>"}` contract. Credentials use the encrypted
+`provider_connection:xai-management` DB row, with `management_key` in the secret
+and discovered `team_id` in metadata. Public connection views never return the
+key; the generic inference token broker refuses this non-inference adapter.
+
+Only two official read-only endpoints are used, with Bearer management-key auth:
+
+1. `GET https://management-api.x.ai/auth/management-keys/validation`: resolve a
+   **team-scoped** key using `scope=SCOPE_TEAM`, `scopeId`. The deprecated
+   `teamId` shape is accepted only without a conflicting explicit scope.
+   Organization-scoped keys are rejected rather than using an organization ID
+   as a team. Validation itself needs no ACL and is not proof of balance access.
+2. `GET https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance`:
+   connection validation also probes this endpoint before saving. Configure
+   only the required prepaid-balance read permission in xAI Console. The public
+   reference does **not** publish its exact ACL string; this implementation
+   does not invent one or require a wildcard/write grant. A `403` remains an
+   explicit permission failure and does not replace a working saved connection.
+
+The balance schema is `{"total": {"val": "<signed int64 cents>"}, "changes": [...]}`.
+`total.val` is **USD cents**, not dollars or microdollars. xAI's documented
+prepaid ledger has negative purchases/refunds and positive spend; its successful
+$10 purchase example returns `total.val="-1000"`. Thus available credit is
+`-Decimal(total.val)/100`, **not** `abs(total.val)`: zero is valid and a positive
+ledger total remains negative credit. We ignore transaction details, fabricate
+no deposit/debit/anchor, and never subtract this app's spend from that balance.
+This sign mapping follows the published ledger/example, not a live account
+probe; secret-safe live read-only verification is a separately authorized step.
+
+The usage provider remains `xai`, with `source=provider_reported` and
+`manual_balance_supported=false`; PUT/DELETE anchor routes return `409` while
+management reporting is configured. Native zero uses the existing `$0.00` UI.
+Missing/malformed data, revoked credentials, network failures and permission
+errors report unavailable, never zero or a silent fallback to manual estimates.
+A same-source `429` may expose the explicitly cached last-good snapshot as in
+other providers. Report reuse is bounded to 10 seconds; source/credential/team
+identity is checked even within that window and after an in-flight fetch, so
+rotating keys, switching teams, disconnecting or enabling management reporting
+cannot reuse a different source's balance. Identity fingerprints contain no
+plaintext credential. Turn completion asks for a provider refresh, not a local
+deduction. Without a management connection, existing clearly labeled manual
+anchor/countdown behavior remains; connecting/disconnecting reporting does not
+modify or delete that anchor, or change inference credentials.
+
+Sources verified before implementation (public docs only):
+- https://docs.x.ai/developers/management-api-guide
+- https://docs.x.ai/developers/rest-api-reference/management/auth.md
+- https://docs.x.ai/developers/rest-api-reference/management/billing.md
 
 ## ChatGPT / Codex usage
 

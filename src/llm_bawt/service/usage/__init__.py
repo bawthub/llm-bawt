@@ -85,6 +85,7 @@ def get_cached(provider: str) -> ProviderUsage | None:
 def invalidate_cache(provider: str) -> None:
     """Discard a report after its runtime settings change."""
     _cache.pop(provider, None)
+    _cache_identities.pop(provider, None)
 
 
 # Default registrations. Add a provider = create the adapter, import it here,
@@ -192,6 +193,7 @@ def get_adapter(provider: str) -> UsageAdapter | None:
 
 # provider -> (fetched_monotonic, ProviderUsage)
 _cache: dict[str, tuple[float, ProviderUsage]] = {}
+_cache_identities: dict[str, Any] = {}
 _locks: dict[str, asyncio.Lock] = {}
 
 
@@ -218,29 +220,60 @@ async def _report(adapter: UsageAdapter, *, force: bool) -> ProviderUsage:
     provider = adapter.provider
     ttl = _cache_ttl(adapter)
     now = time.monotonic()
-    hit = _cache.get(provider)
+    async def current_cache():
+        identity = await asyncio.to_thread(adapter.report_identity)
+        if _cache_identities.get(provider) != identity:
+            invalidate_cache(provider)
+        return identity, _cache.get(provider)
+
+    try:
+        identity, hit = await current_cache()
+    except Exception:  # source unavailable: no stale balance from a different account
+        invalidate_cache(provider)
+        return adapter._base(available=False, status=STATUS_ERROR,
+                             error=f"{adapter.display_name} reporting connection unavailable")
     if not force and hit and (now - hit[0]) < ttl:
         return _cached_copy(hit[1])
 
     lock = _locks.setdefault(provider, asyncio.Lock())
     async with lock:
-        # Re-check: another waiter may have just refreshed it.
-        hit = _cache.get(provider)
+        # Re-check both source and snapshot after waiting for another reader.
+        try:
+            identity, hit = await current_cache()
+        except Exception:
+            invalidate_cache(provider)
+            return adapter._base(available=False, status=STATUS_ERROR,
+                                 error=f"{adapter.display_name} reporting connection unavailable")
         if not force and hit and (time.monotonic() - hit[0]) < ttl:
             return _cached_copy(hit[1])
+        fetch_error = None
         try:
             snap = await adapter.fetch()
         except Exception as e:  # noqa: BLE001 — never fail the UI on a fetch error
             logger.warning("Usage fetch failed for %s: %s", provider, e)
-            if hit is not None:
-                stale = _cached_copy(hit[1])
-                stale.error = f"refresh failed: {e}"
-                return stale
-            return adapter._base(available=False, status=STATUS_ERROR, error=str(e))
+            fetch_error = str(e)
+            snap = adapter._base(available=False, status=STATUS_ERROR, error=fetch_error)
+
+        # A credential/source may change while its request is in flight. Do
+        # not publish that old account's credit under the new configuration.
+        try:
+            unchanged = await asyncio.to_thread(adapter.report_identity) == identity
+        except Exception:
+            unchanged = False
+        if not unchanged:
+            invalidate_cache(provider)
+            return adapter._base(available=False, status=STATUS_ERROR,
+                                 error="Reporting connection changed; refresh the balance")
+
+        if fetch_error is not None and hit is not None:
+            stale = _cached_copy(hit[1])
+            stale.error = f"refresh failed: {fetch_error}"
+            return stale
 
         # Cache only authoritative snapshots; on a transient 429, prefer the
-        # last-good snapshot if we have one.
+        # last-good snapshot if we have one from this exact reporting source.
         if snap.status == STATUS_OK:
+            _cache_identities[provider] = identity
             _cache[provider] = (time.monotonic(), snap)
         elif snap.status == STATUS_RATE_LIMITED and hit is not None:
             # An anchored balance is overlaid fresh after this; a provider-
