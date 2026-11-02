@@ -426,6 +426,7 @@ class TurnStreamFinalizer:
         self._publish_event_direct({
             "_type": "turn_complete",
             "turn_id": ctx.turn_log_id,
+            "text_offset": getattr(ctx, "stream_text_offset", None),
             # TASK-784: symmetric with turn_start / background_service.py nonstream
             # emits — carry the assistant_message_id on the streaming success path
             # too, so commitServerOriginatedTurn on the client can adopt the reply

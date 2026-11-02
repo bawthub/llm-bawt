@@ -211,7 +211,8 @@ def test_the_consumer_never_breaks_the_event_stream(monkeypatch, failure):
     asyncio.run(agent_bridge._settle_bot_steer(_payload("started"), SimpleNamespace(turn_id=TURN)))
 
 
-def test_the_run_stream_settles_only_bot_steers_and_publishes_every_one(monkeypatch):
+@pytest.mark.parametrize("ordered", [False, True])
+def test_the_run_stream_settles_only_bot_steers_and_publishes_every_one(monkeypatch, ordered):
     """AgentBridgeBackend.stream_raw: a bot-origin steer_lifecycle settles its
     delivery; a user one is only published. Both carry origin and proof."""
     from agent_bridge.events import AgentEvent, AgentEventKind
@@ -252,12 +253,19 @@ def test_the_run_stream_settles_only_bot_steers_and_publishes_every_one(monkeypa
     monkeypatch.setattr(module, "get_agent_subscriber", lambda: root)
     monkeypatch.setattr("agent_bridge.subscriber.RedisSubscriber", Subscriber)
     monkeypatch.setattr(module, "_settle_bot_steer", settle)
-    list(module.AgentBridgeBackend().stream_raw(
-        "hello", {"bot_id": "byte", "user_id": "nick", "model": "claude-opus-5-5", "timeout_seconds": 1},
+    queued = list(module.AgentBridgeBackend().stream_raw(
+        "hello", {"bot_id": "byte", "user_id": "nick", "model": "claude-opus-5-5",
+                  "timeout_seconds": 1, "ordered_steer_events": ordered},
     ))
     assert [p["origin"] for p in settled] == ["bot"]
-    assert [(e["origin"], e["proof"], e["state"]) for e in published] == [
+    events = queued if ordered else published
+    assert not (published if ordered else queued)
+    assert [(e["origin"], e["proof"], e["state"]) for e in events] == [
         ("user", None, "cancelled"), ("bot", "sweep_receipt", "cancelled")]
+    assert all(e["run_request_id"] == _payload("cancelled")["run_request_id"] for e in events)
+    if ordered:
+        assert all(e["event"] == "steer_lifecycle" for e in events)
+        assert events[1]["steer_rpc_id"] == _payload("cancelled")["steer_rpc_id"]
 
 
 # --- registry-rendered steer framing ------------------------------------------

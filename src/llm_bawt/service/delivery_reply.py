@@ -33,6 +33,7 @@ def resolve_delivery_reply(
     bot_id: str,
     user_id: str,
     user_message_id: str,
+    include_voice_binding: bool = False,
 ) -> dict[str, Any] | None:
     """Return a pending/terminal receipt, or None for an unknown delivery.
 
@@ -63,9 +64,70 @@ def resolve_delivery_reply(
                                user_message_id=child.user_message_id)
             receipt["delivery_id"] = record.id  # the identity the caller waits on
             receipt["retry_delivery_id"] = child.id
+            if include_voice_binding:
+                receipt["voice_direct_reply"] = True
             return receipt
-    return _receipt(record, turns, bot_id=bot_id, user_id=user_id,
-                    user_message_id=user_message_id)
+    if ((record.metadata.get("ordinary_chat") or {}).get("voice_input")
+            and record.status == "DELIVERED" and record.delivery_mode == "steer"):
+        return _voice_steer_reply(deliveries, record, turns, bot_id=bot_id, user_id=user_id,
+                                  include_binding=include_voice_binding)
+    receipt = _receipt(record, turns, bot_id=bot_id, user_id=user_id,
+                       user_message_id=user_message_id)
+    if include_voice_binding:
+        receipt["voice_direct_reply"] = record.delivery_mode != "steer"
+    return receipt
+
+
+def _voice_steer_reply(deliveries: Any, record: Any, turns: Any, *, bot_id: str, user_id: str,
+                       include_binding: bool) -> dict[str, Any]:
+    """Observe the accepted injection's exact target, not a synthetic new turn.
+
+    DELIVERED here acknowledges persisted transport acceptance, not a model
+    answer. The injected message must still belong to the target's durable
+    conversation. No heuristic latest-turn lookup or resubmission is allowed.
+    """
+    from sqlalchemy import text
+
+    receipt = {"delivery_id": record.id, "status": "UNRESOLVED",
+               "turn_id": record.target_turn_id, "user_message_id": record.user_message_id}
+    engine = getattr(deliveries, "engine", None)
+    turn = turns.get_turn(record.target_turn_id) if record.target_turn_id else None
+    if (engine is None or record.transport_accepted_at is None or turn is None
+            or turn.bot_id != bot_id or turn.user_id != user_id):
+        return receipt
+    with engine.connect() as conn:
+        bound = conn.execute(text("""
+            SELECT s.id FROM messages injected
+            JOIN messages original ON original.bot_id=injected.bot_id
+              AND original.id=:trigger AND original.session_id=injected.session_id
+            JOIN sessions s ON s.id=injected.session_id AND s.bot_id=:bot AND s.user_id=:user
+            WHERE injected.bot_id=:bot AND injected.id=:message AND injected.role='user'
+              AND injected.author_entity_type='user' AND injected.author_entity_id=:user
+              AND (injected.interrupt_source_message_id IS NULL
+                   OR injected.interrupt_source_message_id=:trigger)
+              AND s.status <> 'deleted'
+        """), {"bot": bot_id, "user": user_id, "trigger": turn.trigger_message_id,
+                 "message": record.user_message_id}).scalar_one_or_none()
+    selected = (record.metadata.get("ordinary_chat") or {}).get("session_id")
+    if not bound or (selected is not None and str(bound) != selected.strip()):
+        return receipt
+    from .inter_bot_dispatcher_steer import SteerGeneration
+
+    # This binding proves persisted acceptance, NOT consumption or an answer.
+    # Voice's next-step observer must separately match an ordered started frame.
+    if include_binding:
+        receipt["voice_binding"] = {
+            "turn_id": turn.id, "session_id": str(bound),
+            "run_request_id": turn.agent_request_id,
+            "steer_rpc_id": SteerGeneration.of(record).request_id,
+        }
+    if turn.ended_at is None:
+        receipt["status"] = "IN_FLIGHT"
+    elif turn.status in {"ok", "completed"} and not turn.error_text:
+        receipt.update(status="DELIVERED", response_text=turn.response_text or "")
+    else:
+        receipt.update(status="FAILED", error=turn.error_text or f"Steered turn ended with status={turn.status}")
+    return receipt
 
 
 def _receipt(

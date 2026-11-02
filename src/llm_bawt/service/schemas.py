@@ -91,6 +91,7 @@ class ChatCompletionRequest(BaseModel):
     extract_memory: bool = Field(default=True, description="Whether to extract memories from response")
     include_summaries: bool = Field(default=True, description="Whether to inject conversation summary records into context")
     tts_mode: bool = Field(default=False, description="Whether to append TTS output formatting instructions to the system prompt")
+    voice_input: bool = Field(default=False, description="Speech-originated input: prefer durable next-tool-boundary steering of a busy compatible agent. Independent of TTS output formatting; typed chat must leave this false.")
     inject_user_prefix: bool = Field(default=False, description="For agent backends only: prepend chat.agent_user_prefix body to every user message. Survives agent-SDK session resume (unlike system prompt edits). Stacks independently with the voice-mode prefix.")
     client_system_context: str | None = Field(default=None, description="System context extracted from client messages (set by routes, not by callers)", exclude=True)
     ha_mode: bool = Field(default=False, description="HA-mode: cap history, force tool_choice=required on first call (set by routes)", exclude=True)

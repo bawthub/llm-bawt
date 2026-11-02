@@ -30,6 +30,26 @@ def owned_turn_sessions(engine, turns) -> dict[str, str]:
                 if expected[row["id"]] == (row["bot_id"], row["user_id"], row["trigger_message_id"])}
 
 
+def voice_steer_target_ready(conn, active, *, bot_id: str, user_id: str, session_id: str | None) -> bool:
+    """Conservative voice admission readout and claim fence, under the target lock.
+
+    Only a ready run's pinned NEXT capability counts, never the current bot
+    configuration or a provisional reservation. A selected conversation cannot
+    become a steer into a different (or unknown) durable conversation.
+    """
+    from ..steer_capabilities import NEXT, run_steer_caps
+
+    if (active is None or active.get("status") not in {"streaming", "pending"}
+            or active.get("user_id") != user_id
+            or not active.get("agent_session_key") or not active.get("agent_request_id")
+            or not active.get("agent_backend")
+            or NEXT not in run_steer_caps(backend=active["agent_backend"], caps=active.get("agent_steer_caps"))):
+        return False
+    owned = conn.execute(_OWNED, {"ids": [active["id"]]}).mappings().first()
+    return bool(owned and owned["bot_id"] == bot_id and owned["user_id"] == user_id
+                and (session_id is None or session_id.strip() == str(owned["session_id"])))
+
+
 def require_steer_session(service, request, turn, *, expected_session: str | None = None) -> str:
     """Fail before side effects if the exact target has no owned durable session."""
     try:

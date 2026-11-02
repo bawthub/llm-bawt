@@ -41,7 +41,8 @@ class TurnStreamPublishMixin:
         if not _redis_sub:
             return
         try:
-            await _redis_sub.publish_tool_event(bot_id, user_id, event_dict)
+            async with ctx.publish_lock:
+                await _redis_sub.publish_tool_event(bot_id, user_id, event_dict)
         except Exception as pub_err:
             log.debug("Unified event publish failed: %s", pub_err)
 

@@ -153,6 +153,201 @@ def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
                          {"bot": bot})
 
 
+def _voice_queue(rig):
+    from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+    from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue
+    from llm_bawt.service.turn_logs import TurnLogStore
+
+    turns = TurnLogStore(rig.config)
+    deliveries = InterBotDeliveryStore(rig.config)
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("""UPDATE turn_logs SET ended_at=NULL,status='streaming',
+            agent_backend='claude-code',agent_steer_caps='next',
+            agent_session_key=:key,agent_request_id='req-active' WHERE id=:id"""),
+                     {"id": rig.turn_id, "key": f"{rig.bot}:{rig.user}"})
+        conn.execute(sa_text("""UPDATE bot_profiles SET bot_type='agent',agent_backend='claude-code'
+            WHERE slug=:bot"""), {"bot": rig.bot})
+    return turns, deliveries, OrdinaryTurnQueue(turns, deliveries)
+
+
+def _voice_send(rig, queue, **fields):
+    message = fields.pop("message", "spoken request")
+    request = ChatCompletionRequest(
+        bot_id=rig.bot, user=rig.user, stream=True, tts_mode=fields.pop("tts_mode", True),
+        messages=[ChatMessage(role="user", content=message)],
+        user_message_id=str(uuid.uuid4()), **fields,
+    )
+    return request, queue.decide(request=request, bot_id=rig.bot, user_id=rig.user, user_prompt=message)
+
+
+@pytest.mark.integration
+def test_voice_steers_next_past_same_authors_typed_wait_without_changing_author(rig, monkeypatch):
+    from llm_bawt.message_authorship import AuthorReference
+    from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+    from llm_bawt.service.routes import chat
+
+    turns, deliveries, queue = _voice_queue(rig)
+    _, typed = _voice_send(rig, queue)  # TTS output does NOT mean voice input.
+    request, voice = _voice_send(rig, queue, voice_input=True, tts_mode=False, session_id=rig.session_id)
+    assert deliveries.payload(typed.delivery_id)["prefer_steer"] is False
+    assert "steer_capable" not in typed.receipt() and "busy" not in typed.receipt()
+    assert deliveries.payload(voice.delivery_id)["prefer_steer"] is True
+    assert voice.receipt()["steer_capable"] is True and voice.receipt()["busy"] is True
+    claimed = deliveries.claim_next(rig.bot, claim_owner="voice-worker", steer_capable=False)
+    assert claimed.id == voice.delivery_id and claimed.status == "STEERING"
+    assert claimed.target_turn_id == rig.turn_id and turns.get_turn(voice.turn_id) is None
+    assert deliveries.get(typed.delivery_id).status == "QUEUED"
+    assert claimed.author == AuthorReference.user(rig.user)
+    steer = AsyncMock(return_value=SimpleNamespace(ok=True, persisted=True))
+    monkeypatch.setattr(chat, "steer_active_turn", steer)
+    monkeypatch.setattr("llm_bawt.inter_bot_reply_channel.delivery_reply_channel_note", lambda record: "")
+    service = SimpleNamespace(config=rig.config)
+    dispatcher = InterBotDeliveryDispatcher(service)
+    asyncio.run(dispatcher._steer(claimed))
+    sent = steer.await_args.args[1]
+    assert sent.priority == "next" and sent.turn_id == rig.turn_id
+    assert sent.session_id == rig.session_id and sent.message_id == request.user_message_id
+    assert steer.await_args.kwargs["author"] == AuthorReference.user(rig.user)
+    assert deliveries.get(voice.delivery_id).status == "DELIVERED"
+
+
+@pytest.mark.integration
+def test_voice_selected_session_is_rechecked_at_claim_not_just_receipt(rig):
+    _, deliveries, queue = _voice_queue(rig)
+    _, decision = _voice_send(rig, queue, voice_input=True, session_id=rig.session_id)
+    assert decision.receipt()["steer_capable"] is True
+    moved = str(uuid.uuid4())
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("INSERT INTO sessions (id,bot_id,user_id,status) VALUES (:id,:bot,:user,'archived')"),
+                     {"id": moved, "bot": rig.bot, "user": rig.user})
+        conn.execute(sa_text("UPDATE messages SET session_id=:session WHERE bot_id=:bot AND id=:id"),
+                     {"session": moved, "bot": rig.bot, "id": rig.message_id})
+    assert deliveries.claim_next(rig.bot, claim_owner="voice-worker", steer_capable=True) is None
+    assert deliveries.get(decision.delivery_id).status == "QUEUED"
+
+
+@pytest.mark.integration
+def test_voice_reply_observes_only_the_persisted_injections_exact_target(rig):
+    from llm_bawt.service.delivery_reply import resolve_delivery_reply
+
+    turns, deliveries, queue = _voice_queue(rig)
+    request, decision = _voice_send(rig, queue, voice_input=True, session_id=rig.session_id)
+    claimed = deliveries.claim_next(rig.bot, claim_owner="voice-worker", steer_capable=True)
+    assert claimed.target_turn_id == rig.turn_id
+    assert deliveries.mark_transport_accepted(claimed.id, claimed.claim_token)
+    deliveries.mark_delivered(claimed.id, claimed.claim_token, response_model=None, response_chars=0)
+
+    def reply():
+        return resolve_delivery_reply(deliveries, turns, decision.delivery_id, bot_id=rig.bot,
+                                      user_id=rig.user, user_message_id=request.user_message_id)
+
+    # DELIVERED without the persisted injected message is never an answer.
+    assert reply()["status"] == "UNRESOLVED"
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("""INSERT INTO messages (bot_id,id,role,content,timestamp,session_id,
+            author_entity_type,author_entity_id,interrupt_source_message_id)
+            VALUES (:bot,:message,'user','spoken request',2,:session,'user',:user,:trigger)"""),
+                     {"bot": rig.bot, "message": request.user_message_id, "session": rig.session_id,
+                      "user": rig.user, "trigger": rig.message_id})
+    assert reply()["status"] == "IN_FLIGHT"  # Do not mistake steer acceptance for a completed reply.
+    binding = resolve_delivery_reply(
+        deliveries, turns, decision.delivery_id, bot_id=rig.bot, user_id=rig.user,
+        user_message_id=request.user_message_id, include_voice_binding=True,
+    )["voice_binding"]
+    assert binding == {"turn_id": rig.turn_id, "session_id": rig.session_id,
+                       "run_request_id": "req-active",
+                       "steer_rpc_id": f"steer_{decision.delivery_id.replace('-', '_')}"}
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE turn_logs SET ended_at=now(),status='ok',response_text='exact answer' WHERE id=:id"),
+                     {"id": rig.turn_id})
+    assert reply() == {"delivery_id": decision.delivery_id, "status": "DELIVERED", "turn_id": rig.turn_id,
+                       "user_message_id": request.user_message_id, "response_text": "exact answer"}
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE messages SET interrupt_source_message_id='unrelated' WHERE bot_id=:bot AND id=:message"),
+                     {"bot": rig.bot, "message": request.user_message_id})
+    assert reply()["status"] == "UNRESOLVED"  # A mismatched anchor is not permission to replay.
+    assert turns.get_turn(decision.turn_id) is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("case", ["unsupported", "unready", "ambiguous", "reserved", "session_mismatch", "foreign_user", "idle"])
+def test_voice_receipt_and_claim_fail_closed_for_unsafe_targets(rig, case):
+    turns, deliveries, queue = _voice_queue(rig)
+    selected = rig.session_id
+    with rig.engine.begin() as conn:
+        if case == "unsupported":
+            conn.execute(sa_text("UPDATE turn_logs SET agent_steer_caps='' WHERE id=:id"), {"id": rig.turn_id})
+        elif case == "unready":
+            conn.execute(sa_text("UPDATE turn_logs SET agent_request_id=NULL WHERE id=:id"), {"id": rig.turn_id})
+        elif case == "reserved":
+            conn.execute(sa_text("UPDATE turn_logs SET status='reserved' WHERE id=:id"), {"id": rig.turn_id})
+        elif case == "foreign_user":
+            conn.execute(sa_text("UPDATE turn_logs SET user_id='other-user' WHERE id=:id"), {"id": rig.turn_id})
+        elif case == "idle":
+            conn.execute(sa_text("UPDATE turn_logs SET status='ok',ended_at=now() WHERE id=:id"), {"id": rig.turn_id})
+        elif case == "session_mismatch":
+            selected = str(uuid.uuid4())
+            conn.execute(sa_text("INSERT INTO sessions (id,bot_id,user_id,status) VALUES (:id,:bot,:user,'archived')"),
+                         {"id": selected, "bot": rig.bot, "user": rig.user})
+    if case == "ambiguous":
+        _open(turns, rig.bot)
+    _, decision = _voice_send(rig, queue, voice_input=True, session_id=selected)
+    assert decision.receipt()["steer_capable"] is False
+    assert decision.receipt()["busy"] is (case != "idle")
+    claimed = deliveries.claim_next(rig.bot, claim_owner="voice-worker", steer_capable=True)
+    if case == "idle":
+        assert claimed.id == decision.delivery_id and claimed.status == "DISPATCHING"
+    else:
+        assert claimed is None and deliveries.get(decision.delivery_id).attempt_count == 0
+        with rig.engine.begin() as conn:
+            conn.execute(sa_text("UPDATE turn_logs SET status='ok',ended_at=now() WHERE bot_id=:bot"), {"bot": rig.bot})
+        fallback = deliveries.claim_next(rig.bot, claim_owner="voice-fallback", steer_capable=True)
+        assert fallback.id == decision.delivery_id and fallback.status == "DISPATCHING"
+        assert turns.get_turn(decision.turn_id).status == "reserved"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode,gate", [("hold", "quiesce"), ("deny", "freeze")])
+def test_voice_system_hold_receipt_does_not_promise_steering(rig, mode, gate):
+    from llm_bawt.service.turn_admission import activate_hold
+    from llm_bawt.service.turn_gates import GateScope, GateSpec
+
+    _, deliveries, queue = _voice_queue(rig)
+    owner = f"test-voice-{uuid.uuid4().hex}"
+    try:
+        with rig.engine.begin() as conn:
+            activate_hold(conn, GateSpec(owner_kind="operator", owner_id=owner, mode=mode,
+                                        scope=GateScope.for_bots(rig.bot), ttl_seconds=60, reason="test"))
+        if mode == "deny":
+            from llm_bawt.service.turn_admission import SystemGateRefused
+
+            with pytest.raises(SystemGateRefused, match="system_frozen"):
+                _voice_send(rig, queue, voice_input=True)
+            return  # Preserve the existing global freeze's refusal, not a new admission policy.
+        _, decision = _voice_send(rig, queue, voice_input=True)
+        assert decision.receipt()["busy"] is True and decision.receipt()["steer_capable"] is False
+        assert decision.receipt()["wait_reason"] == {"kind": "system_hold", "gate": gate}
+        assert deliveries.claim_next(rig.bot, claim_owner="voice-worker", steer_capable=True) is None
+    finally:
+        with rig.engine.begin() as conn:
+            conn.execute(sa_text("DELETE FROM gate_members WHERE gate_id IN (SELECT id FROM system_gates WHERE owner_id=:o)"), {"o": owner})
+            conn.execute(sa_text("DELETE FROM system_gates WHERE owner_id=:o"), {"o": owner})
+
+
+@pytest.mark.integration
+def test_spoken_new_remains_ordered_reset_and_preserves_internal_sender(rig):
+    from llm_bawt.message_authorship import AuthorReference
+
+    _, deliveries, queue = _voice_queue(rig)
+    request = ChatCompletionRequest(voice_input=True, bot_id=rig.bot, user=rig.user,
+                                    messages=[ChatMessage(role="user", content="/new")])
+    request._internal_inter_bot_sender_id = "original-sender"
+    decision = queue.decide(request=request, bot_id=rig.bot, user_id=rig.user, user_prompt="/new")
+    assert deliveries.payload(decision.delivery_id)["prefer_steer"] is False
+    assert deliveries.get(decision.delivery_id).author == AuthorReference.bot("original-sender")
+    assert decision.receipt()["steer_capable"] is False
+
+
 @pytest.mark.integration
 def test_explicit_other_session_waits_durably_then_executes_its_own_binding(rig):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore

@@ -94,16 +94,21 @@ async def _wait_stream_reply(service: Any, request: ChatCompletionRequest, recei
     finally:
         if not task.done():
             task.cancel()
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    created, model = int(time.time()), _model(request)
     if reply.get("status") != "DELIVERED":
         status, detail = _reply_error(reply)
         yield _stream_error(detail, status)
         return
+    for frame in _reply_frames(request, reply.get("response_text") or ""):
+        yield frame
+
+
+def _reply_frames(request: ChatCompletionRequest, text: str):
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created, model = int(time.time()), _model(request)
     yield _data({
         "id": response_id, "object": "chat.completion.chunk", "created": created,
         "model": model, "choices": [{"index": 0, "finish_reason": None,
-                               "delta": {"role": "assistant", "content": reply.get("response_text") or ""}}],
+                               "delta": {"role": "assistant", "content": text}}],
     })
     yield _data({
         "id": response_id, "object": "chat.completion.chunk", "created": created,
@@ -189,6 +194,24 @@ async def completion_stream(
     comments), ``data`` (legacy caller keeps non-OpenAI data frames) or
     ``none`` (stock OpenAI client: such frames are dropped).
     """
+    reader = None
+    from .voice_step import VOICE_STEP_TIMEOUT_SECONDS, observe_voice_step
+
+    voice_deadline = asyncio.get_running_loop().time() + VOICE_STEP_TIMEOUT_SECONDS
+    if request.voice_input:
+        subscriber = getattr(service, "_redis_subscriber", None)
+        if subscriber is not None:
+            try:
+                # A unique cursor cannot supersede a chat tab or another call.
+                reader = subscriber.ui_stream(
+                    request.bot_id or service._default_bot,
+                    request.user or service.config.DEFAULT_USER,
+                    f"voice-step-{uuid.uuid4().hex}",
+                )
+                async with asyncio.timeout_at(voice_deadline):
+                    await reader.claim()  # Must precede admission/dispatch.
+            except Exception:
+                reader = None  # Admission still happens once; observation fails closed.
     try:
         async for event in service.chat_completion_stream(request):
             if not event.startswith("data: "):
@@ -208,8 +231,39 @@ async def completion_stream(
                     # existing UI. OpenAI clients ignore comments and observe the
                     # same admitted turn through the normal completion stream.
                     yield f": llm-bawt-admission {json.dumps(payload)}\n\n"
-                async for reply_event in _wait_stream_reply(service, request, payload):
-                    yield reply_event
+                if request.voice_input:
+                    # Route on the durable outcome, not just the advisory busy
+                    # snapshot: another admission can start before this claim.
+                    text = None
+                    busy = payload.get("busy") is True
+                    if not busy or payload.get("steer_capable") is True:
+                        deadline = voice_deadline if busy else (
+                            voice_deadline + REPLY_TIMEOUT_SECONDS - VOICE_STEP_TIMEOUT_SECONDS
+                        )
+                        observer = asyncio.create_task(observe_voice_step(
+                            service, request, payload, reader, deadline=deadline,
+                        ))
+                        try:
+                            while not observer.done():
+                                done, _ = await asyncio.wait({observer}, timeout=15.0)
+                                if not done:
+                                    yield ": waiting for voice reply\n\n"
+                            text = await observer
+                        finally:
+                            if not observer.done():
+                                observer.cancel()
+                                await asyncio.gather(observer, return_exceptions=True)
+                    if text is None:
+                        warning = {"object": "service.warning", "warnings": ["voice_step_unavailable"]}
+                        for frame in _openai_frames(_data(warning), warning, extensions):
+                            yield frame
+                        yield "data: [DONE]\n\n"
+                    else:
+                        for frame in _reply_frames(request, text):
+                            yield frame
+                else:
+                    async for reply_event in _wait_stream_reply(service, request, payload):
+                        yield reply_event
                 return  # Discard the internal receipt's [DONE].
             if payload.get("object") == "service.warning":
                 failures = [str(item) for item in payload.get("warnings", [])

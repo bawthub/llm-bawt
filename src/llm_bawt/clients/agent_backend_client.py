@@ -250,6 +250,7 @@ class AgentBackendClient(LLMClient):
         # (e.g. claude-code bridge). Merge into config so the backend can
         # pass it through in the Redis command.
         config = self._with_turn_settings(dict(self._bot_config))
+        config["ordered_steer_events"] = bool(kwargs.pop("ordered_steer_events", False))
         system_parts = []
         for msg in messages:
             if msg.role == "system":

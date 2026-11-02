@@ -518,6 +518,7 @@ class InterBotDeliveryDispatcher:
                     message_id=record.user_message_id,
                     bot_id=record.target_bot_id,
                     user_id=user_id,
+                    session_id=payload.get("session_id") if payload.get("voice_input") else None,
                     # Bot deliveries never kill running tools (TASK-934); only
                     # the user's own Send now may (TASK-1749, decided per run).
                     priority="next",

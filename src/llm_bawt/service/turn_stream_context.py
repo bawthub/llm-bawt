@@ -7,7 +7,8 @@ holder lists (``*_holder``) and the approval/await guard sets stay shared with
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import Any
 
 # TASK-286: coalesce assistant text deltas into >= this many chars before
@@ -76,3 +77,6 @@ class TurnStreamContext:
     # harnesses that support request-local MCP headers (Claude SDK today).
     task_turn_capability: str | None = None
     execution: Any = None
+    # Preserve worker text/control/tool order through asynchronous Redis writes.
+    publish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    stream_text_offset: int = 0

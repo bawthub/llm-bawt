@@ -35,6 +35,10 @@ class OrdinaryTurnDecision:
     user_id: str | None = None
     # TASK-1676: why a QUEUED row waits (``delivery_wait_reason``), else None.
     wait_reason: dict[str, Any] | None = None
+    # Advisory admission snapshot, not an acknowledgement of bridge acceptance.
+    # Absent for typed requests; false for holds, unready/unknown or unsafe runs.
+    steer_capable: bool | None = None
+    busy: bool | None = None
 
     def receipt(self) -> dict[str, Any]:
         result = {
@@ -43,6 +47,10 @@ class OrdinaryTurnDecision:
             "user_message_id": self.user_message_id,
             "assistant_message_id": self.assistant_message_id,
         }
+        if self.steer_capable is not None:
+            result["steer_capable"] = self.steer_capable
+        if self.busy is not None:
+            result["busy"] = self.busy
         if self.bot_id:
             result["bot_id"] = self.bot_id
         if self.user_id:
@@ -126,7 +134,10 @@ class OrdinaryTurnQueue:
     ) -> OrdinaryTurnDecision:
         message_id = getattr(request, "user_message_id", None)
         payload = request.model_dump(exclude_none=True)
-        payload.update(bot_id=bot_id, user=user_id, prefer_steer=False)
+        voice_input = bool(getattr(request, "voice_input", False))
+        # /new is an ordered reset, not a mid-run message, even when spoken.
+        payload.update(bot_id=bot_id, user=user_id,
+                       prefer_steer=voice_input and not is_new_command(user_prompt))
         # This server-owned field is intentionally excluded by Pydantic's public
         # model_dump, but an accepted deferred run must see the same context.
         context = getattr(request, "client_system_context", None)
@@ -143,6 +154,8 @@ class OrdinaryTurnQueue:
                 "session_id": getattr(request, "session_id", None),
                 "stream": bool(getattr(request, "stream", False)),
             }}
+            if voice_input:
+                metadata["ordinary_chat"]["voice_input"] = True
             # Preserve the exact visible command. Only a trusted claimed
             # follow-up may override the bridge's outbound message with its task.
             from .session_lifecycle.execution import NewSessionExecution
@@ -181,9 +194,23 @@ class OrdinaryTurnQueue:
                 metadata=metadata,
                 producer="ordinary",
             )
+            reason = read_wait_reason(conn, bot_id) if record.status == "QUEUED" else None
+            capable = busy = None
+            if voice_input:
+                from .steer_session import voice_steer_target_ready
+                from .turn_admission import classify_target
+
+                state = classify_target(conn, bot_id, exclude_turn_id=record.turn_id)
+                busy = not state.idle
+                capable = bool(
+                    reason and reason["kind"] == "turn_running"
+                    and payload["prefer_steer"] and record.delivery_mode != "steer_rejected"
+                    and voice_steer_target_ready(conn, state.executing, bot_id=bot_id,
+                                               user_id=user_id, session_id=payload.get("session_id"))
+                )
             return OrdinaryTurnDecision(
                 "queued", record.turn_id, record.user_message_id,
                 record.assistant_message_id, record.id, record.status,
-                bot_id=bot_id, user_id=user_id,
-                wait_reason=read_wait_reason(conn, bot_id) if record.status == "QUEUED" else None,
+                bot_id=bot_id, user_id=user_id, wait_reason=reason,
+                steer_capable=capable, busy=busy,
             )

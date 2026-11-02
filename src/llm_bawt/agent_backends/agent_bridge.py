@@ -442,15 +442,29 @@ class AgentBridgeBackend(AgentBackend):
                                     # TASK-1300: settle the steered delivery row.
                                     await _settle_bot_steer(meta, execution)
                                 if message_id and state and bot_id and user_id:
-                                    try:
-                                        await local_sub.publish_tool_event(bot_id, user_id, {
-                                            "_type": "steer_lifecycle", "bot_id": bot_id,
-                                            "user_id": user_id, "message_id": message_id,
-                                            "state": state, "origin": meta.get("origin"),
-                                            "proof": meta.get("proof"), "ts": time.time(),
-                                        })
-                                    except Exception:
-                                        logger.warning("Could not publish user steer lifecycle", exc_info=True)
+                                    # Keep the consumption barrier in the SAME queue
+                                    # as text/tools. A separate Redis publish can
+                                    # overtake previously buffered assistant text.
+                                    lifecycle = {
+                                        "event": "steer_lifecycle", "message_id": message_id,
+                                        "state": state, "origin": meta.get("origin"),
+                                        "proof": meta.get("proof"),
+                                        "run_request_id": meta.get("run_request_id"),
+                                        "steer_rpc_id": meta.get("steer_rpc_id"),
+                                    }
+                                    if config.get("ordered_steer_events"):
+                                        result_queue.put(lifecycle)
+                                    else:
+                                        # Non-worker consumers (including chat_full)
+                                        # retain their existing UI lifecycle channel.
+                                        try:
+                                            await local_sub.publish_tool_event(bot_id, user_id, {
+                                                **{k: v for k, v in lifecycle.items() if k != "event"},
+                                                "_type": "steer_lifecycle", "bot_id": bot_id,
+                                                "user_id": user_id, "ts": time.time(),
+                                            })
+                                        except Exception:
+                                            logger.warning("Could not publish user steer lifecycle", exc_info=True)
 
                             elif event.kind == AgentEventKind.UPSTREAM_STATUS:
                                 result_queue.put(upstream_status_queue_item(event))

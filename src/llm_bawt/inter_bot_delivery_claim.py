@@ -151,6 +151,13 @@ class DeliveryClaim:
                     provisional=provisional,
                 )
                 can_steer = NEXT in run_caps
+                if payload.get("voice_input"):
+                    from .service.steer_session import voice_steer_target_ready
+
+                    can_steer = can_steer and voice_steer_target_ready(
+                        conn, active, bot_id=target, user_id=payload.get("user"),
+                        session_id=payload.get("session_id"),
+                    )
                 # TASK-1749: a forced chat row interrupts a run that takes `now`;
                 # any other run is never silently `next`-steered: the row waits
                 # for that turn to end, then starts past the hold.

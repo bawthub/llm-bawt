@@ -377,6 +377,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     extra_kwargs["turn_execution"] = ctx.execution
                 if is_agent_backend and user_attachments:
                     extra_kwargs["attachments"] = user_attachments
+                if is_agent_backend:
+                    extra_kwargs["ordered_steer_events"] = True
                 if is_agent_backend and trigger_message_id:
                     # Forward the frontend user-message UUID to the bridge
                     # so every emitted tool event carries it (frontend
@@ -479,6 +481,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     if len(s) < min_chars:
                         return
                     _text_buf.clear()
+                    ctx.stream_text_offset = _text_chars[0]
                     _publish_event_direct({
                         "_type": "text_delta",
                         "turn_id": turn_log_id,
@@ -512,6 +515,17 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 for item in inner:
                     if not is_agent_backend and cancel_event.is_set():
                         break  # do not publish a post-Stop delta/tool start to Redis
+                    if isinstance(item, dict) and item.get("event") == "steer_lifecycle":
+                        _flush_text()
+                        _publish_event_direct({
+                            **{k: v for k, v in item.items() if k != "event"},
+                            "_type": "steer_lifecycle", "turn_id": turn_log_id,
+                            "bot_id": bot_id, "user_id": user_id,
+                            "text_offset": _text_chars[0], "ts": time.time(),
+                        })
+                        # A lifecycle control frame is not model output and
+                        # must not confirm a prompt pin or reap other turns.
+                        continue
                     # CONFIRMED turn start. This first item is the backend/
                     # SDK's first real output (native first chunk, or an
                     # agent-bridge ASSISTANT_DELTA/tool event) — proof the
