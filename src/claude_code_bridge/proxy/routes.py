@@ -38,6 +38,7 @@ from .request_context import (
     valid_skill_names,
 )
 from .transport_policy import normalize_responses_transport
+from .repetition_breaker import RepetitionBreaker, RepetitionLoopError
 from .tool_guard import ToolCallGuard, UnsafeToolCallError
 
 # Seconds of upstream silence before the proxy injects a keepalive ping.
@@ -167,6 +168,7 @@ async def _proxy_iter(
     status_code: int | None = None
     lease = None
     guard = ToolCallGuard()
+    breaker = RepetitionBreaker()
     adapter_stream = heartbeat_stream = None
     try:
         if budgets is not None and fingerprint is not None:
@@ -222,6 +224,8 @@ async def _proxy_iter(
                     saw_error = True
                 if b"event: message_stop" in event_lines:
                     saw_message_stop = True
+                # Stop loops before the guard can release a held tool suffix.
+                breaker.feed(frame)
                 for safe_chunk in guard.feed(frame, tool_start=tool_start):
                     yield safe_chunk
             if len(pending) > _MAX_UNFRAMED_BYTES:
@@ -260,7 +264,11 @@ async def _proxy_iter(
             lease.clear_auth_failure()
         OBSERVABILITY.record_error(provider, status_code)
         context.report_status({"state": "failed", "provider": provider})
-        logger.warning("proxy_tool_rejected request_id=%s reason=%s", context.request_id, e)
+        logger.warning(
+            "%s request_id=%s provider=%s model=%s reason=%s",
+            "proxy_repetition_break" if isinstance(e, RepetitionLoopError) else "proxy_tool_rejected",
+            context.request_id, provider, upstream_model, e,
+        )
         yield final_error_frame("api_error", str(e))
     except RuntimeError as e:
         if lease is not None:

@@ -14,6 +14,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from .repetition_breaker import RepetitionBreaker, RepetitionLoopError
 from .stream import _sse
 from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
 
@@ -132,6 +133,7 @@ async def chat_completions_to_anthropic_sse(
     next_index = 0
     open_block: tuple[str, int] | None = None
     tool_calls: dict[int, dict[str, str]] = {}
+    loop_breaker = RepetitionBreaker()
     required_by_tool = _required_args(tool_schemas)
     finish_reason: str | None = None
     prompt_tokens = completion_tokens = cached_tokens = 0
@@ -270,7 +272,11 @@ async def chat_completions_to_anthropic_sse(
                     if function.get("name"):
                         call["name"] = str(function["name"])
                     if function.get("arguments"):
-                        call["arguments"] += str(function["arguments"])
+                        piece = str(function["arguments"])
+                        # Arguments are buffered until finish; watch them so a
+                        # loop stops mid-stream rather than at max_tokens.
+                        loop_breaker.observe(tool_index, piece, kind="tool_use")
+                        call["arguments"] += piece
 
         async for frame in close_open():
             yield frame
@@ -341,6 +347,8 @@ async def chat_completions_to_anthropic_sse(
             },
         )
         yield _sse("message_stop", {"type": "message_stop"})
+    except RepetitionLoopError:
+        raise  # a model failure, not a translator bug; the route reports it
     except Exception as exc:  # noqa: BLE001
         logger.exception("Chat Completions stream translation failed")
         async for frame in close_open():
