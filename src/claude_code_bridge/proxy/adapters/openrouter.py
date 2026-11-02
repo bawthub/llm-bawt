@@ -24,6 +24,7 @@ mirror is a zero-cost fallback matching the Moonshot precedent.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -34,6 +35,8 @@ import httpx
 
 from agent_bridge import bridge_token
 
+from ..openrouter_routing import normalize_openrouter_provider
+from ..request_context import ProxyRequestContext
 from .anthropic_passthrough import AnthropicPassthroughAdapter
 
 logger = logging.getLogger(__name__)
@@ -116,3 +119,28 @@ class OpenRouterAdapter(AnthropicPassthroughAdapter):
             "Authorization": f"Bearer {api_key}",
             "x-api-key": api_key,
         }
+
+    def _apply_request_policy(
+        self,
+        body: dict,
+        upstream_model: str,
+        context: ProxyRequestContext | None,
+    ) -> None:
+        """Apply the catalog's provider-routing preference (TASK-1915).
+
+        Absent preference -> body untouched (OpenRouter's default routing).
+        The context value already came through the shared normalizer; it is
+        normalized again here so only the supported subset is ever sent.
+        """
+        routing = normalize_openrouter_provider(
+            context.openrouter_provider if context is not None else None
+        )
+        if routing is None:
+            return
+        body["provider"] = routing
+        logger.info(
+            "OpenRouter provider routing request_id=%s model=%s provider=%s",
+            context.request_id if context is not None else "unknown",
+            upstream_model,
+            json.dumps(routing, separators=(",", ":"), sort_keys=True),
+        )

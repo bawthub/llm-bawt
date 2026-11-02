@@ -61,6 +61,7 @@ class CommandPublisherMixin:
         context_window: int | None = None,
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
+        openrouter_provider: Mapping | None = None,
         codex_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
         question_answer_wait_seconds: int | None = None,
@@ -133,6 +134,10 @@ class CommandPublisherMixin:
             fields["compact_threshold"] = str(compact_threshold)
         if responses_transport:
             fields["responses_transport"] = responses_transport
+        if openrouter_provider:  # TASK-1915: app-normalized; bridge re-validates
+            fields["openrouter_provider"] = json.dumps(
+                dict(openrouter_provider), separators=(",", ":"), sort_keys=True
+            )
         if codex_transport:  # TASK-1243: codex exec or app-server
             fields["codex_transport"] = codex_transport
         if mcp_tool_timeout_ms is not None and mcp_tool_timeout_ms > 0:

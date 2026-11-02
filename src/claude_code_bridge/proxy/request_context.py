@@ -16,10 +16,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .openrouter_routing import serialize_openrouter_provider
+
 CONVERSATION_HEADER = "X-LLM-Bawt-Conversation-ID"
 BOT_HEADER = "X-LLM-Bawt-Bot-ID"
 REQUEST_HEADER = "X-LLM-Bawt-Request-ID"
 RESPONSES_TRANSPORT_HEADER = "X-LLM-Bawt-Responses-Transport"
+OPENROUTER_PROVIDER_HEADER = "X-LLM-Bawt-OpenRouter-Provider"
 SKILL_NAMES_HEADER = "X-LLM-Bawt-Skill-Names"
 
 _OPAQUE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -91,6 +94,8 @@ class ProxyRequestContext:
     bot_id: str | None = None
     conversation_id: str | None = None
     responses_transport: str | None = None
+    # TASK-1915: canonical OpenRouter ``provider`` preference (catalog-owned).
+    openrouter_provider: dict[str, Any] | None = None
     skill_names: tuple[str, ...] = ()
     started_at: float = 0.0
     account_hash: str = "default"
@@ -159,6 +164,11 @@ def custom_header_env(context: ProxyRequestContext) -> str:
         lines.append(
             f"{RESPONSES_TRANSPORT_HEADER}: {context.responses_transport}"
         )
+    if context.openrouter_provider:
+        # Compact JSON; the charset-restricted canonical form has no newlines.
+        routing = serialize_openrouter_provider(context.openrouter_provider)
+        if routing:
+            lines.append(f"{OPENROUTER_PROVIDER_HEADER}: {routing}")
     if context.skill_names:
         names = [name for name in context.skill_names if _SKILL_NAME_RE.fullmatch(name)]
         if names:

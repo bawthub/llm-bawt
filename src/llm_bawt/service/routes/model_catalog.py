@@ -9,6 +9,12 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
+from claude_code_bridge.proxy.openrouter_routing import (
+    MAX_PROVIDER_NAME_CHARS,
+    MAX_PROVIDER_NAMES,
+    OPENROUTER_PROVIDER_KEYS,
+    normalize_openrouter_provider,
+)
 from claude_code_bridge.proxy.transport_policy import (
     VALID_RESPONSES_TRANSPORTS,
     normalize_responses_transport,
@@ -99,6 +105,22 @@ class EndpointWrite(BaseModel):
                     f"{choices}"
                 )
             normalized["responses_transport"] = canonical_transport
+
+        # TASK-1915: OpenRouter provider-routing preference (order/only/
+        # ignore/allow_fallbacks). Stored canonical; unknown keys dropped.
+        routing = normalized.get("openrouter_provider")
+        if routing is not None:
+            canonical_routing = normalize_openrouter_provider(routing)
+            if canonical_routing is None:
+                raise ValueError(
+                    "serving_config.openrouter_provider must be an object with "
+                    f"at least one of: {', '.join(OPENROUTER_PROVIDER_KEYS)}; "
+                    "order/only/ignore are lists of at most "
+                    f"{MAX_PROVIDER_NAMES} provider names (1-"
+                    f"{MAX_PROVIDER_NAME_CHARS} chars of letters, digits, "
+                    "space, '.', '-', '_', '/') and allow_fallbacks is a boolean"
+                )
+            normalized["openrouter_provider"] = canonical_routing
         return normalized
 
 

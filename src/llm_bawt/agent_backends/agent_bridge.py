@@ -343,6 +343,11 @@ class AgentBridgeBackend(AgentBackend):
                                 str(config.get("responses_transport")).strip()
                                 if config.get("responses_transport") else None
                             ),
+                            openrouter_provider=(
+                                config.get("openrouter_provider")
+                                if isinstance(config.get("openrouter_provider"), dict)
+                                else None
+                            ),
                             codex_transport=(
                                 str(config.get("codex_transport")).strip()
                                 if config.get("codex_transport") else None
