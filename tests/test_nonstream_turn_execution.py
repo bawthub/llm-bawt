@@ -109,16 +109,18 @@ def _isolate(monkeypatch):
 
 
 @pytest.mark.parametrize("stream,publish_fails", [(True, False), (False, False), (False, True)])
-def test_resumption_event_is_after_accepted_binding_and_user_anchor(monkeypatch, _isolate, stream, publish_fails):
+@pytest.mark.parametrize("explicit", [True, False], ids=["explicit-archive", "implicit-return"])
+def test_resumption_event_is_after_accepted_binding_and_user_anchor(monkeypatch, _isolate, stream, publish_fails,
+                                                                   explicit):
     import json
     from llm_bawt.service.turn_stream_worker import TurnStreamWorker
 
     order = []
     receipt = {}
     service = _service(Mock(return_value=("answer", "", [])))
-    service._bind_agent_thread.return_value = {
-        "thread_session_id": "old-thread", "explicit_thread": True,
-    }
+    binding = {"thread_session_id": "old-thread", "explicit_thread": explicit}
+    service._bind_agent_thread.return_value = binding
+    service._resolve_active_thread_binding.return_value = binding
 
     def accept(**kwargs):
         assert kwargs["record_resumption"] is True
@@ -148,7 +150,8 @@ def test_resumption_event_is_after_accepted_binding_and_user_anchor(monkeypatch,
     monkeypatch.setattr("llm_bawt.service.chat_streaming.ToolEventCoordinator", Mock())
     monkeypatch.setattr("llm_bawt.service.chat_streaming.prepare_stream_request_attachments",
                         AsyncMock(return_value=("do the task", [], [], None)))
-    request = _claimed(_request().model_copy(update={"stream": stream, "session_id": "old-thread"}))
+    request = _claimed(_request().model_copy(update={"stream": stream,
+                                                     "session_id": "old-thread" if explicit else None}))
 
     async def run():
         if not stream:

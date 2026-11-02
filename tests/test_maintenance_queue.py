@@ -16,6 +16,7 @@ from llm_bawt.maintenance_delivery import MaintenanceBarrier
 from llm_bawt.service.maintenance_queue import MaintenanceQueue
 from llm_bawt.service.routes.chat import ChatSteerRequest, steer_active_turn
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 
 
 @pytest.mark.parametrize("prompt,expected", [
@@ -221,9 +222,9 @@ def test_existing_accepted_or_ambiguous_work_keeps_recovery_path(rig, mode, acce
 
 @pytest.mark.parametrize("case,status", [
     ("queue_unavailable", 503), ("unsupported_backend", 409),
-    ("missing_source_session", 503), ("invalid_uuid", 400), ("empty_text", 422),
+    ("missing_source_session", 409), ("invalid_uuid", 400), ("empty_text", 422),
 ])
-def test_unsupported_user_submission_fails_visibly_before_acceptance(monkeypatch, case, status):
+def test_unsupported_user_submission_fails_visibly_before_acceptance(monkeypatch, steer_store_factory, case, status):
     from fastapi import HTTPException
 
     store = SimpleNamespace(engine=None if case == "queue_unavailable" else True, enqueue=Mock())
@@ -236,7 +237,11 @@ def test_unsupported_user_submission_fails_visibly_before_acceptance(monkeypatch
             "unsupported" if case == "unsupported_backend" else "claude-code"))))
     request = SimpleNamespace(message="  " if case == "empty_text" else "keep this text",
                               message_id="bad" if case == "invalid_uuid" else str(uuid.uuid4()))
-    turn = SimpleNamespace(bot_id="fixture", user_id="user", trigger_message_id="trigger")
+    turn = SimpleNamespace(id="source", bot_id="fixture", user_id="user", trigger_message_id="trigger")
+    service._turn_log_store = steer_store_factory(turn, "original")
+    if case == "missing_source_session":
+        with service._turn_log_store.engine.begin() as conn:
+            conn.exec_driver_sql("DELETE FROM messages")
     with pytest.raises(HTTPException) as error:
         asyncio.run(MaintenanceQueue(service).enqueue_user(request, turn))
     assert error.value.status_code == status
@@ -247,7 +252,7 @@ def test_unsupported_user_submission_fails_visibly_before_acceptance(monkeypatch
 @pytest.mark.parametrize("priority", ["now", "next"])
 @pytest.mark.parametrize("history_fails", [False, True])
 @pytest.mark.parametrize("prompt,message", [("/compact", "go ahead\nKeep IDs"), ("normal work", "/compact\nhuge summary  ")])
-def test_user_route_preserves_uuid_session_bytes_and_retry(monkeypatch, priority, history_fails, prompt, message):
+def test_user_route_preserves_uuid_session_bytes_and_retry(monkeypatch, steer_store_factory, priority, history_fails, prompt, message):
     payloads, records, messages = {}, {}, {}
     original_id = str(uuid.uuid4())
     turn = SimpleNamespace(id="source-turn", bot_id="fixture", user_id="user", user_prompt=prompt,
@@ -268,7 +273,7 @@ def test_user_route_preserves_uuid_session_bytes_and_retry(monkeypatch, priority
     store = SimpleNamespace(engine=True, enqueue=Mock(side_effect=enqueue), payload=payloads.get)
     dispatcher = SimpleNamespace(store=store, wake=Mock(), _emit=AsyncMock())
     service = SimpleNamespace(_inter_bot_dispatcher=dispatcher, config=None,
-                              _turn_log_store=SimpleNamespace(get_turn=lambda _: turn),
+                              _turn_log_store=steer_store_factory(turn, "original-session"),
                               get_memory_client=lambda *a: client)
     monkeypatch.setattr("llm_bawt.bots.BotManager", lambda _: SimpleNamespace(
         get_bot=lambda _: SimpleNamespace(agent_backend="claude-code")))

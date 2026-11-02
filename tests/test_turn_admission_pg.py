@@ -154,6 +154,106 @@ def test_ordinary_agent_starts_enqueue_atomically_and_claim_fifo(pg_turns):
 
 
 @pytest.mark.integration
+def test_explicit_other_session_waits_durably_then_executes_its_own_binding(rig):
+    from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
+    from llm_bawt.service import session_resumption as receipts
+    from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
+    from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue
+    from llm_bawt.service.session_lifecycle.admission import accept_session_binding
+    from llm_bawt.service.steer_session import owned_turn_sessions
+    from llm_bawt.service.turn_logs import TurnLogStore
+
+    turns = TurnLogStore(rig.config)
+    deliveries = InterBotDeliveryStore(rig.config)
+    selected = str(uuid.uuid4())
+    receipts.ensure_schema(rig.engine)
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("""UPDATE turn_logs SET ended_at=NULL,status='streaming',
+            agent_session_key=:key,agent_request_id='req-original' WHERE id=:id"""),
+                     {"id": rig.turn_id, "key": f"{rig.bot}:{rig.user}"})
+        conn.execute(sa_text("""INSERT INTO sessions (id,bot_id,user_id,status)
+            VALUES (:session,:bot,:user,'archived')"""),
+                     {"session": selected, "bot": rig.bot, "user": rig.user})
+        conn.execute(sa_text("""INSERT INTO messages (bot_id,id,role,content,timestamp,session_id)
+            VALUES (:bot,:id,'assistant','earlier selected conversation',1,:session)"""),
+                     {"bot": rig.bot, "id": str(uuid.uuid4()), "session": selected})
+    request = ChatCompletionRequest(
+        bot_id=rig.bot, user=rig.user, session_id=selected, stream=True,
+        messages=[ChatMessage(role="user", content="continue selected conversation")],
+        user_message_id=str(uuid.uuid4()), assistant_message_id=str(uuid.uuid4()),
+    )
+    decision = OrdinaryTurnQueue(turns, deliveries).decide(
+        request=request, bot_id=rig.bot, user_id=rig.user, user_prompt="continue selected conversation",
+    )
+    assert decision.state == "queued" and turns.get_turn(decision.turn_id) is None
+    assert owned_turn_sessions(rig.engine, [turns.get_turn(rig.turn_id)]) == {rig.turn_id: rig.session_id}
+    # Enqueue/navigation is not accepted execution and cannot move the pointer
+    # or create a RETURN receipt. A fresh store must keep exactly the same intent.
+    restarted = InterBotDeliveryStore(rig.config)
+    payload = restarted.payload(decision.delivery_id)
+    assert payload["session_id"] == selected and payload["prefer_steer"] is False
+    assert payload["user_message_id"] == request.user_message_id
+    assert restarted.get(decision.delivery_id).metadata["ordinary_chat"]["session_id"] == selected
+    assert restarted.claim_next(rig.bot, claim_owner="waiting", steer_capable=True) is None
+    waiting = restarted.get(decision.delivery_id)
+    assert waiting.status == "QUEUED" and waiting.attempt_count == 0
+    assert turns.get_turn(decision.turn_id) is None
+    with rig.engine.begin() as conn:
+        assert conn.execute(sa_text("SELECT last_session_id FROM bot_profiles WHERE slug=:bot"),
+                            {"bot": rig.bot}).scalar_one() == rig.session_id
+        assert conn.execute(sa_text("SELECT count(*) FROM session_resumption_receipts WHERE bot_id=:bot"),
+                            {"bot": rig.bot}).scalar_one() == 0
+        conn.execute(sa_text("UPDATE turn_logs SET status='ok',ended_at=now(),response_text='original answer' WHERE id=:id"),
+                     {"id": rig.turn_id})
+    claimed = restarted.claim_next(rig.bot, claim_owner="after-original", steer_capable=True)
+    assert claimed.id == decision.delivery_id and claimed.status == "DISPATCHING"
+    assert turns.get_turn(claimed.turn_id).status == "reserved"
+    accepted = []
+
+    async def execute(queued_request):
+        # Keep the real dispatcher deserialization, claim and accepted-binding
+        # transaction; replace only provider execution with deterministic output.
+        assert queued_request.session_id == selected
+        assert queued_request.user_message_id == request.user_message_id
+        with rig.engine.begin() as conn:
+            conn.execute(sa_text("UPDATE turn_logs SET status='streaming',trigger_message_id=:message WHERE id=:id"),
+                         {"id": claimed.turn_id, "message": queued_request.user_message_id})
+        accepted.append(accept_session_binding(
+            rig.engine, turn_id=claimed.turn_id, bot_id=rig.bot, user_id=rig.user,
+            session_id=queued_request.session_id, record_resumption=True,
+        ))
+        with rig.engine.begin() as conn:
+            conn.execute(sa_text("""INSERT INTO messages (bot_id,id,role,content,timestamp,session_id)
+                VALUES (:bot,:id,'user','continue selected conversation',2,:session)"""),
+                         {"bot": rig.bot, "id": queued_request.user_message_id, "session": queued_request.session_id})
+            conn.execute(sa_text("UPDATE turn_logs SET status='ok',ended_at=now(),response_text='selected answer' WHERE id=:id"),
+                         {"id": claimed.turn_id})
+        yield "data: [DONE]\n\n"
+
+    dispatcher = InterBotDeliveryDispatcher.__new__(InterBotDeliveryDispatcher)
+    dispatcher.store = restarted
+    dispatcher.service = SimpleNamespace(_turn_log_store=turns, chat_completion_stream=execute)
+    dispatcher._heartbeat = AsyncMock()
+    dispatcher._await_turn_finalized = AsyncMock()
+    dispatcher._finish_delivered = AsyncMock()
+    asyncio.run(dispatcher._dispatch(claimed))
+    assert restarted.get(claimed.id).status == "DELIVERED"
+    assert accepted[0]["session_id"] == selected and accepted[0]["previous_session_id"] == rig.session_id
+    assert owned_turn_sessions(rig.engine, [turns.get_turn(rig.turn_id), turns.get_turn(claimed.turn_id)]) == {
+        rig.turn_id: rig.session_id, claimed.turn_id: selected,
+    }
+    assert turns.get_turn(rig.turn_id).response_text == "original answer"
+    assert receipts.for_messages(rig.engine, bot_id=rig.bot, user_id=rig.user,
+                                 messages=[{"id": request.user_message_id, "role": "user"}]) == {
+        request.user_message_id: accepted[0],
+    }
+    with rig.engine.connect() as conn:
+        statuses = dict(conn.execute(sa_text("SELECT id,status FROM sessions WHERE bot_id=:bot"),
+                                     {"bot": rig.bot}).all())
+    assert statuses == {rig.session_id: "active", selected: "archived"}
+
+
+@pytest.mark.integration
 def test_idle_http_ack_survives_dispatcher_crash_before_bridge_send(pg_turns):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
     from llm_bawt.service.ordinary_turn_queue import OrdinaryTurnQueue

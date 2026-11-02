@@ -20,18 +20,19 @@ from llm_bawt.service import system_gate_admission as gates
 from llm_bawt.service.leader_side_pumps import CONTROL_RECHECK_CAP_SECONDS, LeaderSidePumps
 from llm_bawt.service.system_gate_admission import ControlGrantRefused, ControlTarget
 from llm_bawt.steer_capabilities import ALL_STEER_CAPS, NEXT
+from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 
 GRANT = DeliveryControlGrant(bot_id="bot", turn_id="turn", delivery_id="d1", claim_token="tok")
 PINNED = ControlTarget(request_id="req-pinned", backend="claude-code", session_key="sess-pinned",
                        steer_caps=ALL_STEER_CAPS)
 
 
-def _service():
+def _service(steer_store_factory):
     turn = SimpleNamespace(id="turn", bot_id="bot", user_id="user", user_prompt="work", ended_at=None,
                            status="streaming", agent_session_key="sess-current",
-                           agent_request_id="req-current", trigger_message_id=None)
-    engine = object()
-    store = SimpleNamespace(get_turn=lambda _id: turn, engine=engine)
+                           agent_request_id="req-current", trigger_message_id="trigger")
+    store = steer_store_factory(turn)
+    engine = store.engine
     return SimpleNamespace(_turn_log_store=store, config=None, get_memory_client=lambda *_a: None), engine
 
 
@@ -62,7 +63,7 @@ def bridge(monkeypatch):
 # --- steer_active_turn's control path -------------------------------------
 
 
-def test_a_control_steer_addresses_only_the_pinned_run(monkeypatch, bridge):
+def test_a_control_steer_addresses_only_the_pinned_run(monkeypatch, bridge, steer_store_factory):
     from llm_bawt.service.routes.chat import steer_active_turn
 
     asked = []
@@ -73,7 +74,7 @@ def test_a_control_steer_addresses_only_the_pinned_run(monkeypatch, bridge):
 
     monkeypatch.setattr(gates, "check_steer", check)
     monkeypatch.setattr("llm_bawt.bots.BotManager", lambda *_a: pytest.fail("no current-backend lookup"))
-    service, engine = _service()
+    service, engine = _service(steer_store_factory)
     response = asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q", control=GRANT))
 
     assert response.ok and asked == [(engine, "bot", "turn", GRANT)]
@@ -83,23 +84,23 @@ def test_a_control_steer_addresses_only_the_pinned_run(monkeypatch, bridge):
     assert (sent["request_id"], sent["origin"], sent["priority"]) == ("steer-q", "system", "next")
 
 
-def test_a_control_steer_to_a_pinned_run_on_another_backend_is_refused(monkeypatch, bridge):
+def test_a_control_steer_to_a_pinned_run_on_another_backend_is_refused(monkeypatch, bridge, steer_store_factory):
     from llm_bawt.service.routes.chat import steer_active_turn
 
     monkeypatch.setattr(gates, "check_steer", lambda *_a, **_k: ControlTarget("req", "codex", "sess"))
-    service, _ = _service()
+    service, _ = _service(steer_store_factory)
     with pytest.raises(HTTPException) as raised:
         asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q", control=GRANT))
     assert raised.value.status_code == 409 and bridge.sent == []
     assert raised.value.detail == "steer_unsupported_transport"
 
 
-def test_a_control_steer_follows_the_pinned_caps_not_the_backend_name(monkeypatch, bridge):
+def test_a_control_steer_follows_the_pinned_caps_not_the_backend_name(monkeypatch, bridge, steer_store_factory):
     """TASK-1243: a run pinned with ``next`` steers on any backend; one pinned
     without it is refused even on claude-code."""
     from llm_bawt.service.routes.chat import steer_active_turn
 
-    service, _ = _service()
+    service, _ = _service(steer_store_factory)
     capable = ControlTarget("req", "codex", "sess", steer_caps=frozenset({NEXT}))
     monkeypatch.setattr(gates, "check_steer", lambda *_a, **_k: capable)
     asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q", control=GRANT))
@@ -113,30 +114,30 @@ def test_a_control_steer_follows_the_pinned_caps_not_the_backend_name(monkeypatc
     assert len(bridge.sent) == 1
 
 
-def test_a_control_steer_needs_its_dedupe_id(monkeypatch, bridge):
+def test_a_control_steer_needs_its_dedupe_id(monkeypatch, bridge, steer_store_factory):
     from llm_bawt.service.routes.chat import steer_active_turn
 
     monkeypatch.setattr(gates, "check_steer", lambda *_a, **_k: pytest.fail("refused before the gate"))
-    service, _ = _service()
+    service, _ = _service(steer_store_factory)
     with pytest.raises(HTTPException) as raised:
         asyncio.run(steer_active_turn(service, _request(), control=GRANT))
     assert raised.value.status_code == 409 and bridge.sent == []
 
 
-def test_a_refused_grant_never_reaches_the_bridge(monkeypatch, bridge):
+def test_a_refused_grant_never_reaches_the_bridge(monkeypatch, bridge, steer_store_factory):
     from llm_bawt.service.routes.chat import steer_active_turn
 
     def check(*_a, grant=None, **_k):
         raise ControlGrantRefused(grant)
 
     monkeypatch.setattr(gates, "check_steer", check)
-    service, _ = _service()
+    service, _ = _service(steer_store_factory)
     with pytest.raises(ControlGrantRefused):
         asyncio.run(steer_active_turn(service, _request(), steer_request_id="steer-q", control=GRANT))
     assert bridge.sent == []
 
 
-def test_the_public_route_carries_no_grant(monkeypatch, bridge):
+def test_the_public_route_carries_no_grant(monkeypatch, bridge, steer_store_factory):
     from llm_bawt.service.routes import chat
 
     assert "control" not in chat.ChatSteerRequest.model_fields
@@ -148,7 +149,7 @@ def test_the_public_route_carries_no_grant(monkeypatch, bridge):
     monkeypatch.setattr(gates, "check_steer", check)
     monkeypatch.setattr("llm_bawt.bots.BotManager",
                         lambda *_a: SimpleNamespace(get_bot=lambda _b: SimpleNamespace(agent_backend="claude-code")))
-    service, _ = _service()
+    service, _ = _service(steer_store_factory)
     monkeypatch.setattr(chat, "get_service", lambda: service)
     asyncio.run(chat.chat_steer(_request()))
     assert asked == ["turn"]

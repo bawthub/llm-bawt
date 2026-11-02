@@ -82,7 +82,7 @@ def test_same_prompt_cannot_rebind_receipt_identity(db):
     assert pointer(db) == "old" and len(stored(db)) == 1
 
 
-@pytest.mark.parametrize("kind", ["navigation", "unscoped", "null", "unchanged", "empty", "only_current_prompt", "wrong_owner", "reset"])
+@pytest.mark.parametrize("kind", ["navigation", "null", "unchanged", "empty", "only_current_prompt", "wrong_owner", "reset"])
 def test_no_false_resumption_markers(db, kind):
     with db.begin() as conn:
         if kind == "null":
@@ -96,7 +96,7 @@ def test_no_false_resumption_markers(db, kind):
             conn.exec_driver_sql("INSERT INTO messages VALUES ('prompt','fixture','old','user')")
     if kind != "navigation":
         assert accept(db, session_id="empty" if kind == "empty" else "old",
-                      record_resumption=kind not in {"unscoped", "reset"}) is None
+                      record_resumption=kind != "reset") is None
     assert stored(db) == []
 
 
@@ -133,6 +133,37 @@ def test_switch_away_and_back_is_a_distinct_prompt_receipt(db):
     second = accept(db, turn_id="turn2")
     assert first["turn_id"] == "turn" and second["turn_id"] == "turn2"
     assert len(stored(db)) == 2
+
+
+def test_default_B_explicit_A_default_B_live_receipts_survive_reload(db):
+    # B is already the status-active/default; accepting A never changes that
+    # status. Returning to B is an accepted transition even with no explicit ID.
+    with db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('B-prior','fixture','current','assistant')")
+    away = accept(db)
+    assert away["previous_session_id"] == "current" and away["session_id"] == "old"
+    with db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('prompt','fixture','old','user')")
+        conn.exec_driver_sql("UPDATE turn_logs SET ended_at=2,status='completed'")
+        conn.exec_driver_sql("INSERT INTO turn_logs VALUES ('return','fixture','owner',2,NULL,'streaming','return-prompt')")
+    back = accept(db, turn_id="return", session_id="current")
+    assert back["previous_session_id"] == "old" and back["session_id"] == "current"
+    wire = receipts.event(back, bot_id="fixture", user_id="owner", trigger_message_id="return-prompt")
+    assert wire["session_resumption"] == back and wire["session_id"] == "current"
+    assert accept(db, turn_id="return", session_id="current") == back  # stable retry
+    with db.begin() as conn:
+        conn.exec_driver_sql("INSERT INTO messages VALUES ('return-prompt','fixture','current','user')")
+        conn.exec_driver_sql("UPDATE turn_logs SET ended_at=3,status='completed' WHERE id='return'")
+        conn.exec_driver_sql("INSERT INTO turn_logs VALUES ('again','fixture','owner',3,NULL,'streaming','again-prompt')")
+    assert accept(db, turn_id="again", session_id="current") is None
+    assert len(stored(db)) == 2
+    with db.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE turn_logs")
+        assert conn.exec_driver_sql("SELECT status FROM sessions WHERE id='current'").scalar_one() == "active"
+        assert conn.exec_driver_sql("SELECT status FROM sessions WHERE id='old'").scalar_one() == "archived"
+    assert receipts.for_messages(db, bot_id="fixture", user_id="owner", messages=[
+        {"id": "prompt", "role": "user"}, {"id": "return-prompt", "role": "user"},
+    ]) == {"prompt": away, "return-prompt": back}
 
 
 def test_history_is_exact_bot_message_session_and_owner_scoped(db):

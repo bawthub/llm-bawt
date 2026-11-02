@@ -37,10 +37,13 @@ class MaintenanceQueue:
             message_id = str(uuid.UUID(request.message_id))
         except ValueError as exc:
             raise HTTPException(400, "Maintenance message requires a UUID") from exc
+        from .steer_session import require_steer_session, revalidate_steer_target
+
+        session_id = await asyncio.to_thread(require_steer_session, self.service, request, turn)
         client = self.service.get_memory_client(turn.bot_id, turn.user_id)
-        trigger = await asyncio.to_thread(client.get_message_by_id, turn.trigger_message_id) if client else None
-        if not isinstance(trigger, dict) or not trigger.get("session_id"):
-            raise HTTPException(503, "Maintenance source session unavailable; message was not accepted")
+        await asyncio.to_thread(
+            revalidate_steer_target, self.service, request, turn, session_id, allow_ended=True,
+        )
         metadata = {"maintenance_user_queue": True}
         if is_compact_command(turn.user_prompt):
             metadata["maintenance_barrier"] = {"turn_id": turn.id, "published": False}
@@ -52,7 +55,7 @@ class MaintenanceQueue:
                 idempotency_key=f"maintenance-user:{turn.id}:{message_id}",
                 payload={
                     "bot_id": turn.bot_id, "user": turn.user_id,
-                    "session_id": str(trigger["session_id"]),
+                    "session_id": session_id,
                     "messages": [{"role": "user", "content": request.message}],
                     "prefer_steer": False, "stream": True,
                 },
@@ -67,7 +70,7 @@ class MaintenanceQueue:
             await asyncio.to_thread(
                 client.add_message, "user",
                 self.store.payload(record.id)["messages"][-1]["content"],
-                str(trigger["session_id"]), None, record.user_message_id,
+                session_id, None, record.user_message_id,
                 None, None, "user", turn.user_id,
             )
             persisted = True
@@ -80,7 +83,7 @@ class MaintenanceQueue:
         return {
             "ok": True, "detail": "queued_after_maintenance", "queued": True,
             "turn_id": record.turn_id, "message_id": record.user_message_id,
-            "delivery_id": record.id, "persisted": persisted,
+            "delivery_id": record.id, "persisted": persisted, "session_id": session_id,
             "can_escalate": False, "can_cancel": False,
         }
 

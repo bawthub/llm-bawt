@@ -54,9 +54,10 @@ def payload(row) -> dict:
 
 def record(conn, *, bot_id: str, user_id: str, turn_id: str,
            trigger_message_id: str | None, session_id: str) -> dict | None:
-    """Called only for an explicit existing binding, under the admission lock.
+    """Called for an accepted ordinary binding, under the admission lock.
 
-    Verify real prior conversation rows, not just a selected/requested session.
+    Explicit archived resumes and implicit returns to an existing default are
+    both transitions. Verify prior conversation rows, not merely a requested session.
     The caller commits this receipt together with BotSessionState.accept.
     """
     if not trigger_message_id:

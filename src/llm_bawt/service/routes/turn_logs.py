@@ -378,6 +378,16 @@ def list_turn_logs(
     # TASK-1074: mid-turn joiners get the current transient phase (never stored).
     live_phases = getattr(service, "_live_turn_phases", None)
     steer_caps_by_turn = _in_flight_steer_caps(service, rows)
+    # Enrich, never filter: another-session busy work must not look idle.
+    from ..steer_session import owned_turn_sessions
+
+    try:
+        active_sessions = owned_turn_sessions(
+            store.engine, [row for row in rows if getattr(row, "ended_at", None) is None],
+        )
+    except Exception:
+        log.warning("Active turn durable sessions unavailable", exc_info=True)
+        active_sessions = {}  # unknown session is fail-closed at submit, not idle
     items = []
     for row in rows:
         tool_call_count = live_tool_counts.get(row.id, 0)
@@ -406,6 +416,7 @@ def list_turn_logs(
                 agent_session_key=getattr(row, "agent_session_key", None),
                 agent_request_id=getattr(row, "agent_request_id", None),
                 trigger_message_id=getattr(row, "trigger_message_id", None),
+                session_id=active_sessions.get(row.id),
                 assistant_message_id=getattr(row, "assistant_message_id", None),
                 token_usage=_parse_token_usage(getattr(row, "token_usage_json", None)),
                 end_reason=getattr(row, "end_reason", None),

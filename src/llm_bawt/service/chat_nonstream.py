@@ -500,8 +500,7 @@ class ChatNonStreamMixin:
                             resumption = self._turn_log_store.accept_session_binding(
                                 turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
                                 session_id=_final_sid, admission_claim=admission_claim,
-                                record_resumption=bool(_final_binding.get("explicit_thread"))
-                                    and not is_new_command(user_prompt),
+                                record_resumption=not is_new_command(user_prompt),
                             )
                             if isinstance(resumption, dict):
                                 from .session_resumption import event as resumption_event

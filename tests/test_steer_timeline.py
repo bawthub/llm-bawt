@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from llm_bawt.entity_presentation import EntityPresentationResolver
 from llm_bawt.message_authorship import AuthorReference
 from llm_bawt.service.steer_timeline import SteerTimeline
+from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ def test_publish_failure_does_not_undo_persisted_message(timeline, monkeypatch):
     ],
 )
 def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
-    monkeypatch, author, steer_request_id, persisted_author,
+    monkeypatch, steer_store_factory, author, steer_request_id, persisted_author,
 ):
     from llm_bawt.agent_backends import agent_bridge
     from llm_bawt.bots import BotManager
@@ -103,7 +104,7 @@ def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
                            trigger_message_id="trigger")
     memory = SimpleNamespace(get_message_by_id=lambda id: {"session_id": "session-target"},
                              add_message=lambda *args: calls.append(("persist", args)))
-    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda id: turn),
+    service = SimpleNamespace(config=object(), _turn_log_store=steer_store_factory(turn),
                               get_memory_client=lambda *args: memory)
     subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": True}))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
@@ -134,7 +135,7 @@ def test_active_steer_persists_anchor_then_publishes_without_ending_turn(
     assert calls[2] == ("publish", None)
 
 
-def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch):
+def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch, steer_store_factory):
     """The reply-channel note reaches the bridge only; history keeps the message."""
     from llm_bawt.agent_backends import agent_bridge
     from llm_bawt.bots import BotManager
@@ -146,7 +147,7 @@ def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch):
                            trigger_message_id="trigger")
     memory = SimpleNamespace(get_message_by_id=lambda id: {"session_id": "session-target"},
                              add_message=lambda *args: persisted.append(args))
-    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda id: turn),
+    service = SimpleNamespace(config=object(), _turn_log_store=steer_store_factory(turn),
                               get_memory_client=lambda *args: memory)
     subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": True}))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
@@ -178,7 +179,7 @@ def test_delivery_steer_sends_wire_suffix_but_persists_clean_text(monkeypatch):
 
 
 @pytest.mark.parametrize("steer_request_id", [None, "steer_delivery_test"])
-def test_run_finishing_is_a_definite_409_without_composer_retries(monkeypatch, steer_request_id):
+def test_run_finishing_is_a_definite_409_without_composer_retries(monkeypatch, steer_store_factory, steer_request_id):
     """TASK-1344: the run already produced its final result; it will not become
     steerable again, so the composer loop must not spin and callers get a 409
     they route to a fresh turn."""
@@ -191,7 +192,7 @@ def test_run_finishing_is_a_definite_409_without_composer_retries(monkeypatch, s
     turn = SimpleNamespace(id="turn-live", bot_id="target", user_id="nick", ended_at=None,
                            status="streaming", agent_session_key="session-key", agent_request_id="req",
                            trigger_message_id="trigger")
-    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda id: turn),
+    service = SimpleNamespace(config=object(), _turn_log_store=steer_store_factory(turn),
                               get_memory_client=lambda *args: None)
     subscriber = SimpleNamespace(send_steer=AsyncMock(return_value={"ok": False, "error": "run_finishing"}))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)

@@ -19,6 +19,7 @@ from llm_bawt.service import system_gate_admission as gates
 from llm_bawt.service.turn_admission import SystemGateRefused
 from llm_bawt.service.turn_gates import GateBlock
 from tests.test_prompt_delivery import rig  # noqa: F401 (pytest fixture registration)
+from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 
 UNTIL = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
 FREEZE = GateBlock(id=7, mode="deny", owner_kind="operator", owner_id="op-1",
@@ -229,7 +230,7 @@ def test_admitted_escalation_continues_to_the_normal_checks(monkeypatch):
     assert raised.value.detail == "Active bridge run is not ready"
 
 
-def test_a_maintenance_time_message_is_an_enqueue_not_a_gated_steer(monkeypatch):
+def test_a_maintenance_time_message_is_an_enqueue_not_a_gated_steer(monkeypatch, steer_store_factory):
     """A message during /compact is queued and asks the gate at enqueue instead."""
     monkeypatch.setattr(gates, "check_steer", lambda *_a, **_k: pytest.fail("not a steer"))
     queued = []
@@ -240,6 +241,9 @@ def test_a_maintenance_time_message_is_an_enqueue_not_a_gated_steer(monkeypatch)
 
     monkeypatch.setattr("llm_bawt.service.maintenance_queue.MaintenanceQueue.enqueue_user", enqueue_user)
     service, _ = _steer_service(prompt="/compact")
+    turn = service._turn_log_store.get_turn("turn")
+    turn.trigger_message_id = "trigger"
+    service._turn_log_store = steer_store_factory(turn)
     assert _steer(service).detail == "queued"
     assert queued == ["turn"]
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from copy import copy
 from typing import TYPE_CHECKING, Literal
 
 from agent_bridge.steer_contract import STEER_CAPABILITY_REFUSALS, STEER_RUN_FINISHING
@@ -92,6 +93,7 @@ class ChatSteerRequest(BaseModel):
     content_offset: int | None = Field(None, ge=0, description="Assistant characters visible when steering")
     bot_id: str = Field(..., description="Bot slug owning the active turn")
     user_id: str = Field("nick", description="User namespace owning the turn")
+    session_id: str | None = Field(None, description="Explicit durable conversation; must match the target turn")
     allow_queue: bool = Field(True, description="Allow maintenance to queue a separate turn; false for same-turn recovery")
     priority: Literal["now", "next"] = Field(
         "next", description="Queue until the next model call without interrupting running tools"
@@ -128,6 +130,7 @@ class ChatSteerResponse(BaseModel):
     can_cancel: bool = False
     queued: bool = False
     delivery_id: str | None = None
+    session_id: str | None = None  # authoritative durable target, not agent_session_key
 
 
 def _persist_interrupt_anchor(
@@ -229,19 +232,24 @@ async def steer_active_turn(
     # Inter-bot steers pass their sender; a composer steer is the turn owner's.
     author = author or AuthorReference.user(user_id)
     from agent_bridge.maintenance import is_compact_command
-    if not steer_request_id and (
+    from ..steer_session import require_steer_session, revalidate_steer_target
+
+    maintenance = not steer_request_id and (
         is_compact_command(getattr(turn, "user_prompt", None)) or is_compact_command(request.message)
+    )
+    if not maintenance and not steer_request_id and (
+        turn.ended_at is not None or turn.status not in ("streaming", "pending")
     ):
+        raise HTTPException(status_code=409, detail="Turn is no longer active")
+    turn = copy(turn)  # immutable comparison snapshot across awaited preparation
+    if maintenance:
         if not request.allow_queue:
             # Exact recovery must never become a separately queued turn.
             # Ordinary composer messages retain maintenance queue behavior.
             raise HTTPException(status_code=409, detail="maintenance_requires_separate_turn")
         from ..maintenance_queue import MaintenanceQueue
+        await asyncio.to_thread(require_steer_session, service, request, turn)
         return ChatSteerResponse(**await MaintenanceQueue(service).enqueue_user(request, turn))
-    if (
-        turn.ended_at is not None or turn.status not in ("streaming", "pending")
-    ) and not steer_request_id:
-        raise HTTPException(status_code=409, detail="Turn is no longer active")
     # A maintenance-time message above is an enqueue and asks the gate there.
     from ..system_gate_admission import check_steer
     engine = getattr(service._turn_log_store, "engine", None)
@@ -296,8 +304,13 @@ async def steer_active_turn(
     # dispatcher retries under a new steer generation). Composer steers pass
     # no id and keep their retry loop unchanged.
     attempts = 1 if steer_request_id else 8
+    session_id = await asyncio.to_thread(require_steer_session, service, request, turn)
     try:
         for attempt in range(attempts):
+            await asyncio.to_thread(
+                revalidate_steer_target, service, request, turn, session_id,
+                allow_ended=bool(steer_request_id),
+            )
             result = await subscriber.send_steer(
                 session_key=session_key,
                 message=wire_message,
@@ -327,17 +340,8 @@ async def steer_active_turn(
         memory_client = service.get_memory_client(bot_id, user_id)
         if memory_client is None:
             raise RuntimeError("Memory client unavailable")
-        if not turn.trigger_message_id:
-            raise RuntimeError("Active turn has no trigger message id")
-        trigger = await asyncio.to_thread(
-            memory_client.get_message_by_id,
-            turn.trigger_message_id,
-        )
-        if not isinstance(trigger, dict):
-            raise RuntimeError("Active turn trigger message was not found")
-        session_id = trigger.get("session_id")
-        if not session_id:
-            raise RuntimeError("Active turn trigger message has no session id")
+        # Persist to the pre-dispatch validated destination, never a fresh
+        # post-RPC lookup that could move an accepted message to another thread.
         from ..steer_timeline import SteerTimeline
 
         timeline = SteerTimeline(
@@ -383,6 +387,7 @@ async def steer_active_turn(
         turn_id=turn.id,
         message_id=request.message_id,
         persisted=persisted,
+        session_id=session_id,
         can_escalate=bool(result.get("can_escalate")) and request.priority == "next" and ESCALATE in caps,
         can_cancel=bool(result.get("can_cancel")) and request.priority == "next" and CANCEL_QUEUED in caps,
     )

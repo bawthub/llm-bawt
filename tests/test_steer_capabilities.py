@@ -18,6 +18,7 @@ from agent_bridge.steer_contract import (
     STEER_UNSUPPORTED_TRANSPORT,
 )
 from llm_bawt.inter_bot_control_lane import pin_matches, pinned_steer_caps
+from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 from llm_bawt.steer_capabilities import (
     ALL_STEER_CAPS,
@@ -111,13 +112,13 @@ def _turn(**fields):
     })
 
 
-def _harness(monkeypatch, turn, *, bot_backend=None, result=None):
+def _harness(monkeypatch, steer_store_factory, turn, *, bot_backend=None, result=None):
     """A steer service around ``turn``. ``bot_backend`` None: BotManager must not be read."""
     from llm_bawt.agent_backends import agent_bridge
     from llm_bawt.bots import BotManager
     from llm_bawt.service.routes import chat
 
-    service = SimpleNamespace(config=object(), _turn_log_store=SimpleNamespace(get_turn=lambda _id: turn),
+    service = SimpleNamespace(config=object(), _turn_log_store=steer_store_factory(turn),
                               get_memory_client=lambda *args: None)
     subscriber = SimpleNamespace(send_steer=AsyncMock(return_value=result or {"ok": True}))
     monkeypatch.setattr(agent_bridge, "get_agent_subscriber", lambda: subscriber)
@@ -147,8 +148,8 @@ def _steer(chat, service, priority="next"):
     ({"agent_backend": "claude-code", "agent_steer_caps": ""}, "next", STEER_UNSUPPORTED_TRANSPORT),
     ({"agent_backend": "codex", "agent_steer_caps": "next"}, "now", STEER_PRIORITY_UNSUPPORTED),
 ])
-def test_steer_refuses_from_the_runs_pin_before_any_bridge_rpc(monkeypatch, fields, priority, code):
-    chat, service, subscriber = _harness(monkeypatch, _turn(**fields))
+def test_steer_refuses_from_the_runs_pin_before_any_bridge_rpc(monkeypatch, steer_store_factory, fields, priority, code):
+    chat, service, subscriber = _harness(monkeypatch, steer_store_factory, _turn(**fields))
     with pytest.raises(HTTPException) as raised:
         _steer(chat, service, priority)
     assert (raised.value.status_code, raised.value.detail) == (409, code)
@@ -159,34 +160,34 @@ def test_steer_refuses_from_the_runs_pin_before_any_bridge_rpc(monkeypatch, fiel
     ("next", (False, False)),
     ("cancel_queued,escalate,next", (True, True)),
 ])
-def test_a_pinned_run_steers_on_its_own_backend_and_offers_only_its_caps(monkeypatch, caps, offers):
+def test_a_pinned_run_steers_on_its_own_backend_and_offers_only_its_caps(monkeypatch, steer_store_factory, caps, offers):
     turn = _turn(agent_backend="codex", agent_steer_caps=caps)
     chat, service, subscriber = _harness(
-        monkeypatch, turn, result={"ok": True, "can_escalate": True, "can_cancel": True})
+        monkeypatch, steer_store_factory, turn, result={"ok": True, "can_escalate": True, "can_cancel": True})
     result = _steer(chat, service)  # no memory client: accepted, persistence logged as failed
     assert subscriber.send_steer.await_args.kwargs["backend"] == "codex"
     assert (result.can_escalate, result.can_cancel) == offers
 
 
-def test_a_claude_run_still_steers_after_the_bot_flips_to_codex(monkeypatch):
+def test_a_claude_run_still_steers_after_the_bot_flips_to_codex(monkeypatch, steer_store_factory):
     turn = _turn(agent_backend="claude-code", agent_steer_caps=None)  # legacy row, bound as claude-code
-    chat, service, subscriber = _harness(monkeypatch, turn)
+    chat, service, subscriber = _harness(monkeypatch, steer_store_factory, turn)
     _steer(chat, service, "now")
     assert subscriber.send_steer.await_args.kwargs["backend"] == "claude-code"
 
 
-def test_an_unrecorded_backend_falls_back_to_the_bots(monkeypatch):
-    chat, service, subscriber = _harness(monkeypatch, _turn(), bot_backend="codex")
+def test_an_unrecorded_backend_falls_back_to_the_bots(monkeypatch, steer_store_factory):
+    chat, service, subscriber = _harness(monkeypatch, steer_store_factory, _turn(), bot_backend="codex")
     with pytest.raises(HTTPException) as raised:
         _steer(chat, service)
     assert raised.value.detail == STEER_UNSUPPORTED_TRANSPORT
     subscriber.send_steer.assert_not_awaited()
 
 
-def test_a_bridge_capability_refusal_is_a_definite_409(monkeypatch):
+def test_a_bridge_capability_refusal_is_a_definite_409(monkeypatch, steer_store_factory):
     turn = _turn(agent_backend="codex", agent_steer_caps="next")
     chat, service, subscriber = _harness(
-        monkeypatch, turn, result={"ok": False, "error": STEER_UNSUPPORTED_TRANSPORT})
+        monkeypatch, steer_store_factory, turn, result={"ok": False, "error": STEER_UNSUPPORTED_TRANSPORT})
     with pytest.raises(HTTPException) as raised:
         _steer(chat, service)
     assert (raised.value.status_code, raised.value.detail) == (409, STEER_UNSUPPORTED_TRANSPORT)
@@ -199,8 +200,8 @@ def test_a_bridge_capability_refusal_is_a_definite_409(monkeypatch):
     ("chat_steer_escalate", None, STEER_UNSUPPORTED_TRANSPORT),
     ("chat_steer_cancel", None, STEER_UNSUPPORTED_TRANSPORT),
 ])
-def test_escalate_and_cancel_refuse_without_their_capability(monkeypatch, route, caps, code):
-    chat, _service, subscriber = _harness(monkeypatch, _turn(agent_backend="codex", agent_steer_caps=caps))
+def test_escalate_and_cancel_refuse_without_their_capability(monkeypatch, steer_store_factory, route, caps, code):
+    chat, _service, subscriber = _harness(monkeypatch, steer_store_factory, _turn(agent_backend="codex", agent_steer_caps=caps))
     with pytest.raises(HTTPException) as raised:
         asyncio.run(getattr(chat, route)(chat.ChatSteerEscalateRequest(
             turn_id="turn-live", message_id="message-1", bot_id="target", user_id="nick")))
@@ -209,9 +210,9 @@ def test_escalate_and_cancel_refuse_without_their_capability(monkeypatch, route,
 
 
 @pytest.mark.parametrize("route", ["chat_steer_escalate", "chat_steer_cancel"])
-def test_escalate_and_cancel_address_the_pinned_runs_backend(monkeypatch, route):
+def test_escalate_and_cancel_address_the_pinned_runs_backend(monkeypatch, steer_store_factory, route):
     turn = _turn(agent_backend="codex", agent_steer_caps="cancel_queued,escalate,next")
-    chat, _service, subscriber = _harness(monkeypatch, turn, result={"ok": True, "detail": "done"})
+    chat, _service, subscriber = _harness(monkeypatch, steer_store_factory, turn, result={"ok": True, "detail": "done"})
     asyncio.run(getattr(chat, route)(chat.ChatSteerEscalateRequest(
         turn_id="turn-live", message_id="message-1", bot_id="target", user_id="nick")))
     assert subscriber.send_steer.await_args.kwargs["backend"] == "codex"

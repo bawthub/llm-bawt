@@ -291,6 +291,7 @@ class TurnLogListItem(BaseModel):
     agent_session_key: str | None = None
     agent_request_id: str | None = None
     trigger_message_id: str | None = None
+    session_id: str | None = None  # owned durable trigger session for active-target comparison
     assistant_message_id: str | None = None
     # Per-turn token accounting from the upstream SDK (claude_code, etc.).
     # Shape: {input_tokens, cache_read_tokens, cache_creation_tokens,

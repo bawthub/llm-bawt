@@ -397,8 +397,7 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
                     session_resumption = self._turn_log_store.accept_session_binding(
                         turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
                         session_id=session_id, admission_claim=admission_claim,
-                        record_resumption=bool((thread_binding or {}).get("explicit_thread"))
-                            and not is_new_command(user_prompt),
+                        record_resumption=not is_new_command(user_prompt),
                     )
                 from .session_continuity import record_session_continuity
                 record_session_continuity(llm_bawt, thread_binding, inject_seed_messages,
