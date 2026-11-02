@@ -204,7 +204,7 @@ def test_request_totals_sum_every_upstream_request_not_only_the_last() -> None:
     usage = publisher.with_totals({"input_tokens": 18_235, "cache_read_tokens": 128_640})
     assert usage["input_tokens"] == 18_235  # final-request context is untouched
     assert usage["turn_request_totals"]["requests"] == 3
-    assert publisher.with_totals(None) is None
+    assert publisher.with_totals(None) == {"turn_request_totals": publisher.request_totals()}
 
 
 def test_request_totals_keep_native_start_usage_and_route_interleaved_subagents() -> None:
@@ -235,3 +235,28 @@ def test_live_usage_update_carries_running_request_totals() -> None:
     publisher.publish(0, assistant_usage=None, stream_usage=_delta(1_000, 0)["usage"])
 
     assert harness.events[-1]["token_usage"]["turn_request_totals"]["requests"] == 1
+
+
+def test_live_usage_republishes_when_only_request_totals_change() -> None:
+    """Two same-sized consecutive requests leave the context signature equal;
+    the changed request count must still publish."""
+    harness = _Harness()
+    publisher = LiveUsagePublisher(harness, "req-1", "vex:nick", "m", "m", 372_000)
+    seq = 0
+    for _ in range(2):
+        publisher.observe_stream_event(_start())
+        publisher.observe_stream_event(_delta(1_000, 0))
+        seq = publisher.publish(seq, assistant_usage=None, stream_usage=_delta(1_000, 0)["usage"])
+    assert seq == 2
+    assert [e["token_usage"]["turn_request_totals"]["requests"] for e in harness.events] == [1, 2]
+
+
+def test_with_totals_keeps_totals_without_inventing_final_request_usage() -> None:
+    harness = _Harness()
+    publisher = LiveUsagePublisher(harness, "req-1", "byte:nick", "m", "m", 1_000_000)
+    assert publisher.with_totals(None) is None  # nothing measured yet
+    publisher.observe_stream_event(_start({"input_tokens": 50, "cache_read_input_tokens": 0}))
+    assert publisher.with_totals(None) == {"turn_request_totals": {
+        "requests": 1, "input_tokens": 50, "cache_read_tokens": 0,
+        "cache_creation_tokens": 0, "requests_with_cache_read": 0,
+    }}

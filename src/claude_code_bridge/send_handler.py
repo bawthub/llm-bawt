@@ -439,6 +439,9 @@ class ClaudeSendMixin(
                         self, request_id, session_key, actual_model, model,
                         bot_context_window,
                         compact_threshold=req.compact_threshold,
+                        # Requests a failed attempt already made still count
+                        # toward the turn's totals after an auth/session retry.
+                        request_usages=live_usage.request_usages if live_usage is not None else [],
                     )
                     phase_tracker.set_context_source(lambda: live_usage.resident_tokens)
                     # /compact lifecycle tracking for this turn. The SDK reports

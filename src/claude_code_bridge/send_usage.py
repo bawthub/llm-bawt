@@ -147,8 +147,12 @@ class LiveUsagePublisher:
     def with_totals(self, usage: dict | None) -> dict | None:
         """Attach the turn's request totals to a usage payload."""
         totals = self.request_totals()
-        if not isinstance(usage, dict) or not usage or totals is None:
+        if totals is None:
             return usage
+        if not isinstance(usage, dict) or not usage:
+            # Cancelled/errored before any final-request usage: keep the
+            # measured totals without inventing a context size.
+            return {"turn_request_totals": totals}
         return {**usage, "turn_request_totals": totals}
 
     def publish(
@@ -184,7 +188,7 @@ class LiveUsagePublisher:
                 "resident_tokens",
                 "context_window",
             )
-        )
+        ) + tuple(sorted((self.request_totals() or {}).items()))
         if signature == self.last_signature:
             return seq
         self.last_signature = signature

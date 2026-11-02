@@ -118,3 +118,40 @@ def test_steering_without_any_model_output_blocks_original_prompt_replay(monkeyp
         harness._publisher.publish_run_done.assert_called_once_with(
             "turn-request", teardown=TeardownReport("ok", "none", False))
     virtual_clock.run_timing(run())
+
+
+def test_turn_request_totals_span_a_fresh_retry_and_survive_an_error_without_usage(monkeypatch):
+    """TASK-1961: a pre-content CLI crash still made an upstream request. The
+    fresh retry's totals include it, and an ERROR with no final-request usage
+    keeps the measured totals instead of dropping them."""
+    async def run():
+        harness = _SendHarness()
+        harness._uses_claude_oauth_gateway = lambda: True
+        attempts = []
+
+        class StartThenCrashSDK(_SDKStream):
+            async def receive_messages(self):
+                # Native route: usage arrives in message_start, then the CLI dies.
+                yield StreamEvent(uuid=f"start-{len(attempts)}", session_id="sdk-session", event={
+                    "type": "message_start", "message": {"usage": {
+                        "input_tokens": 100, "cache_read_input_tokens": 9_000,
+                        "cache_creation_input_tokens": 0}},
+                })
+                raise RuntimeError("CLI subprocess failed with exit code 1")
+
+        def client(**kwargs):
+            sdk = StartThenCrashSDK()
+            attempts.append(sdk)
+            return sdk
+
+        monkeypatch.setattr("claude_code_bridge.send_handler.ClaudeSDKClient", client)
+        harness._build_agent_options = Mock(return_value=None)
+        await harness.send()
+        assert len(attempts) == 2
+        errors = [event for event in harness.events if event.kind == AgentEventKind.ERROR]
+        assert len(errors) == 1
+        assert errors[0].token_usage == {"turn_request_totals": {
+            "requests": 2, "input_tokens": 18_200, "cache_read_tokens": 18_000,
+            "cache_creation_tokens": 0, "requests_with_cache_read": 2,
+        }}
+    asyncio.run(run())
