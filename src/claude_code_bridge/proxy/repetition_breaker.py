@@ -10,6 +10,11 @@ held tool suffix means no executable call is forwarded.
 Detection only; it does not retry. The existing retry lease keeps its
 conservative no-replay tombstone for streams that started a tool block.
 Thresholds come from the environment (``0`` disables a check).
+
+Deliberate tradeoff: legitimate output that is itself periodic for 8192+
+chars (e.g. a Write of 10,000 zeros, or enough byte-identical table rows)
+also trips the default. Raise ``CLAUDE_CODE_BRIDGE_PROXY_REPETITION_MIN_SPAN``
+or set it to ``0`` to disable when such content is expected.
 """
 from __future__ import annotations
 
