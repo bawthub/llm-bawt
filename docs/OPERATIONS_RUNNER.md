@@ -429,10 +429,14 @@ It never changes a job, releases a durable hold, or supplies dead-holder recover
 `prepare_process_spawn_hold` pins a full target container ID, Compose project/service
 labels and an aware absolute deadline once on a queued isolated job, **before**
 exclusive-acquisition retries. It does not take a hold. Retries/restarts read that
-same policy; it cannot be extended or retargeted. An expired policy cannot claim,
-and a prepared job cannot dispatch through the ordinary no-hold claim path. Any
-future enabled hold action must prepare this policy first; the legacy dormant
-ledger seam remains for its existing tests, not an alternative enabling path.
+same policy; it cannot be extended or retargeted. An expired policy cannot claim:
+the claim takes operation, worker-slot and job-row locks in that order, then
+checks the persisted deadline against fresh PostgreSQL wall time in its queued
+CAS. Lock waits cannot preserve a stale transaction-time acquisition budget or
+backdate the hold/dispatch stamps. A prepared job cannot dispatch through the
+ordinary no-hold claim path. Any future enabled hold action must prepare this
+policy first; the legacy dormant ledger seam remains for its existing tests,
+not an alternative enabling path.
 
 Once claimed, a prepared hold blocks **all process-mode slot admission and
 initial/recovery spawns sharing this ledger/receipt root**, including after any

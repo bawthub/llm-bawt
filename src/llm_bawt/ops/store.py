@@ -520,7 +520,6 @@ class OpsStore:
                         or snapshot_execution_mode(snapshot, kind) != EXECUTION_ISOLATED
                         or not process_spawn_hold_available(conn, child_count=process_child_count)):
                     return False
-                values["process_spawn_hold_at"] = values["dispatched_at"]
             worker_slot = worker_slot_free(conn, snapshot, job_id=job_id) if snapshot else None
             if worker_slot is False:
                 return False  # Waiting on a slot only: no error_text, so the S1e deadline never runs.
@@ -528,11 +527,20 @@ class OpsStore:
                 values["worker_slot_at"] = values["dispatched_at"]
             conditions = [OpsJob.id == job_id, OpsJob.state == JOB_QUEUED]
             if hold_process_spawns:
+                # Take every potentially blocking lock before observing expiry:
+                # operation -> worker slots -> job. PostgreSQL transaction time
+                # is frozen before those waits; even an UPDATE's wall-clock
+                # predicate could be evaluated before its target row lock.
+                if session.exec(select(OpsJob.id).where(OpsJob.id == job_id).with_for_update()).first() is None:
+                    return False
+                now = func.clock_timestamp() if conn.dialect.name == "postgresql" else func.current_timestamp()
                 # A prepared policy's absolute budget cannot be renewed/bypassed
                 # by a stale queued reader. Legacy dormant ledger tests remain
                 # unchanged; any future enabled hold action must prepare first.
                 conditions.append(or_(OpsJob.process_spawn_hold_deadline_at.is_(None),
-                                      OpsJob.process_spawn_hold_deadline_at > func.current_timestamp()))
+                                      OpsJob.process_spawn_hold_deadline_at > now))
+                stamp = session.exec(select(now)).one() if conn.dialect.name == "postgresql" else _utcnow()
+                values["dispatched_at"] = values["process_spawn_hold_at"] = stamp
             else:
                 # A prepared hold action must not run through ordinary dispatch.
                 conditions.append(OpsJob.process_spawn_hold_target_json.is_(None))

@@ -293,6 +293,64 @@ def test_spawn_hold_claims_serialize_against_process_claims_and_other_holds(rig,
     assert (winner.process_spawn_hold_at is not None) != (winner.worker_slot_at is not None)
 
 
+@pytest.mark.parametrize("row_lock", ["operation", "worker_slots", "job"])
+@pytest.mark.parametrize("expired", [True, False], ids=["expired", "live"])
+def test_prepared_spawn_hold_checks_fresh_deadline_after_all_claim_locks(rig, row_lock, expired):
+    """A deadline after transaction start but before lock release cannot claim.
+
+    The persisted timestamp is moved only after the existing helper proves the
+    claim is waiting. No sleep or race against an artificial short TTL is needed;
+    the production policy remains immutable to callers, as covered separately.
+    """
+    store = rig.stores[1]
+    job_id = _admit_slot_claim(rig, "isolated")
+    snapshot = json.loads(rig.job(job_id).invocation_snapshot_json)
+    snapshot["execution"]["receipt_root"] = str(rig.root)
+    rig.sql("UPDATE ops_jobs SET invocation_snapshot_json=:raw WHERE id=:id",
+            raw=json.dumps(snapshot), id=job_id)
+    target = {"container_id": "a" * 64, "compose_project": "test", "compose_service": "fake"}
+    deadline = rig.sql("SELECT clock_timestamp() + interval '5 minutes'").scalar_one()
+    assert store.prepare_process_spawn_hold(job_id, target_identity=target, deadline_at=deadline)
+    before = rig.job(job_id)
+    with ThreadPoolExecutor(1) as pool:
+        with store.engine.begin() as holder:
+            pid = holder.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            if row_lock == "operation":
+                holder.execute(text("SELECT id FROM ops_operations WHERE slug=:s FOR UPDATE"),
+                               {"s": before.operation_slug})
+            elif row_lock == "worker_slots":
+                holder.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                               {"k": WORKER_SLOT_LOCK})
+            else:
+                holder.execute(text("SELECT id FROM ops_jobs WHERE id=:id FOR UPDATE"), {"id": job_id})
+            claim = pool.submit(store.claim_job, job_id, hold_process_spawns=True, process_child_count=0)
+            wait_blocked_by(store.engine, pid, claim, timeout=HANG_GUARD_S)
+            # This clock observation is strictly after the waiting transaction
+            # began, and before the holder releases its actual PostgreSQL lock.
+            observed = holder.execute(text("SELECT clock_timestamp()")).scalar_one()
+            if expired:
+                deadline = observed
+                holder.execute(text("UPDATE ops_jobs SET process_spawn_hold_deadline_at=:at WHERE id=:id"),
+                               {"at": deadline, "id": job_id})
+        # The holder's context commits/releases before the pool can join.
+        assert claim.result(timeout=HANG_GUARD_S) is not expired
+    after = rig.job(job_id)
+    assert after.state == (JOB_QUEUED if expired else JOB_DISPATCHING)
+    assert after.process_spawn_hold_deadline_at == deadline
+    assert after.process_spawn_hold_target_json == before.process_spawn_hold_target_json
+    assert after.worker_slot_at is None and after.error_text is None
+    assert store.process_spawns_held() is not expired
+    if expired:
+        assert after.dispatched_at is None and after.process_spawn_hold_at is None
+        assert after.host_unit_name is None
+    else:
+        assert after.dispatched_at == after.process_spawn_hold_at
+        assert after.dispatched_at >= observed
+        stamp = after.process_spawn_hold_at
+        assert not store.claim_job(job_id, hold_process_spawns=True, process_child_count=0)
+        assert rig.job(job_id).process_spawn_hold_at == stamp
+
+
 def test_terminal_hold_release_is_not_visible_before_commit(rig):
     from llm_bawt.ops import JOB_SUCCEEDED
     from llm_bawt.ops.worker_slots import process_spawn_held
