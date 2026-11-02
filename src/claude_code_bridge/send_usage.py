@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ._bridge_helpers import (
@@ -43,6 +43,11 @@ NATIVE_CONTEXT_READ_ATTEMPTS = 2
 # ``context_breakdown_status`` when the read ran but returned nothing usable,
 # so the UI can say why instead of a blanket "unavailable".
 CONTEXT_BREAKDOWN_UNAVAILABLE = "unavailable"
+
+# Anthropic-shaped per-request usage fields summed into turn totals.
+_REQUEST_USAGE_KEYS = (
+    "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+)
 
 
 def turn_session_ledger(resume_id: str | None) -> SessionLedger:
@@ -90,6 +95,61 @@ class LiveUsagePublisher:
     compact_threshold: int | None = None
     # Latest live resident context, read by the turn phase status line.
     resident_tokens: int | None = None
+    # TASK-1961: per-request usage for every upstream request in the turn.
+    # The usage fields above describe only the latest request (the context
+    # gauge); these sum all of them so cache hit rate covers the whole turn.
+    request_usages: list[dict] = field(default_factory=list)
+    _open_requests: dict[str | None, int] = field(default_factory=dict)
+
+    def observe_stream_event(self, event: dict, source: str | None = None) -> None:
+        """Track each upstream request: message_start opens one, deltas update it.
+
+        ``source`` is the StreamEvent's ``parent_tool_use_id`` (None for the
+        main thread), so concurrent subagent streams update their own request.
+        """
+        kind = event.get("type")
+        if kind == "message_start":
+            message = event.get("message")
+            self.request_usages.append({})
+            self._open_requests[source] = len(self.request_usages) - 1
+            self._merge_request_usage(source, message.get("usage") if isinstance(message, dict) else None)
+        elif kind == "message_delta":
+            self._merge_request_usage(source, event.get("usage"))
+
+    def _merge_request_usage(self, source: str | None, usage: object) -> None:
+        # Same merge as the SDK: a later non-zero value replaces an earlier one.
+        index = self._open_requests.get(source)
+        if index is None or not isinstance(usage, dict):
+            return
+        current = self.request_usages[index]
+        for key in _REQUEST_USAGE_KEYS:
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                current[key] = int(value)
+
+    def request_totals(self) -> dict | None:
+        """Sum of every upstream request's input so far; None before the first."""
+        if not self.request_usages:
+            return None
+        fresh = sum(u.get("input_tokens", 0) for u in self.request_usages)
+        cache_read = sum(u.get("cache_read_input_tokens", 0) for u in self.request_usages)
+        cache_create = sum(u.get("cache_creation_input_tokens", 0) for u in self.request_usages)
+        return {
+            "requests": len(self.request_usages),
+            "input_tokens": fresh + cache_read + cache_create,
+            "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_create,
+            "requests_with_cache_read": sum(
+                1 for u in self.request_usages if u.get("cache_read_input_tokens", 0) > 0
+            ),
+        }
+
+    def with_totals(self, usage: dict | None) -> dict | None:
+        """Attach the turn's request totals to a usage payload."""
+        totals = self.request_totals()
+        if not isinstance(usage, dict) or not usage or totals is None:
+            return usage
+        return {**usage, "turn_request_totals": totals}
 
     def publish(
         self,
@@ -137,7 +197,7 @@ class LiveUsagePublisher:
             seq,
             kind=AgentEventKind.USAGE_UPDATE,
             model=self.actual_model or self.requested_model,
-            token_usage=usage,
+            token_usage=self.with_totals(usage),
         )
         return seq
 

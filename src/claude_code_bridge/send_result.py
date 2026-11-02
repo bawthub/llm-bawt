@@ -79,6 +79,7 @@ class ClaudeResultMixin:
         reset_ack: dict | None = None,
         compact_threshold: int | None = None,
         capture_usage: Callable[[dict | None], None] | None = None,
+        turn_request_totals: dict | None = None,
     ) -> int:
         full_text = "".join(text_parts)
         if not full_text:
@@ -191,6 +192,9 @@ class ClaudeResultMixin:
             )
             full_text = "".join(text_parts)
 
+        if token_usage_payload and turn_request_totals:
+            # TASK-1961: every upstream request in the turn, not just the last.
+            token_usage_payload = {**token_usage_payload, "turn_request_totals": turn_request_totals}
         seq += 1
         self._publish_event(
             request_id, session_key, seq,

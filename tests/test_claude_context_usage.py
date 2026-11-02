@@ -209,6 +209,9 @@ def test_native_context_usage_overrides_resident_not_cost_accounting():
         compact_error_msg=None,
         turn_session_id="sdk-1",
         turn_screenshot_assets=[],
+        turn_request_totals={"requests": 3, "input_tokens": 9000,
+                             "cache_read_tokens": 2000, "cache_creation_tokens": 0,
+                             "requests_with_cache_read": 1},
     ))
     assert seq == 1
     event = harness.events[-1][3]
@@ -220,6 +223,9 @@ def test_native_context_usage_overrides_resident_not_cost_accounting():
     assert usage["cache_read_tokens"] == 2000
     assert usage["total_cost_usd"] is not None
     assert usage["auto_compact_enabled"] is True
+    # TASK-1961: whole-turn totals ride beside the final-request numbers.
+    assert usage["turn_request_totals"]["requests"] == 3
+    assert usage["input_tokens"] == 1000
 
 
 def test_successful_compact_persists_lifecycle_in_usage(monkeypatch):

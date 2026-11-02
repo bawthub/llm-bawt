@@ -169,3 +169,69 @@ def test_post_done_context_update_persists_final_status_and_breakdown() -> None:
     assert event["token_usage"] == final
     assert store.updates[-1] == {"turn_id": "turn-1", "token_usage": final}
     assert coordinator.http_chunk(event)["token_usage"]["context_breakdown"] == {"read_ms": 18.2}
+
+
+def _start(usage: dict | None = None) -> dict:
+    return {"type": "message_start", "message": {"usage": usage or {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+    }}}
+
+
+def _delta(fresh: int, cached: int, created: int = 0) -> dict:
+    return {"type": "message_delta", "usage": {
+        "input_tokens": fresh, "output_tokens": 5,
+        "cache_creation_input_tokens": created, "cache_read_input_tokens": cached,
+    }}
+
+
+def test_request_totals_sum_every_upstream_request_not_only_the_last() -> None:
+    """TASK-1961: proxy routes report usage only in message_delta."""
+    harness = _Harness()
+    publisher = LiveUsagePublisher(harness, "req-1", "vex:nick", "m", "m", 372_000)
+    assert publisher.request_totals() is None
+    for fresh, cached in ((40_641, 0), (41_607, 0), (18_235, 128_640)):
+        publisher.observe_stream_event(_start())
+        publisher.observe_stream_event(_delta(fresh, cached))
+
+    assert publisher.request_totals() == {
+        "requests": 3,
+        "input_tokens": 40_641 + 41_607 + 18_235 + 128_640,
+        "cache_read_tokens": 128_640,
+        "cache_creation_tokens": 0,
+        "requests_with_cache_read": 1,
+    }
+    usage = publisher.with_totals({"input_tokens": 18_235, "cache_read_tokens": 128_640})
+    assert usage["input_tokens"] == 18_235  # final-request context is untouched
+    assert usage["turn_request_totals"]["requests"] == 3
+    assert publisher.with_totals(None) is None
+
+
+def test_request_totals_keep_native_start_usage_and_route_interleaved_subagents() -> None:
+    harness = _Harness()
+    publisher = LiveUsagePublisher(harness, "req-1", "byte:nick", "m", "m", 1_000_000)
+    # Native Anthropic: usage arrives in message_start; delta may repeat zeros.
+    publisher.observe_stream_event(_start({
+        "input_tokens": 10, "cache_read_input_tokens": 9_000, "cache_creation_input_tokens": 500,
+    }))
+    publisher.observe_stream_event(_start(), "toolu_sub")
+    publisher.observe_stream_event(_delta(0, 0))
+    publisher.observe_stream_event(_delta(3_000, 0), "toolu_sub")
+
+    assert publisher.request_totals() == {
+        "requests": 2,
+        "input_tokens": 10 + 9_000 + 500 + 3_000,
+        "cache_read_tokens": 9_000,
+        "cache_creation_tokens": 500,
+        "requests_with_cache_read": 1,
+    }
+
+
+def test_live_usage_update_carries_running_request_totals() -> None:
+    harness = _Harness()
+    publisher = LiveUsagePublisher(harness, "req-1", "vex:nick", "m", "m", 372_000)
+    publisher.observe_stream_event(_start())
+    publisher.observe_stream_event(_delta(1_000, 0))
+    publisher.publish(0, assistant_usage=None, stream_usage=_delta(1_000, 0)["usage"])
+
+    assert harness.events[-1]["token_usage"]["turn_request_totals"]["requests"] == 1

@@ -184,6 +184,7 @@ class ClaudeSendMixin(
             if not direct_anthropic:
                 self._proxy_request_sessions[request_id] = session_key
             interrupted_usage: dict | None = None
+            live_usage: LiveUsagePublisher | None = None
             # Credential failures map to the Claude reconnect only when the
             # turn actually authenticates with the Claude subscription.
             claude_subscription_auth = direct_anthropic
@@ -492,7 +493,7 @@ class ClaudeSendMixin(
                         seq += 1
                         self._publish_event(
                             request_id, session_key, seq, kind=AgentEventKind.ASSISTANT_DONE,
-                            text=text, model=actual_model, token_usage=interrupted_usage,
+                            text=text, model=actual_model, token_usage=live_usage.with_totals(interrupted_usage),
                             attachments=attachments or turn_screenshot_assets or None,
                             extra_raw=_cancelled_raw() if cancelled else None,
                         )
@@ -656,6 +657,7 @@ class ClaudeSendMixin(
                             if isinstance(msg, StreamEvent):
                                 event = msg.event
                                 phase_tracker.on_stream_event(event)
+                                live_usage.observe_stream_event(event, msg.parent_tool_use_id)
                                 if event.get("type") == "message_delta":
                                     seq = live_usage.publish(
                                         seq,
@@ -799,6 +801,7 @@ class ClaudeSendMixin(
                                     cost_baseline_usd=cost_baseline_usd,
                                     native_context_usage=None,
                                     capture_usage=lambda usage: terminal_usage.__setitem__(0, usage),
+                                    turn_request_totals=live_usage.request_totals(),
                                     compact_status=compact_status,
                                     compact_error_msg=compact_error_msg,
                                     turn_session_id=turn_session_id,
@@ -1008,7 +1011,10 @@ class ClaudeSendMixin(
                     request_id, session_key, seq,
                     kind=AgentEventKind.ERROR,
                     text=error_text,
-                    token_usage=interrupted_usage,
+                    token_usage=(
+                        live_usage.with_totals(interrupted_usage)
+                        if live_usage is not None else interrupted_usage
+                    ),
                     extra_raw=error_raw,
                 )
                 terminal_event_published = True
