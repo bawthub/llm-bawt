@@ -424,6 +424,61 @@ capacity, durable retirement/attempt-two fencing, receipt/callback attachment
 and active-attempt trusted host publication remain unfinished. No packaging
 infrastructure, scheduler, policy, config, catalog or activation change is added.
 
+## Dormant committed admission capacity and pre-start ledger guard
+
+`ops/gate_start.py` is a separate unused context after `reserve_gate_launch`'s
+consumer scope ends. It does not call the runner, create a container, dispatch,
+mark accepted/running/terminal, attach a callback, or publish a gate result.
+It uses existing nullable ledger fields; no schema/catalog/config change is
+introduced and generic claims remain unchanged.
+
+Under the same nonblocking per-job submission flock, phase one locks current
+operation -> shared worker-slot advisory lock -> fresh job row. It authenticates
+the existing trusted claim and exact nonce-bound custody intent, refuses closed
+or previously reserved jobs, unavailable operations and process-spawn holds,
+and conservatively shares `live_worker_slots`/`worker_concurrency` with ordinary
+process jobs. The gate is **not** mislabeled as a process executor to change
+`needs_worker_slot` semantics. The strictest admitted/current/holder operation
+cap still applies. `worker_slot_at` records capacity; `log_file_path` points to
+private `gate-start.json`, not runner output or an ordinary worker log.
+
+The start marker binds the existing custody digest, job, owner nonce, claim
+and slot timestamps. Exclusive owned-0600 creation and file/directory fsync
+precede the capacity transaction's commit. No confirmed commit means no start
+boundary is yielded. A partial/orphan marker, committed ledger reservation,
+occupied journal, interrupted consumer, missing storage or uncertain commit
+never authorizes another reservation, even after terminalization. No repair,
+cleanup, automatic slot release or retry path is added.
+
+Phase two re-locks **only** the fresh job and compares the exact retained intent,
+nonce, timestamp and start marker before exposing the short consumer boundary.
+A preceding terminal transition refuses. A concurrent terminal writer waits
+only while that PostgreSQL transaction/session survives; phase two acquires no
+operation/slot lock after the job lock. The submission flock stays held through
+both phases and the consumer scope. Authorization remains the earlier trusted
+claim's linearization, with prospective revocation; this context is not another
+authority grant or production dispatch entry point.
+
+**This is admission reservation plus a bounded ledger guard, not active-lifetime
+capacity or a complete launch permit.** If the DB session dies during the
+consumer scope, its row lock disappears while caller code may continue. A
+copied nonce/boundary cannot be revoked by the local flock. A `lost`/`timed_out`
+row also stops counting in the existing shared budget even if a future runner
+survives. Durable one-shot evidence prevents reissuing this identity but does
+not retire that runner or prevent another job from taking the freed slot.
+Positive retirement/lifetime and lost-session fencing are prerequisites to
+production launch integration. Keep the workload outside this short DB scope;
+no claim of unconditional terminal exclusion, retirement or safe live dispatch
+is made here.
+
+Authored targeted regressions cover ordinary-process/shared-budget interaction,
+observed operation/slot/job lock waits, terminal-before/after-boundary ordering,
+spawn holds, operation caps, commit uncertainty, rollback orphans, interrupted
+consumers, storage loss and changed marker/nonce/ledger evidence. Functional
+execution still requires the supported test target under actual host custody;
+source review and authored tests alone are not passing execution receipts.
+The earlier custody and claim receipts remain independent and reusable.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is
