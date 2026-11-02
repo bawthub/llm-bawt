@@ -30,6 +30,7 @@ from .observability import OBSERVABILITY
 from .request_context import (
     BOT_HEADER,
     CONVERSATION_HEADER,
+    OPENROUTER_PROVIDER_HEADER,
     REQUEST_HEADER,
     RESPONSES_TRANSPORT_HEADER,
     SKILL_NAMES_HEADER,
@@ -37,6 +38,7 @@ from .request_context import (
     valid_conversation_identity,
     valid_skill_names,
 )
+from .openrouter_routing import parse_openrouter_provider
 from .transport_policy import normalize_responses_transport
 from .repetition_breaker import RepetitionBreaker, RepetitionLoopError
 from .tool_guard import ToolCallGuard, UnsafeToolCallError
@@ -531,6 +533,10 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
         ),
         responses_transport=normalize_responses_transport(
             request_headers.get(RESPONSES_TRANSPORT_HEADER)
+        ),
+        # Untrusted header: re-validated through the shared normalizer.
+        openrouter_provider=parse_openrouter_provider(
+            request_headers.get(OPENROUTER_PROVIDER_HEADER)
         ),
         skill_names=valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
         status_callback=getattr(

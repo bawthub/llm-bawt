@@ -22,6 +22,7 @@ from agent_bridge.prompt_cache import normalize_prompt_cache_ttl
 from agent_bridge.skill_selection import INJECTED_FIELD, SELECTION_FIELD
 
 from ._bridge_helpers import _bot_slug_from_session_key
+from .proxy.openrouter_routing import parse_openrouter_provider
 from .proxy.transport_policy import normalize_responses_transport
 
 # Keep the original logger name so log lines are byte-identical to the
@@ -78,6 +79,8 @@ class SendRequest:
     inject_seed_framing: SeedFraming | None = None
     # TASK-1750: the app's skill facts for this reset's acknowledgement.
     reset_skills: dict | None = None
+    # TASK-1915: catalog OpenRouter provider-routing preference (canonical).
+    openrouter_provider: dict | None = None
     # TASK-1295: the app-resolved catalog endpoint's access-path key. None only
     # when the field is absent (a legacy producer); a present-but-blank value
     # is kept as "" so it is rejected, never mistaken for legacy.
@@ -188,6 +191,15 @@ class SendRequest:
                 transport_raw, bot_slug,
             )
 
+        # TASK-1915: catalog OpenRouter provider routing. Invalid values are
+        # ignored (OpenRouter's default routing) rather than failing the turn.
+        routing_raw = fields.get("openrouter_provider")
+        openrouter_provider = parse_openrouter_provider(routing_raw)
+        if routing_raw and openrouter_provider is None:
+            logger.warning(
+                "Ignoring invalid openrouter_provider for %s", bot_slug,
+            )
+
         # TASK-618: app-resolved DB setting plus 30s headroom, expressed in the
         # milliseconds the Claude CLI expects. Invalid/absent -> CLI default.
         mcp_timeout_raw = (fields.get("mcp_tool_timeout_ms") or "").strip()
@@ -262,6 +274,7 @@ class SendRequest:
             compact_threshold=compact_threshold,
             prompt_cache_ttl=prompt_cache_ttl,
             responses_transport=responses_transport,
+            openrouter_provider=openrouter_provider,
             mcp_tool_timeout_ms=mcp_tool_timeout_ms,
             question_answer_wait_seconds=question_answer_wait_seconds,
             configured_disallowed_tools=configured_disallowed_tools,

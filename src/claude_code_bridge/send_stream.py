@@ -134,6 +134,7 @@ class ClaudeStreamMixin:
         context_window: int | None = None,
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
+        openrouter_provider: dict | None = None,
         skill_bundle: str | None = None,
         native_route: NativeAuthRoute | None = None,
         skill_selection: str | None = None,
@@ -192,6 +193,7 @@ class ClaudeStreamMixin:
                     bot_id=bot_id,
                     conversation_id=conversation_id,
                     responses_transport=responses_transport,
+                    openrouter_provider=openrouter_provider,
                     skill_names=claude_skill_names(
                         skill_bundle, ManagedSelection.from_field(skill_selection)),
                 )

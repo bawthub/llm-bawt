@@ -145,6 +145,17 @@ class ServiceLLMBawt(BaseLLMBawt):
                     self.client._bot_config["responses_transport"] = (
                         responses_transport.strip().lower()
                     )
+                # TASK-1915: catalog OpenRouter provider routing, re-validated
+                # by the shared normalizer (rows may predate API validation).
+                from claude_code_bridge.proxy.openrouter_routing import (
+                    normalize_openrouter_provider,
+                )
+
+                openrouter_provider = normalize_openrouter_provider(
+                    model_def.get("openrouter_provider")
+                )
+                if openrouter_provider is not None:
+                    self.client._bot_config["openrouter_provider"] = openrouter_provider
                 provider_system_prompt = model_def.get("provider_system_prompt")
                 if isinstance(provider_system_prompt, str) and provider_system_prompt:
                     self.client._bot_config["provider_system_prompt"] = (

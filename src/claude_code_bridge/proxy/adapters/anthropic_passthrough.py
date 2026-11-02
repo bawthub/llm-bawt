@@ -157,6 +157,7 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
         body["stream"] = True  # proxy only supports streaming (routes.py)
         if not self._supports_deferral(upstream_model):
             self._strip_tool_deferral(body)
+        self._apply_request_policy(body, upstream_model, context)
 
         headers = {
             **self._auth_headers(api_key),
@@ -218,6 +219,18 @@ class AnthropicPassthroughAdapter(ProviderAdapter):
     def _supports_deferral(self, upstream_model: str) -> bool:
         """Hook so adapters can decide per-model (OpenRouter overrides)."""
         return self.SUPPORTS_TOOL_DEFERRAL
+
+    def _apply_request_policy(
+        self,
+        body: dict,
+        upstream_model: str,
+        context: ProxyRequestContext | None,
+    ) -> None:
+        """Hook for provider-specific body fields (OpenRouter overrides).
+
+        ``body`` is the adapter's private copy; the default is a no-op so
+        every other passthrough provider sends the body unchanged.
+        """
 
     @classmethod
     def _strip_tool_deferral(cls, body: dict) -> None:
