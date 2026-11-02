@@ -36,6 +36,8 @@ import pytest
 from claude_code_bridge.proxy import retry as retry_mod
 from claude_code_bridge.proxy import stream as stream_mod
 from claude_code_bridge.proxy.adapters import base as base_mod
+from claude_code_bridge.proxy.repetition_breaker import RepetitionLoopError
+from claude_code_bridge.proxy.tool_guard import UnsafeToolCallError
 
 
 # The container has anyio 4.x installed (pytest-anyio auto-registers the
@@ -868,6 +870,33 @@ class TestRetryLoop:
         assert adapter._responses_client._script[1] is not None  # script slot still present
         # Concretely: only one .create was consumed (index advanced to 1, not 2)
         assert adapter._responses_client._i == 1
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("exc, line", [
+        (RepetitionLoopError("Model output looped: fixture"), "proxy_repetition_break"),
+        (UnsafeToolCallError("Truncated tool call: fixture"), "proxy_tool_rejected"),
+        (RuntimeError("upstream cut"), None),
+    ])
+    async def test_guard_errors_on_responses_path_emit_counter_line(self, caplog, exc, line):
+        """TASK-1915: the retry loop absorbs guard/breaker errors before the
+        route handler, so it must emit the counter line itself, exactly once."""
+        upstream = _FakeUpstreamStream(
+            [_mk_event("response.output_item.added", item=types.SimpleNamespace(
+                type="function_call", id="fc1", call_id="call_x", name="Write"))],
+            raise_after=1, raise_exc=exc,
+        )
+        adapter = _FakeAdapter(script=[upstream, RuntimeError("SHOULD NOT RETRY")])
+        with caplog.at_level("WARNING"):
+            joined = b"".join(await _drain(adapter.call({"model": "fake/foo"}, "foo")))
+        assert b'"type":"api_error"' in joined
+        assert adapter._responses_client._i == 1
+        counted = [r.getMessage() for r in caplog.records
+                   if r.getMessage().startswith(("proxy_repetition_break", "proxy_tool_rejected"))]
+        if line is None:
+            assert counted == []
+        else:
+            assert len(counted) == 1 and counted[0].startswith(line + " ")
+            assert "model=foo" in counted[0] and "fixture" in counted[0]
 
     @pytest.mark.anyio
     async def test_text_partial_default_fails_upward_as_api_error(self):

@@ -35,6 +35,8 @@ from ..errors import final_error_frame as _final_error_frame
 from ..request_context import ProxyRequestContext
 from .. import retry as retry_mod
 from ..stream import TranslatorState
+from ..repetition_breaker import RepetitionLoopError
+from ..tool_guard import UnsafeToolCallError
 
 logger = logging.getLogger(__name__)
 
@@ -613,6 +615,17 @@ class ProviderAdapter(ABC):
             if discard_stream is not None:
                 await discard_stream()
             final_error_type = decision.final_error_type or "api_error"
+            if isinstance(stream_exc, UnsafeToolCallError):
+                # TASK-1915: this path absorbs guard/breaker errors before the
+                # route's handler, so emit the same counter line here.
+                logger.warning(
+                    "%s request_id=%s provider=%s model=%s reason=%s",
+                    "proxy_repetition_break" if isinstance(stream_exc, RepetitionLoopError)
+                    else "proxy_tool_rejected",
+                    context.request_id if context else "unknown",
+                    context.provider if context else "unknown",
+                    original_body.get("model"), stream_exc,
+                )
             if context is not None:
                 context.report_status({"state": "failed", "provider": context.provider})
             yield _final_error_frame(
