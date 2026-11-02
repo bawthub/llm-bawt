@@ -1,0 +1,37 @@
+# TASK-1865 socketless gate runner (llm-bawt test-all/offline workload).
+# Build context: a committed-byte export of the target SHA (pyproject.toml,
+# uv.lock, README.md, LICENSE). Network is used ONLY at build time; payloads
+# are SHA256-pinned. The final stage is a scratch copy, so image defaults carry
+# only PATH/LANG (gate_runner._IMAGE_ENV allowlist).
+FROM ghcr.io/astral-sh/uv:0.10.8 AS uv
+FROM python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f AS build
+COPY --from=uv /uv /uvx /usr/local/bin/
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; mkdir -p /opt/gate/tiktoken; \
+    curl -fsSL -o /opt/gate/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790 \
+      https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken; \
+    echo "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d  /opt/gate/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790" | sha256sum -c -; \
+    curl -fsSL -o /tmp/mt.deb https://deb.debian.org/debian/pool/main/m/media-types/media-types_13.0.0_all.deb; \
+    echo "0788e4b0b72db1bcf74a19cb24c3511e7770ad0b341f0f30e361701c3072f53e  /tmp/mt.deb" | sha256sum -c -; \
+    mkdir /tmp/mt && dpkg-deb -x /tmp/mt.deb /tmp/mt; \
+    echo "db27e73f7ffc7779ef8196bc36bba4e11142f09c7c210e1e42d221d28cb90901  /tmp/mt/etc/mime.types" | sha256sum -c -; \
+    cp /tmp/mt/etc/mime.types /etc/mime.types; rm -rf /tmp/mt /tmp/mt.deb; \
+    curl -fsSL -o /tmp/node.txz https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz; \
+    echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  /tmp/node.txz" | sha256sum -c -; \
+    tar -xJf /tmp/node.txz -C /usr/local --strip-components=1 --no-same-owner \
+      node-v22.23.4-linux-x64/bin/node; rm /tmp/node.txz; node --version
+# Prebuilt read-only venv for the exact lockfile. The project is installed
+# EDITABLE from /work/source (the sandbox's private source copy), so its .pth
+# resolves to the gated SHA at runtime. No uv cache is shipped: a multi-GB
+# cache cannot be copied into the memory-charged /work tmpfs.
+COPY pyproject.toml uv.lock README.md LICENSE /work/source/
+RUN set -eu; cd /work/source; mkdir -p src/llm_bawt && touch src/llm_bawt/__init__.py; \
+    UV_CACHE_DIR=/tmp/uv-cache UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/gate/venv \
+      uv sync --frozen --compile-bytecode --extra dev --extra service --extra mcp --extra search --extra memory; \
+    rm -rf /tmp/uv-cache /work; chmod -R a+rX /opt/gate
+
+FROM scratch
+COPY --from=build / /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8
+USER 65532:65532

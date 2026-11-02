@@ -34,20 +34,19 @@ _MAX_OUTPUT = 1024 * 1024
 _IMAGE_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "PG_MAJOR", "PG_VERSION", "PG_SHA256",
     "PGDATA", "GOSU_VERSION", "PYTHON_VERSION", "PYTHON_SHA256"}
 _PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-_RUN_ENV = [f"PATH={_PATH}", "HOME=/work/home", "TMPDIR=/work/tmp", "XDG_CONFIG_HOME=/work/config",
+_RUN_ENV = [f"PATH={_PATH}", "HOME=/work/home", "TMPDIR=/tmp", "XDG_CONFIG_HOME=/work/config",
     "XDG_CACHE_HOME=/work/cache", "XDG_DATA_HOME=/work/data", "LC_ALL=C.UTF-8",
-    "UV_CACHE_DIR=/work/uv-cache", "UV_OFFLINE=1", "UV_PYTHON_DOWNLOADS=never",
+    "UV_OFFLINE=1", "UV_PYTHON_DOWNLOADS=never",
     "TIKTOKEN_CACHE_DIR=/opt/gate/tiktoken", "OPS_GATE_SANDBOX=1",
     "OPS_GATE_PG_BINDING=/gate/pg.json", "LLM_BAWT_TEST_WORKERS=2",
     "LLM_BAWT_UNIT_TIME_BUDGET_SECONDS=3", "LLM_BAWT_REAL_PROCESS_TIME_BUDGET_SECONDS=7"]
 # Trusted constant bootstrap, executed ONLY inside the unprivileged container.
 # The image's attested cache is copied to private scratch because uv writes it.
 _BOOTSTRAP = """set -eu
-mkdir -p /work/home /work/tmp /work/config /work/cache /work/data /work/source /work/uv-cache
+mkdir -p /work/home /work/tmp /work/config /work/cache /work/data /work/source
 cp -R /gate/source/. /work/source/
-cp -R /opt/gate/uv-cache/. /work/uv-cache/
 cd /work/source
-exec uv run --offline --isolated --frozen --extra dev --extra service --extra mcp --extra search --extra memory python -m scripts.test_suite offline
+exec /opt/gate/venv/bin/python -m scripts.test_suite offline
 """
 
 
@@ -166,7 +165,7 @@ def _body(image, labels, *, postgres, source, socket, binding):
         "SecurityOpt": ["no-new-privileges:true"], "LogConfig": {"Type": "none", "Config": {}},
         "RestartPolicy": {"Name": "no"}, "AutoRemove": False, "Privileged": False,
         "Memory": (512 if postgres else 4096) * 1024 * 1024,
-        "PidsLimit": 256, "NanoCpus": 2_000_000_000, "ShmSize": 64 * 1024 * 1024,
+        "PidsLimit": 256 if postgres else 2048, "NanoCpus": 2_000_000_000, "ShmSize": 64 * 1024 * 1024,
         "Mounts": [{"Type": "bind", "Source": str(socket), "Target": "/var/run/postgresql",
             "ReadOnly": not postgres, "BindOptions": {"Propagation": "rprivate"}}]}
     if postgres:
@@ -182,9 +181,10 @@ def _body(image, labels, *, postgres, source, socket, binding):
                 "BindOptions": {"Propagation": "rprivate"}},
             {"Type": "bind", "Source": str(binding), "Target": "/gate/pg.json", "ReadOnly": True,
                 "BindOptions": {"Propagation": "rprivate"}}]
-        # Scratch allows exec for fixture programs; it is bounded and not a host bind.
-        host["Tmpfs"] = {"/work": "rw,nosuid,nodev,size=4294967296,uid=65532,gid=65532,mode=0700",
-            "/tmp": "rw,nosuid,nodev,size=268435456,uid=65532,gid=65532,mode=1777"}
+        # Scratch allows exec for fixture programs (explicit: Docker defaults tmpfs to
+        # noexec); it is bounded and not a host bind.
+        host["Tmpfs"] = {"/work": "rw,exec,nosuid,nodev,size=4294967296,uid=65532,gid=65532,mode=0700",
+            "/tmp": "rw,exec,nosuid,nodev,size=1073741824,uid=65532,gid=65532,mode=1777"}
         env, command = _RUN_ENV, ["/bin/sh", "-c", _BOOTSTRAP]
     return {"Image": image, "User": "999:999" if postgres else "65532:65532",
         "Entrypoint": ["/usr/bin/env", "-i", *env], "Cmd": command, "Env": [f"PATH={_PATH}"],

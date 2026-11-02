@@ -170,7 +170,7 @@ def test_fixed_hardened_workload_and_positive_cleanup(setup, monkeypatch):
         assert host["ReadonlyRootfs"] and host["CapDrop"] == ["ALL"]
         assert host["SecurityOpt"] == ["no-new-privileges:true"]
         assert host["LogConfig"]["Type"] == "none" and host["AutoRemove"] is False
-        assert host["Privileged"] is False and host["PidsLimit"] == 256
+        assert host["Privileged"] is False
         assert host["NanoCpus"] == 2_000_000_000 and not body["OpenStdin"]
         assert not ({"Binds", "VolumesFrom", "Devices", "PortBindings", "GroupAdd"} & host.keys())
         assert body["Entrypoint"][:2] == ["/usr/bin/env", "-i"]
@@ -179,12 +179,16 @@ def test_fixed_hardened_workload_and_positive_cleanup(setup, monkeypatch):
         assert all("docker.sock" not in m["Source"] for m in host["Mounts"])
         assert body["Labels"]["llm-bawt.ops.job"] == JOB
     assert pg["User"] == "999:999" and run["User"] == "65532:65532"
+    assert pg["HostConfig"]["PidsLimit"] == 256 and run["HostConfig"]["PidsLimit"] == 2048
+    # Docker defaults tmpfs to noexec; fixture programs need explicit exec.
+    assert all(o.split(",")[:2] == ["rw", "exec"] for o in run["HostConfig"]["Tmpfs"].values())
+    assert "TMPDIR=/tmp" in run["Entrypoint"] and "/opt/gate/venv/bin/python" in run["Cmd"][-1]
     assert pg["Image"] == PG_ID and run["Image"] == RUNNER_ID
     assert len(pg["HostConfig"]["Mounts"]) == 1 and len(run["HostConfig"]["Mounts"]) == 3
     assert all(m["ReadOnly"] for m in run["HostConfig"]["Mounts"])
     assert not pg["HostConfig"]["Mounts"][0]["ReadOnly"]
     assert "listen_addresses=" in pg["Cmd"] and "port=55439" in pg["Cmd"]
-    assert "--offline --isolated --frozen" in run["Cmd"][-1]
+    assert "uv run" not in run["Cmd"][-1] and "uv-cache" not in run["Cmd"][-1]
     assert run["Cmd"][-1].endswith("python -m scripts.test_suite offline\n")
     assert "OPS_GATE_SANDBOX=1" in run["Entrypoint"]
     assert "OPS_GATE_PG_BINDING=/gate/pg.json" in run["Entrypoint"]

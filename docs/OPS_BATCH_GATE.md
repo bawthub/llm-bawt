@@ -224,7 +224,7 @@ image tag, pull, build or caller-selected workload. The closed
   trusted packaging reports for the image's actual tool binaries, complete
   offline Python/build dependency closure and runtime asset closure for this
   source and fixed workload. These are **not** declared version comparisons or
-  the finite asset manifest. Reports must cover `/opt/gate/uv-cache`, tokenizer
+  the finite asset manifest. Reports must cover the prebuilt `/opt/gate/venv`, tokenizer
   data at `/opt/gate/tiktoken`, `/etc/mime.types`, shell/Git/Node/uv/Python and
   the workload's build tools, with no runtime downloads or host caches.
 
@@ -242,10 +242,15 @@ unexpected image environment defaults and inherited writable volumes.
 The source handoff changes only private directory/Git-metadata readability;
 its host parent stays 0700 and tracked bytes/modes stay unchanged. The runner
 gets just RO binds for source, fixed PG binding and the per-job Unix-socket
-directory. UID 65532 copies source/private Git metadata and the image's uv cache
-into bounded private tmpfs, then runs exactly `uv run --offline --isolated
---frozen --extra dev --extra service --extra mcp --extra search --extra memory
-python -m scripts.test_suite offline`. Fixed worker/budget settings match the
+directory. UID 65532 copies source/private Git metadata into bounded private
+tmpfs at `/work/source`, then runs exactly `/opt/gate/venv/bin/python -m
+scripts.test_suite offline`. The image's read-only venv is built from the
+frozen lock with all five extras and installs the project editable from
+`/work/source` (`docker/Dockerfile.gate-runner`); no uv cache is copied, since
+tmpfs is memory-charged and the dependency cache is multi-GB. Runner tmpfs
+mounts are explicitly `exec` (Docker defaults tmpfs to noexec) and
+`TMPDIR=/tmp` keeps fixture Unix-socket paths within the AF_UNIX limit; the
+runner PID bound is 2048 (xdist threads), the sidecar's 256. Fixed worker/budget settings match the
 preserved CI values (2 workers; 3s unit / 7s real-process), not inherited host
 environment. The PG sidecar runs as UID 999 with private disposable tmpfs data
 and only that job's RW Unix-socket directory. Both have network-none, RO root,
