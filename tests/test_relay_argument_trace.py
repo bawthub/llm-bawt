@@ -9,6 +9,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from claude_code_bridge.proxy import relay_trace as trace_mod
+from claude_code_bridge.proxy.repetition_breaker import ENV_MIN_SPAN
 from claude_code_bridge.proxy.request_context import ProxyRequestContext
 from claude_code_bridge.proxy.stream import responses_to_anthropic_sse
 
@@ -196,7 +197,10 @@ def test_unsafe_files_fail_closed_without_output_change(arm, tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("kind", ["byte_limit", "event_limit"])
-def test_hard_limits_disarm_and_do_not_change_output(arm, kind):
+def test_hard_limits_disarm_and_do_not_change_output(arm, kind, monkeypatch):
+    # The whitespace payload is a deliberate repetition-breaker trip (TASK-1915);
+    # disable it so this test isolates trace hard limits.
+    monkeypatch.setenv(ENV_MIN_SPAN, "0")
     directory = arm()
     deltas = [" " * trace_mod.MAX_BYTES] if kind == "byte_limit" else [" "] * trace_mod.MAX_EVENTS
     frames = asyncio.run(_collect(_events(deltas=deltas), _context()))
