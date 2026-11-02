@@ -91,8 +91,17 @@ def _validate_setting_writes(engine, writes: list[tuple[str, str, str, object]],
     true needs a non-protected claude-code bot. Credential keys are refused
     outright (TASK-1520).
     """
-    for _scope_type, _scope_id, key, _value in writes:
+    for scope_type, _scope_id, key, value in writes:
         _refuse_credential_key(key)
+        from ..crawl4ai_token_export import GENERATION_KEY, validate_generation  # noqa: PLC0415
+
+        if key == GENERATION_KEY:
+            if scope_type != "global":
+                raise HTTPException(status_code=400, detail="Crawl4AI generation is global-only")
+            try:
+                validate_generation(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
     policy = WorkingMemoryPolicy(engine)
     for scope_type, scope_id, key, value in writes:
         if key in RETIRED_BALANCE_SETTINGS:

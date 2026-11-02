@@ -55,12 +55,12 @@ async def lifespan(app):
     from .bridge_gate import bridge_gates, seed_enforced_defaults, use_store
 
     bridge_gates().export_tokens()
-    # TASK-1476: the derived Crawl4AI bearer, for Crawl4AI and the bridges.
+    # Bootstrap before the Crawl4AI generation read on a fresh tenant.
+    gate_settings = RuntimeSettingsStore(config)
+    # TASK-1476/1955: the independently versioned Crawl4AI bearer.
     from .crawl4ai_token_export import export_crawl4ai_token
 
     export_crawl4ai_token()
-    # The store bootstraps runtime_settings, which a fresh tenant lacks.
-    gate_settings = RuntimeSettingsStore(config)
     use_store(gate_settings)
     try:
         seed_enforced_defaults(gate_settings.engine)

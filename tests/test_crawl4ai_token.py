@@ -170,6 +170,7 @@ def test_default_derivation_is_versioned_hex_and_follows_the_root(monkeypatch):
 
     from llm_bawt.service.providers import crypto
 
+    monkeypatch.setattr(crawl4ai_token_export, "current_generation", lambda: 0)
     labels: list[str] = []
     real = crypto.derive_key
     monkeypatch.setattr(crypto, "derive_key", lambda label: labels.append(label) or real(label))
