@@ -171,6 +171,21 @@ def test_access_paths_for_claude_code_backend_cover_native_and_proxy_routes():
     assert all(row["connection"] == {"key": row["key"]} for row in rows)
 
 
+def test_access_paths_project_static_provider_billing_mode():
+    rows, _, _ = _list_access_paths(harness=None, agent_backend=None)
+    assert {row["key"]: row["billing_mode"] for row in rows} == {
+        "anthropic-api": "metered",
+        "anthropic-oauth": "subscription",
+        "local-llamacpp": "unknown",
+        "openai-api": "metered",
+        "openai-oauth": "subscription",
+        "openai-responses": "metered",
+        "openrouter-anthropic": "metered",
+        "xai-chat": "metered",
+        "xai-responses": "metered",
+    }
+
+
 def test_access_paths_harness_filter_still_narrows_to_one_harness():
     rows, _, _ = _list_access_paths(harness="claude-code", agent_backend=None)
     assert [row["key"] for row in rows] == ["anthropic-api", "anthropic-oauth"]

@@ -17,6 +17,10 @@ def access_path_snapshot(catalog: Any, model_ref: str | None) -> dict[str, Any] 
     endpoint = endpoint_by_ref(model_ref) if callable(endpoint_by_ref) else None
     if endpoint is None:
         return None
+    # Keep this shared write-side module independent of provider imports at load
+    # time: adapters can themselves depend on service/turn-log code.
+    from .providers.registry import access_path_billing_mode
+
     access = endpoint.access_path
     return {
         "key": access.key,
@@ -24,6 +28,7 @@ def access_path_snapshot(catalog: Any, model_ref: str | None) -> dict[str, Any] 
         "protocol": access.protocol,
         "auth_mechanism": access.auth_mechanism,
         "engine_kind": access.engine_kind,
+        "billing_mode": access_path_billing_mode(access.key),
     }
 
 

@@ -33,6 +33,7 @@ class ChatGPTAppAdapter(ProviderAdapter):
     label = "ChatGPT (app-authorized)"
     auth_methods = (AUTH_BROWSER_OAUTH,)
     access_path_keys = ("openai-chatgpt-app",)
+    billing_mode = "subscription"
 
     @contextmanager
     def _transaction(self):

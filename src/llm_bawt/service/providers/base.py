@@ -13,7 +13,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from ...runtime_settings import RuntimeSettingsStore
 from ...utils.config import Config
@@ -334,6 +334,9 @@ class CredentialStore:
         return self._store.delete_value("global", "*", self._key(provider))
 
 
+BillingMode = Literal["subscription", "metered", "unknown"]
+
+
 class ProviderAdapter:
     """Base class for a connectable provider.
 
@@ -349,6 +352,9 @@ class ProviderAdapter:
     #: adapter's credential. The registry is the only place this mapping is
     #: read, and a key may have at most one owner.
     access_path_keys: tuple[str, ...] = ()
+    #: Static billing semantics of this provider's routes, independent of auth
+    #: kind or connection state. Unclassified providers must remain unknown.
+    billing_mode: BillingMode = "unknown"
 
     def __init__(self, config: Config):
         self.config = config

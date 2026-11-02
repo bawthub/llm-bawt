@@ -23,7 +23,6 @@ unregistered base class).
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import tempfile
@@ -67,6 +66,7 @@ class ClaudeAdapter(ClaudeSubAdapter):
     label = "Claude"
     auth_methods = (AUTH_CLI_OAUTH,)
     access_path_keys = ("anthropic-oauth",)
+    billing_mode = "subscription"
 
     # --- hooks --------------------------------------------------------------
     def _cli_args(self) -> list[str]:

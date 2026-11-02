@@ -27,6 +27,7 @@ class AnthropicKeyAdapter(ApiKeyAdapter):
     id = "anthropic-api"
     label = "Anthropic API"
     access_path_keys = ("anthropic-api",)
+    billing_mode = "metered"
 
     @staticmethod
     def _probe_request(key: str) -> tuple[str, dict[str, str]]:

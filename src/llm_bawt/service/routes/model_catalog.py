@@ -17,7 +17,7 @@ from claude_code_bridge.proxy.transport_policy import (
 from ...memory.model_catalog_migration import _derive_harness
 from ...model_catalog import AccessPath, ProtocolCompatibility
 from ..dependencies import get_model_catalog_engine, get_service
-from ..providers.registry import access_path_connections, route_eligibility
+from ..providers.registry import access_path_billing_mode, access_path_connections, route_eligibility
 
 router = APIRouter(prefix="/v1/models/catalog", tags=["Models"])
 
@@ -289,6 +289,7 @@ def list_access_paths(
         ]
     connections = access_path_connections(get_service().config, [row["key"] for row in rows])
     for row in rows:
+        row["billing_mode"] = access_path_billing_mode(row["key"])
         row["connection"] = connections[row["key"]]
         row["eligibility"] = route_eligibility(row["key"], row["auth_mechanism"], row["connection"])
     return {"access_paths": rows}

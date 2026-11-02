@@ -149,6 +149,7 @@ class ZaiKeyAdapter(ApiKeyAdapter):
     id = "zai"
     label = "Z.AI"
     access_path_keys = ("zai-anthropic",)
+    billing_mode = "unknown"  # API-key ownership alone does not establish a plan.
     keeps_disconnected_record = True
     #: Legacy env names, read only while no record exists.
     env_vars = ("ZAI_API_KEY", "Z_AI_API_KEY")
@@ -172,6 +173,7 @@ class KimiCodingKeyAdapter(ApiKeyAdapter):
     id = "kimi-coding"
     label = "Kimi For Coding"
     access_path_keys = ("kimi-coding-chat",)
+    billing_mode = "subscription"
     keeps_disconnected_record = True
     env_vars = ("KIMI_CODING_API_KEY", "KIMI_API_KEY")
 
@@ -192,6 +194,7 @@ class MoonshotKeyAdapter(ApiKeyAdapter):
     id = "moonshot"
     label = "Moonshot"
     access_path_keys = ("moonshot-anthropic",)
+    billing_mode = "metered"
     keeps_disconnected_record = True
     env_vars = ("MOONSHOT_API_KEY", "LLM_BAWT_MOONSHOT_API_KEY", "KIMI_API_KEY")
 

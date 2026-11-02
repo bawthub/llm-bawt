@@ -18,6 +18,7 @@ from .base import (
     HEALTH_BROKEN,
     HEALTH_UNCONFIGURED,
     HEALTH_UNKNOWN,
+    BillingMode,
     ProviderAdapter,
 )
 from .claude import ClaudeAdapter
@@ -84,6 +85,12 @@ def _access_path_owners() -> dict[str, type[ProviderAdapter]]:
 
 #: access_paths.key -> the adapter whose credential authorizes it (TASK-1297).
 _ACCESS_PATH_OWNERS = _access_path_owners()
+
+
+def access_path_billing_mode(access_path_key: str | None) -> BillingMode:
+    """Static owner metadata only; never constructs or probes an adapter."""
+    cls = _ACCESS_PATH_OWNERS.get(str(access_path_key or ""))
+    return cls.billing_mode if cls is not None else "unknown"
 
 
 def access_path_adapter(config: Config, access_path_key: str | None) -> ProviderAdapter | None:

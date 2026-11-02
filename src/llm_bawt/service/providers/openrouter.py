@@ -39,6 +39,7 @@ class OpenRouterAdapter(ProviderAdapter):
     label = "OpenRouter"
     auth_methods = (AUTH_API_KEY,)
     access_path_keys = ("openrouter-anthropic", "openrouter-chat")
+    billing_mode = "metered"
 
     # --- api key -------------------------------------------------------------
     def set_api_key(self, api_key: str) -> ValidateResult:

@@ -26,6 +26,7 @@ class XaiAdapter(ApiKeyAdapter):
     id = "xai"
     label = "xAI"
     access_path_keys = ("xai-chat", "xai-responses")
+    billing_mode = "metered"
 
     @staticmethod
     def _probe(key: str) -> tuple[str | None, str | None]:

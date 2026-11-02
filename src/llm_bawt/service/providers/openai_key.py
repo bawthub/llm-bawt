@@ -26,6 +26,7 @@ class OpenAIKeyAdapter(ApiKeyAdapter):
     id = "openai-api"
     label = "OpenAI API"
     access_path_keys = ("openai-api", "openai-responses")
+    billing_mode = "metered"
 
     @staticmethod
     def _probe(key: str) -> tuple[str | None, str | None]:

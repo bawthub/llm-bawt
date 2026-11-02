@@ -38,6 +38,47 @@ def test_registry_owner_map_is_exactly_the_expected_one():
     assert {key: cls.id for key, cls in registry._ACCESS_PATH_OWNERS.items()} == EXPECTED_OWNERS
 
 
+@pytest.mark.parametrize(("key", "expected"), [
+    ("anthropic-oauth", "subscription"),
+    ("openai-oauth", "subscription"),
+    ("openai-chatgpt-app", "subscription"),
+    ("zai-anthropic", "unknown"),
+    ("kimi-coding-chat", "subscription"),
+    ("anthropic-api", "metered"),
+    ("openai-api", "metered"),
+    ("openai-responses", "metered"),
+    ("xai-chat", "metered"),
+    ("xai-responses", "metered"),
+    ("openrouter-anthropic", "metered"),
+    ("openrouter-chat", "metered"),
+    ("moonshot-anthropic", "metered"),
+    ("local-vllm", "unknown"),
+    ("future-api", "unknown"),
+    ("", "unknown"),
+    (None, "unknown"),
+])
+def test_billing_mode_is_explicit_static_owner_metadata(key, expected):
+    with (
+        patch.object(ProviderAdapter, "__init__", side_effect=AssertionError("constructed adapter")),
+        patch.object(ProviderAdapter, "health", side_effect=AssertionError("probed health")),
+        patch("llm_bawt.service.providers.base.CredentialStore", side_effect=AssertionError("read credentials")),
+    ):
+        assert registry.access_path_billing_mode(key) == expected
+    if key in registry._ACCESS_PATH_OWNERS:
+        assert registry._ACCESS_PATH_OWNERS[key].__dict__["billing_mode"] == expected
+
+
+def test_billing_mode_does_not_infer_metering_from_api_key_auth():
+    from llm_bawt.service.providers.api_key import ApiKeyAdapter
+
+    class UnclassifiedKeyAdapter(ApiKeyAdapter):
+        access_path_keys = ("future-api",)
+
+    assert ProviderAdapter.billing_mode == "unknown"
+    with patch.object(registry, "_ACCESS_PATH_OWNERS", {"future-api": UnclassifiedKeyAdapter}):
+        assert registry.access_path_billing_mode("future-api") == "unknown"
+
+
 def test_every_owned_access_path_is_a_standard_seeded_path():
     seeded = {seed.key for seed in STANDARD_ACCESS_PATHS}
     # openrouter-anthropic is seeded by TASK-1295 B1c; once it lands nothing may be missing.
