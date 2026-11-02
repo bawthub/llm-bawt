@@ -276,14 +276,15 @@ def test_discovery_uses_models_slug_and_visibility(adapter, upstream, monkeypatc
     ]
 
 
-def test_proxy_route_namespaced_tools_and_result_replay():
+@pytest.mark.parametrize("choice_type", ["tool", "function"])
+def test_proxy_route_namespaced_tools_and_result_replay(choice_type):
     from claude_code_bridge.proxy.adapters.chatgpt_app import ChatGPTAppAdapter
     from claude_code_bridge.proxy.translate import anthropic_to_responses
     adapter = ChatGPTAppAdapter()
     body = anthropic_to_responses({
         "model": "chatgpt_app/gpt-6.1-sol", "max_tokens": 4096,
         "tools": [{"name": "noop", "description": "No-op", "input_schema": {"type": "object", "properties": {}}}],
-        "tool_choice": {"type": "tool", "name": "noop"},
+        "tool_choice": {"type": choice_type, "name": "noop"},
         "messages": [
             {"role": "user", "content": "synthetic"},
             {"role": "assistant", "content": [{"type": "tool_use", "id": "call_one", "name": "noop", "input": {}}]},
@@ -295,7 +296,7 @@ def test_proxy_route_namespaced_tools_and_result_replay():
     assert body["tools"][0]["tools"][0]["name"] == "noop"
     assert body["input"][1]["namespace"] == "bawthub"
     assert body["input"][2] == {"type": "function_call_output", "call_id": "call_one", "output": "OK"}
-    assert body["tool_choice"] == {"type": "function", "name": "noop", "namespace": "bawthub"}
+    assert body["tool_choice"] == {"type": "function", "name": "noop"}
     assert "max_output_tokens" not in body
     assert body["stream"] and not body["store"]
 

@@ -105,7 +105,8 @@ class ChatGPTAppAdapter(ProviderAdapter):
         if isinstance(choice, dict):
             kind = choice.get("type")
             if kind in {"tool", "function"}:
-                body["tool_choice"] = {"type": "function", "name": choice["name"], "namespace": TOOL_NAMESPACE}
+                # Namespaces belong to definitions/replayed calls, not this selector.
+                body["tool_choice"] = {"type": "function", "name": choice["name"]}
             elif kind in {"any", "auto", "none"}:
                 body["tool_choice"] = "required" if kind == "any" else kind
             else:
