@@ -378,3 +378,18 @@ def test_no_model_or_provider_branches_in_factory_module():
     text = Path(bc.__file__).read_text()
     assert not re.search(r"\b(gpt-|grok-|claude-|gemini-|llama)", text)
     assert not re.search(r"provider\s*==", text)
+
+
+def test_messages_client_1m_alias_sends_base_id_with_beta_header():
+    """TASK-1763: the CLI ``[1m]`` alias 404s on the Messages API."""
+    sdk = MagicMock()
+    sdk.messages.create.return_value = SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
+    cfg = SimpleNamespace(TEMPERATURE=0.5, PLAIN_OUTPUT=True, get_model_max_tokens=lambda alias: 777)
+    with patch("llm_bawt.clients.anthropic_messages_client.Anthropic", return_value=sdk) as ctor:
+        client = AnthropicMessagesClient("claude-x[1m]", cfg, base_url="https://a.example", api_key="k")
+    client.query([Message(role="user", content="u")], max_tokens=5)
+    assert sdk.messages.create.call_args.kwargs["model"] == "claude-x"
+    assert ctor.call_args.kwargs["default_headers"] == {"anthropic-beta": "context-1m-2025-08-07"}
+    with patch("llm_bawt.clients.anthropic_messages_client.Anthropic", return_value=sdk) as ctor:
+        AnthropicMessagesClient("claude-x", cfg, base_url="https://a.example", api_key="k")
+    assert "default_headers" not in ctor.call_args.kwargs

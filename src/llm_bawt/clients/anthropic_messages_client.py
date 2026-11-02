@@ -28,6 +28,19 @@ logger = logging.getLogger(__name__)
 #: Local Messages servers ignore the key, but the SDK requires one.
 _NO_AUTH_KEY = "not-needed"
 
+#: The Messages API selects the 1M window with this beta header on the base
+#: model id; the ``[1m]`` name suffix is a Claude Code CLI alias (TASK-1763).
+CONTEXT_1M_BETA = "context-1m-2025-08-07"
+
+
+def api_model_and_headers(model: str) -> tuple[str, dict[str, str]]:
+    """Map a CLI ``<id>[1m]`` alias to the base id plus the 1M beta header."""
+    from ..service.model_discovery import CLAUDE_CODE_1M_SUFFIX
+
+    if model.endswith(CLAUDE_CODE_1M_SUFFIX):
+        return model[: -len(CLAUDE_CODE_1M_SUFFIX)], {"anthropic-beta": CONTEXT_1M_BETA}
+    return model, {}
+
 
 class AnthropicMessagesClient(LLMClient):
     SUPPORTS_STREAMING = False
@@ -45,7 +58,9 @@ class AnthropicMessagesClient(LLMClient):
         if not base_url:
             raise ValueError("Anthropic Messages endpoint has no base_url")
         self.base_url = base_url
-        self.client = Anthropic(api_key=api_key or _NO_AUTH_KEY, base_url=base_url)
+        self.api_model, headers = api_model_and_headers(model)
+        extra = {"default_headers": headers} if headers else {}
+        self.client = Anthropic(api_key=api_key or _NO_AUTH_KEY, base_url=base_url, **extra)
         self._rejected_fields: set[str] = set()
 
     # -- message conversion ------------------------------------------------
@@ -111,7 +126,7 @@ class AnthropicMessagesClient(LLMClient):
 
     def _payload(self, messages: List[Message], *, max_tokens: int, optional: dict[str, Any]) -> dict:
         system, turns = self._prepare(messages)
-        payload: dict[str, Any] = {"model": self.model, "max_tokens": int(max_tokens), "messages": turns}
+        payload: dict[str, Any] = {"model": self.api_model, "max_tokens": int(max_tokens), "messages": turns}
         if system:
             payload["system"] = system
         payload.update(optional)
