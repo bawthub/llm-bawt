@@ -74,7 +74,14 @@ class ChatGPTAppAdapter(ProviderAdapter):
     def extra_headers(self, body, context=None):
         if context is not None:
             context.account_hash = self.account_hash()
-        return {}  # No Codex originator, account header, or impersonated client identity.
+        # session_id gives the upstream prompt cache sticky routing (TASK-1958);
+        # same value as prompt_cache_key. Still no Codex originator, account
+        # header, or impersonated client identity.
+        session_id = (
+            context.conversation_id if context and context.conversation_id
+            else _prompt_cache_key(body)
+        )
+        return {"session_id": session_id}
 
     def prepare_request(self, body, context=None):
         for key in _UNSUPPORTED:

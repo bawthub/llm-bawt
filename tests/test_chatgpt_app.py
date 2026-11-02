@@ -311,7 +311,21 @@ async def test_proxy_resolves_broker_each_request_and_fences_accounts(monkeypatc
     first = adapter.reasoning_codec("gpt-6.1-sol", BASE_URL)
     assert await adapter.authorize() == ("synthetic", BASE_URL)
     assert adapter.reasoning_codec("gpt-6.1-sol", BASE_URL) != first
-    assert adapter.extra_headers({}) == {}
+    headers = adapter.extra_headers({})
+    assert set(headers) == {"session_id"}  # no originator/beta/account identity
+
+
+def test_session_id_header_matches_prompt_cache_key():
+    """TASK-1958: session_id rides with prompt_cache_key for sticky cache routing."""
+    from claude_code_bridge.proxy.adapters.chatgpt_app import ChatGPTAppAdapter
+    from claude_code_bridge.proxy.request_context import ProxyRequestContext
+    adapter = ChatGPTAppAdapter()
+    ctx = ProxyRequestContext(request_id="r", provider="chatgpt_app", conversation_id="ab" * 16)
+    body = adapter.prepare_request({"model": "m", "instructions": "x", "input": []}, ctx)
+    assert adapter.extra_headers(body, ctx) == {"session_id": body["prompt_cache_key"]} == {"session_id": "ab" * 16}
+    bare = {"model": "m", "instructions": "stable prefix", "input": []}
+    fallback = adapter.prepare_request(dict(bare), None)
+    assert adapter.extra_headers(dict(bare), None) == {"session_id": fallback["prompt_cache_key"]}
 
 
 @pytest.mark.asyncio
