@@ -65,6 +65,7 @@ from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
 from .reasoning import ReasoningCodec
 from .continuation import CommittedOutput
 from .relay_trace import RelayTrace, claim_relay_trace
+from .repetition_breaker import RepetitionBreaker
 from .request_context import ProxyRequestContext
 
 logger = logging.getLogger(__name__)
@@ -313,6 +314,7 @@ async def responses_to_anthropic_sse(
     # pages: "") which the SDK tools reject. We buffer, strip empties, then
     # emit on the .done event.
     tool_arg_buffers: dict[str, str] = {}   # item_id → accumulated JSON string
+    loop_breaker = RepetitionBreaker()
     relay_trace: RelayTrace | None = None
 
     terminal_event_seen = False
@@ -522,7 +524,10 @@ async def responses_to_anthropic_sse(
                     relay_trace.record("delta", delta=getattr(event, "delta", None))
                 if block is None or not partial:
                     continue
-                # Buffer instead of emitting — we sanitize on .done.
+                # Buffer instead of emitting — we sanitize on .done. Buffered
+                # arguments are invisible to the route-level breaker until
+                # then, so watch them here to stop a loop mid-stream.
+                loop_breaker.observe(item_id, partial, kind="tool_use")
                 tool_arg_buffers[item_id] = tool_arg_buffers.get(item_id, "") + partial
                 continue
 
@@ -670,6 +675,7 @@ async def responses_to_anthropic_sse(
                 # so the delta buffer alone yields "{}" and every call reaches
                 # the SDK with empty input. Buffer is the fallback only.
                 buffered = tool_arg_buffers.pop(item_id, "")
+                loop_breaker.discard(item_id)
                 complete = (
                     getattr(event, "arguments", None)
                     if etype == "response.function_call_arguments.done"
