@@ -361,6 +361,7 @@ def _chat_steer(monkeypatch, steer_request_id):
     from llm_bawt import bots
     from llm_bawt.agent_backends import agent_bridge
     from llm_bawt.service.routes.chat import ChatSteerRequest, steer_active_turn
+    from tests.steer_session_fixture import owned_steer_store
 
     sends: list[str | None] = []
     sleeps: list[float] = []
@@ -381,15 +382,17 @@ def _chat_steer(monkeypatch, steer_request_id):
     turn = SimpleNamespace(
         id="turn-live", bot_id="byte", user_id="nick", status="streaming", ended_at=None,
         agent_session_key="byte:nick", agent_request_id="req-live", user_prompt="work",
+        trigger_message_id="trigger-live",
     )
-    service = SimpleNamespace(config=None, _turn_log_store=SimpleNamespace(get_turn=lambda _id: turn))
-    with pytest.raises(HTTPException) as caught:
-        asyncio.run(steer_active_turn(
-            service,
-            ChatSteerRequest(turn_id=turn.id, message="hi", message_id="m-1",
-                             bot_id="byte", user_id="nick"),
-            steer_request_id=steer_request_id,
-        ))
+    with owned_steer_store(turn) as store:
+        service = SimpleNamespace(config=None, _turn_log_store=store)
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(steer_active_turn(
+                service,
+                ChatSteerRequest(turn_id=turn.id, message="hi", message_id="m-1",
+                                 bot_id="byte", user_id="nick"),
+                steer_request_id=steer_request_id,
+            ))
     assert caught.value.detail == "no_active_run"
     return sends, sleeps
 
