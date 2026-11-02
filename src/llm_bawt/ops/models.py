@@ -469,6 +469,10 @@ class OpsJob(SQLModel, table=True):
     worker_slot_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
+    # TASK-1865: durable positive retirement of a slot-reserved gate's containers.
+    gate_retired_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     # The isolated self-reconcile claim blocks new process slots while open.
     # Prepared recovery-policy holds also block after terminalization until an
     # explicit identity-matched verified release. Legacy dormant holds unchanged.

@@ -41,6 +41,10 @@ WORKER_SLOT_LOCK = "ops-worker-slots"
 # Release orchestration never starts a worker (its mode is inert).
 CHILD_PROCESS_EXECUTORS = frozenset({EXECUTOR_DOCKER})
 WORKER_SLOT_STATES = (JOB_QUIESCING, JOB_DISPATCHING, JOB_ACCEPTED, JOB_RUNNING)
+# TASK-1865: a slot-reserved gate keeps counting in ANY state until a durable
+# positive retirement stamp. Ordinary terminal non-gate rows stay excluded.
+UNRETIRED_GATE_SLOT = ("(host_unit_name LIKE 'gate-custody:%' AND worker_slot_at IS NOT NULL"
+                       " AND gate_retired_at IS NULL)")
 WAITING_WORKER_SLOT = "waiting for a process worker slot"
 
 
@@ -110,8 +114,8 @@ def live_worker_slots(conn, *, exclude_job_id: str | None = None) -> int:
     params: dict[str, Any] = {f"s{i}": state for i, state in enumerate(WORKER_SLOT_STATES)}
     params["exclude"] = exclude_job_id or ""
     return int(conn.execute(text(
-        f"SELECT count(*) FROM ops_jobs WHERE worker_slot_at IS NOT NULL AND state IN ({states})"
-        " AND id <> :exclude"), params).scalar_one())
+        f"SELECT count(*) FROM ops_jobs WHERE worker_slot_at IS NOT NULL"
+        f" AND (state IN ({states}) OR {UNRETIRED_GATE_SLOT}) AND id <> :exclude"), params).scalar_one())
 
 
 def worker_slot_free(conn, snapshot: Mapping[str, Any], *, job_id: str) -> bool | None:

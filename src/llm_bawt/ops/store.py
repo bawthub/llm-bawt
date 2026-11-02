@@ -32,6 +32,7 @@ from .models import (EXECUTOR_DOCKER, EXECUTOR_RELEASE, JOB_ACCEPTED, JOB_DISPAT
                      JOB_QUIESCING, JOB_RUNNING, JOB_TERMINAL_STATES, OpsJob, OpsOperation,
                      OpsOperationRevision)
 from .quiesce_settings import validate_quiesce_settings
+from .worker_slots import UNRETIRED_GATE_SLOT
 from .gate_history import gate_plan_key, migrate_gate_history
 from .validation import canonical_json, validate_catalog
 from .worker_slots import process_spawn_held, process_spawn_hold_available, worker_slot_free
@@ -78,6 +79,7 @@ _JOB_WORKER_SLOT_COLUMNS = (  # TASK-1169 process admission and self-config drai
     ("process_spawn_hold_target_json", "TEXT"),
     ("process_spawn_hold_quarantine_at", "TIMESTAMP WITH TIME ZONE"),
     ("process_spawn_hold_release_json", "TEXT"),
+    ("gate_retired_at", "TIMESTAMP WITH TIME ZONE"),  # TASK-1865 positive gate retirement.
 )
 _OP_QUIESCE_COLUMNS = (
     ("quiesce_enabled", "BOOLEAN NOT NULL DEFAULT false"),
@@ -91,12 +93,15 @@ def slot_holders(conn, operation_slug, *, exclude_job_id=None):
 
     A claimed job holds a slot, and so does a quiescing job once its gate is
     open (TASK-1233 C5): its hold is already in effect. Run under the
-    operation-row lock, like every slot claim.
+    operation-row lock, like every slot claim. A reserved gate keeps its
+    slot in any state until positively retired (TASK-1865); a terminal row
+    alone never proves its runner stopped. Each row is listed once.
     """
     rows = conn.execute(text(
         "SELECT id, invocation_snapshot_json FROM ops_jobs WHERE operation_slug=:slug"
         " AND (state IN (:dispatching, :accepted, :running)"
-        "      OR (state=:quiescing AND quiesce_gate_id IS NOT NULL))"
+        "      OR (state=:quiescing AND quiesce_gate_id IS NOT NULL)"
+        f"      OR {UNRETIRED_GATE_SLOT})"
     ), {"slug": operation_slug, "dispatching": JOB_DISPATCHING, "accepted": JOB_ACCEPTED,
         "running": JOB_RUNNING, "quiescing": JOB_QUIESCING}).all()
     return [row[1] for row in rows if row[0] != exclude_job_id]

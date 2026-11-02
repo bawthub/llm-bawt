@@ -479,6 +479,31 @@ execution still requires the supported test target under actual host custody;
 source review and authored tests alone are not passing execution receipts.
 The earlier custody and claim receipts remain independent and reusable.
 
+## Dormant positive retirement of reserved gate capacity
+
+`ops_jobs.gate_retired_at` (nullable, additive) closes the freed-slot gap
+above for the shared and per-operation budgets. A gate row with a gate-custody
+marker and `worker_slot_at` counts in `live_worker_slots` and `slot_holders` in
+**any** state until that stamp exists; active rows count once, and ordinary
+terminal non-gate rows stay excluded. No such rows exist while dispatch is
+unwired, so current admission is unchanged.
+
+`gate_retire.retire_gate_slot` (no production caller) holds the submission
+flock, requires a terminal row with a durable start reservation, then lists
+**all** containers carrying the exact job+nonce labels (GET-only, `all=1`;
+labels are immutable, so renames cannot hide one) and re-inspects each by
+immutable ID. Every match must be `exited`, not running/restarting, with
+explicit `RestartPolicy.Name == "no"`; zero matches is positive absence. It
+then CAS-stamps the row once under a fresh row lock. Any other state, missing
+field, 404 after listing, daemon error or changed ledger refuses with a fixed
+code and the slot stays held; an unreadable intent therefore keeps the slot
+until an operator acts. No removal, retry, result, callback or launch.
+
+Limits: this is not a DB-loss or copied-identity fence. A late creator that
+outlived its session with a copied nonce, or a manual restart of a retained
+exited container, is not prevented. Retirement is not permission for a second
+attempt or SHIP.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is

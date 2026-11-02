@@ -262,10 +262,10 @@ def test_terminal_after_guard_waits_only_for_surviving_transaction(ready, monkey
             wait_blocked_by(c.rig.engine, holder[0], future)
             assert c.rig.store.get_job(c.job.id).state == "dispatching"
         assert future.result(timeout=HANG_GUARD).state == "lost"
-    # This demonstrates the explicit limitation, NOT retirement: terminal rows
-    # stop counting although the immutable reservation still cannot be reissued.
+    # A terminal row is NOT retirement: the reserved gate keeps its shared
+    # slot until gate_retire stamps positive evidence (TASK-1865).
     with c.rig.engine.begin() as conn:
-        assert live_worker_slots(conn) == 0
+        assert live_worker_slots(conn) == 1
     with pytest.raises(start.GateStartError):
         with reserve(c):
             pytest.fail("terminal marker was reusable")

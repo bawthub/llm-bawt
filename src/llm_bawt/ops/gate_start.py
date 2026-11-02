@@ -3,8 +3,8 @@
 No caller, launch, running/result transition, recovery or retirement lives here.
 This is NOT a complete execution permit or lifetime capacity fence. A surviving
 DB session excludes concurrent terminal writes only within the yielded boundary;
-DB loss cannot stop caller code. Terminal rows cease counting even if a runner
-survives, so positive retirement/lifetime fencing is still owed before wiring.
+DB loss cannot stop caller code. A reserved gate keeps counting in any state
+until gate_retire records positive retirement; that is not a DB-loss fence.
 """
 from __future__ import annotations
 
