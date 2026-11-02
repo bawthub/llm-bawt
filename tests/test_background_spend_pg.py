@@ -27,7 +27,11 @@ PATH = {"key": "xai-chat", "vendor": "xai", "protocol": "chat-completions",
 
 
 @pytest.fixture
-def rig():
+def rig(monkeypatch):
+    # These cases exercise manual-anchor accounting, not management reporting.
+    from llm_bawt.service.usage.adapters.xai import XaiUsageAdapter
+
+    monkeypatch.setattr(XaiUsageAdapter, "_management_connection", lambda _self: None)
     store = TurnLogStore(require_test_db_config())
     bot = f"testbgs{uuid.uuid4().hex[:12]}"
 
