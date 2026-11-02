@@ -171,12 +171,15 @@ class _MCPShortTermManager:
             **({"idempotency_key": idempotency_key} if idempotency_key else {})
         )
 
-    def clear(self) -> bool:
-        deleted = self._memory_client.clear_messages()
+    def clear(self, *, user_id: str | None = None) -> bool:
+        owner = self.user_id if user_id is None else user_id
+        if not owner:
+            raise ValueError("History mutation requires user_id")
+        deleted = self._memory_client.clear_messages(user_id=owner)
         return deleted >= 0
 
-    def remove_last_message_if_partial(self, role: str) -> bool:
-        return bool(self._memory_client.remove_last_message_if_partial(role=role))
+    def remove_last_message_if_partial(self, role: str, *, user_id: str | None = None) -> bool:
+        return bool(self._memory_client.remove_last_message_if_partial(role=role, user_id=user_id))
 
     def get_messages_for_summary(self, summary_id: str) -> list:
         from llm_bawt.models.message import Message

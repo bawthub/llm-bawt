@@ -962,7 +962,7 @@ class HistoryManager:
         # Clear PostgreSQL if available
         if self._db_backend:
             try:
-                self._db_backend.clear()
+                self._db_backend.clear(user_id=self.user_id)
                 self.client.console.print("[bold red]History cleared (PostgreSQL).[/bold red]")
                 return
             except Exception as e:
@@ -994,7 +994,7 @@ class HistoryManager:
             # Remove from PostgreSQL as well if available
             if self._db_backend:
                 try:
-                    self._db_backend.remove_last_message_if_partial(role)
+                    self._db_backend.remove_last_message_if_partial(role, user_id=self.user_id)
                 except Exception as e:
                     logger.warning(f"Failed to remove from PostgreSQL: {e}")
             else:

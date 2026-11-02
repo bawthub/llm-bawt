@@ -804,8 +804,15 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
             logger.error("Failed to get summary husks: %s", e)
             return []
 
-    async def clear_messages(self, bot_id: str = "default") -> int:
-        """Delete all messages for a bot."""
+    async def clear_messages(self, bot_id: str = "default", user_id: str | None = None) -> int:
+        """Delete one user's conversation rows, never their semantic memories."""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("History mutation requires user_id")
+        manager = self.get_short_term_manager(bot_id, provision_schema=True)
+        return manager.clear_messages(user_id=user_id)
+
+    async def clear_all_messages(self, bot_id: str = "default") -> int:
+        """Internal operator clear-all; not an ordinary caller-facing tool."""
         backend = self._get_backend(bot_id, provision_schema=True)
         from sqlalchemy import text
 
@@ -822,34 +829,14 @@ class MemoryStorage(StorageAdminMixin, StorageSearchMixin, StorageSessionsMixin)
         """Delete all distilled memories for a bot through its cached backend."""
         return bool(self._get_backend(bot_id, provision_schema=True).clear())
 
-    async def remove_last_message_if_partial(self, bot_id: str = "default", role: str = "assistant") -> bool:
-        """Remove the most recent message if it matches role."""
-        backend = self._get_backend(bot_id, provision_schema=True)
-        from sqlalchemy import text
-
-        try:
-            with backend.engine.connect() as conn:
-                row = conn.execute(
-                    text(
-                        f"""
-                        SELECT id, role
-                        FROM {backend._messages_table_name}
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                        """
-                    )
-                ).fetchone()
-                if not row or row.role != role:
-                    return False
-                conn.execute(
-                    text(f"DELETE FROM {backend._messages_table_name} WHERE id = :id"),
-                    {"id": row.id},
-                )
-                conn.commit()
-                return True
-        except Exception as e:
-            logger.error("Failed to remove last message: %s", e)
-            return False
+    async def remove_last_message_if_partial(
+        self, bot_id: str = "default", role: str = "assistant", user_id: str | None = None,
+    ) -> bool:
+        """Remove the user's newest message only if its role matches."""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("History mutation requires user_id")
+        manager = self.get_short_term_manager(bot_id, provision_schema=True)
+        return manager.remove_last_message_if_partial(role, user_id=user_id)
 
     async def store_recap_summary(
         self,

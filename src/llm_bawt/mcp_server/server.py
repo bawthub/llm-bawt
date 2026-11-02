@@ -36,6 +36,7 @@ from llm_bawt.shared.logging import LogConfig
 from .registry import mcp  # noqa: F401 — re-exported for downstream tool modules
 from .bot_access_identity import BotAccessMiddleware
 from .agent_view import for_caller
+from .history_owner import history_caller_user
 from .system_author_fence import fenced_system_author, is_system_author_request
 
 if TYPE_CHECKING:
@@ -744,9 +745,7 @@ async def get_messages(
     ``exclude_summarized`` drops already-summarized bubbles from a session-scoped
     read so raw and summary rows stay disjoint (no double-loading).
     """
-    # TASK-1774: ``user_id`` limits the read to that user's sessions; request
-    # context assembly always passes it. (Kept out of the docstring: it is the
-    # tool description and counts against the catalog token budget.)
+    user_id = history_caller_user(bot_id, user_id, operator=True)
     logger.debug(
         "MCP tool invoked: tools/get_messages bot_id=%s session_id=%s summaries_only=%s excl_summ=%s",
         bot_id, session_id, summaries_only, exclude_summarized,
@@ -760,18 +759,25 @@ async def get_messages(
 
 
 @mcp.tool(name="messages_clear")
-async def clear_messages(bot_id: str = "default") -> int:
-    """Delete all messages for a bot."""
+async def clear_messages(bot_id: str = "default", user_id: str | None = None) -> int:
+    """Delete your messages for a bot."""
+    user_id = history_caller_user(bot_id, user_id, operator=True)
     logger.debug("MCP tool invoked: tools/clear_messages bot_id=%s", bot_id)
     storage = _get_storage()
-    return await storage.clear_messages(bot_id=bot_id)
+    if user_id is None:
+        return await storage.clear_all_messages(bot_id=bot_id)
+    return await storage.clear_messages(bot_id=bot_id, user_id=user_id)
 
 
 @mcp.tool(name="messages_remove_last_partial")
-async def remove_last_message_if_partial(bot_id: str = "default", role: str = "assistant") -> bool:
+async def remove_last_message_if_partial(
+    bot_id: str = "default", role: str = "assistant", user_id: str | None = None,
+) -> bool:
+    """Remove your newest message if its role matches."""
+    user_id = history_caller_user(bot_id, user_id)
     logger.debug("MCP tool invoked: tools/remove_last_message_if_partial bot_id=%s role=%s", bot_id, role)
     storage = _get_storage()
-    return await storage.remove_last_message_if_partial(bot_id=bot_id, role=role)
+    return await storage.remove_last_message_if_partial(bot_id=bot_id, role=role, user_id=user_id)
 
 
 # ---------------------------------------------------------------------------

@@ -140,7 +140,7 @@ def test_moved_methods_keep_embedded_backend_provisioning():
 
 
 def test_server_mode_short_term_manager_is_the_reexported_adapter(monkeypatch):
-    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture", server_url="http://mcp.invalid")
+    client = MemoryClient(SimpleNamespace(), bot_id="public_fixture", user_id="user_a", server_url="http://mcp.invalid")
     manager = client.get_short_term_manager()
     assert type(manager) is _MCPShortTermManager
     client.clear_messages = Mock(return_value=0)

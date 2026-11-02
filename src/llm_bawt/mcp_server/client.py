@@ -316,13 +316,14 @@ class MemoryClient(
                 transcript. When None, existing behaviour is unchanged.
             summaries_only: TASK-284 step 12 — return only the rolling summary
                 husks (continuity), no raw bubbles.
-            user_id: TASK-1774 — limit the read to this user's sessions. It is
-                passed explicitly (not taken from ``self.user_id``) because
-                tool and route readers share this client.
+            user_id: Limit to this user's sessions; defaults to the client's
+                bound owner. Only user-less internal/operator clients may
+                choose an arbitrary filter or leave it bot-wide.
 
         Returns:
             List of message dicts with role, content, timestamp, session_id.
         """
+        user_id = self._history_user(user_id)
         self._ensure_initialized()
         if self.server_url:
             result = self._call_server(
@@ -438,12 +439,26 @@ class MemoryClient(
                                    working_memory_mode=working_memory_mode, **key_args)
         )
 
-    def clear_messages(self) -> int:
+    def _history_user(self, user_id: str | None) -> str | None:
+        if self.user_id is not None:
+            if user_id is not None and user_id != self.user_id:
+                raise ValueError("History user does not match client owner")
+            user_id = self.user_id
+        if user_id is not None and not user_id.strip():
+            raise ValueError("History requires a nonblank user_id")
+        return user_id
+
+    def clear_messages(self, *, user_id: str | None = None) -> int:
+        user_id = self._history_user(user_id)
         self._ensure_initialized()
         if self.server_url:
-            return int(self._call_server("messages_clear", {"bot_id": self.bot_id}))
+            return int(self._call_server("messages_clear", {"bot_id": self.bot_id, "user_id": user_id}))
         storage = self._get_storage()
-        return int(_run_async(storage.clear_messages(bot_id=self.bot_id)))
+        # The user-less service client is the existing operator clear-all path;
+        # request-bound clients never enter it. No public admin flag is accepted.
+        if user_id is None:
+            return int(_run_async(storage.clear_all_messages(bot_id=self.bot_id)))
+        return int(_run_async(storage.clear_messages(bot_id=self.bot_id, user_id=user_id)))
 
     def clear_memories(self) -> bool:
         """Delete all distilled memories for this bot."""
@@ -453,12 +468,15 @@ class MemoryClient(
         storage = self._get_storage()
         return bool(_run_async(storage.clear_memories(bot_id=self.bot_id)))
 
-    def remove_last_message_if_partial(self, role: str) -> bool:
+    def remove_last_message_if_partial(self, role: str, *, user_id: str | None = None) -> bool:
+        user_id = self._history_user(user_id)
+        if user_id is None:
+            raise ValueError("History mutation requires user_id")
         self._ensure_initialized()
         if self.server_url:
-            return bool(self._call_server("messages_remove_last_partial", {"bot_id": self.bot_id, "role": role}))
+            return bool(self._call_server("messages_remove_last_partial", {"bot_id": self.bot_id, "role": role, "user_id": user_id}))
         storage = self._get_storage()
-        return bool(_run_async(storage.remove_last_message_if_partial(bot_id=self.bot_id, role=role)))
+        return bool(_run_async(storage.remove_last_message_if_partial(bot_id=self.bot_id, role=role, user_id=user_id)))
 
     def get_messages_for_summary(self, summary_id: str) -> list[dict[str, Any]]:
         """Get raw messages referenced by a summary row."""

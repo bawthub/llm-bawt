@@ -12,17 +12,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from ..message_authorship import AuthorReference
 from .short_term_message_reads import ShortTermMessageReadsMixin
+from .short_term_message_mutations import ShortTermMessageMutationsMixin
 
 logger = logging.getLogger(__name__)
 
 
-class PostgreSQLShortTermManager(ShortTermMessageReadsMixin):
+class PostgreSQLShortTermManager(ShortTermMessageReadsMixin, ShortTermMessageMutationsMixin):
     """Manages short-term (session) conversation history using PostgreSQL.
     
     This stores messages permanently
@@ -758,34 +758,6 @@ class PostgreSQLShortTermManager(ShortTermMessageReadsMixin):
 
         return mid
     
-    def clear(self) -> bool:
-        """Clear all messages for this bot."""
-        return self._backend.clear()
-
-    def remove_last_message_if_partial(self, role: str) -> bool:
-        """Remove the last message if it matches the specified role.
-        
-        Used for cleanup on error/interrupt.
-        """
-        with Session(self._backend.engine) as session:
-            # Find the last message
-            stmt = (
-                select(self._backend.messages_table)
-                .order_by(self._backend.messages_table.c.timestamp.desc())
-                .limit(1)
-            )
-            row = session.execute(stmt).fetchone()
-            
-            if row and row.role == role:
-                delete_stmt = (
-                    self._backend.messages_table.delete()
-                    .where(self._backend.messages_table.c.id == row.id)
-                )
-                session.execute(delete_stmt)
-                session.commit()
-                return True
-            return False
-
     def get_messages_for_summary(self, summary_id: str) -> list:
         """Get the original raw messages that a summary covers.
 

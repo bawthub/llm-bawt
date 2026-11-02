@@ -74,6 +74,18 @@ def test_direct_clear_reports_incomplete_memory_clear() -> None:
     assert client.calls == ["clear_messages", "clear_memories"]
 
 
+def test_operator_clear_failure_does_not_fall_back_to_one_user_or_load_model() -> None:
+    client = FakeMemoryClient(memories_cleared=False)
+    service = fake_service(client)
+    service._available_models = ["synthetic"]
+    service._get_llm_bawt = lambda *_a: pytest.fail("must not load a model or report a user-only clear as bot-wide")
+    dependencies.set_service(service)
+    with pytest.raises(HTTPException) as exc_info:
+        history.clear_history(bot_id="nova")
+    assert exc_info.value.status_code == 500
+    assert ("model", "nova", "user") in service._llm_bawt_cache
+
+
 def test_delete_message_uses_cached_client_and_evicts_bot_cache() -> None:
     client = FakeMemoryClient(forgotten=True)
     service = fake_service(client)

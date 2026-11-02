@@ -752,12 +752,9 @@ def clear_history(
         cleared = _clear_history_direct(client, effective_bot_id)
 
         if not cleared:
-            # Fallback: use the full LLMBawt instance
-            model_alias = list(service._available_models)[0] if service._available_models else None
-            if not model_alias:
-                raise HTTPException(status_code=500, detail="No models available")
-            llm_bawt = service._get_llm_bawt(model_alias, effective_bot_id, service.config.DEFAULT_USER)
-            llm_bawt.history_manager.clear_history()
+            # A request-local HistoryManager clears only its user, so it cannot
+            # be a successful fallback for this explicit operator clear-all.
+            raise HTTPException(status_code=500, detail="Could not clear all bot history")
 
         # Evict any cached LLMBawt instances for this bot
         stale_keys = [k for k in service._llm_bawt_cache if k[1] == effective_bot_id]

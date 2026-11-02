@@ -174,7 +174,8 @@ async def test_catalog_token_budgets():
     # in-band, since session-only harness timers die on /new and restarts): 4,499 (+60).
     # TASK-1781: compact task defaults and lossless detail/next-page guidance:
     # 4,546 (+47). Huge history now stays behind explicit bounded reads.
-    assert sum(descriptions) <= 4546, f"Descriptions grew to {sum(descriptions)} tokens"
+    # TASK-1778: explicit trusted-user history read/mutation ownership (+13).
+    assert sum(descriptions) <= 4559, f"Descriptions grew to {sum(descriptions)} tokens"
     definitions = [{"name": f"mcp__bawthub__{t.name}", "description": t.description or "", "input_schema": t.inputSchema} for t in tools]
     total = len(encoder.encode(json.dumps(definitions, ensure_ascii=False, separators=(",", ":"))))
     # TASK-900: explicit X search adds ~160 tokens; measured catalog 11,239.
@@ -268,7 +269,8 @@ async def test_catalog_token_budgets():
     # sessions; a bot's partition holds every user's history): 16,744 (+21).
     # TASK-1781: path/offset/budget/cursor/version on both task readers:
     # 17,173 (+429), replacing unbounded 170k+ task dumps.
-    assert total <= 17173, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
+    # TASK-1778: two optional owner args (+42) and scoped descriptions (+13).
+    assert total <= 17228, f"Catalog grew to {total} tokens; see docs/MCP_TOOL_DESIGN.md"
     assert all("Args:" not in (tool.description or "") for tool in tools)
 
 

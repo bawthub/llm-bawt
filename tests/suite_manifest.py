@@ -34,6 +34,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_message_tsv_pg.py::",
     "test_message_author_backfill_pg.py::",
     "test_continuation_author_history_pg.py::",
+    "test_history_owner_mutations_pg.py::",
     "test_continuation_author_backfill_pg.py::",
     "test_session_continuity_pg.py::",
     "test_agent_context.py::",
