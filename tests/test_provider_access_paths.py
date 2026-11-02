@@ -20,6 +20,7 @@ EXPECTED_OWNERS = {
     "anthropic-oauth": "claude",
     "anthropic-api": "anthropic-api",
     "openai-oauth": "codex",
+    "openai-chatgpt-app": "chatgpt-app",
     "openai-api": "openai-api",
     "openai-responses": "openai-api",
     "xai-chat": "xai",

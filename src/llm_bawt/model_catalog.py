@@ -259,6 +259,8 @@ class ModelCatalog:
     def _provider_prefix(access_path: AccessPath) -> str | None:
         if access_path.key == "openai-oauth":
             return "openai_chatgpt"
+        if access_path.key == "openai-chatgpt-app":
+            return "chatgpt_app"
         if access_path.key == "openai-responses":
             return "openai"
         if access_path.vendor == "xai":

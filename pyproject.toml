@@ -50,6 +50,7 @@ dependencies = [
     # is connected.
     "cryptography>=42.0.0",
     "pyjwt[crypto]>=2.8.0",
+    "authlib>=1.6.9,<2",  # Own-app OAuth PKCE and OIDC validation (TASK-1944).
 ]
 
 [project.optional-dependencies]

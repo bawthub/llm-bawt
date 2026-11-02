@@ -127,6 +127,7 @@ class ProviderAdapter(ABC):
     """
 
     name: ClassVar[str]
+    capture_codex_usage: ClassVar[bool] = True
 
     def __init__(self) -> None:
         self._lifecycle_lock = asyncio.Lock()
@@ -370,8 +371,9 @@ class ProviderAdapter(ABC):
                 # one; instead of predicting, we schedule on every attempt and
                 # rely on state.usage_snapshot for the authoritative final value.
                 # (The header-capture path writes to Redis and is idempotent.)
-                from .. import usage_capture as _usage_capture
-                _usage_capture.schedule_capture(upstream_stream)
+                if self.capture_codex_usage:
+                    from .. import usage_capture as _usage_capture
+                    _usage_capture.schedule_capture(upstream_stream)
             except (asyncio.CancelledError, GeneratorExit):
                 # Client is gone (aclose from FastAPI's StreamingResponse, or a
                 # task cancellation). Do not retry, do not emit an error frame
