@@ -169,6 +169,55 @@ async def cli_login_complete(provider_id: str, body: CliLoginCompleteRequest):
     return out
 
 
+# --- App-authorized browser OAuth (separate from Codex) --------------------
+class BrowserLoginRequest(BaseModel):
+    session_id: str
+    callback_url: str = ""
+
+
+def _browser_adapter(provider_id: str):
+    from ..providers.chatgpt_app import ChatGPTAppAdapter
+
+    adapter = _adapter_or_404(provider_id)
+    if not isinstance(adapter, ChatGPTAppAdapter):
+        raise HTTPException(status_code=400, detail="Provider has no browser OAuth flow")
+    return adapter
+
+
+@router.post("/v1/providers/{provider_id}/browser/start")
+async def browser_login_start(provider_id: str, response: Response):
+    from ..providers.chatgpt_app_auth import SignInError
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_in_threadpool(_browser_adapter(provider_id).start_browser_login)
+    except SignInError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not start app sign-in") from None
+
+
+@router.post("/v1/providers/{provider_id}/browser/complete")
+async def browser_login_complete(provider_id: str, body: BrowserLoginRequest, response: Response):
+    from ..providers.chatgpt_app_auth import SignInError
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_in_threadpool(
+            _browser_adapter(provider_id).complete_browser_login, body.session_id, body.callback_url,
+        )
+    except SignInError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except Exception:
+        # Do not echo callback/code/token/SDK exception text.
+        raise HTTPException(status_code=502, detail="App sign-in failed") from None
+
+
+@router.post("/v1/providers/{provider_id}/browser/cancel")
+async def browser_login_cancel(provider_id: str, body: BrowserLoginRequest):
+    return await run_in_threadpool(_browser_adapter(provider_id).cancel_browser_login, body.session_id)
+
+
 # --- API-key connect (openrouter, any future AUTH_API_KEY adapter) ----------
 @router.post("/v1/providers/{provider_id}/connect/api-key")
 async def connect_api_key(provider_id: str, body: ApiKeyRequest):
@@ -218,8 +267,8 @@ async def openrouter_api_key(request: Request):
 @router.delete("/v1/providers/{provider_id}")
 async def disconnect(provider_id: str):
     adapter = _adapter_or_404(provider_id)
-    ok = await run_in_threadpool(adapter.disconnect)
-    return {"disconnected": ok}
+    result = await run_in_threadpool(adapter.disconnect)
+    return result if isinstance(result, dict) else {"disconnected": result}
 
 
 # --- Claude token broker (TASK-635) -----------------------------------------
@@ -356,6 +405,27 @@ async def github_git_credential(request: Request):
     # git credential helper protocol: key=value lines on stdout.
     body = f"username=x-access-token\npassword={token}\n"
     return Response(content=body, media_type="text/plain")
+
+
+@router.get("/v1/providers/chatgpt-app/token")
+async def chatgpt_app_access_token(
+    request: Request, response: Response,
+    rejected_token_sha256: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+):
+    from ..providers.chatgpt_app_auth import SignInError
+
+    bridge_gate.check(request, bridge_gate.BROKER)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = await run_in_threadpool(
+            _browser_adapter("chatgpt-app").access_token,
+            rejected_token_sha256=rejected_token_sha256,
+        )
+    except SignInError:
+        raise HTTPException(status_code=503, detail="ChatGPT app connection unavailable; check Providers") from None
+    if not result.get("access_token"):
+        raise HTTPException(status_code=503, detail="Reconnect ChatGPT (app-authorized)")
+    return result
 
 
 # --- Generic API-key broker (TASK-825) ---------------------------------------

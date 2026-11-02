@@ -15,6 +15,7 @@ from .local import LocalAdapter
 from .moonshot import MoonshotAdapter
 from .openai import OpenAIAdapter
 from .openai_chatgpt import OpenAIChatGPTAdapter
+from .chatgpt_app import ChatGPTAppAdapter
 from .openrouter import OpenRouterAdapter
 from .xai import XaiAdapter
 from .zai import ZaiAdapter
@@ -43,6 +44,7 @@ async def close_all() -> None:
 # Default registrations. Adding a new provider = create the adapter file,
 # import it here, and register an instance.
 register(OpenAIChatGPTAdapter())
+register(ChatGPTAppAdapter())
 register(OpenAIAdapter())
 register(XaiAdapter())
 register(ZaiAdapter())

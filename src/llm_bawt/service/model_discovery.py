@@ -362,6 +362,40 @@ class ChatGPTSubscriptionDiscoveryProvider(ModelDiscoveryProvider):
         return models
 
 
+class ChatGPTAppDiscoveryProvider(ModelDiscoveryProvider):
+    """Account-specific SIWC public catalog, never the old Codex catalog."""
+
+    aliases = ("chatgpt-app",)
+
+    def __init__(self, config: Config | None = None):
+        self._config = config
+
+    def fetch(self) -> list[dict[str, Any]]:
+        from .providers.chatgpt_app import ChatGPTAppAdapter
+        from .providers.chatgpt_app_auth import SignInError
+
+        try:
+            credential = ChatGPTAppAdapter(self._config).access_token()
+            if not credential.get("access_token"):
+                raise SignInError("Reconnect ChatGPT (app-authorized)")
+            response = httpx.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {credential['access_token']}"}, timeout=20.0,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (SignInError, httpx.HTTPError, ValueError):
+            raise ModelDiscoveryError("ChatGPT app model discovery unavailable; check this connection in Providers") from None
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            raise ModelDiscoveryError("ChatGPT app catalog returned an invalid payload")
+        return _normalize({
+            "id": model.get("slug"), "description": model.get("display_name"),
+            "context_length": model.get("context_window"),
+        } for model in models if isinstance(model, dict) and model.get("visibility") == "list")
+
+
 class CodexBridgeDiscoveryProvider(ModelDiscoveryProvider):
     """Authenticated ChatGPT subscription catalog from the Codex bridge.
 
@@ -572,6 +606,7 @@ def _providers(config: Config | None = None) -> tuple[ModelDiscoveryProvider, ..
     return (
         ClaudeSubscriptionDiscoveryProvider(),
         ChatGPTSubscriptionDiscoveryProvider(config),
+        ChatGPTAppDiscoveryProvider(config),
         OpenAIDiscoveryProvider(
             aliases=("openai",),
             label="openai",

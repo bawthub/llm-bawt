@@ -22,6 +22,7 @@ from .base import (
 )
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
+from .chatgpt_app import ChatGPTAppAdapter
 from .github import GitHubAdapter
 from .github_deploy import (
     GhcrPullAdapter,
@@ -47,6 +48,7 @@ _ADAPTER_CLASSES: dict[str, type[ProviderAdapter]] = {
     GitHubAdapter.id: GitHubAdapter,
     ClaudeAdapter.id: ClaudeAdapter,
     CodexAdapter.id: CodexAdapter,
+    ChatGPTAppAdapter.id: ChatGPTAppAdapter,
     OpenRouterAdapter.id: OpenRouterAdapter,
     XaiAdapter.id: XaiAdapter,
     OpenAIKeyAdapter.id: OpenAIKeyAdapter,

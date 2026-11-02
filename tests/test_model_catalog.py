@@ -83,6 +83,17 @@ def test_openai_platform_responses_routes_through_proxy_not_native_codex():
     assert not ProtocolCompatibility.is_compatible("codex", endpoint.access_path)
 
 
+def test_chatgpt_app_is_selectable_separately_and_never_native_codex():
+    old = _endpoint(20, "same-model", "openai-oauth", "openai", "responses", "same-model")
+    app = _endpoint(21, "same-model", "openai-chatgpt-app", "openai", "responses", "same-model")
+    catalog = ModelCatalog([old, app])
+    assert catalog.resolve(app.ref, harness="claude-proxy")["model_id"] == "chatgpt_app/same-model"
+    assert catalog.resolve(old.ref, harness="claude-proxy")["model_id"] == "openai_chatgpt/same-model"
+    assert [endpoint.ref for endpoint in catalog.endpoints(harness="codex")] == [old.ref]
+    with pytest.raises(IncompatibleModelError):
+        catalog.resolve(app.ref, harness="codex")
+
+
 def test_openai_chat_completions_path_is_not_advertised_to_agent_proxy():
     endpoint = _endpoint(
         22,

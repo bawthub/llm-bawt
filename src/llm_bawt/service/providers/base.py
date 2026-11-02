@@ -280,6 +280,23 @@ class CredentialStore:
         ).on_conflict_do_nothing(index_elements=["scope_type", "scope_id", "key"])
         return conn.execute(statement).rowcount == 1
 
+    def save_in(self, conn: Any, record: ConnectionRecord) -> None:
+        """Atomically replace a credential using the caller's locked transaction."""
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        from ...runtime_settings import RuntimeSetting
+
+        dialect = {"postgresql": postgresql, "sqlite": sqlite}[conn.dialect.name]
+        values = {
+            "value_json": json.dumps(self._payload(record), ensure_ascii=False),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        conn.execute(dialect.insert(RuntimeSetting.__table__).values(
+            scope_type="global", scope_id="*", key=self._key(record.provider), **values,
+        ).on_conflict_do_update(
+            index_elements=["scope_type", "scope_id", "key"], set_=values,
+        ))
+
     def load_in(self, conn: Any, provider: str) -> ConnectionRecord | None:
         """:meth:`load` through ``conn``, so it sees that transaction's own writes."""
         from sqlalchemy import select
