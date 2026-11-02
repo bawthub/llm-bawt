@@ -186,6 +186,20 @@ def test_short_repeats_below_span_pass(monkeypatch):
     assert events[-1]["type"] == "message_stop"
 
 
+def test_documented_false_positive_periodic_content_and_override(monkeypatch):
+    # Deliberate tradeoff: valid content periodic for 8KB+ trips the default.
+    zeros = json_pieces(["0" * 100] * 100)
+    rows = json_pieces(["| same | row |\n"] * 1000)
+    for pieces in (zeros, rows):
+        events, *_ = post(monkeypatch, "native", pieces)
+        assert events[-1]["type"] == "error" and "looped" in events[-1]["error"]["message"]
+    monkeypatch.setenv(rb.ENV_MIN_SPAN, "0")
+    for pieces in (zeros, rows):
+        assert post(monkeypatch, "native", pieces)[0][-1]["type"] == "message_stop"
+    monkeypatch.setenv(rb.ENV_MIN_SPAN, "65536")
+    assert post(monkeypatch, "native", zeros)[0][-1]["type"] == "message_stop"
+
+
 def test_config_disables_and_tunes(monkeypatch):
     monkeypatch.setenv(rb.ENV_MIN_SPAN, "0")
     events, *_ = post(monkeypatch, "native", json_pieces([LOOP] * LOOP_DELTAS))
