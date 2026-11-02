@@ -200,6 +200,230 @@ runner. Focused scratch-Git tests cover metadata isolation, exact older commits,
 dirty exclusion, hostile filters/environment/replacements, link/path/size
 refusals, post-export tampering and partial-stage cleanup.
 
+## Unused fixed socketless launcher
+
+`ops/gate_runner.py:run_gate` is an **internal, unused** launcher over the
+existing worker's `DockerAPI.request`/`attach_stream`, never its generic
+`execute`. No route, catalog entry, dispatcher, worker branch or production
+caller invokes it. Source-only publication does not authorize even a scratch
+Docker run. Its focused tests use fake Docker; actual image compatibility and
+end-to-end execution remain unproven.
+
+The trusted caller must provide the still-owned/frozen `GateSource`, a ledger
+job ID, private scratch parent, and **separately trusted, DB-frozen** SHA256 of a
+bounded environment-evidence JSON document. There is no environment fallback,
+image tag, pull, build or caller-selected workload. The closed
+`llm-bawt.ops.gate-environment/v1` evidence has exactly these string fields:
+
+- `schema`, `repository`, `source_sha`, `tree_sha`, `workload`, `platform` bind
+  the exact staged commit/tree to `llm-bawt`, `test-all/offline`, `linux/amd64`.
+- `runner_image` / `postgres_image` are immutable repository digest references;
+  `runner_image_id` / `postgres_image_id` are immutable local image config IDs.
+  PG must match the committed private-PG fixture's fixed image/protocol.
+- `toolchain_sha256`, `dependency_closure_sha256`, `asset_closure_sha256` identify
+  trusted packaging reports for the image's actual tool binaries, complete
+  offline Python/build dependency closure and runtime asset closure for this
+  source and fixed workload. These are **not** declared version comparisons or
+  the finite asset manifest. Reports must cover `/opt/gate/uv-cache`, tokenizer
+  data at `/opt/gate/tiktoken`, `/etc/mime.types`, shell/Git/Node/uv/Python and
+  the workload's build tools, with no runtime downloads or host caches.
+
+The evidence producer, report verification/approval and live configuration are
+**not implemented**. The dormant trusted-snapshot adapter below freezes a selected
+DB configuration at admission, but no production dispatch consumes it. Checking an
+independently approved digest binds trusted packaging claims; it does not prove
+those claims, authenticate arbitrary submitted JSON, or authorize execution.
+No configured evidence or approved runnable image is supplied by this slice.
+The existing finite manifest cannot pass this schema and is not upgraded into
+an attestation. Missing/incompatible/unpinned evidence refuses before Docker.
+Local-only image inspection verifies both IDs/digests and platform, rejecting
+unexpected image environment defaults and inherited writable volumes.
+
+The source handoff changes only private directory/Git-metadata readability;
+its host parent stays 0700 and tracked bytes/modes stay unchanged. The runner
+gets just RO binds for source, fixed PG binding and the per-job Unix-socket
+directory. UID 65532 copies source/private Git metadata and the image's uv cache
+into bounded private tmpfs, then runs exactly `uv run --offline --isolated
+--frozen --extra dev --extra service --extra mcp --extra search --extra memory
+python -m scripts.test_suite offline`. Fixed worker/budget settings match the
+preserved CI values (2 workers; 3s unit / 7s real-process), not inherited host
+environment. The PG sidecar runs as UID 999 with private disposable tmpfs data
+and only that job's RW Unix-socket directory. Both have network-none, RO root,
+no capabilities, no-new-privileges, memory/CPU/PID bounds, no stdin/restart and
+no daemon logs. No Docker socket, credentials, shared source/cache, authoritative
+receipt root, network, host port, dependency installer or repository code reaches
+the socket-owning process. "Socketless" excludes control sockets, not the private
+PG socket or the runner's local integration loopback sockets.
+
+Lifetime is bounded by a process-local 1800s OS deadline, with separate 60s
+cleanup; the helper refuses a non-main thread or a preexisting deadline rather
+than silently replacing another owner's timer. Future worker integration must
+explicitly arrange this custody. Runner output is attached before start, capped
+at 1MiB without truncation, returned only as **untrusted bytes**, and never echoed.
+A zero exit/output alone is not a verified gate receipt or SHIP permission.
+
+Names are deterministic per job/role; a unique per-invocation label establishes
+cleanup custody, not retry authority. Existing containers/scratch are never
+adopted or removed. A lost create/start response is uncertain, never retried.
+Cleanup removes only matching owned identities and verifies ID/name absence;
+unknown/failed removal refuses success and retains private scratch for later
+investigation. Even positive immediate cleanup is **not** the missing durable
+retirement/publication fence. Process death can still leave labeled containers;
+reconciler adoption/recovery and active-attempt host publication remain future
+integration work. No new scheduler, ledger, retry or callback path is created.
+
+## Dormant configured environment and durable caller provenance
+
+`ops/gate_trust.py:create_trusted_gate_job` is an additional **unused** admission
+adapter. It accepts the same fixed plan, trusted operation slug, authenticated
+turn capability and bounded idempotency key, but no environment/digest, caller,
+tag, destination, path, image or command argument. It reads exactly one existing
+`runtime_settings` global (`scope_id='*'`) value at the internally derived key
+`ops_gate_environment:llm-bawt:<exact source SHA>`. There is no settings cache,
+bot/request override, environment fallback, bootstrap, default or auto-seed.
+The config envelope is closed and bounded to 16KiB:
+
+```json
+{"schema":"llm-bawt.ops.gate-environment-config/v1","evidence_json":"<exact UTF-8 JSON bytes described above>","evidence_sha256":"<independently approved raw-byte SHA256>"}
+```
+
+Only trusted configuration writers may establish this value after actual
+packaging-report review. This code creates no configuration or evidence producer;
+a digest stored beside evidence is a DB trust assertion, not independent proof
+of packaging claims. Missing, duplicate, oversized, malformed, source-incompatible
+or unpinned values refuse. Admission uses the same pure environment decoder as
+the launcher, which still additionally checks the independently staged tree.
+Before the existing `create_job` inserts, its transaction fence rereads the
+selected config with a shared row lock. A committed change refuses rather than
+silently rebinding; a waiting edit cannot change the captured evidence before
+insert commits. A later edit is prospective: **future claim integration must
+revalidate live configuration together with current grant/catalog state**.
+
+The existing invocation snapshot stores the exact evidence bytes/digest and
+full immutable request, including all signed caller/session/trigger identifiers.
+A deterministic HMAC-SHA256 covers the entire snapshot, operation, request,
+idempotency key and evidence under the existing persistent server root with
+versioned domain `llm-bawt.ops.gate-request-provenance/v1`. It stores neither the
+expiring turn capability nor its issue time. Same-turn token reissue produces
+the same snapshot, so concurrent insertion uses the existing ledger unique key
+and payload/snapshot conflict handling. Identical replay verifies the stored
+proof and is read-only, even after configuration removal or terminalization;
+legacy unsigned records are never upgraded or repaired in place.
+
+`read_trusted_gate_request` verifies that HMAC, snapshot hash, closed workload
+and immutable ledger columns and returns the frozen evidence/provenance without
+reopening the original expiring capability. That establishes historical
+**authenticity/integrity only**, never permission to execute. Ordinary hashes
+cannot replace the MAC; key rotation/unavailability and drift refuse. Derived
+key material stays server-side and must not enter the socketless runner.
+There is no new table, column, migration, scheduler or production caller. Both
+generic dispatch and the existing strict gate-only claim refuse these enriched
+snapshots; the old token-only admission/claim path remains unchanged and dormant.
+No callback, retry, container, receipt publication or SHIP path is enabled.
+
+Focused tests are authored for frozen/replayed/expired-token provenance,
+configuration refusal/drift, key failure/rotation, ordinary-rehash tampering,
+ledger binding, deterministic concurrent inserts and an observed PostgreSQL
+config-edit lock wait. They require the separately scheduled supported test
+slot; authored tests alone are not a passing/runtime receipt.
+
+## Dormant trusted-request claim with fresh authority
+
+`ops/gate_trusted_claim.py:claim_trusted_gate_job` is an additional unused,
+PostgreSQL-only internal adapter. It accepts only a stored job ID and store,
+not a caller, token, tag, plan, environment or command override. The stored
+server MAC authenticates its original caller without reopening an expired turn
+capability; that identity is then checked against **current** locked DB authority.
+No route, store entry point, scheduler, executor or runner uses this adapter.
+
+The legacy claim shares its unchanged operation/job locks, current-grant check
+and first-attempt transition through small extracted private helpers. Both
+ordinary and legacy token-only claims still refuse enriched snapshots. The new
+adapter checks the entire authenticated original operation/caller/plan/limits
+against the freshly locked operation using canonical equality, then locks the
+current profile, grant catalog and assignment and refuses private/inactive bots.
+It rereads the one exact-source global config under `FOR SHARE`, requires its
+exact evidence bytes/digest to equal the frozen request and retains those locks
+through the existing QUEUED-to-DISPATCHING transaction/event. Lock order is
+operation -> job -> bot advisory -> profile -> tag catalog -> assignment ->
+config -> repo+SHA advisory. Committed prior changes deny; later writers wait
+and are prospective. There is no pre-lock authority/config cache.
+
+The same indexed history query and operation slot cap remain authoritative,
+including across the legacy and trusted paths. Any prior nonqueued attempt,
+even terminal without a dispatch timestamp, still blocks a new key; this slice
+has no retirement proof or attempt-two bypass. Rollback leaves neither the
+transition nor its event. The claim itself launches nothing and acquires no
+worker slot or callback: missing runtime qualification, dispatch/recovery,
+retirement and trusted receipt publication remain explicit future work.
+
+New regressions cover fresh config/catalog/grant denials, durable authentication,
+original-token expiry, observed before/after PostgreSQL writer lock waits,
+rollback, concurrent claims and shared first-attempt/slot fences. They must run
+under an actual supported verification slot; authored tests alone prove nothing.
+The SQL suite manifest also registers the previous trust-admission tests and
+these new claim tests for the integrator's offline gate (no gate rerun here).
+
+## Dormant one-shot dispatch custody and read-only recovery observation
+
+`ops/gate_custody.py` adds an unused identity-reservation context and recovery
+observer, not an executor or production dispatcher. It requires an authenticated
+already-DISPATCHING request from `claim_trusted_gate_job`; generic `claim_job`
+is not interchangeable and already populates incompatible host metadata. No
+current service, reconciler, worker or route calls the new module.
+
+`reserve_gate_launch` takes only internal store/job/private receipt-root inputs.
+It authenticates before creating local state, takes the existing per-job
+`submission.lock` nonblockingly, then locks and rechecks the fresh ledger row.
+The existing `host_unit_name` stores `gate-custody:<intent SHA256>` (a custody
+identity, not acceptance of a running container), and `status_file_path` points
+to `gate-intent.json` (not a terminal receipt). No table/schema is added and no
+lifecycle state/event changes. The immutable intent binds job ID, exact snapshot
+and request digests, claim timestamp, fixed workload, environment digest, both
+deterministic role names and a random owner nonce. It is published via exclusive
+temp/hard-link/fsync before transaction commit. Only successful commit yields
+the identity, with the submission lock held until the consumer scope ends.
+
+A committed DB digest marker refuses a second reservation even after journal
+loss. A published orphan after rollback or interrupted commit also refuses;
+it is never silently adopted, repaired or removed. Preexisting ordinary worker
+files, partial intent/temp files and hostile links/special files refuse. Private
+receipt directories must be owned 0700, regular single-link files owned 0600;
+the trusted root is never a runner mount. Concurrent adversarial writers with
+that trusted identity/storage custody are outside the same frozen-storage
+assumption as source staging. No expiring capability, signing key, caller data
+or raw environment evidence is written into the intent.
+
+The fixed launcher accepts an optional internal `owner_nonce` for its existing
+ownership labels; old inert helper uses still generate a nonce. That argument is
+an identity label only, **not** execution permission, a retry token or proof the
+caller owns a live reservation. A local flock cannot fence a process that copies
+the nonce then outlives its context. Future production integration must arrange
+worker capacity, supported pinned runtime, execution/terminal fencing and process
+custody before consuming it. This module does not wire a launcher call or enable
+even a scratch container. Generic service recovery is still incompatible with
+gate snapshots and must not be used as gate recovery.
+
+`observe_gate_launch` opens only existing storage under the same nonblocking
+lock. It authenticates the stored request and exact DB-bound intent before two
+GET-only Docker inspections. Both role names, immutable ID shape and complete
+job/source/environment/role/nonce labels must match. It reports only busy or
+per-role missing/created/running/exited observations. Missing/invalid storage,
+ledger/intent drift, a foreign owner or any uncertain daemon response refuses.
+It never starts, adopts, removes, retries, writes metadata or imports a result.
+Even two 404s or an exited runner with exit zero are **not** positive durable
+retirement, a terminal receipt, gate pass, host proof or SHIP permission.
+
+Authored regressions cover concurrent reservation, interrupted consumers and
+dead lock holders, rollback-orphan and commit-acknowledgment uncertainty,
+nonterminal/terminal journal loss, fresh-row denial, exact nonce/intent binding,
+unsafe storage, GET-only recovery and no lifecycle writes. Focused execution
+requires Gavel's actual supported test custody; authored tests alone are not a
+passing receipt. Runtime packaging qualification, production dispatch/worker
+capacity, durable retirement/attempt-two fencing, receipt/callback attachment
+and active-attempt trusted host publication remain unfinished. No packaging
+infrastructure, scheduler, policy, config, catalog or activation change is added.
+
 ## Before any trusted dispatch wiring
 
 The recorded security design r2 approval is

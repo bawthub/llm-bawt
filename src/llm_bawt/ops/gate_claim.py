@@ -77,22 +77,10 @@ def _claim(conn, job_id: str, caller: TaskTurnContext, *, events=None) -> bool:
     row locks also serialize profile deletion and direct assignment deletion.
     All inputs are read again after the locks; no pre-lock grant cache is used.
     """
-    job = conn.execute(text("SELECT operation_slug FROM ops_jobs WHERE id=:id"),
-                       {"id": job_id}).mappings().first()
-    if job is None:
+    locked = _lock_claim_rows(conn, job_id)
+    if locked is None:
         return False
-    op_row = conn.execute(text("SELECT * FROM ops_operations WHERE slug=:slug FOR UPDATE"),
-                          {"slug": job["operation_slug"]}).mappings().first()
-    if op_row is None:
-        return False
-    operation = OpsOperation(**op_row)
-    job = conn.execute(text("SELECT * FROM ops_jobs WHERE id=:id FOR UPDATE"),
-                       {"id": job_id}).mappings().first()
-    tag = operation.execution_tag
-    if (job is None or job["state"] != JOB_QUEUED or job["dispatched_at"] is not None
-            or not operation.enabled or operation.soft_deleted_at is not None
-            or operation.quiesce_enabled or not isinstance(tag, str) or not TAG_SLUG.fullmatch(tag)):
-        return False
+    operation, job = locked
     if ((job["caller_bot_id"], job["caller_user_id"], job["caller_turn_id"])
             != (caller.bot_id, caller.user_id, caller.turn_id)):
         return False
@@ -108,10 +96,37 @@ def _claim(conn, job_id: str, caller: TaskTurnContext, *, events=None) -> bool:
             or job["operation_script_hash"] != operation.script_hash
             or operation.script_hash != hashlib.sha256(operation.command_script.encode()).hexdigest()):
         return False
+    if not _current_grant(conn, bot_id=caller.bot_id, tag=operation.execution_tag):
+        return False
+    return _claim_first_attempt(conn, job_id, operation, plan, events=events)
 
-    lock_bot(conn, caller.bot_id)
+
+def _lock_claim_rows(conn, job_id: str):
+    """Common operation -> job locks, with the same QUEUED-only fence."""
+    job = conn.execute(text("SELECT operation_slug FROM ops_jobs WHERE id=:id"),
+                       {"id": job_id}).mappings().first()
+    if job is None:
+        return None
+    op_row = conn.execute(text("SELECT * FROM ops_operations WHERE slug=:slug FOR UPDATE"),
+                          {"slug": job["operation_slug"]}).mappings().first()
+    if op_row is None:
+        return None
+    operation = OpsOperation(**op_row)
+    job = conn.execute(text("SELECT * FROM ops_jobs WHERE id=:id FOR UPDATE"),
+                       {"id": job_id}).mappings().first()
+    tag = operation.execution_tag
+    if (job is None or job["state"] != JOB_QUEUED or job["dispatched_at"] is not None
+            or not operation.enabled or operation.soft_deleted_at is not None
+            or operation.quiesce_enabled or not isinstance(tag, str) or not TAG_SLUG.fullmatch(tag)):
+        return None
+    return operation, job
+
+
+def _current_grant(conn, *, bot_id: str, tag: str) -> bool:
+    """Lock current caller/profile/catalog/assignment, never trust historic tags."""
+    lock_bot(conn, bot_id)
     profile = conn.execute(text("SELECT slug FROM bot_profiles WHERE slug=:bot FOR SHARE"),
-                           {"bot": caller.bot_id}).first()
+                           {"bot": bot_id}).first()
     if profile is None:
         return False
     # Catalog rename/delete also changes assignments without lock_bot. Lock the
@@ -122,14 +137,16 @@ def _claim(conn, job_id: str, caller: TaskTurnContext, *, events=None) -> bool:
         return False
     assignment = conn.execute(text("SELECT tag_slug FROM bot_profile_tags "
                                    "WHERE bot_slug=:bot AND tag_slug=:tag FOR SHARE"),
-                              {"bot": caller.bot_id, "tag": tag}).first()
+                              {"bot": bot_id, "tag": tag}).first()
     restricted = conn.execute(text("SELECT 1 FROM bot_profile_tags "
                                    "WHERE bot_slug=:bot AND tag_slug IN (:private, :inactive)"),
-                              {"bot": caller.bot_id, "private": str(BehaviorTag.PRIVATE),
+                              {"bot": bot_id, "private": str(BehaviorTag.PRIVATE),
                                "inactive": str(BehaviorTag.INACTIVE)}).first()
-    if assignment is None or restricted is not None:
-        return False
+    return assignment is not None and restricted is None
 
+
+def _claim_first_attempt(conn, job_id: str, operation: OpsOperation, plan: GatePlan, *, events=None) -> bool:
+    """Same ledger transition/fence for both dormant gate-only claim adapters."""
     # All claimers for this immutable workload serialize, even across operation
     # rows. No terminal status is a runner-retirement fence in this slice.
     conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
