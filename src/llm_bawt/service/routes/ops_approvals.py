@@ -17,7 +17,13 @@ requester isn't private, and the caller didn't request it. A card the caller
 can't see (another user's, a private requester's, or none) is ``not_found``
 either way.
 
-The decision goes through ``resolve_mcp_card``, the path the chat card takes,
+Exact-ID read/resolve also support an EXISTING, fully bound release-deploy
+orchestration card, including an HTTP operator's synthetic ``ops`` requester.
+These decisions use an audited, live-grant-fenced orchestration CAS with no
+agent continuation or tool grant; only the existing release coordinator may
+continue. Listing/fanout remain bounded to MCP ops_run cards.
+
+Ordinary MCP decisions go through ``resolve_mcp_card``, the path chat takes,
 with ``resolved_via=bot_grant`` written in the same compare-and-set. A caller
 that loses the race gets the winner's decision. The listing shows the
 operation and its arguments with ``x-sensitive`` values masked. It never
@@ -33,8 +39,11 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...approval_models import BOT_RESOLVER_PREFIX, REQ_PENDING, RESOLVED_VIA_BOT_GRANT
+from ...approval_models import BOT_RESOLVER_PREFIX, REQ_APPROVED, REQ_DENIED, REQ_PENDING, RESOLVED_VIA_BOT_GRANT
+from ...bot_tags.catalog import lock_bot
+from ...ops.release_approval import InvalidReleaseApproval, is_release_deploy_card, validate_release_approval
 from ...ops.service import display_args
+from ..dependencies import get_ops_service, get_service
 from ...task_turn_context import (
     TASK_TURN_CONTEXT_HEADER,
     TaskTurnContext,
@@ -113,6 +122,22 @@ def _holder_and_tags(bot: str):
         return holder_and_tags(conn, bot)
 
 
+def _release_ops():
+    return get_ops_service(get_service().config)
+
+
+def _validated_release(row, caller: TaskTurnContext, *, ops=None, session=None):
+    """Only exact-ID routes opt in to the coordinator-owned recovery gate."""
+    if not is_release_deploy_card(row):
+        return None
+    if row.user_id != caller.user_id:
+        raise _refuse(404, "not_found", "no such approval request")
+    try:
+        return validate_release_approval(row, ops=ops or _release_ops(), session=session)
+    except InvalidReleaseApproval as exc:
+        raise _refuse(404, "not_found", "no such approval request") from exc
+
+
 def _visible(row, caller: TaskTurnContext, tags) -> bool:
     """The caller's user's card, from a non-private requester; fails closed."""
     return card_visible(row, user_id=caller.user_id, tags=tags)
@@ -172,9 +197,11 @@ async def get_ops_approval(request_id: str, request: Request):
     caller = _caller(request)
     tags = await asyncio.to_thread(_require_holder, caller)
     row = await asyncio.to_thread(_store().get_request, request_id)
+    release = await asyncio.to_thread(_validated_release, row, caller)
     card = None
     if approver_eligible(holds=True, tags=tags, row=row, approver=caller.bot_id,
-                         user_id=caller.user_id):
+                         user_id=caller.user_id, release_deploy_validated=release is not None,
+                         operator_request=bool(release and release.operator_request)):
         card = _card(row)
     if card is None:
         raise _refuse(404, "not_found", "no such approval request")
@@ -193,6 +220,45 @@ def approver_detail(row, card: OpsApprovalCard, *, approver: str) -> OpsApproval
         reason=(row.resolution_message or "") if own_decision else None)
 
 
+def _resolve_release_approval(store, row, caller, body, tags) -> OpsApprovalResult:
+    ops = _release_ops()
+    release = _validated_release(row, caller, ops=ops)
+    if not card_visible(row, user_id=caller.user_id, tags=tags,
+                        operator_request=release.operator_request):
+        raise _refuse(404, "not_found", "no such approval request")
+    if row.bot_id == caller.bot_id:
+        raise _refuse(403, "self_approval_refused", "a bot can't approve its own request")
+
+    def fence(session, current):
+        conn = session.connection()
+        # The existing tag-write advisory lock serializes revoke/private changes
+        # with this decision. SQLite is used only by isolated source tests.
+        if conn.dialect.name == "postgresql":
+            for bot in sorted({caller.bot_id, current.bot_id}):
+                lock_bot(conn, bot)
+        holds, live_tags = holder_and_tags(conn, caller.bot_id)
+        if not holds:
+            raise _refuse(403, "grant_required", "this bot doesn't hold the approve_ops grant")
+        active = _validated_release(current, caller, ops=ops, session=session)
+        if active is None:
+            raise _refuse(404, "not_found", "no such approval request")
+        if not approver_eligible(holds=holds, tags=live_tags, row=current,
+                                 approver=caller.bot_id, user_id=caller.user_id,
+                                 release_deploy_validated=True, operator_request=active.operator_request):
+            raise _refuse(404, "not_found", "no such approval request")
+
+    final, won = store.decide_orchestration_request(
+        row.id, status=REQ_APPROVED if body.decision == "approve" else REQ_DENIED,
+        resolved_by=f"{BOT_RESOLVER_PREFIX}{caller.bot_id}", resolved_turn_id=caller.turn_id,
+        message=body.reason, decision_fence=fence)
+    if final is None:
+        raise _refuse(404, "not_found", "no such approval request")
+    if not won:
+        raise _refuse(409, "already_resolved", "the request is already resolved",
+                      **_result(final).model_dump())
+    return _result(final)
+
+
 @router.post("/v1/ops-approvals/{request_id}/resolve", response_model=OpsApprovalResult)
 async def resolve_ops_approval(request_id: str, request: Request):
     """Approve or deny another bot's pending ops card as the calling grant holder."""
@@ -201,6 +267,8 @@ async def resolve_ops_approval(request_id: str, request: Request):
     tags = await asyncio.to_thread(_require_holder, caller)
     store = _store()
     row = await asyncio.to_thread(store.get_request, request_id)
+    if is_release_deploy_card(row):
+        return await asyncio.to_thread(_resolve_release_approval, store, row, caller, body, tags)
     if not _visible(row, caller, tags):
         raise _refuse(404, "not_found", "no such approval request")
     if not is_ops_card(row):

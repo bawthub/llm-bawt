@@ -11,15 +11,18 @@ path — no new frontend server prefix is required.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ...ops.quiesce_status import attach_members, live_holds
+from ...ops.release_status import attach_release_status
 from ..dependencies import get_ops_service, get_ops_store, get_service
+from .service_auth import NO_STORE, read_body, require_service_token
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -241,7 +244,8 @@ def list_jobs(operation: str | None = None, state: str | None = None,
     store = _store()
     filters = dict(operation_slug=operation, state=state)
     rows = store.list_jobs(**filters, limit=limit, offset=offset)
-    jobs = attach_members(store.engine, [r.to_api(include_output=False) for r in rows])
+    jobs = attach_members(store.engine, attach_release_status(
+        store.engine, [r.to_api(include_output=False) for r in rows]))
     return {"jobs": jobs,
             "total": store.count_jobs(**filters), "limit": limit, "offset": offset}
 
@@ -258,7 +262,8 @@ def live_jobs():
     # cannot finish and disappear between two global banner reads.
     since = datetime.now(timezone.utc) - timedelta(seconds=60)
     rows = store.find_active_jobs(limit=None, recent_terminal_since=since)
-    return {"jobs": attach_members(store.engine, [r.to_api(include_output=False) for r in rows])}
+    return {"jobs": attach_members(store.engine, attach_release_status(
+        store.engine, [r.to_api(include_output=False) for r in rows]))}
 
 
 @router.get("/v1/ops/jobs/{job_id}", tags=["Ops"])
@@ -370,3 +375,32 @@ def dispatch_job(body: DispatchRequest):
         status = DISPATCH_ERROR_STATUS.get(exc.code, 500)
         raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
     return result
+
+
+class OperatorDispatchRequest(BaseModel):
+    model_config = {"extra": "forbid", "str_strip_whitespace": True}
+    operation: str = Field(min_length=1, max_length=128, strict=True)
+    args: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str = Field(min_length=1, max_length=128, strict=True)
+    # Assertion by authenticated BawtHub after its verified-person manager guard,
+    # never accepted directly from the browser or the legacy LAN dispatch path.
+    operator_user_id: str = Field(min_length=1, max_length=128, strict=True)
+    operator_run: Literal[True]
+
+
+@router.post("/v1/ops/operator-jobs", tags=["Ops"], status_code=202,
+             dependencies=[Depends(require_service_token)])
+async def dispatch_operator_job(request: Request):
+    from ...ops.operator_run import dispatch_operator_run
+    from ...ops.service import OpsDispatchError
+    from .approval_policies import _store as approval_store
+
+    body = await read_body(request, OperatorDispatchRequest)
+    try:
+        return await asyncio.to_thread(
+            dispatch_operator_run, _service(), approval_store(),
+            user_id=body.operator_user_id, operation=body.operation,
+            args=body.args, idempotency_key=body.idempotency_key)
+    except OpsDispatchError as exc:
+        raise HTTPException(DISPATCH_ERROR_STATUS.get(exc.code, 500),
+                            {"code": exc.code, "message": str(exc)}, headers=NO_STORE) from exc

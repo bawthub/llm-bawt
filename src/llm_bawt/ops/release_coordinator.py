@@ -17,9 +17,9 @@ Invariants (each has a regression test in tests/test_release_coordinator.py):
   workflow is dispatched at most once per release, a partial run is recovered
   with "Re-run all jobs" on the SAME run (no second version bump), and the
   child deploy is keyed by a deterministic idempotency key.
-* A build-and-deploy approval delegates only a verified, baseline-matching
-  child deploy. Older build-only and direct HTTP runs still need a second card;
-  both paths persist the verified child snapshot before dispatch.
+* A build-and-deploy approval or authenticated operator Run delegates only a
+  verified, baseline-matching child deploy. Older build-only and unauthenticated
+  legacy HTTP runs still need a second card; their authority is never promoted.
 * Anything ambiguous ends in ``lost_requires_inspection``; nothing is retried
   blindly past its phase deadline.
 """
@@ -453,20 +453,25 @@ class ReleaseCoordinator:
         return None
 
     def _release_authority(self, row: ReleaseRun, snapshot: dict):
-        """Only the parent release's exact approved invocation can delegate a deploy."""
+        """Only an exact approved bot invocation or authenticated Run delegates."""
+        from .operator_run import operator_authority_matches
+        from .release_spec import is_release_spec
+
         parent = self.ops.store.get_job(row.parent_job_id)
-        if parent is None or parent.operation_slug != "bawthub.release-prod":
+        if (parent is None or not is_release_spec(snapshot.get("spec") or {})
+                or parent.operation_slug != snapshot.get("operation", {}).get("slug")):
             raise ValueError("release parent job is missing or not a release")
         if canonical_json(_loads(parent.invocation_snapshot_json)) != canonical_json(snapshot):
             raise ValueError("parent release approval snapshot differs from the running job")
-        # Direct HTTP runs have no approval card showing the exact source/target.
-        # Keep their separate deploy approval until that surface has a bound preview.
         request = self._approvals().get_request(parent.approval_request_id) if parent.approval_request_id else None
-        if (request is None or request.status != REQ_APPROVED or request.request_kind != KIND_MCP
-                or request.tool_name != "ops_run" or request.operations_snapshot_json is None
+        if (request is None or request.status != REQ_APPROVED or request.operations_snapshot_json is None
                 or canonical_json(_loads(request.operations_snapshot_json)) != canonical_json(snapshot)
-                or request.bot_id != parent.caller_bot_id or request.user_id != parent.caller_user_id
-                or request.turn_id != parent.caller_turn_id):
+                or request.user_id != parent.caller_user_id or request.turn_id != parent.caller_turn_id):
+            raise ValueError("parent release has no matching approved build-and-deploy authority")
+        bot_authority = (request.request_kind == KIND_MCP and request.tool_name == "ops_run"
+                         and request.bot_id == parent.caller_bot_id
+                         and parent.caller_backend != "http-operator")
+        if not (bot_authority or operator_authority_matches(request, parent)):
             raise ValueError("parent release has no matching approved build-and-deploy authority")
         args = _loads(request.tool_arguments_json)
         if (args.get("operation") != parent.operation_slug
@@ -520,7 +525,7 @@ class ReleaseCoordinator:
         if ((snapshot.get("release_source") or {}).get("deploy_authorization") == "after_verified_build"
                 and parent is not None and parent.caller_backend != "http-operator"):
             return self._request_authorized_deploy(row, token, snapshot)
-        # Older build-only approvals and direct HTTP runs keep the second card.
+        # Older build-only approvals and legacy HTTP runs keep the second card.
         plan = _loads(row.release_plan_json)
         slug = plan.get("deploy_operation") or snapshot["spec"]["deploy_operation"]
         try:

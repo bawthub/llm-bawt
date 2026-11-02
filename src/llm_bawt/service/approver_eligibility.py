@@ -11,6 +11,11 @@ now:
 * the requester is not a private bot;
 * the requester is not the approver itself.
 
+Exact-ID recovery additionally accepts a fully validated coordinator-owned
+release deploy card. A synthetic ``ops`` requester is visible only when its
+stored HTTP operator parent was verified; callers must explicitly opt in.
+Listing, fanout and history retain their MCP-only defaults.
+
 Masking (``display_args``) is redaction, not authorization: callers check this
 first and only then render.
 """
@@ -26,16 +31,35 @@ def is_ops_card(row) -> bool:
     return row.request_kind == KIND_MCP and row.tool_name == OPS_RUN_TOOL
 
 
-def card_visible(row, *, user_id: str, tags) -> bool:
-    """The user's card from a known, non-private requester; fails closed."""
+def _release_card(row) -> bool:
+    # OpsService imports the fanout/eligibility path during initialization.
+    # Load the release validator only when a fully initialized route needs it.
+    from ..ops.release_approval import is_release_deploy_card
+
+    return is_release_deploy_card(row)
+
+
+def card_visible(row, *, user_id: str, tags, operator_request: bool = False) -> bool:
+    """Same-user/non-private visibility; synthetic ops needs verified linkage.
+
+    ``operator_request`` is only supplied after validating the durable HTTP
+    operator parent. It never exempts a known private bot named ``ops``.
+    """
     return (row is not None and row.user_id == user_id and tags.available
-            and not tags.has(row.bot_id, BehaviorTag.PRIVATE))
+            and (not tags.has(row.bot_id, BehaviorTag.PRIVATE)
+                 or (operator_request and _release_card(row) and row.bot_id == "ops"
+                     and row.bot_id not in tags.known_bots)))
 
 
-def approver_eligible(*, holds: bool, tags, row, approver: str, user_id: str) -> bool:
-    """Whether ``approver`` may see and decide ``row`` for ``user_id`` now."""
-    return (holds and card_visible(row, user_id=user_id, tags=tags)
-            and is_ops_card(row) and row.bot_id != approver)
+def approver_eligible(*, holds: bool, tags, row, approver: str, user_id: str,
+                      release_deploy_validated: bool = False, operator_request: bool = False) -> bool:
+    """Whether ``approver`` may decide a card; release gates require validation.
+
+    Defaults deliberately preserve the MCP-only fanout/listing contract.
+    """
+    return (holds and card_visible(row, user_id=user_id, tags=tags, operator_request=operator_request)
+            and (is_ops_card(row) or (release_deploy_validated and _release_card(row)))
+            and row.bot_id != approver)
 
 
 def holder_and_tags(conn, bot: str):
