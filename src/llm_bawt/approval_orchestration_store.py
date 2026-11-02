@@ -16,15 +16,21 @@ import json
 import logging
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from .approval_events import append_approval_transition
 from .approval_models import (
     ApprovalPersistError,
+    ApprovalStoreUnavailable,
     KIND_ORCHESTRATION,
+    REQ_APPROVED,
+    REQ_DENIED,
     REQ_PENDING,
+    RESOLVED_VIA_BOT_GRANT,
     ToolApprovalRequest,
+    _utcnow,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,7 +39,48 @@ ORCHESTRATION_GRANT_STATE = "not_applicable"
 
 
 class OrchestrationApprovalStoreMixin:
-    """Insert-if-absent persistence for coordinator-owned approval gates."""
+    """Persistence and fenced, audited decisions for coordinator-owned gates."""
+
+    def decide_orchestration_request(
+        self, request_id: str, *, status: str, resolved_by: str,
+        resolved_turn_id: str, message: str, decision_fence,
+    ) -> tuple[ToolApprovalRequest | None, bool]:
+        """Audited first-wins bot decision, without granting or continuing.
+
+        ``decision_fence(session, row)`` must recheck live authorization and
+        durable coordinator linkage on this transaction, or raise. In contrast
+        to MCP resolution, no execution/outbox state is made runnable here.
+        """
+        if self.engine is None:
+            raise ApprovalStoreUnavailable("Approval database unavailable")
+        if status not in (REQ_APPROVED, REQ_DENIED):
+            raise ValueError("Invalid orchestration decision")
+        with Session(self.engine) as session:
+            row = session.exec(select(ToolApprovalRequest).where(
+                ToolApprovalRequest.id == request_id).with_for_update()).first()
+            if row is None:
+                return None, False
+            if row.request_kind != KIND_ORCHESTRATION:
+                return None, False
+            decision_fence(session, row)
+            if row.status != REQ_PENDING:
+                return row, False
+            changed = session.exec(update(ToolApprovalRequest).where(
+                ToolApprovalRequest.id == request_id,
+                ToolApprovalRequest.status == REQ_PENDING,
+                ToolApprovalRequest.request_kind == KIND_ORCHESTRATION,
+                ToolApprovalRequest.continuation_owner == "none",
+                ToolApprovalRequest.grant_state == ORCHESTRATION_GRANT_STATE,
+            ).values(status=status, resolved_at=_utcnow(), resolved_by=resolved_by,
+                     resolved_turn_id=resolved_turn_id, resolution_message=message,
+                     resolved_via=RESOLVED_VIA_BOT_GRANT, continuation_owner="none"))
+            won = changed.rowcount == 1
+            session.refresh(row)
+            if won:
+                append_approval_transition(getattr(self, "events", None), session.connection(), row)
+            session.commit()
+            session.refresh(row)
+            return row, won
 
     def record_orchestration_request(
         self,
