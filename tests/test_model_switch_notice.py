@@ -27,11 +27,11 @@ def pinned_for(model: str) -> str:
 def claims(monkeypatch):
     seen: dict[str, dict] = {}
 
-    def fake_claim(engine, session_id, mark):
-        if seen.get(session_id) == mark:
-            return False
-        seen[session_id] = mark
-        return True
+    def fake_claim(engine, session_id, decision, current_model):
+        model = notice.notice_model(seen.get(session_id), decision, current_model)
+        if model is not None:
+            seen[session_id] = {"pin_turn_id": decision.pin_turn_id, "model": model}
+        return model
 
     monkeypatch.setattr(notice, "_claim", fake_claim)
     monkeypatch.setattr(notice, "render_notice", lambda model, bot_id: f"NOTICE {model}")
@@ -69,6 +69,22 @@ def test_kept_pin_naming_old_model_notices_once(claims):
 def test_no_notice(claims, decision, current, eligible):
     assert run(decision, current, eligible=eligible) is None
     assert claims == {}
+
+
+def test_return_to_pinned_model_and_repeat_switches_notice(claims):
+    decision = Decision(pinned_for("A"))
+    assert run(decision, "B") == "NOTICE B"
+    assert run(decision, "B") is None
+    assert run(decision, "A") == "NOTICE A"   # corrects the earlier "report B"
+    assert run(decision, "A") is None
+    assert run(decision, "B") == "NOTICE B"   # not suppressed by a stale mark
+    assert claims["s1"] == {"pin_turn_id": "turn-pin", "model": "B"}
+
+
+def test_marker_from_older_pin_is_ignored():
+    old = {"pin_turn_id": "older", "model": "B"}
+    assert notice.notice_model(old, Decision(pinned_for("A")), "A") is None
+    assert notice.notice_model(old, Decision(pinned_for("A")), "B") == "B"
 
 
 def test_new_pin_episode_can_notice_again(claims):
