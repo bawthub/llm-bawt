@@ -46,6 +46,15 @@ TURN_CUTOFF_NOTICE = (
     "side effects, then handle the message below.]"
 )
 
+# Appended to the first agent turn after the bot's model changed while its
+# SDK session (and so its pinned <runtime-context> block) was kept (TASK-1956).
+# {model} is the model now serving the bot.
+MODEL_SWITCH_NOTICE = (
+    "[System notice: this bot's model was switched since this session started. "
+    "You are now running on `{model}`. The model named in your <runtime-context> "
+    "block is out of date: report `{model}` if asked which model you are.]"
+)
+
 SESSION_SEED_ACK = (
     "Context restored — I've reviewed our prior "
     "summaries and recent messages and I'm caught up."

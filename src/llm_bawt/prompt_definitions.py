@@ -25,6 +25,7 @@ from .chat_prompt_defaults import (
     SESSION_SEED_BRIEFING,
     SYSTEM_PROMPT_REFINE_INSTRUCTION,
     TURN_CUTOFF_NOTICE,
+    MODEL_SWITCH_NOTICE,
     TTS_OUTPUT_INSTRUCTIONS,
 )
 from .prompt_default_loaders import (
@@ -411,6 +412,22 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "is the cut-off cause, {ended_at} its UTC time. A body that is "
                 "blank or no longer renders falls back to this default. Resolved "
                 "per bot at dispatch. TASK-1738."
+            ),
+        },
+    ),
+    "agents.model_switch_notice": PromptDefinition(
+        key="agents.model_switch_notice",
+        title="Agent Model Switch Notice",
+        category="agent_execution",
+        required_vars=("model",),
+        loader=lambda: MODEL_SWITCH_NOTICE,
+        metadata={
+            "notes": (
+                "Appended once to the first agent turn after the bot's model "
+                "changed while its SDK session was kept: the harness ignores a "
+                "new system prompt on resume, so the pinned <runtime-context> "
+                "model is stale until the next session boundary. {model} is the "
+                "current model id. Resolved per bot at dispatch. TASK-1956."
             ),
         },
     ),

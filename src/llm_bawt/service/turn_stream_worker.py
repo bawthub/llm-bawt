@@ -13,6 +13,7 @@ import time
 import uuid
 
 from ..inter_bot_reply_channel import append_request_reply_channel_note
+from ..model_switch_notice import apply_model_switch_notice
 from ..media.serializers import build_agent_image_manifest
 from .chat_stream_worker import consume_stream_chunks, put_queue_item_threadsafe
 from .logging import get_service_logger
@@ -265,6 +266,8 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 )
                 # TASK-1281: floor + notice, committed before the command publishes.
                 messages = working_memory.after_pin(messages, system_prompt_pin)
+                # TASK-1956: a kept pin may name the model from before a switch.
+                messages = apply_model_switch_notice(ctx, llm_bawt.client, messages, system_prompt_pin)
 
             # TASK-215: the "AVATAR ANIMATION: You MUST call trigger_animation"
             # prompt-injection hack has been removed. Animation selection
