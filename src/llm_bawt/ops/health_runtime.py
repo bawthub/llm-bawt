@@ -1,11 +1,11 @@
 """Fixed-worker lifecycle: health HTTP survives blocked reconciliation/collectors."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from threading import Event, Thread
 import time
 
 from .health_collector import OpsHealthCollector
-from .health_http import OpsHealthServer
 from .health_state import HealthSample, OpsHealthState
 
 
@@ -55,14 +55,15 @@ def build_reconciler(interval):
 
 class OpsHealthRuntime:
     def __init__(self, *, interval=5.0, state=None, collector=None,
-                 reconciler_factory=build_reconciler, address=("0.0.0.0", 8650),
+                 reconciler_factory=build_reconciler,
                  control_address=None, control_factory=build_control_service):
         self.state = state or OpsHealthState()
         self.stop = Event()
         self.collector = collector or OpsHealthCollector(self.state, database_engine)
         self.reconciler_factory = reconciler_factory
         self.interval = interval
-        self.http = OpsHealthServer(self.state, address)
+        self._started = False
+        self._closed = False
         # The app's prepare/readiness channel (TASK-1169 S3a): its own listener,
         # so a slow Docker read there never delays the health surface.
         self.control = None
@@ -83,9 +84,21 @@ class OpsHealthRuntime:
                     sampled, "down", "reconciler initialization unavailable"))
                 self.stop.wait(self.interval)
 
+    @asynccontextmanager
+    async def lifespan(self, _app):
+        # FastAPI owns these existing workers, not per-request BackgroundTasks.
+        # Even a partial startup must release listeners and signal producers.
+        try:
+            self.start()
+            yield
+        finally:
+            self.close()
+
     def start(self):
-        # No database/Docker initialization on the HTTP thread or before listen.
-        self.http.start()
+        if self._started or self.stop.is_set():
+            raise RuntimeError("ops runtime is single-use")
+        self._started = True
+        # Initialization stays in fixed daemon producers, off the HTTP loop.
         if self.control is not None:
             self.control.start()
         for name, target in (
@@ -94,13 +107,15 @@ class OpsHealthRuntime:
             ("ops-reconciler", self._reconcile),
         ):
             worker = Thread(name=name, target=target, daemon=True)
-            self.workers.append(worker)
             worker.start()
+            self.workers.append(worker)
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         self.state.stop()
         self.stop.set()
-        self.http.close()
         if self.control is not None:
             self.control.close()
         # A stuck RPC cannot hold SIGTERM indefinitely. One fixed daemon per

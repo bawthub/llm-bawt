@@ -1,7 +1,10 @@
 """Ops-owned health: bounded cached reads, no execution or Docker API proxy."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import ExitStack
 import json
+import socket
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,9 +15,11 @@ from urllib.request import Request, urlopen
 from unittest.mock import Mock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from llm_bawt.ops.health_collector import ISOLATED_CAPABILITIES, OpsHealthCollector, observe_container
-from llm_bawt.ops.health_http import OpsHealthServer
+from llm_bawt.ops.health_http import OpsHealthServer, _HealthProtocol, create_health_app
 from llm_bawt.ops.health_runtime import OpsHealthRuntime
 from llm_bawt.ops.health_state import ExecutorModeSample, HealthSample, OpsHealthState
 from llm_bawt.ops.reconciler import OpsReconciler
@@ -337,27 +342,29 @@ def test_http_survives_blocked_reconciler_and_collectors_and_shutdown_is_bounded
 
     collectors = SimpleNamespace(run=OpsHealthCollector.run, collect_storage=block, collect_docker=block)
     runtime = OpsHealthRuntime(state=state, collector=collectors,
-                              reconciler_factory=lambda _: SimpleNamespace(run=block),
-                              address=("127.0.0.1", 0))
-    runtime.start()
+                              reconciler_factory=lambda _: SimpleNamespace(run=block))
+    server = OpsHealthServer(state, ("127.0.0.1", 0), lifespan=runtime.lifespan)
+    server.start()
     try:
         assert entered.wait(HANG_GUARD_S)
         clock.advance(31)
         before = time.monotonic()
-        assert request(runtime.http, "/health/live") == (200, {"status": "ok"})
-        assert request(runtime.http, "/health/ready")[0] == 503
-        assert request(runtime.http, "/v1/health/containers")[0] == 503
-        assert request(runtime.http, "/v1/health/services")[0] == 503
+        assert request(server, "/health/live") == (200, {"status": "ok"})
+        assert request(server, "/health/ready")[0] == 503
+        assert request(server, "/v1/health/containers")[0] == 503
+        assert request(server, "/v1/health/services")[0] == 503
         # timing-ok: real HTTP requests answer from cached state; waiting on the stalled collectors takes 10s
         assert time.monotonic() - before < 1
         before = time.monotonic()
-        runtime.close()
+        server.close()
+        assert runtime.stop.is_set()  # FastAPI lifespan, not the test, stops workers
         # timing-ok: real thread joins: close's 2s worker deadline vs collectors stalled for 10s
         assert time.monotonic() - before < 3.5
-        assert not runtime.http.thread.is_alive()
+        assert not server.thread.is_alive()
         assert len(runtime.workers) == 3
     finally:
         release.set()
+        server.close()
         for worker in runtime.workers:
             worker.join(HANG_GUARD_S)
             assert not worker.is_alive()
@@ -442,20 +449,21 @@ def test_bootstrap_failure_recovers_without_restarting_http():
     collectors = SimpleNamespace(run=lambda _collect, stop: _until_stopped(stop),
                                  collect_storage=None, collect_docker=None)
     runtime = OpsHealthRuntime(state=state, collector=collectors, interval=0.01,
-                              reconciler_factory=build, address=("127.0.0.1", 0))
-    runtime.start()
+                              reconciler_factory=build)
+    server = OpsHealthServer(state, ("127.0.0.1", 0), lifespan=runtime.lifespan)
+    server.start()
     try:
         assert failed.wait(HANG_GUARD_S)
-        assert request(runtime.http, "/health/live")[0] == 200
-        body = request(runtime.http, "/health/ready")[1]
+        assert request(server, "/health/live")[0] == 200
+        body = request(server, "/health/ready")[1]
         assert "private" not in json.dumps(body)
         retry.set()
         assert recovered.wait(HANG_GUARD_S)
-        assert request(runtime.http, "/health/ready")[1]["checks"][-1]["status"] == "ok"
+        assert request(server, "/health/ready")[1]["checks"][-1]["status"] == "ok"
         assert len(attempts) == 2
     finally:
         retry.set()
-        runtime.close()
+        server.close()
 
 
 def test_successful_slow_tick_is_not_fresh_at_completion():
@@ -483,19 +491,204 @@ def test_maximum_inventory_fits_consumers_body_limit(collector):
 
 @pytest.mark.integration
 @pytest.mark.offline_integration
-def test_http_shutdown_is_bounded_even_if_request_handler_stalls():
+def test_http_shutdown_closes_incomplete_request_without_waiting_for_headers():
     server = OpsHealthServer(Clock().state(), ("127.0.0.1", 0))
-    entered, release = Event(), Event()
-
-    server.server.handle_request = lambda: _stall(entered, release)
     server.start()
     try:
-        assert entered.wait(HANG_GUARD_S)
-        before = time.monotonic()
-        server.close()
-        # timing-ok: real server thread; close joins it for at most 2s, the stalled handler holds for 10s
-        assert time.monotonic() - before < 2.5
+        with socket.create_connection(server.address, timeout=HANG_GUARD_S) as connection:
+            connection.sendall(b"GET /health/live HTTP/1.1\r\nHost:")
+            server.close()
+            assert not server.thread.is_alive()
+            try:
+                assert connection.recv(1024) == b""
+            except ConnectionResetError:
+                pass  # shutdown may reset an accepted but incomplete request
     finally:
-        release.set()
-        server.thread.join(HANG_GUARD_S)
-        assert not server.thread.is_alive()
+        server.close()
+
+
+@pytest.mark.integration
+@pytest.mark.offline_integration
+@pytest.mark.parametrize("initial_bytes", [b"", b"GET /health/live HTTP/1.1\r\nHost:"])
+def test_incomplete_clients_expire_and_health_recovers_without_restart(initial_bytes):
+    server = OpsHealthServer(Clock().state(), ("127.0.0.1", 0))
+    server.start()
+    original_thread = server.thread
+    try:
+        with ExitStack() as clients:
+            connections = []
+            for _ in range(32):
+                connection = clients.enter_context(socket.create_connection(
+                    server.address, timeout=HANG_GUARD_S))
+                if initial_bytes:
+                    connection.sendall(initial_bytes)
+                connections.append(connection)
+            # The real protocol deadline, not shutdown or a test-side close,
+            # must release every silent/partial socket while the server stays up.
+            for connection in connections:
+                try:
+                    assert connection.recv(1024) == b""
+                except ConnectionResetError:
+                    pass
+            assert server.thread is original_thread and server.thread.is_alive()
+            assert not server.server.should_exit
+            assert request(server, "/health/live") == (200, {"status": "ok"})
+    finally:
+        server.close()
+    assert not server.thread.is_alive()
+
+
+def health_protocol(loop):
+    from uvicorn import Config
+    from uvicorn.server import ServerState
+
+    config = Config(create_health_app(Clock().state()), http=_HealthProtocol,
+                    ws="none", log_config=None, access_log=False)
+    state = ServerState()
+    protocol = _HealthProtocol(config, state, {}, _loop=loop)
+    closed = []
+    transport = Mock()
+    transport.get_extra_info.side_effect = lambda name, *_: {
+        "sockname": ("127.0.0.1", 8650), "peername": ("127.0.0.1", 1),
+    }.get(name)
+    transport.is_closing.side_effect = lambda: bool(closed)
+    transport.close.side_effect = lambda: closed.append(loop.time())
+    protocol.connection_made(transport)
+    return protocol, transport, state, closed
+
+
+@pytest.mark.parametrize("initial_bytes", [b"", b"GET /health/live HTTP/1.1\r\nHost:"])
+def test_header_deadline_is_absolute_even_when_client_trickles(initial_bytes):
+    from tests.virtual_clock import run
+
+    async def check():
+        loop = asyncio.get_running_loop()
+        protocol, transport, _, closed = health_protocol(loop)
+        started = loop.time()
+        timer = protocol._headers_timer
+        if initial_bytes:
+            protocol.data_received(initial_bytes)
+        loop.call_later(0.5, protocol.data_received, b"x")
+        await asyncio.sleep(1.25)
+        assert closed == [started + 1.0]
+        assert protocol._headers_timer is None and timer.cancelled()
+        transport.close.assert_called_once()
+        protocol.connection_lost(None)
+
+    run(check())
+
+
+def test_complete_headers_cancel_initial_deadline():
+    from tests.virtual_clock import run
+
+    async def check():
+        loop = asyncio.get_running_loop()
+        protocol, transport, state, _ = health_protocol(loop)
+        timer = protocol._headers_timer
+        protocol.data_received(b"GET /health/live HTTP/1.1\r\nHost: local\r\n\r\n")
+        assert protocol.scope is not None
+        assert timer.cancelled() and protocol._headers_timer is None
+        await asyncio.gather(*state.tasks)
+        assert b"200 OK" in b"".join(call.args[0] for call in transport.write.call_args_list)
+        await asyncio.sleep(1.25)
+        transport.close.assert_called_once()  # response closes it, not the old timer
+        protocol.connection_lost(None)
+
+    run(check())
+
+
+def test_disconnect_cancels_header_timer_without_late_transport_action():
+    from tests.virtual_clock import run
+
+    async def check():
+        loop = asyncio.get_running_loop()
+        protocol, transport, state, _ = health_protocol(loop)
+        timer = protocol._headers_timer
+        protocol.connection_lost(ConnectionResetError())
+        assert timer.cancelled() and protocol._headers_timer is None
+        assert not state.connections
+        await asyncio.sleep(1.25)
+        transport.close.assert_not_called()
+
+    run(check())
+
+
+def test_fastapi_lifespan_owns_one_fixed_runtime_and_control_listener():
+    state = Clock().state()
+    entered = Event()
+
+    def run(stop, health):
+        assert health is state
+        entered.set()
+        _until_stopped(stop)
+
+    collectors = SimpleNamespace(run=lambda _collect, stop: _until_stopped(stop),
+                                 collect_storage=None, collect_docker=None)
+    runtime = OpsHealthRuntime(state=state, collector=collectors,
+                              reconciler_factory=lambda _: SimpleNamespace(run=run))
+    runtime.control = Mock()
+    app = create_health_app(state, lifespan=runtime.lifespan)
+    assert isinstance(app, FastAPI)
+    assert runtime.workers == []
+    runtime.control.start.assert_not_called()
+    with TestClient(app) as client:
+        assert entered.wait(HANG_GUARD_S)
+        assert len(runtime.workers) == 3
+        assert not runtime.stop.is_set()
+        runtime.control.start.assert_called_once()
+        for _ in range(3):
+            response = client.get("/health/live")
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+        assert len(runtime.workers) == 3  # HTTP requests never spawn producers
+    assert runtime.stop.is_set()
+    assert all(not worker.is_alive() for worker in runtime.workers)
+    runtime.control.close.assert_called_once()
+    runtime.close()
+    runtime.control.close.assert_called_once()  # main's fallback cleanup is safe
+    with pytest.raises(RuntimeError, match="single-use"):
+        runtime.start()
+
+
+def test_fastapi_partial_startup_failure_closes_control_and_never_runs_producers():
+    runtime = OpsHealthRuntime(collector=Mock(), reconciler_factory=Mock())
+    runtime.control = Mock()
+    runtime.control.start.side_effect = RuntimeError("fixture startup refusal")
+    with pytest.raises(RuntimeError, match="fixture startup refusal"), TestClient(
+        create_health_app(runtime.state, lifespan=runtime.lifespan)
+    ):
+        pytest.fail("startup must fail")
+    assert runtime.stop.is_set()
+    assert runtime.workers == []
+    runtime.control.close.assert_called_once()
+    runtime.reconciler_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("path", [
+    "/docs", "/redoc", "/openapi.json", "/health/live/", "/health/live?refresh=1",
+    "/health/%6cive", "/v1/health/services/bawthub%2etts", "/v1/ops/prepare",
+])
+def test_fastapi_does_not_expand_private_health_surface(path):
+    with TestClient(create_health_app(Clock().state())) as client:
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code == 404
+        assert response.json() == {"error": "not found"}
+        assert response.headers["cache-control"] == "no-store"
+
+
+def test_reconciler_entrypoint_runs_health_host_with_runtime_lifespan(monkeypatch):
+    from llm_bawt.ops import health_http, health_runtime, reconciler
+
+    runtime = Mock()
+    server = Mock()
+    build_runtime = Mock(return_value=runtime)
+    build_server = Mock(return_value=server)
+    monkeypatch.setenv("LLM_BAWT_OPS_RECONCILE_INTERVAL", "7")
+    monkeypatch.setattr(health_runtime, "OpsHealthRuntime", build_runtime)
+    monkeypatch.setattr(health_http, "OpsHealthServer", build_server)
+    reconciler.main()
+    build_runtime.assert_called_once_with(interval=7, control_address=("0.0.0.0", 8651))
+    build_server.assert_called_once_with(runtime.state, lifespan=runtime.lifespan)
+    server.run.assert_called_once_with()
+    runtime.start.assert_not_called()
+    runtime.close.assert_called_once_with()

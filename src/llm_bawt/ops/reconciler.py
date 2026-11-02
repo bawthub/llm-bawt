@@ -19,7 +19,6 @@ import logging
 import math
 import os
 import select
-import signal
 import time
 from threading import Event
 
@@ -179,6 +178,7 @@ class OpsReconciler:
 
 def main():
     from .control_protocol import CONTROL_PORT
+    from .health_http import OpsHealthServer
     from .health_runtime import OpsHealthRuntime
 
     logging.basicConfig(level=logging.INFO)
@@ -186,13 +186,12 @@ def main():
     if not math.isfinite(interval) or interval < 1:
         raise ValueError("LLM_BAWT_OPS_RECONCILE_INTERVAL must be finite and at least 1 second")
     runtime = OpsHealthRuntime(interval=interval, control_address=("0.0.0.0", CONTROL_PORT))
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_args: runtime.stop.set())
+    # Uvicorn owns SIGTERM/SIGINT in the main thread. Its FastAPI lifespan
+    # starts and closes the fixed producers plus the separate control listener.
     try:
-        runtime.start()
-        runtime.stop.wait()
+        OpsHealthServer(runtime.state, lifespan=runtime.lifespan).run()
     finally:
-        runtime.close()
+        runtime.close()  # also release the control socket if health bind fails
 
 
 if __name__ == "__main__":

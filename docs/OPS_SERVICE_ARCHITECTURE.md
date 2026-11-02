@@ -2,7 +2,7 @@
 
 **Status:** migration design with dated source/readiness evidence; integrated runtime acceptance is not complete.
 
-**Updated:** 2026-11-01 (TASK-1171 readiness and remaining authorization/acceptance; other tasks retain their dated rollout records). **Accountable owner:** Snark.
+**Updated:** 2026-11-02 (TASK-1169 FastAPI health host/lifespan source slice; other tasks retain their dated rollout records). **Accountable owner:** Snark.
 
 **Tasks:** TASK-1169–TASK-1173. Related health delivery: TASK-1157.
 
@@ -78,14 +78,16 @@ The durable ledger, approval snapshots, idempotency, recovery markers, bounded d
 
 ### What runs in the ops container
 
-The observed entrypoint is `python -m llm_bawt.ops.reconciler`: **one Python process**, containing:
+The entrypoint remains `python -m llm_bawt.ops.reconciler`. **TASK-1169 FastAPI host slice (implemented in source, not activated)** runs Uvicorn/FastAPI on the existing private health port `8650`, with FastAPI lifespan owning:
 
-- A reconciliation/queued-dispatch loop.
-- A database health collector thread.
-- A Docker inventory/executor-prerequisite collector thread.
-- A separate standard-library HTTP server thread serving cached observations.
+- The existing reconciliation/queued-dispatch daemon thread.
+- A fixed database health collector daemon thread.
+- A fixed Docker inventory/executor-prerequisite collector daemon thread.
+- The separate bounded, bearer-authenticated standard-library control listener on `8651`.
 
-It is **not currently a FastAPI operations control service**. Its HTTP interface is GET-only:
+HTTP runs on the main async loop, outside the blocking producers. Uvicorn handles SIGTERM/SIGINT; lifespan stops readiness, signals producers and closes the control listener, with the existing two-second shared producer join budget. Partial startup is cleaned up; a runtime cannot start twice or spawn replacements for blocked producers. HTTP request draining has a two-second budget. A protocol-level, absolute one-second initial-header deadline closes silent or trickling clients before ASGI parsing, preventing incomplete connections from indefinitely exhausting the concurrency limit; it is cancelled on parsed headers or disconnect. Every health response closes its connection. Docs/OpenAPI, proxy-header trust and access-path logging are disabled. Health responses remain cache-only, exact-path, GET-only, `no-store`; query strings and encoded aliases are refused. No listener is published and no control protocol, bearer, dispatch, admission or ledger semantics change. Moving the control routes themselves into FastAPI remains a later bounded slice; this is not yet the complete FastAPI control service.
+
+The health routes remain:
 
 | Current route | Meaning |
 | --- | --- |
@@ -263,7 +265,7 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `src/llm_bawt/ops/release_executor.py`: release execution/coordinator integration.
 - `src/llm_bawt/ops/config_reconcile.py`, `app_config_reconcile.py`, `tagged_config_reconcile.py`: worker-side same-image Compose reconcile per target kind (frontend, Compose-built with source guard, public tagged image); see `docs/OPS_CONFIG_RECONCILE.md`.
 - `src/llm_bawt/ops/plan_reconcile.py`, `plan_approval.py`, `probe_contract.py`: the cutover service plan (TASK-1476). The worker runs the ordered recreate, end probes and revert-all; the app binds the plan at approval; the probe contract is the one-line JSON schema shared with `service/cutover_probe.py` and `claude_code_bridge/cutover_probe.py`.
-- `src/llm_bawt/ops/reconciler.py`, `health_runtime.py`, `health_http.py`, `health_collector.py`, `health_state.py`: current independent loop and monitoring.
+- `src/llm_bawt/ops/reconciler.py`, `health_runtime.py`, `health_http.py`, `health_collector.py`, `health_state.py`: FastAPI health host/lifespan and independent fixed reconciliation/collection producers (implemented, not activated); cached observation contracts unchanged.
 - `src/llm_bawt/ops/approved_admission.py`: approved MCP `ops_run` admission and the shared `ops_run` receipt/error contract (TASK-1220).
 - `src/llm_bawt/approval_mcp_store.py`: approval execution claims, plus the shared awaiting-execution predicate used by the claim, app recovery and admission.
 - `src/llm_bawt/service/routes/approval_policies.py`, `service/approval_continuations.py`: approval decision recording and the continuation outbox, which reads ops results without reconciling them.
@@ -274,6 +276,8 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `bawthub/bawthub/main_websocket.py`, `bawthub/bawthub/tts/restart.py`: voice restart controller and fenced llm-bawt client; the direct `restart_tts_container.sh` helper is removed (TASK-1171).
 
 ### Decision record
+
+- **2026-11-02 (TASK-1169 FastAPI health host):** Reconciled the published prepared-hold correction and existing process/adapter work without replay. Migrated only the dedicated health host and runtime ownership to FastAPI/Uvicorn lifespan; kept the separate bounded control transport, immutable wire contracts, fixed producers and execution/recovery semantics. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
 
 - **2026-10-18:** Health monitoring fixed independently of full isolation; broader tasks remain queued.
 - **2026-10-18:** Caid review narrows scope: reuse ledger, portable service contracts, shared observations, routing owned by deployment, guardrails first. Follow-up found repository mount inspection; TASK-1170 explicitly covers it.
