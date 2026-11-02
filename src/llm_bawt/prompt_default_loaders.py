@@ -157,6 +157,12 @@ def load_inter_bot_restart_retry_continue() -> str:
     return DEFAULT_RESTART_RETRY_CONTINUE
 
 
+def load_deliveries_failure_notice() -> str:
+    from .service.delivery_failure_notice_prompt import DEFAULT_FAILURE_NOTICE
+
+    return DEFAULT_FAILURE_NOTICE
+
+
 def load_deliveries_cancel_notice() -> str:
     from .service.delivery_cancel_notice_prompt import DEFAULT_CANCEL_NOTICE
 

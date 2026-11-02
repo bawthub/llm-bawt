@@ -44,6 +44,7 @@ from .prompt_default_loaders import (
     load_chat_steer_interrupt_replacement,
     load_chat_steer_next_aside,
     load_deliveries_cancel_notice,
+    load_deliveries_failure_notice,
     load_deliveries_stopped_after_start_notice,
     load_global_recall_guidance,
     load_inter_bot_reply_channel_async,
@@ -655,6 +656,21 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
             "it was notified about has been decided by someone else. {resolved_by} "
             "is a bot slug or \"a person\"; the resolver's reason is never included. "
             "Approver-bot overrides supported."
+        )},
+    ),
+    "deliveries.failure_notice": PromptDefinition(
+        key="deliveries.failure_notice",
+        title="Delegated Delivery Failure Notice",
+        category="agent_execution",
+        required_vars=("worker_bot_id", "task_id", "delivery_id", "original_delivery_id",
+                       "failed_turn_id", "initiating_turn_id", "delivery_status", "turn_status",
+                       "error_code", "existing_retry_delivery_id"),
+        loader=load_deliveries_failure_notice,
+        metadata={"notes": (
+            "System-authored failure callback to the verified initiating durable session. "
+            "Error category is allowlisted; provider text/tool arguments are never included. "
+            "Warn that effects may persist and never authorize replay or restart. "
+            "Blank/unavailable rendering rolls back production for a later leader sweep."
         )},
     ),
     "deliveries.cancel_notice": PromptDefinition(

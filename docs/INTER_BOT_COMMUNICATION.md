@@ -240,6 +240,45 @@ harnesses. Local/chat backends are recorded as inspectable `FAILED`
 deliveries because their tool side effects cannot be safely reattached after an
 ambiguous process failure.
 
+### Initiating-session failure callbacks (TASK-1946)
+
+New bot sends with a verified sender turn retain server-owned
+`_failure_origin` identifiers (bot, user, durable session, initiating turn and
+trigger message), never the capability token. The leader's existing sweep
+reconciles canonical FAILED deliveries and failed terminal turns owned by a
+DELIVERED fallback delivery's exact trigger/bot/user. It transactionally enqueues
+one system `DELIVERY_FAILED` notice with key `failure-notice:<delivery-id>` and
+stamps `_failure_notice` on the source. Crash/reconnect or duplicate passes do
+not create another logical notice. A missed announcement is safe: the notice
+is already in the ordinary durable queue. No schema or separate scheduler is
+introduced, and existing UI lifecycle events remain unchanged.
+
+The notice is pinned to the initiating session after verifying its actual
+turn/message/session ownership. It waits for a safe idle turn, respects gates
+and user-stop holds, and never falls back to an unrelated current session.
+Missing/untrusted/deleted/foreign lineage and private/no-profile bots fail
+closed. Rows predating trusted origin capture are not retroactively broadcast.
+Existing explicit/restart retry children preserve their initiating provenance,
+but not their parent's notice-decision marker; this feature creates no retries.
+
+Steer acceptance means a message was persisted, not that its work completed.
+The current shared-run lifecycle has no command-specific failure cause. A
+failed shared turn therefore notifies its proven original owning delegation,
+not every steering sender (even one whose command reported started). A steer
+row's own FAILED send can notify its verified sender, but its target turn is
+labelled unattributed rather than blamed on that command. Uncertain/not-run
+steer fences are unchanged.
+
+The prompt-registry body `deliveries.failure_notice` includes worker/task and
+delivery/turn IDs, terminal status, and a fixed error category; raw exception,
+message, response and tool-argument text is never copied into it. The notice
+warns that prior effects may persist and grants no permission to replay work.
+Explicit Stop/cancellation evidence is excluded from failure notifications;
+the existing cancellation notices remain distinct. Generated failure and
+cancellation notices cannot create callback-of-callback loops. Blank or
+unavailable prompt rendering rolls back the notice and decision together for
+a later bounded sweep.
+
 ## Lifecycle observability
 
 Every state transition publishes `_type="inter_bot_delivery"` to the sender's

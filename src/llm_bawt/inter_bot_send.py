@@ -54,7 +54,10 @@ PRIVILEGED_FIELDS = ("session_id", "augment_memory", "raw_message")
 # control lane's pin; ``prompt_schedule`` is written only by the scheduler's
 # outbox (its owner routes receipts, TASK-1790). A caller supplying any of them
 # is refused on every route.
-SERVER_OWNED_METADATA_KEYS = ("new_session_intent", "batch_id", "batch", "control", "prompt_schedule")
+SERVER_OWNED_METADATA_KEYS = (
+    "new_session_intent", "batch_id", "batch", "control", "prompt_schedule",
+    "_failure_origin", "_failure_notice",
+)
 
 
 class _DeliveryFields(BaseModel):
@@ -230,8 +233,8 @@ def _gate_disposition(request: Any, body: DeliveryCreate, sender: str, target: s
     return ON_GATE_HOLD if own else ON_GATE_DENY
 
 
-def _signed_sender_turn(request: Any, sender: str) -> str | None:
-    """The sender's turn id from its verified capability, or None (TASK-1249).
+def _signed_sender_context(request: Any, sender: str):
+    """The sender's verified initiating context, or None (TASK-1249/1946).
 
     Provenance only: a missing, invalid or expired capability, one signed for
     another bot, or an unreadable signing key records nothing and never
@@ -252,7 +255,7 @@ def _signed_sender_turn(request: Any, sender: str) -> str | None:
     except Exception as exc:  # noqa: BLE001 - see docstring
         logger.debug("Sender turn not recorded: %s", exc)
         return None
-    return caller.turn_id if caller.bot_id.strip().lower() == sender else None
+    return caller if caller.bot_id.strip().lower() == sender else None
 
 
 def _steer_only_receipt(
@@ -384,7 +387,13 @@ class DeliverySender:
             )
         if body.from_selector:
             self._refuse_unselectable(target, sender, bot_caller=author.entity_type == "bot")
-        sender_turn_id = _signed_sender_turn(request, sender) if author.entity_type == "bot" else None
+        caller = _signed_sender_context(request, sender) if author.entity_type == "bot" else None
+        sender_turn_id = caller.turn_id if caller else None
+        metadata = dict(body.metadata)
+        if caller is not None and author.entity_id == sender == caller.bot_id:
+            from .inter_bot_failure import ORIGIN, FailureOrigin
+
+            metadata[ORIGIN] = FailureOrigin.capture(caller)
         target_bot = bots.get_bot(target)
         target_exists = target_bot is not None
         durable_capable = bool(target_bot and durable_agent_backend(target_bot))
@@ -533,7 +542,7 @@ class DeliverySender:
                     follow_up=body.message, reason=body.reset_reason or automatic_reason,
                 )
                 record, duplicate = NewSessionLifecycle(self.service).admit_bot_delivery(
-                    intent, payload=payload, metadata=body.metadata,
+                    intent, payload=payload, metadata=metadata,
                     sender_bot_id=sender, project_id=body.project_id, task_id=body.task_id,
                     message_kind=body.message_kind, max_attempts=body.max_attempts,
                     reset_reason=body.reset_reason or automatic_reason, producer="bot",
@@ -546,7 +555,7 @@ class DeliverySender:
                     idempotency_key=body.idempotency_key or body.user_message_id,
                     user_message_id=body.user_message_id,
                     project_id=body.project_id, task_id=body.task_id,
-                    message_kind=body.message_kind, metadata=body.metadata,
+                    message_kind=body.message_kind, metadata=metadata,
                     max_attempts=body.max_attempts, session_policy=policy,
                     reset_reason=body.reset_reason or automatic_reason, producer="bot",
                     on_gate=on_gate, sender_turn_id=sender_turn_id,

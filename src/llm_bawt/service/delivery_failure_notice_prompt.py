@@ -1,0 +1,20 @@
+"""Prompt-registry seed only for the initiating-session failure notice."""
+
+PROMPT_KEY = "deliveries.failure_notice"
+DEFAULT_FAILURE_NOTICE = (
+    "[Delegated delivery failed — notification, not a retry]\n"
+    "Worker: {worker_bot_id}; task: {task_id}; delivery: {delivery_id}; "
+    "original delivery: {original_delivery_id}; failed turn: {failed_turn_id}; "
+    "initiating turn: {initiating_turn_id}; delivery status: {delivery_status}; "
+    "turn status: {turn_status}; error category: {error_code}; "
+    "existing retry delivery: {existing_retry_delivery_id}.\n"
+    "The delivery or its owning turn recorded a terminal failure. An unattributed "
+    "turn means the send failed, not proof that its command did not run or that "
+    "the shared worker turn failed. Prior tool effects may persist; do not assume "
+    "nothing happened. Inspect these delivery/turn IDs "
+    "and retained task evidence, then report a concrete result or blocker. "
+    "This callback did not restart or replay the worker and is not permission "
+    "to resend work or repeat side effects. If a retry already exists, inspect "
+    "that delivery rather than creating another. A user-requested stop or "
+    "cancellation must never be overridden by automatically restarting work."
+)

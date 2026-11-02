@@ -84,7 +84,7 @@ RETRY_ORIGINAL_AUTHOR = "retry_original_author"
 # Why a host-shutdown FAILED delivery did or did not come back (audit only).
 RESTART_RETRY_OUTCOME = "restart_retry_outcome"
 _EXECUTION_METADATA = frozenset({
-    "maintenance_barrier", RETRY_ORIGINAL_AUTHOR, RESTART_RETRY_OUTCOME, *RETRY_MARKERS,
+    "maintenance_barrier", "_failure_notice", RETRY_ORIGINAL_AUTHOR, RESTART_RETRY_OUTCOME, *RETRY_MARKERS,
 })
 
 
@@ -334,6 +334,7 @@ def _retry(
             connection=conn,
             producer=RETRY_PRODUCER,
             on_gate=policy.on_gate,
+            sender_turn_id=original.sender_turn_id,
         )
 
 

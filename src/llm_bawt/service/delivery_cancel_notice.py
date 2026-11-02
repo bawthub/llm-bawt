@@ -78,6 +78,7 @@ _PENDING = f"""
     AND cancel_notified_at IS NULL
     AND author_entity_type='bot' AND sender_bot_id <> target_bot_id
     AND message_kind IS DISTINCT FROM '{NOTICE_KIND}'
+    AND message_kind IS DISTINCT FROM 'DELIVERY_FAILED'
     AND metadata_json->'prompt_schedule' IS NULL
 """
 _SENDER_ALLOWED, _SENDER_PARAMS = sql_allowed(

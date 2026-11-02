@@ -27,13 +27,15 @@ class LeaderSidePumps:
 
     def __init__(self, service: Any, store: Any, *, talk_replies: Any = None,
                  quiesce_control: Any = None, cancel_notices: Any = None,
-                 approver_notices: Any = None, quiesce_escalation: Any = None) -> None:
+                 approver_notices: Any = None, quiesce_escalation: Any = None,
+                 failure_notices: Any = None) -> None:
         self.service = service
         self.store = store
         self.talk_replies = talk_replies
         self.quiesce_control = quiesce_control
         self.quiesce_escalation = quiesce_escalation
         self.cancel_notices = cancel_notices
+        self.failure_notices = failure_notices
         self.approver_notices = approver_notices
         self.talk_reply_task: asyncio.Task | None = None
         self._new_session_outbox = None
@@ -43,6 +45,7 @@ class LeaderSidePumps:
     def build(cls, service: Any, store: Any) -> "LeaderSidePumps":
         from .approval_fanout import ApprovalFanoutPump
         from .delivery_cancel_notice import CancelNoticePump
+        from .delivery_failure_notice import FailureNoticePump
         from .quiesce_control import build_producer
         from .quiesce_escalation import build_escalator
         from .talk_reply_outbox import TalkReplyOutbox
@@ -56,6 +59,7 @@ class LeaderSidePumps:
             # TASK-1748: interrupt a held run whose control sat behind a long tool.
             quiesce_escalation=build_escalator(store),
             cancel_notices=CancelNoticePump(store) if engine is not None else None,
+            failure_notices=FailureNoticePump(store) if engine is not None else None,
             approver_notices=ApprovalFanoutPump(store) if engine is not None else None,
         )
 
@@ -76,6 +80,11 @@ class LeaderSidePumps:
             await self._escalate_controls()
         if self.cancel_notices is not None:
             await self._send_notices(emit, self.cancel_notices)
+        if self.failure_notices is not None:
+            try:
+                await self._send_notices(emit, self.failure_notices)
+            except Exception:  # retained canonical state is retried on the next sweep
+                logger.warning("Failure notice pass deferred")
         if self.approver_notices is not None:
             try:
                 await self._send_notices(emit, self.approver_notices)

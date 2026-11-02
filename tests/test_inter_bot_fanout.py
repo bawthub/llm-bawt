@@ -241,7 +241,8 @@ def test_a_user_fan_out_may_wait_for_nothing_either(no_service):
     assert response.json()["detail"]["error"] == "fanout_waited"
 
 
-@pytest.mark.parametrize("key", ["batch_id", "batch", "control", "new_session_intent", "prompt_schedule"])
+@pytest.mark.parametrize("key", ["batch_id", "batch", "control", "new_session_intent", "prompt_schedule",
+                                 "_failure_origin", "_failure_notice"])
 def test_server_owned_metadata_is_refused_on_the_batch_route(no_service, key):
     response = _batch(idempotency_key="k", metadata={key: "forged"})
     assert response.status_code == 422 and "server-owned" in response.text

@@ -34,14 +34,20 @@ def _capability(bot_id="fixture-sender", turn_id=TURN):
 
 
 def _bot_body(**kwargs):
-    fields = {"session_policy": "continue", **kwargs}
-    return _body(author_entity_type=None, author_entity_id=None, **fields)
+    fields = {"session_policy": "continue", "author_entity_type": None,
+              "author_entity_id": None, **kwargs}
+    return _body(**fields)
 
 
 @pytest.mark.parametrize("header", [SENDER_TURN_CONTEXT_HEADER, TASK_TURN_CONTEXT_HEADER])
 def test_signed_sender_turn_is_stamped(delivery_route, fernet, header):
     _send(_bot_body(), _request({header: _capability()}))
     assert _enqueued(delivery_route)["sender_turn_id"] == TURN
+    assert _enqueued(delivery_route)["metadata"]["_failure_origin"] == {
+        "version": 1, "bot_id": "fixture-sender", "user_id": "fixture-user",
+        "session_id": "12490000-0000-4000-8000-000000000001", "turn_id": TURN,
+        "trigger_message_id": "12490000-0000-4000-8000-000000000002",
+    }
 
 
 @pytest.mark.parametrize("headers", [
@@ -56,6 +62,7 @@ def test_unsigned_forged_or_foreign_turn_records_nothing_and_still_sends(
         headers = {SENDER_TURN_CONTEXT_HEADER: _capability(bot_id="fixture-target")}
     _send(_bot_body(), _request(headers))
     assert _enqueued(delivery_route)["sender_turn_id"] is None
+    assert "_failure_origin" not in _enqueued(delivery_route)["metadata"]
 
 
 def test_unreadable_signing_key_records_nothing_and_still_sends(delivery_route, monkeypatch):
@@ -65,11 +72,28 @@ def test_unreadable_signing_key_records_nothing_and_still_sends(delivery_route, 
     monkeypatch.setattr(codec, "_get_fernet", broken)
     _send(_bot_body(), _request({SENDER_TURN_CONTEXT_HEADER: "anything"}))
     assert _enqueued(delivery_route)["sender_turn_id"] is None
+    assert "_failure_origin" not in _enqueued(delivery_route)["metadata"]
 
 
 def test_user_authored_delivery_never_takes_a_turn(delivery_route, fernet):
     _send(_body(session_policy="continue"), _request({SENDER_TURN_CONTEXT_HEADER: _capability(bot_id="fixture-user")}))
     assert _enqueued(delivery_route)["sender_turn_id"] is None
+    assert "_failure_origin" not in _enqueued(delivery_route)["metadata"]
+
+
+def test_expired_sender_capability_cannot_target_a_failure_callback(delivery_route, fernet):
+    expired = mint_task_turn_context(
+        session_id="12490000-0000-4000-8000-000000000001", turn_id=TURN,
+        trigger_message_id="12490000-0000-4000-8000-000000000002",
+        bot_id="fixture-sender", user_id="fixture-user", issued_at=1,
+    )
+    # TTL checks the authenticated Fernet envelope timestamp, not issued_at.
+    expired = fernet.encrypt_at_time(
+        fernet.decrypt(expired.encode("ascii")), current_time=1,
+    ).decode("ascii")
+    _send(_bot_body(), _request({SENDER_TURN_CONTEXT_HEADER: expired}))
+    assert _enqueued(delivery_route)["sender_turn_id"] is None
+    assert "_failure_origin" not in _enqueued(delivery_route)["metadata"]
 
 
 def test_sender_header_alone_never_grants_the_gate_hold(fernet):
@@ -97,6 +121,24 @@ def test_reset_admission_carries_the_sender_turn(delivery_route, fernet, monkeyp
     _send(_bot_body(session_policy="reset_retain_history"),
           _request({SENDER_TURN_CONTEXT_HEADER: _capability()}))
     assert seen["sender_turn_id"] == TURN
+    assert seen["metadata"]["_failure_origin"]["turn_id"] == TURN
+    assert seen["metadata"]["_failure_origin"]["user_id"] == "fixture-user"
+
+
+@pytest.mark.parametrize("key", ["_failure_origin", "_failure_notice"])
+def test_failure_notice_metadata_cannot_be_supplied_by_a_caller(delivery_route, key):
+    from llm_bawt.inter_bot_send_types import DeliveryRefused
+
+    with pytest.raises(DeliveryRefused) as exc:
+        _send(_bot_body(metadata={key: {"version": 1}}))
+    assert exc.value.status_code == 422
+    delivery_route.dispatcher.store.enqueue.assert_not_called()
+
+
+def test_bot_author_mismatch_does_not_get_failure_callback_origin(delivery_route, fernet):
+    _send(_bot_body(author_entity_type="bot", author_entity_id="fixture-target"),
+          _request({SENDER_TURN_CONTEXT_HEADER: _capability()}))
+    assert "_failure_origin" not in _enqueued(delivery_route)["metadata"]
 
 
 class _Client:
