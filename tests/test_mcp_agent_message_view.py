@@ -12,7 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from llm_bawt.bot_access import BotAccessError, BotPolicyResolver
 from llm_bawt.bot_access.context import bind_bot_access
+from llm_bawt.bot_access.policy import TrustedCaller
 from llm_bawt.mcp_server import agent_view, find_tools
 from llm_bawt.mcp_server import server as tools
 
@@ -29,33 +31,44 @@ def _row(message_id: str = "m1") -> dict:
 
 
 def _access(kind: str):
-    return SimpleNamespace(caller=SimpleNamespace(kind=kind))
+    caller = TrustedCaller("fixture_bot", None if kind == "service" else "fixture_user", kind)
+    return BotPolicyResolver._compile(
+        [{"slug": "fixture_bot", "include_in_global_search": True}], caller)
+
 
 
 @pytest.fixture
 def storage(monkeypatch):
+    history_calls = []
+
     async def search_all_messages(**kwargs):
         return [_row()]
 
     async def get_messages(**kwargs):
+        history_calls.append(kwargs)
         return [_row("m1"), _row("m2")]
 
     async def get_message_by_id(**kwargs):
         return {"message": _row("m2"), "before": [_row("m1")], "after": [_row("m3")]}
 
     fake = SimpleNamespace(search_all_messages=search_all_messages, get_messages=get_messages,
-                           get_message_by_id=get_message_by_id)
+                           get_message_by_id=get_message_by_id, history_calls=history_calls)
     monkeypatch.setattr(tools, "_get_storage", lambda: fake)
     return fake
 
 
 def _call_all(kind: str | None) -> list:
     async def run():
-        return [
-            await tools.search_all_messages(query="hello"),
-            await tools.get_messages(bot_id="fixture_bot"),
-            await tools.get_message_by_id(bot_id="fixture_bot", message_id="m2", before=1, after=1),
-        ]
+        results = [await tools.search_all_messages(query="hello")]
+        if kind is None:
+            # Ordinary history reads now require an owned caller even on public bots.
+            with pytest.raises(BotAccessError, match="caller_unavailable"):
+                await tools.get_messages(bot_id="fixture_bot")
+        else:
+            results.append(await tools.get_messages(bot_id="fixture_bot"))
+        results.append(await tools.get_message_by_id(
+            bot_id="fixture_bot", message_id="m2", before=1, after=1))
+        return results
     if kind is None:
         return asyncio.run(run())
     with bind_bot_access(_access(kind)):
@@ -80,7 +93,9 @@ def _authors(value) -> list[dict]:
 def test_agent_callers_get_no_avatar_render_but_keep_display_fields(storage, kind):
     results = _call_all(kind)
     authors = [a for result in results for a in _authors(result)]
-    assert len(authors) == 1 + 2 + 3
+    assert len(authors) == (1 + 3 if kind is None else 1 + 2 + 3)
+    assert [call["user_id"] for call in storage.history_calls] == (
+        [] if kind is None else ["fixture_user"])
     for author in authors:
         assert "avatar_render" not in author
         assert (author["display_name"], author["color"], author["avatar"]) == (
@@ -92,6 +107,7 @@ def test_service_caller_keeps_avatar_render_for_rest_and_ui(storage):
     results = _call_all("service")
     authors = [a for result in results for a in _authors(result)]
     assert len(authors) == 6
+    assert [call["user_id"] for call in storage.history_calls] == [None]
     assert all(author["avatar_render"] == RENDER for author in authors)
 
 
