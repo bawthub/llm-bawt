@@ -494,6 +494,7 @@ class ProviderAdapter(ABC):
                     resumed_from_index=resumed_from_index,
                     reasoning_codec=reasoning_codec,
                     allowed_skill_names=context.skill_names if context else (),
+                    request_context=context,
                 ):
                     progress = getattr(upstream_stream, "progress", None)
                     if progress is not None:

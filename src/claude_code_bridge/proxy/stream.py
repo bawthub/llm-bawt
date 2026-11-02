@@ -64,6 +64,8 @@ from typing import Any, AsyncIterator, Callable
 from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
 from .reasoning import ReasoningCodec
 from .continuation import CommittedOutput
+from .relay_trace import RelayTrace, claim_relay_trace
+from .request_context import ProxyRequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +233,7 @@ async def responses_to_anthropic_sse(
     resumed_from_index: int | None = None,
     reasoning_codec: ReasoningCodec | None = None,
     allowed_skill_names: tuple[str, ...] = (),
+    request_context: ProxyRequestContext | None = None,
 ) -> AsyncIterator[bytes]:
     """Translate a Responses API event stream into Anthropic SSE bytes.
 
@@ -310,6 +313,7 @@ async def responses_to_anthropic_sse(
     # pages: "") which the SDK tools reject. We buffer, strip empties, then
     # emit on the .done event.
     tool_arg_buffers: dict[str, str] = {}   # item_id → accumulated JSON string
+    relay_trace: RelayTrace | None = None
 
     terminal_event_seen = False
     saw_tool_use = False
@@ -396,6 +400,8 @@ async def responses_to_anthropic_sse(
                     }
                     _set_open(block)
                     blocks_by_item[item_id] = block
+                    if relay_trace is None:
+                        relay_trace = claim_relay_trace(request_context, block, message_id)
                     saw_tool_use = True
                     # TASK-714 HARD BARRIER: a tool call has been forwarded to
                     # the SDK. Retry policy will refuse to replay from this
@@ -512,6 +518,8 @@ async def responses_to_anthropic_sse(
                 item_id = getattr(event, "item_id", "") or ""
                 partial = getattr(event, "delta", "") or ""
                 block = blocks_by_item.get(item_id)
+                if relay_trace is not None and item_id == relay_trace.item_id:
+                    relay_trace.record("delta", delta=getattr(event, "delta", None))
                 if block is None or not partial:
                     continue
                 # Buffer instead of emitting — we sanitize on .done.
@@ -667,6 +675,12 @@ async def responses_to_anthropic_sse(
                     if etype == "response.function_call_arguments.done"
                     else getattr(event, "input", None)
                 )
+                if relay_trace is not None and item_id == relay_trace.item_id:
+                    relay_trace.record(
+                        "before_selection", arguments=complete, buffered=buffered,
+                        selected="done" if isinstance(complete, str) and complete
+                        else "buffer" if buffered else "empty_object",
+                    )
                 raw = (
                     complete if isinstance(complete, str) and complete
                     else buffered or "{}"
@@ -707,6 +721,8 @@ async def responses_to_anthropic_sse(
                     # whose arguments never reached the SDK — a closed empty
                     # block is a complete ``{}`` call that the CLI executes.
                     block["args_flushed"] = True
+                    if relay_trace is not None and item_id == relay_trace.item_id:
+                        relay_trace.record("translator_partial_json", partial_json=cleaned)
                     yield _sse(
                         "content_block_delta",
                         {
@@ -715,6 +731,8 @@ async def responses_to_anthropic_sse(
                             "delta": {"type": "input_json_delta", "partial_json": cleaned},
                         },
                     )
+                    if relay_trace is not None and item_id == relay_trace.item_id:
+                        relay_trace.finish("captured")
                 continue
 
             # ── events with no Anthropic analog: close-out / annotations /
@@ -750,6 +768,9 @@ async def responses_to_anthropic_sse(
         for item_id, leftover in tool_arg_buffers.items():
             block = blocks_by_item.get(item_id) or open_block
             if block is not None and leftover:
+                if relay_trace is not None and item_id == relay_trace.item_id:
+                    relay_trace.record("fallback_partial_json", partial_json=leftover)
+                    relay_trace.finish("missing_done")
                 yield _sse(
                     "content_block_delta",
                     {
@@ -829,3 +850,6 @@ async def responses_to_anthropic_sse(
                 },
             },
         )
+    finally:
+        if relay_trace is not None:
+            relay_trace.finish("stream_closed_before_capture")
