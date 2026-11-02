@@ -77,6 +77,7 @@ OPS_ADAPTER = {
     "llm_bawt/ops/container_remove.py": ({"engine api"}, "worker-side inspect/delete of one stopped orphan"),
     "llm_bawt/ops/gate_runner.py": ({"engine api"}, "unused fixed-workload socketless gate launcher"),
     "llm_bawt/ops/gate_custody.py": ({"engine api"}, "GET-only nonce-bound gate recovery observation"),
+    "llm_bawt/ops/gate_retire.py": ({"engine api"}, "GET-only list/inspect of nonce-labelled gate containers before slot retirement"),
     "llm_bawt/ops/restart_health.py": ({"engine api"}, "worker-side inspect/exec health probe after a restart"),
     "llm_bawt/ops/compose_render.py": ({"runs docker"}, "sealed `docker compose config` render"),
     # Catalog data only: the deployed mounts a sealed recreate preserves.
