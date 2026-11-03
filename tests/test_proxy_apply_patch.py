@@ -1,6 +1,7 @@
 """TASK-1976: apply_patch on GPT routes translated to native Claude Code tools."""
 import asyncio
 import json
+import tempfile
 from types import SimpleNamespace as NS
 
 import pytest
@@ -19,8 +20,29 @@ WRITE = {"type": "object", "properties": {"file_path": {"type": "string"},
 READ = {"type": "object", "properties": {"file_path": {"type": "string"}},
         "required": ["file_path"]}
 
-PATCH = """*** Begin Patch
-*** Update File: /w/a.py
+W = tempfile.mkdtemp(prefix="apply-patch-")
+FILES = {"a.py": "def f():\n    return 1\n\nx = 1\ny = 2\n", "old.txt": "bye\n", "a": "a\nb\n"}
+
+
+@pytest.fixture(autouse=True)
+def _workdir():
+    import os
+    for name, text in FILES.items():
+        with open(os.path.join(W, name), "w", newline="") as fh:
+            fh.write(text)
+    yield
+
+
+def apply_like_cli(text: str, edits: list[dict]) -> str:
+    """Claude Code Edit semantics: old_string must occur exactly once."""
+    for e in edits:
+        assert text.count(e["old_string"]) == 1, e
+        text = text.replace(e["old_string"], e["new_string"])
+    return text
+
+
+PATCH = f"""*** Begin Patch
+*** Update File: {W}/a.py
 @@ def f():
  def f():
 -    return 1
@@ -29,10 +51,10 @@ PATCH = """*** Begin Patch
  x = 1
 -y = 2
 +y = 3
-*** Add File: /w/new.txt
+*** Add File: {W}/new.txt
 +hello
 +world
-*** Delete File: /w/old.txt
+*** Delete File: {W}/old.txt
 *** End Patch"""
 
 
@@ -49,17 +71,17 @@ def test_patch_becomes_edit_write_and_rm_in_order():
     assert [(i, n) for i, n, _ in uses] == [
         ("call_1__ap0of4", "Edit"), ("call_1__ap1of4", "Edit"),
         ("call_1__ap2of4", "Write"), ("call_1__ap3of4", "Bash")]
-    assert uses[0][2] == {"file_path": "/w/a.py", "old_string": "def f():\n    return 1",
-                          "new_string": "def f():\n    return 2"}
-    assert uses[1][2]["old_string"] == "x = 1\ny = 2"
-    assert uses[2][2] == {"file_path": "/w/new.txt", "content": "hello\nworld\n"}
-    assert uses[3][2]["command"] == "rm -- /w/old.txt"
+    assert uses[0][2] == {"file_path": f"{W}/a.py", "old_string": "def f():\n    return 1\n",
+                          "new_string": "def f():\n    return 2\n"}
+    assert uses[1][2]["old_string"] == "x = 1\ny = 2\n"
+    assert uses[2][2] == {"file_path": f"{W}/new.txt", "content": "hello\nworld\n"}
+    assert uses[3][2]["command"] == f"rm -- {W}/old.txt"
 
 
 def test_lenient_fences_crlf_and_missing_markers():
-    text = "```\n*** Update File: /w/a\r\n@@\r\n a\r\n-b\r\n+c\r\n```"
+    text = f"```\n*** Update File: {W}/a\r\n@@\r\n a\r\n-b\r\n+c\r\n```"
     [(_, name, inp)] = ap.patch_to_tool_uses("c", text, None)
-    assert name == "Edit" and inp["old_string"] == "a\nb" and inp["new_string"] == "a\nc"
+    assert name == "Edit" and inp["old_string"] == "a\nb\n" and inp["new_string"] == "a\nc\n"
 
 
 def test_relative_paths_resolve_against_cli_cwd_or_fail():
@@ -74,12 +96,15 @@ def test_relative_paths_resolve_against_cli_cwd_or_fail():
     ("*** Begin Patch\n*** Update File: /a\n*** Move to: /b\n@@\n-x\n+y\n*** End Patch", "Move to"),
     ("*** Begin Patch\n*** End Patch", "no file sections"),
     ("*** Begin Patch\n*** Update File: /a\n@@\n x\n*** End Patch", "no + or -"),
-    ("*** Begin Patch\n*** Update File: /a\n@@\n+only added\n*** End Patch", "no context"),
+    ("*** Begin Patch\n*** Update File: {W}/a\n@@\n+only added\n*** End Patch", "no context"),
+    ("*** Begin Patch\n*** Update File: /nonexistent/x\n@@\n-a\n+b\n*** End Patch", "Add File"),
+    ("*** Begin Patch\n*** Update File: {W}/a\n@@\n-zzz\n+b\n*** End Patch", "re-read"),
+    ("*** Begin Patch\n*** Update File: {W}/a\n@@ nope\n-a\n+b\n*** End Patch", "not found"),
     ("*** Begin Patch\n*** Add File: /a\nnot plus\n*** End Patch", "must start with"),
     ("random text", "outside a file section"),
 ])
 def test_malformed_patch_is_a_recoverable_error_block(text, needle):
-    [(tid, name, inp)] = ap.patch_to_tool_uses("c", text, None)
+    [(tid, name, inp)] = ap.patch_to_tool_uses("c", text.replace("{W}", W), None)
     assert (tid, name) == ("c__aperr", "Bash")
     assert needle in inp["command"] and inp["command"].endswith("exit 1")
 
@@ -94,6 +119,35 @@ def test_error_block_really_prints_to_stderr_and_fails():
     assert "$(touch /tmp/x)" in proc.stderr  # quoted, never executed
 
 
+@pytest.mark.parametrize("content, patch, expected", [
+    # Codex review: deleting a line removes the line, not just its text.
+    ("keep\nfoo\nkeep2\n", "@@\n keep\n-foo\n keep2", "keep\nkeep2\n"),
+    ("foo\nbar\n", "@@\n-foo", "bar\n"),
+    # A prefix of a longer line never matches; the whole line does.
+    ("foobar\nfoo\n", "@@\n-foo\n+bar", "foobar\nbar\n"),
+    ("xfoo\nfoo\nzfoo\n", "@@\n-foo\n+bar", "xfoo\nbar\nzfoo\n"),
+    # Last changed line of a larger hunk cannot prefix-match the next line.
+    ("a\nb\nbc\n", "@@\n a\n-b\n+B", "a\nB\nbc\n"),
+    # EOF without a trailing newline keeps having none.
+    ("a\nlast", "@@\n a\n-last\n+LAST", "a\nLAST"),
+    # CRLF files keep CRLF on new lines.
+    ("a\r\nb\r\n", "@@\n a\n-b\n+B\n+C", "a\r\nB\r\nC\r\n"),
+    # Duplicate lines: sections apply in order after the previous one / @@ anchor.
+    ("def f():\n    x\ndef g():\n    x\n", "@@ def g():\n-    x\n+    y", "def f():\n    x\ndef g():\n    y\n"),
+    ("x\ny\nx\ny\n", "@@\n-x\n+X\n@@\n-x\n+Z", "X\ny\nZ\ny\n"),
+    # Trailing-whitespace drift in context still locates; file text is kept.
+    ("a  \nb\n", "@@\n a\n-b\n+c", "a  \nc\n"),
+])
+def test_edits_apply_with_line_semantics(content, patch, expected):
+    import os
+    path = os.path.join(W, "t.txt")
+    with open(path, "w", newline="") as fh:
+        fh.write(content)
+    uses = ap.patch_to_tool_uses("c", f"*** Update File: {path}\n{patch}\n", None)
+    assert all(name == "Edit" for _, name, _ in uses), uses
+    assert apply_like_cli(content, [inp for _, _, inp in uses]) == expected
+
+
 def test_regenerated_patch_round_trips_to_the_same_blocks():
     uses = ap.patch_to_tool_uses("c", PATCH, None)
     blocks = [{"type": "tool_use", "id": i, "name": n, "input": inp} for i, n, inp in uses]
@@ -106,13 +160,13 @@ def test_fold_results_success_and_partial_failure():
     blocks = [{"type": "tool_use", "id": i, "name": n, "input": inp} for i, n, inp in uses]
     ok = {b["id"]: {"content": "done"} for b in blocks}
     assert ap.fold_results(blocks, ok) == (
-        "Success. Updated the following files:\nM /w/a.py\nA /w/new.txt\nD /w/old.txt")
+        f"Success. Updated the following files:\nM {W}/a.py\nA {W}/new.txt\nD {W}/old.txt")
     bad = dict(ok)
     bad[blocks[1]["id"]] = {"is_error": True,
                             "content": "<tool_use_error>String to replace not found</tool_use_error>"}
     text = ap.fold_results(blocks, bad)
-    assert "FAILED M /w/a.py: <tool_use_error>String to replace not found" in text
-    assert "ok A /w/new.txt" in text and "corrected patch" in text
+    assert f"FAILED M {W}/a.py: <tool_use_error>String to replace not found" in text
+    assert f"ok A {W}/new.txt" in text and "corrected patch" in text
 
 
 def test_find_cwd_takes_the_latest_reported_directory():
@@ -176,7 +230,7 @@ def test_history_function_mode_and_legacy_native_edit():
     legacy = [
         {"role": "user", "content": "x"},
         {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Edit",
-            "input": {"file_path": "/a", "old_string": "a\nb", "new_string": "a\nc"}}]},
+            "input": {"file_path": f"{W}/a", "old_string": "a\nb", "new_string": "a\nc"}}]},
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
                                       "content": "updated"}]},
     ]
@@ -184,9 +238,9 @@ def test_history_function_mode_and_legacy_native_edit():
     call, out = payload["input"][1], payload["input"][2]
     assert call["type"] == "function_call" and call["name"] == "apply_patch"
     assert json.loads(call["arguments"])["input"] == (
-        "*** Begin Patch\n*** Update File: /a\n@@\n a\n-b\n+c\n*** End Patch")
+        f"*** Begin Patch\n*** Update File: {W}/a\n@@\n a\n-b\n+c\n*** End Patch")
     assert out == {"type": "function_call_output", "call_id": "toolu_1",
-                   "output": "Success. Updated the following files:\nM /a"}
+                   "output": f"Success. Updated the following files:\nM {W}/a"}
     # Flag off: legacy history untouched.
     plain = anthropic_to_responses(_body(legacy), "gpt")
     assert plain["input"][1]["name"] == "Edit"

@@ -14,6 +14,12 @@ cards. On the next request those blocks are folded back into one apply_patch
 call and one output, regenerated deterministically from the block inputs so
 the replayed history is stateless and byte-stable.
 
+Update sections are located on the target file's real lines (read-only, the
+proxy shares the CLI's filesystem), in order and after any ``@@`` anchor, as
+Codex applies them. Each Edit's old_string is then the exact whole-line text,
+widened with neighbouring lines until it is unique, so a removed line takes
+its newline with it and a line never prefix-matches a longer one.
+
 The patch grammar follows OpenAI Codex's apply_patch tool (Apache-2.0).
 """
 
@@ -81,6 +87,7 @@ class PatchError(ValueError):
 @dataclass
 class Chunk:
     lines: list[tuple[str, str]] = field(default_factory=list)  # (" "|"-"|"+", text)
+    anchor: str | None = None  # text after "@@ ", a line to search after
 
 
 @dataclass
@@ -186,7 +193,7 @@ def parse_patch(text: str) -> list[FileOp]:
             continue
         # update
         if raw.startswith("@@"):
-            cur.chunks.append(Chunk())
+            cur.chunks.append(Chunk(anchor=raw[2:].strip() or None))
             continue
         if not cur.chunks:
             cur.chunks.append(Chunk())
@@ -225,6 +232,121 @@ def resolve_path(path: str, cwd: str | None) -> str:
     return os.path.normpath(os.path.join(cwd, path))
 
 
+MAX_PATCH_FILE_BYTES = 8 * 1024 * 1024
+
+
+def _read_lines(path: str, display: str) -> list[str]:
+    """Current file content as lines with their endings kept."""
+    try:
+        if os.path.getsize(path) > MAX_PATCH_FILE_BYTES:
+            raise PatchError(f"{display} is too large to patch; edit it another way.")
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except FileNotFoundError:
+        raise PatchError(f"{display} does not exist; use Add File to create it.") from None
+    except OSError:
+        raise PatchError(f"{display} cannot be read.") from None
+    try:
+        return data.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        raise PatchError(f"{display} is not UTF-8 text.") from None
+
+
+def _bare(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def _find(lines: list[str], want: list[str], start: int) -> int | None:
+    """First index >= start where ``want`` matches whole lines (exact, then rstrip)."""
+    for norm in (lambda t: t, lambda t: t.rstrip()):
+        target = [norm(t) for t in want]
+        for i in range(start, len(lines) - len(want) + 1):
+            if all(norm(_bare(lines[i + k])) == target[k] for k in range(len(want))):
+                return i
+    return None
+
+
+def _update_edits(op: FileOp, path: str) -> list[dict]:
+    """Locate each section on the file's real lines (Codex semantics: in order,
+    after the previous section and its @@ anchor) and build Edit inputs whose
+    old_string is exact, whole-line and unique in the file as it will be when
+    that Edit runs."""
+    lines = _read_lines(path, op.path)
+    eol = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    cursor = 0
+    edits: list[dict] = []
+    for chunk in op.chunks:
+        anchor_at: int | None = None
+        if chunk.anchor:
+            anchor_at = _find(lines, [chunk.anchor], cursor)
+            if anchor_at is None:
+                raise PatchError(f"@@ {chunk.anchor[:80]!r} was not found in {op.path}.")
+        body = list(chunk.lines)
+        old = [t for k, t in body if k != "+"]
+        if not old:
+            raise PatchError(
+                f"A section of {op.path} has no context or removed lines; "
+                "include unchanged lines around the insertion so it can be located."
+            )
+
+        def locate(want: list[str]) -> int | None:
+            if anchor_at is None:
+                return _find(lines, want, cursor)
+            # Search after the anchor; models often repeat it as first context.
+            found = _find(lines, want, anchor_at + 1)
+            return found if found is not None else _find(lines, want, anchor_at)
+
+        at = locate(old)
+        # A trailing blank context line the model added past EOF is harmless.
+        if at is None and body and body[-1] == (" ", ""):
+            body = body[:-1]
+            old = [t for k, t in body if k != "+"]
+            at = locate(old) if old else None
+        if at is None:
+            raise PatchError(
+                f"A section of {op.path} does not match the file's current lines; "
+                "re-read the file and resend that section."
+            )
+        end = at + len(old)
+        # Context lines keep the file's exact text; added lines use its line ending.
+        new_lines: list[str] = []
+        src = at
+        for kind, text in body:
+            if kind == " ":
+                new_lines.append(lines[src])
+                src += 1
+            elif kind == "-":
+                src += 1
+            else:
+                new_lines.append(text + eol)
+        # Every line but the last needs an ending; the last keeps the file's
+        # (none at an EOF without a trailing newline).
+        for i in range(len(new_lines) - 1):
+            if _bare(new_lines[i]) == new_lines[i]:
+                new_lines[i] += eol
+        if new_lines:
+            tail_eol = lines[end - 1][len(_bare(lines[end - 1])):]
+            new_lines[-1] = _bare(new_lines[-1]) + tail_eol
+        lo, hi = at, end
+        text = "".join(lines)
+        while True:
+            old_s = "".join(lines[lo:hi])
+            new_s = "".join(lines[lo:at]) + "".join(new_lines) + "".join(lines[end:hi])
+            if text.count(old_s) == 1:
+                break
+            if lo > 0:
+                lo -= 1
+            elif hi < len(lines):
+                hi += 1
+            else:
+                raise PatchError(f"A section of {op.path} cannot be located uniquely.")
+        edits.append({"file_path": path, "old_string": old_s, "new_string": new_s})
+        # Later sections see the file as this Edit leaves it.
+        lines = lines[:at] + "".join(new_lines).splitlines(keepends=True) + lines[end:]
+        cursor = at + len(new_lines)
+    return edits
+
+
 def _ops_to_inputs(ops: list[FileOp], cwd: str | None) -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = []
     for op in ops:
@@ -237,15 +359,7 @@ def _ops_to_inputs(ops: list[FileOp], cwd: str | None) -> list[tuple[str, dict]]
                 "description": f"Delete {os.path.basename(path)}",
             }))
         else:
-            for chunk in op.chunks:
-                old = "\n".join(t for k, t in chunk.lines if k != "+")
-                new = "\n".join(t for k, t in chunk.lines if k != "-")
-                if not old.strip():
-                    raise PatchError(
-                        f"A section of {op.path} has no context or removed lines; "
-                        "include unchanged lines around the insertion so it can be located."
-                    )
-                out.append(("Edit", {"file_path": path, "old_string": old, "new_string": new}))
+            out += [("Edit", edit) for edit in _update_edits(op, path)]
     return out
 
 
@@ -295,7 +409,11 @@ def _lines(s: str) -> list[str]:
 
 
 def _edit_chunk(old: str, new: str) -> list[str]:
-    a, b = (old or "").split("\n"), (new or "").split("\n")
+    old, new = old or "", new or ""
+    if old.endswith("\n") and (new.endswith("\n") or not new):
+        old, new = old[:-1], new[:-1] if new else new
+    a = [t.rstrip("\r") for t in old.split("\n")]
+    b = [t.rstrip("\r") for t in new.split("\n")] if new else []
     pre = 0
     while pre < min(len(a), len(b)) and a[pre] == b[pre]:
         pre += 1
