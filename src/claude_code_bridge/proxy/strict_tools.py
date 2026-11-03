@@ -158,6 +158,11 @@ def _convert(schema: Any, depth: int, counter: list[int]) -> dict:
         if "type" not in out and "anyOf" not in out:
             out["type"] = "object"
 
+    # Strict mode rejects any node without a declared type ("schema must
+    # specify a type"), e.g. an "any value" field like Workflow's ``args``.
+    if "type" not in out and "anyOf" not in out:
+        raise _NotStrict("untyped node")
+
     if "items" in out:
         out["items"] = _convert(out["items"], depth + 1, counter)
     return out

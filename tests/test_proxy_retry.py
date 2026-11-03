@@ -1099,3 +1099,19 @@ class TestBrokerCached401:
         assert b"authentication_error" in joined
         # single upstream call — no retry for non-broker adapters
         assert adapter._responses_client._i == 1
+
+
+def test_stream_error_event_request_rejection_is_permanent():
+    """TASK-1966: an SSE error event for a rejected tool schema is not a network blip."""
+    import httpx
+    import openai
+
+    req = httpx.Request("POST", "https://example.invalid/responses")
+    rejected = openai.APIError(
+        "Invalid schema for function 'Workflow': schema must specify a type",
+        req, body={"type": "invalid_request_error", "code": "invalid_function_parameters"},
+    )
+    assert retry_mod.classify_stream_exception(rejected) == retry_mod.FailureBucket.C_PERMANENT
+    # A status-less APIError without a rejection body keeps the transient bucket.
+    blip = openai.APIError("An error occurred during streaming", req, body=None)
+    assert retry_mod.classify_stream_exception(blip) == retry_mod.FailureBucket.A_TRANSIENT_NETWORK

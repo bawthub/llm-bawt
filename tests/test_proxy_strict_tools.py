@@ -319,7 +319,7 @@ def test_scalar_unions_still_convert():
     {"type": ["string", "null"]},
     {"anyOf": [{"type": "string"}, {"type": "null"}]},
     {"oneOf": [{"type": "string"}, {"type": "null"}]},
-    {"enum": ["a", None]},
+    {"type": ["string", "null"], "enum": ["a", None]},
 ])
 def test_original_nullable_optional_keeps_explicit_null(nullable):
     schema = {"type": "object", "properties": {"value": nullable, "other": {"type": "string"}}}
@@ -353,3 +353,43 @@ def test_explicit_clear_null_reaches_cli_through_translator():
             tool_schemas=[{"name": "Set", "input_schema": schema}], request_context=ctx)]
 
     assert _cli_input(asyncio.run(run())) == {"value": None}
+
+
+# TASK-1966 live regression: Workflow's ``args`` is an "any value" field with no
+# type; strict mode rejected the whole tool list ("schema must specify a type").
+WORKFLOW = {"type": "object", "properties": {
+    "script": {"type": "string"},
+    "args": {"description": "Optional input value exposed to the script verbatim."},
+}, "required": [], "additionalProperties": False}
+
+
+def _every_node_typed(node):
+    if isinstance(node, dict):
+        if "properties" in node or "items" in node or "anyOf" in node or node:
+            assert "type" in node or "anyOf" in node, node
+        for key in ("anyOf",):
+            for b in node.get(key) or []:
+                _every_node_typed(b)
+        for sub in (node.get("properties") or {}).values():
+            _every_node_typed(sub)
+        if "items" in node:
+            _every_node_typed(node["items"])
+
+
+@pytest.mark.parametrize("schema", [
+    WORKFLOW,
+    {"type": "object", "properties": {"x": {"type": "array", "items": {}}}},
+    {"type": "object", "properties": {"x": {"enum": ["a", "b"]}}},
+    {"type": "object", "properties": {"x": {"anyOf": [{"description": "any"}, {"type": "string"}]}}},
+])
+def test_untyped_nodes_stay_non_strict(schema):
+    assert to_strict_parameters(schema) is None
+    body = _body(("Workflow", schema))
+    assert "strict" not in _tools(body, strict_tools=True)["Workflow"]
+
+
+@pytest.mark.parametrize("schema", [READ, EDIT])
+def test_every_strict_node_declares_a_type(schema):
+    converted = to_strict_parameters(schema)
+    assert converted is not None
+    _every_node_typed(converted)

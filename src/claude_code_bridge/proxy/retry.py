@@ -392,6 +392,21 @@ def compute_backoff(
 
 # ── Bucket classification — exceptions from the initial request ────────────
 
+_REQUEST_REJECTION_TYPES = frozenset({"invalid_request_error"})
+_REQUEST_REJECTION_CODES = frozenset({
+    "invalid_request", "invalid_request_error", "invalid_function_parameters",
+    "context_length_exceeded",
+})
+
+
+def _is_request_rejection(body: Any) -> bool:
+    if not isinstance(body, dict):
+        return False
+    err_type = str(body.get("type") or "").strip().lower()
+    code = str(body.get("code") or "").strip().lower()
+    return err_type in _REQUEST_REJECTION_TYPES or code in _REQUEST_REJECTION_CODES
+
+
 def classify_initial_exception(exc: BaseException) -> FailureBucket:
     """Bucket a failure raised BEFORE any Anthropic bytes were yielded downstream.
 
@@ -424,6 +439,11 @@ def classify_initial_exception(exc: BaseException) -> FailureBucket:
     # C: permanent 4xx from upstream. Auth/permission/not-found/bad-request
     # (including context-window overflow) cannot be fixed by retrying.
     if status in (400, 401, 403, 404):
+        return FailureBucket.C_PERMANENT
+    # An SSE ``error`` event raises a status-less openai.APIError whose body
+    # carries the upstream error type (e.g. an invalid tool schema). A request
+    # rejection is permanent, not a network blip (TASK-1966).
+    if status is None and module == "openai" and _is_request_rejection(getattr(exc, "body", None)):
         return FailureBucket.C_PERMANENT
 
     # D: rate limit. Distinct bucket so the caller can consult retry-after.
