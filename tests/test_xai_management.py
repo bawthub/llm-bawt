@@ -97,21 +97,30 @@ def test_validation_never_uses_organization_or_unsafe_id_as_team(payload):
         team_id_from_validation(payload)
 
 
-@pytest.mark.parametrize("cents,dollars", [
-    ("-1000", "10"), ("-12345", "123.45"), ("0", "0"), ("-0", "0"),
-    ("1", "-0.01"), ("1000", "-10"),
-    ("-9223372036854775808", "92233720368547758.08"),
-    ("9223372036854775807", "-92233720368547758.07"),
+def preview(credits, used):
+    return {"coreInvoice": {"prepaidCredits": {"val": credits}, "prepaidCreditsUsed": {"val": used},
+                            "totalWithCorr": {"val": "999"}}, "lines": [{"amount": "unneeded"}]}
+
+
+@pytest.mark.parametrize("credits,used,dollars", [
+    ("-4151", "-335", "38.16"),  # live shape: console $38.16 while ledger total said $91.56
+    ("-1000", "0", "10"), ("0", "0", "0"), ("-500", "-500", "0"), ("100", "0", "-1"),
 ])
-def test_signed_int64_usd_cents_follow_documented_prepaid_ledger(cents, dollars):
-    assert prepaid_usd({"total": {"val": cents}, "changes": [{"amount": {"val": "unneeded"}}]}) == Decimal(dollars)
+def test_remaining_is_cycle_credit_minus_cycle_use(credits, used, dollars):
+    assert prepaid_usd(preview(credits, used)) == Decimal(dollars)
+
+
+def test_posted_ledger_total_is_not_accepted_as_balance():
+    with pytest.raises(ValueError):
+        prepaid_usd({"total": {"val": "-9156"}})
 
 
 @pytest.mark.parametrize("payload", [
-    None, [], {}, {"total": None}, {"total": {}}, {"total": {"val": None}},
-    *({"total": {"val": value}} for value in [True, 0, 1.5, "", " 0", "1.5", "NaN", "Infinity", "1e3", "9223372036854775808", "-9223372036854775809"]),
+    None, [], {}, {"coreInvoice": None}, {"coreInvoice": {"prepaidCredits": {"val": "-1"}}},
+    *(preview(value, "0") for value in [True, 0, 1.5, "", " 0", "1.5", "NaN", "1e3", "9223372036854775808"]),
+    *(preview("-1", value) for value in [None, "", "x"]),
 ])
-def test_missing_or_invalid_total_is_not_a_fabricated_zero(payload):
+def test_missing_or_invalid_credit_is_not_a_fabricated_zero(payload):
     with pytest.raises(ValueError):
         prepaid_usd(payload)
 
@@ -126,7 +135,7 @@ def mock_connect(monkeypatch, *, validation=VALIDATION, validation_status=200, b
         if url == VALIDATION_URL:
             return httpx.Response(validation_status, json=validation, request=httpx.Request("GET", url))
         assert url == balance_url(TEAM)
-        return httpx.Response(balance_status, json=balance if balance is not None else {"total": {"val": "-1000"}},
+        return httpx.Response(balance_status, json=balance if balance is not None else preview("-1000", "0"),
                               request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx, "get", get)
@@ -203,7 +212,7 @@ def mock_report(monkeypatch, *, payload=None, status=200, error=None):
         assert url == balance_url(TEAM) and headers["Authorization"] == f"Bearer {KEY}"
         if error:
             raise error
-        return httpx.Response(status, json=payload if payload is not None else {"total": {"val": "-12345"}},
+        return httpx.Response(status, json=payload if payload is not None else preview("-12345", "0"),
                               request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", get)
@@ -214,7 +223,7 @@ def mock_report(monkeypatch, *, payload=None, status=200, error=None):
 @pytest.mark.parametrize("cents,remaining", [("-12345", 123.45), ("0", 0), ("150", -1.5)])
 async def test_native_balance_including_zero_is_authoritative_without_inference_key(offline, monkeypatch, cents, remaining):
     offline.records[CONNECTION_ID] = record()
-    mock_report(monkeypatch, payload={"total": {"val": cents}, "changes": [{"private": KEY}]})
+    mock_report(monkeypatch, payload={**preview(cents, "0"), "lines": [{"private": KEY}]})
     snap = await XaiUsageAdapter().fetch()
     assert snap.available and snap.status == "ok" and snap.balance_supported and not snap.manual_balance_supported
     assert snap.balance.remaining_usd == remaining
@@ -372,7 +381,7 @@ async def test_same_source_rate_limit_shows_explicitly_cached_last_good_not_live
 
 def test_usage_http_reports_native_zero_and_refuses_manual_writes(offline, monkeypatch):
     offline.records[CONNECTION_ID] = record()
-    mock_report(monkeypatch, payload={"total": {"val": "0"}})
+    mock_report(monkeypatch, payload=preview("0", "0"))
     monkeypatch.setattr(usage_routes, "set_balance", lambda *_: pytest.fail("Native credit must not accept an anchor"))
     monkeypatch.setattr(usage_routes, "clear_balance", lambda *_: pytest.fail("Native credit must not clear an anchor"))
     app = FastAPI()
@@ -393,7 +402,7 @@ async def test_switch_during_inflight_read_does_not_publish_old_credit(offline, 
 
     async def switching(_self, url, *, headers):
         offline.records[CONNECTION_ID] = record(meta={"team_id": "new-team"})
-        return httpx.Response(200, json={"total": {"val": "-12345"}}, request=httpx.Request("GET", url))
+        return httpx.Response(200, json=preview("-12345", "0"), request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", switching)
     snap = await usage.get_usage("xai")

@@ -1,7 +1,7 @@
 """Read-only xAI management credential; deliberately NOT an inference adapter.
 
 Public contract: docs.x.ai/developers/rest-api-reference/management/{auth,billing}.
-Only validation and prepaid-balance GETs are used. No API-key/billing mutations,
+Only validation and invoice-preview GETs are used. No API-key/billing mutations,
 inference access paths or token-broker method are exposed by this adapter.
 """
 
@@ -43,27 +43,38 @@ def team_id_from_validation(payload: Any) -> str:
 
 
 def balance_url(team_id: str) -> str:
+    """Current-cycle postpaid invoice preview; carries the live prepaid position.
+
+    The prepaid/balance ledger total omits spend until xAI posts each month's
+    SPEND entry (around the 11th of the next month), so it overstates credit.
+    """
     if not isinstance(team_id, str) or not _TEAM_ID.fullmatch(team_id):
         raise ValueError("Invalid xAI team ID")
-    return f"{MANAGEMENT_ORIGIN}/v1/billing/teams/{team_id}/prepaid/balance"
+    return f"{MANAGEMENT_ORIGIN}/v1/billing/teams/{team_id}/postpaid/invoice/preview"
+
+
+def _cents(container: Any, field: str) -> int:
+    node = container.get(field) if isinstance(container, dict) else None
+    value = node.get("val") if isinstance(node, dict) else None
+    if not isinstance(value, str) or not _INT64.fullmatch(value):
+        raise ValueError("Invalid xAI prepaid credit field")
+    cents = int(value)
+    if not -(2**63) <= cents < 2**63:
+        raise ValueError("Invalid xAI prepaid credit field")
+    return cents
 
 
 def prepaid_usd(payload: Any) -> Decimal:
-    """Available prepaid credit from the documented signed int64 USD cents.
+    """Remaining prepaid credit, matching the xAI console balance.
 
-    xAI's prepaid ledger charges SPEND positively, PURCHASE/REFUND negatively;
-    the official successful $10 purchase example has total.val == '-1000'.
-    Negate the ledger total, not abs(): a positive total remains negative credit.
-    No local spend/deposit/transaction reconstruction is applied.
+    From the invoice preview's coreInvoice: prepaidCredits is the credit
+    available to this cycle and prepaidCreditsUsed is what this cycle has
+    consumed, both as negative-signed int64 USD cents. Remaining is
+    -(prepaidCredits) - -(prepaidCreditsUsed). Missing fields raise; no
+    local spend reconstruction or fabricated zero.
     """
-    total = payload.get("total") if isinstance(payload, dict) else None
-    value = total.get("val") if isinstance(total, dict) else None
-    if not isinstance(value, str) or not _INT64.fullmatch(value):
-        raise ValueError("Invalid xAI prepaid total")
-    cents = int(value)
-    if not -(2**63) <= cents < 2**63:
-        raise ValueError("Invalid xAI prepaid total")
-    return Decimal(-cents) / 100
+    core = payload.get("coreInvoice") if isinstance(payload, dict) else None
+    return Decimal(-_cents(core, "prepaidCredits") + _cents(core, "prepaidCreditsUsed")) / 100
 
 
 def reporting_headers(key: str) -> dict[str, str]:
