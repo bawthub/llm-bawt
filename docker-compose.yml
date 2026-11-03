@@ -409,6 +409,9 @@ services:
       # HTTPS). Wire it with `tenant.sh bridge-git-setup`. BRIDGE_SSH_DIR remains
       # available for any non-GitHub SSH remotes a bridge still needs.
       - ${BRIDGE_SSH_DIR:-${HOME}/.ssh}:/home/bridge/.ssh:ro
+      # Same client ssh_config as claude-code-bridge, so host aliases and host-key
+      # policy do not depend on a copied known_hosts (TASK-1985).
+      - ${HOME}/.config/claude-code-bridge/ssh_config:/etc/ssh/ssh_config:ro
       # Shared agent scripts (bw-secret etc.) — live, no rebuild needed
       - ${HOME}/dev/agent-skills/scripts:/opt/agent-skills/bin:ro
       # TASK-1604: the app's exported bridge tokens, read-only.
