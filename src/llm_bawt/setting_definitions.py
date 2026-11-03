@@ -439,16 +439,6 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
         help="Agent bots only: max seconds for a single agent turn before timeout.",
         legacy_keys=("timeout_seconds",),
     ),
-    "session_model": SettingDefinition(
-        key="session_model",
-        type="str",
-        default=None,
-        applies_to=("agent",),
-        storage=STORAGE_RUNTIME_SETTING,
-        label="Session model (raw SDK id)",
-        help="Agent bots only: the raw backend/SDK model id the session runs.",
-        legacy_keys=("session_model",),
-    ),
     # --- identity: keep in the blob/column, but typed so the UI knows it ------
     "session_key": SettingDefinition(
         key="session_key",

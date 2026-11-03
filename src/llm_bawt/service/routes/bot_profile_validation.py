@@ -109,12 +109,11 @@ def _normalize_agent_backend_config_model(
     agent_backend: str,
     payload: dict[str, object],
 ) -> None:
-    """Mirror a legacy ``agent_backend_config.model`` key on profile save.
+    """Drop a legacy ``agent_backend_config.model`` key on profile save.
 
-    ``default_model`` is canonical. Historical UI/config payloads may still
-    carry ``model``; preserve compatibility by mirroring a non-empty value to
-    ``session_model`` rather than rejecting the whole profile. Empty/non-string
-    values are dropped. Agent bridges no longer read or write this metadata.
+    ``default_model`` is canonical; historical UI/config payloads may still
+    carry ``model``. It is ignored (with a log line) rather than rejecting the
+    whole profile. Agent bridges no longer read this metadata.
     """
     if agent_backend not in _CATALOG_MODEL_BACKENDS:
         return
@@ -122,17 +121,13 @@ def _normalize_agent_backend_config_model(
     if not isinstance(config, dict) or "model" not in config:
         return
     config = dict(config)
-    legacy = config.get("model")
+    legacy = config.pop("model")
     if isinstance(legacy, str) and legacy.strip():
-        config["session_model"] = legacy.strip()
         logger.warning(
-            "bot %s: mirrored legacy agent_backend_config.model=%r to "
-            "session_model for profile compatibility — the bot's "
+            "bot %s: ignored legacy agent_backend_config.model=%r — the bot's "
             "model is configured via default_model",
             payload.get("slug"), legacy,
         )
-    else:
-        config.pop("model")
     payload["agent_backend_config"] = config
 
 

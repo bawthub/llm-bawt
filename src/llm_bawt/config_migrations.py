@@ -27,7 +27,7 @@ from .utils.config import Config
 logger = logging.getLogger(__name__)
 
 # Keys promoted out of agent_backend_config into typed runtime_settings.
-PROMOTED_KEYS = ("seed_summary_on_new_session", "timeout_seconds", "session_model")
+PROMOTED_KEYS = ("seed_summary_on_new_session", "timeout_seconds")
 
 # The unified session-memory-continuity key (TASK-492). For agent bots it
 # reflects the current seed flag so behavior is preserved on cutover.

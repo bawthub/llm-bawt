@@ -99,8 +99,8 @@ class ServiceLLMBawt(BaseLLMBawt):
             # Canonical model injection: the bot's default_model is THE model
             # reference for agent bots.  Resolve it through the catalog and
             # inject the SDK model_id into the bridge config — this overrides
-            # any legacy ``agent_backend_config.model`` (which is migrated to
-            # ``session_model`` and no longer user-facing).
+            # any legacy ``agent_backend_config.model`` (dropped on profile
+            # save and no longer user-facing).
             from ..bot_types import agent_backend_for_model_def
             from ..model_catalog import resolve_model_config
             default_alias = self._agent_model_ref()

@@ -464,17 +464,15 @@ def _patch_catalog(monkeypatch, catalog):
     monkeypatch.setattr(validation, "get_service", lambda: service)
 
 
-def test_normalize_mirrors_model_to_session_model():
+def test_normalize_drops_legacy_model():
     payload = {
         "slug": "loopy",
         "agent_backend_config": {"model": "claude-sonnet-4", "session_key": "k"},
     }
     validation._normalize_agent_backend_config_model("claude-code", payload)
     config = payload["agent_backend_config"]
-    # "model" is kept (not popped) so un-restarted bridges still see it for
-    # session resume-vs-reset; new bridge code drops it on first persist.
-    assert config["model"] == "claude-sonnet-4"
-    assert config["session_model"] == "claude-sonnet-4"
+    assert "model" not in config
+    assert "session_model" not in config
     assert config["session_key"] == "k"
 
 
