@@ -10,6 +10,9 @@ x-agent-bridge-image: &agent-bridge-image
   build:
     context: .
     dockerfile: Dockerfile.agent-bridge
+    args:
+      BRIDGE_UID: ${BRIDGE_UID:-1000}
+      BRIDGE_GID: ${BRIDGE_GID:-1000}
   image: llm-bawt-agent-bridge
 
 services:
@@ -71,7 +74,7 @@ services:
       # bridge-tokens volume, owned by the agent-bridge image's user (uid 1000,
       # `bridge` in Dockerfile.agent-bridge); the bridges mount it read-only and
       # read each file on every call (agent_bridge/bridge_token.py).
-      - BRIDGE_TOKEN_EXPORT_UID=${BRIDGE_TOKEN_EXPORT_UID:-1000}
+      - BRIDGE_TOKEN_EXPORT_UID=${BRIDGE_TOKEN_EXPORT_UID:-${BRIDGE_UID:-1000}}
       - BRIDGE_BROKER_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/broker
       - BRIDGE_GIT_CREDENTIAL_TOKEN_EXPORT_FILE=/run/llm-bawt-bridge-tokens/git-credential
       # The Crawl4AI bearer, derived the same way (crawl4ai_token_export.py):

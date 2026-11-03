@@ -136,7 +136,13 @@ RUN uv pip install -e . --no-deps
 # skips project dependencies, so bridge-only imports must be verified here.
 RUN .venv/bin/python -c "import tomlkit, yaml"
 
-RUN useradd -m -s /bin/bash bridge && chown -R bridge:bridge /app
+# Host deployments can match the bridge user to the account owning the
+# bind-mounted checkouts (TASK-1985); default stays 1000.
+ARG BRIDGE_UID=1000
+ARG BRIDGE_GID=1000
+RUN groupadd -g "${BRIDGE_GID}" bridge \
+    && useradd -m -s /bin/bash -u "${BRIDGE_UID}" -g "${BRIDGE_GID}" bridge \
+    && chown -R bridge:bridge /app
 # Pre-create the bridge-owned dirs the compose files mount over, so both
 # mount kinds inherit correct ownership:
 #   ~/.codex  - bind mounts inherit the parent dir's ownership; without this the
