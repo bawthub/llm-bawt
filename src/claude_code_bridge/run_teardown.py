@@ -62,9 +62,9 @@ logger = logging.getLogger(__name__)
 
 # claude-agent-sdk versions whose private layout this module was verified
 # against (``client._transport._process``, ``close()`` escalation). The
-# claude-code-bridge image and uv.lock both pin 0.2.160;
+# claude-code-bridge image and uv.lock both pin 0.2.176 (0.2.176 transport/client files are byte-identical to 0.2.160, TASK-1975);
 # tests/test_bridge_dependency_lock.py keeps them equal (TASK-1269).
-VERIFIED_SDK_VERSIONS = frozenset({"0.2.160"})
+VERIFIED_SDK_VERSIONS = frozenset({"0.2.160", "0.2.176"})
 
 DISCONNECT_OK = "ok"
 DISCONNECT_TIMEOUT = "timeout"

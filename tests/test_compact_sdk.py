@@ -143,6 +143,9 @@ async def compact(root, base_url, model, command, *, policy=True, hook_enabled=N
 
 
 def wire(text):
+    # Real compaction replies wrap the summary in tags; CLI 2.1.300+ re-asks
+    # once when they are missing (TASK-1975), which would double-count inputs.
+    text = f"<analysis>fixture</analysis>\n<summary>{text}</summary>"
     events = [
         ("message_start", {"type": "message_start", "message": {
             "id": "msg_fixture", "type": "message", "role": "assistant",
@@ -221,9 +224,12 @@ def test_installed_cli_receives_policy_and_persists_complete_summary(
             expected_instructions = sent.removeprefix("/compact").strip()
             assert (result["hooks"][0]["custom_instructions"] or "") == expected_instructions
             inputs = json.dumps(requests, ensure_ascii=False)
+            # Once per provider attempt: CLI 2.1.300+ retries a refused
+            # compaction request itself (TASK-1975); the prompt is still read once.
             assert inputs.count(COMPACT_SUMMARY_DEFAULT) == (
-                1 if command.strip() == "/compact" and (policy or hook_enabled) else 0
+                len(requests) if command.strip() == "/compact" and (policy or hook_enabled) else 0
             )
+            assert len(requests) >= 1 and (failure or len(requests) == 1)
             assert prompt_state["reads"] == (
                 1 if command.strip() == "/compact" and (policy or hook_enabled) else 0
             )
