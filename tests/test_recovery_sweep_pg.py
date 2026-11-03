@@ -631,3 +631,86 @@ def test_a_stale_claim_is_not_revoked_for_a_reservation_another_owner_holds(deli
             stale_before=datetime.now(timezone.utc), reason="recovery: test") is False
     assert _claim(approvals, request_id) == before
     assert TurnLogStore(store.config).get_turn(turn_id).status == "reserved"
+
+
+# --- TASK-1846: a turn whose run outlived the restart ---------------------
+
+
+class _ScriptedProbe:
+    """The turn's own bridge answering each probe in turn; the last answer repeats."""
+
+    def __init__(self, *states: str):
+        self.states, self.calls = states, []
+
+    async def probe(self, turn):
+        state = self.states[min(len(self.calls), len(self.states) - 1)]
+        self.calls.append(turn["turn_id"])
+        return ProbeResult(state, backend_matched=True, backend="claude-code", boot_id="boot-1")
+
+
+def _parked_behind(store, sender, target, turn_id):
+    """The Oct 31 shape: a delivery that spent its steer generations and now
+    waits (``steer_rejected``) for the target's turn to end."""
+    delivery, _ = _enqueue(store, sender, target, "waits behind the orphan")
+    with store.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET delivery_mode='steer_rejected', target_turn_id=:turn,"
+                             " available_at = now() - interval '1 minute' WHERE id=:id"),
+                     {"id": delivery.id, "turn": turn_id})
+    return delivery
+
+
+def test_a_turn_whose_run_ends_after_restart_settles_on_follow_up_and_its_delivery_runs(delivery_store):  # noqa: F811
+    """Startup sees the run still live and leaves the turn; once the bridge
+    stops reporting it, the follow-up settles the turn and the parked delivery
+    is claimed as an idle fallback turn."""
+    store, sender, target = delivery_store
+    turn_id = _old_turn(store, target, backend="claude-code")
+    delivery = _parked_behind(store, sender, target, turn_id)
+    probe = _ScriptedProbe("running", "running", "not_found")
+    check = StartupRecoveryCheck(RecoverySweep(store.engine, probe=probe))
+
+    assert check.follow_up_due(asyncio.run(check.run_at_startup()))
+    assert store.claim_next(target, claim_owner="fallback", steer_capable=False) is None
+    assert check.follow_up_due(asyncio.run(check.follow_up()))  # still running
+    assert TurnLogStore(store.config).get_turn(turn_id).ended_at is None
+
+    settled = asyncio.run(check.follow_up())
+    assert _ids(_step(settled, "orphan_turns")["done"]) == [turn_id]
+    assert not check.follow_up_due(settled)
+    assert probe.calls == [turn_id] * 3
+    row = TurnLogStore(store.config).get_turn(turn_id)
+    assert (row.status, row.end_reason) == ("aborted", "aborted")
+    recovery = json.loads(row.request_json)["recovery"]
+    assert (recovery["cause"], recovery["actor"]) == ("orphaned_by_restart", "recovery_follow_up")
+
+    claimed = store.claim_next(target, claim_owner="fallback", steer_capable=False)
+    assert claimed is not None and claimed.id == delivery.id
+    assert (claimed.status, claimed.delivery_mode) == ("DISPATCHING", "turn")
+
+
+def test_a_live_long_turn_is_never_settled_by_the_follow_up(delivery_store):  # noqa: F811
+    store, sender, target = delivery_store
+    turn_id = _old_turn(store, target, backend="claude-code", age_seconds=5400)
+    _parked_behind(store, sender, target, turn_id)
+    probe = _ScriptedProbe("running")
+    check = StartupRecoveryCheck(RecoverySweep(store.engine, probe=probe))
+
+    assert check.follow_up_due(asyncio.run(check.run_at_startup()))
+    for _ in range(5):
+        result = asyncio.run(check.follow_up())
+        assert _step(result, "orphan_turns")["done"] == [] and check.follow_up_due(result)
+    assert TurnLogStore(store.config).get_turn(turn_id).ended_at is None
+    assert store.claim_next(target, claim_owner="fallback", steer_capable=False) is None
+
+
+@pytest.mark.parametrize("left, due", [
+    ({"probe": {"state": "running"}}, True),
+    ({"probe": {"state": "timeout"}}, True),
+    ({"probe": {"state": "unaddressed"}}, False),  # no recorded backend: never settled here
+    ({}, False),  # no bridge request id: never probed
+])
+def test_only_turns_a_later_probe_can_settle_are_followed_up(left, due):
+    result = {"busy": False, "steps": [{"step": "orphan_turns", "ambiguous": [{"turn_id": "t", **left}]}]}
+    assert StartupRecoveryCheck.follow_up_due(result) is due
+    assert StartupRecoveryCheck.follow_up_due({"busy": True, "steps": []}) is True
+    assert StartupRecoveryCheck.follow_up_due({"busy": False, "steps": []}) is False

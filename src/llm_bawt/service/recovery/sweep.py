@@ -3,7 +3,9 @@
 One procedure, run once per process: when this process takes dispatcher
 leadership at startup, after the dispatcher's first ``recover_expired``
 (``StartupRecoveryCheck``, the dispatcher's ``StartupCheck``). It never runs
-on a timer. ``RecoverySweep.run`` is also callable directly; no HTTP route
+on a timer. The one exception is the TASK-1846 follow-up: while that pass left
+a pre-startup turn whose run it could not prove gone, the dispatcher re-runs
+only ``orphan_turns`` (``StartupRecoveryCheck.follow_up``) at a fixed interval. ``RecoverySweep.run`` is also callable directly; no HTTP route
 calls it yet. A mutating pass holds this process's ``asyncio.Lock`` and a
 PostgreSQL advisory transaction lock for its whole run; a pass that finds
 either busy skips and reports ``busy``. A dry run takes no lock and changes
@@ -142,6 +144,16 @@ class RecoverySweep:
             conn.close()
 
 
+# Probe states a later pass can change: the run was live, or its bridge did
+# not answer. Turns without a bridge request id or recorded backend never are.
+_NOT_FOLLOWED = frozenset({"unaddressed"})
+
+
+def _awaits_its_run(entry: dict[str, Any]) -> bool:
+    probe = entry.get("probe")
+    return isinstance(probe, dict) and probe.get("state") not in _NOT_FOLLOWED
+
+
 class StartupRecoveryCheck:
     """The dispatcher's ``StartupCheck``: every default step, once, at startup.
 
@@ -150,6 +162,7 @@ class StartupRecoveryCheck:
     boot shows what the check found and changed."""
 
     ACTOR = "recovery_startup"
+    FOLLOW_UP_ACTOR = "recovery_follow_up"
 
     def __init__(self, sweep: RecoverySweep):
         self.sweep = sweep
@@ -168,4 +181,30 @@ class StartupRecoveryCheck:
                 for entry in step["ambiguous"]:
                     logger.info("startup recovery left open turn %s (%s): %s",
                                 entry["turn_id"], entry["bot_id"], entry["why"])
+        return result
+
+    @staticmethod
+    def follow_up_due(result: dict[str, Any]) -> bool:
+        """Whether a pass left a turn a later probe can settle (TASK-1846).
+
+        The candidate set is fixed by this process's start, so it only shrinks.
+        A busy or failed ``orphan_turns`` pass decided nothing: it is due again.
+        """
+        if result.get("busy"):
+            return True
+        for step in result.get("steps", ()):
+            if step.get("step") == "orphan_turns":
+                return bool(step.get("error")) or any(_awaits_its_run(e) for e in step.get("ambiguous", ()))
+        return False
+
+    async def follow_up(self) -> dict[str, Any]:
+        """Re-probe what startup left: ``orphan_turns`` only, same fences and cutoff.
+
+        A run that was live at restart answers ``not_found`` once it ends; the
+        turn then settles exactly as at startup. A live run is left again.
+        """
+        result = await self.sweep.run(dry_run=False, steps=["orphan_turns"], actor=self.FOLLOW_UP_ACTOR)
+        for step in result.get("steps", ()):
+            for entry in step.get("done", ()):
+                logger.info("recovery follow-up settled turn %s (%s)", entry.get("turn_id"), entry.get("bot_id"))
         return result

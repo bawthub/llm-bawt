@@ -2,7 +2,8 @@
 
 The dispatcher holds the singleton leadership lock, so it is the one place
 that can run recovery exactly once per cluster. Recovery runs once per
-leadership term, at its start, never on a timer:
+leadership term, at its start, never on a periodic timer (the bounded
+follow-up below re-probes only what that pass left):
 
 - ``run_once`` starts the check at the first ``run()`` entry, after the
   initial ``recover_expired`` (recovery steps defer claimed deliveries to it,
@@ -19,6 +20,12 @@ leadership term, at its start, never on a timer:
   it runs on. Only ``stop()`` (shutdown) cancels it.
 - When the check ends, ``on_done`` runs (the dispatcher wakes, so deliveries
   to a bot whose stuck turn was just settled drain without waiting a sweep).
+- TASK-1846 follow-up: a check that left work it can only finish once a bridge
+  run ends (``follow_up_due``) is followed by its narrow ``follow_up`` pass
+  every ``FOLLOW_UP_SECONDS`` while this term leads, until nothing is due or
+  ``FOLLOW_UP_LIMIT_SECONDS`` pass. Without it, a turn whose run was still live
+  at restart stayed open after the run ended, and IDLE_ONLY deliveries to its
+  bot waited behind it forever. Each pass also runs ``on_done``.
 """
 
 from __future__ import annotations
@@ -35,9 +42,23 @@ class StartupCheck(Protocol):
     async def run_at_startup(self) -> Any: ...
 
 
+class FollowUpCheck(StartupCheck, Protocol):
+    """Optional (TASK-1846): a check whose result can leave work for later."""
+
+    def follow_up_due(self, result: Any) -> bool: ...
+
+    async def follow_up(self) -> Any: ...
+
+
 class StartupRecoveryRunner:
     # How long dispatch waits for the startup check before it starts anyway.
     WAIT_SECONDS = 30.0
+    # TASK-1846: cadence and lifetime of the follow-up. A run left live at
+    # restart is settled within about one interval (plus its probe) of ending.
+    # Agent turns, 14 days to 2026-10-25: max 99 min, so the limit only ends a
+    # follow-up whose turns never answer; deliveries.queue health flags those.
+    FOLLOW_UP_SECONDS = 60.0
+    FOLLOW_UP_LIMIT_SECONDS = 6 * 3600.0
 
     def __init__(
         self, check: StartupCheck, *, on_done: Callable[[], None] | None = None,
@@ -52,6 +73,7 @@ class StartupRecoveryRunner:
         # A new leadership term began while the previous term's check was
         # still running: that term is owed a pass once this check settles.
         self._term_pending = False
+        self._follow_up: asyncio.Task | None = None
 
     @property
     def started(self) -> bool:
@@ -118,21 +140,62 @@ class StartupRecoveryRunner:
             )
 
     async def stop(self) -> None:
-        """Cancel a running check (shutdown only) and wait for it to unwind.
+        """Cancel a running check or follow-up (shutdown only) and wait for it to unwind.
 
         A cancelled check may leave a worker-thread write in flight after its
         await unwinds. That is safe only because the check is idempotent by
         contract: every step re-checks under its own fence.
         """
-        task = self._task
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        for task in (self._task, self._follow_up):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    def _start_follow_up(self, origin: asyncio.Task) -> None:
+        due = getattr(self.check, "follow_up_due", None)
+        if due is None or not hasattr(self.check, "follow_up"):
+            return
+        if self._follow_up is not None and not self._follow_up.done():
+            return  # the running loop sees the new pass and hands over
+        try:
+            wanted = bool(due(origin.result()))
+        except Exception:
+            logger.exception("startup recovery follow-up check failed; no follow-up")
+            return
+        if wanted and self._is_leader():
+            self._follow_up = asyncio.create_task(
+                self._follow_up_loop(origin), name="inter-bot-recovery-follow-up")
+
+    async def _follow_up_loop(self, origin: asyncio.Task) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.FOLLOW_UP_LIMIT_SECONDS
+        while True:
+            await asyncio.sleep(self.FOLLOW_UP_SECONDS)
+            if self._task is not origin and self._task is not None and self._task.done():
+                origin = self._task  # a later pass (new term) ended: follow it instead
+            elif self._task is not origin:
+                return  # a later pass is running; its end starts its own follow-up
+            if not self._is_leader():
+                return  # the next leadership term runs its own check
+            if loop.time() >= deadline:
+                logger.warning("startup recovery follow-up gave up after %.0fs; turns may still be open",
+                               self.FOLLOW_UP_LIMIT_SECONDS)
+                return
+            try:
+                result = await self.check.follow_up()
+            except Exception:
+                logger.exception("startup recovery follow-up pass failed; retrying next interval")
+                continue
+            if self._on_done is not None:
+                self._on_done()
+            if not self.check.follow_up_due(result):
+                return
 
     def _check_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
             return  # shutdown: nothing restarts
-        if task.exception():
+        failed = task.exception() is not None
+        if failed:
             logger.error("startup recovery check failed; dispatch continues", exc_info=task.exception())
         if self._term_pending and self._task is task:
             # TASK-1311: the term that began while this check ran gets its own
@@ -149,5 +212,7 @@ class StartupRecoveryRunner:
                     "startup recovery check not rerun: leadership was lost again; "
                     "the next leadership term runs it"
                 )
+        if not failed and self._task is task:
+            self._start_follow_up(task)
         if self._on_done is not None:
             self._on_done()

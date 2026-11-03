@@ -19,8 +19,9 @@ the claim's own selectors and authorities:
 
 A row behind the candidate waits on it, so it inherits the candidate's verdict
 and names it. No watchdog ends a long agent turn while the app runs:
-``recovery.orphan_turns`` settles stranded turns only at startup, and the turn
-reaper skips ordinary agent starts. A wait behind a turn open longer than
+``recovery.orphan_turns`` settles only turns opened before startup (and
+follows them up for a bounded time, TASK-1846), and the turn reaper skips
+ordinary agent starts. A wait behind a turn open longer than
 ``BUSY_TURN_CEILING`` is therefore Degraded too, so a stuck turn can't hide
 behind "target busy". The check reads only; it locks and admits nothing.
 """

@@ -404,3 +404,105 @@ def test_the_wired_check_runs_one_full_mutating_sweep_per_process():
         return sweep.calls
 
     assert virtual_clock.run_timing(main()) == [{"dry_run": False, "actor": "recovery_startup"}]
+
+
+# --- TASK-1846: follow-up of turns whose run outlived the restart ---------
+
+FOLLOW_UP_S = StartupRecoveryRunner.FOLLOW_UP_SECONDS
+FOLLOW_UP_LIMIT_S = StartupRecoveryRunner.FOLLOW_UP_LIMIT_SECONDS
+
+
+class _FollowUpCheck(_Check):
+    """Startup leaves work; each follow-up pass reports it due until ``clear_after``."""
+
+    def __init__(self, clear_after: int | None, *, startup_leaves: bool = True):
+        super().__init__()
+        self.clear_after, self.startup_leaves = clear_after, startup_leaves
+        self.follow_up_at: list[float] = []
+
+    async def run_at_startup(self):
+        await super().run_at_startup()
+        return "left" if self.startup_leaves else "clear"
+
+    def follow_up_due(self, result) -> bool:
+        return result == "left"
+
+    async def follow_up(self):
+        self.follow_up_at.append(asyncio.get_running_loop().time())
+        done = self.clear_after is not None and len(self.follow_up_at) >= self.clear_after
+        return "clear" if done else "left"
+
+
+def _follow(check: _FollowUpCheck, *, settle_for: float, leader=lambda: True, woke=None):
+    async def main():
+        runner = StartupRecoveryRunner(check, on_done=lambda: woke.append(True) if woke is not None else None,
+                                       is_leader=leader)
+        start = asyncio.get_running_loop().time()
+        await runner.run_once()
+        await asyncio.sleep(settle_for)
+        await runner.stop()
+        return [round(at - start) for at in check.follow_up_at]
+
+    return virtual_clock.run_timing(main())
+
+
+def test_a_left_turn_is_followed_up_each_interval_until_nothing_is_due():
+    woke: list[bool] = []
+    times = _follow(_FollowUpCheck(clear_after=3), settle_for=10 * FOLLOW_UP_S, woke=woke)
+    assert times == [round(FOLLOW_UP_S * n) for n in (1, 2, 3)]
+    assert len(woke) == 1 + 3  # the startup pass, then every follow-up wakes dispatch
+
+
+def test_a_check_that_left_nothing_is_never_followed_up():
+    assert _follow(_FollowUpCheck(clear_after=None, startup_leaves=False), settle_for=10 * FOLLOW_UP_S) == []
+
+
+def test_a_follow_up_stops_when_leadership_is_lost():
+    leading = {"now": True}
+    check = _FollowUpCheck(clear_after=None)
+    original = check.follow_up
+
+    async def then_lose_leadership():
+        result = await original()
+        leading["now"] = len(check.follow_up_at) < 2
+        return result
+
+    check.follow_up = then_lose_leadership
+    assert len(_follow(check, settle_for=10 * FOLLOW_UP_S, leader=lambda: leading["now"])) == 2
+
+
+def test_a_follow_up_whose_turns_never_answer_gives_up_at_its_limit(caplog):
+    caplog.set_level(logging.WARNING)
+    times = _follow(_FollowUpCheck(clear_after=None), settle_for=FOLLOW_UP_LIMIT_S + 5 * FOLLOW_UP_S)
+    assert len(times) == int(FOLLOW_UP_LIMIT_S // FOLLOW_UP_S) - 1 and times[-1] < FOLLOW_UP_LIMIT_S
+    assert "follow-up gave up" in caplog.text
+
+
+def test_a_failed_follow_up_pass_is_retried_next_interval(caplog):
+    caplog.set_level(logging.ERROR)
+    check = _FollowUpCheck(clear_after=2)
+    original = check.follow_up
+
+    async def first_fails():
+        result = await original()
+        if len(check.follow_up_at) == 1:
+            raise RuntimeError("db blip")
+        return result
+
+    check.follow_up = first_fails
+    assert _follow(check, settle_for=10 * FOLLOW_UP_S) == [round(FOLLOW_UP_S), round(2 * FOLLOW_UP_S)]
+    assert "follow-up pass failed" in caplog.text
+
+
+def test_stop_cancels_a_waiting_follow_up():
+    async def main():
+        check = _FollowUpCheck(clear_after=None)
+        runner = StartupRecoveryRunner(check)
+        await runner.run_once()
+        await asyncio.sleep(FOLLOW_UP_S / 2)
+        follow_up = runner._follow_up
+        assert follow_up is not None and not follow_up.done()
+        await runner.stop()
+        return follow_up.cancelled(), check.follow_up_at
+
+    assert virtual_clock.run_timing(main()) == (True, [])

@@ -19,10 +19,12 @@ Cutoff limits. Turn rows carry no owner stamp, so "created before this process
 started" is the only exact "not this process's". Consequences:
 
 - A turn the check leaves (no answer within the probe timeout, any state but
-  ``not_found``) gets no second look from this process. The turn reaper never
+  ``not_found``) is probed again by the dispatcher's follow-up (TASK-1846,
+  ``StartupRecoveryCheck.follow_up``) every minute while this process leads,
+  for up to six hours, and settles once its run is gone. The turn reaper never
   clears an ordinary agent START (``reap_unowned_turns`` skips rows carrying
-  ``ordinary_request_digest``), so it stays open until a user Stop or the next
-  startup check.
+  ``ordinary_request_digest``), so past that it stays open until a user Stop or
+  the next startup check. A turn without a recorded backend is never followed.
 - A process that takes leadership late (it was passive and the leader died)
   never settles turns the dead leader opened after this process started; they
   stay open the same way. This app runs as one process, so the case is a
