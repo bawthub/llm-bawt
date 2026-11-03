@@ -148,6 +148,46 @@ def test_edits_apply_with_line_semantics(content, patch, expected):
     assert apply_like_cli(content, [inp for _, _, inp in uses]) == expected
 
 
+def _update(path):
+    return ap.patch_to_tool_uses("c", f"*** Update File: {path}\n@@\n-a\n+b\n", None)
+
+
+def test_special_files_are_refused_without_blocking(tmp_path):
+    import os
+    import threading
+
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    result = {}
+    t = threading.Thread(target=lambda: result.update(r=_update(fifo)), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "FIFO open/read blocked"
+    [(tid, _, inp)] = result["r"]
+    assert tid == "c__aperr" and "not a regular file" in inp["command"]
+    for special in (tmp_path, "/dev/zero", "/dev/null"):
+        [(tid, _, inp)] = _update(special)
+        assert tid == "c__aperr" and "regular file" in inp["command"], special
+
+
+def test_actual_read_is_bounded_even_if_stat_lies(tmp_path, monkeypatch):
+    import os
+    big = tmp_path / "big.txt"
+    big.write_text("a\n" * 600)
+    monkeypatch.setattr(ap, "MAX_PATCH_FILE_BYTES", 1000)
+    monkeypatch.setattr(ap.os.path, "getsize", lambda p: 0)  # size check must not be trusted
+    reads = []
+    real_read = os.read
+    monkeypatch.setattr(ap.os, "read", lambda fd, n: reads.append(n) or real_read(fd, n))
+    [(tid, _, inp)] = _update(big)
+    assert tid == "c__aperr" and "too large" in inp["command"]
+    assert sum(reads) <= 1001
+    small = tmp_path / "small.txt"
+    small.write_text("a\n" + "x\n" * 400)
+    [(_, name, inp)] = _update(small)
+    assert name == "Edit" and inp["new_string"] == "b\n"
+
+
 def test_regenerated_patch_round_trips_to_the_same_blocks():
     uses = ap.patch_to_tool_uses("c", PATCH, None)
     blocks = [{"type": "tool_use", "id": i, "name": n, "input": inp} for i, n, inp in uses]

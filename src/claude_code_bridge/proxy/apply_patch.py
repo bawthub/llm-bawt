@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shlex
+import stat
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -236,16 +237,38 @@ MAX_PATCH_FILE_BYTES = 8 * 1024 * 1024
 
 
 def _read_lines(path: str, display: str) -> list[str]:
-    """Current file content as lines with their endings kept."""
+    """Current file content as lines with their endings kept.
+
+    Runs on the proxy's event loop, so it must never block or read without a
+    bound: open non-blocking (a FIFO cannot stall the open), accept only a
+    regular file by its descriptor, and read at most the limit + 1 bytes so
+    a special or growing file cannot exhaust memory.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
     try:
-        if os.path.getsize(path) > MAX_PATCH_FILE_BYTES:
-            raise PatchError(f"{display} is too large to patch; edit it another way.")
-        with open(path, "rb") as fh:
-            data = fh.read()
+        fd = os.open(path, flags)
     except FileNotFoundError:
         raise PatchError(f"{display} does not exist; use Add File to create it.") from None
     except OSError:
         raise PatchError(f"{display} cannot be read.") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PatchError(f"{display} is not a regular file.")
+        chunks: list[bytes] = []
+        remaining = MAX_PATCH_FILE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        raise PatchError(f"{display} cannot be read.") from None
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > MAX_PATCH_FILE_BYTES:
+        raise PatchError(f"{display} is too large to patch; edit it another way.")
     try:
         return data.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError:
