@@ -506,3 +506,56 @@ def test_stop_cancels_a_waiting_follow_up():
         return follow_up.cancelled(), check.follow_up_at
 
     assert virtual_clock.run_timing(main()) == (True, [])
+
+
+def test_a_new_terms_full_pass_skipped_behind_a_running_follow_up_still_runs_in_full():
+    """Codex 1846 r1: the old term's follow-up holds the sweep when a new term
+    starts; the new term's full pass returns busy. The follow-up is never
+    cancelled, and once it unwinds a non-busy full pass runs."""
+    from llm_bawt.service.recovery.sweep import RecoverySweep, StartupRecoveryCheck
+
+    class Sweep:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self.lock = asyncio.Lock()
+            self.release = asyncio.Event()
+            self.blocked = asyncio.Event()
+
+        async def run(self, **kwargs):
+            if self.lock.locked():
+                self.calls.append({**kwargs, "busy": True})
+                return {"dry_run": False, "busy": True, "steps": []}
+            async with self.lock:
+                self.calls.append({**kwargs, "busy": False})
+                if kwargs.get("steps") == ["orphan_turns"] and not self.release.is_set():
+                    self.blocked.set()
+                    await self.release.wait()  # the old term's DB work, in flight
+                left = [{"turn_id": "t", "bot_id": "b", "why": "run.status running", "probe": {"state": "running"}}]
+                return {"dry_run": False, "busy": False, "sweep_run_id": "r", "steps": [
+                    {"step": name, "found": [], "planned": [], "done": [], "raced": [],
+                     "ambiguous": left if name == "orphan_turns" else []}
+                    for name in kwargs.get("steps") or RecoverySweep.DEFAULT_STEPS]}
+
+    async def main():
+        sweep = Sweep()
+        runner = StartupRecoveryRunner(StartupRecoveryCheck(sweep))
+        await runner.run_once()
+        await sweep.blocked.wait()  # first follow-up holds the sweep
+        follow_up = runner._follow_up
+        runner.rearm()  # new leadership term
+        await runner.run_once()  # its full pass: busy
+        assert sweep.calls[-1] == {"dry_run": False, "actor": "recovery_startup", "busy": True}
+        sweep.release.set()
+        await asyncio.sleep(2 * FOLLOW_UP_S + PROMPT_S)
+        cancelled = follow_up.cancelled()
+        await runner.stop()
+        return cancelled, [(c.get("steps"), c["actor"], c["busy"]) for c in sweep.calls]
+
+    cancelled, calls = virtual_clock.run_timing(main())
+    assert not cancelled
+    assert calls[:4] == [
+        (None, "recovery_startup", False),            # the old term's startup
+        (["orphan_turns"], "recovery_follow_up", False),  # its follow-up, blocked
+        (None, "recovery_startup", True),             # the new term's pass, skipped
+        (None, "recovery_startup", False),            # owed, run in full on the next follow-up
+    ]

@@ -710,7 +710,38 @@ def test_a_live_long_turn_is_never_settled_by_the_follow_up(delivery_store):  # 
     ({}, False),  # no bridge request id: never probed
 ])
 def test_only_turns_a_later_probe_can_settle_are_followed_up(left, due):
+    check = StartupRecoveryCheck(sweep=None)
     result = {"busy": False, "steps": [{"step": "orphan_turns", "ambiguous": [{"turn_id": "t", **left}]}]}
-    assert StartupRecoveryCheck.follow_up_due(result) is due
-    assert StartupRecoveryCheck.follow_up_due({"busy": True, "steps": []}) is True
-    assert StartupRecoveryCheck.follow_up_due({"busy": False, "steps": []}) is False
+    assert check.follow_up_due(result) is due
+    assert check.follow_up_due({"busy": True, "steps": []}) is True
+    assert check.follow_up_due({"busy": False, "steps": []}) is False
+
+
+def test_a_full_pass_skipped_as_busy_is_run_in_full_by_the_next_follow_up():
+    """Codex 1846 r1: a new term's full pass found the sweep held by the old
+    term's follow-up. It stays owed whatever the old follow-up reports, and the
+    next follow-up runs every default step, not orphan_turns alone."""
+    class Sweep:
+        def __init__(self):
+            self.calls, self.busy = [], True
+
+        async def run(self, **kwargs):
+            self.calls.append(kwargs)
+            if self.busy:
+                return {"dry_run": False, "busy": True, "steps": []}
+            return {"dry_run": False, "busy": False, "sweep_run_id": "r", "steps": [
+                {"step": name, "found": [], "planned": [], "done": [], "ambiguous": [], "raced": []}
+                for name in kwargs.get("steps") or RecoverySweep.DEFAULT_STEPS]}
+
+    sweep = Sweep()
+    check = StartupRecoveryCheck(sweep)
+    assert check.follow_up_due(asyncio.run(check.run_at_startup()))  # skipped as busy
+    sweep.busy = False
+    old_follow_up_clear = {"busy": False, "steps": [{"step": "orphan_turns", "ambiguous": []}]}
+    assert check.follow_up_due(old_follow_up_clear)  # the full pass is still owed
+    full = asyncio.run(check.follow_up())
+    assert sweep.calls[-1] == {"dry_run": False, "actor": "recovery_startup"}
+    assert [step["step"] for step in full["steps"]] == list(RecoverySweep.DEFAULT_STEPS)
+    assert not check.follow_up_due(full)
+    asyncio.run(check.follow_up())  # nothing owed now: orphan_turns only
+    assert sweep.calls[-1]["steps"] == ["orphan_turns"]

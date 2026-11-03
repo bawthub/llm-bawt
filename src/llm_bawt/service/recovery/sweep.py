@@ -166,9 +166,13 @@ class StartupRecoveryCheck:
 
     def __init__(self, sweep: RecoverySweep):
         self.sweep = sweep
+        # A full pass that found the sweep busy (e.g. a previous term's
+        # follow-up held it) ran no step: the next follow-up owes it in full.
+        self._full_pass_owed = False
 
     async def run_at_startup(self) -> dict[str, Any]:
         result = await self.sweep.run(dry_run=False, actor=self.ACTOR)
+        self._full_pass_owed = bool(result.get("busy"))
         if result.get("busy"):
             logger.info("startup recovery check skipped: another pass holds the sweep")
             return result
@@ -183,14 +187,14 @@ class StartupRecoveryCheck:
                                 entry["turn_id"], entry["bot_id"], entry["why"])
         return result
 
-    @staticmethod
-    def follow_up_due(result: dict[str, Any]) -> bool:
+    def follow_up_due(self, result: dict[str, Any]) -> bool:
         """Whether a pass left a turn a later probe can settle (TASK-1846).
 
         The candidate set is fixed by this process's start, so it only shrinks.
-        A busy or failed ``orphan_turns`` pass decided nothing: it is due again.
+        A busy or failed ``orphan_turns`` pass decided nothing: it is due again,
+        and so is a skipped full pass, whatever this result says.
         """
-        if result.get("busy"):
+        if self._full_pass_owed or result.get("busy"):
             return True
         for step in result.get("steps", ()):
             if step.get("step") == "orphan_turns":
@@ -202,7 +206,11 @@ class StartupRecoveryCheck:
 
         A run that was live at restart answers ``not_found`` once it ends; the
         turn then settles exactly as at startup. A live run is left again.
+        A full pass that was skipped as busy runs here instead, in full.
         """
+        if self._full_pass_owed:
+            logger.info("recovery follow-up runs the full pass skipped as busy")
+            return await self.run_at_startup()
         result = await self.sweep.run(dry_run=False, steps=["orphan_turns"], actor=self.FOLLOW_UP_ACTOR)
         for step in result.get("steps", ()):
             for entry in step.get("done", ()):
