@@ -951,6 +951,30 @@ class TestRetryLoop:
         assert adapter._responses_client._i == 1
 
 
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("mid_stream", [False, True])
+    async def test_statusless_schema_rejection_surfaces_invalid_request_error(self, mid_stream):
+        """TASK-1966: an SSE error event rejecting the tool schema is final once,
+        typed invalid_request_error, never retried or labelled authentication_error."""
+        import httpx
+        import openai
+
+        rejected = openai.APIError(
+            "Invalid schema for function 'Workflow': schema must specify a type",
+            httpx.Request("POST", "https://example.invalid/responses"),
+            body={"type": "invalid_request_error", "code": "invalid_function_parameters"},
+        )
+        first = (
+            _FakeUpstreamStream([], raise_after=0, raise_exc=rejected)
+            if mid_stream else rejected
+        )
+        adapter = _FakeAdapter(script=[first, RuntimeError("SHOULD NOT RETRY")])
+        chunks = await _drain(adapter.call({"model": "fake/foo"}, "foo"))
+        joined = b"".join(chunks)
+        assert b'"type":"invalid_request_error"' in joined
+        assert b'"type":"authentication_error"' not in joined
+        assert adapter._responses_client._i == 1
+
 class TestPermanentTypeMapping:
     """Al review fix: status/payload → capability-classified error type."""
 

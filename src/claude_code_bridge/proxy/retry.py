@@ -572,7 +572,14 @@ def permanent_error_type_for_exception(exc: BaseException | None) -> str | None:
     """Status-specific permanent error type pulled from an exception, or None."""
     if exc is None:
         return None
-    return permanent_error_type_for_status(_extract_status_code(exc))
+    status = _extract_status_code(exc)
+    if (
+        status is None
+        and type(exc).__module__.split(".", 1)[0] == "openai"
+        and _is_request_rejection(getattr(exc, "body", None))
+    ):
+        return "invalid_request_error"  # TASK-1966: status-less SSE rejection
+    return permanent_error_type_for_status(status)
 
 
 def permanent_error_type_for_inband(payload: dict[str, Any]) -> str | None:
