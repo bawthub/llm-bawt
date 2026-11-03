@@ -61,6 +61,7 @@ class Rig:
 
         monkeypatch.setattr(notify, "RuntimeSettingsStore", Settings)
         monkeypatch.setattr(notify, "resolve_ha_credentials", credentials)
+        monkeypatch.setattr(notify, "sender_name", lambda bot_id: f"Name-{bot_id}")
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -88,8 +89,8 @@ async def send(rig, store, *, at=NOON, bot="fixture-bot", **kwargs):
 
 def test_normal_payload_has_link_and_group_but_no_priority_keys():
     payload = build_payload("Deploy done", title="Deploy", urgency="normal", bot_id="fixture-bot",
-                            url=f"{ORIGIN}/tasks/1")
-    assert payload == {"message": "Deploy done", "title": "Deploy", "data": {
+                            url=f"{ORIGIN}/tasks/1", sender="Fixture")
+    assert payload == {"message": "Deploy done", "title": "Fixture: Deploy", "data": {
         "group": "bawthub-fixture-bot", "url": f"{ORIGIN}/tasks/1",
         "clickAction": f"{ORIGIN}/tasks/1"}}
 
@@ -100,6 +101,33 @@ def test_high_payload_is_time_sensitive_on_ios_and_immediate_on_android():
     assert data == {"group": "bawthub-fixture-bot",
                     "push": {"interruption-level": "time-sensitive"},
                     "priority": "high", "ttl": 0}
+
+
+def test_title_always_names_the_sender():
+    def title(t, sender=None):
+        return build_payload("m", title=t, urgency="normal", bot_id="fixture-bot", url=None,
+                             sender=sender)["title"]
+    assert title(None, "Fixture") == "Fixture"
+    assert title("   ", "Fixture") == "Fixture"
+    assert title("Deploy", "Fixture") == "Fixture: Deploy"
+    assert title(None) == "fixture-bot"  # no display name: the verified id
+
+
+def test_sender_name_uses_profile_name_or_falls_back_to_id(monkeypatch):
+    import llm_bawt.bots as bots
+
+    class Bot:
+        name = "Fixture"
+
+    monkeypatch.setattr(bots, "get_bot", lambda slug: Bot() if slug == "fixture-bot" else None)
+    assert notify.sender_name("fixture-bot") == "Fixture"
+    assert notify.sender_name("other-bot") == "other-bot"
+
+    def boom(slug):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(bots, "get_bot", boom)
+    assert notify.sender_name("fixture-bot") == "fixture-bot"
 
 
 def test_link_is_app_relative_or_on_the_public_origin():
@@ -168,7 +196,7 @@ async def test_sent_posts_to_each_configured_notify_service(rig, store):
     request = rig.requests[0]
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
     body = json.loads(request.content)
-    assert body["title"] == "Approval" and body["data"]["url"] == f"{ORIGIN}/approvals"
+    assert body["title"] == "Name-fixture-bot: Approval" and body["data"]["url"] == f"{ORIGIN}/approvals"
     assert body["data"]["push"] == {"interruption-level": "time-sensitive"}
     row = store.get(receipt["id"])
     assert (row["bot_id"], row["result"], row["urgency"]) == ("fixture-bot", "sent", "high")

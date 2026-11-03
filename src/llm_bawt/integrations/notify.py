@@ -126,9 +126,25 @@ def resolve_link(link: str | None, origin: str) -> str | None:
     raise ValueError("link must be an app-relative path or a URL on the public origin")
 
 
+def sender_name(bot_id: str) -> str:
+    """The verified sender's display name from its bot profile, else its id."""
+    try:
+        from llm_bawt.bots import get_bot
+        bot = get_bot(bot_id)
+    except Exception:  # attribution must never block a push
+        logger.warning("notify: could not resolve display name for %s", bot_id, exc_info=True)
+        bot = None
+    name = (getattr(bot, "name", "") or "").strip()
+    return name or bot_id
+
+
 def build_payload(message: str, *, title: str | None, urgency: str, bot_id: str,
-                  url: str | None) -> dict:
-    """The Home Assistant companion-app payload; iOS and Android keys side by side."""
+                  url: str | None, sender: str | None = None) -> dict:
+    """The Home Assistant companion-app payload; iOS and Android keys side by side.
+
+    The visible title always names the sender, so a bot can't send an
+    unattributed push or remove the attribution through its own title text.
+    """
     data: dict = {"group": f"bawthub-{bot_id}"}
     if url:
         data["url"] = url          # iOS
@@ -137,10 +153,10 @@ def build_payload(message: str, *, title: str | None, urgency: str, bot_id: str,
         data["push"] = {"interruption-level": "time-sensitive"}  # iOS
         data["priority"] = "high"                                 # Android
         data["ttl"] = 0                                           # Android: deliver now
-    payload: dict = {"message": message, "data": data}
-    if title:
-        payload["title"] = title
-    return payload
+    sender = (sender or bot_id).strip() or bot_id
+    title = (title or "").strip()
+    return {"message": message, "title": f"{sender}: {title}" if title else sender,
+            "data": data}
 
 
 async def send_to_service(http: httpx.AsyncClient, credentials: HACredentials, service: str,
@@ -199,7 +215,9 @@ class Notifier:
                                                 now.timestamp())
         if admitted != "sending":
             return {"result": admitted, "id": row}
-        payload = build_payload(message, title=title, urgency=urgency, bot_id=bot_id, url=url)
+        sender = await asyncio.to_thread(sender_name, bot_id)
+        payload = build_payload(message, title=title, urgency=urgency, bot_id=bot_id, url=url,
+                                sender=sender)
         results = {}
         for service in settings.services:
             results[service] = await send_to_service(self.http, credentials, service, payload)
