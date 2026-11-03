@@ -114,7 +114,7 @@ A readiness healthcheck exists in Compose source but has not been activated in t
 | Hono repository browsing | `repos.ts` takes the host path from `REPOS_HOST_ROOT`, never Docker | Done in source, BawtHub `39d2ee30` (TASK-1170) |
 | Voice backend | Fenced llm-bawt restart client (`tts/restart.py`) using the existing service token; direct shell/Docker restart helper removed | TASK-1171 source published; backend observed token-configured and socket-free on 2026-11-01. Catalog enablement and actual Restart acceptance remain pending below |
 | GPU handoff in app | Reads STT/TTS from the reconciler's `/v1/health/services/bawthub.{stt,tts}` (`LLM_BAWT_OPS_HEALTH_URL`); refuses on anything but one fresh, typed instance. No Docker client. Mutations use consented ops jobs | Done in source, TASK-1171 |
-| Traefik | Docker provider watches labels through a socket mount | Deployment-owned routing, TASK-1172 |
+| Traefik | Live: Docker provider watches labels through a `:ro` socket mount. Prepared: file provider reading `bawthub/deploy/traefik/dynamic/routes.yml`, no socket | Routes file and checks in source (TASK-1172); the cutover commit (provider switch, labels and socket removed) is applied with Traefik's recreation in TASK-1173 |
 
 #### TASK-1171: source, observed readiness and remaining acceptance
 
@@ -223,6 +223,13 @@ Prefer supported static/templated Traefik file-provider configuration with stabl
 
 Stable DNS alone is not proof of replica load balancing or stale-endpoint recovery; test the real provider/upstream behavior. Do not build custom route discovery in ops, a Docker compatibility proxy, or another privileged sidecar. A future Kubernetes deployment uses its routing/Ingress configuration without changing product ops consumers.
 
+**Verified topology and prepared state (TASK-1172, 2026-11-03).** Only the echo BawtHub stack uses Traefik: three routed services (`frontend` for dev.bawthub.com, `frontend-prod` for app.bawthub.com, `backend` as the host-agnostic `/api` catch-all with the `strip-api` middleware), no auth middleware, Traefik on `bawthub_default` only. Tenant installs publish ports directly and have no Traefik. Ops image deploys clone containers with their network aliases, so the Compose service names stay resolvable after a release.
+
+- `bawthub/deploy/traefik/dynamic/routes.yml` is the one routing source: the same routers, priorities, middleware and upstreams by Compose service name. Until the cutover, a parity test keeps it identical to the live labels.
+- `bawthub/deploy/traefik/check_routes.py` runs it in a disposable real Traefik with stub upstreams and no socket. It checks loading, the host/path/priority matrix, `/api` stripping, unbuffered SSE, a websocket upgrade, upstream recreation (Docker DNS follows the new IP), two replicas behind one name (requests succeed; spread is not promised), a stopped upstream (502, other hosts unaffected), and a broken watched edit (logged; last good routes keep serving).
+- Behaviour changes at cutover: routing no longer follows container health, so a down or starting upstream answers 502 instead of Traefik's 404; and Traefik no longer needs a restart after a recreate. Scaling a service needs its replicas listed in the file, or an orchestrator Service/Ingress.
+- The cutover commit must ship with Traefik's recreation: merged alone, a recreated `frontend`/`backend` would lose its labels while Traefik still reads them. The `bawthub.reconcile-prod-routing` ops action (TASK-1179) edits labels, so TASK-1173 disables it at the same time; route changes become reviewed edits to the routes file.
+
 ## 7. Bounded implementation and acceptance
 
 | Task | Deliverable | Dependency |
@@ -230,7 +237,7 @@ Stable DNS alone is not proof of replica load balancing or stale-endpoint recove
 | TASK-1169 | FastAPI ops host; portable contracts; existing ledger/admission separation; adapter and bounded execution; recovery tests | Foundation |
 | TASK-1170 | Frontend controls/health plus repo-path discovery migrated; direct helpers removed (done; socket mounts left to 1173) | 1169 |
 | TASK-1171 | TTS restart and GPU observations use the shared contract | 1169 |
-| TASK-1172 | Socket-free deployment routing using supported provider configuration | Independent of 1169 |
+| TASK-1172 | Socket-free deployment routing using supported provider configuration (source prepared; cutover commit for 1173) | Independent of 1169 |
 | TASK-1173 | Integrated authorized activation, actual mount removal, healthcheck/recovery configuration and final evidence | 1169–1172 |
 
 Start an architecture ratchet in TASK-1169: list current offenders with owning task IDs, reject new ones immediately, and remove exceptions as migrations land. Cover SDK imports, direct HTTP/CLI/shell helpers, socket/TCP configuration and parent-directory mounts across Compose and tenant artifacts. Separate legitimate adapter code and operator test tooling from product dependencies.
@@ -273,6 +280,7 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `src/llm_bawt/media/gpu_handoff_adapter.py`: GPU-service observation through the reconciler's `/v1/health/services` (TASK-1171).
 - `docker-compose.ops.yml`: ops deployment and source healthcheck configuration.
 - `bawthub/frontend/server/routes/ops-services.ts`, `lib/opsHealth.ts`, `routes/docker-containers.ts` (410 tombstones), `routes/repos.ts` (`REPOS_HOST_ROOT`): the frontend's ops-backed service view; no direct Docker consumer remains (paths relative to `frontend/server/`).
+- `bawthub/deploy/traefik/dynamic/routes.yml`, `deploy/traefik/check_routes.py`: deployment-owned Traefik routes and their real-proxy check (TASK-1172).
 - `bawthub/bawthub/main_websocket.py`, `bawthub/bawthub/tts/restart.py`: voice restart controller and fenced llm-bawt client; the direct `restart_tts_container.sh` helper is removed (TASK-1171).
 
 ### Decision record
@@ -280,6 +288,7 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - **2026-11-02 (TASK-1169 FastAPI health host):** Reconciled the published prepared-hold correction and existing process/adapter work without replay. Migrated only the dedicated health host and runtime ownership to FastAPI/Uvicorn lifespan; kept the separate bounded control transport, immutable wire contracts, fixed producers and execution/recovery semantics. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
 - **2026-11-03 (TASK-1169 FastAPI control host):** Moved the `8651` control listener from the standard-library server to FastAPI/Uvicorn on its own socket and loop thread, keeping the wire contract, bearer, slots and wall budget unchanged and adding header/body deadlines. With this, the ops service's control, status and health endpoints are all on FastAPI in source. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
 - **2026-11-03 (TASK-1170 reconciliation):** BawtHub frontend code has no direct Docker consumer: service view and actions go through ops, legacy container routes are 410, repo paths come from `REPOS_HOST_ROOT`. The BawtHub ratchet's only frontend offenders are the two unused socket mounts, now owned by TASK-1173.
+- **2026-11-03 (TASK-1172 source prep):** Traefik routing moves to one file-provider routes file using Compose service names; no ops route discovery, proxy or sidecar. The routes file, parity test and real-proxy check are in source. A separate cutover commit (provider switch, labels and socket mount removed, ratchet entry dropped) is held for TASK-1173 to integrate alongside Traefik's recreation, together with disabling `bawthub.reconcile-prod-routing`. No live routing or service change.
 
 - **2026-10-18:** Health monitoring fixed independently of full isolation; broader tasks remain queued.
 - **2026-10-18:** Caid review narrows scope: reuse ledger, portable service contracts, shared observations, routing owned by deployment, guardrails first. Follow-up found repository mount inspection; TASK-1170 explicitly covers it.
