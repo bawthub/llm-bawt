@@ -71,6 +71,7 @@ RUN uv pip install 'diffusers==0.40.0' 'ftfy>=6.0' 'imageio>=2.30' 'imageio-ffmp
 # Changes to src/ won't invalidate the venv/deps layer above
 COPY src/ ./src/
 COPY server.sh ./
+COPY docker/agent-bridge-constraints.txt ./docker/
 RUN chmod +x server.sh
 
 # Install the project itself (fast since deps + llama-cpp + vllm are cached)
@@ -111,6 +112,7 @@ COPY --from=base /app/.venv /app/.venv
 COPY --from=base /app/src /app/src
 COPY --from=base /app/pyproject.toml /app/pyproject.toml
 COPY --from=base /app/server.sh /app/server.sh
+COPY --from=base /app/docker/agent-bridge-constraints.txt /app/docker/agent-bridge-constraints.txt
 
 # Create necessary directories
 RUN mkdir -p /app/.run /app/.logs /root/.config/llm-bawt

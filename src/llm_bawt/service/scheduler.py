@@ -35,6 +35,7 @@ class JobType(str, Enum):
     MEMORY_EXTRACTION = "memory_extraction"
     MEDIA_GC = "media_gc"
     TOOL_RESULT_GC = "tool_result_gc"
+    HARNESS_VERSION_CHECK = "harness_version_check"
     SEND_PROMPT = "send_prompt"
     IDLE_CONTEXT_RESET = "idle_context_reset"
 
@@ -699,7 +700,7 @@ class JobScheduler:
                 # gating would add a separate scan with no real win.
                 return True, None
 
-            if job.job_type == JobType.TOOL_RESULT_GC:
+            if job.job_type in (JobType.TOOL_RESULT_GC, JobType.HARNESS_VERSION_CHECK):
                 # Always-on for the same reason as MEDIA_GC — a cheap sweep.
                 return True, None
         except Exception as e:
@@ -721,6 +722,7 @@ class JobScheduler:
             create_media_assets_gc_task,
             create_memory_extraction_task,
             create_profile_maintenance_task,
+            create_harness_version_check_task,
             create_tool_result_gc_task,
         )
         
@@ -783,6 +785,13 @@ class JobScheduler:
             return create_tool_result_gc_task(
                 retention_days=int(config.get("retention_days", 14)),
                 dry_run=bool(config.get("dry_run", False)),
+                bot_id=job.bot_id or "system",
+                user_id=config.get("user_id", "system"),
+            )
+        elif job.job_type == JobType.HARNESS_VERSION_CHECK:
+            config = self._parse_config_json(job.config_json)
+            return create_harness_version_check_task(
+                config=config,
                 bot_id=job.bot_id or "system",
                 user_id=config.get("user_id", "system"),
             )
@@ -996,3 +1005,29 @@ def init_default_jobs(engine, config) -> None:
                 "Created tool_result GC job (nightly @ 04:30 UTC, next: %s)",
                 next_run.isoformat(),
             )
+
+        # TASK-1975: weekly agent-harness version check. Read-only against
+        # PyPI; keeps one open upgrade task. The task owner comes from the
+        # job's config_json (agent_bot_id), set by the operator.
+        existing_harness_check = session.exec(
+            select(ScheduledJob).where(ScheduledJob.job_type == JobType.HARNESS_VERSION_CHECK)
+        ).first()
+        if not existing_harness_check:
+            now = datetime.now(timezone.utc)
+            next_run = now.replace(hour=13, minute=0, second=0, microsecond=0)
+            if next_run <= now:
+                next_run = next_run + timedelta(days=1)
+            session.add(
+                ScheduledJob(
+                    job_type=JobType.HARNESS_VERSION_CHECK,
+                    bot_id=SYSTEM_BOT_ID,
+                    enabled=config.SCHEDULER_ENABLED,
+                    interval_minutes=int(
+                        getattr(config, "HARNESS_VERSION_CHECK_INTERVAL_MINUTES", 10080),
+                    ),
+                    next_run_at=next_run,
+                    config_json=json.dumps({"user_id": "system", "agent_bot_id": None}),
+                )
+            )
+            session.commit()
+            logger.debug("Created harness version-check job (weekly, next: %s)", next_run.isoformat())

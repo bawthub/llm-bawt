@@ -19,6 +19,7 @@ class TaskType(Enum):
     MEMORY_EXTRACTION = "memory_extraction"
     MEDIA_ASSETS_GC = "media_assets_gc"
     TOOL_RESULT_GC = "tool_result_gc"
+    HARNESS_VERSION_CHECK = "harness_version_check"
 
 
 class TaskStatus(Enum):
@@ -249,6 +250,22 @@ def create_tool_result_gc_task(
             "retention_days": retention_days,
             "dry_run": dry_run,
         },
+    )
+
+
+def create_harness_version_check_task(
+    config: dict | None = None,
+    bot_id: str = "system",
+    user_id: str = "system",
+    priority: int = -1,
+) -> Task:
+    """Create a weekly harness version-check task (TASK-1975)."""
+    return Task(
+        task_type=TaskType.HARNESS_VERSION_CHECK,
+        bot_id=bot_id,
+        user_id=user_id,
+        priority=priority,
+        payload=dict(config or {}),
     )
 
 

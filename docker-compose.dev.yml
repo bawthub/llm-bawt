@@ -16,6 +16,8 @@ services:
       # Mount source code for live development
       - ./src:/app/src
       - ./server.sh:/app/server.sh
+      # Harness pins read by the weekly version check (TASK-1975)
+      - ./docker/agent-bridge-constraints.txt:/app/docker/agent-bridge-constraints.txt:ro
       # Config, logs, models (mirrors base compose)
       - ${HOME}/.config/llm-bawt:/root/.config/llm-bawt
       - ./.logs:/app/.logs

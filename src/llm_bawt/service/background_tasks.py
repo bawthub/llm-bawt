@@ -37,6 +37,7 @@ class BackgroundTasksMixin:
         TaskType.MEMORY_EXTRACTION: "_process_memory_extraction",
         TaskType.MEDIA_ASSETS_GC: "_process_media_assets_gc",
         TaskType.TOOL_RESULT_GC: "_process_tool_result_gc",
+        TaskType.HARNESS_VERSION_CHECK: "_process_harness_version_check",
     }
 
     async def process_task(self, task: Task) -> TaskResult:
@@ -742,3 +743,16 @@ class BackgroundTasksMixin:
         retention_days = int(task.payload.get("retention_days", 14))
         dry_run = bool(task.payload.get("dry_run", False))
         return run_tool_result_gc(self.config, retention_days=retention_days, dry_run=dry_run)
+
+    def _process_harness_version_check(self, task: Task) -> dict:
+        """Compare pinned agent-harness packages with PyPI (TASK-1975)."""
+        from .jobs.harness_version_check import run_harness_version_check
+
+        p = task.payload
+        return run_harness_version_check(
+            self.config,
+            constraints_path=p.get("constraints_path"),
+            packages=p.get("packages"),
+            agent_bot_id=p.get("agent_bot_id"),
+            priority=str(p.get("priority", "MEDIUM")),
+        )
