@@ -42,7 +42,8 @@ def bot_tag_store() -> BotTagStore:
 def _response(tag: CatalogTag) -> BotTagResponse:
     return BotTagResponse(
         slug=tag.slug, name=tag.name, description=tag.description, kind=tag.kind,
-        prompt_key=tag.prompt_key, capabilities=list(tag.capabilities), system=tag.system,
+        prompt_key=tag.prompt_key, capabilities=list(tag.capabilities), color=tag.color,
+        system=tag.system,
         used_by=[BotTagUse(bot=u.bot, has_profile=u.has_profile) for u in tag.used_by],
         created_at=tag.created_at, updated_at=tag.updated_at)
 
@@ -68,7 +69,7 @@ async def create_bot_tag(request: BotTagCreateRequest):
     store = bot_tag_store()
     tag = await _run(lambda: store.create_role(
         request.slug, request.name, request.description, request.prompt_key,
-        request.capabilities))
+        request.capabilities, request.color))
     return _response(tag)
 
 

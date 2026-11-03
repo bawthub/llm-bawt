@@ -23,7 +23,7 @@ from . import catalog, grants
 from .errors import TagConflict, TagNotFound, TagValidationError
 from .vocabulary import TAG_SLUG, BehaviorTag, is_canonical_bot_slug
 
-ROLE_FIELDS = frozenset({"name", "description", "prompt_key", "capabilities"})
+ROLE_FIELDS = frozenset({"name", "description", "prompt_key", "capabilities", "color"})
 # ``slug`` is editable too, as an atomic rename (TASK-1249); it is not a column write.
 EDITABLE_FIELDS = ROLE_FIELDS | {"slug"}
 MAX_NAME = 128
@@ -32,11 +32,15 @@ MAX_PROMPT_KEY = 160
 MAX_CAPABILITY = 64
 MAX_INSTRUCTIONS = 20000
 ROLE_PROMPT_PREFIX = "role."
+# Chip colors a role tag may pick (TASK-1971): keys, not CSS, so every client
+# themes them. Gold is reserved for grant tags and is deliberately absent.
+TAG_COLORS = ("sky", "teal", "emerald", "lime", "indigo", "violet", "fuchsia", "rose")
 # Registry category for tag instruction prompts (operator data, global scope).
 INSTRUCTIONS_CATEGORY = "bot_tag"
 
 _CATALOG_SQL = """
-    SELECT c.slug, c.name, c.description, c.kind, c.prompt_key, c.capabilities, c.system,
+    SELECT c.slug, c.name, c.description, c.kind, c.prompt_key, c.capabilities, c.color,
+           c.system,
            c.created_at, c.updated_at,
            COALESCE(json_agg(json_build_object('bot', t.bot_slug,
                                                'has_profile', p.slug IS NOT NULL)
@@ -69,6 +73,7 @@ class CatalogTag:
     created_at: datetime | None
     updated_at: datetime | None
     used_by: tuple[TagUse, ...]
+    color: str | None = None
 
     @classmethod
     def from_row(cls, row: Mapping) -> CatalogTag:
@@ -80,7 +85,8 @@ class CatalogTag:
             prompt_key=row["prompt_key"], capabilities=tuple(row["capabilities"] or ()),
             system=bool(row["system"]), created_at=row["created_at"],
             updated_at=row["updated_at"],
-            used_by=tuple(TagUse(u["bot"], bool(u["has_profile"])) for u in used))
+            used_by=tuple(TagUse(u["bot"], bool(u["has_profile"])) for u in used),
+            color=row.get("color"))
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,16 @@ class RoleFields:
         if len(set(value)) != len(value):
             raise TagValidationError("capabilities must not repeat")
         return list(value)
+
+    @staticmethod
+    def color(value: object) -> str | None:
+        """A palette key, or null for the automatic color."""
+        if value is None:
+            return None
+        if not isinstance(value, str) or value not in TAG_COLORS:
+            raise TagValidationError(
+                f"color must be null or one of: {', '.join(TAG_COLORS)}")
+        return value
 
     @staticmethod
     def instructions(value: object) -> str:
@@ -206,20 +222,22 @@ class BotTagStore:
     # --- role catalog writes ---------------------------------------------
 
     def create_role(self, slug: object, name: object, description: object = "",
-                    prompt_key: object = None, capabilities: object = ()) -> CatalogTag:
+                    prompt_key: object = None, capabilities: object = (),
+                    color: object = None) -> CatalogTag:
         values = {
             "slug": RoleFields.slug(slug), "name": RoleFields.name(name),
             "description": RoleFields.description(description),
             "prompt_key": RoleFields.prompt_key(prompt_key),
             "capabilities": json.dumps(RoleFields.capabilities(capabilities)),
+            "color": RoleFields.color(color),
         }
         with _prompt_key_conflicts(values["prompt_key"]), self.engine.begin() as conn:
             self._require_free_prompt_key(conn, values["prompt_key"], values["slug"])
             created = conn.execute(text("""
                 INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key,
-                                             capabilities, system)
+                                             capabilities, color, system)
                 VALUES (:slug, :name, :description, 'role', :prompt_key,
-                        CAST(:capabilities AS jsonb), FALSE)
+                        CAST(:capabilities AS jsonb), :color, FALSE)
                 ON CONFLICT (slug) DO NOTHING
                 RETURNING slug
             """), values).scalar_one_or_none()
@@ -380,8 +398,8 @@ class BotTagStore:
         """
         created = conn.execute(text("""
             INSERT INTO bot_tag_catalog (slug, name, description, kind, prompt_key,
-                                         capabilities, system, created_at, updated_at)
-            SELECT :new, name, description, kind, NULL, capabilities, FALSE,
+                                         capabilities, color, system, created_at, updated_at)
+            SELECT :new, name, description, kind, NULL, capabilities, color, FALSE,
                    created_at, now()
             FROM bot_tag_catalog WHERE slug = :old
             ON CONFLICT (slug) DO NOTHING

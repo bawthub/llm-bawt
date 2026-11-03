@@ -258,8 +258,8 @@ def test_a_role_tag_is_created_listed_edited_and_deleted(api):
     assert created.status_code == 201, created.text
     assert created.json() | {"created_at": None, "updated_at": None} == {
         "slug": "fixture_role", "name": "Fixture Role", "description": "", "kind": "role",
-        "prompt_key": "role.fixture", "capabilities": ["read"], "system": False, "used_by": [],
-        "created_at": None, "updated_at": None}
+        "prompt_key": "role.fixture", "capabilities": ["read"], "color": None, "system": False,
+        "used_by": [], "created_at": None, "updated_at": None}
 
     edited = api.client.patch("/v1/bot-tags/fixture_role",
                               json={"prompt_key": None, "capabilities": ["read", "write"]})
@@ -275,6 +275,42 @@ def test_a_role_tag_is_created_listed_edited_and_deleted(api):
     assert api.client.patch("/v1/bot-tags/fixture_role", json={"name": "x"}).status_code == 404
 
 
+def test_a_role_tag_color_is_a_palette_key_that_survives_a_rename(api):
+    """TASK-1971: optional chip color; null means the client's automatic color."""
+    created = api.client.post("/v1/bot-tags", json={
+        "slug": "fixture_tint", "name": "Tint", "color": "teal"})
+    assert created.status_code == 201, created.text
+    assert created.json()["color"] == "teal"
+
+    renamed = api.client.patch("/v1/bot-tags/fixture_tint",
+                               json={"slug": "fixture_tinted", "color": "rose"})
+    assert renamed.status_code == 200, renamed.text
+    assert (renamed.json()["slug"], renamed.json()["color"]) == ("fixture_tinted", "rose")
+    kept = api.client.patch("/v1/bot-tags/fixture_tinted", json={"name": "Tinted"})
+    assert kept.json()["color"] == "rose"  # an edit that omits color keeps it
+
+    refused = api.client.patch("/v1/bot-tags/fixture_tinted", json={"color": "gold"})
+    assert refused.status_code == 422, refused.text
+    cleared = api.client.patch("/v1/bot-tags/fixture_tinted", json={"color": None})
+    assert cleared.status_code == 200 and cleared.json()["color"] is None
+
+    system = api.client.patch("/v1/bot-tags/private", json={"color": "sky"})
+    assert system.status_code == 409  # behaviour colors are fixed in code
+    listed = {t["slug"]: t for t in api.client.get("/v1/bot-tags").json()["data"]}
+    assert listed["private"]["color"] is None and listed["fixture_tinted"]["color"] is None
+
+
+def test_bootstrap_adds_the_color_column_to_an_older_catalog(api):
+    with api.rig.engine.begin() as conn:
+        conn.execute(text("ALTER TABLE bot_tag_catalog DROP COLUMN color"))
+    with api.rig.engine.begin() as conn:
+        catalog.ensure_schema(conn)
+        assert catalog.owned(conn, catalog.CATALOG_TABLE)
+    created = api.client.post("/v1/bot-tags", json={
+        "slug": "fixture_after", "name": "After", "color": "lime"})
+    assert created.status_code == 201 and created.json()["color"] == "lime"
+
+
 @pytest.mark.parametrize("body, status", [
     ({"slug": "private", "name": "Shadow"}, 409),
     ({"slug": "fixture_dupe", "name": "Second"}, 409),
@@ -285,6 +321,8 @@ def test_a_role_tag_is_created_listed_edited_and_deleted(api):
     ({"slug": "fixture_bad", "name": "Bad", "capabilities": ["read", "read"]}, 422),
     ({"slug": "fixture_bad", "name": "Bad", "capabilities": [" read"]}, 422),
     ({"slug": "fixture_bad", "name": "Bad", "kind": "behavior"}, 422),
+    ({"slug": "fixture_bad", "name": "Bad", "color": "gold"}, 422),
+    ({"slug": "fixture_bad", "name": "Bad", "color": "#ff0000"}, 422),
 ])
 def test_a_refused_role_create_writes_nothing(api, body, status):
     api.client.post("/v1/bot-tags", json={"slug": "fixture_dupe", "name": "First"})

@@ -242,6 +242,7 @@ class BotTagResponse(BaseModel):
     kind: Literal["behavior", "role"]
     prompt_key: str | None = None
     capabilities: list[str] = Field(default_factory=list)
+    color: str | None = None  # palette key (TASK-1971); null = automatic
     system: bool
     used_by: list[BotTagUse] = Field(default_factory=list)
     created_at: datetime | None = None
@@ -262,6 +263,7 @@ class BotTagCreateRequest(BaseModel):
     description: str = ""
     prompt_key: str | None = None
     capabilities: list[str] = Field(default_factory=list)
+    color: str | None = None
 
 
 class BotTagPatchRequest(BaseModel):
@@ -277,6 +279,7 @@ class BotTagPatchRequest(BaseModel):
     description: str | None = None
     prompt_key: str | None = None
     capabilities: list[str] | None = None
+    color: str | None = None  # null clears to the automatic color
 
 
 class BotTagInstructionsRequest(BaseModel):

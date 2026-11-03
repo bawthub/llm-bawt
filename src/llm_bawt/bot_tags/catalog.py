@@ -24,6 +24,7 @@ CATALOG_TABLE = "bot_tag_catalog"
 ASSIGNMENT_TABLE = "bot_profile_tags"
 ASSIGNMENT_INDEX = "bot_profile_tags_tag_idx"
 PROMPT_KEY_INDEX = "bot_tag_catalog_prompt_key_key"
+COLOR_COLUMN = "color"
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS bot_tag_catalog (
                CHECK (prompt_key IS NULL OR (kind = 'role' AND prompt_key LIKE 'role.%')),
   capabilities JSONB        NOT NULL DEFAULT '[]'::jsonb
                CHECK (jsonb_typeof(capabilities) = 'array'),
+  color        VARCHAR(32)  NULL,
   system       BOOLEAN      NOT NULL DEFAULT FALSE,
   created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
   updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -64,6 +66,18 @@ CREATE TABLE IF NOT EXISTS bot_profile_tags (
   CHECK (bot_slug = lower(btrim(bot_slug)) AND bot_slug <> '')
 )
 """
+
+_HAS_COLUMN = text("""
+    SELECT EXISTS (
+      SELECT 1 FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = current_schema() AND c.relname = :rel AND a.attname = :col
+        AND a.attnum > 0 AND NOT a.attisdropped)
+""")
+# TASK-1971: an optional palette key for a role tag's chip. Nullable and
+# unconstrained in SQL (the palette is validated by the store), so adding it
+# to an existing catalog is a metadata-only change.
+_COLOR_DDL = "ALTER TABLE bot_tag_catalog ADD COLUMN IF NOT EXISTS color VARCHAR(32) NULL"
 
 _INDEX_DDL = "CREATE INDEX IF NOT EXISTS bot_profile_tags_tag_idx ON bot_profile_tags (tag_slug)"
 
@@ -99,6 +113,8 @@ def ensure_schema(conn) -> None:
     """
     if not owned(conn, CATALOG_TABLE):
         conn.execute(text(_CATALOG_DDL))
+    elif not conn.execute(_HAS_COLUMN, {"rel": CATALOG_TABLE, "col": COLOR_COLUMN}).scalar_one():
+        conn.execute(text(_COLOR_DDL))
     if not owned(conn, ASSIGNMENT_TABLE):
         conn.execute(text(_ASSIGNMENT_DDL))
     if not owned(conn, ASSIGNMENT_INDEX, "i"):
