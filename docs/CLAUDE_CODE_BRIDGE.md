@@ -120,25 +120,43 @@ MCP HTTP header on the `bawthub` MCP tool calls only:
 
 Propagation trail (all in this repo — the bridge is a dumb executor here too):
 
-1. `src/llm_bawt/service/chat_streaming.py:347-373` — mint site. Only fires
-   when `is_agent_backend AND backend_name == "claude-code" AND
-   thread_binding.session_id` is present. Mint failure logs a warning; the
-   chat turn is never blocked over association plumbing.
-2. `src/llm_bawt/agent_bridge/subscriber.py` — capability rides as one of the
+1. `src/llm_bawt/task_turn_context.py` — `mint_for_agent_turn` mints for
+   supported agent backends (`claude-code` and `codex`) with a resolved
+   `session_id`. Mint failure logs a warning; the chat turn is never blocked
+   over association plumbing.
+2. `src/agent_bridge/subscriber.py` — capability rides as one of the
    Redis command fields (`task_turn_capability`).
 3. `src/claude_code_bridge/send_request.py` → `send_handler.py` →
-   `send_stream.py` — pops the field, sets the MCP HTTP header on the
-   outbound MCP client env for this run.
+   `send_stream.py` — pops the field and sets the per-attempt MCP HTTP header.
+   The SDK child environment also receives the opaque bearer as
+   `LLM_BAWT_TASK_TURN_CONTEXT` for shell helpers. Each attempt gets a fresh
+   environment copy; absent context explicitly clears any inherited value.
 4. `src/llm_bawt/mcp_server/task_association.py` —
    `TaskTurnCapabilityMiddleware` binds the ASGI header to a `ContextVar`;
    `open_task_turn_context()` verifies the Fernet token in the app process.
 
-The native Codex bridge does not mint or forward the capability; MCP
-task tools that require it (`tasks_associate_current`, the
-`associate_current_turn=true` flag on `tasks_update` / `tasks_create`) fail
-closed on those bridges. See
+The native Codex bridge already supplies the same environment variable through
+`codex_mcp_environment`; its MCP correlation also carries a signed request
+context. See
 [`agent-skills/agent-system/task-conversation-architecture.md`](../../agent-skills/agent-system/task-conversation-architecture.md)
 for the cross-system diagrams and the internal-listener write contract.
+
+### Git author attribution (TASK-1280)
+
+`GET /v1/git/identity` verifies `X-LLM-Bawt-Task-Turn-Context` using the existing
+capability codec. It returns only `bot_id`, `author_name` (the bot slug),
+`author_email` (`<slug>@bots.bawt.local`), and `turn_id`. The canonical slug must
+match `[a-z0-9][a-z0-9_-]{0,63}`; unsafe identities fail closed rather than being
+sanitized. Caller-supplied bot hints are not authority. Missing, invalid, or
+expired capabilities return 401; a verified but unsuitable slug returns 403.
+Responses are marked `Cache-Control: no-store`.
+
+This is **six-hour bearer attribution, not proof of an active turn**. The route
+performs no live-turn or database lookup, so possession remains sufficient
+within the existing TTL even after the originating turn ends. The capability
+is a secret: do not log it, print it, or persist it in Git configuration. The
+identity response contains neither the capability nor provider credentials;
+GitHub credential and adapter behavior is unchanged.
 
 ## Related files
 

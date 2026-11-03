@@ -26,6 +26,7 @@ import os
 from collections.abc import AsyncIterable
 
 from agent_bridge.events import AgentEventKind
+from agent_bridge.mcp_call_context import MCP_TASK_TURN_CONTEXT_ENV
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk.types import (
     HookMatcher,
@@ -265,7 +266,12 @@ class ClaudeStreamMixin:
         skill_bundle: str | None = None,
         skill_selection: str | None = None,
     ) -> ClaudeAgentOptions:
-        """Construct per-attempt options with isolated MCP request headers."""
+        """Construct per-attempt options with isolated capability and MCP headers."""
+        # Shell helpers resolve Git attribution using this opaque bearer. The SDK
+        # merges env over os.environ, so an absent capability must explicitly
+        # clear any inherited value. Never mutate the caller's reusable sdk_env.
+        sdk_env = dict(sdk_env)
+        sdk_env[MCP_TASK_TURN_CONTEXT_ENV] = task_turn_capability or ""
         mcp_servers = copy.deepcopy(self._mcp_servers) if self._mcp_servers else {}
         if task_turn_capability:
             bawthub = mcp_servers.get("bawthub")

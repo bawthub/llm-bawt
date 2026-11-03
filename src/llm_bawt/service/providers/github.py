@@ -4,9 +4,11 @@ Auth model (locked with Nick): a single ``bawthub`` GitHub App, authorized by
 each tenant user via **device flow** (no callback URL needed). The user approves
 once at ``github.com/login/device``; we then read their App installations, let
 them pick repos, and mint **short-lived installation tokens** on demand for git
-over HTTPS. No static secret ever lands on the tenant.
+over HTTPS. App configuration is app-side only, encrypted in the existing
+credential store under ``github-app`` (separate from the user's connection).
+Vault remains the operator's canonical source; this store is the runtime copy.
 
-Required env (the App Nick registers once):
+Legacy env fallback, only when no stored App configuration exists:
   * ``GITHUB_APP_CLIENT_ID``   — OAuth client id (device flow)
   * ``GITHUB_APP_ID``          — numeric App id (JWT ``iss``)
   * ``GITHUB_APP_PRIVATE_KEY`` — PEM contents  (or ``GITHUB_APP_PRIVATE_KEY_PATH``)
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -44,10 +47,21 @@ _DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 _SCOPE = "read:user"
 _UA = "llm-bawt-provider-connect"
 _TIMEOUT = 15.0
+_APP_CONFIG_PROVIDER = "github-app"
 
 
 class GitHubConfigError(RuntimeError):
-    """Raised when the GitHub App env is not configured."""
+    """Raised when GitHub App configuration is missing or unusable."""
+
+
+def parse_repository(repository: str) -> tuple[str, str]:
+    """Accept only an OWNER/REPO slug, never a URL or path/query fragment."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}", repository):
+        raise ValueError("repository must be OWNER/REPO")
+    owner, repo = repository.split("/")
+    if repo in {".", ".."}:
+        raise ValueError("repository must be OWNER/REPO")
+    return owner, repo
 
 
 def _client_id() -> str:
@@ -88,13 +102,13 @@ def _headers(token: str | None = None, *, bearer: bool = False) -> dict[str, str
     return h
 
 
-def _app_jwt() -> str:
+def _app_jwt(app_id: str | None = None, private_key: str | None = None) -> str:
     """Signed RS256 JWT for App-level API calls (short-lived, <=10min)."""
     import jwt  # lazy — pyjwt[crypto]
 
     now = int(time.time())
-    payload = {"iat": now - 60, "exp": now + 9 * 60, "iss": _app_id()}
-    return jwt.encode(payload, _private_key(), algorithm="RS256")
+    payload = {"iat": now - 60, "exp": now + 9 * 60, "iss": app_id or _app_id()}
+    return jwt.encode(payload, private_key or _private_key(), algorithm="RS256")
 
 
 class GitHubAdapter(ProviderAdapter):
@@ -102,19 +116,69 @@ class GitHubAdapter(ProviderAdapter):
     label = "GitHub"
     auth_methods = (AUTH_DEVICE_OAUTH,)
 
-    @staticmethod
-    def is_configured() -> bool:
+    def is_configured(self) -> bool:
         try:
-            _client_id()
+            self._device_client_id()
             return True
         except GitHubConfigError:
             return False
+
+    def configure_app(self, app_id: str, client_id: str, private_key: str) -> None:
+        """Install a complete runtime copy, without touching OAuth/selection state.
+
+        Local structural validation only: no upstream call and no key readback.
+        All fields live in ``secret``, never public metadata.
+        """
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+
+        app_id, client_id = app_id.strip(), client_id.strip()
+        private_key = private_key.replace("\\n", "\n").strip()
+        if not re.fullmatch(r"[1-9][0-9]*", app_id) or not re.fullmatch(r"[A-Za-z0-9_.-]+", client_id):
+            raise ValueError("Invalid GitHub App IDs")
+        try:
+            key = serialization.load_pem_private_key(private_key.encode(), password=None)
+        except (ValueError, TypeError):
+            raise ValueError("Invalid GitHub App RSA private key") from None
+        if not isinstance(key, RSAPrivateKey) or key.key_size < 2048:
+            raise ValueError("GitHub App key must be RSA, at least 2048 bits")
+        if self.store.durable_key_problem() is not None:
+            raise GitHubConfigError("Persistent provider encryption unavailable")
+        self.store.save(ConnectionRecord(
+            provider=_APP_CONFIG_PROVIDER,
+            status=STATUS_CONNECTED,
+            auth_method="app",
+            secret={"app_id": app_id, "client_id": client_id, "private_key": private_key},
+        ))
+
+    def _stored_app(self) -> dict[str, str] | None:
+        record = self.store.load(_APP_CONFIG_PROVIDER)
+        if record is None:
+            return None
+        fields = ("app_id", "client_id", "private_key")
+        if record.status != STATUS_CONNECTED or any(
+            not isinstance(record.secret.get(field), str) or not record.secret[field].strip()
+            for field in fields
+        ):
+            # Never silently mix a broken stored configuration with env credentials.
+            raise GitHubConfigError("Stored GitHub App configuration is unavailable")
+        return {field: record.secret[field] for field in fields}
+
+    def _device_client_id(self) -> str:
+        stored = self._stored_app()
+        return stored["client_id"] if stored is not None else _client_id()
+
+    def _installation_jwt(self) -> str:
+        stored = self._stored_app()
+        if stored is None:
+            return _app_jwt()
+        return _app_jwt(stored["app_id"], stored["private_key"])
 
     # --- device flow --------------------------------------------------------
     def start_device_flow(self) -> DeviceFlowStart:
         resp = httpx.post(
             _DEVICE_CODE_URL,
-            data={"client_id": _client_id(), "scope": _SCOPE},
+            data={"client_id": self._device_client_id(), "scope": _SCOPE},
             headers={"Accept": "application/json", "User-Agent": _UA},
             timeout=_TIMEOUT,
         )
@@ -132,7 +196,7 @@ class GitHubAdapter(ProviderAdapter):
         resp = httpx.post(
             _ACCESS_TOKEN_URL,
             data={
-                "client_id": _client_id(),
+                "client_id": self._device_client_id(),
                 "device_code": device_code,
                 "grant_type": _DEVICE_GRANT,
             },
@@ -201,23 +265,51 @@ class GitHubAdapter(ProviderAdapter):
         )
 
     # --- installation token (for git credential helper) ---------------------
-    def mint_installation_token(self, record: ConnectionRecord | None = None) -> str:
-        """Mint a fresh, short-lived installation token. Never persisted."""
-        rec = record or self.store.load(self.id)
-        if rec is None or rec.status != STATUS_CONNECTED:
-            raise RuntimeError("GitHub is not connected")
-        installation_id = rec.meta.get("installation_id")
-        if not installation_id:
-            raise RuntimeError(
-                "No GitHub App installation selected — pick repos/installation first"
+    def mint_installation_token(
+        self, record: ConnectionRecord | None = None, *, repository: str | None = None,
+    ) -> str:
+        """Mint a fresh token; optional repository selection is request-local only.
+
+        Repository requests use App authority directly, independent of the device
+        OAuth connection/global selection. GitHub checks the App installation's
+        actual repository access; the minted token is narrowed to that repo.
+        """
+        token_options: dict[str, Any] = {}
+        if repository is not None:
+            owner, repo = parse_repository(repository)
+            headers = _headers(self._installation_jwt(), bearer=True)
+            installation = httpx.get(
+                f"{_API}/repos/{owner}/{repo}/installation",
+                headers=headers,
+                timeout=_TIMEOUT,
             )
+            installation.raise_for_status()
+            installation_id = installation.json()["id"]
+            if type(installation_id) is not int or installation_id <= 0:
+                raise RuntimeError("Invalid GitHub installation response")
+            token_options["json"] = {"repositories": [repo]}
+        else:
+            # Omitted query preserves the original connection/selection contract.
+            rec = record or self.store.load(self.id)
+            if rec is None or rec.status != STATUS_CONNECTED:
+                raise RuntimeError("GitHub is not connected")
+            installation_id = rec.meta.get("installation_id")
+            if not installation_id:
+                raise RuntimeError(
+                    "No GitHub App installation selected — pick repos/installation first"
+                )
+            headers = _headers(self._installation_jwt(), bearer=True)
         resp = httpx.post(
             f"{_API}/app/installations/{installation_id}/access_tokens",
-            headers=_headers(_app_jwt(), bearer=True),
+            headers=headers,
             timeout=_TIMEOUT,
+            **token_options,
         )
         resp.raise_for_status()
-        return resp.json()["token"]
+        token = resp.json()["token"]
+        if not isinstance(token, str) or not token or any(char.isspace() for char in token):
+            raise RuntimeError("Invalid GitHub token response")
+        return token
 
     def list_installations(self) -> list[dict[str, Any]]:
         rec = self.store.load(self.id)

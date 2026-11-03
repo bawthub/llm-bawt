@@ -11,15 +11,21 @@ event loop isn't blocked.
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, SecretStr
 
+from ...task_turn_context import (
+    TASK_TURN_CONTEXT_HEADER,
+    TaskTurnContextError,
+    open_task_turn_context,
+)
 from .. import bridge_gate
 from ..dependencies import get_service
 from ..providers.base import AUTH_API_KEY, AUTH_CLI_OAUTH, AUTH_DEVICE_OAUTH
-from ..providers.github import GitHubAdapter, GitHubConfigError
+from ..providers.github import GitHubAdapter, GitHubConfigError, parse_repository
 from ..providers.registry import all_adapters, get_adapter
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,14 @@ class SelectReposRequest(BaseModel):
 
 class ApiKeyRequest(BaseModel):
     api_key: str
+
+
+class GitHubAppConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app_id: SecretStr
+    client_id: SecretStr
+    private_key: SecretStr
 
 
 def _adapter_or_404(provider_id: str):
@@ -354,6 +368,43 @@ async def chatgpt_auth_bundle(request: Request):
 
 
 # --- GitHub-specific --------------------------------------------------------
+@router.put("/v1/providers/github/app-config")
+async def github_configure_app(request: Request, response: Response):
+    """Install app-side runtime configuration from the operator's vault.
+
+    JSON fields: app_id (numeric string), client_id, private_key (RSA PEM).
+    Full replacement, no upstream calls/readback; OAuth selection is untouched.
+    Uses the GitHub credential bridge gate before parsing any submitted secrets.
+    Parse inside the handler so validation errors never echo submitted secrets.
+    """
+    no_store = {"Cache-Control": "no-store"}
+    response.headers.update(no_store)
+    try:
+        bridge_gate.check(request, bridge_gate.GIT_CREDENTIAL)
+    except HTTPException as error:
+        error.headers = {**(error.headers or {}), **no_store}
+        raise
+    try:
+        body = GitHubAppConfigRequest.model_validate(await request.json())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid GitHub App configuration", headers=no_store) from None
+    adapter = _adapter_or_404("github")
+    if not isinstance(adapter, GitHubAdapter):
+        raise HTTPException(status_code=404, detail="github not available", headers=no_store)
+    try:
+        await run_in_threadpool(
+            adapter.configure_app,
+            body.app_id.get_secret_value(),
+            body.client_id.get_secret_value(),
+            body.private_key.get_secret_value(),
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid GitHub App configuration", headers=no_store) from None
+    except Exception:  # noqa: BLE001 — storage/crypto errors must not disclose input
+        raise HTTPException(status_code=503, detail="Could not persist GitHub App configuration", headers=no_store) from None
+    return {"configured": True}
+
+
 @router.get("/v1/providers/github/installations")
 async def github_installations():
     service = get_service()
@@ -378,8 +429,45 @@ async def github_select_repos(body: SelectReposRequest):
     return {"connection": record.public()}
 
 
+@router.get("/v1/git/identity")
+async def git_identity(request: Request, response: Response):
+    """Return Git author attribution from a verified task-turn bearer capability.
+
+    Uses the existing six-hour capability TTL, not active-turn liveness: a
+    bearer remains usable until expiry even after its originating turn ends.
+    No caller-supplied bot hint, provider credential, or live database is used.
+    The response contains only public author fields and the attributed turn ID.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        context = open_task_turn_context(request.headers.get(TASK_TURN_CONTEXT_HEADER))
+    except TaskTurnContextError:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing, invalid, or expired task-turn context",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+
+    # Actor IDs accepted by the capability codec are broader than bot slugs.
+    # Restrict the author/email local part to a bounded, canonical ASCII slug;
+    # never sanitize an unsafe identity into a different bot's attribution.
+    slug = context.bot_id
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", slug):
+        raise HTTPException(
+            status_code=403,
+            detail="Task-turn bot identity is not a safe Git author slug",
+            headers={"Cache-Control": "no-store"},
+        )
+    return {
+        "bot_id": slug,
+        "author_name": slug,
+        "author_email": f"{slug}@bots.bawt.local",
+        "turn_id": context.turn_id,
+    }
+
+
 @router.get("/v1/providers/github/git-credential")
-async def github_git_credential(request: Request):
+async def github_git_credential(request: Request, repository: str | None = None):
     """Internal: mint a fresh installation token in git-credential format.
 
     The tenant bridge configures ``credential.helper`` to curl this endpoint.
@@ -387,24 +475,40 @@ async def github_git_credential(request: Request):
     other services by compose service name, and only the frontend (:3000) is
     forwarded to the LAN — the app port is not routed to the internet. The
     ``X-Bridge-Token`` git-credential gate (``bridge_gate``) adds a token check.
+    With ``repository=OWNER/REPO``, resolve the App installation for that repo
+    and restrict the token to it, without changing global installation state.
+    Omission retains the legacy selected-installation behavior.
     """
-    bridge_gate.check(request, bridge_gate.GIT_CREDENTIAL)
+    no_store = {"Cache-Control": "no-store"}
+    try:
+        bridge_gate.check(request, bridge_gate.GIT_CREDENTIAL)
+    except HTTPException as error:
+        error.headers = {**(error.headers or {}), **no_store}
+        raise
+    if repository is not None:
+        try:
+            parse_repository(repository)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="repository must be OWNER/REPO", headers=no_store) from None
 
     service = get_service()
     adapter = get_adapter(service.config, "github")
     if not isinstance(adapter, GitHubAdapter):
-        raise HTTPException(status_code=404, detail="github not available")
+        raise HTTPException(status_code=404, detail="github not available", headers=no_store)
     try:
-        token = await run_in_threadpool(adapter.mint_installation_token)
-    except GitHubConfigError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("git-credential mint failed: %s", e)
-        raise HTTPException(status_code=502, detail="git-credential mint failed")
+        if repository is None:
+            token = await run_in_threadpool(adapter.mint_installation_token)
+        else:
+            token = await run_in_threadpool(adapter.mint_installation_token, repository=repository)
+    except GitHubConfigError:
+        raise HTTPException(status_code=503, detail="GitHub App configuration unavailable", headers=no_store) from None
+    except Exception:  # noqa: BLE001 — never log upstream bodies or credentials
+        logger.warning("git-credential mint failed")
+        raise HTTPException(status_code=502, detail="git-credential mint failed", headers=no_store) from None
 
     # git credential helper protocol: key=value lines on stdout.
     body = f"username=x-access-token\npassword={token}\n"
-    return Response(content=body, media_type="text/plain")
+    return Response(content=body, media_type="text/plain", headers=no_store)
 
 
 @router.get("/v1/providers/chatgpt-app/token")
