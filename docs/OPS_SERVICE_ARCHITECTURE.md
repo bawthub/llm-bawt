@@ -2,7 +2,7 @@
 
 **Status:** migration design with dated source/readiness evidence; integrated runtime acceptance is not complete.
 
-**Updated:** 2026-11-03 (TASK-1169 FastAPI control host source slice; other tasks retain their dated rollout records). **Accountable owner:** Snark.
+**Updated:** 2026-11-03 (TASK-1170 frontend consumer reconciliation; TASK-1169 FastAPI control host source slice; other tasks retain their dated rollout records). **Accountable owner:** Snark.
 
 **Tasks:** TASK-1169–TASK-1173. Related health delivery: TASK-1157.
 
@@ -109,9 +109,9 @@ A readiness healthcheck exists in Compose source but has not been activated in t
 | Consumer | Current dependency | Migration |
 | --- | --- | --- |
 | llm-bawt app | Admission-only: prepares through the ops control channel; no executor, dispatch or reconciliation. The Docker socket and worker env in its compose are not yet removed | Done in source, TASK-1169 S3; mount removal follows activation |
-| Ops collectors/execution | Separate Docker access implementations | Cohesive runtime adapter, TASK-1169 |
-| Hono dev/prod | Docker list/sync/state/start/stop/restart helpers | TASK-1170 |
-| Hono repository browsing | `repos.ts` imports `getContainerMounts` for path discovery | Explicit deployment/repo-path configuration, TASK-1170 |
+| Ops collectors/execution | One Docker SDK construction path: `DockerExecutor` (`executor.py`), reused by `health_collector.docker_client` | Done in source, TASK-1169 |
+| Hono dev/prod | None in code. `/tools/docker` reads `/api/system/ops/services` (ops health) and runs actions through the catalog Run dialog; `/api/docker/containers*` return 410; `dockerApi.ts` is deleted. The `frontend`/`frontend-prod` socket mounts are unused and remain until TASK-1173 | Done in source and on DEV (TASK-1170 via the TASK-1169-labelled BawtHub commits `d7df2b67`, `44f8112c`); mount removal TASK-1173 |
+| Hono repository browsing | `repos.ts` takes the host path from `REPOS_HOST_ROOT`, never Docker | Done in source, BawtHub `39d2ee30` (TASK-1170) |
 | Voice backend | Fenced llm-bawt restart client (`tts/restart.py`) using the existing service token; direct shell/Docker restart helper removed | TASK-1171 source published; backend observed token-configured and socket-free on 2026-11-01. Catalog enablement and actual Restart acceptance remain pending below |
 | GPU handoff in app | Reads STT/TTS from the reconciler's `/v1/health/services/bawthub.{stt,tts}` (`LLM_BAWT_OPS_HEALTH_URL`); refuses on anything but one fresh, typed instance. No Docker client. Mutations use consented ops jobs | Done in source, TASK-1171 |
 | Traefik | Docker provider watches labels through a socket mount | Deployment-owned routing, TASK-1172 |
@@ -228,7 +228,7 @@ Stable DNS alone is not proof of replica load balancing or stale-endpoint recove
 | Task | Deliverable | Dependency |
 | --- | --- | --- |
 | TASK-1169 | FastAPI ops host; portable contracts; existing ledger/admission separation; adapter and bounded execution; recovery tests | Foundation |
-| TASK-1170 | Frontend controls/health plus repo-path discovery migrated; direct helpers removed | 1169 |
+| TASK-1170 | Frontend controls/health plus repo-path discovery migrated; direct helpers removed (done; socket mounts left to 1173) | 1169 |
 | TASK-1171 | TTS restart and GPU observations use the shared contract | 1169 |
 | TASK-1172 | Socket-free deployment routing using supported provider configuration | Independent of 1169 |
 | TASK-1173 | Integrated authorized activation, actual mount removal, healthcheck/recovery configuration and final evidence | 1169–1172 |
@@ -272,13 +272,14 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `src/llm_bawt/service/routes/ops.py`: existing app HTTP surface.
 - `src/llm_bawt/media/gpu_handoff_adapter.py`: GPU-service observation through the reconciler's `/v1/health/services` (TASK-1171).
 - `docker-compose.ops.yml`: ops deployment and source healthcheck configuration.
-- `bawthub/frontend/server/lib/dockerApi.ts`, `routes/docker-unraid.ts`, `routes/repos.ts`: direct frontend Docker consumers (route paths relative to `frontend/server/`).
+- `bawthub/frontend/server/routes/ops-services.ts`, `lib/opsHealth.ts`, `routes/docker-containers.ts` (410 tombstones), `routes/repos.ts` (`REPOS_HOST_ROOT`): the frontend's ops-backed service view; no direct Docker consumer remains (paths relative to `frontend/server/`).
 - `bawthub/bawthub/main_websocket.py`, `bawthub/bawthub/tts/restart.py`: voice restart controller and fenced llm-bawt client; the direct `restart_tts_container.sh` helper is removed (TASK-1171).
 
 ### Decision record
 
 - **2026-11-02 (TASK-1169 FastAPI health host):** Reconciled the published prepared-hold correction and existing process/adapter work without replay. Migrated only the dedicated health host and runtime ownership to FastAPI/Uvicorn lifespan; kept the separate bounded control transport, immutable wire contracts, fixed producers and execution/recovery semantics. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
 - **2026-11-03 (TASK-1169 FastAPI control host):** Moved the `8651` control listener from the standard-library server to FastAPI/Uvicorn on its own socket and loop thread, keeping the wire contract, bearer, slots and wall budget unchanged and adding header/body deadlines. With this, the ops service's control, status and health endpoints are all on FastAPI in source. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
+- **2026-11-03 (TASK-1170 reconciliation):** BawtHub frontend code has no direct Docker consumer: service view and actions go through ops, legacy container routes are 410, repo paths come from `REPOS_HOST_ROOT`. The BawtHub ratchet's only frontend offenders are the two unused socket mounts, now owned by TASK-1173.
 
 - **2026-10-18:** Health monitoring fixed independently of full isolation; broader tasks remain queued.
 - **2026-10-18:** Caid review narrows scope: reuse ledger, portable service contracts, shared observations, routing owned by deployment, guardrails first. Follow-up found repository mount inspection; TASK-1170 explicitly covers it.
