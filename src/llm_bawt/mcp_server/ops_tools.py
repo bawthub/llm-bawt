@@ -128,6 +128,26 @@ def _caller_instruction(ops, result: dict, bot_id: str | None) -> dict | None:
         return None
 
 
+def _is_gate_operation(ops, operation: str) -> bool:
+    from ..ops.gate_driver import GATE_ACTION
+    from ..ops.service import _spec_action
+    return _spec_action(ops.store.get_operation_by_slug(operation)) == GATE_ACTION
+
+
+async def _admit_gate(ops, operation: str, args: dict, idem: str) -> dict:
+    """TASK-1865: a batch gate is admitted QUEUED from the signed turn; the
+    ops reconciler claims and runs it, and the callback reaches this turn."""
+    from ..ops.gate_driver import admit_gate
+    from .task_association import current_task_turn_capability
+
+    try:
+        result = await asyncio.to_thread(admit_gate, ops.store, operation_slug=operation, args=args,
+                                         turn_token=current_task_turn_capability(), idempotency_key=idem)
+    except Exception as exc:  # noqa: BLE001 - bounded, code-first text
+        raise RuntimeError(f"[gate_admission_refused] {type(exc).__name__}: {str(exc)[:200]}") from exc
+    return ops_run_receipt(result, idem, caller_instruction=None)
+
+
 @mcp.tool(name="ops_run")
 async def ops_run(
     operation: str,
@@ -160,6 +180,8 @@ async def ops_run(
     ops = await asyncio.to_thread(_get_ops_service)
     idem = (idempotency_key or "").strip() or uuid.uuid4().hex
     provenance = _caller_provenance()
+    if await asyncio.to_thread(_is_gate_operation, ops, operation):
+        return await _admit_gate(ops, operation, {} if args is None else args, idem)
     try:
         result = await asyncio.to_thread(
             ops.dispatch_job,

@@ -279,6 +279,11 @@ def validate_spec(command_script: str) -> dict:
         return validate_remove_spec(spec)
     if is_release_spec(spec):
         return validate_release_spec(spec)
+    if isinstance(spec, dict) and spec.get("action") == "batch_gate":
+        # TASK-1865: fixed workload; everything else comes from the trusted plan.
+        if spec != {"action": "batch_gate"}:
+            raise ValueError("batch_gate spec carries no other fields")
+        return spec
     allowed = {"action", "container_name", "container_name_from_arg", "compose_project",
                "compose_service", "compose_service_from_arg", "stop_grace_seconds", *RESTART_HEALTH_KEYS}
     if not isinstance(spec, dict) or set(spec) - allowed:

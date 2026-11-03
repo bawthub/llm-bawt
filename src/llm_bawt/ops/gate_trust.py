@@ -164,7 +164,8 @@ def read_trusted_gate_request(job: OpsJob) -> TrustedGateRequest:
 
 
 def create_trusted_gate_job(store: OpsStore, *, operation_slug: str, plan: dict,
-                            turn_token: str, idempotency_key: str) -> OpsJob:
+                            turn_token: str, idempotency_key: str,
+                            direct_callback: bool = False) -> OpsJob:
     """Freeze configured evidence and authenticated identity in one QUEUED insert.
 
     The only caller identity is opened from the valid authenticated capability;
@@ -207,10 +208,17 @@ def create_trusted_gate_job(store: OpsStore, *, operation_slug: str, plan: dict,
         if _configured_environment(session.connection(), workload, lock=True) != environment:
             raise IdempotencyConflict("gate environment changed before request insertion")
 
+    callback = None
+    if direct_callback:
+        # Destination comes only from the signed capability, never arguments.
+        from .gate_receipt import gate_callback
+        callback = canonical_json(gate_callback(workload, bot_id=caller.bot_id,
+            user_id=caller.user_id, session_id=caller.session_id))
     job = store.create_job(operation=operation, args_json=canonical_json(workload.to_dict()),
         display_args_json=canonical_json(workload.to_dict()), idempotency_key=idempotency_key,
         invocation_snapshot_json=sealed, request_payload_json=payload, fence=fence,
         caller_actor=f"bot:{caller.bot_id}", caller_bot_id=caller.bot_id,
-        caller_user_id=caller.user_id, caller_turn_id=caller.turn_id)
+        caller_user_id=caller.user_id, caller_turn_id=caller.turn_id,
+        receipt_callback_json=callback)
     read_trusted_gate_request(job)
     return job

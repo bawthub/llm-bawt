@@ -51,8 +51,15 @@ services:
       LLM_BAWT_LOG_DIR:
       LLM_BAWT_LOG_PREFIX:
       LLM_BAWT_REDIS_URL:
+      # TASK-1865 batch gates: driven only when the scratch path is set. The
+      # repository is read-only git input; scratch must be the identical path
+      # on the host because the runner's bind mounts resolve on the daemon.
+      LLM_BAWT_OPS_GATE_REPOSITORY: /srv/llm-bawt-repo
+      LLM_BAWT_OPS_GATE_SCRATCH: ${LLM_BAWT_OPS_GATE_SCRATCH:-}
     volumes:
       - ./src:/app/src:ro
+      - .:/srv/llm-bawt-repo:ro
+      - ${LLM_BAWT_OPS_GATE_SCRATCH:-/tmp/llm-bawt-ops-gate-disabled}:${LLM_BAWT_OPS_GATE_SCRATCH:-/tmp/llm-bawt-ops-gate-disabled}
       # Read only the app's existing encryption key, not its full config directory.
       # Release reconciliation must decrypt the same DB-stored provider credentials.
       - ${HOME}/.config/llm-bawt/secret.key:/root/.config/llm-bawt/secret.key:ro

@@ -37,6 +37,12 @@ def build_full_service():
     return service, approvals
 
 
+def _attach_gate_driver(service):
+    from .gate_driver import build_gate_driver
+    service.gate_driver = build_gate_driver(service.store)
+    return service
+
+
 def build_control_service():
     return build_full_service()[0]
 
@@ -46,6 +52,7 @@ def build_reconciler(interval):
     from .reconciler import JobCreatedWaiter, OpsReconciler
 
     service, approvals = build_full_service()
+    _attach_gate_driver(service)  # Only the reconciler loop drives batch gates.
     engine = service.store.engine
     # The app's job creation notifies; wake on it rather than the interval.
     waiter = JobCreatedWaiter(engine) if engine.dialect.name == "postgresql" else None

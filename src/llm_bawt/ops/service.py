@@ -48,6 +48,9 @@ APPROVAL_REQUIRED = ("this operation runs only through an approval card: ask an 
 APPROVAL_ONLY_ACTIONS = frozenset({APP_CONFIG_ACTION, PLAN_ACTION, DEV_CONFIG_ACTION})
 
 
+from .gate_driver import GATE_ACTION, is_gate_snapshot  # noqa: E402
+
+
 def _spec_action(operation) -> str | None:
     try:
         spec = json.loads(operation.command_script) if operation is not None else None
@@ -139,6 +142,8 @@ class OpsService:
         # Only the reconciler process drives quiesce jobs (TASK-1233); every
         # other OpsService just reports them.
         self.quiesce_driver = quiesce_driver
+        # Batch gates are driven only by the reconciler (TASK-1865).
+        self.gate_driver = None
         self.releases = release_store or ReleaseStore(None, engine=store.engine)
         self._release_verifier = release_verifier or GitHubReleaseVerifier()
         self.admission_only = admission_only
@@ -474,6 +479,9 @@ class OpsService:
                 release = self.releases.get_by_parent_job(existing.id)
                 result["release_id"] = release.id if release else None
             return result
+        if _spec_action(self.store.get_operation_by_slug(operation_slug)) == GATE_ACTION:
+            raise OpsDispatchError("gate_admission_required",
+                "batch gates are admitted only from a signed agent turn (ops_run)")
         if snapshot is None and _spec_action(self.store.get_operation_by_slug(operation_slug)) in APPROVAL_ONLY_ACTIONS:
             # Refused before prepare_invocation, which would start the sealed
             # source check for a caller that can never run it.
@@ -611,7 +619,10 @@ class OpsService:
             return
         snapshot = json.loads(job.invocation_snapshot_json)
         if "gate_claim_schema" in snapshot:
-            return  # TASK-1865 contracts stay inert: no generic executor path.
+            # Never the generic executor path; only the reconciler's driver claims.
+            if self.gate_driver is not None:
+                self.gate_driver.dispatch(job)
+            return
         if (snapshot.get("spec") or {}).get("action") in APPROVAL_ONLY_ACTIONS and not job.approval_request_id:
             # Defense in depth (TASK-1474 C-c): only an approved request creates one.
             self.store.mark_terminal(job.id, state=JOB_FAILED,
@@ -707,6 +718,9 @@ class OpsService:
                 self._drive_quiesce(job)
             elif not job.invocation_snapshot_json:
                 self.store.mark_terminal(job.id, state=JOB_LOST, error_text="legacy active job has no immutable snapshot; side effects unknown")
+            elif is_gate_snapshot(job.invocation_snapshot_json):
+                if self.gate_driver is not None:
+                    self.gate_driver.reconcile(job)
             else:
                 snapshot = json.loads(job.invocation_snapshot_json)
                 executor = self._resolve_executor(snapshot["execution"]["executor_kind"])
@@ -765,4 +779,9 @@ class OpsService:
             self.get_job_status(job.id)
         if self.quiesce_driver is not None:
             self.quiesce_driver.release_terminal()
+        if self.gate_driver is not None:
+            try:
+                self.gate_driver.retire_pending()
+            except Exception:  # noqa: BLE001 - retirement is retried next cycle
+                logger.exception("gate retirement pass failed; slots stay held")
         return len(jobs)
