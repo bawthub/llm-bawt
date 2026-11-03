@@ -40,7 +40,8 @@ SDK_CHANGELOG_URL = (
     "https://raw.githubusercontent.com/anthropics/claude-agent-sdk-python/main/CHANGELOG.md"
 )
 PYPI_URL = "https://pypi.org/pypi/{name}/json"
-CLOSED_STATUSES = {"COMPLETED", "DELETED"}
+# BawtHub taskStatuses.ts: closed + hidden groups.
+CLOSED_STATUSES = {"COMPLETED", "FAILED", "CANCELLED", "DELETED"}
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CONSTRAINTS = _REPO_ROOT / "docker" / "agent-bridge-constraints.txt"
 

@@ -103,10 +103,11 @@ def test_updates_open_task_when_versions_move(pins):
     assert len(tasks.tasks) == 1 and "openai-codex 0.164.0" in tasks.tasks[0]["title"]
 
 
-def test_completed_task_is_not_reused(pins):
+@pytest.mark.parametrize("closed", ["COMPLETED", "FAILED", "CANCELLED", "DELETED"])
+def test_closed_task_is_not_reused(pins, closed):
     tasks = FakeTasks()
     run(pins, tasks)
-    tasks.tasks[0]["status"] = "COMPLETED"
+    tasks.tasks[0]["status"] = closed
     assert run(pins, tasks)["task"]["action"] == "created"
     assert len(tasks.tasks) == 2
 
