@@ -59,9 +59,10 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterator
 
 from .strict_tools import strip_strict_nulls, to_strict_parameters
+from . import apply_patch as ap
 from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
 from .reasoning import ReasoningCodec
 from .continuation import CommittedOutput
@@ -372,6 +373,47 @@ async def responses_to_anthropic_sse(
         if state is not None:
             state.open_block = block
 
+    patch_mode = request_context.apply_patch if request_context is not None else None
+    patch_cwd = request_context.patch_cwd if request_context is not None else None
+
+    def _emit_patch(block: dict, raw: str) -> Iterator[bytes]:
+        """TASK-1976: a complete apply_patch call → native tool_use blocks.
+
+        Nothing reached the SDK while the patch streamed, so a stall inside it
+        is still pre-commit. The blocks commit here, all at once.
+        """
+        nonlocal saw_tool_use
+        block["emitted"] = True
+        text = (
+            ap.patch_from_function_arguments(raw)
+            if block.get("patch_kind") == "function" else raw
+        )
+        for tool_id, name, tool_input in ap.patch_to_tool_uses(
+            block["call_id"], text, patch_cwd,
+        ):
+            if open_block is not None:
+                yield _stop_frame(open_block["index"])
+                _set_open(None)
+            idx = _alloc_index()
+            native = {"index": idx, "kind": "tool", "item_id": block["item_id"],
+                      "call_id": tool_id, "name": name, "args_flushed": True}
+            _set_open(native)
+            saw_tool_use = True
+            if state is not None:
+                state.tool_committed = True
+            yield _open_start_frame("tool", idx, call_id=tool_id, name=name)
+            yield _sse(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": idx,
+                    "delta": {"type": "input_json_delta",
+                              "partial_json": json.dumps(tool_input, separators=(",", ":"))},
+                },
+            )
+            yield _stop_frame(idx)
+            _set_open(None)
+
     try:
         async for event in upstream_stream:
             etype = getattr(event, "type", "") or ""
@@ -393,6 +435,17 @@ async def responses_to_anthropic_sse(
                     _set_open({"index": idx, "kind": "thinking",
                                "item_id": getattr(item, "id", "") or ""})
                     yield _open_start_frame("thinking", idx)
+                elif (patch_mode and itype in ("function_call", "custom_tool_call")
+                      and (getattr(item, "name", "") or "") == ap.APPLY_PATCH_TOOL):
+                    # TASK-1976: hold the patch; no tool_use opens until .done.
+                    item_id = getattr(item, "id", "") or ""
+                    blocks_by_item[item_id] = {
+                        "index": None, "kind": "patch", "item_id": item_id,
+                        "call_id": (getattr(item, "call_id", "") or item_id
+                                    or f"call_{uuid.uuid4().hex[:16]}"),
+                        "name": ap.APPLY_PATCH_TOOL,
+                        "patch_kind": "custom" if itype == "custom_tool_call" else "function",
+                    }
                 elif itype in ("function_call", "custom_tool_call"):
                     if open_block is not None:
                         yield _stop_frame(open_block["index"])
@@ -583,6 +636,16 @@ async def responses_to_anthropic_sse(
                 elif itype in ("function_call", "custom_tool_call"):
                     item_id = getattr(item, "id", "") or ""
                     block = blocks_by_item.get(item_id) or open_block
+                    if block is not None and block.get("kind") == "patch":
+                        if not block.get("emitted"):
+                            # No .done event: the completed item is authoritative.
+                            raw = (getattr(item, "input", None)
+                                   if itype == "custom_tool_call"
+                                   else getattr(item, "arguments", None))
+                            raw = raw if isinstance(raw, str) and raw else tool_arg_buffers.pop(item_id, "")
+                            for frame in _emit_patch(block, raw):
+                                yield frame
+                        continue
                     if block is not None:
                         yield _stop_frame(block["index"])
                         if open_block is block:
@@ -695,6 +758,14 @@ async def responses_to_anthropic_sse(
                     if etype == "response.function_call_arguments.done"
                     else getattr(event, "input", None)
                 )
+                if block is not None and block.get("kind") == "patch":
+                    if not block.get("emitted"):
+                        for frame in _emit_patch(
+                            block,
+                            complete if isinstance(complete, str) and complete else buffered,
+                        ):
+                            yield frame
+                    continue
                 if relay_trace is not None and item_id == relay_trace.item_id:
                     relay_trace.record(
                         "before_selection", arguments=complete, buffered=buffered,
@@ -791,6 +862,11 @@ async def responses_to_anthropic_sse(
         # .done event). Emit as-is since we can't guarantee well-formed JSON.
         for item_id, leftover in tool_arg_buffers.items():
             block = blocks_by_item.get(item_id) or open_block
+            if block is not None and block.get("kind") == "patch":
+                if leftover and not block.get("emitted"):
+                    for frame in _emit_patch(block, leftover):
+                        yield frame
+                continue
             if block is not None and leftover:
                 if relay_trace is not None and item_id == relay_trace.item_id:
                     relay_trace.record("fallback_partial_json", partial_json=leftover)

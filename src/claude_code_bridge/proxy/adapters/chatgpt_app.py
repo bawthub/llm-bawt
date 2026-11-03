@@ -18,6 +18,7 @@ from .base import ProviderAdapter
 from .openai_chatgpt import _prompt_cache_key
 from .. import retry as retry_mod
 from ..reasoning import ReasoningCodec
+from ..apply_patch import APPLY_PATCH_TOOL
 
 BASE_URL = "https://api.openai.com/v1"
 TOOL_NAMESPACE = "bawthub"
@@ -99,12 +100,18 @@ class ChatGPTAppAdapter(ProviderAdapter):
         # Public SIWC accepts function tools in namespaces, not flat top-level
         # functions. Names stay identical for SDK local/MCP dispatch and output
         # translation. Replay carries the same namespace + call_id.
-        functions = body.get("tools", [])
-        if functions:
+        tools = body.get("tools", [])
+        if tools:
+            # TASK-1976: the freeform apply_patch tool stays top-level, as in
+            # Codex; it is the only non-function tool the translator emits.
+            custom = [t for t in tools if t.get("type") == "custom"
+                      and t.get("name") == APPLY_PATCH_TOOL]
+            functions = [t for t in tools if t not in custom]
             if any(tool.get("type") != "function" for tool in functions):
                 raise ValueError("ChatGPT app route supports local function tools only")
-            body["tools"] = [{"type": "namespace", "name": TOOL_NAMESPACE,
-                              "description": "BawtHub local tools", "tools": functions}]
+            body["tools"] = ([{"type": "namespace", "name": TOOL_NAMESPACE,
+                               "description": "BawtHub local tools", "tools": functions}]
+                             if functions else []) + custom
         for item in body.get("input", []):
             if item.get("type") == "function_call":
                 item["namespace"] = TOOL_NAMESPACE

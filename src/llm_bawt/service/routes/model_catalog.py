@@ -126,6 +126,15 @@ class EndpointWrite(BaseModel):
         strict_tools = normalized.get("responses_strict_tools")
         if strict_tools is not None and not isinstance(strict_tools, bool):
             raise ValueError("serving_config.responses_strict_tools must be a boolean")
+        # TASK-1976: apply_patch in place of Edit/Write on the Responses path.
+        apply_patch = normalized.get("responses_apply_patch")
+        if apply_patch is not None and not (
+            isinstance(apply_patch, bool) or apply_patch in ("freeform", "function")
+        ):
+            raise ValueError(
+                "serving_config.responses_apply_patch must be a boolean, "
+                "\"freeform\" or \"function\""
+            )
         return normalized
 
 

@@ -42,6 +42,7 @@ from .request_context import (
 )
 from .openrouter_routing import parse_openrouter_provider
 from .strict_tools import STRICT_TOOLS_HEADER, parse_strict_tools
+from .apply_patch import APPLY_PATCH_HEADER, parse_mode as parse_apply_patch_mode
 from .transport_policy import normalize_responses_transport
 from .repetition_breaker import RepetitionBreaker, RepetitionLoopError
 from .tool_guard import ToolCallGuard, UnsafeToolCallError
@@ -547,6 +548,7 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
             request_headers.get(OPENROUTER_PROVIDER_HEADER)
         ),
         strict_tools=parse_strict_tools(request_headers.get(STRICT_TOOLS_HEADER)),
+        apply_patch=parse_apply_patch_mode(request_headers.get(APPLY_PATCH_HEADER)),
         skill_names=valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
         status_callback=getattr(
             getattr(getattr(request, "app", None), "state", None),

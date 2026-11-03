@@ -351,6 +351,11 @@ class AgentBridgeBackend(AgentBackend):
                             responses_strict_tools=(
                                 config.get("responses_strict_tools") is True
                             ),
+                            responses_apply_patch=(
+                                config.get("responses_apply_patch")
+                                if config.get("responses_apply_patch") in ("freeform", "function")
+                                else None
+                            ),
                             codex_transport=(
                                 str(config.get("codex_transport")).strip()
                                 if config.get("codex_transport") else None

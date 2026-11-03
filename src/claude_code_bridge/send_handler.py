@@ -334,6 +334,7 @@ class ClaudeSendMixin(
                         responses_transport=responses_transport,
                         openrouter_provider=req.openrouter_provider,
                         strict_tools=req.strict_tools,
+                        apply_patch=req.apply_patch,
                         force_refresh=auth_retry.attempted,
                         bot_id=bot_slug,
                         session_key=session_key,

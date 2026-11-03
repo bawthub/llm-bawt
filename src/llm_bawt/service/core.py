@@ -159,6 +159,12 @@ class ServiceLLMBawt(BaseLLMBawt):
                 # TASK-1966: per-tool strict Responses schemas (catalog opt-in).
                 if model_def.get("responses_strict_tools") is True:
                     self.client._bot_config["responses_strict_tools"] = True
+                # TASK-1976: apply_patch edit tool (catalog opt-in).
+                apply_patch = model_def.get("responses_apply_patch")
+                if apply_patch is True or apply_patch in ("freeform", "function"):
+                    self.client._bot_config["responses_apply_patch"] = (
+                        "freeform" if apply_patch is True else apply_patch
+                    )
                 provider_system_prompt = model_def.get("provider_system_prompt")
                 if isinstance(provider_system_prompt, str) and provider_system_prompt:
                     self.client._bot_config["provider_system_prompt"] = (

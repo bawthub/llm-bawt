@@ -63,6 +63,7 @@ class CommandPublisherMixin:
         responses_transport: str | None = None,
         openrouter_provider: Mapping | None = None,
         responses_strict_tools: bool = False,
+        responses_apply_patch: str | None = None,
         codex_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
         question_answer_wait_seconds: int | None = None,
@@ -141,6 +142,8 @@ class CommandPublisherMixin:
             )
         if responses_strict_tools:  # TASK-1966: per-tool strict schemas
             fields["responses_strict_tools"] = "1"
+        if responses_apply_patch:  # TASK-1976: freeform | function
+            fields["responses_apply_patch"] = responses_apply_patch
         if codex_transport:  # TASK-1243: codex exec or app-server
             fields["codex_transport"] = codex_transport
         if mcp_tool_timeout_ms is not None and mcp_tool_timeout_ms > 0:

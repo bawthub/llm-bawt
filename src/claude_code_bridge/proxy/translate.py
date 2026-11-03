@@ -55,6 +55,7 @@ from typing import Any
 from .tool_discovery import model_tool_description
 from .reasoning import ReasoningCodec
 from .strict_tools import to_strict_parameters
+from . import apply_patch as ap
 from .tool_sanitizers import normalize_skill_arguments
 
 logger = logging.getLogger(__name__)
@@ -259,7 +260,10 @@ def _image_block_to_input_image(block: dict) -> dict | None:
     return {"type": "input_image", "image_url": url, "detail": "auto"}
 
 
-def _user_content_to_responses(content: Any) -> tuple[list[dict], list[dict], list[dict]]:
+def _user_content_to_responses(
+    content: Any, patch_call_ids: set[str] | frozenset[str] = frozenset(),
+    patch_mode: str | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
     """Split a user-role content payload into (parts, tool_result items, followup images).
 
     Anthropic packs tool_result blocks inside a user message; Responses API
@@ -329,7 +333,12 @@ def _user_content_to_responses(content: Any) -> tuple[list[dict], list[dict], li
             else:
                 output = ""
             tool_results.append({
-                "type": "function_call_output",
+                # TASK-1976: a folded apply_patch result answers a custom call.
+                "type": (
+                    "custom_tool_call_output"
+                    if call_id in patch_call_ids and patch_mode == "freeform"
+                    else "function_call_output"
+                ),
                 "call_id": call_id,
                 "output": output,
             })
@@ -339,6 +348,7 @@ def _user_content_to_responses(content: Any) -> tuple[list[dict], list[dict], li
 
 def _assistant_content_to_responses(
     content: Any, reasoning_codec: ReasoningCodec | None = None,
+    patch_mode: str | None = None,
 ) -> list[dict]:
     """Assistant content → text item(s) + function_call items.
 
@@ -381,6 +391,18 @@ def _assistant_content_to_responses(
         elif btype == "tool_use":
             flush_text()
             tool_input = block.get("input") or {}
+            if (patch_mode and block.get("name") == ap.APPLY_PATCH_TOOL
+                    and isinstance(tool_input, dict) and ap.PATCH_INPUT_KEY in tool_input):
+                patch = tool_input[ap.PATCH_INPUT_KEY]
+                items.append(
+                    {"type": "custom_tool_call", "name": ap.APPLY_PATCH_TOOL,
+                     "input": patch, "call_id": block.get("id") or ""}
+                    if patch_mode == "freeform" else
+                    {"type": "function_call", "name": ap.APPLY_PATCH_TOOL,
+                     "arguments": json.dumps({"input": patch}, separators=(",", ":")),
+                     "call_id": block.get("id") or ""}
+                )
+                continue
             items.append({
                 "type": "function_call",
                 "name": block.get("name") or "",
@@ -405,6 +427,7 @@ def _tools_to_responses(
     allowed_skill_names: tuple[str, ...] = (),
     disable_skill: bool = False,
     strict_tools: bool = False,
+    patch_mode: str | None = None,
 ) -> list[dict] | None:
     """Anthropic tools schema → Responses API tools schema.
 
@@ -417,6 +440,7 @@ def _tools_to_responses(
     if not tools:
         return None
     converted: list[dict] = []
+    replaced_edit_tool = False
     for tool in tools:
         if not isinstance(tool, dict):
             continue
@@ -434,6 +458,9 @@ def _tools_to_responses(
             logger.debug("Stripping Anthropic server-side tool type=%r from proxy request", ttype)
             continue
         if disable_skill and tool.get("name") == "Skill":
+            continue
+        if patch_mode and tool.get("name") in ap.REPLACED_TOOLS:
+            replaced_edit_tool = True
             continue
         item: dict[str, Any] = {
             "type": "function",
@@ -460,6 +487,9 @@ def _tools_to_responses(
                 item["parameters"] = strict_params
                 item["strict"] = True
         converted.append(item)
+    if replaced_edit_tool and patch_mode:
+        # TASK-1976: one patch tool stands in for Edit/Write/MultiEdit.
+        converted.append(ap.responses_tool(patch_mode))
     if not converted:
         return None
     # Deterministic ordering: sort by tool name so an SDK-side reorder
@@ -475,6 +505,7 @@ def anthropic_to_responses(
     reasoning_codec: ReasoningCodec | None = None,
     allowed_skill_names: tuple[str, ...] = (),
     strict_tools: bool = False,
+    apply_patch: str | None = None,
 ) -> dict:
     """Translate an Anthropic Messages request body to a Responses API body.
 
@@ -490,14 +521,20 @@ def anthropic_to_responses(
     disable_skill = should_disable_skill_tool(
         body.get("messages"), allowed_skill_names
     )
-    for msg in body.get("messages") or []:
+    messages = body.get("messages") or []
+    patch_call_ids: set[str] = set()
+    if apply_patch:
+        messages, patch_call_ids = ap.rewrite_history(messages)
+    for msg in messages:
         if not isinstance(msg, dict):
             continue
         role = msg.get("role") or "user"
         content = msg.get("content")
 
         if role == "user":
-            parts, tool_results, followup_images = _user_content_to_responses(content)
+            parts, tool_results, followup_images = _user_content_to_responses(
+                content, patch_call_ids, apply_patch,
+            )
             if temporal_prefix and not temporal_prefix_attached:
                 parts = [{"type": "input_text", "text": temporal_prefix}, *parts]
                 temporal_prefix_attached = True
@@ -527,7 +564,9 @@ def anthropic_to_responses(
                 # take the list directly.
                 input_items.append({"role": "user", "content": parts})
         elif role == "assistant":
-            input_items.extend(_assistant_content_to_responses(content, reasoning_codec))
+            input_items.extend(
+                _assistant_content_to_responses(content, reasoning_codec, apply_patch)
+            )
         elif role == "system":
             text = inline_system_text(content)
             if text:
@@ -596,6 +635,7 @@ def anthropic_to_responses(
         allowed_skill_names=allowed_skill_names,
         disable_skill=disable_skill,
         strict_tools=strict_tools,
+        patch_mode=apply_patch,
     )
     if tools:
         payload["tools"] = tools

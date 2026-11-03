@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from .openrouter_routing import serialize_openrouter_provider
 from .strict_tools import STRICT_TOOLS_HEADER
+from .apply_patch import APPLY_PATCH_HEADER
 
 CONVERSATION_HEADER = "X-LLM-Bawt-Conversation-ID"
 BOT_HEADER = "X-LLM-Bawt-Bot-ID"
@@ -99,6 +100,10 @@ class ProxyRequestContext:
     openrouter_provider: dict[str, Any] | None = None
     # TASK-1966: catalog opt-in for per-tool strict Responses function schemas.
     strict_tools: bool = False
+    # TASK-1976: "freeform" | "function" apply_patch in place of Edit/Write.
+    apply_patch: str | None = None
+    # Latest CLI working directory, for relative patch paths (set per request).
+    patch_cwd: str | None = None
     skill_names: tuple[str, ...] = ()
     started_at: float = 0.0
     account_hash: str = "default"
@@ -174,6 +179,8 @@ def custom_header_env(context: ProxyRequestContext) -> str:
             lines.append(f"{OPENROUTER_PROVIDER_HEADER}: {routing}")
     if context.strict_tools:
         lines.append(f"{STRICT_TOOLS_HEADER}: 1")
+    if context.apply_patch:
+        lines.append(f"{APPLY_PATCH_HEADER}: {context.apply_patch}")
     if context.skill_names:
         names = [name for name in context.skill_names if _SKILL_NAME_RE.fullmatch(name)]
         if names:

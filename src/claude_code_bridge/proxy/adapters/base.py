@@ -266,7 +266,11 @@ class ProviderAdapter(ABC):
             anthropic_body, upstream_model, reasoning_codec=codec,
             allowed_skill_names=context.skill_names if context else (),
             strict_tools=bool(context and context.strict_tools),
+            apply_patch=context.apply_patch if context else None,
         )
+        if context is not None and context.apply_patch:
+            from ..apply_patch import find_cwd
+            context.patch_cwd = find_cwd(anthropic_body)
         body = self.prepare_request(body, context)
         headers = tuple((self.extra_headers(body, context) or {}).items())
         prepared = PreparedCall(bearer, base_url, body, headers, codec, identity)
