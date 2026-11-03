@@ -89,9 +89,7 @@ OPS_COMPOSE = {
 }
 
 #: Current offenders outside the boundary, each with the task that removes it.
-OFFENDERS = {
-    ("compose", "docker-compose.yml", "app"): "TASK-1173",
-}
+OFFENDERS: dict = {}
 
 
 def _docstring_ids(tree):
