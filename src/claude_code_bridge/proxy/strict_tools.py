@@ -19,7 +19,7 @@ Conversion (OpenAI structured-outputs subset):
   loosens decoding, never execution;
 * ``oneOf`` becomes ``anyOf`` (equivalent for decoding).
 
-Not convertible (tool stays non-strict): unions with an object branch (the
+Not convertible (tool stays non-strict): unions with an object/array branch (the
 null cleanup could not tell which branch was chosen), open maps (an object without
 ``properties`` or with ``additionalProperties`` other than ``false``),
 ``allOf``/``not``/conditionals/``patternProperties``/``$ref``, a non-object
@@ -84,12 +84,19 @@ def _allows_null(schema: dict) -> bool:
     )
 
 
-def _is_object_schema(schema: dict) -> bool:
+def _is_structured(schema: Any) -> bool:
+    """True if any node in ``schema`` is an object or array shape."""
+    if isinstance(schema, list):
+        return any(_is_structured(s) for s in schema)
+    if not isinstance(schema, dict):
+        return False
     t = schema.get("type")
-    return (
-        t == "object" or (isinstance(t, list) and "object" in t)
-        or "properties" in schema or "additionalProperties" in schema
-    )
+    types = t if isinstance(t, list) else [t]
+    if "object" in types or "array" in types:
+        return True
+    if {"properties", "additionalProperties", "items"} & schema.keys():
+        return True
+    return any(_is_structured(schema.get(k)) for k in ("anyOf", "oneOf"))
 
 
 def _convert(schema: Any, depth: int, counter: list[int]) -> dict:
@@ -113,10 +120,11 @@ def _convert(schema: Any, depth: int, counter: list[int]) -> dict:
     if branches is not None:
         if not isinstance(branches, list) or not branches:
             raise _NotStrict("bad anyOf")
-        if any(isinstance(b, dict) and _is_object_schema(b) for b in branches):
+        if _is_structured(branches):
             # Null cleanup on the way back cannot know which branch the model
-            # chose, so object unions stay non-strict (TASK-1966 review).
-            raise _NotStrict("object branch in union")
+            # chose, so unions with any object/array shape (at any depth) stay
+            # non-strict (TASK-1966 review). Scalar-only unions convert.
+            raise _NotStrict("structured branch in union")
         out["anyOf"] = [_convert(b, depth + 1, counter) for b in branches]
 
     t = out.get("type")
