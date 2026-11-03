@@ -185,6 +185,15 @@ class RetryAdmissionError(RuntimeError):
     """The proxy must reject a duplicate or exhausted call before sampling."""
 
 
+class ReplayRefusedError(RetryAdmissionError):
+    """TASK-1966: committed tool/output can never be resampled for this turn.
+
+    Unlike a busy or exhausted budget, no later resend of the same body can
+    succeed, so the route surfaces a non-retryable rejection. Otherwise the
+    CLI's non-streaming fallback gets HTTP 500 and resends ~10 times first.
+    """
+
+
 class BrokerAuthorizationError(RuntimeError):
     """Typed broker unavailability, never inferred from arbitrary error text."""
 
@@ -317,9 +326,9 @@ class RetryBudgetRegistry:
             if entry.active:
                 raise RetryAdmissionError("Identical model call already running")
             if entry.tool_committed:
-                raise RetryAdmissionError("Completed or partial tool call cannot be replayed")
+                raise ReplayRefusedError("Completed or partial tool call cannot be replayed")
             if entry.output_committed:
-                raise RetryAdmissionError("Partial model output cannot be replayed")
+                raise ReplayRefusedError("Partial model output cannot be replayed")
             if entry.auth_recovery_used:
                 raise RetryAdmissionError("Proxy auth recovery allowance already spent")
             if entry.auth_failed:

@@ -24,7 +24,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import lookup
 from .errors import anthropic_error, auth_failed_error, final_error_frame
-from .retry import BrokerAuthorizationError, RetryAdmissionError, RetryBudgetRegistry
+from .retry import (
+    BrokerAuthorizationError, ReplayRefusedError, RetryAdmissionError, RetryBudgetRegistry,
+)
 from .heartbeat import DEFAULT_INTERVAL, with_heartbeat
 from .observability import OBSERVABILITY
 from .request_context import (
@@ -243,10 +245,15 @@ async def _proxy_iter(
         if saw_error:
             status_code = 500
     except RetryAdmissionError as e:
-        status_code = 500
+        status_code = 400 if isinstance(e, ReplayRefusedError) else 500
         context.report_status({"state": "failed", "provider": provider})
         logger.warning("proxy_retry_rejected request_id=%s reason=%s", context.request_id, e)
-        yield final_error_frame("api_error", str(e))
+        # A replay refusal is final for this body: 400 stops the CLI's resends;
+        # a busy/exhausted/auth admission stays a retryable api_error (500).
+        yield final_error_frame(
+            "invalid_request_error" if isinstance(e, ReplayRefusedError) else "api_error",
+            str(e),
+        )
     except (asyncio.CancelledError, GeneratorExit):
         # Cancellation is not a successful model response. No error frame can
         # be sent to a departed consumer, but telemetry must retain the outcome.

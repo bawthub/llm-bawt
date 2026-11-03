@@ -406,3 +406,63 @@ def test_terminal_stall_cannot_be_reopened_by_auth_marker():
     lease.release()
     with pytest.raises(RetryAdmissionError, match="unavailable"):
         registry.acquire("turn", "body", RetryPolicy, allow_auth_probe=True)
+
+
+@pytest.mark.parametrize("payload, reason", [
+    ({"type": "content_block_start", "index": 0,
+      "content_block": {"type": "tool_use", "id": "t", "name": "Read", "input": {}}},
+     b"tool call cannot be replayed"),
+    ({"type": "content_block_delta", "index": 0,
+      "delta": {"type": "text_delta", "text": "visible"}},
+     b"output cannot be replayed"),
+])
+def test_replay_refusal_is_non_retryable_for_cli_fallback(harness, monkeypatch, payload, reason):
+    """TASK-1966: a stall after commitment must not cost ~10 CLI resends.
+
+    The CLI answers a mid-stream error with a non-streaming resend of the
+    same body and retries any 5xx. A replay refusal can never succeed, so it
+    surfaces as invalid_request_error/400, ending the turn on the first resend.
+    """
+    import json
+
+    async def run():
+        adapter, _, send = harness
+        calls = []
+
+        async def call(_body, _model, _context):
+            calls.append(True)
+            yield f"event: {payload['type']}\ndata: {json.dumps(payload)}\n\n".encode()
+            yield b'event: error\ndata: {"type":"error","error":{"type":"api_error"}}\n\n'
+
+        monkeypatch.setattr(adapter, "call", call)
+        await send()
+        streamed = await send()
+        assert reason in streamed and b'"type":"invalid_request_error"' in streamed
+        fallback = await send(False)
+        assert fallback.status_code == 400
+        assert json.loads(fallback.body)["error"]["type"] == "invalid_request_error"
+        assert reason in fallback.body
+        assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+def test_busy_or_exhausted_admission_stays_retryable(harness, monkeypatch):
+    """Only committed-output refusals become 400; a spent budget keeps 500."""
+    async def run():
+        adapter, registry, send = harness
+
+        async def call(_body, _model, _context):
+            yield b'event: error\ndata: {"type":"error","error":{"type":"api_error"}}\n\n'
+            if False:  # pragma: no cover - async generator marker
+                yield b""
+
+        monkeypatch.setattr(adapter, "call", call)
+        await send()
+        for entry in registry._entries.values():
+            entry.policy._attempts_used = entry.policy.max_attempts
+        exhausted = await send(False)
+        assert b"budget exhausted" in exhausted.body
+        assert exhausted.status_code == 500
+
+    asyncio.run(run())

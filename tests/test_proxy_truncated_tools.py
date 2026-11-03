@@ -149,7 +149,7 @@ def test_routes_block_truncation_and_preserve_valid_calls(monkeypatch, mode, rea
                 # Keep the original conservative tool tombstone, including
                 # across SDK stream→JSON fallback and valid completed calls.
                 again = await client.post("/v1/messages", json={**body, "stream": False}, headers=headers)
-                assert again.status_code == 500
+                assert again.status_code == 400  # TASK-1966: final, not CLI-retryable
                 assert "tool" in again.json()["error"]["message"]
                 assert adapter.calls == 1
 

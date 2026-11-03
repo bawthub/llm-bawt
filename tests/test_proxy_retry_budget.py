@@ -166,8 +166,9 @@ def test_route_rejects_in_flight_duplicate_without_second_upstream_call(monkeypa
         first_output = await first_task
         assert b'"tool_use"' in first_output
         third = await routes.messages(Request({**body, "stream": False}))
-        # The same body with another SDK stream mode cannot execute it again.
-        assert third.status_code == 500
+        # The same body with another SDK stream mode cannot execute it again;
+        # TASK-1966: that refusal is final (400), so the CLI stops resending.
+        assert third.status_code == 400
         assert len(calls) == 1
         changed = await routes.messages(Request({**body, "messages": [
             {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1",

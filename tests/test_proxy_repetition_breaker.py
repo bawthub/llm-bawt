@@ -144,7 +144,8 @@ def test_tool_argument_loop_stops_early_without_forwarding(monkeypatch, mode):
     assert "looped" in events[-1]["error"]["message"]
     # Stopped near the 8KB span, not after ~58KB of junk.
     assert consumed < LOOP_DELTAS // 4
-    assert again.status_code == 500
+    # TASK-1966: a refused replay is final (400); cc's admitted retry fails 500.
+    assert again.status_code == (500 if mode == "cc" else 400)
     if mode == "cc":
         # This translator emits no tool frame before the loop trips, so
         # nothing was committed: the lease admits one retry, which fails visibly.
