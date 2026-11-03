@@ -518,7 +518,9 @@ _CONFIG_SEEDS: list[dict[str, Any]] = [{
                      "/root/.cache/huggingface", "/root/.cache/llm-bawt/models", "/var/lib/llm-bawt/media",
                      "/var/lib/llm-bawt-ops", "/var/run/docker.sock", "/home/bridge/dev/agent-skills",
                      "/run/bawthub-service-token", "/run/llm-bawt-bridge-tokens",
-                     "/run/llm-bawt-crawl4ai-token"],
+                     "/run/llm-bawt-crawl4ai-token",
+                     # Read-only pin list the weekly harness check reads (TASK-1975); never executed.
+                     "/app/docker/agent-bridge-constraints.txt"],
         # Every environment name the container carries beyond the product's
         # own runtime variables is app data, opaque to the approver: the
         # install's operator lists its names here (never values). Empty fails
