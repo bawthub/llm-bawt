@@ -289,6 +289,17 @@ CLOSED_NOTE = {"type": "object", "properties": {"note": {"type": "string"}},
     {"type": "object", "properties": {"xs": {"type": "array", "items": {
         "anyOf": [CLOSED_NOTE, {"type": "integer"}]}}}, "required": ["xs"]},
     {"type": "object", "properties": {"cfg": {"anyOf": [CLOSED_NOTE, {"type": "null"}]}}},
+    # R2 counterexample: object hidden under an array branch.
+    {"type": "object", "properties": {"cfg": {"anyOf": [
+        {"type": "array", "items": CLOSED_NOTE}, {"type": "string"}]}}, "required": ["cfg"]},
+    # Nested array-of-array and union-in-union shapes.
+    {"type": "object", "properties": {"cfg": {"anyOf": [
+        {"type": "array", "items": {"type": "array", "items": CLOSED_NOTE}},
+        {"type": "string"}]}}},
+    {"type": "object", "properties": {"cfg": {"anyOf": [
+        {"anyOf": [CLOSED_NOTE, {"type": "integer"}]}, {"type": "string"}]}}},
+    {"type": "object", "properties": {"cfg": {"anyOf": [
+        {"type": "array", "items": {"type": "string"}}, {"type": "string"}]}}},
 ])
 def test_object_unions_stay_non_strict(schema):
     """Cleanup can't tell which branch a strict null came from; don't go strict."""
