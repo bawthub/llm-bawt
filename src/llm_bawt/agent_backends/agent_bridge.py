@@ -348,6 +348,9 @@ class AgentBridgeBackend(AgentBackend):
                                 if isinstance(config.get("openrouter_provider"), dict)
                                 else None
                             ),
+                            responses_strict_tools=(
+                                config.get("responses_strict_tools") is True
+                            ),
                             codex_transport=(
                                 str(config.get("codex_transport")).strip()
                                 if config.get("codex_transport") else None

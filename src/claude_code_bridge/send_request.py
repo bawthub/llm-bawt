@@ -23,6 +23,7 @@ from agent_bridge.skill_selection import INJECTED_FIELD, SELECTION_FIELD
 
 from ._bridge_helpers import _bot_slug_from_session_key
 from .proxy.openrouter_routing import parse_openrouter_provider
+from .proxy.strict_tools import parse_strict_tools
 from .proxy.transport_policy import normalize_responses_transport
 
 # Keep the original logger name so log lines are byte-identical to the
@@ -81,6 +82,8 @@ class SendRequest:
     reset_skills: dict | None = None
     # TASK-1915: catalog OpenRouter provider-routing preference (canonical).
     openrouter_provider: dict | None = None
+    # TASK-1966: catalog opt-in for per-tool strict Responses function schemas.
+    strict_tools: bool = False
     # TASK-1295: the app-resolved catalog endpoint's access-path key. None only
     # when the field is absent (a legacy producer); a present-but-blank value
     # is kept as "" so it is rejected, never mistaken for legacy.
@@ -275,6 +278,7 @@ class SendRequest:
             prompt_cache_ttl=prompt_cache_ttl,
             responses_transport=responses_transport,
             openrouter_provider=openrouter_provider,
+            strict_tools=parse_strict_tools(fields.get("responses_strict_tools")),
             mcp_tool_timeout_ms=mcp_tool_timeout_ms,
             question_answer_wait_seconds=question_answer_wait_seconds,
             configured_disallowed_tools=configured_disallowed_tools,

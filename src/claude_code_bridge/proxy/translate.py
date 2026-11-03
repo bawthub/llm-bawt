@@ -54,6 +54,7 @@ from typing import Any
 
 from .tool_discovery import model_tool_description
 from .reasoning import ReasoningCodec
+from .strict_tools import to_strict_parameters
 from .tool_sanitizers import normalize_skill_arguments
 
 logger = logging.getLogger(__name__)
@@ -403,6 +404,7 @@ def _tools_to_responses(
     *,
     allowed_skill_names: tuple[str, ...] = (),
     disable_skill: bool = False,
+    strict_tools: bool = False,
 ) -> list[dict] | None:
     """Anthropic tools schema → Responses API tools schema.
 
@@ -449,6 +451,14 @@ def _tools_to_responses(
                 and isinstance(params, dict)
                 else params
             )
+            # TASK-1966: catalog opt-in, per tool; a schema strict mode cannot
+            # express stays an ordinary non-strict function.
+            strict_params = (
+                to_strict_parameters(item["parameters"]) if strict_tools else None
+            )
+            if strict_params is not None:
+                item["parameters"] = strict_params
+                item["strict"] = True
         converted.append(item)
     if not converted:
         return None
@@ -464,6 +474,7 @@ def anthropic_to_responses(
     *,
     reasoning_codec: ReasoningCodec | None = None,
     allowed_skill_names: tuple[str, ...] = (),
+    strict_tools: bool = False,
 ) -> dict:
     """Translate an Anthropic Messages request body to a Responses API body.
 
@@ -584,6 +595,7 @@ def anthropic_to_responses(
         body.get("tools"),
         allowed_skill_names=allowed_skill_names,
         disable_skill=disable_skill,
+        strict_tools=strict_tools,
     )
     if tools:
         payload["tools"] = tools

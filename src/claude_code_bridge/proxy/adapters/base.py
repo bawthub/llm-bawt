@@ -40,6 +40,21 @@ from ..tool_guard import UnsafeToolCallError
 
 logger = logging.getLogger(__name__)
 
+def _held_tool_fields(block: dict | None) -> tuple[str, str, str]:
+    """TASK-1966 stall attribution: open tool name, held-argument size, and
+    whether the held arguments already parse as JSON. Never the content."""
+    if not isinstance(block, dict) or block.get("kind") != "tool":
+        return "-", "-", "-"
+    held = block.get("held_args") or ""
+    try:
+        json.loads(held)
+        parses = "yes"
+    except (TypeError, ValueError):
+        parses = "no"
+    name = block.get("name") or "unknown"
+    return str(name)[:64], str(len(held)), parses
+
+
 def _stop_block_frame(index: int) -> bytes:
     """Emit a well-formed content_block_stop frame for the splice (Al #1).
 
@@ -250,6 +265,7 @@ class ProviderAdapter(ABC):
         body = translate.anthropic_to_responses(
             anthropic_body, upstream_model, reasoning_codec=codec,
             allowed_skill_names=context.skill_names if context else (),
+            strict_tools=bool(context and context.strict_tools),
         )
         body = self.prepare_request(body, context)
         headers = tuple((self.extra_headers(body, context) or {}).items())
@@ -556,7 +572,8 @@ class ProviderAdapter(ABC):
                 "transport=%s bucket=%s phase=%s stall_phase=%s "
                 "attempt=%d/%d decision=%s reason=%r "
                 "attempt_elapsed_ms=%.0f total_elapsed_ms=%.0f "
-                "productive_idle_ms=%s backoff_ms=%.0f detail=%r",
+                "productive_idle_ms=%s backoff_ms=%.0f detail=%r "
+                "tool=%s held_arg_chars=%s held_args_json=%s",
                 context.request_id if context else "unknown",
                 context.bot_id if context else "unknown",
                 getattr(stream_exc, "transport", None)
@@ -571,6 +588,7 @@ class ProviderAdapter(ABC):
                 if stream_exc is not None
                 and hasattr(stream_exc, "productive_idle_seconds") else "unknown",
                 decision.backoff_s * 1000, exc_repr,
+                *_held_tool_fields(state.open_block),
             )
 
             if decision.retry:

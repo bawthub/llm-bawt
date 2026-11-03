@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .openrouter_routing import serialize_openrouter_provider
+from .strict_tools import STRICT_TOOLS_HEADER
 
 CONVERSATION_HEADER = "X-LLM-Bawt-Conversation-ID"
 BOT_HEADER = "X-LLM-Bawt-Bot-ID"
@@ -96,6 +97,8 @@ class ProxyRequestContext:
     responses_transport: str | None = None
     # TASK-1915: canonical OpenRouter ``provider`` preference (catalog-owned).
     openrouter_provider: dict[str, Any] | None = None
+    # TASK-1966: catalog opt-in for per-tool strict Responses function schemas.
+    strict_tools: bool = False
     skill_names: tuple[str, ...] = ()
     started_at: float = 0.0
     account_hash: str = "default"
@@ -169,6 +172,8 @@ def custom_header_env(context: ProxyRequestContext) -> str:
         routing = serialize_openrouter_provider(context.openrouter_provider)
         if routing:
             lines.append(f"{OPENROUTER_PROVIDER_HEADER}: {routing}")
+    if context.strict_tools:
+        lines.append(f"{STRICT_TOOLS_HEADER}: 1")
     if context.skill_names:
         names = [name for name in context.skill_names if _SKILL_NAME_RE.fullmatch(name)]
         if names:
