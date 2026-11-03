@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Image-owned gh entrypoint; only opted-in accounts use the shared App helper.
+
+Keep PATH image-owned. The fixed dispatcher delegates one explicit command to
+our read-only shared helper mount, never an arbitrary leading mounted bin.
+No credential is fetched here; the existing helper validates repo/host scope.
+"""
+import os
+import subprocess
+import sys
+
+GIT = "/usr/bin/git"
+GH = "/usr/bin/gh"
+HELPER = "/opt/agent-skills/bin/gh-bawthub-app"
+CREDENTIAL_HELPER = "/opt/agent-skills/bin/git-credential-bawthub-app"
+
+
+def main(argv):
+    try:
+        result = subprocess.run(
+            [GIT, "config", "--type=bool", "--get", "bawthub.requireTurnIdentity"],
+            capture_output=True, text=True, check=False,
+        )
+        # 1 is an absent key, not an invalid/unreadable config. Never turn a
+        # broken opted-in configuration into a silent native-gh fallback.
+        if result.returncode not in (0, 1):
+            print("gh: account Git configuration could not be read", file=sys.stderr)
+            return 1
+        env = dict(os.environ)
+        target = GH
+        if result.returncode == 0 and result.stdout.strip() == "true":
+            target = HELPER
+            # Fixed real binary prevents recursion into this baked dispatcher;
+            # fixed credential helper preserves the reviewed repo-scope checks.
+            env["BAWTHUB_GH_BIN"] = GH
+            env["BAWTHUB_GIT_CREDENTIAL_HELPER"] = CREDENTIAL_HELPER
+        os.execve(target, [target, *argv[1:]], env)
+    except OSError:
+        print("gh: configured GitHub command is unavailable", file=sys.stderr)
+        return 1
+    return 127  # execve does not return
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

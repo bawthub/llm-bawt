@@ -158,6 +158,27 @@ is a secret: do not log it, print it, or persist it in Git configuration. The
 identity response contains neither the capability nor provider credentials;
 GitHub credential and adapter behavior is unchanged.
 
+### Shared App Git/gh configuration (both harness bridges)
+
+The shared bridge image includes the optional account profile at
+`/home/bridge/.config/bawthub-git/gitconfig` through `/etc/gitconfig`. The dev
+Compose overlay mounts that profile directory read-only; it sets neither a
+`GIT_*` environment variable nor a leading mounted `PATH` entry. The default
+image PATH and the ops reconcile runtime guard are unchanged.
+
+The image-owned `/usr/local/bin/gh` dispatcher preserves native `/usr/bin/gh`
+when `bawthub.requireTurnIdentity` is absent or false. With opt-in true it
+executes the fixed shared `gh-bawthub-app` helper, using `/usr/bin/gh` as the
+real CLI and the fixed repository-scoped credential helper. Invalid Git
+configuration or a missing opted-in helper fails closed. The existing App
+helper still owns host/repository validation and ephemeral token delivery.
+
+This wiring requires a rebuilt bridge image once, followed by the existing
+same-image reconcile operation to prove the declared environment and mounts.
+Reconcile itself never upgrades an image. A read-only file bind onto
+`/usr/local/bin/gh` is not an alternative: the unchanged guard also treats
+mounts nested beneath a PATH entry as mounted executable search paths.
+
 ## Related files
 
 - [src/llm_bawt/agent_backends/claude_code.py](../src/llm_bawt/agent_backends/claude_code.py)

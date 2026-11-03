@@ -203,5 +203,17 @@ RUN corepack install --global pnpm@10.32.1
 COPY docker/test-agent-bridge-toolchain.sh /usr/local/libexec/test-agent-bridge-toolchain.sh
 RUN sh /usr/local/libexec/test-agent-bridge-toolchain.sh
 
+# TASK-1987: image-owned Git/gh wiring, not a mounted leading PATH bin or
+# reserved GIT_CONFIG_* runtime override. Git ignores the optional include if
+# absent; gh keeps native behaviour unless the account opts into signed authors.
+# Place this after toolchain provisioning so this small layer is independently
+# rebuildable. The dispatcher calls only the explicit read-only App helper.
+USER root
+COPY docker/gh-app-dispatch /usr/local/bin/gh
+RUN chmod 0755 /usr/local/bin/gh \
+    && git config --system --add include.path /home/bridge/.config/bawthub-git/gitconfig
+USER bridge
+RUN gh --version
+
 # Default command — overridden per service in docker-compose.yml
 CMD ["python", "-m", "claude_code_bridge"]
