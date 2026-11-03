@@ -10,7 +10,8 @@ from llm_bawt.service.tool_call_store import ToolCallRecord
 
 
 @pytest.mark.parametrize("ended", [False, True])
-def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypatch, ended):
+@pytest.mark.parametrize("tracking,execution", [(False, None), (True, None), (True, 1790467260.0)])
+def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypatch, ended, tracking, execution):
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine, tables=[ToolCallRecord.__table__])
     timestamp = datetime(2026, 9, 27, tzinfo=timezone.utc)
@@ -23,6 +24,7 @@ def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypa
         session.add(ToolCallRecord(
             turn_id=row.id, bot_id="snark", user_id="nick", tool_name="Bash",
             call_id="call-history", started_at=timestamp.timestamp(), result_text="",
+            exec_tracked=tracking, exec_started_at=execution,
         ))
         session.commit()
     store = SimpleNamespace(engine=engine, list_turns=lambda **kwargs: ([row], 1))
@@ -36,5 +38,8 @@ def test_history_exposes_parent_terminal_signal_without_completing_tool(monkeypa
     assert event.tool_calls[0]["status"] == "pending"
     assert event.tool_calls[0]["result"] is None
     assert event.tool_calls[0]["started_at"] == timestamp.timestamp()
-    assert "turn_ended_at" in response.model_dump(mode="json")["events"][0]
+    serialized = response.model_dump(mode="json")["events"][0]
+    assert "turn_ended_at" in serialized
+    assert serialized["tool_calls"][0]["exec_tracked"] is tracking
+    assert serialized["tool_calls"][0]["exec_started_at"] == execution
     engine.dispose()

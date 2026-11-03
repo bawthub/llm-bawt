@@ -92,6 +92,10 @@ class ToolCallRecord(SQLModel, table=True):
     # TASK-1095: when the tool actually began executing (PreToolUse). started_at
     # is when the model emitted it; the gap is queue/approval wait.
     exec_started_at: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
+    # Only explicit producer support can make a pending, unstamped call queued.
+    exec_tracked: bool = Field(
+        default=False, sa_column=Column(Boolean, nullable=False, server_default=sa_text("false"))
+    )
     duration_ms: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
     text_offset: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     is_error: bool | None = Field(default=None, sa_column=Column(Boolean, nullable=True))
@@ -201,6 +205,7 @@ class ToolCallStore:
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS attachments_json TEXT",
                 # TASK-1095: execution start, separate from model emit time.
                 "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS exec_started_at DOUBLE PRECISION",
+                "ALTER TABLE tool_call_records ADD COLUMN IF NOT EXISTS exec_tracked BOOLEAN NOT NULL DEFAULT FALSE",
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_turn_call ON tool_call_records (turn_id, call_id)",
                 # TASK-594: content-addressed lookup for the TTL prune keep-set.
                 "CREATE INDEX IF NOT EXISTS ix_tool_call_records_blob_key ON tool_call_records (result_blob_key)",
@@ -249,6 +254,7 @@ class ToolCallStore:
         arguments: dict | None = None,
         iteration: int = 1,
         started_at: float | None = None,
+        exec_tracked: bool = False,
         text_offset: int | None = None,
         tool_use_id: str | None = None,
         parent_tool_use_id: str | None = None,
@@ -280,6 +286,8 @@ class ToolCallStore:
             row.arguments_json = json.dumps(arguments or {}, ensure_ascii=False, default=str)
             row.iteration = iteration
             row.started_at = started_at
+            # A duplicate start without metadata must not erase the capability.
+            row.exec_tracked = row.exec_tracked or exec_tracked
             row.text_offset = text_offset
             row.tool_use_id = tool_use_id
             row.parent_tool_use_id = parent_tool_use_id

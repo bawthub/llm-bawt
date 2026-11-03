@@ -70,6 +70,28 @@ def test_untracked_call_keeps_emit_time_duration_and_late_stamp_is_ignored(engin
     assert row.duration_ms == pytest.approx(3000.0)
 
 
+def test_tracking_survives_persistence_and_duplicate_start(engine):
+    coord = ToolEventCoordinator(engine)
+    event = {**ENVELOPE, "call_id": "tracked", "tool_name": "Read",
+             "ts": 100.0, "exec_tracked": True}
+    coord.start(event)
+    assert _row(engine, "tracked").exec_tracked is True
+    assert _row(engine, "tracked").exec_started_at is None
+    coord.start({key: value for key, value in event.items() if key != "exec_tracked"})
+    assert _row(engine, "tracked").exec_tracked is True
+    coord.executing({**ENVELOPE, "call_id": "tracked", "ts": 160.0})
+    _end(coord, "tracked", 165.0)
+    row = _row(engine, "tracked")
+    assert row.exec_tracked is True
+    assert row.exec_started_at == 160.0
+    assert row.duration_ms == pytest.approx(5000.0)
+
+
+def test_legacy_tracking_defaults_false(engine):
+    _start(ToolEventCoordinator(engine), "legacy")
+    assert _row(engine, "legacy").exec_tracked is False
+
+
 def test_stamp_never_creates_a_row(engine):
     ToolCallStore(engine).mark_executing(turn_id="turn", call_id="ghost", tool_use_id="tu-ghost",
                                          exec_started_at=1.0)

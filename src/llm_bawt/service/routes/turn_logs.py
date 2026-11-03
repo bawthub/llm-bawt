@@ -90,6 +90,7 @@ def _records_to_calls(records: list[ToolCallRecord], *, turn_ended_at=None) -> l
             "call_id": row.call_id,
             "started_at": row.started_at,
             "exec_started_at": row.exec_started_at,
+            "exec_tracked": row.exec_tracked,
             "ended_at": row.ended_at,
             "duration_ms": row.duration_ms,
             "text_offset": row.text_offset,

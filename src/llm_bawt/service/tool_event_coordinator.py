@@ -28,6 +28,7 @@ class ToolEventCoordinator:
             arguments=event.get("arguments") if isinstance(event.get("arguments"), dict) else {},
             iteration=int(event.get("iteration") or 1),
             started_at=event.get("ts"),
+            exec_tracked=event.get("exec_tracked") is True,
             text_offset=event.get("text_offset"),
             tool_use_id=event.get("tool_use_id"),
             parent_tool_use_id=event.get("parent_tool_use_id"),
