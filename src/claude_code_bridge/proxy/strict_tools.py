@@ -19,7 +19,8 @@ Conversion (OpenAI structured-outputs subset):
   loosens decoding, never execution;
 * ``oneOf`` becomes ``anyOf`` (equivalent for decoding).
 
-Not convertible (tool stays non-strict): open maps (an object without
+Not convertible (tool stays non-strict): unions with an object branch (the
+null cleanup could not tell which branch was chosen), open maps (an object without
 ``properties`` or with ``additionalProperties`` other than ``false``),
 ``allOf``/``not``/conditionals/``patternProperties``/``$ref``, a non-object
 root, nesting deeper than OpenAI's limit, or too many properties.
@@ -78,7 +79,16 @@ def _allows_null(schema: dict) -> bool:
     if "enum" in schema and None in (schema.get("enum") or []):
         return True
     return any(
-        isinstance(b, dict) and _allows_null(b) for b in schema.get("anyOf") or []
+        isinstance(b, dict) and _allows_null(b)
+        for b in (schema.get("anyOf") or []) + (schema.get("oneOf") or [])
+    )
+
+
+def _is_object_schema(schema: dict) -> bool:
+    t = schema.get("type")
+    return (
+        t == "object" or (isinstance(t, list) and "object" in t)
+        or "properties" in schema or "additionalProperties" in schema
     )
 
 
@@ -103,6 +113,10 @@ def _convert(schema: Any, depth: int, counter: list[int]) -> dict:
     if branches is not None:
         if not isinstance(branches, list) or not branches:
             raise _NotStrict("bad anyOf")
+        if any(isinstance(b, dict) and _is_object_schema(b) for b in branches):
+            # Null cleanup on the way back cannot know which branch the model
+            # chose, so object unions stay non-strict (TASK-1966 review).
+            raise _NotStrict("object branch in union")
         out["anyOf"] = [_convert(b, depth + 1, counter) for b in branches]
 
     t = out.get("type")
@@ -158,8 +172,10 @@ def to_strict_parameters(schema: Any) -> dict | None:
 def strip_strict_nulls(value: Any, schema: Any) -> Any:
     """Drop ``null`` for fields optional in the ORIGINAL schema, recursively.
 
-    A ``null`` on a field the original schema requires is kept: the model sent
-    it on purpose and the CLI's own validation decides what it means.
+    Only the ``null`` the converter itself made possible is removed. A
+    ``null`` on a required field, or on an optional field whose original
+    schema already allows ``null`` (e.g. an explicit "clear"), is kept: the
+    model sent it on purpose and the CLI's own validation decides.
     """
     if not isinstance(schema, dict):
         return value
@@ -170,9 +186,11 @@ def strip_strict_nulls(value: Any, schema: Any) -> Any:
         required = set(schema.get("required") or [])
         out: dict[str, Any] = {}
         for key, item in value.items():
-            if item is None and key in props and key not in required:
+            sub = props.get(key)
+            if (item is None and key in props and key not in required
+                    and isinstance(sub, dict) and not _allows_null(sub)):
                 continue
-            out[key] = strip_strict_nulls(item, props.get(key))
+            out[key] = strip_strict_nulls(item, sub)
         return out
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
         return [strip_strict_nulls(item, schema["items"]) for item in value]

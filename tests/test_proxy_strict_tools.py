@@ -273,3 +273,72 @@ def test_strict_flag_command_to_proxy_context_round_trip(monkeypatch):
     asyncio.run(run_route(request_with(headers)))
     asyncio.run(run_route(request_with({"X-LLM-Bawt-Request-ID": "request-2"})))
     assert [c.strict_tools for c in captured] == [True, False]
+
+
+# --- review cmvzxu34t00nk0mnvtzxq3738 regressions ---------------------------
+
+CLOSED_NOTE = {"type": "object", "properties": {"note": {"type": "string"}},
+               "additionalProperties": False}
+
+
+@pytest.mark.parametrize("schema", [
+    {"type": "object", "properties": {"cfg": {"anyOf": [CLOSED_NOTE, {"type": "string"}]}},
+     "required": ["cfg"]},
+    {"type": "object", "properties": {"cfg": {"oneOf": [CLOSED_NOTE, {"type": "string"}]}},
+     "required": ["cfg"]},
+    {"type": "object", "properties": {"xs": {"type": "array", "items": {
+        "anyOf": [CLOSED_NOTE, {"type": "integer"}]}}}, "required": ["xs"]},
+    {"type": "object", "properties": {"cfg": {"anyOf": [CLOSED_NOTE, {"type": "null"}]}}},
+])
+def test_object_unions_stay_non_strict(schema):
+    """Cleanup can't tell which branch a strict null came from; don't go strict."""
+    assert to_strict_parameters(schema) is None
+    body = _body(("Cfg", schema))
+    assert "strict" not in _tools(body, strict_tools=True)["Cfg"]
+
+
+def test_scalar_unions_still_convert():
+    schema = {"type": "object", "properties": {"v": {"anyOf": [
+        {"type": "string"}, {"type": "integer"}]}}}
+    assert to_strict_parameters(schema)["properties"]["v"] == {"anyOf": [
+        {"anyOf": [{"type": "string"}, {"type": "integer"}]}, {"type": "null"}]}
+
+
+@pytest.mark.parametrize("nullable", [
+    {"type": ["string", "null"]},
+    {"anyOf": [{"type": "string"}, {"type": "null"}]},
+    {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    {"enum": ["a", None]},
+])
+def test_original_nullable_optional_keeps_explicit_null(nullable):
+    schema = {"type": "object", "properties": {"value": nullable, "other": {"type": "string"}}}
+    converted = to_strict_parameters(schema)
+    assert converted is not None
+    # No synthetic null branch was added, so the model's null is a real "clear".
+    assert strip_strict_nulls({"value": None, "other": None}, schema) == {"value": None}
+
+
+def test_explicit_clear_null_reaches_cli_through_translator():
+    schema = {"type": "object", "properties": {"value": {"type": ["string", "null"]},
+                                              "label": {"type": "string"}},
+              "required": []}
+
+    async def run():
+        item = NS(type="function_call", id="item", call_id="call-0", name="Set")
+        args = json.dumps({"value": None, "label": None})
+        events = [NS(type="response.output_item.added", item=item),
+                  NS(type="response.function_call_arguments.done", item_id="item",
+                     arguments=args),
+                  NS(type="response.output_item.done", item=item),
+                  NS(type="response.completed", response=NS(status="completed", usage=None))]
+
+        async def upstream():
+            for event in events:
+                yield event
+
+        ctx = ProxyRequestContext(request_id="r", provider="openai_chatgpt", strict_tools=True)
+        return [c async for c in responses_to_anthropic_sse(
+            upstream(), anthropic_model="fixture",
+            tool_schemas=[{"name": "Set", "input_schema": schema}], request_context=ctx)]
+
+    assert _cli_input(asyncio.run(run())) == {"value": None}
