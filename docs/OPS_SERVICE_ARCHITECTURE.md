@@ -2,7 +2,7 @@
 
 **Status:** migration design with dated source/readiness evidence; integrated runtime acceptance is not complete.
 
-**Updated:** 2026-11-02 (TASK-1169 FastAPI health host/lifespan source slice; other tasks retain their dated rollout records). **Accountable owner:** Snark.
+**Updated:** 2026-11-03 (TASK-1169 FastAPI control host source slice; other tasks retain their dated rollout records). **Accountable owner:** Snark.
 
 **Tasks:** TASK-1169–TASK-1173. Related health delivery: TASK-1157.
 
@@ -83,9 +83,9 @@ The entrypoint remains `python -m llm_bawt.ops.reconciler`. **TASK-1169 FastAPI 
 - The existing reconciliation/queued-dispatch daemon thread.
 - A fixed database health collector daemon thread.
 - A fixed Docker inventory/executor-prerequisite collector daemon thread.
-- The separate bounded, bearer-authenticated standard-library control listener on `8651`.
+- The separate bounded, bearer-authenticated FastAPI control host on `8651` (its own socket, Uvicorn loop thread and slots; see below).
 
-HTTP runs on the main async loop, outside the blocking producers. Uvicorn handles SIGTERM/SIGINT; lifespan stops readiness, signals producers and closes the control listener, with the existing two-second shared producer join budget. Partial startup is cleaned up; a runtime cannot start twice or spawn replacements for blocked producers. HTTP request draining has a two-second budget. A protocol-level, absolute one-second initial-header deadline closes silent or trickling clients before ASGI parsing, preventing incomplete connections from indefinitely exhausting the concurrency limit; it is cancelled on parsed headers or disconnect. Every health response closes its connection. Docs/OpenAPI, proxy-header trust and access-path logging are disabled. Health responses remain cache-only, exact-path, GET-only, `no-store`; query strings and encoded aliases are refused. No listener is published and no control protocol, bearer, dispatch, admission or ledger semantics change. Moving the control routes themselves into FastAPI remains a later bounded slice; this is not yet the complete FastAPI control service.
+HTTP runs on the main async loop, outside the blocking producers. Uvicorn handles SIGTERM/SIGINT; lifespan stops readiness, signals producers and closes the control listener, with the existing two-second shared producer join budget. Partial startup is cleaned up; a runtime cannot start twice or spawn replacements for blocked producers. HTTP request draining has a two-second budget. A protocol-level, absolute one-second initial-header deadline closes silent or trickling clients before ASGI parsing, preventing incomplete connections from indefinitely exhausting the concurrency limit; it is cancelled on parsed headers or disconnect. Every health response closes its connection. Docs/OpenAPI, proxy-header trust and access-path logging are disabled. Health responses remain cache-only, exact-path, GET-only, `no-store`; query strings and encoded aliases are refused. No listener is published and no control protocol, bearer, dispatch, admission or ledger semantics change. **TASK-1169 FastAPI control slice (implemented in source, not activated):** the `8651` control listener (`ops/control_http.py`) is now a FastAPI app with exactly two typed routes, `POST /v1/ops/prepare` and `GET /v1/ops/executors`, on its own private socket and Uvicorn loop thread. It never shares the health host's loop or slots, and signals stay with the main-thread health host. The wire contract is unchanged: bearer check before any body read, 411/413/400, 401, 404/405 protocol bodies, 503 `ops_busy` with `Retry-After`, 504 `ops_timeout`, 500 `ops_internal`, protocol field, `no-store` and `Connection: close`. The prepare concurrency semaphore and the per-request worker-thread wall budget are kept as they were; the abandoned call still holds its slot until it returns. Slow clients are bounded by an absolute 5s initial-header deadline (the health host's protocol, at the old 5s read bound) and a 5s body deadline (408, no slot taken), with at most 32 connections. Query strings, encoded aliases, trailing slashes, docs and OpenAPI are refused, and there is no access-path logging or proxy trust. Port, protocol, client, bearer derivation, compose and catalog are unchanged; activation belongs to TASK-1173.
 
 The health routes remain:
 
@@ -259,7 +259,7 @@ This is the single working design for the five tasks, not a frozen proposal.
 Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 
 - `src/llm_bawt/ops/service.py`: admission, target preparation, dispatch and status reconciliation; `admission_only` limits the app's instance to admission and reads (TASK-1169 S3).
-- `src/llm_bawt/ops/control_protocol.py`, `control_http.py`, `control_client.py`: the app/ops control channel and `build_admission_ops_service` (TASK-1169 S3).
+- `src/llm_bawt/ops/control_protocol.py`, `control_http.py`, `control_client.py`: the app/ops control channel and `build_admission_ops_service` (TASK-1169 S3); `control_http.py` is the FastAPI control host (implemented, not activated).
 - `src/llm_bawt/ops/store.py`: durable ledger and claims.
 - `src/llm_bawt/ops/executor.py`, `worker.py`, `image_deploy.py`: Docker execution and per-job worker lifecycle.
 - `src/llm_bawt/ops/release_executor.py`: release execution/coordinator integration.
@@ -278,6 +278,7 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 ### Decision record
 
 - **2026-11-02 (TASK-1169 FastAPI health host):** Reconciled the published prepared-hold correction and existing process/adapter work without replay. Migrated only the dedicated health host and runtime ownership to FastAPI/Uvicorn lifespan; kept the separate bounded control transport, immutable wire contracts, fixed producers and execution/recovery semantics. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
+- **2026-11-03 (TASK-1169 FastAPI control host):** Moved the `8651` control listener from the standard-library server to FastAPI/Uvicorn on its own socket and loop thread, keeping the wire contract, bearer, slots and wall budget unchanged and adding header/body deadlines. With this, the ops service's control, status and health endpoints are all on FastAPI in source. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
 
 - **2026-10-18:** Health monitoring fixed independently of full isolation; broader tasks remain queued.
 - **2026-10-18:** Caid review narrows scope: reuse ledger, portable service contracts, shared observations, routing owned by deployment, guardrails first. Follow-up found repository mount inspection; TASK-1170 explicitly covers it.

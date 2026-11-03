@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import socket as _socket
+import time as _time
 from threading import Event, Semaphore, Thread
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import create_engine
 
 from llm_bawt.ops import JOB_ACCEPTED, JOB_DISPATCHING, JOB_QUEUED, OpsDispatchError, OpsService, OpsStore
+from llm_bawt.ops import control_http
 from llm_bawt.ops import executor as executor_module
 from llm_bawt.ops.control_client import BUSY_RETRY_SECONDS, OpsControlClient, build_admission_ops_service
 from llm_bawt.ops.control_http import OpsControlServer
@@ -470,3 +473,119 @@ def test_a_listener_failure_falls_back_to_the_interval_and_reconnects():
     assert waiter.wait(stop, 5.0) is False
     assert waiter.wait(stop, 5.0) is False
     assert len(attempts) == 2 and waiter._conn is None
+
+
+# ── FastAPI control host: fixed surface and slow-client bounds (TASK-1169) ──
+
+
+@pytest.mark.parametrize(("method", "path", "status", "code"), [
+    ("GET", PREPARE_PATH, 404, "not_found"),
+    ("POST", EXECUTORS_PATH, 404, "not_found"),
+    ("GET", EXECUTORS_PATH + "?x=1", 404, "not_found"),
+    ("GET", "/v1/ops/%65xecutors", 404, "not_found"),
+    ("GET", EXECUTORS_PATH + "/", 404, "not_found"),
+    ("GET", "/docs", 404, "not_found"),
+    ("GET", "/openapi.json", 404, "not_found"),
+    ("PUT", PREPARE_PATH, 405, "method_not_allowed"),
+    ("PATCH", PREPARE_PATH, 405, "method_not_allowed"),
+    ("OPTIONS", EXECUTORS_PATH, 405, "method_not_allowed"),
+])
+def test_the_surface_is_exactly_two_routes(rig, method, path, status, code):
+    response = httpx.request(method, rig.url + path, headers={"Authorization": f"Bearer {TOKEN}"},
+                             timeout=HANG_GUARD_S)
+    assert response.status_code == status
+    assert response.json() == {PROTOCOL_FIELD: 1, "code": code, "message": response.json()["message"]}
+    assert response.headers["Cache-Control"] == "no-store" and response.headers["Connection"] == "close"
+    assert "server" not in response.headers
+
+
+def test_head_is_refused(rig):
+    response = httpx.head(rig.url + EXECUTORS_PATH, headers={"Authorization": f"Bearer {TOKEN}"},
+                          timeout=HANG_GUARD_S)
+    assert response.status_code == 405
+
+
+def test_success_keeps_the_wire_shape(rig):
+    response = httpx.get(rig.url + EXECUTORS_PATH, headers={"Authorization": f"Bearer {TOKEN}"},
+                         timeout=HANG_GUARD_S)
+    assert response.status_code == 200
+    assert response.content == b'{"%s":1,"executors":{"docker":null}}' % PROTOCOL_FIELD.encode()
+    assert response.headers["Content-Type"] == "application/json"
+    assert response.headers["Cache-Control"] == "no-store" and response.headers["Connection"] == "close"
+
+
+def test_auth_is_checked_before_any_body_is_read(rig):
+    status, body = _raw_post(rig.url, {"Content-Length": str(MAX_BODY_BYTES + 1)})
+    assert (status, body["code"]) == (401, "unauthorized")
+
+
+def _wait_until(predicate, seconds=HANG_GUARD_S):
+    deadline = _time.monotonic() + seconds
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        _time.sleep(0.02)
+    return False
+
+
+def _closed_by_server(sock):
+    try:
+        return sock.recv(1) == b""
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+
+
+def test_silent_and_trickling_clients_are_closed_and_never_hold_the_listener(monkeypatch):
+    monkeypatch.setattr(control_http._ControlProtocol, "HEADER_TIMEOUT_SECONDS", 0.3)
+    server, url = _served(SimpleNamespace(executor_readiness=lambda: {"docker": None}))
+    host, port = server.address
+    clients = []
+    try:
+        for index in range(control_http.CONNECTION_LIMIT):
+            sock = _socket.create_connection((host, port), timeout=HANG_GUARD_S)
+            if index % 2:
+                sock.sendall(b"GET " + EXECUTORS_PATH.encode() + b" HTTP/1.1\r\nHost: x\r\n")  # never finishes
+            sock.setblocking(False)
+            clients.append(sock)
+        assert _wait_until(lambda: all(_closed_by_server(sock) for sock in clients))
+        response = httpx.get(url + EXECUTORS_PATH, headers={"Authorization": f"Bearer {TOKEN}"},
+                             timeout=HANG_GUARD_S)
+        assert response.status_code == 200
+    finally:
+        for sock in clients:
+            sock.close()
+        server.close()
+
+
+def test_a_body_that_never_arrives_is_refused_without_taking_a_slot(monkeypatch):
+    monkeypatch.setattr(control_http, "READ_TIMEOUT_SECONDS", 0.3)
+    service = BlockingService()
+    server, url = _served(service, concurrency=1)
+    host, port = server.address
+    sock = _socket.create_connection((host, port), timeout=HANG_GUARD_S)
+    try:
+        sock.sendall(b"POST " + PREPARE_PATH.encode() + b" HTTP/1.1\r\nHost: x\r\n"
+                     b"Authorization: Bearer " + TOKEN.encode() + b"\r\nContent-Length: 40\r\n\r\n{\"op")
+        reply = b""
+        while b"\r\n\r\n" not in reply:
+            chunk = sock.recv(4096)
+            assert chunk
+            reply += chunk
+        assert reply.startswith(b"HTTP/1.1 408 ")
+        assert service.entered.acquire(timeout=0) is False
+        assert server.slots.acquire(blocking=False)
+        server.slots.release()
+    finally:
+        sock.close()
+        server.close()
+
+
+def test_close_stops_the_loop_and_releases_the_port():
+    server, _url = _served(SimpleNamespace())
+    address = server.address
+    server.close()
+    assert not server.thread.is_alive()
+    rebound = OpsControlServer(lambda: None, address, token_source=lambda: TOKEN)
+    rebound.close()
