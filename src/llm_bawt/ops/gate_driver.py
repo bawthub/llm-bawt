@@ -194,8 +194,17 @@ class GateDriver:
         except GateRetireError:
             return False
 
+    def reap(self) -> int:
+        """Poll every owned child so exited ones never linger as zombies."""
+        with self._lock:
+            done = [job_id for job_id, child in self._children.items() if child.poll() is not None]
+            for job_id in done:
+                self._children.pop(job_id, None)
+        return len(done)
+
     def retire_pending(self, limit: int = 20) -> int:
         """Terminal reserved gates still holding capacity; retire once stopped."""
+        self.reap()
         with self.store.engine.connect() as conn:
             ids = conn.execute(text("SELECT id FROM ops_jobs WHERE worker_slot_at IS NOT NULL "
                 "AND gate_retired_at IS NULL AND host_unit_name LIKE 'gate-custody:%' "

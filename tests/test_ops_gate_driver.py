@@ -160,3 +160,17 @@ def test_uncertain_launch_is_lost_not_failed(monkeypatch):
     store = Store()
     assert gd.run_child(store, "j1", CONFIG, api=object()) == JOB_LOST
     assert events[-1] == "retire"
+
+
+def test_exited_retired_child_is_reaped_each_pass():
+    class Conn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, *a, **k): return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+    store = Store()
+    store.engine = SimpleNamespace(connect=Conn)
+    driver = gd.GateDriver(store, CONFIG)
+    driver._children["done"] = Child(alive=False)
+    driver._children["live"] = Child(alive=True)
+    assert driver.retire_pending() == 0  # row already retired: no DB match
+    assert list(driver._children) == ["live"]
