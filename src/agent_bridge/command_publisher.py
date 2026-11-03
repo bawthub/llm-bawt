@@ -62,6 +62,7 @@ class CommandPublisherMixin:
         compact_threshold: int | None = None,
         responses_transport: str | None = None,
         openrouter_provider: Mapping | None = None,
+        responses_strict_tools: bool = False,
         codex_transport: str | None = None,
         mcp_tool_timeout_ms: int | None = None,
         question_answer_wait_seconds: int | None = None,
@@ -138,6 +139,8 @@ class CommandPublisherMixin:
             fields["openrouter_provider"] = json.dumps(
                 dict(openrouter_provider), separators=(",", ":"), sort_keys=True
             )
+        if responses_strict_tools:  # TASK-1966: per-tool strict schemas
+            fields["responses_strict_tools"] = "1"
         if codex_transport:  # TASK-1243: codex exec or app-server
             fields["codex_transport"] = codex_transport
         if mcp_tool_timeout_ms is not None and mcp_tool_timeout_ms > 0:

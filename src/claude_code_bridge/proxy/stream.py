@@ -61,6 +61,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
+from .strict_tools import strip_strict_nulls, to_strict_parameters
 from .tool_sanitizers import recover_trailing_json, sanitize_tool_arguments
 from .reasoning import ReasoningCodec
 from .continuation import CommittedOutput
@@ -264,6 +265,17 @@ async def responses_to_anthropic_sse(
         required_args_by_tool[name] = frozenset(
             value for value in required or [] if isinstance(value, str)
         )
+    # TASK-1966: tools that went upstream strict; their nulls mean "omitted".
+    strict_original_schemas: dict[str, dict] = (
+        {
+            tool["name"]: tool["input_schema"]
+            for tool in tool_schemas or []
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+            and to_strict_parameters(tool.get("input_schema")) is not None
+        }
+        if request_context is not None and request_context.strict_tools
+        else {}
+    )
 
     # TASK-714: skip message_start on resumed attempts — the previous attempt
     # already emitted it and the SDK's parser rejects a second one. When state
@@ -529,6 +541,8 @@ async def responses_to_anthropic_sse(
                 # then, so watch them here to stop a loop mid-stream.
                 loop_breaker.observe(item_id, partial, kind="tool_use")
                 tool_arg_buffers[item_id] = tool_arg_buffers.get(item_id, "") + partial
+                # TASK-1966: stall attribution reads the held arguments here.
+                block["held_args"] = tool_arg_buffers[item_id]
                 continue
 
             # ── output item closed ──────────────────────────────────────────
@@ -699,6 +713,10 @@ async def responses_to_anthropic_sse(
                 # fields that the matching tool schema declares optional.
                 try:
                     parsed = json.loads(raw)
+                    if tool_name in strict_original_schemas:
+                        parsed = strip_strict_nulls(
+                            parsed, strict_original_schemas[tool_name]
+                        )
                     if isinstance(parsed, dict):
                         if tool_name in required_args_by_tool:
                             required_args = required_args_by_tool[tool_name]

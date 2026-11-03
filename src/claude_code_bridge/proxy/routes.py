@@ -39,6 +39,7 @@ from .request_context import (
     valid_skill_names,
 )
 from .openrouter_routing import parse_openrouter_provider
+from .strict_tools import STRICT_TOOLS_HEADER, parse_strict_tools
 from .transport_policy import normalize_responses_transport
 from .repetition_breaker import RepetitionBreaker, RepetitionLoopError
 from .tool_guard import ToolCallGuard, UnsafeToolCallError
@@ -538,6 +539,7 @@ async def messages(request: Request) -> JSONResponse | StreamingResponse:
         openrouter_provider=parse_openrouter_provider(
             request_headers.get(OPENROUTER_PROVIDER_HEADER)
         ),
+        strict_tools=parse_strict_tools(request_headers.get(STRICT_TOOLS_HEADER)),
         skill_names=valid_skill_names(request_headers.get(SKILL_NAMES_HEADER)),
         status_callback=getattr(
             getattr(getattr(request, "app", None), "state", None),

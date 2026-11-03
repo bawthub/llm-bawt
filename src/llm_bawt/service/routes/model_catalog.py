@@ -121,6 +121,11 @@ class EndpointWrite(BaseModel):
                     "space, '.', '-', '_', '/') and allow_fallbacks is a boolean"
                 )
             normalized["openrouter_provider"] = canonical_routing
+
+        # TASK-1966: per-tool strict function schemas on the Responses path.
+        strict_tools = normalized.get("responses_strict_tools")
+        if strict_tools is not None and not isinstance(strict_tools, bool):
+            raise ValueError("serving_config.responses_strict_tools must be a boolean")
         return normalized
 
 

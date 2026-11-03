@@ -156,6 +156,9 @@ class ServiceLLMBawt(BaseLLMBawt):
                 )
                 if openrouter_provider is not None:
                     self.client._bot_config["openrouter_provider"] = openrouter_provider
+                # TASK-1966: per-tool strict Responses schemas (catalog opt-in).
+                if model_def.get("responses_strict_tools") is True:
+                    self.client._bot_config["responses_strict_tools"] = True
                 provider_system_prompt = model_def.get("provider_system_prompt")
                 if isinstance(provider_system_prompt, str) and provider_system_prompt:
                     self.client._bot_config["provider_system_prompt"] = (
