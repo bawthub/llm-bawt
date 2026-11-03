@@ -71,7 +71,7 @@ ABORT_CAUSES = frozenset({HOST_SHUTDOWN})
 # outlives it. The bridge's teardown takes its waits from these constants.
 
 TEARDOWN_DISCONNECT_BACKSTOP_S = 22.0
-"""Cap on the SDK's own ``disconnect()``. claude-agent-sdk 0.2.160-0.2.176 escalates
+"""Cap on the SDK's own ``disconnect()``. claude-agent-sdk 0.2.160-0.2.177 escalates
 stdin EOF -> SIGTERM -> SIGKILL with 5s waits, plus up to 5s for the stdin
 write lock: 20s at most."""
 
