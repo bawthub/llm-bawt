@@ -110,7 +110,14 @@ def create_control_app(control: "OpsControlServer") -> FastAPI:
 
 
 async def read_json(request: Request):
-    """The JSON object body, or the refusal to send. Over-limit bodies stay unread."""
+    """The JSON object body, or the refusal to send. Over-limit bodies stay unread.
+
+    The contract is Content-Length framing only. h11 frames by
+    Transfer-Encoding when both are sent, so any Transfer-Encoding is refused
+    before the body is touched, and the streamed read is still capped and held
+    to one absolute deadline."""
+    if "transfer-encoding" in request.headers:
+        return fail(411, "length_required", "a Content-Length body is required; Transfer-Encoding is not accepted")
     try:
         length = int(request.headers.get("Content-Length", ""))
     except ValueError:
@@ -118,9 +125,11 @@ async def read_json(request: Request):
     if length < 0 or length > MAX_BODY_BYTES:
         return fail(413, "body_too_large", f"the body is limited to {MAX_BODY_BYTES} bytes")
     try:
-        raw = await asyncio.wait_for(request.body(), READ_TIMEOUT_SECONDS)
+        raw = await asyncio.wait_for(_read_capped(request, length), READ_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         return fail(408, "request_timeout", f"the body did not arrive within {READ_TIMEOUT_SECONDS:g}s")
+    if raw is None:
+        return fail(413, "body_too_large", f"the body is limited to {MAX_BODY_BYTES} bytes")
     try:
         body = json.loads(raw or b"null")
     except ValueError:
@@ -128,6 +137,17 @@ async def read_json(request: Request):
     if not isinstance(body, dict):
         return fail(400, "bad_request", "the body is not a JSON object")
     return body
+
+
+async def _read_capped(request: Request, length: int):
+    """At most ``length`` bytes; None if the stream delivers more."""
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > length:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class _ControlProtocol(_HealthProtocol):

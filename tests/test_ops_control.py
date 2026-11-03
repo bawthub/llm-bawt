@@ -582,6 +582,49 @@ def test_a_body_that_never_arrives_is_refused_without_taking_a_slot(monkeypatch)
         server.close()
 
 
+@pytest.mark.parametrize("framing", [b"Transfer-Encoding: chunked\r\nContent-Length: 1\r\n",
+                                     b"Transfer-Encoding: chunked\r\n"])
+def test_chunked_framing_is_refused_before_the_body_and_never_reaches_the_service(framing):
+    service = BlockingService()
+    server, _url = _served(service, concurrency=1)
+    host, port = server.address
+    sock = _socket.create_connection((host, port), timeout=HANG_GUARD_S)
+    try:
+        sock.sendall(b"POST " + PREPARE_PATH.encode() + b" HTTP/1.1\r\nHost: x\r\n"
+                     b"Authorization: Bearer " + TOKEN.encode() + b"\r\n" + framing + b"\r\n")
+        big = b"x" * (control_http.MAX_BODY_BYTES * 2)
+        try:  # a mixed-framing body well over the cap; the server may close mid-send
+            sock.sendall(b"%x\r\n" % len(big) + big + b"\r\n0\r\n\r\n")
+        except OSError:
+            pass
+        reply = b""
+        try:  # unread request bytes may turn the server's close into a reset
+            while b'"length_required"' not in reply and (chunk := sock.recv(4096)):
+                reply += chunk
+        except ConnectionResetError:
+            pass
+        assert reply.startswith(b"HTTP/1.1 411 ")
+        assert b'"length_required"' in reply
+        assert service.entered.acquire(timeout=0) is False
+        assert server.slots.acquire(blocking=False)
+        server.slots.release()
+    finally:
+        sock.close()
+        server.close()
+
+
+def test_a_stream_longer_than_its_content_length_is_never_buffered_past_the_cap():
+    """Defense in depth: the capped reader stops at the declared length."""
+    import asyncio as _asyncio
+
+    class _Request:
+        async def stream(self):
+            for _ in range(1000):
+                yield b"x" * 1024
+
+    assert _asyncio.run(control_http._read_capped(_Request(), 10)) is None
+
+
 def test_close_stops_the_loop_and_releases_the_port():
     server, _url = _served(SimpleNamespace())
     address = server.address
