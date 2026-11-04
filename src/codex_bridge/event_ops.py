@@ -5,6 +5,7 @@ import base64
 import binascii
 import json
 import logging
+import shlex
 import shutil
 import tempfile
 import time
@@ -170,7 +171,7 @@ class CodexEventMixin:
         if args and isinstance(args[0], dict):
             command = (args[0].get("tool_input") or {}).get("command")
             if isinstance(command, (list, tuple)):
-                args[0]["tool_input"]["command"] = " ".join(str(part) for part in command)
+                args[0]["tool_input"]["command"] = shlex.join(str(part) for part in command)
         try:
             await hook(request_id, session_key, *args)
         except Exception:

@@ -56,13 +56,10 @@ class ChangedFileLifecycleMixin:
     def _carry_turn_snapshot_trees(self, session_key: str | None, receipts: list[dict[str, Any]]) -> None:
         if not session_key:
             return
-        # Tree receipts only (timing entries carry no status); skip trees that
-        # failed or were too large to snapshot.
-        roots = [
-            str(r["tree"]) for r in receipts
-            if r.get("tree") and r.get("status")
-            and r["status"] != "error" and not str(r["status"]).startswith("skipped")
-        ]
+        # Only trees this session actually changed.  Carrying trees it merely
+        # read would re-register them every turn and mark other bots' live
+        # turns there as overlapping (ineligible_shared_tree_busy).
+        roots = [str(r["tree"]) for r in receipts if r.get("tree") and r.get("status") == "observed"]
         if not roots:
             return
         carried = getattr(self, "_turn_snapshot_carried", None)

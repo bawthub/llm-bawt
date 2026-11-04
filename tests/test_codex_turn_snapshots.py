@@ -100,6 +100,21 @@ async def test_codex_shell_add_then_delete_are_observed(repo: Path, tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_read_only_tree_is_not_carried(repo: Path, tmp_path: Path) -> None:
+    """A tree the session only read must not be re-registered next turn."""
+    bridge = _bridge(tmp_path)
+    await _event(bridge, "r1", _command(f"cat {repo}/kept.txt", tmp_path))
+    await _event(bridge, "r1", SimpleNamespace(type="turn.completed", usage=None))
+    assert _command_rows(_published(bridge, "r1")) == []
+    assert getattr(bridge, "_turn_snapshot_carried", {}).get(SESSION) is None
+
+    observe = AsyncMock()
+    bridge._observe_tool_for_turn_snapshot = observe  # type: ignore[method-assign]
+    await _event(bridge, "r2", SimpleNamespace(type="thread.started", thread_id="thread-1"))
+    observe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_commands_are_joined_for_path_discovery(repo: Path, tmp_path: Path) -> None:
     bridge = _bridge(tmp_path)
     await _event(bridge, "r1", _command(["bash", "-lc", f"touch {repo}/x.txt"], tmp_path))  # type: ignore[arg-type]
