@@ -29,7 +29,7 @@ from llm_bawt.service.system_gate_admission import (
     check_steer,
 )
 from llm_bawt.service.turn_admission import lock_target
-from llm_bawt.steer_capabilities import ALL_STEER_CAPS
+from llm_bawt.steer_capabilities import LEGACY_STEER_CAPS
 from tests.test_ops_quiesce_pg import rig  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
@@ -126,7 +126,7 @@ def test_a_held_head_is_passed_by_the_control_row_and_normal_order_survives(rig)
     grant = DeliveryControlGrant.of(claimed)
     assert grant == DeliveryControlGrant(rig.bot, turn_id, control.id, claimed.claim_token)
     assert check_steer(rig.engine, rig.bot, turn_id=turn_id, grant=grant) == ControlTarget(
-        f"req-{turn_id}", "claude-code", "sess-held", ALL_STEER_CAPS)  # a legacy row decodes
+        f"req-{turn_id}", "claude-code", "sess-held", LEGACY_STEER_CAPS)  # a legacy row decodes (no TASK-774 images)
     # A normal steer is still refused, and the held head never moved.
     with pytest.raises(SteerGateRefused):
         check_steer(rig.engine, rig.bot, turn_id=turn_id)
