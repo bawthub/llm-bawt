@@ -313,16 +313,23 @@ async def test_turn_completed_publishes_per_turn_usage(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_turn_usage_falls_back_to_the_rollout_context_window(tmp_path):
+@pytest.mark.parametrize("limit,expected", [(None, 258400), (225000, 225000), (400000, 258400)])
+async def test_turn_usage_falls_back_to_the_rollout_context_window(tmp_path, limit, expected):
+    from codex_bridge.context_window import compact_config_overrides
+    from codex_bridge.exec_patch import CONFIG_OVERRIDES
+
     lines, total = build_rollout([TURN_1])
     write_rollout(tmp_path, lines)
     bridge = _bridge(tmp_path, {})
-
-    usage = await bridge._turn_token_usage(
-        sdk_usage(total), thread=SimpleNamespace(id=THREAD_ID), model="gpt-6",
-    )
-
-    assert usage is not None and usage["context_window"] == 258400
+    token = CONFIG_OVERRIDES.set(compact_config_overrides(limit))
+    try:
+        usage = await bridge._turn_token_usage(
+            sdk_usage(total), thread=SimpleNamespace(id=THREAD_ID), model="gpt-6",
+        )
+    finally:
+        CONFIG_OVERRIDES.reset(token)
+    assert usage is not None and usage["context_window"] == expected
+    assert usage["resident_tokens"] == TURN_1[-1][0]
 
 
 @pytest.mark.asyncio

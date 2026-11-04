@@ -127,6 +127,28 @@ def test_app_server_turn_streams_and_completes_like_exec(tmp_path):
 
 
 @REAL
+@pytest.mark.parametrize("threshold,expected", [("225000", 225000), ("bad", None), (None, None)])
+def test_app_server_send_receives_the_per_run_compaction_setting(
+    tmp_path, monkeypatch, threshold, expected,
+):
+    from agent_bridge import skill_codex
+
+    monkeypatch.setattr(skill_codex, "codex_config_overrides",
+                        lambda *a, **kw: ["skills.bundled.enabled=false"])
+    argv = tmp_path / "argv.json"
+    bridge = _bridge(tmp_path, _fake_codex(tmp_path, mode="complete", argv=str(argv)))
+    asyncio.run(_send(bridge, SimpleNamespace(xack=AsyncMock()), compact_threshold=threshold))
+    arguments = json.loads(argv.read_text())
+    assert arguments[:2] == ["--config", "skills.bundled.enabled=false"]
+    if expected:
+        assert arguments[2:4] == ["--config", f"model_auto_compact_token_limit={expected}"]
+    else:
+        assert not any("model_auto_compact_token_limit" in argument for argument in arguments)
+    assert arguments[-1] == "app-server"
+    assert len(_published(bridge, AgentEventKind.ASSISTANT_DONE)) == 1
+
+
+@REAL
 def test_a_resumed_thread_uses_thread_resume(tmp_path):
     bridge = _bridge(tmp_path, _fake_codex(tmp_path, mode="complete"))
     asyncio.run(_send(bridge, SimpleNamespace(xack=AsyncMock()), thread_resume_id="thr-1"))

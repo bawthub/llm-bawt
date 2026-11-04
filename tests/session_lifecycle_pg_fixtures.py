@@ -71,12 +71,17 @@ def rig(private_app_pg):
 
 
 @pytest.fixture
-def real_lifecycle(rig, monkeypatch):
+def lifecycle_backend(request):
+    return getattr(request, "param", "claude-code")
+
+
+@pytest.fixture
+def real_lifecycle(rig, monkeypatch, lifecycle_backend):
     from llm_bawt.inter_bot_delivery import InterBotDeliveryStore
     from llm_bawt.service.session_lifecycle.lifecycle import NewSessionLifecycle
 
     store = InterBotDeliveryStore(rig.config)
-    fake_bot = SimpleNamespace(slug=rig.bot, agent_backend="claude-code", harness="claude-code")
+    fake_bot = SimpleNamespace(slug=rig.bot, agent_backend=lifecycle_backend, harness=lifecycle_backend)
     monkeypatch.setattr("llm_bawt.service.session_lifecycle.lifecycle.BotManager",
                         lambda config: SimpleNamespace(get_bot=lambda slug: fake_bot))
     service = SimpleNamespace(config=rig.config, _inter_bot_dispatcher=SimpleNamespace(

@@ -151,7 +151,6 @@ class NewSessionReceipt:
                        IN ('scheduler', 'chat_command')
                        AND (:provider='claude-code'
                             OR (:provider='codex'
-                                AND metadata_json->'new_session_intent'->>'origin'='chat_command'
                                 AND ((:clean_start=true AND :provider_session_id='')
                                      OR (:provider_session_id <> ''
                                          AND (payload_json->>'inter_bot_typed_follow_up'='true'

@@ -94,6 +94,37 @@ def test_empty_provider_evidence_cannot_ack(pending_receipt):
     assert finish(state) is None
 
 
+@pytest.mark.parametrize("lifecycle_backend", ["codex"], indirect=True)
+@pytest.mark.parametrize("damage", ["digest", "count", "clean_start", "empty_provider", "trigger"])
+def test_codex_scheduled_seed_ack_remains_exact(pending_receipt, damage):
+    import json
+
+    state = pending_receipt
+    state.event.provider = "codex"
+    ack = state.event.raw["new_session_ack"]
+    ack.update(seed_digest="bound", seeded_count=3, clean_start=False,
+               provider_session_id="new-provider")
+    with state.rig.engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET metadata_json=metadata_json || CAST(:meta AS jsonb)
+            WHERE id=:id
+        """), {"id": state.claim.id, "meta": json.dumps({
+            "new_session_seed": {"payload_digest": "bound", "count": 3},
+        })})
+    if damage == "trigger":
+        state.event.trigger_message_id = "another-trigger"
+    else:
+        key, value = {
+            "digest": ("seed_digest", "other"),
+            "count": ("seeded_count", 2),
+            "clean_start": ("clean_start", True),
+            "empty_provider": ("provider_session_id", ""),
+        }[damage]
+        ack[key] = value
+    assert acknowledge(state) is False
+    assert finish(state) is None
+
+
 @pytest.mark.parametrize("damage", [
     "user_author", "user_author_type", "user_session", "assistant_missing",
     "assistant_session", "assistant_role", "failed_turn", "unfinished_turn",

@@ -153,7 +153,12 @@ class CodexEventMixin:
             return None
         usage = turn.to_token_usage()
         info = await self._model_info.get(model)
-        usage["context_window"] = info.get("context_window") or turn.context_window
+        from .context_window import effective_context_window
+        from .exec_patch import CONFIG_OVERRIDES
+
+        usage["context_window"] = effective_context_window(
+            info.get("context_window") or turn.context_window, CONFIG_OVERRIDES.get(),
+        )
         usage["max_output_tokens"] = info.get("max_output_tokens")
         return usage
 

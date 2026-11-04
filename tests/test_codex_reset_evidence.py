@@ -103,6 +103,32 @@ def send(state):
     return state.events
 
 
+@pytest.mark.parametrize("threshold,expected", [
+    ("225000", ("skills.bundled.enabled=false", "model_auto_compact_token_limit=225000")),
+    ("invalid", ("skills.bundled.enabled=false",)),
+    (None, ("skills.bundled.enabled=false",)),
+])
+def test_send_merges_per_run_compact_threshold_with_skill_overrides(
+    harness, monkeypatch, threshold, expected,
+):
+    from agent_bridge import skill_codex
+    from codex_bridge.exec_patch import CONFIG_OVERRIDES
+
+    monkeypatch.setattr(skill_codex, "codex_config_overrides",
+                        lambda *a, **kw: ["skills.bundled.enabled=false"])
+    harness.fields["compact_threshold"] = threshold
+    observed = []
+    original = harness.thread.run_streamed
+
+    async def streamed(prompt, options):
+        observed.append(CONFIG_OVERRIDES.get())
+        return await original(prompt, options)
+
+    harness.thread.run_streamed = streamed
+    send(harness)
+    assert observed == [expected]
+
+
 def assert_no_ack(state):
     assert not any(event.raw.get("new_session_ack") for event in state.events)
     assert not any(event.kind == AgentEventKind.ASSISTANT_DONE for event in state.events)

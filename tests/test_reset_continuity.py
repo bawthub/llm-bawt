@@ -67,20 +67,21 @@ def test_effective_history_scope():
         effective_history_scope(resolver("inline"), "everything")
 
 
-def test_seed_obeys_override_in_both_directions(monkeypatch):
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+def test_seed_obeys_override_in_both_directions(monkeypatch, backend):
     from llm_bawt.service.routes import history_seed
 
     built = Mock(return_value={"messages": [{"role": "user", "content": "carried"}]})
     monkeypatch.setattr(history_seed, "build_context_seed", built)
     binding = {"thread_session_id": "old"}
 
-    on = SimpleNamespace(bot=SimpleNamespace(agent_backend="claude-code"),
+    on = SimpleNamespace(bot=SimpleNamespace(agent_backend=backend),
                          config_resolver=resolver("inline+summaries"))
     assert history_seed.maybe_build_session_seed(on, "fixture", "m", "/new", None, binding,
                                                  history_scope="none") == []
     built.assert_not_called()
 
-    off = SimpleNamespace(bot=SimpleNamespace(agent_backend="claude-code"), config_resolver=resolver("none"))
+    off = SimpleNamespace(bot=SimpleNamespace(agent_backend=backend), config_resolver=resolver("none"))
     assert history_seed.maybe_build_session_seed(off, "fixture", "m", "/new", None, binding,
                                                  history_scope="inline") == [
         {"role": "user", "content": "carried"}]
@@ -174,3 +175,41 @@ def test_continuity_receipt_records_the_scope_actually_used(monkeypatch):
     session_continuity.record_session_continuity(
         llm, {"thread_session_id": "new"}, [], bot_id="fixture", user_id="owner", history_scope="none")
     assert record.call_args.args[3]["settings"]["history_scope"] == "none"
+
+
+@pytest.mark.parametrize("backend,scope,allowed", [
+    ("codex", "inline+summaries", True), ("codex", "none", True),
+    ("claude-code", "summaries", True), ("unknown", "inline", False),
+    ("unknown", "none", False), ("codex", "invalid", False),
+])
+def test_scheduled_reset_uses_mode_capabilities_not_inspection(monkeypatch, backend, scope, allowed):
+    from llm_bawt import config_resolver
+
+    monkeypatch.setattr(config_resolver, "ConfigResolver", lambda *a, **kw: resolver(scope))
+    lifecycle = object.__new__(NewSessionLifecycle)
+    lifecycle.service = SimpleNamespace(config=object())
+    bot = SimpleNamespace(slug="fixture", agent_backend=backend, harness=backend)
+    assert lifecycle._supports_scheduled_reset(bot, scheduled()) is allowed
+
+
+@pytest.mark.parametrize("retain,clean,scope,override,allowed", [
+    (True, False, "inline", "configured", True),
+    (True, False, "none", "configured", False),
+    (False, True, "none", "configured", True),
+    (False, True, "inline", "configured", False),
+    (False, True, "inline", "none", True),
+    (True, False, "none", "inline+summaries", True),
+])
+def test_scheduled_reset_requires_the_requested_mode(monkeypatch, retain, clean, scope, override, allowed):
+    from llm_bawt import agent_context, config_resolver
+
+    monkeypatch.setattr(config_resolver, "ConfigResolver", lambda *a, **kw: resolver(scope))
+    monkeypatch.setattr(agent_context, "capabilities_for_backend", lambda backend: SimpleNamespace(
+        reset_retain_history=retain, reset_without_history=clean, inspect=False, compact=False,
+    ))
+    lifecycle = object.__new__(NewSessionLifecycle)
+    lifecycle.service = SimpleNamespace(config=object())
+    bot = SimpleNamespace(slug="fixture", agent_backend="codex", harness="codex")
+    assert lifecycle._supports_scheduled_reset(
+        bot, scheduled(IdleContextResetParameters(continuity=override)),
+    ) is allowed

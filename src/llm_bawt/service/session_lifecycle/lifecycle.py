@@ -266,7 +266,7 @@ class NewSessionLifecycle:
         if excluded:  # rechecked under the target lock by scheduled_skip_reason
             return None, excluded
         bot = BotManager(self.service.config).get_bot(intent.bot_id)
-        if bot is None or durable_agent_backend(bot) != "claude-code":
+        if bot is None or not self._supports_scheduled_reset(bot, intent):
             return None, "target does not support scheduled fresh provider sessions"
         engine = self.store.engine
         with engine.begin() as conn:
@@ -315,6 +315,23 @@ class NewSessionLifecycle:
                 producer="bot", on_gate="hold",  # scheduled /new waits out a gate
             )
             return record, None
+
+    def _supports_scheduled_reset(self, bot: Any, intent: NewSessionIntent) -> bool:
+        """Reset support is mode-specific, independent of inspect/compact APIs."""
+        from ...agent_context import capabilities_for_backend
+        from ...config_resolver import ConfigResolver
+        from ...setting_definitions import HISTORY_SCOPES
+        from ...utils.history import effective_history_scope
+
+        caps = capabilities_for_backend(durable_agent_backend(bot))
+        override = (
+            intent.scheduler_parameters.history_scope_override
+            if intent.scheduler_parameters else None
+        )
+        scope = effective_history_scope(ConfigResolver(self.service.config, bot=bot), override)
+        if scope not in HISTORY_SCOPES:
+            return False
+        return caps.reset_without_history if scope == "none" else caps.reset_retain_history
 
     def admit_bot_delivery(
         self, intent: NewSessionIntent, *, payload: dict | None = None,

@@ -216,6 +216,7 @@ def test_scheduler_does_not_label_unconfirmed_resets_successful(rig, monkeypatch
         assert json.loads(run.result_json)["reset"] == 0
 
 
+@pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
 def test_real_submission_is_literal_system_command_and_keyed_retry(rig, real_lifecycle):
     first = asyncio.run(real_lifecycle.submit(scheduled_intent(rig), timeout_seconds=0))
     second = asyncio.run(real_lifecycle.submit(scheduled_intent(rig, run_id="next-run"), timeout_seconds=0))
@@ -236,6 +237,7 @@ def test_real_submission_is_literal_system_command_and_keyed_retry(rig, real_lif
 
 
 @pytest.mark.parametrize("change", ["pointer", "usage", "new_work", "queued_work"])
+@pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
 def test_real_claim_skips_stale_scheduled_intent_without_reset(rig, real_lifecycle, change):
     intent = scheduled_intent(rig)
     first = asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
@@ -267,6 +269,7 @@ def test_real_claim_skips_stale_scheduled_intent_without_reset(rig, real_lifecyc
                             {"id": first.turn_id}).scalar_one() == 0
 
 
+@pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
 def test_real_scheduler_never_confirms_transport_only_delivery(rig, real_lifecycle):
     def wake(bot):
         claim = real_lifecycle.store.claim_next(bot, claim_owner="fixture", steer_capable=False)

@@ -17,7 +17,8 @@ from tests.session_lifecycle_pg_fixtures import scheduled_intent
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("private_app_pg")]
 
 
-def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle):
+@pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
+def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle, lifecycle_backend):
     intent = scheduled_intent(rig)
     asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
     claim = real_lifecycle.store.claim_next(rig.bot, claim_owner="fixture", steer_capable=False)
@@ -48,7 +49,7 @@ def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle):
                "turn": claim.turn_id})
     assert NewSessionReceipt.record_provider_ack(
         rig.engine, request_id="wrong-run", bot_id=rig.bot,
-        event=SimpleNamespace(run_id="wrong-run", provider="claude-code",
+        event=SimpleNamespace(run_id="wrong-run", provider=lifecycle_backend,
                               session_key=rig.bot, trigger_message_id=claim.user_message_id,
                               raw={"new_session_ack": {"thread_session_id": new_id, "clean_start": True}}),
     ) is False
@@ -63,7 +64,7 @@ def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle):
             WHERE id=:id
         """), {"id": claim.id, "token": claim.claim_token})
     event = SimpleNamespace(
-        run_id=payload["inter_bot_bridge_request_id"], provider="claude-code",
+        run_id=payload["inter_bot_bridge_request_id"], provider=lifecycle_backend,
         session_key=rig.bot, trigger_message_id=claim.user_message_id,
         raw={"new_session_ack": {"thread_session_id": new_id, "clean_start": True,
                                    "provider_session_id": None}},
@@ -88,7 +89,10 @@ def test_provider_ack_and_exact_persisted_receipt(rig, real_lifecycle):
         """), {"id": claim.id}).scalar_one() == 1
 
 
-def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(rig, real_lifecycle):
+@pytest.mark.parametrize("lifecycle_backend", ["claude-code", "codex"], indirect=True)
+def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(
+    rig, real_lifecycle, lifecycle_backend,
+):
     """A seeded reset's bubble cites the restored manifest, never bridge prose."""
     intent = scheduled_intent(rig)
     asyncio.run(real_lifecycle.submit(intent, timeout_seconds=0))
@@ -109,7 +113,15 @@ def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(rig, real_
             UPDATE sessions SET session_metadata=COALESCE(session_metadata, '{}'::jsonb)
                 || CAST(:meta AS jsonb) WHERE id=:id
         """), {"id": new_id, "meta": json.dumps({
-            "agent_session_keys": {"claude_code": "sdk-seeded"}, "continuity": continuity})})
+            "agent_session_keys": {
+                "codex" if lifecycle_backend == "codex" else "claude_code": "sdk-seeded",
+            }, "continuity": continuity})})
+        conn.execute(text("""
+            UPDATE inter_bot_deliveries SET metadata_json=metadata_json || CAST(:meta AS jsonb)
+            WHERE id=:id
+        """), {"id": claim.id, "meta": json.dumps({
+            "new_session_seed": {"payload_digest": "exact-bound-seed", "count": 40},
+        })})
         conn.execute(text("""
             INSERT INTO messages (bot_id, id, role, content, timestamp, session_id,
                                   author_entity_type, author_entity_id)
@@ -126,9 +138,10 @@ def test_seeded_scheduler_receipt_reports_the_acknowledged_continuity(rig, real_
         """), {"assistant": payload["assistant_message_id"], "trigger": claim.user_message_id,
                "turn": claim.turn_id})
     event = SimpleNamespace(
-        run_id=payload["inter_bot_bridge_request_id"], provider="claude-code",
+        run_id=payload["inter_bot_bridge_request_id"], provider=lifecycle_backend,
         session_key=rig.bot, trigger_message_id=claim.user_message_id,
-        raw={"new_session_ack": {"thread_session_id": new_id, "provider_session_id": "sdk-seeded"}},
+        raw={"new_session_ack": {"thread_session_id": new_id, "provider_session_id": "sdk-seeded",
+                                 "seed_digest": "exact-bound-seed", "seeded_count": 40}},
     )
     assert NewSessionReceipt.record_provider_ack(
         rig.engine, request_id=event.run_id, bot_id=rig.bot, event=event,
