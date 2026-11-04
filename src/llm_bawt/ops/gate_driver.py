@@ -76,8 +76,28 @@ def admit_gate(store, *, operation_slug: str, args: dict, turn_token: str | None
     return job.to_api()
 
 
+def _demux(output: bytes) -> bytes:
+    """Strip Docker's non-TTY attach framing (8-byte header per frame).
+
+    Malformed framing falls back to the raw bytes; NULs are removed below either way.
+    """
+    body, pos = bytearray(), 0
+    while pos < len(output):
+        header = output[pos:pos + 8]
+        if len(header) < 8 or header[0] not in (0, 1, 2) or header[1:4] != b"\0\0\0":
+            return output
+        size = int.from_bytes(header[4:8], "big")
+        if pos + 8 + size > len(output):
+            return output
+        body += output[pos + 8:pos + 8 + size]
+        pos += 8 + size
+    return bytes(body)
+
+
 def _tail(output: bytes) -> str:
-    return output[-_OUTPUT_TAIL:].decode("utf-8", errors="replace")
+    # TASK-1865: raw frame headers carry NULs, which PostgreSQL text rejects;
+    # that failed the terminal write of a green run and left it LOST.
+    return _demux(output)[-_OUTPUT_TAIL:].replace(b"\0", b"").decode("utf-8", errors="replace")
 
 
 def run_child(store, job_id: str, config: GateDriverConfig, *, api=None) -> str:

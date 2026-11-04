@@ -174,3 +174,19 @@ def test_exited_retired_child_is_reaped_each_pass():
     driver._children["live"] = Child(alive=True)
     assert driver.retire_pending() == 0  # row already retired: no DB match
     assert list(driver._children) == ["live"]
+
+
+def _frame(stream, data):
+    return bytes([stream, 0, 0, 0]) + len(data).to_bytes(4, "big") + data
+
+
+def test_tail_demuxes_docker_frames_and_has_no_nul():
+    from llm_bawt.ops import gate_driver
+    raw = _frame(1, b"collected 10\n") + _frame(2, b"warn\n") + _frame(1, b"10 passed\n")
+    assert gate_driver._tail(raw) == "collected 10\nwarn\n10 passed\n"
+
+
+def test_tail_strips_nul_from_malformed_stream():
+    from llm_bawt.ops import gate_driver
+    out = gate_driver._tail(b"\x01\x00\x00\x00\xff\xff\xff\xfftruncated\x00tail")
+    assert "\x00" not in out and out.endswith("tail")
