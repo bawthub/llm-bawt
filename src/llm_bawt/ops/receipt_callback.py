@@ -10,7 +10,7 @@ this sender delivers it once the job is terminal. It runs in the app process
 dispatcher, so each new delivery is announced QUEUED at once (Vex r2 N1):
 
 * through the existing durable inter-bot delivery FIFO, from ``system``, as a
-  new turn (never a steer) bound to the caller's session;
+  new turn (never a steer) in the caller's current active session;
 * ``on_gate="hold"``: a system receipt is never refused by a gate; under a
   hold it waits at the claim and is delivered after release;
 * exactly once per job: the delivery's idempotency key is the job id, and the
