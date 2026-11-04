@@ -27,12 +27,15 @@ from agent_bridge.abort_rpc import cancel_request_handler
 from agent_bridge.events import AgentEventKind
 from agent_bridge.publisher import COMMANDS_STREAM
 from agent_bridge.steer_contract import (
+    ATTACHMENTS_FIELD,
     FRAMED_MESSAGE_FIELD,
     LIFECYCLE_UNCERTAIN,
     STEER_PRIORITY_UNSUPPORTED,
     STEER_UNFRAMED,
     STEER_UNSUPPORTED_TRANSPORT,
+    parse_steer_attachments,
 )
+from .event_ops import CodexEventMixin
 
 from ._bridge_helpers import CONSUMER_GROUP, _is_auth_failure, _is_codex_session_error
 from .app_server import (
@@ -222,6 +225,8 @@ class CodexAppServerMixin:
                 run.track_close(close_task)
             detail = await asyncio.shield(close_task)
             logger.info("codex app-server closed: request=%s %s", request_id, detail)
+            if run is not None and run.tmp_paths:
+                CodexEventMixin._cleanup_tmp_files(run.tmp_paths)
         return seq, aborted, session_persisted, final_usage, thread
 
     async def _app_server_event(self, event: Any, **kwargs: Any) -> tuple[int, bool, Any]:
@@ -335,9 +340,11 @@ class CodexAppServerMixin:
                 raise ValueError("chat.steer requires message")
             # An unconfirmed steer is still ``ok``: it may be in the turn, so
             # the caller must not send it again. Its lifecycle settles it.
+            images = parse_steer_attachments(fields.get(ATTACHMENTS_FIELD))
             detail = await run.steer(
                 text, message_id=(fields.get("message_id") or "").strip() or None,
                 origin=origin, steer_rpc_id=rpc_id or None,
+                **({"images": images} if images else {}),
             )
             logger.info("chat.steer %s: session=%s active_request=%s chars=%d",
                         detail, session_key, active_request_id or "?", len(text))

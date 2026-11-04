@@ -20,6 +20,10 @@ Capabilities:
     (``/v1/chat/steer/escalate``).
 ``cancel_queued``
     A queued ``next`` message can be withdrawn (``/v1/chat/steer/cancel``).
+``images``
+    Images can ride a steer (TASK-774). Without it a steer that carries
+    images is refused with ``steer_images_unsupported`` and the caller sends
+    it as the next turn. Rows bound before TASK-774 lack it.
 
 The stored form is the sorted, comma-joined names. ``NULL`` is a row bound
 before TASK-1243 recorded capabilities: only the claude-code bridge could
@@ -35,7 +39,10 @@ NEXT = "next"
 NOW = "now"
 ESCALATE = "escalate"
 CANCEL_QUEUED = "cancel_queued"
-ALL_STEER_CAPS = frozenset({NEXT, NOW, ESCALATE, CANCEL_QUEUED})
+IMAGES = "images"
+ALL_STEER_CAPS = frozenset({NEXT, NOW, ESCALATE, CANCEL_QUEUED, IMAGES})
+# What a pre-TASK-1243 (NULL) claude-code row could do: never images.
+LEGACY_STEER_CAPS = frozenset({NEXT, NOW, ESCALATE, CANCEL_QUEUED})
 NO_STEER_CAPS: frozenset[str] = frozenset()
 
 # The one backend whose runs could steer before capabilities were recorded.
@@ -68,7 +75,7 @@ def run_steer_caps(
     if caps is not None:
         return decode_caps(caps)
     if backend:
-        return ALL_STEER_CAPS if backend.strip().lower() == LEGACY_STEERABLE_BACKEND else NO_STEER_CAPS
+        return LEGACY_STEER_CAPS if backend.strip().lower() == LEGACY_STEERABLE_BACKEND else NO_STEER_CAPS
     return provisional if provisional is not None else NO_STEER_CAPS
 
 
@@ -110,6 +117,8 @@ __all__ = [
     "ALL_STEER_CAPS",
     "CANCEL_QUEUED",
     "ESCALATE",
+    "IMAGES",
+    "LEGACY_STEER_CAPS",
     "LEGACY_STEERABLE_BACKEND",
     "NEXT",
     "NOW",

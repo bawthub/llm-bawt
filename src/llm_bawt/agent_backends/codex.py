@@ -41,10 +41,11 @@ class CodexBackend(AgentBridgeBackend):
         # TASK-1243: app-server accepts ``turn/steer`` into the running turn,
         # which is a ``next`` steer. It has no queued-command handle, so no
         # ``now``, escalate or cancel. ``codex exec`` cannot steer at all.
-        from ..steer_capabilities import NEXT, NO_STEER_CAPS
+        # TASK-774: ``turn/steer`` input takes the same local-image items.
+        from ..steer_capabilities import IMAGES, NEXT, NO_STEER_CAPS
 
         if str(config.get("codex_transport") or "").strip() == "app_server":
-            return frozenset({NEXT})
+            return frozenset({NEXT, IMAGES})
         return NO_STEER_CAPS
 
     def system_prompt_delivery(self, is_boundary: bool) -> str | None:

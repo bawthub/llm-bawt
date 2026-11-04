@@ -76,73 +76,94 @@ async def prepare_stream_request_attachments(
                         )
 
         requested_ids = list(getattr(message, "attachment_ids", None) or [])
-        for asset_id in requested_ids:
-            if not isinstance(asset_id, str) or not asset_id.strip():
-                continue
-            asset_id = asset_id.strip()
-            if media_store is None:
-                log.error(
-                    "TASK-225: dropping attachment_id %s — MediaStore unavailable",
-                    asset_id,
-                )
-                continue
-            # TASK-847: non-image assets (PDF, log, zip, …) are persisted as
-            # refs but never inlined — there is no preview rendition and
-            # vision input only takes images. Agent backends still learn
-            # about them through the attachment manifest built in
-            # turn_stream_worker (curlable + public URLs).
-            try:
-                meta = await asyncio.to_thread(media_store.stat, asset_id)
-            except Exception as exc:
-                log.warning("TASK-847: stat failed for attachment_id=%s: %s", asset_id, exc)
-                meta = None
-            if meta is not None and getattr(meta, "kind", "image") != "image":
-                attachments_to_persist.append({"asset_id": asset_id, "kind": meta.kind})
-                continue
-            try:
-                data_url = await asyncio.to_thread(
-                    media_store.read_preview_as_data_url, asset_id
-                )
-            except MediaAssetNotFound:
-                log.warning(
-                    "TASK-225: attachment_id not found in media_assets: %s",
-                    asset_id,
-                )
-                continue
-            except FileNotFoundError as exc:
-                log.warning(
-                    "TASK-225: preview blob missing for asset_id=%s, "
-                    "falling back to original: %s",
-                    asset_id,
-                    exc,
-                )
-                try:
-                    data_url = await asyncio.to_thread(
-                        media_store.read_original_as_data_url, asset_id
-                    )
-                except Exception as fallback_exc:
-                    log.error(
-                        "TASK-225: original fallback also failed for "
-                        "asset_id=%s: %s",
-                        asset_id,
-                        fallback_exc,
-                    )
-                    continue
-            except Exception as exc:
-                log.warning(
-                    "TASK-225: MediaStore.read_preview failed for asset_id=%s: %s",
-                    asset_id,
-                    exc,
-                )
-                continue
-
-            try:
-                header, payload = data_url.split(",", 1)
-                mime = header.split(":")[1].split(";")[0]
-            except Exception:
-                continue
-            user_attachments.append({"mimeType": mime, "content": payload})
-            attachments_to_persist.append({"asset_id": asset_id, "kind": "image"})
+        inline, refs = await resolve_attachment_ids(requested_ids, media_store, log=log)
+        user_attachments.extend(inline)
+        attachments_to_persist.extend(refs)
         break
 
     return user_prompt, user_attachments, attachments_to_persist, media_store
+
+
+async def resolve_attachment_ids(
+    asset_ids: list[str],
+    media_store: Any | None,
+    *,
+    log: Any,
+) -> tuple[list[dict], list[dict]]:
+    """Resolve media asset IDs to LLM image bytes and durable refs.
+
+    Images become ``{mimeType, content}`` (the preview rendition, falling back
+    to the original) plus ``{asset_id, kind: "image"}``; other kinds become
+    refs only. An unresolvable ID is logged and skipped.
+    """
+    user_attachments: list[dict] = []
+    attachments_to_persist: list[dict] = []
+    requested_ids = list(asset_ids or [])
+    for asset_id in requested_ids:
+        if not isinstance(asset_id, str) or not asset_id.strip():
+            continue
+        asset_id = asset_id.strip()
+        if media_store is None:
+            log.error(
+                "TASK-225: dropping attachment_id %s — MediaStore unavailable",
+                asset_id,
+            )
+            continue
+        # TASK-847: non-image assets (PDF, log, zip, …) are persisted as
+        # refs but never inlined — there is no preview rendition and
+        # vision input only takes images. Agent backends still learn
+        # about them through the attachment manifest built in
+        # turn_stream_worker (curlable + public URLs).
+        try:
+            meta = await asyncio.to_thread(media_store.stat, asset_id)
+        except Exception as exc:
+            log.warning("TASK-847: stat failed for attachment_id=%s: %s", asset_id, exc)
+            meta = None
+        if meta is not None and getattr(meta, "kind", "image") != "image":
+            attachments_to_persist.append({"asset_id": asset_id, "kind": meta.kind})
+            continue
+        try:
+            data_url = await asyncio.to_thread(
+                media_store.read_preview_as_data_url, asset_id
+            )
+        except MediaAssetNotFound:
+            log.warning(
+                "TASK-225: attachment_id not found in media_assets: %s",
+                asset_id,
+            )
+            continue
+        except FileNotFoundError as exc:
+            log.warning(
+                "TASK-225: preview blob missing for asset_id=%s, "
+                "falling back to original: %s",
+                asset_id,
+                exc,
+            )
+            try:
+                data_url = await asyncio.to_thread(
+                    media_store.read_original_as_data_url, asset_id
+                )
+            except Exception as fallback_exc:
+                log.error(
+                    "TASK-225: original fallback also failed for "
+                    "asset_id=%s: %s",
+                    asset_id,
+                    fallback_exc,
+                )
+                continue
+        except Exception as exc:
+            log.warning(
+                "TASK-225: MediaStore.read_preview failed for asset_id=%s: %s",
+                asset_id,
+                exc,
+            )
+            continue
+
+        try:
+            header, payload = data_url.split(",", 1)
+            mime = header.split(":")[1].split(";")[0]
+        except Exception:
+            continue
+        user_attachments.append({"mimeType": mime, "content": payload})
+        attachments_to_persist.append({"asset_id": asset_id, "kind": "image"})
+    return user_attachments, attachments_to_persist

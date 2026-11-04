@@ -6,7 +6,12 @@ import time
 from copy import copy
 from typing import TYPE_CHECKING, Literal
 
-from agent_bridge.steer_contract import STEER_CAPABILITY_REFUSALS, STEER_RUN_FINISHING
+from agent_bridge.steer_contract import (
+    MAX_STEER_IMAGES,
+    STEER_CAPABILITY_REFUSALS,
+    STEER_IMAGES_UNSUPPORTED,
+    STEER_RUN_FINISHING,
+)
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -98,6 +103,11 @@ class ChatSteerRequest(BaseModel):
     priority: Literal["now", "next"] = Field(
         "next", description="Queue until the next model call without interrupting running tools"
     )
+    attachment_ids: list[str] | None = Field(
+        None,
+        max_length=MAX_STEER_IMAGES,
+        description="TASK-774: uploaded media asset IDs (images) that ride this steer",
+    )
 
 
 # Steer errors that are a definite answer about the run, never a transport fault.
@@ -178,6 +188,39 @@ def _persist_interrupt_anchor(
     return bool(result.rowcount)
 
 
+async def _resolve_steer_attachments(
+    service, asset_ids: list[str], user_id: str,
+) -> tuple[list[dict], list[dict], str]:
+    """``(images, durable refs, agent manifest)`` for a steer's asset IDs.
+
+    Same resolution and manifest as a normal agent send (TASK-774). Every ID
+    must resolve to an image: a partial set is refused (422) rather than
+    steering the model with fewer images than the sender attached.
+    """
+    from ...media import get_media_store
+    from ...media.serializers import build_agent_image_manifest
+    from ..stream_request_attachments import resolve_attachment_ids
+
+    try:
+        store = get_media_store()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Media store unavailable") from exc
+    images, refs = await resolve_attachment_ids(asset_ids, store, log=log)
+    if len(images) != len(asset_ids) or len(refs) != len(asset_ids):
+        raise HTTPException(status_code=422, detail="steer_attachment_unresolved")
+    config = getattr(service, "config", None)
+    try:
+        manifest = await asyncio.to_thread(
+            build_agent_image_manifest, refs, store.db,
+            origin=getattr(config, "AGENT_ORIGIN", "") or "",
+            public_origin_override=getattr(config, "PUBLIC_ORIGIN", None),
+        )
+    except Exception as exc:
+        log.warning("TASK-774: failed to build steer attachment manifest: %s", exc)
+        manifest = ""
+    return images, refs, manifest or ""
+
+
 def _steer_framing(
     message: str, *, origin: str, priority: str, bot_id: str, user_id: str,
 ) -> dict[str, str]:
@@ -242,6 +285,12 @@ async def steer_active_turn(
     ):
         raise HTTPException(status_code=409, detail="Turn is no longer active")
     turn = copy(turn)  # immutable comparison snapshot across awaited preparation
+    asset_ids = [a.strip() for a in (request.attachment_ids or []) if isinstance(a, str) and a.strip()]
+    if asset_ids and (maintenance or steer_request_id):
+        # TASK-774: images ride only a composer steer into a live run; a
+        # maintenance enqueue or bot delivery would drop them. Definite, so the
+        # caller sends them as the next turn.
+        raise HTTPException(status_code=409, detail=STEER_IMAGES_UNSUPPORTED)
     if maintenance:
         if not request.allow_queue:
             # Exact recovery must never become a separately queued turn.
@@ -272,17 +321,26 @@ async def steer_active_turn(
         raise HTTPException(status_code=409, detail="Active bridge run is not ready")
 
     from ...agent_backends.agent_bridge import get_agent_subscriber
-    from ...steer_capabilities import CANCEL_QUEUED, ESCALATE, steer_refusal
+    from ...steer_capabilities import CANCEL_QUEUED, ESCALATE, IMAGES, steer_refusal
     # TASK-1243: the run's own pinned capabilities, never the bot's current backend.
     if caps is None:
         backend_name, caps = _run_steer_caps(service, turn)
     request.priority = SendNow.priority() if send_now_delivery_id else request.priority  # TASK-1749
     refusal = steer_refusal(caps, request.priority)
+    if refusal is None and asset_ids:
+        refusal = steer_refusal(caps, IMAGES) and STEER_IMAGES_UNSUPPORTED
     if refusal is not None:
         raise HTTPException(status_code=409, detail=refusal)
 
     message = request.message.strip()
     wire_message = f"{message}\n\n{wire_suffix}" if wire_suffix else message
+    images: list[dict] = []
+    attachment_refs: list[dict] | None = None
+    if asset_ids:
+        images, attachment_refs, manifest = await _resolve_steer_attachments(service, asset_ids, user_id)
+        if manifest:
+            # Outbound only, like a normal agent send's attachment manifest.
+            wire_message = f"{wire_message}\n\n{manifest}"
     origin = "user" if steer_request_id is None or send_now_delivery_id else "system" if control else "bot"
     from ...steer_prompts import SteerPromptUnavailable
     try:
@@ -320,6 +378,7 @@ async def steer_active_turn(
                 request_id=steer_request_id,
                 priority=request.priority,
                 origin=origin,
+                **({"attachments": images} if images else {}),
                 **framing,
             )
             if result.get("ok") or result.get("error") != "no_active_run":
@@ -356,7 +415,7 @@ async def steer_active_turn(
             session_id,
             None,
             request.message_id,
-            None,
+            attachment_refs,
             None,
             author.entity_type,
             author.entity_id,

@@ -411,6 +411,9 @@ class CodexAppServerRun:
         self.closed = asyncio.Event()
         self.teardown_detail: str | None = None
         self.pending_steers: dict[str, PendingSteer] = {}
+        # TASK-774: temp image files written for steers; the send removes
+        # them when it leaves the turn.
+        self.tmp_paths: list[str] = []
         self._finished_turns: dict[str, str] = {}
         client.add_observer(self._observe)
 
@@ -441,7 +444,7 @@ class CodexAppServerRun:
         self.turn_done.set()
 
     async def steer(self, text: str, *, message_id: str | None, origin: str,
-                    steer_rpc_id: str | None) -> str:
+                    steer_rpc_id: str | None, images: list[dict] | None = None) -> str:
         """Add ``text`` to the running turn (``turn/steer``).
 
         Returns :data:`STEERED`, or :data:`STEERED_UNCONFIRMED` when the
@@ -454,10 +457,21 @@ class CodexAppServerRun:
         """
         if self.stopping or self.turn_done.is_set() or self.turn_id is None:
             raise RuntimeError(STEER_RUN_FINISHING)
+        input_items: list[dict] = [{"type": "text", "text": text, "text_elements": []}]
+        if images:
+            # Same local-image files a normal send writes (TASK-774).
+            from .app_server_events import app_server_input
+            from .event_ops import CodexEventMixin
+
+            prompt_input, paths = CodexEventMixin._build_prompt_input(text, images)
+            self.tmp_paths.extend(paths)
+            if len(paths) != len(images):
+                raise RuntimeError("chat.steer attachment could not be decoded")
+            input_items = [input_items[0], *app_server_input(prompt_input)[1:]]
         params: dict[str, Any] = {
             "threadId": self.thread_id,
             "expectedTurnId": self.turn_id,
-            "input": [{"type": "text", "text": text, "text_elements": []}],
+            "input": input_items,
         }
         pending = None
         if message_id:

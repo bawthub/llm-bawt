@@ -22,6 +22,8 @@ from tests.steer_session_fixture import steer_store_factory  # noqa: F401
 from llm_bawt.service.inter_bot_dispatcher import InterBotDeliveryDispatcher
 from llm_bawt.steer_capabilities import (
     ALL_STEER_CAPS,
+    IMAGES,
+    LEGACY_STEER_CAPS,
     CANCEL_QUEUED,
     ESCALATE,
     NEXT,
@@ -40,7 +42,7 @@ from llm_bawt.steer_capabilities import (
 def test_encode_is_sorted_known_names_and_decode_round_trips():
     assert encode_caps({NOW, NEXT, "bogus"}) == "next,now"
     assert encode_caps(NO_STEER_CAPS) == ""
-    assert encode_caps(ALL_STEER_CAPS) == "cancel_queued,escalate,next,now"
+    assert encode_caps(ALL_STEER_CAPS) == "cancel_queued,escalate,images,next,now"
     assert decode_caps(encode_caps(ALL_STEER_CAPS)) == ALL_STEER_CAPS
     assert decode_caps(" next , bogus ,") == frozenset({NEXT})
     assert decode_caps("") == decode_caps(None) == NO_STEER_CAPS
@@ -51,8 +53,8 @@ def test_encode_is_sorted_known_names_and_decode_round_trips():
     ("codex", "next", None, {NEXT}),
     ("claude-code", "", ALL_STEER_CAPS, set()),
     # NULL on a bound run is a pre-TASK-1243 row: only claude-code steered.
-    ("claude-code", None, NO_STEER_CAPS, ALL_STEER_CAPS),
-    (" Claude-Code ", None, None, ALL_STEER_CAPS),
+    ("claude-code", None, NO_STEER_CAPS, LEGACY_STEER_CAPS),
+    (" Claude-Code ", None, None, LEGACY_STEER_CAPS),
     ("codex", None, ALL_STEER_CAPS, set()),
     # No binding yet: the bot's provisional answer, else none.
     (None, None, frozenset({NEXT}), {NEXT}),
@@ -75,7 +77,7 @@ def test_turn_steer_caps_prefers_the_rows_backend_over_the_bots():
     codex_row = SimpleNamespace(agent_backend="codex", agent_steer_caps=None)
     assert turn_steer_caps(codex_row, bot_backend="claude-code") == ("codex", NO_STEER_CAPS)
     unrecorded = SimpleNamespace(agent_backend=None)  # bound before TASK-1232 recorded it
-    assert turn_steer_caps(unrecorded, bot_backend="claude-code") == ("claude-code", ALL_STEER_CAPS)
+    assert turn_steer_caps(unrecorded, bot_backend="claude-code") == ("claude-code", LEGACY_STEER_CAPS)
     pinned = SimpleNamespace(agent_backend="codex", agent_steer_caps="next")
     assert turn_steer_caps(pinned, bot_backend="codex") == ("codex", frozenset({NEXT}))
 
@@ -86,7 +88,7 @@ def test_a_legacy_control_pin_still_matches_and_decodes_from_its_backend():
     assert pin_matches(legacy, current)  # stored before the key existed
     assert not pin_matches({**legacy, "steer_caps": ""}, current)
     assert not pin_matches({**legacy, "backend": "codex"}, current)
-    assert pinned_steer_caps(legacy) == ALL_STEER_CAPS
+    assert pinned_steer_caps(legacy) == LEGACY_STEER_CAPS
     assert pinned_steer_caps({**legacy, "backend": "codex"}) == NO_STEER_CAPS
     assert pinned_steer_caps({**legacy, "backend": "codex", "steer_caps": "next"}) == frozenset({NEXT})
 
@@ -216,3 +218,13 @@ def test_escalate_and_cancel_address_the_pinned_runs_backend(monkeypatch, steer_
     asyncio.run(getattr(chat, route)(chat.ChatSteerEscalateRequest(
         turn_id="turn-live", message_id="message-1", bot_id="target", user_id="nick")))
     assert subscriber.send_steer.await_args.kwargs["backend"] == "codex"
+
+
+def test_images_ride_only_runs_pinned_with_the_images_capability():
+    # TASK-774: a pre-774 pin (or a NULL legacy claude-code row) steers
+    # text but refuses images, so the caller queues them as the next turn.
+    assert IMAGES in ALL_STEER_CAPS
+    assert IMAGES not in LEGACY_STEER_CAPS
+    assert steer_refusal(decode_caps("cancel_queued,escalate,next,now"), IMAGES) == STEER_PRIORITY_UNSUPPORTED
+    assert steer_refusal(decode_caps("images,next"), IMAGES) is None
+    assert run_steer_caps(backend="claude-code", caps=None) == LEGACY_STEER_CAPS

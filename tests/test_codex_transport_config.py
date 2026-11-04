@@ -19,12 +19,12 @@ from agent_bridge.subscriber import RedisSubscriber
 from llm_bawt.agent_backends import agent_bridge
 from llm_bawt.agent_backends.codex import CodexBackend
 from llm_bawt.service.routes import bot_profile_validation
-from llm_bawt.steer_capabilities import NEXT, NO_STEER_CAPS, bot_steer_caps
+from llm_bawt.steer_capabilities import IMAGES, NEXT, NO_STEER_CAPS, bot_steer_caps
 
 
 @pytest.mark.parametrize(("config", "caps"), [
-    ({"codex_transport": "app_server"}, frozenset({NEXT})),
-    ({"codex_transport": " app_server "}, frozenset({NEXT})),
+    ({"codex_transport": "app_server"}, frozenset({NEXT, IMAGES})),
+    ({"codex_transport": " app_server "}, frozenset({NEXT, IMAGES})),
     ({"codex_transport": "exec"}, NO_STEER_CAPS),
     ({}, NO_STEER_CAPS),
 ])

@@ -15,6 +15,7 @@ from llm_bawt.service.routes import turn_logs as turn_logs_route
 
 NOW = datetime(2026, 10, 27, tzinfo=timezone.utc)
 ALL = ["cancel_queued", "escalate", "next", "now"]
+ALL_NEW = ["cancel_queued", "escalate", "images", "next", "now"]  # TASK-774
 
 
 def _row(turn_id, *, bot_id="worker", backend=None, caps=None, ended=False):
@@ -86,7 +87,7 @@ def test_an_unbound_row_stands_in_with_its_bots_caps_read_once(monkeypatch):
         agent_backend="codex", agent_backend_config={"codex_transport": "app_server"},
     )}
     caps, lookups = _list(monkeypatch, [_row("a"), _row("b"), _row("gone", bot_id="missing")], bots)
-    assert caps == {"a": ["next"], "b": ["next"], "gone": []}
+    assert caps == {"a": ["images", "next"], "b": ["images", "next"], "gone": []}
     assert lookups == ["worker", "missing"]
 
 
@@ -116,4 +117,4 @@ def test_bot_listing_carries_what_a_new_run_would_bind(monkeypatch):
     monkeypatch.setattr(models_route, "get_service", lambda: SimpleNamespace(config=None))
     monkeypatch.setattr(models_route, "BotManager", lambda _config: SimpleNamespace(list_bots=lambda: bots))
     listed = {bot.slug: bot.steer_capabilities for bot in models_route.list_bots().data}
-    assert listed == {"one": ALL, "two": ["next"], "three": [], "four": []}
+    assert listed == {"one": ALL_NEW, "two": ["images", "next"], "three": [], "four": []}

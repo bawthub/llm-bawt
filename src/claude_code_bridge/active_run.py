@@ -112,6 +112,33 @@ def _command_uuid(message_id: str | None) -> str:
     return str(uuid_mod.uuid4())
 
 
+def _user_content(text: str, images: Any = ()) -> str | list[dict]:
+    """The CLI user-message content: ``text``, plus image blocks when any.
+
+    Same block shape as a normal multimodal send (send_handler).
+    """
+    if not images:
+        return text
+    content: list[dict] = [{"type": "text", "text": text}]
+    for image in images:
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": image["mimeType"], "data": image["content"]},
+        })
+    return content
+
+
+def _query_prompt(content: str | list[dict]) -> Any:
+    """``client.query`` input for ``content``: a string, or one user frame."""
+    if isinstance(content, str):
+        return content
+
+    async def _frames():
+        yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+
+    return _frames()
+
+
 def _sdk_query_handle(client: Any) -> Any | None:
     """Return the SDK's raw frame ``Query`` for a real ``ClaudeSDKClient``."""
     try:
@@ -169,6 +196,8 @@ class HeldCommand:
     origin: str
     item: str
     steer_rpc_id: str | None = None
+    # TASK-774: images that rode this command, replayed with its item.
+    images: tuple = ()
 
 
 @dataclass
@@ -248,13 +277,15 @@ class ClaudeActiveRun:
         framed_message: str | None = None,
         interrupt_item: str | None = None,
         steer_rpc_id: str | None = None,
+        images: list[dict] | None = None,
     ) -> None:
         """Deliver ``message`` into the live run at ``priority``.
 
         ``framed_message`` is the exact model-facing text and
         ``interrupt_item`` is this message's replay item. Both are rendered by
         the app (:mod:`agent_bridge.steer_contract`). A ``system`` steer is
-        already final registry text and goes verbatim.
+        already final registry text and goes verbatim. ``images`` ride the
+        same user message as image blocks (TASK-774).
         """
         # The app retains these as durable, separate turns. Never inject them
         # into compaction or reinterpret a new command as ordinary steering.
@@ -280,9 +311,10 @@ class ClaudeActiveRun:
                 raise ValueError("User next steer requires a UUID message_id")
             await self._steer_next(
                 framed, item, message_id, origin=origin, steer_rpc_id=steer_rpc_id,
+                images=tuple(images or ()),
             )
             return
-        await self._steer_now(framed)
+        await self._steer_now(framed, images=tuple(images or ()))
 
     async def _steer_next(
         self,
@@ -292,6 +324,7 @@ class ClaudeActiveRun:
         *,
         origin: str,
         steer_rpc_id: str | None,
+        images: tuple = (),
     ) -> None:
         """Queue ``framed`` for the next tool boundary without interrupting."""
         if not self.lifecycle_supported:
@@ -319,6 +352,7 @@ class ClaudeActiveRun:
                 self._held.pop(command_uuid, None)
                 self._held[command_uuid] = HeldCommand(
                     uuid=command_uuid, origin=origin, item=item, steer_rpc_id=steer_rpc_id,
+                    images=images,
                 )
                 self._started_ever.discard(command_uuid)
                 self._replayed.discard(command_uuid)
@@ -329,7 +363,7 @@ class ClaudeActiveRun:
                 async def _frames():
                     yield {
                         "type": "user",
-                        "message": {"role": "user", "content": framed},
+                        "message": {"role": "user", "content": _user_content(framed, images)},
                         "parent_tool_use_id": None,
                         "uuid": command_uuid,
                         "priority": "next",
@@ -518,14 +552,17 @@ class ClaudeActiveRun:
                     )
                 if self._completed.is_set():
                     raise RuntimeError("no_active_run")
-                prompt = render_interrupt(
-                    interrupt_frame, [self._held[uuid].item for uuid in swept]
+                prompt = _user_content(
+                    render_interrupt(interrupt_frame, [self._held[uuid].item for uuid in swept]),
+                    [image for uuid in swept for image in self._held[uuid].images],
                 )
                 # Set before the write: ``client.query`` only awaits the
                 # transport write, so once it is attempted the CLI may have the
                 # text even if the await fails.
                 replacement_attempted = True
-                await asyncio.wait_for(self.client.query(prompt), timeout=self._steer_timeout_s)
+                await asyncio.wait_for(
+                    self.client.query(_query_prompt(prompt)), timeout=self._steer_timeout_s,
+                )
                 self._replayed.update(swept)
                 self._escalations[message_id] = "escalated"
                 self._escalated_pending.update(dict.fromkeys(swept))
@@ -895,7 +932,7 @@ class ClaudeActiveRun:
             result, self._pending_user_result = self._pending_user_result, None
             yield self._finish(result)
 
-    async def _steer_now(self, replacement_prompt: str) -> None:
+    async def _steer_now(self, replacement_prompt: str, *, images: tuple = ()) -> None:
         """Interrupt current work and inject ``replacement_prompt`` into the run.
 
         ``interrupt()`` terminates the SDK's current task; ``query()`` starts a
@@ -933,7 +970,7 @@ class ClaudeActiveRun:
                     raise RuntimeError("steer_interrupt_timeout")
                 try:
                     await asyncio.wait_for(
-                        self.client.query(replacement_prompt),
+                        self.client.query(_query_prompt(_user_content(replacement_prompt, images))),
                         timeout=remaining_s,
                     )
                 except asyncio.TimeoutError as exc:

@@ -36,6 +36,8 @@ from agent_bridge.abort_rpc import answer_abort
 from agent_bridge.ping import PING_METHOD, answer_ping
 from agent_bridge.run_status import RUN_STATUS_METHOD, answer_run_status, queue_run_state
 from agent_bridge.steer_contract import (
+    ATTACHMENTS_FIELD,
+    parse_steer_attachments,
     FRAMED_MESSAGE_FIELD,
     INTERRUPT_FRAME_FIELD,
     INTERRUPT_ITEM_FIELD,
@@ -245,12 +247,14 @@ class ClaudeCommandMixin:
             else:
                 # TASK-1300: app-rendered registry text, plus this RPC's id so
                 # a lifecycle event names the delivery generation it settles.
+                images = parse_steer_attachments(fields.get(ATTACHMENTS_FIELD))
                 await active_run.steer(
                     message, priority=priority, message_id=message_id or None,
                     origin=(fields.get("origin") or "system").strip().lower(),
                     framed_message=fields.get(FRAMED_MESSAGE_FIELD) or None,
                     interrupt_item=fields.get(INTERRUPT_ITEM_FIELD) or None,
                     steer_rpc_id=request_id or None,
+                    **({"images": images} if images else {}),
                 )
                 detail = "steered"
             # A steer adds a separate user message to this run; it does not

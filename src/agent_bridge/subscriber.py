@@ -17,7 +17,12 @@ from redis.asyncio import BlockingConnectionPool
 from .command_publisher import CommandPublisherMixin
 from .events import AgentEvent, AgentEventKind
 from .run_contract import DONE_FIELD, RunContractError, RunTerminal, run_terminal_key
-from .steer_contract import FRAMED_MESSAGE_FIELD, INTERRUPT_FRAME_FIELD, INTERRUPT_ITEM_FIELD
+from .steer_contract import (
+    ATTACHMENTS_FIELD,
+    FRAMED_MESSAGE_FIELD,
+    INTERRUPT_FRAME_FIELD,
+    INTERRUPT_ITEM_FIELD,
+)
 from .ui_stream import LEGACY_UI_GROUP_PREFIX, UiStreamReader, unified_stream_keys
 from .publisher import (
     COMMANDS_STREAM,
@@ -133,6 +138,7 @@ class RedisSubscriber(CommandPublisherMixin):
         framed_message: str | None = None,
         interrupt_item: str | None = None,
         interrupt_frame: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> dict:
         """Steer, escalate, or cancel an active run message and await its RPC result.
 
@@ -170,6 +176,9 @@ class RedisSubscriber(CommandPublisherMixin):
         ):
             if value:
                 fields[name] = value
+        if attachments:
+            # TASK-774: images riding the steer, normal-send form.
+            fields[ATTACHMENTS_FIELD] = json.dumps(attachments, ensure_ascii=False)
 
         dedupe_key = f"agent:steer:request:{request_id}"
         flat_fields: list[str] = []
