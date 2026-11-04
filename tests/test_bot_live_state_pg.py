@@ -116,7 +116,7 @@ def test_busy_and_idle_bots_report_every_source(rig):
     assert "unavailable" not in hot
 
     cold = states[idle]
-    assert cold["turn"] == {"kind": "idle", "turn_id": None, "started_at": None}
+    assert cold["turn"] == {"kind": "idle", "turn_id": None, "started_at": None, "task": None}
     assert cold["last_turn"]["status"] == "ok" and cold["last_turn"]["end_reason"] == "complete"
     assert cold["queued_deliveries"] == {"count": 0, "oldest_at": None}
     assert cold["gated"] is False and cold["gate"] is None

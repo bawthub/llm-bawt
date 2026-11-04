@@ -785,6 +785,32 @@ def _live_states(profiles: list) -> dict[str, dict]:
     )
 
 
+async def _add_task_titles(states: dict[str, dict]) -> None:
+    """Fill ``title`` on each resolved turn task from BawtHub; null if unreadable."""
+    from .task_api import api_get
+
+    tasks = [
+        turn["task"]
+        for state in states.values()
+        for key in ("turn", "last_turn")
+        if isinstance(turn := state.get(key), dict) and isinstance(turn.get("task"), dict)
+    ]
+    if not tasks:
+        return
+    refs = sorted({task["task_ref"] for task in tasks})
+    found: dict = {}
+    try:
+        payload = await api_get("/refs", {"ref": refs})
+        found = payload.get("tasks", {}) if isinstance(payload, dict) else {}
+    except Exception:
+        logger.warning("bot live state: task titles unavailable", exc_info=True)
+    for task in tasks:
+        match = found.get(task["task_ref"]) if isinstance(found, dict) else None
+        if isinstance(match, dict) and match.get("shortId"):
+            task["task_ref"] = match["shortId"]
+        task["title"] = match.get("title") if isinstance(match, dict) else None
+
+
 def _discovery_caller(arguments: dict) -> tuple[str | None, str | None]:
     """(signed caller bot, its signed turn id) for discovery (TASK-1249).
 
@@ -905,6 +931,9 @@ async def list_available_bots(
     admission classifier, so it matches what a send would see at that moment.
     A source that can't be read is named in ``state.unavailable`` with null
     fields, never reported as idle. Task counts live in BawtHub (``tasks_list``).
+    ``state.turn.task``/``state.last_turn.task`` (TASK-1754): the task that turn
+    works on, ``{task_ref, title, source}``; source is association, delivery or
+    mutation; null when none resolves.
     """
     caller, turn_id = _discovery_caller(
         {"tag": tag, "capability": capability, "include_state": include_state})
@@ -937,6 +966,7 @@ async def list_available_bots(
     routed = profiles + [row for row in every if row.slug == caller]
     facts, caller_provider = await asyncio.to_thread(_route_facts, routed, caller, turn_id)
     states = await asyncio.to_thread(_live_states, profiles) if include_state and profiles else {}
+    await _add_task_titles(states)
     listed = []
     for row in profiles:
         route = facts[row.slug]

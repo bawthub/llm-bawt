@@ -116,8 +116,10 @@ def test_turn_state_comes_from_the_admission_classifier(engine, sources, monkeyp
 
     assert seen == [sorted(BOTS)]
     assert states["fixture-busy"]["turn"] == {
-        "kind": "executing", "turn_id": "turn-1", "started_at": "2026-10-24T10:00:00"}
-    assert states["fixture-idle"]["turn"] == {"kind": "idle", "turn_id": None, "started_at": None}
+        "kind": "executing", "turn_id": "turn-1", "started_at": "2026-10-24T10:00:00",
+        "task": None}
+    assert states["fixture-idle"]["turn"] == {
+        "kind": "idle", "turn_id": None, "started_at": None, "task": None}
     assert states["fixture-busy"]["queued_deliveries"] == {"count": 2, "oldest_at": None}
     assert states["fixture-idle"]["queued_deliveries"] == {"count": 0, "oldest_at": None}
     assert states["fixture-busy"]["pending_approvals"] == 1
@@ -142,7 +144,8 @@ def test_last_turn_portable_query_picks_the_newest_ended_row(engine, sources):
     states = _read(engine)
 
     assert states["fixture-idle"]["last_turn"] == {
-        "ended_at": "2026-10-24T09:00:00", "status": "ok", "end_reason": "complete"}
+        "turn_id": "t-2", "ended_at": "2026-10-24T09:00:00", "status": "ok",
+        "end_reason": "complete", "task": None}
     assert states["fixture-busy"]["last_turn"] is None
 
 

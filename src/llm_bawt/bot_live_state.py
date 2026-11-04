@@ -9,7 +9,9 @@ that owns it, never re-derived here:
 * gate: ``turn_gates.covering_gates`` (strictest live gate, as admission picks);
 * pending approvals: ``approval_request_store.pending_counts_by_bot``;
 * session: ``BotSessionState.resolve_many`` (the ``last_session_id`` pointer);
-* last turn: the newest ended ``turn_logs`` row.
+* last turn: the newest ended ``turn_logs`` row;
+* task: ``turn_task.resolve_turn_tasks`` for the open and last turns
+  (TASK-1754), as ``turn.task`` / ``last_turn.task`` (null when unresolved).
 
 Each source is one query for all bots (no per-bot loop). The read is
 unlocked and advisory, like ``peek_target``: it admits nothing. A source that
@@ -32,17 +34,17 @@ log = logging.getLogger(__name__)
 # Newest ended turn per bot. LATERAL keeps it one statement that walks the
 # ended_at index backwards per bot instead of sorting the whole table.
 _LAST_TURNS = text("""
-    SELECT b.bot AS bot_id, t.ended_at, t.status, t.end_reason
+    SELECT b.bot AS bot_id, t.id, t.ended_at, t.status, t.end_reason
     FROM unnest(CAST(:bots AS text[])) AS b(bot)
     JOIN LATERAL (
-        SELECT ended_at, status, end_reason FROM turn_logs
+        SELECT id, ended_at, status, end_reason FROM turn_logs
         WHERE bot_id = b.bot AND ended_at IS NOT NULL
         ORDER BY ended_at DESC LIMIT 1
     ) AS t ON true
 """)
 # Portable fallback (SQLite fixtures): same answer, no LATERAL.
 _LAST_TURNS_PORTABLE = text("""
-    SELECT t.bot_id, t.ended_at, t.status, t.end_reason FROM turn_logs AS t
+    SELECT t.bot_id, t.id, t.ended_at, t.status, t.end_reason FROM turn_logs AS t
     WHERE t.bot_id IN :bots AND t.id = (
         SELECT t2.id FROM turn_logs AS t2
         WHERE t2.bot_id = t.bot_id AND t2.ended_at IS NOT NULL
@@ -67,7 +69,7 @@ class BotIdentity:
 class BotLiveStateReader:
     """Batched, read-only live state for a set of visible bots."""
 
-    SOURCES = ("turn", "last_turn", "queued_deliveries", "gate", "pending_approvals", "session")
+    SOURCES = ("turn", "last_turn", "task", "queued_deliveries", "gate", "pending_approvals", "session")
 
     def __init__(self, engine):
         self.engine = engine
@@ -83,6 +85,7 @@ class BotLiveStateReader:
         loaders: dict[str, Callable[[Any], Mapping[str, Any]]] = {
             "turn": lambda conn: self._turns(conn, slugs),
             "last_turn": lambda conn: self._last_turns(conn, slugs),
+            "task": lambda conn: self._tasks(conn, results),
             "queued_deliveries": lambda conn: self._queues(conn, slugs),
             "gate": lambda conn: self._gates(conn, bots),
             "pending_approvals": lambda conn: self._approvals(conn, slugs),
@@ -128,11 +131,30 @@ class BotLiveStateReader:
         rows = conn.execute(query, {"bots": slugs}).mappings().all()
         return {
             row["bot_id"]: {
+                "turn_id": row["id"],
                 "ended_at": _iso(row["ended_at"]),
                 "status": row["status"],
                 "end_reason": row["end_reason"],
             }
             for row in rows
+        }
+
+    @staticmethod
+    def _tasks(conn, results: Mapping[str, Mapping[str, Any]]) -> Mapping[str, Any]:
+        """``{turn_id: {task_ref, source}}`` for the turns already read."""
+        if conn.dialect.name != "postgresql":
+            return {}
+        from .turn_task import resolve_turn_tasks
+
+        turn_ids = [
+            turn["turn_id"]
+            for source in ("turn", "last_turn")
+            for turn in results.get(source, {}).values()
+            if turn and turn.get("turn_id")
+        ]
+        return {
+            found.turn_id: {"task_ref": found.task_ref, "source": found.source}
+            for found in resolve_turn_tasks(conn, turn_ids=turn_ids)
         }
 
     @staticmethod
@@ -198,9 +220,17 @@ class BotLiveStateReader:
             return found[slug]
 
         gate = value("gate")
+        tasks = None if "task" in failed else results.get("task", {})
+
+        def with_task(turn: Any) -> Any:
+            if not isinstance(turn, Mapping):
+                return turn
+            found = None if tasks is None else tasks.get(turn.get("turn_id"))
+            return {**turn, "task": found}
+
         state: dict[str, Any] = {
-            "turn": value("turn", required=True),
-            "last_turn": value("last_turn"),
+            "turn": with_task(value("turn", required=True)),
+            "last_turn": with_task(value("last_turn")),
             "queued_deliveries": value("queued_deliveries", required=True),
             "gated": None if "gate" in failed else gate is not None,
             "gate": gate,
