@@ -182,6 +182,10 @@ def main():
     from .health_runtime import OpsHealthRuntime
 
     logging.basicConfig(level=logging.INFO)
+    # Bound a connect to an unreachable database (no RST) so the storage
+    # producer keeps publishing "down" instead of going silent for ~2 minutes
+    # and tripping the wedge watchdog through an outage (TASK-1991).
+    os.environ.setdefault("PGCONNECT_TIMEOUT", "10")
     interval = float(os.getenv("LLM_BAWT_OPS_RECONCILE_INTERVAL", "5"))
     if not math.isfinite(interval) or interval < 1:
         raise ValueError("LLM_BAWT_OPS_RECONCILE_INTERVAL must be finite and at least 1 second")

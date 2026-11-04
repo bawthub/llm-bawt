@@ -797,7 +797,10 @@ class DockerExecutor(Executor):
         removed = 0
         workers = self.client.containers.list(
             all=True, filters={"label": OPS_JOB_LABEL, "status": ["exited", "dead"]})
-        for worker in workers[:max(0, limit)]:
+        budget = max(0, limit)
+        for worker in workers:
+            if budget <= 0:
+                break
             job_id = (worker.labels or {}).get(OPS_JOB_LABEL, "")
             try:
                 if worker.name != self.worker_name(job_id):
@@ -806,6 +809,9 @@ class DockerExecutor(Executor):
                 continue
             if not is_finished(job_id):
                 continue
+            # Only removal attempts spend the budget, so workers that are never
+            # reapable (no ledger row, active job) cannot pin it and starve others.
+            budget -= 1
             try:
                 worker.remove(v=False, force=False)
                 removed += 1

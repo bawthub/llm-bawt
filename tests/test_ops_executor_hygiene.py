@@ -62,6 +62,24 @@ def test_reap_is_bounded_and_survives_a_failed_remove():
     assert not gone.removed and later[0].removed and later[1].removed and not later[2].removed
 
 
+def test_unreapable_workers_do_not_starve_older_ones():
+    stuck = [Worker(f"{i:032x}") for i in range(1, 61)]
+    old = Worker(DONE)
+    executor, _ = executor_with([*stuck, old])
+    assert executor.reap_finished_workers(lambda job: job == DONE, limit=50) == 1
+    assert old.removed and not any(w.removed for w in stuck)
+
+
+def test_ops_process_bounds_database_connects(monkeypatch):
+    from llm_bawt.ops import reconciler
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
+    monkeypatch.setattr("llm_bawt.ops.health_runtime.OpsHealthRuntime", lambda **_kw: (_ for _ in ()).throw(SystemExit))
+    with pytest.raises(SystemExit):
+        reconciler.main()
+    import os
+    assert os.environ["PGCONNECT_TIMEOUT"] == "10"
+
+
 def test_dispatch_refuses_a_job_whose_receipt_exists(tmp_path):
     executor = DockerExecutor(client_factory=lambda: None, worker_image="w", receipt_volume="r",
                               receipt_root=str(tmp_path))
