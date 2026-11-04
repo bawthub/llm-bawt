@@ -70,6 +70,26 @@ async def test_leading_whitespace_cannot_hide_the_only_nonblank_quote():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_valid", [False, True])
+async def test_whitespace_only_rows_never_become_rejected_fallback_quotes(with_valid):
+    row = Source().rows[0]
+    blank = replace(row, id="blank", text=" \n\t ")
+    class Forced(TimeoutModel):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+        async def synthesize(self, *args):
+            self.attempts += 1
+            return await super().synthesize(*args)
+    model = Forced()
+    packet = await RecallService([Source([blank, row] if with_valid else [blank])], model).recall(request(), SCOPE)
+    assert packet["status"] == ("partial" if with_valid else "no_match")
+    assert packet["rejected_findings"] == 0
+    assert model.attempts == int(with_valid)
+    assert [finding["id"] for finding in packet["findings"]] == ([row.id] if with_valid else [])
+
+
+@pytest.mark.asyncio
 async def test_caller_cancellation_is_not_swallowed_as_a_synthesis_timeout():
     class Cancelled(Model):
         async def synthesize(self, *args):
