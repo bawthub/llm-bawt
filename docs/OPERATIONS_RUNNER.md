@@ -1,10 +1,10 @@
 # Durable operations runner (TASK-861)
 
 > **Architecture transition:** [Ops service: current and intended architecture](OPS_SERVICE_ARCHITECTURE.md)
-> is the working design for TASK-1169–TASK-1173, including the intended FastAPI
-> service boundary. Those tasks are not yet implemented or activated. This runner
-> document describes the existing execution contracts; do not treat the proposed
-> architecture as a live runbook. Keep both references reconciled during migration.
+> owns the live consumer/ownership picture (TASK-1169–1173 activated 2026-11-03:
+> the ops reconciler is the only executor and the only first-party Docker-socket
+> holder). This document keeps the execution contracts; where they differ, that
+> document's live-state sections win.
 
 ## Execution and recovery contract
 
@@ -58,7 +58,7 @@ accepted, and running jobs; the smallest limit among overlapping snapshots wins.
 See [OPS_ROUTING_REPAIR.md](OPS_ROUTING_REPAIR.md) for the disabled-by-default
 `bawthub.reconcile-prod-routing` action, approval binding, routed verification,
 and worker/bootstrap activation gates. Echo has the tested worker and enabled,
-approval-gated operation. Approved job `389fd3f7eb2742a8944f82158b51154b`
+approval-gated operation. **Disabled 2026-11-03 (TASK-1173):** Traefik now reads a file provider, so label repair no longer applies; route changes are reviewed edits to `bawthub/deploy/traefik/dynamic/routes.yml`. Historical: approved job `389fd3f7eb2742a8944f82158b51154b`
 completed the repair and both hostname-routed health endpoints returned HTTP 200.
 A catalog row alone does not upgrade an immutable worker on other installations.
 
@@ -635,8 +635,8 @@ The **ops-reconciler process** owns Docker health inspection. The frontend healt
 aggregator consumes `http://ops-reconciler:8650`; it does not need Docker socket
 permissions for monitoring. Port 8650 is exposed only on the Compose network:
 no host publish, public proxy route, arbitrary target selector or Docker proxy.
-This migration does **not** remove the app executor or existing Docker-page
-controls/socket mounts; those are separate work.
+The app executor and the frontend socket mounts were later removed (TASK-1169 S3,
+TASK-1170, activated in TASK-1173).
 
 The fixed GET-only contract (`ops/health_http.py`):
 
@@ -975,8 +975,8 @@ approved SHA, version, digest and workflow run.
 
 The Actions credential is separate from `github-release` (read-only verification)
 and `ghcr-pull` (registry pull). It is least-privilege Actions read/write plus
-Contents read on the release repositories. The release executor runs in the app
-and independent reconciler processes; no GitHub credential enters the Docker
+Contents read on the release repositories. The release executor runs in the
+reconciler (the app is admission-only since TASK-1169 S3); no GitHub credential enters the Docker
 worker. The operation ships disabled. Implementation, catalog activation, each
 build approval, and each deployment approval are distinct decisions; implementing
 this contract authorizes no live release.

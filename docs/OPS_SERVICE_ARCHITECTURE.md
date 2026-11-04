@@ -1,8 +1,8 @@
 # Ops service: current architecture and intended consolidation
 
-**Status:** migration design with dated source/readiness evidence; integrated runtime acceptance is not complete.
+**Status:** TASK-1169–1173 activated and live-verified on 2026-11-03 (TASK-1173). The ops reconciler is the only Docker-socket holder among first-party services. Sections 3–5 still describe intended work that is **not** live: per-job worker containers remain, and an unhealthy ops container is marked unhealthy but not restarted automatically.
 
-**Updated:** 2026-11-03 (TASK-1170 frontend consumer reconciliation; TASK-1169 FastAPI control host source slice; other tasks retain their dated rollout records). **Accountable owner:** Snark.
+**Updated:** 2026-11-04 (TASK-1173 activation and final reconciliation). **Accountable owner:** Snark.
 
 **Tasks:** TASK-1169–TASK-1173. Related health delivery: TASK-1157.
 
@@ -35,7 +35,7 @@ ops-reconciler process ---------------> canonical ops job database
 Docker daemon <------ per-job Docker worker container ----> durable request/receipt volume
 ```
 
-**TASK-1169 S3 (implemented, not deployed):** the ops-reconciler is the only executor. The app's `OpsService` is admission-only (`build_admission_ops_service`). It builds no `DockerExecutor` and registers no executor: `_resolve_executor` raises `ops_admission_only`. It asks the ops service to prepare each invocation over the internal control listener (`ops/control_http.py`, `:8651`, never published), then creates the job QUEUED (or QUIESCING) and returns. `get_job_status()` in the app is a pure read. The job insert notifies `ops_job_created` in its own transaction, which wakes the reconciler loop at once; a lost notify costs one interval. Callers already handle a queued result: the BawtHub Run dialog, `ops_run` and the GPU handoff adapter, which polls. A release job's `release_id` stays null until the reconciler creates the release.
+**TASK-1169 S3 (live since TASK-1173, 2026-11-03):** the ops-reconciler is the only executor. The app's `OpsService` is admission-only (`build_admission_ops_service`). It builds no `DockerExecutor` and registers no executor: `_resolve_executor` raises `ops_admission_only`. It asks the ops service to prepare each invocation over the internal control listener (`ops/control_http.py`, `:8651`, never published), then creates the job QUEUED (or QUIESCING) and returns. `get_job_status()` in the app is a pure read. The job insert notifies `ops_job_created` in its own transaction, which wakes the reconciler loop at once; a lost notify costs one interval. Callers already handle a queued result: the BawtHub Run dialog, `ops_run` and the GPU handoff adapter, which polls. A release job's `release_id` stays null until the reconciler creates the release.
 
 - **Control channel.** `POST /v1/ops/prepare` returns the ops service's snapshot or a coded refusal, which keeps its own status. Auth is a bearer derived from the master key under `ops-control-token/v1`, not the BawtHub service token: the reconciler mounts the key but not BawtHub's token override. The client verifies the snapshot hash. It retries once, and only where nothing ran: a connection that never opened, or `ops_busy`. Everything else (timeout, 5xx, an old reconciler's 404, a non-protocol body) is `ops_unavailable`, which maps to HTTP 503 and creates nothing. The server runs at most `LLM_BAWT_OPS_CONTROL_CONCURRENCY` (default 2) requests at a time under a 20s budget; one more gets 503 `ops_busy`, and an over-budget request gets 504 `ops_timeout`. `GET /v1/ops/executors` feeds the app's `ops.executor.*` health rows; when it is unreachable they collapse into one DOWN `ops.control` row.
 - **GPU guard target.** Prepare records `gpu_target` in the snapshot, so the app's creation check needs no Docker read. The app checks it against whatever the spec alone proves. A snapshot without the field whose target needs a Docker read is refused in the app with `gpu_guard_unverifiable`. Dispatch still re-checks live in the reconciler.
@@ -100,21 +100,19 @@ The HTTP handlers do not probe Docker/DB or dispatch jobs. This separation keeps
 
 ### Recovery behavior today
 
-The inspected runtime uses `restart: unless-stopped`, with Docker's healthcheck disabled (`Test: ["NONE"]`). Process exit can trigger a Docker restart. A blocked background thread can leave the Python process and health HTTP alive; readiness reports failure, but the current runtime has no automatic stuck-loop restart mechanism.
+Live (verified 2026-11-03, TASK-1173): `llm-bawt-ops-reconciler-1` runs `restart: unless-stopped` with the Compose readiness healthcheck active (`GET 127.0.0.1:8650/health/ready`), status healthy; the `8651` control listener is up and unpublished. Process exit triggers a Docker restart. A blocked background thread fails readiness and marks the container **unhealthy, but nothing restarts it**: there is no autoheal or stuck-loop restart. That remains open work (section 5), not a live guarantee.
 
-A readiness healthcheck exists in Compose source but has not been activated in the inspected container. A plain restart cannot apply that configuration. Adding a Docker healthcheck alone would mark unhealthy, **not automatically restart** it.
-
-### Remaining direct consumers
+### Direct Docker consumers (live state after TASK-1173)
 
 | Consumer | Current dependency | Migration |
 | --- | --- | --- |
-| llm-bawt app | Admission-only: prepares through the ops control channel; no executor, dispatch or reconciliation. The Docker socket and worker env in its compose are not yet removed | Done in source, TASK-1169 S3; mount removal follows activation |
+| llm-bawt app | Admission-only: prepares through the ops control channel; no executor, dispatch or reconciliation. No socket mount and no worker env | Live: llm-bawt `feba0310`, app recreated 2026-11-03; socket connect inside the container fails |
 | Ops collectors/execution | One Docker SDK construction path: `DockerExecutor` (`executor.py`), reused by `health_collector.docker_client` | Done in source, TASK-1169 |
-| Hono dev/prod | None in code. `/tools/docker` reads `/api/system/ops/services` (ops health) and runs actions through the catalog Run dialog; `/api/docker/containers*` return 410; `dockerApi.ts` is deleted. The `frontend`/`frontend-prod` socket mounts are unused and remain until TASK-1173 | Done in source and on DEV (TASK-1170 via the TASK-1169-labelled BawtHub commits `d7df2b67`, `44f8112c`); mount removal TASK-1173 |
+| Hono dev/prod | None in code. `/tools/docker` reads `/api/system/ops/services` (ops health) and runs actions through the catalog Run dialog; `/api/docker/containers*` return 410; `dockerApi.ts` is deleted. No socket mount on `frontend` or `frontend-prod` | Live: TASK-1170 code; mounts removed in BawtHub `b19ba64f`, containers recreated 2026-11-03 |
 | Hono repository browsing | `repos.ts` takes the host path from `REPOS_HOST_ROOT`, never Docker | Done in source, BawtHub `39d2ee30` (TASK-1170) |
 | Voice backend | Fenced llm-bawt restart client (`tts/restart.py`) using the existing service token; direct shell/Docker restart helper removed | TASK-1171 source published; backend observed token-configured and socket-free on 2026-11-01. Catalog enablement and actual Restart acceptance remain pending below |
 | GPU handoff in app | Reads STT/TTS from the reconciler's `/v1/health/services/bawthub.{stt,tts}` (`LLM_BAWT_OPS_HEALTH_URL`); refuses on anything but one fresh, typed instance. No Docker client. Mutations use consented ops jobs | Done in source, TASK-1171 |
-| Traefik | Live: Docker provider watches labels through a `:ro` socket mount. Prepared: file provider reading `bawthub/deploy/traefik/dynamic/routes.yml`, no socket | Routes file and checks in source (TASK-1172); the cutover commit (provider switch, labels and socket removed) is applied with Traefik's recreation in TASK-1173 |
+| Traefik | File provider reading `bawthub/deploy/traefik/dynamic/routes.yml` (watched, `:ro`); no socket, no `traefik.*` labels | Live: TASK-1172 cutover (BawtHub `e31c6421`) with Traefik recreated 2026-11-03; `bawthub.reconcile-prod-routing` disabled |
 
 #### TASK-1171: source, observed readiness and remaining acceptance
 
@@ -135,7 +133,7 @@ At that observation point, GPU ownership was voice/idle with no open claims or p
 
 **Restart acceptance remains a separate genuine-human TTS Admin action.** Do not simulate operator consent through the service bearer or direct backend calls. Record the correlated request/job, terminal receipt, exactly one fresh running/healthy TTS instance with `startedAt > dispatched_at` and integer `restartCount == 0`, two consecutive `build_info` successes in the voice client, evidence-based fence release and unchanged STT. The status route can release a proven never-dispatched refusal without start evidence; a dispatched success or supported uncertain terminal outcome needs the fresh start evidence. Timeout/PID absence alone cannot release uncertainty, and an uncertain transport/5xx response (including 503) is not a definite refusal or permission to create a fresh restart. Disabling the catalog row prevents new admissions but cannot cancel an in-flight job or clear its fence. Ready-to-click is not restarted, UI acceptance or task completion.
 
-Production Hono has a socket mount but its non-root user lacks socket permission; dev Hono has effective access. A `:ro` socket mount, as used by Traefik, does not restrict Docker API methods. Agent bridges have no direct socket mount in the inspected deployment, but host SSH/operator privileges are a separate surface, not removed by this design.
+After TASK-1173 only the ops reconciler and its per-job workers hold the Docker socket. A `:ro` socket mount does not restrict Docker API methods, so that boundary is the reconciler, not the mount flag. Agent bridges have no direct socket mount in the inspected deployment, but host SSH/operator privileges are a separate surface, not removed by this design.
 
 ### Original health issue: resolved, not blocked on this refactor
 
@@ -237,12 +235,12 @@ Stable DNS alone is not proof of replica load balancing or stale-endpoint recove
 | TASK-1169 | FastAPI ops host; portable contracts; existing ledger/admission separation; adapter and bounded execution; recovery tests | Foundation |
 | TASK-1170 | Frontend controls/health plus repo-path discovery migrated; direct helpers removed (done; socket mounts left to 1173) | 1169 |
 | TASK-1171 | TTS restart and GPU observations use the shared contract | 1169 |
-| TASK-1172 | Socket-free deployment routing using supported provider configuration (source prepared; cutover commit for 1173) | Independent of 1169 |
-| TASK-1173 | Integrated authorized activation, actual mount removal, healthcheck/recovery configuration and final evidence | 1169–1172 |
+| TASK-1172 | Socket-free deployment routing using supported provider configuration (live via TASK-1173) | Independent of 1169 |
+| TASK-1173 | Integrated activation, mount removal, healthcheck and final evidence (done 2026-11-03; receipts in the task) | 1169–1172 |
 
 Start an architecture ratchet in TASK-1169: list current offenders with owning task IDs, reject new ones immediately, and remove exceptions as migrations land. Cover SDK imports, direct HTTP/CLI/shell helpers, socket/TCP configuration and parent-directory mounts across Compose and tenant artifacts. Separate legitimate adapter code and operator test tooling from product dependencies.
 
-**Implemented (S1a):** `tests/test_docker_access_ratchet.py` scans `src/` and every `docker-compose*.yml`. `OPS_ADAPTER` and `OPS_COMPOSE` name the ops boundary; `OFFENDERS` lists each current offender with its owning task (`media/gpu_handoff_adapter.py` → TASK-1171, compose `app` socket mount → TASK-1173). A new offender fails, and so does an entry that no longer matches, so a migration deletes its own exception. BawtHub carries the twin for Hono, the voice backend and its compose files.
+**Implemented (S1a):** `tests/test_docker_access_ratchet.py` scans `src/` and every `docker-compose*.yml`. `OPS_ADAPTER` and `OPS_COMPOSE` name the ops boundary; `OFFENDERS` listed each offender with its owning task; since TASK-1173 it is empty in both repos. A new offender fails, and so does an entry that no longer matches, so a migration deletes its own exception. BawtHub carries the twin for Hono, the voice backend and its compose files.
 
 Required evidence includes consumer tests with Docker unreachable; zero/one/many-instance contract fixtures; pure status reads; authorization/target-drift and duplicate dispatch tests; competing claims and crash recovery; blocked-execution health responsiveness; routing replacement; and proof that ordinary jobs no longer create per-job containers.
 
@@ -284,6 +282,8 @@ Paths below are relative to llm-bawt unless prefixed with `bawthub/`:
 - `bawthub/bawthub/main_websocket.py`, `bawthub/bawthub/tts/restart.py`: voice restart controller and fenced llm-bawt client; the direct `restart_tts_container.sh` helper is removed (TASK-1171).
 
 ### Decision record
+
+- **2026-11-03 (TASK-1173 activation):** App recreated without socket/worker env (`feba0310`); Traefik switched to the file provider and `frontend`/`frontend-prod` sockets removed (`e31c6421`, `b19ba64f`); `bawthub.reconcile-prod-routing` disabled; image IDs unchanged. Verified live: `check_routes.py` PASS, dev/prod pages and APIs, HMR, SSE, and with Docker unreachable from app/frontends: service list, a catalog restart, speech synthesis, GPU handoff status and the release card render. Both ratchets have no remaining consumer offenders. Still open, not live: per-job worker containers and automatic restart of an unhealthy ops container.
 
 - **2026-11-02 (TASK-1169 FastAPI health host):** Reconciled the published prepared-hold correction and existing process/adapter work without replay. Migrated only the dedicated health host and runtime ownership to FastAPI/Uvicorn lifespan; kept the separate bounded control transport, immutable wire contracts, fixed producers and execution/recovery semantics. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
 - **2026-11-03 (TASK-1169 FastAPI control host):** Moved the `8651` control listener from the standard-library server to FastAPI/Uvicorn on its own socket and loop thread, keeping the wire contract, bearer, slots and wall budget unchanged and adding header/body deadlines. With this, the ops service's control, status and health endpoints are all on FastAPI in source. No dependency, Compose, catalog, runtime, mount or activation change; TASK-1173 retains rollout.
