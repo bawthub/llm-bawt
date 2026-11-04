@@ -563,3 +563,80 @@ async def test_release_without_a_capture_still_settles_from_known_state():
     run.mark_completed()
 
     assert run.release_unstarted(SimpleNamespace(exited=True)) == [CMD]
+
+
+# --- TASK-1885: a now-steer intent never outlives its consumed boundary ------
+
+_NOTIFICATION = {
+    "type": "system", "subtype": "task_notification", "task_id": "t1",
+    "status": "completed", "summary": "notification finished",
+    "output_file": "", "uuid": "notification-1", "session_id": "s",
+}
+_INJECTED_INTERRUPT = {
+    **_result(""), "subtype": "error_during_execution",
+    "origin": {"kind": "task-notification"},
+}
+
+
+@pytest.mark.anyio
+async def test_now_steer_during_deferred_result_is_spent_with_that_boundary():
+    """Deferred path: the rejected next-steer releases the withheld result as the
+    now-steer's boundary, so no stale now-intent remains to misjudge a later
+    injected notification interrupt as ambiguous."""
+    client = _FakeClient()
+    run = _run(client)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    await asyncio.sleep(0)
+    await _next(run, "queued note", CMD, origin="bot")
+    client._query.frames.put_nowait(_result("held answer"))
+    await asyncio.sleep(0.05)
+    assert run._deferred_result is not None
+    await run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
+    assert (run._expected_interrupt_results, run._pending_now_interrupts) == (1, 1)
+    client._query.frames.put_nowait(_lifecycle(CMD, "discarded"))
+    await asyncio.sleep(0.05)
+    assert (run._expected_interrupt_results, run._pending_now_interrupts) == (0, 0)
+    for frame in (_NOTIFICATION, _INJECTED_INTERRUPT, _result("replacement answer")):
+        client._query.frames.put_nowait(frame)
+
+    yielded = await asyncio.wait_for(consumer, 1)
+    assert _results(yielded) == ["replacement answer"]
+    assert run._finishing is True
+
+
+@pytest.mark.anyio
+async def test_now_steer_during_pending_user_result_is_spent_with_that_boundary():
+    """Pending-user path: a started user follow-up's early result is withheld;
+    its completed lifecycle releases it as the now-steer's boundary."""
+    client = _FakeClient()
+    run = _run(client)
+    consumer = asyncio.create_task(_consume_until_result(run))
+    await asyncio.sleep(0)
+    await _next(run, "follow-up", CMD, origin="user")
+    client._query.frames.put_nowait(_lifecycle(CMD, "started"))
+    client._query.frames.put_nowait(_result("early follow-up answer"))
+    await asyncio.sleep(0.05)
+    assert run._pending_user_result is not None
+    await run.steer("redirect", priority="now", origin="user", framed_message="NOW[redirect]")
+    client._query.frames.put_nowait(_lifecycle(CMD, "completed"))
+    await asyncio.sleep(0.05)
+    assert (run._expected_interrupt_results, run._pending_now_interrupts) == (0, 0)
+    for frame in (_NOTIFICATION, _INJECTED_INTERRUPT, _result("replacement answer")):
+        client._query.frames.put_nowait(frame)
+
+    yielded = await asyncio.wait_for(consumer, 1)
+    assert _results(yielded) == ["replacement answer"]
+    assert run._finishing is True
+
+
+@pytest.mark.anyio
+async def test_notification_frame_read_by_an_earlier_run_fails_visibly_in_the_next():
+    """Cross-run scope: provenance is per run. A notification frame consumed by
+    an earlier run's reader is not inferred by the next run; its injected
+    interrupt result fails visibly instead of draining as a now-steer boundary."""
+    earlier = _run(_FakeClient())
+    earlier._injected_notification_active = True
+    later = _run(_FakeClient())
+    later._expected_interrupt_results = later._pending_now_interrupts = 1
+    with pytest.raises(RuntimeError, match="unattributed_injected_interrupt_boundary"):
+        later._injected_interrupt_boundary(parse_message(_INJECTED_INTERRUPT), "task-notification")

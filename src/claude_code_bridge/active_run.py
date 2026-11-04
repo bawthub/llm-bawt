@@ -747,6 +747,19 @@ class ClaudeActiveRun:
         logger.info("Draining interrupted injected notification: request=%s", self.request_id)
         return True
 
+    def _consume_expected_boundary(self) -> None:
+        """Consume one expected interrupt boundary from a withheld result.
+
+        A now-steer can arm while a result is withheld for a queued ``next``
+        command; when the lifecycle frame releases that result as the boundary,
+        the now-steer intent is spent with it. A now-steer intent can never
+        outlive every expected boundary (TASK-1885).
+        """
+        self._expected_interrupt_results -= 1
+        self._pending_now_interrupts = min(
+            self._pending_now_interrupts, self._expected_interrupt_results
+        )
+
     def note_lifecycle(self, command_uuid: str, state: str) -> None:
         """Record a CLI ``command_lifecycle`` frame for our injected commands."""
         if command_uuid not in self._commands:
@@ -878,7 +891,7 @@ class ClaudeActiveRun:
                         # An escalation consumes the aborted turn's result;
                         # ordinary rejection releases the withheld result.
                         if self._expected_interrupt_results > 0:
-                            self._expected_interrupt_results -= 1
+                            self._consume_expected_boundary()
                         else:
                             yield self._finish(deferred)
                     # Otherwise it started a follow-up turn whose own
@@ -889,7 +902,7 @@ class ClaudeActiveRun:
                     result = self._pending_user_result
                     self._pending_user_result = None
                     if self._expected_interrupt_results > 0:
-                        self._expected_interrupt_results -= 1
+                        self._consume_expected_boundary()
                     else:
                         yield self._finish(result)
                 continue
