@@ -878,9 +878,12 @@ Activation order:
 The publish workflow builds each green CI push run's commit, so a commit that
 was never a push tip on its own gets no image. A `workflow_dispatch` publish
 can't satisfy the `ci_publish` binding (its trigger must be a successful
-`push` CI run). To publish a specific main commit, re-run that commit's CI
-push run (`gh run rerun <run-id>`); its completion triggers the publish for
-that commit (TASK-1811).
+`push` CI run). If the commit already has its own CI push run on main (it was
+a push tip whose publish failed or was skipped), re-run that run
+(`gh run rerun <run-id>`); its completion publishes that commit. Re-running a
+later commit's run never selects an earlier SHA, and a commit that was never a
+push tip has no such run: it needs an approved publication path (for example,
+making it the tip of a main push) rather than this recipe (TASK-1811).
 
 A container still on the local `bawthub-pocket-tts:local` build carries no
 release labels, so the reconcile can't adopt it. If the first deploy reports
