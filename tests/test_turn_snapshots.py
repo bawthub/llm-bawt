@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_bridge import turn_snapshots
 from agent_bridge.turn_snapshots import (
     PROVENANCE,
     REF_PREFIX,
@@ -98,7 +99,7 @@ def test_commit_during_turn_is_kept(repo: Path) -> None:
     obs = TurnSnapshotObserver()
     bash(obs, "r1", "sed -i s/two/TWO/ a.txt && git commit -am x", repo)
     (repo / "a.txt").write_text("one\nTWO\n")
-    git(repo, "commit", "-qam", "turn work")
+    git(repo, "commit", "-qam", "turn work", env={"GIT_AUTHOR_NAME": "nova", "GIT_AUTHOR_EMAIL": "nova@bots.x"})
     files, receipts = obs.finish("r1")
     assert [Path(f["path"]).name for f in files] == ["a.txt"]
     assert files[0]["git_head_sha"] == git(repo, "rev-parse", "HEAD")
@@ -243,3 +244,71 @@ def test_stale_registry_marker_is_ignored(repo: Path) -> None:
     (repo / "a.txt").write_text("z\n")
     files, _ = obs.finish("r1")
     assert len(files) == 1 and not stale.exists()
+
+
+def test_fresh_commits_by_another_author_are_not_attributed(repo: Path, tmp_path: Path) -> None:
+    """Byte SF1: an integrator's rebased publish has fresh dates but isn't ours."""
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(repo), str(other))
+    obs = TurnSnapshotObserver()
+    bash(obs, "r1", "cat a.txt", repo)
+    (other / "b.txt").write_text("integrated\n")
+    git(other, "commit", "-qam", "publish", env={"GIT_AUTHOR_NAME": "gavel", "GIT_AUTHOR_EMAIL": "gavel@bots.x"})
+    git(repo, "pull", "-q", "--ff-only", str(other), "main")
+    files, receipts = obs.finish("r1")
+    assert files == [] and receipts[0]["status"] == "ineligible_head_moved"
+
+
+def test_refs_kept_only_for_observed_trees(repo: Path, tmp_path: Path) -> None:
+    """Byte SF2: read-only references leave no refs behind."""
+    quiet = tmp_path / "quiet"
+    git(tmp_path, "clone", "-q", str(repo), str(quiet))
+    obs = TurnSnapshotObserver()
+    bash(obs, "r1", f"cat {quiet}/a.txt && sed -i s/one/1/ a.txt", repo)
+    (repo / "a.txt").write_text("1\ntwo\n")
+    obs.finish("r1")
+    assert git(quiet, "for-each-ref", REF_PREFIX) == ""
+    assert len(git(repo, "for-each-ref", REF_PREFIX).splitlines()) == 2
+    obs2 = TurnSnapshotObserver()
+    bash(obs2, "r2", "true", repo)
+    obs2.discard("r2")
+    assert len(git(repo, "for-each-ref", REF_PREFIX).splitlines()) == 2
+
+
+def test_content_budget_makes_later_rows_metadata_only(repo: Path, monkeypatch) -> None:
+    """Byte SF3: a repo-wide formatter can't ship unbounded diff bytes."""
+    monkeypatch.setattr(turn_snapshots, "MAX_CONTENT_BYTES_PER_TURN", 20)
+    obs = TurnSnapshotObserver()
+    bash(obs, "r1", "ruff format .", repo)
+    (repo / "a.txt").write_text("one\ntwo!\n")
+    (repo / "b.txt").write_text("bee!\n")
+    files, _ = obs.finish("r1")
+    rows = by_path(files)
+    assert rows["a.txt"]["after_b64"] is not None
+    assert rows["b.txt"]["after_b64"] is None and rows["b.txt"]["truncated"] is True
+
+
+def test_too_many_changed_paths_skips_tree(repo: Path, monkeypatch) -> None:
+    monkeypatch.setattr(turn_snapshots, "MAX_STATUS_PATHS", 2)
+    obs = TurnSnapshotObserver()
+    bash(obs, "r1", "codegen", repo)
+    for n in range(3):
+        (repo / f"gen{n}.txt").write_text("x\n")
+    files, receipts = obs.finish("r1")
+    assert files == [] and receipts[0]["status"] == "skipped_too_many_paths"
+
+
+def test_marker_from_previous_bridge_process_is_dead(repo: Path) -> None:
+    import json
+    import socket
+
+    registry = repo / ".git" / "bawt-turns"
+    registry.mkdir()
+    (registry / "crashed.json").write_text(json.dumps({
+        "turn_id": "crashed", "host": socket.gethostname(), "process": "old", "registered_at": 0,
+    }))
+    obs = TurnSnapshotObserver()
+    bash(obs, "r1", "sed", repo)
+    (repo / "a.txt").write_text("z\n")
+    files, _ = obs.finish("r1")
+    assert len(files) == 1 and not (registry / "crashed.json").exists()

@@ -55,7 +55,9 @@ class ChangedFileLifecycleMixin:
                 asyncio.to_thread(
                     self._turn_snapshot_observer().observe_tool,
                     request_id=request_id,
-                    bot_id=session_key,
+                    # Session keys are "<bot>:<user>..."; the bot slug is the
+                    # commit author a HEAD advance must match.
+                    bot_id=(session_key or "").split(":", 1)[0] or None,
                     tool_input=input_data.get("tool_input"),
                     cwd=input_data.get("cwd"),
                 ),
