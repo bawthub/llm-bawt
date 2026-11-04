@@ -16,6 +16,7 @@ from llm_bawt.bot_access.context import current_bot_access
 from llm_bawt.bot_tags import BehaviorTag
 from llm_bawt.bot_types import normalize_bot_type
 from .bot_access_deliveries import ScopedDeliveryReader
+from .delivery_receipt_compact import compact_send_receipt
 from llm_bawt.inter_bot_send_targets import SelectorError
 from .inter_bot_fanout import selector_error, send_batch, single_explicit_target
 from .inter_bot_send_mode import (
@@ -520,8 +521,8 @@ async def send_message_to_bot(
                 **({"steer_only": True} if mode.steer_only else {}),
                 **durable_kwargs,
             )
-        return {**receipt, "mode": mode.label,
-                "dispatched": bool(receipt.get("delivery_id"))}
+        return compact_send_receipt({**receipt, "mode": mode.label,
+                "dispatched": bool(receipt.get("delivery_id"))})
 
     ceiling = _compat_hook(
         "_bot_send_wait_ceiling_seconds", _bot_send_wait_ceiling_seconds
@@ -564,13 +565,13 @@ async def send_message_to_bot(
         receipt = {**existing, "duplicate": True}
 
     result = await _compat_hook("_await_delivery", _await_delivery)(receipt, wait_seconds)
-    return {
+    return compact_send_receipt({
         **result,
         "mode": mode.label,
         "bot_id": target_bot_id,
         "sender": sender_bot_id,
         **clamp,
-    }
+    })
 
 
 @mcp.tool(name="bots_delivery_get")
