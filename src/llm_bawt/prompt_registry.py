@@ -143,19 +143,64 @@ def _parse_json_dict(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-# A placeholder is ``{identifier}``. Any other brace text (for example a literal
-# JSON example such as ``{"headline": ...}``) is kept verbatim, and ``{{``/``}}``
-# still collapse to single braces so existing escaped templates render unchanged.
-_TEMPLATE_TOKEN_RE = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# A placeholder is ``{identifier}``. Other brace text (for example a literal JSON
+# example such as ``{"outer": {"inner": 1}}``) is kept verbatim. Legacy escapes
+# still work: ``{{`` renders ``{`` and the ``}}`` that closes it renders ``}``.
+# Braces are tracked by depth so a literal object's own closing ``}}`` is not
+# mistaken for an escape.
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _scan_template(body: str):
+    """Yield ``("text", str)`` and ``("var", name)`` tokens for a template."""
+    open_kinds: list[str] = []  # "esc" for {{ ... }}, "lit" for a literal {
+    text: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "{":
+            if body.startswith("{{", i):
+                open_kinds.append("esc")
+                text.append("{")
+                i += 2
+                continue
+            close = body.find("}", i + 1)
+            if close != -1 and _IDENT_RE.fullmatch(body, i + 1, close):
+                if text:
+                    yield "text", "".join(text)
+                    text = []
+                yield "var", body[i + 1:close]
+                i = close + 1
+                continue
+            open_kinds.append("lit")
+            text.append("{")
+            i += 1
+            continue
+        if ch == "}":
+            top = open_kinds[-1] if open_kinds else None
+            if top == "lit":
+                open_kinds.pop()
+                text.append("}")
+                i += 1
+                continue
+            if body.startswith("}}", i) and top in ("esc", None):
+                if top == "esc":
+                    open_kinds.pop()
+                text.append("}")
+                i += 2
+                continue
+        text.append(ch)
+        i += 1
+    if text:
+        yield "text", "".join(text)
 
 
 def extract_placeholders(body: str) -> list[str]:
     """Extract ``{identifier}`` placeholders from a prompt template."""
     names: list[str] = []
-    for match in _TEMPLATE_TOKEN_RE.finditer(body or ""):
-        name = match.group(1)
-        if name and name not in names:
-            names.append(name)
+    for kind, value in _scan_template(body or ""):
+        if kind == "var" and value not in names:
+            names.append(value)
     return names
 
 
@@ -164,16 +209,10 @@ def render_template(body: str, variables: dict[str, Any]) -> str:
 
     Raises ``KeyError`` for a placeholder with no supplied variable.
     """
-
-    def _replace(match: re.Match[str]) -> str:
-        token = match.group(0)
-        if token == "{{":
-            return "{"
-        if token == "}}":
-            return "}"
-        return str(variables[match.group(1)])
-
-    return _TEMPLATE_TOKEN_RE.sub(_replace, body or "")
+    return "".join(
+        str(variables[value]) if kind == "var" else value
+        for kind, value in _scan_template(body or "")
+    )
 
 
 class PromptKeyTaken(Exception):

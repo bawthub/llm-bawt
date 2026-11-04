@@ -228,6 +228,29 @@ def test_runtime_render_keeps_literal_json_and_escapes() -> None:
     assert escaped == '{"ok": true} {messages} hi'
 
 
+_NESTED_CASES = [
+    '{"outer": {"inner": 1}}',
+    '{"a": {"b": {"c": {"d": 1}}}}',
+    '[{"a": [{"b": {"c": 1}}]}]',
+    '{"x": {messages}}',
+]
+
+
+def test_nested_literal_json_keeps_every_close_brace() -> None:
+    resolver = PromptResolver()
+    for literal in _NESTED_CASES:
+        body = f"Example: {literal}\n{{messages}}"
+        assert extract_placeholders(body) == ["messages"]
+        rendered = resolver.render(
+            key="history.summarization.single", variables={"messages": "M"}, body_override=body
+        )
+        assert rendered == f"Example: {literal.replace('{messages}', 'M')}\nM"
+    legacy = '{{"a": {{"b": 1}}}} {{messages}} {messages}'
+    assert resolver.render(
+        key="history.summarization.single", variables={"messages": "M"}, body_override=legacy
+    ) == '{"a": {"b": 1}} {messages} M'
+
+
 def test_runtime_render_still_raises_for_missing_variable() -> None:
     import pytest
 
@@ -257,3 +280,11 @@ def test_preview_route_renders_literal_json_and_rejects_missing_required(monkeyp
         scope_id=None,
     )
     assert bad.valid is False and bad.missing_required == ["messages"]
+    for literal in _NESTED_CASES[:3]:
+        nested = routes.preview_prompt(
+            "history.summarization.single",
+            PromptTemplateValidateRequest(body=f"{literal}\n{{messages}}", variables={"messages": "M"}),
+            scope_type="global",
+            scope_id=None,
+        )
+        assert nested.valid is True and nested.rendered_preview == f"{literal}\nM"
