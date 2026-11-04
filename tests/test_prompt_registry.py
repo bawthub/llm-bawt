@@ -195,3 +195,65 @@ def test_prompt_store_seed_defaults_is_idempotent() -> None:
     assert first["created"] > 0
     assert second["created"] == 0
     assert second["skipped"] == first["total"]
+
+
+# TASK-1502: literal JSON examples in prompt bodies.
+_JSON_BODY = 'Reply as JSON: {"headline": "...", "items": [{"id": 1}]}\nConversation:\n{messages}'
+
+
+def test_literal_json_is_not_a_placeholder_and_validates() -> None:
+    assert extract_placeholders(_JSON_BODY) == ["messages"]
+    result = PromptResolver().validate(key="history.summarization.single", body=_JSON_BODY)
+    assert result["valid"] is True
+    assert result["unknown_placeholders"] == []
+
+
+def test_literal_json_still_enforces_required_and_unknown_vars() -> None:
+    resolver = PromptResolver()
+    missing = resolver.validate(key="history.summarization.single", body='Example {"headline": 1}')
+    assert missing["valid"] is False and missing["missing_required"] == ["messages"]
+    unknown = resolver.validate(key="history.summarization.single", body=_JSON_BODY + " {typo}")
+    assert unknown["valid"] is False and unknown["unknown_placeholders"] == ["typo"]
+
+
+def test_runtime_render_keeps_literal_json_and_escapes() -> None:
+    resolver = PromptResolver()
+    rendered = resolver.render(
+        key="history.summarization.single", variables={"messages": "hi"}, body_override=_JSON_BODY
+    )
+    assert rendered == 'Reply as JSON: {"headline": "...", "items": [{"id": 1}]}\nConversation:\nhi'
+    escaped = resolver.render(
+        key="history.summarization.single", variables={"messages": "hi"}, body_override='{{"ok": true}} {{messages}} {messages}'
+    )
+    assert escaped == '{"ok": true} {messages} hi'
+
+
+def test_runtime_render_still_raises_for_missing_variable() -> None:
+    import pytest
+
+    with pytest.raises(KeyError):
+        PromptResolver().render(key="history.summarization.single", variables={}, body_override=_JSON_BODY)
+
+
+def test_preview_route_renders_literal_json_and_rejects_missing_required(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from llm_bawt.service.routes import prompts as routes
+    from llm_bawt.service.schemas import PromptTemplateValidateRequest
+
+    monkeypatch.setattr(routes, "get_service", lambda: SimpleNamespace(config=None))
+    ok = routes.preview_prompt(
+        "history.summarization.single",
+        PromptTemplateValidateRequest(body=_JSON_BODY, variables={"messages": "hi"}),
+        scope_type="global",
+        scope_id=None,
+    )
+    assert ok.valid is True and ok.errors == []
+    assert ok.rendered_preview.startswith('Reply as JSON: {"headline": "..."')
+    bad = routes.preview_prompt(
+        "history.summarization.single",
+        PromptTemplateValidateRequest(body='Example {"headline": 1}', variables={}),
+        scope_type="global",
+        scope_id=None,
+    )
+    assert bad.valid is False and bad.missing_required == ["messages"]

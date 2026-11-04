@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from string import Formatter
+import re
 from typing import Any
 
 from sqlalchemy import Column, DateTime, String, Text, UniqueConstraint
@@ -143,16 +143,37 @@ def _parse_json_dict(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+# A placeholder is ``{identifier}``. Any other brace text (for example a literal
+# JSON example such as ``{"headline": ...}``) is kept verbatim, and ``{{``/``}}``
+# still collapse to single braces so existing escaped templates render unchanged.
+_TEMPLATE_TOKEN_RE = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
 def extract_placeholders(body: str) -> list[str]:
-    """Extract format placeholders from a prompt template."""
+    """Extract ``{identifier}`` placeholders from a prompt template."""
     names: list[str] = []
-    for _, field_name, _, _ in Formatter().parse(body or ""):
-        if not field_name:
-            continue
-        base_name = field_name.split("!", 1)[0].split(":", 1)[0]
-        if base_name and base_name not in names:
-            names.append(base_name)
+    for match in _TEMPLATE_TOKEN_RE.finditer(body or ""):
+        name = match.group(1)
+        if name and name not in names:
+            names.append(name)
     return names
+
+
+def render_template(body: str, variables: dict[str, Any]) -> str:
+    """Substitute ``{identifier}`` placeholders; leave other braces literal.
+
+    Raises ``KeyError`` for a placeholder with no supplied variable.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token == "{{":
+            return "{"
+        if token == "}}":
+            return "}"
+        return str(variables[match.group(1)])
+
+    return _TEMPLATE_TOKEN_RE.sub(_replace, body or "")
 
 
 class PromptKeyTaken(Exception):
@@ -658,11 +679,11 @@ class PromptResolver:
             source = resolved.source
 
         try:
-            return body.format(**variables)
+            return render_template(body, variables)
         except KeyError:
             if source != "code_default" and definition is not None and body_override is None:
                 logger.warning("Prompt '%s' DB override failed to render; falling back to code default", key)
-                return definition.default_body().format(**variables)
+                return render_template(definition.default_body(), variables)
             raise
 
 
