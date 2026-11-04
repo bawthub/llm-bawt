@@ -91,12 +91,30 @@ def test_github_uses_connection_not_app_configuration(client, monkeypatch, statu
 
 def test_app_prefers_exported_derived_broker(client, monkeypatch):
     monkeypatch.setenv("BRIDGE_BROKER_TOKEN_EXPORT_FILE", "/fixture/exported")
-    monkeypatch.setattr(routes.bridge_gate, "bridge_gates", lambda: SimpleNamespace(
-        derived_token=lambda _: "derived-fixture",
-    ))
+    gates = routes.bridge_gate.BridgeGates(lambda: {}, derive=lambda _: "derived-fixture")
+    monkeypatch.setattr(routes.bridge_gate, "bridge_gates", lambda: gates)
     request = upstream(monkeypatch, httpx.Response(200, json={"entries": []}))
     assert client.get("/v1/workspace").status_code == 200
     assert request.call_args.kwargs["headers"] == {"X-Bridge-Token": "derived-fixture"}
+
+
+@pytest.mark.parametrize("export,derived,legacy,expected", [
+    (False, "derived", "legacy", "legacy"),
+    (True, "derived", "legacy", "derived"),
+    (True, None, "legacy", "legacy"),
+    (False, "derived", None, "derived"),
+    (False, None, None, None),
+])
+def test_outbound_broker_migration(export, derived, legacy, expected):
+    env = {}
+    if export:
+        env["BRIDGE_BROKER_TOKEN_EXPORT_FILE"] = "/fixture/exported"
+    if legacy:
+        env["BRIDGE_CLAUDE_TOKEN_SECRET"] = legacy
+    gates = routes.bridge_gate.BridgeGates(lambda: {}, environ=env, derive=lambda _: derived)
+    assert gates.outbound_headers(routes.bridge_gate.BROKER) == (
+        {"X-Bridge-Token": expected} if expected else {}
+    )
 
 
 def test_timeout_and_bad_success(client, monkeypatch):

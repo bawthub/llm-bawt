@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from urllib.parse import urlsplit
 
 import httpx
@@ -57,13 +56,11 @@ async def _proxy(method: str, item: CloneInput | None = None):
         # Reuse the broker identity for app -> bridge on private networks.
         # Legacy tenants share the env secret; current bridges read its derived
         # replacement from the app-exported broker file.
-        derived = bridge_gate.bridge_gates().derived_token(bridge_gate.BROKER)
-        legacy = os.getenv("BRIDGE_CLAUDE_TOKEN_SECRET")
-        token = (derived if os.getenv("BRIDGE_BROKER_TOKEN_EXPORT_FILE") else legacy) or derived or legacy
+        headers = bridge_gate.bridge_gates().outbound_headers(bridge_gate.BROKER)
         async with httpx.AsyncClient(timeout=125.0, follow_redirects=False) as client:
             response = await client.request(
                 method, url + ("/workspace/clone" if item else "/workspace"),
-                headers={"X-Bridge-Token": token} if token else {},
+                headers=headers,
                 json={"url": item.url, "name": item.name, **({"branch": item.branch} if item.branch else {})} if item else None,
             )
         # Never pass through arbitrary bridge diagnostics (Git URLs may hold secrets).

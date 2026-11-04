@@ -151,6 +151,13 @@ class BridgeGates:
     def _legacy(self, gate: Gate) -> str | None:
         return (self._environ.get(gate.legacy_env) or "").strip() or None
 
+    def outbound_headers(self, gate: Gate) -> dict[str, str]:
+        """App-to-bridge identity, preserving the export-file migration order."""
+        derived = self.derived_token(gate)
+        legacy = self._legacy(gate)
+        value = (derived if self._environ.get(gate.export_env) else legacy) or derived or legacy
+        return {HEADER: value} if value else {}
+
     # --- enforcement ----------------------------------------------------
     def _global_settings(self) -> Mapping[str, Any] | None:
         now = self._clock()
