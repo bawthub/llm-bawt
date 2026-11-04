@@ -134,6 +134,7 @@ class PromptDeliveryWorker:
                     target_bot_id=snapshot["bot_id"], message=snapshot["prompt"],
                     author=author,
                     idempotency_key=idem,
+                    task_id=snapshot.get("task_id"),
                     session_policy="continue",
                     payload={
                         "messages": [{"role": "user", "content": snapshot["prompt"]}],

@@ -83,12 +83,14 @@ def test_create_idempotency_and_payload_conflict(client):
 
 
 def test_manual_idempotency_cadence_and_busy_edit(client):
-    item = create(client, payload(enabled=False))
+    item = create(client, payload(enabled=False, task_id="TASK-2019"))
+    assert item["task_id"] == "TASK-2019"
     url = f"/v1/prompt-schedules/{item['id']}"
     key = {"idempotency_key": str(uuid4())}
     response = client.post(url+"/run-now?user=test", json=key)
     assert response.status_code == 202, response.text
     run = response.json()
+    assert run["snapshot"]["task_id"] == "TASK-2019"
     assert client.post(url+"/run-now?user=test", json=key).json()["id"] == run["id"]
     assert client.get(url+"?user=test").json()["next_run_at"] == item["next_run_at"]
     assert client.post(url+"/run-now?user=test", json={"idempotency_key": str(uuid4())}).status_code == 409

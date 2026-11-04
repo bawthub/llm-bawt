@@ -189,3 +189,40 @@ def test_live_state_carries_the_running_and_last_turn_task(rig):
 ])
 def test_normalize_task_ref(raw, ref):
     assert normalize_task_ref(raw) == ref
+
+
+def test_task_snapshot_is_turn_scoped_and_explicit_association_wins(rig):
+    from llm_bawt.service.turn_task_attribution import write_attribution
+
+    bot = rig.bot()
+    turn = _turn(rig.engine, bot)
+    other = _turn(rig.engine, bot, ended=True)
+    args = dict(turn_id=turn, bot_id=bot, user_id="fixture-user")
+    write_attribution(rig.engine, **args, task_ref="cm-first", source="active_assignment")
+    assert _resolve(rig, turn) == ("cm-first", "active_assignment")
+    assert _resolve(rig, other) is None
+    # An incidental mutation/read does not replace the admission snapshot.
+    _call(rig.engine, bot, turn, "tasks_update", {"task_id": "TASK-123"})
+    assert _resolve(rig, turn) == ("cm-first", "active_assignment")
+    write_attribution(rig.engine, **args, task_ref="cm-explicit", source="association", explicit=True)
+    write_attribution(rig.engine, **args, task_ref="cm-late", source="active_assignment")
+    assert _resolve(rig, turn) == ("cm-explicit", "association")
+
+
+def test_snapshot_scope_and_starting_delivery_exclude_steers(rig):
+    from llm_bawt.service.turn_task_attribution import starting_delivery, write_attribution
+
+    sender, bot = rig.bot(), rig.bot()
+    start = _deliver(rig, sender, bot, "TASK-71")
+    turn = _turn(rig.engine, bot, turn_id=start.turn_id)
+    steer = _deliver(rig, sender, bot, "TASK-72")
+    with rig.engine.begin() as conn:
+        conn.execute(sa_text("UPDATE inter_bot_deliveries SET target_turn_id=:t WHERE id=:d"),
+                     {"t": turn, "d": steer.id})
+    assert starting_delivery(rig.engine, turn, bot, "fixture-user") == "TASK-71"
+    assert starting_delivery(rig.engine, turn, bot, "wrong-user") is None
+    write_attribution(rig.engine, turn_id=turn, bot_id=bot, user_id="wrong-user",
+                      task_ref="TASK-73", source="association", explicit=True)
+    with rig.engine.connect() as conn:
+        assert conn.execute(sa_text("SELECT task_ref FROM turn_logs WHERE id=:t"),
+                            {"t": turn}).scalar_one() is None

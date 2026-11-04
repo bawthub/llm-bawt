@@ -57,6 +57,7 @@ def upgrade_prompt_schedules(conn, dialect):
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS target_mode VARCHAR NOT NULL DEFAULT 'specific'"))
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS candidate_bot_ids JSON"))
         conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS creator_bot_id VARCHAR"))
+        conn.execute(text("ALTER TABLE prompt_schedules ADD COLUMN IF NOT EXISTS task_id VARCHAR"))
     # Wake-ups created before TASK-1790 carry their creator only in the name.
     # A row whose name no longer proves it stays NULL (user-authored).
     rows = conn.execute(text(
@@ -88,7 +89,7 @@ def schedule_view(job, schedule, last_run=None):
                 enabled=job.enabled, next_run_at=(db_utc(job.next_run_at) if schedule.lifecycle == "active" and job.enabled and job.next_run_at else None),
                 timing=schedule.timing_json, last_run=last_run,
                 **{key: getattr(schedule, key) for key in (
-                    "owner_user_id", "creator_bot_id", "name", "description", "prompt", "requested_model",
+                    "owner_user_id", "creator_bot_id", "name", "description", "prompt", "task_id", "requested_model",
                     "target_mode", "candidate_bot_ids", "clear_context", "augment_memory", "extract_memory", "missed_policy",
                     "misfire_grace_seconds", "lifecycle", "revision", "created_at", "updated_at")})
 
@@ -288,6 +289,7 @@ class PromptManagement:
             session.add(run)
             session.flush()
             snapshot = dict(owner_user_id=owner, creator_bot_id=schedule.creator_bot_id,
+                            task_id=schedule.task_id,
                             bot_id=job.bot_id, name=schedule.name, prompt=schedule.prompt,
                             target_mode=schedule.target_mode, candidate_bot_ids=schedule.candidate_bot_ids,
                             model=schedule.requested_model, clear_context=schedule.clear_context,

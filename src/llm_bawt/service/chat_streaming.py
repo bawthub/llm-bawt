@@ -329,6 +329,11 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             for event in request_failed_events(response_id, created, model_alias, refused):
                 yield event
             return
+        if is_agent_backend:
+            from .turn_task_attribution import stamp_turn_task
+            await stamp_turn_task(
+                self._turn_log_store, turn_id=turn_log_id, bot_id=bot_id, user_id=user_id,
+            )
         chat_reset = None
         if not is_agent_backend:
             try:

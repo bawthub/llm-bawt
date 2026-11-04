@@ -92,6 +92,10 @@ class TurnLog(SQLModel, table=True):
     error_text: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     trigger_message_id: str | None = Field(default=None, index=True)
     assistant_message_id: str | None = Field(default=None, index=True)
+    # TASK-2019: accounting snapshot, not task/conversation write authority.
+    # NULL source means a legacy turn; unresolved attempts retain their reason.
+    task_ref: str | None = Field(default=None, index=True, max_length=128)
+    task_attribution_source: str | None = Field(default=None, max_length=32)
     agent_session_key: str | None = Field(default=None, max_length=128, index=True)
     agent_request_id: str | None = Field(default=None, max_length=128, index=True)
     # TASK-1232: the bridge backend the request was published to, persisted
@@ -154,6 +158,15 @@ def bootstrap_turn_log_schema(conn) -> None:
         conn.execute(sa_text(
             "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS"
             " trigger_message_id VARCHAR"
+        ))
+        conn.execute(sa_text(
+            "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS task_ref VARCHAR(128)"
+        ))
+        conn.execute(sa_text(
+            "ALTER TABLE turn_logs ADD COLUMN IF NOT EXISTS task_attribution_source VARCHAR(32)"
+        ))
+        conn.execute(sa_text(
+            "CREATE INDEX IF NOT EXISTS ix_turn_logs_task_ref ON turn_logs (task_ref)"
         ))
         conn.execute(sa_text(
             "CREATE INDEX IF NOT EXISTS ix_turn_logs_trigger_message_id"

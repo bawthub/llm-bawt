@@ -6,10 +6,11 @@ records the app already keeps, never from prose, in this order:
 
 1. ``association``: the turn linked itself (``tasks_associate_current``, or a
    task tool called with ``associate_current_turn=true``);
-2. ``delivery``: the inter-bot delivery that STARTED the turn carried a
+2. admission accounting snapshot (starting delivery or sole active assignment);
+3. ``delivery``: the inter-bot delivery that STARTED the turn carried a
    ``task_id`` (``turn_logs.id = 'turn-' || delivery.id``). Deliveries steered
    into a running turn are messages about other work, not assignments;
-3. ``mutation``: the turn's latest task-mutating tool call. Read-only calls
+4. ``mutation``: the turn's latest task-mutating tool call. Read-only calls
    (``tasks_get``, ``tasks_get_context``, ``tasks_reviews_list``…) never count:
    reviewers and coordinators read many tasks.
 
@@ -29,7 +30,7 @@ from typing import Any
 from sqlalchemy import text
 
 ASSOCIATION, DELIVERY, MUTATION = "association", "delivery", "mutation"
-SOURCES = (ASSOCIATION, DELIVERY, MUTATION)
+SOURCES = (ASSOCIATION, "snapshot", DELIVERY, MUTATION)
 ASSOCIATING_TOOLS = ("tasks_associate_current",)
 # Tools that link the turn when called with associate_current_turn=true.
 LINKABLE_TOOLS = ("tasks_update",)
@@ -66,7 +67,7 @@ class TurnTask:
 # ``turns`` is narrowed first so tool calls are only read for those turns.
 _RESOLVE = text("""
     WITH turns AS (
-        SELECT id, bot_id, created_at, ended_at FROM turn_logs
+        SELECT id, bot_id, created_at, ended_at, task_ref, task_attribution_source FROM turn_logs
         WHERE (CAST(:turn_ids AS text[]) IS NULL OR id = ANY(CAST(:turn_ids AS text[])))
           AND (CAST(:bots AS text[]) IS NULL OR bot_id = ANY(CAST(:bots AS text[])))
           AND (CAST(:since AS timestamptz) IS NULL
@@ -88,10 +89,12 @@ _RESOLVE = text("""
            OR (tool = ANY(CAST(:linkable AS text[]))
                AND args->'associate_current_turn' = 'true'::jsonb)
         UNION ALL
-        SELECT t.id, 2, d.created_at, d.task_id
+        SELECT id, 2, created_at, task_ref FROM turns
+        UNION ALL
+        SELECT t.id, 3, d.created_at, d.task_id
         FROM turns AS t JOIN inter_bot_deliveries AS d ON t.id = 'turn-' || d.id
         UNION ALL
-        SELECT turn_id, 3, created_at, args->>'task_id' FROM calls
+        SELECT turn_id, 4, created_at, args->>'task_id' FROM calls
         WHERE tool = ANY(CAST(:mutating AS text[]))
     ),
     best AS (
@@ -99,7 +102,8 @@ _RESOLVE = text("""
         WHERE NULLIF(btrim(ref), '') IS NOT NULL
         ORDER BY turn_id, rank, at DESC
     )
-    SELECT t.id AS turn_id, t.bot_id, t.created_at, t.ended_at, b.rank, b.ref
+    SELECT t.id AS turn_id, t.bot_id, t.created_at, t.ended_at, b.rank, b.ref,
+           t.task_attribution_source
     FROM best AS b JOIN turns AS t ON t.id = b.turn_id
     ORDER BY t.created_at DESC
 """)
@@ -137,7 +141,8 @@ def resolve_turn_tasks(
             continue
         resolved.append(TurnTask(
             turn_id=row["turn_id"], bot_id=row["bot_id"], task_ref=ref,
-            source=SOURCES[row["rank"] - 1],
+            source=(row["task_attribution_source"] if row["rank"] == 2
+                    else SOURCES[row["rank"] - 1]),
             started_at=_iso(row["created_at"]), ended_at=_iso(row["ended_at"]),
         ))
     return resolved

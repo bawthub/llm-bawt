@@ -41,6 +41,7 @@ class ScheduleInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     prompt: str = Field(min_length=1, max_length=100000)
+    task_id: str | None = Field(default=None, max_length=128, pattern=r"^TASK-\d+$")
     bot_id: str | None = Field(default=None, max_length=128)
     target_mode: Literal["specific", "auto"] = "specific"
     candidate_bot_ids: list[str] | None = None

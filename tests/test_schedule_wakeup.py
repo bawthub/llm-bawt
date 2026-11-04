@@ -106,6 +106,7 @@ async def test_create_uses_signed_owner_and_callback_defaults(rig):
     assert body["misfire_grace_seconds"] == 604800
     assert body["name"].startswith("wakeup:byte:") and body["name"].endswith(":TASK-1713")
     assert body["description"] == "task_id=TASK-1713"
+    assert body["task_id"] == "TASK-1713"
     assert body["prompt"].startswith("[Scheduled wake-up from byte, TASK-1713]\n\n")
     assert out["id"] in rig.schedules
     # TASK-1790: the tool's create key is what proves the creator on the server.

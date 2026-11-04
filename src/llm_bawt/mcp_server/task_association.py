@@ -197,6 +197,18 @@ async def associate_current_task(task_ref: str) -> dict[str, Any]:
     canonical = association.get("taskId") if isinstance(association, dict) else None
     if isinstance(canonical, str) and canonical:
         try:
+            from llm_bawt.service.turn_task_attribution import write_attribution
+            from llm_bawt.utils.config import Config
+            from llm_bawt.utils.db import get_shared_engine
+
+            await asyncio.to_thread(
+                write_attribution, get_shared_engine(Config()),
+                turn_id=context.turn_id, bot_id=context.bot_id, user_id=context.user_id,
+                task_ref=canonical, source="association", explicit=True,
+            )
+        except Exception:
+            logger.warning("Task association committed but accounting stamp failed", exc_info=True)
+        try:
             from llm_bawt.working_memory.service import WorkingMemoryService
             from llm_bawt.working_memory.contracts import WorkingMemoryError
             from llm_bawt.utils.config import Config

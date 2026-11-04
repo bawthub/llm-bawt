@@ -222,6 +222,7 @@ async def schedule_wakeup(
     name = f"{WAKEUP_PREFIX}{bot}:{nonce}:{(label or task or 'wake-up').strip()}"[:120]
     body = {
         "name": name, "description": f"task_id={task}" if task else "",
+        "task_id": task,
         "prompt": f"{header}\n\n{message.strip()}", "bot_id": target, "target_mode": "specific",
         "timing": timing, "clear_context": True, "augment_memory": False, "extract_memory": False,
         # A late wake-up beats none: missed runs fire on recovery for up to

@@ -31,6 +31,7 @@ class PromptSchedule(SQLModel, table=True):
     name: str = Field(max_length=120)
     description: str = Field(default="", sa_column=Column(Text, nullable=False))
     prompt: str = Field(sa_column=Column(Text, nullable=False))
+    task_id: str | None = None
     requested_model: str | None = None
     target_mode: str = "specific"
     candidate_bot_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))

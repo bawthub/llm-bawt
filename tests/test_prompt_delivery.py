@@ -47,6 +47,7 @@ class LocalDeliveryStore:
 
     def enqueue(self, **kwargs):
         self.calls += 1
+        self.last_task_id = kwargs.get("task_id")
         if self.failure == "before":
             raise RuntimeError("injected before enqueue")
         with self.engine.begin() as conn:
@@ -133,16 +134,17 @@ def rig(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600, creator=None):
+def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600, creator=None, task=None):
     timing = (PromptTiming(kind="once", once_at=now + timedelta(seconds=1)) if once else
               PromptTiming(kind="interval", interval_seconds=60, anchor_at=now + timedelta(seconds=1)))
     job = rig.worker.store.create(owner=OWNER, bot_id=BOT, name="Automation", prompt="Literal saved prompt",
                                   now=now, timing=timing, clear_context=clear,
                                   requested_model="second", misfire_grace_seconds=grace)
-    if creator:
+    if creator or task:
         with Session(rig.engine) as session:
             row = session.get(PromptSchedule, job)
             row.creator_bot_id = creator
+            row.task_id = task
             session.add(row)
             session.commit()
     run = rig.worker.store.reserve_due(now + timedelta(seconds=1))[0]
@@ -152,6 +154,19 @@ def reserve(rig, *, clear=True, once=False, now=NOW, grace=3600, creator=None):
 def enqueue(rig, run, now=NOW):
     prepared = rig.worker._prepare(run, now)
     return rig.worker._enqueue(run, prepared, rig.dispatcher, now)
+
+
+def test_scheduled_task_identity_survives_snapshot_and_enqueue(rig):
+    job, run = reserve(rig, task="TASK-2019")
+    assert occurrence(rig, run).snapshot_json["task_id"] == "TASK-2019"
+    # A later schedule edit cannot change an accepted occurrence's attribution.
+    with Session(rig.engine) as session:
+        row = session.get(PromptSchedule, job)
+        row.task_id = "TASK-2020"
+        session.add(row)
+        session.commit()
+    assert enqueue(rig, run) is not None
+    assert rig.delivery.last_task_id == "TASK-2019"
 
 
 def occurrence(rig, run):

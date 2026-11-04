@@ -46,6 +46,9 @@ def test_signed_association_links_only_after_success_with_returned_cuid(
     monkeypatch.setattr(task_association, "current_task_turn_context", lambda: ctx)
     monkeypatch.setattr(db, "get_shared_engine", lambda config: object())
     calls = []
+    from llm_bawt.service import turn_task_attribution
+    monkeypatch.setattr(turn_task_attribution, "write_attribution",
+                        lambda engine, **kwargs: calls.append(("accounting", kwargs)))
 
     def linked(self, context, canonical):
         calls.append((context, canonical))
@@ -77,7 +80,10 @@ def test_signed_association_links_only_after_success_with_returned_cuid(
     monkeypatch.setattr(task_association.httpx, "AsyncClient", Client)
     result = run(task_association.associate_current_task("TASK-900"))
     assert calls == [("/internal/tasks/TASK-900/associations", "test-bot"),
-                     "association_committed", (ctx, "canonical-cuid")]
+                     "association_committed",
+                     ("accounting", dict(turn_id="turn-abc", bot_id="test-bot", user_id="test-user",
+                                         task_ref="canonical-cuid", source="association", explicit=True)),
+                     (ctx, "canonical-cuid")]
     assert result["workingMemoryLink"] == {
         "state": "linked", "taskId": "canonical-cuid", "itemId": "memory-item"}
 
