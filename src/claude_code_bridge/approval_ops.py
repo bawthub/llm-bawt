@@ -802,6 +802,11 @@ class ClaudeApprovalMixin:
         async def pre_tool_use(input_data, tool_use_id, context):
             decision = await decide(input_data, tool_use_id, context)
             if not self._hook_denies(decision):
+                # TASK-1218: the CLI awaits this hook before running the tool,
+                # so a tree's start snapshot precedes the command's effects.
+                await self._observe_tool_for_turn_snapshot(
+                    request_id, session_key, input_data,
+                )
                 # TASK-1095: the CLI fires PreToolUse immediately before running
                 # each tool (serially for unsafe tools), after any approval
                 # wait resolved. That is the execution start, not emit time.

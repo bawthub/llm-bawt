@@ -188,6 +188,10 @@ class ToolChangedFileCapture:
                 "truncated": False,
             }
 
+    def captured_paths(self, request_id: str) -> list[Path]:
+        """Absolute paths this request's file tools declared (TASK-1218)."""
+        return [path for key, path in self._baselines if key == request_id]
+
     def discard_request(self, request_id: str) -> None:
         stale = [key for key in self._pending if key[0] == request_id]
         for key in stale:

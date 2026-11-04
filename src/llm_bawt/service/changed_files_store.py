@@ -166,7 +166,8 @@ class TurnChangedFile(SQLModel, table=True):
     git_head_sha: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     git_base_sha: str | None = Field(default=None, sa_column=Column(String(64), nullable=True))
     identity_status: str | None = Field(default=None, sa_column=Column(String(16), nullable=True))
-    provenance: str | None = Field(default=None, sa_column=Column(String(16), nullable=True))
+    # "tool" (Edit/Write capture) or "command_observation" (TASK-1218 turn snapshots).
+    provenance: str | None = Field(default=None, sa_column=Column(String(32), nullable=True))
 
 
 IDENTITY_FIELDS = (
@@ -179,7 +180,7 @@ _IDENTITY_SQL_TYPES = {
     "workspace_id": "VARCHAR(160)", "workspace_kind": "VARCHAR(16)",
     "repo_relative_path": "TEXT", "git_branch": "VARCHAR(255)",
     "git_head_sha": "VARCHAR(64)", "git_base_sha": "VARCHAR(64)",
-    "identity_status": "VARCHAR(16)", "provenance": "VARCHAR(16)",
+    "identity_status": "VARCHAR(16)", "provenance": "VARCHAR(32)",
 }
 
 
@@ -457,6 +458,17 @@ class ChangedFilesStore:
                         f"ALTER TABLE turn_changed_files ADD COLUMN {name} "
                         f"{_IDENTITY_SQL_TYPES[name]}"
                     ))
+            # TASK-1218: "command_observation" needs more than the original 16.
+            provenance_type = next(
+                (column["type"] for column in inspect(conn).get_columns("turn_changed_files")
+                 if column["name"] == "provenance"),
+                None,
+            )
+            if (conn.dialect.name == "postgresql"
+                    and (getattr(provenance_type, "length", None) or 32) < 32):
+                conn.execute(sa_text(
+                    "ALTER TABLE turn_changed_files ALTER COLUMN provenance TYPE VARCHAR(32)"
+                ))
             conn.execute(sa_text(
                 "CREATE INDEX IF NOT EXISTS ix_turn_changed_files_commit_requested_at"
                 " ON turn_changed_files (commit_requested_at)"

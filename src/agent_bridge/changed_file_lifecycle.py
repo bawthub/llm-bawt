@@ -1,23 +1,99 @@
-"""Shared bridge hooks for tool-call-based changed-file attribution."""
+"""Shared bridge hooks for changed-file attribution."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from typing import Any
 
 from .changed_files import ToolChangedFileCapture
 from .events import AgentEvent, AgentEventKind
+from .turn_snapshots import TurnSnapshotObserver, file_identity
 
 logger = logging.getLogger(__name__)
 
+# A start snapshot slower than this lets the tool run anyway; the tree's start
+# then may include that tool's effects (under-attribution, never misattribution).
+TURN_SNAPSHOT_HOOK_TIMEOUT_SECONDS = 10.0
+_TERMINAL_KINDS = frozenset({AgentEventKind.ASSISTANT_DONE, AgentEventKind.ERROR})
+
+
+def turn_snapshots_enabled() -> bool:
+    return os.getenv("AGENT_TURN_SNAPSHOTS", "1").strip().lower() not in ("0", "false", "off", "no")
+
 
 class ChangedFileLifecycleMixin:
-    """Attach per-tool file capture to standardized bridge events.
+    """Attach changed-file capture to standardized bridge events.
 
-    Concrete bridges keep publishing TOOL_START/TOOL_END normally.  This mixin
-    snapshots only the declared ``file_path`` and emits a FILE_CHANGED event as
-    soon as that specific tool completes.  No workspace-wide turn snapshots,
-    overlap registry, or finalize phase are involved.
+    Edit/Write-style tools are captured per call: the declared ``file_path`` is
+    snapshotted and a FILE_CHANGED event is emitted as soon as the tool ends.
+    Shell-command edits (TASK-1218) come from per-turn Git snapshots of the
+    trees a turn touched; bridges that call ``_observe_tool_for_turn_snapshot``
+    from a pre-execution hook get them as FILE_CHANGED events published just
+    before the turn's terminal event.
     """
+
+    def _turn_snapshot_observer(self) -> TurnSnapshotObserver:
+        observer = getattr(self, "_turn_snapshots", None)
+        if observer is None:
+            observer = TurnSnapshotObserver()
+            self._turn_snapshots = observer
+        return observer
+
+    async def _observe_tool_for_turn_snapshot(
+        self, request_id: str, session_key: str | None, input_data: Any,
+    ) -> None:
+        """Pre-execution hook: make the trees this tool references candidates."""
+        if not request_id or not turn_snapshots_enabled() or not isinstance(input_data, dict):
+            return
+        tool_name = str(input_data.get("tool_name") or "")
+        if tool_name.startswith("mcp__"):
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._turn_snapshot_observer().observe_tool,
+                    request_id=request_id,
+                    bot_id=session_key,
+                    tool_input=input_data.get("tool_input"),
+                    cwd=input_data.get("cwd"),
+                ),
+                timeout=TURN_SNAPSHOT_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.debug("turn snapshot observe failed request_id=%s", request_id, exc_info=True)
+
+    def _command_file_events(self, request_id: str, terminal: AgentEvent) -> list[AgentEvent]:
+        """End-of-turn snapshots as FILE_CHANGED events (before the terminal)."""
+        try:
+            covered = [
+                identity
+                for path in self._changed_file_capture().captured_paths(request_id)
+                if (identity := file_identity(path)) is not None
+            ]
+            files, _receipts = self._turn_snapshot_observer().finish(request_id, covered=covered)
+        except Exception:
+            logger.warning("turn snapshot finish failed request_id=%s", request_id, exc_info=True)
+            return []
+        return [
+            AgentEvent(
+                event_id=f"{terminal.event_id}:command-file:{index}",
+                session_key=terminal.session_key,
+                run_id=terminal.run_id,
+                kind=AgentEventKind.FILE_CHANGED,
+                origin="system",
+                tool_name="Bash",
+                tool_arguments={},
+                tool_use_id=None,
+                seq=terminal.seq,
+                timestamp=terminal.timestamp,
+                raw={"file": file_data},
+                provider=terminal.provider,
+                trigger_message_id=terminal.trigger_message_id,
+            )
+            for index, file_data in enumerate(files)
+        ]
 
     def _changed_file_capture(self) -> ToolChangedFileCapture:
         capture = getattr(self, "_tool_changed_file_capture", None)
@@ -83,6 +159,9 @@ class ChangedFileLifecycleMixin:
             self._capture_changed_file_event(event, request_id=request_id)
             self._publisher.publish_run_event(request_id, event)
             return
+        if event.kind in _TERMINAL_KINDS:
+            for file_event in self._command_file_events(request_id, event):
+                self._publisher.publish_run_event(request_id, file_event)
         self._publisher.publish_run_event(request_id, event)
         file_event = self._capture_changed_file_event(event, request_id=request_id)
         if file_event is not None:
@@ -91,5 +170,6 @@ class ChangedFileLifecycleMixin:
     def _discard_changed_file_request(self, request_id: str) -> None:
         try:
             self._changed_file_capture().discard_request(request_id)
+            self._turn_snapshot_observer().discard(request_id)
         except Exception:
             logger.debug("changed-file request cleanup failed", exc_info=True)
