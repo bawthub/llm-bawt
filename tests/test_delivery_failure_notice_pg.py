@@ -134,7 +134,9 @@ def _assert_notice(ctx, source, notice, *, error_code):
     assert (stored["sender_bot_id"], stored["target_bot_id"], stored["message_kind"], stored["status"]) == (
         SYSTEM_BOT_ID, ctx.sender, NOTICE_KIND, "QUEUED",
     )
-    assert payload["session_id"] == ctx.origin.session_id != ctx.current.session_id
+    # The origin session was archived after the delegation: never reopen it;
+    # an unset session_id routes to the bot/user's current active session.
+    assert payload["session_id"] is None
     assert payload["user"] == ctx.origin.user_id != "worker-owner"
     assert payload["bot_id"] == ctx.sender and payload["prefer_steer"] is False
     assert payload["extract_memory"] is False and payload["augment_memory"] is False
@@ -153,7 +155,7 @@ def _assert_notice(ctx, source, notice, *, error_code):
 
 
 @pytest.mark.parametrize("accepted", [False, True], ids=["before-acceptance", "after-acceptance"])
-def test_failed_delivery_notifies_the_owned_archived_initiating_session(notices, accepted):
+def test_failed_delivery_from_an_archived_origin_routes_to_the_active_session(notices, accepted):
     source, _ = _send(notices, task_id="TASK-1946", project_id="project-test")
     claim = _claim(notices, source)
     if accepted:
@@ -169,6 +171,22 @@ def test_failed_delivery_notifies_the_owned_archived_initiating_session(notices,
     assert bool(_row(notices, source.id)["transport_accepted_at"]) is accepted
     with notices.store.engine.connect() as conn:
         assert BotSessionState.resolve(conn, bot_id=notices.sender)["id"] == notices.current.session_id
+
+
+def test_failed_delivery_from_a_still_active_origin_keeps_that_session(notices):
+    source, _ = _send(notices, caller=notices.current)
+    claim = _claim(notices, source)
+    assert notices.deliveries.fail_claim(source.id, claim.claim_token, "TimeoutError")
+
+    [notice] = notices.pump.run_pass().notified
+
+    stored = _row(notices, notice.id)
+    assert stored["target_bot_id"] == notices.sender
+    assert stored["payload_json"]["session_id"] == notices.current.session_id
+    assert stored["metadata_json"]["initiating_turn_id"] == notices.current.turn_id
+    with notices.store.engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM sessions WHERE id=:id"),
+                            {"id": notices.origin.session_id}).scalar_one() == "archived"
 
 
 @pytest.mark.parametrize("status", ["error", "timeout"])
@@ -227,7 +245,7 @@ def test_a_steers_own_failed_send_notifies_its_sender_without_blaming_the_shared
     [notice] = notices.pump.run_pass().notified
     stored = _row(notices, notice.id)
     assert stored["target_bot_id"] == caller.bot_id
-    assert stored["payload_json"]["session_id"] == caller.session_id
+    assert stored["payload_json"]["session_id"] is None  # caller's origin is archived
     assert stored["metadata_json"]["failed_delivery_id"] == steer.id
     assert stored["metadata_json"]["failed_turn_id"] == claim.turn_id
     assert stored["metadata_json"]["turn_status"] == "unattributed"

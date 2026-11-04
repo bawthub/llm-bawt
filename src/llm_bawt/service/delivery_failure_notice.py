@@ -115,7 +115,8 @@ class FailureNoticePump:
             if row is None:
                 return None, False
             origin = FailureOrigin.from_row(row)
-            if origin is None or not self._owned_origin(conn, origin) or self._user_stopped(row):
+            origin_status = None if origin is None else self._owned_origin(conn, origin)
+            if origin_status is None or self._user_stopped(row):
                 self._stamp(conn, row["id"], "ineligible")
                 return None, True
             # A shared turn's terminal state does not confer failure on every
@@ -148,7 +149,9 @@ class FailureNoticePump:
                 metadata={"failed_delivery_id": row["id"], **variables},
                 payload={
                     "bot_id": origin.bot_id, "user": origin.user_id,
-                    "session_id": origin.session_id,
+                    # A since-archived origin (/new, reset, rotation) must not
+                    # be reopened; None routes to the current active session.
+                    "session_id": origin.session_id if origin_status == "active" else None,
                     "messages": [{"role": "user", "content": message}],
                     "prefer_steer": False, "reply_mode": "async", "stream": True,
                     "extract_memory": False, "augment_memory": False,
@@ -167,11 +170,12 @@ class FailureNoticePump:
         """), {"id": delivery_id, "decision": json.dumps({"outcome": outcome, "notice_delivery_id": notice_id})})
 
     @staticmethod
-    def _owned_origin(conn, origin: FailureOrigin) -> bool:
+    def _owned_origin(conn, origin: FailureOrigin) -> str | None:
         # Revalidate against the actual initiating turn + trigger + session, not
         # a callback's caller-shaped metadata, target user, or current default.
+        # Returns the origin session's status when owned, else None.
         row = conn.execute(sa_text("""
-            SELECT p.bot_type, p.agent_backend
+            SELECT p.bot_type, p.agent_backend, s.status
             FROM sessions s
             JOIN turn_logs t ON t.id=:turn AND t.bot_id=s.bot_id AND t.user_id=s.user_id
             JOIN messages m ON m.bot_id=:partition AND m.id=t.trigger_message_id AND m.session_id=s.id
@@ -181,7 +185,9 @@ class FailureNoticePump:
         """), {"session": origin.session_id, "bot": origin.bot_id, "user": origin.user_id,
                "partition": _sanitize_table_name(origin.bot_id), "turn": origin.turn_id,
                "trigger": origin.trigger_message_id}).mappings().first()
-        return row is not None and normalize_bot_type(row["bot_type"], row["agent_backend"]) == "agent"
+        if row is None or normalize_bot_type(row["bot_type"], row["agent_backend"]) != "agent":
+            return None
+        return row["status"]
 
     @staticmethod
     def _user_stopped(row) -> bool:
