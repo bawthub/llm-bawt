@@ -101,7 +101,10 @@ class QuiesceReceiptSender:
             metadata={"ops_job_id": job_id, "ops_receipt": True},
             payload={
                 "bot_id": bot_id, "user": callback.get("user_id"),
-                "session_id": callback.get("session_id"),
+                # Like the cancel notice (TASK-2021): never pin the caller's
+                # session, which /new, reset or rotation may have archived
+                # since. The normal delivery path targets the active session.
+                "session_id": None,
                 "messages": [{"role": "user", "content": message}],
                 "prefer_steer": False, "reply_mode": "async",
                 "extract_memory": False, "augment_memory": False, "stream": True,

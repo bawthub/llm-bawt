@@ -714,7 +714,7 @@ def test_the_callers_own_turn_holds_until_it_exits_and_it_is_told_to_end_it(rig,
     [delivery] = _receipt_deliveries(rig)
     assert (delivery["sender_bot_id"], delivery["message_kind"]) == ("system", "OPS_RECEIPT")
     payload = delivery["payload_json"]
-    assert (payload["session_id"], payload["user"], payload["bot_id"]) == ("sess-caller", "nick", rig.bot)
+    assert (payload["session_id"], payload["user"], payload["bot_id"]) == (None, "nick", rig.bot)
     assert payload["prefer_steer"] is False and payload["extract_memory"] is False
     assert delivery["metadata_json"]["ops_job_id"] == job_id
     sent = json.loads(delivery["message"].split("\n", 1)[1])

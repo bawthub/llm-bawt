@@ -5,8 +5,6 @@ import hashlib
 import json
 
 from ..bot_identities import SYSTEM_BOT_ID
-from .approval_continuation_session import approval_origin_session
-
 
 class OpsBlockedNotifier:
     """One warning per approved job/error, without consuming its final receipt."""
@@ -20,8 +18,9 @@ class OpsBlockedNotifier:
         dispatcher = getattr(self.service, "_inter_bot_dispatcher", None)
         if dispatcher is None:
             raise RuntimeError("Ops blocked notification delivery dispatcher unavailable")
-        # Keep the identity and payload stable across sweeps/restarts. Binding to
-        # the original thread avoids injecting this into unrelated active work.
+        # Keep the identity and payload stable across sweeps/restarts. Like the
+        # cancel notice (TASK-2021), never pin the raw approval-origin session:
+        # /new may have archived it, and reopening it strands the warning.
         error = str(result["error_text"])
         job_id = str(result["job_id"])
         message = (
@@ -44,7 +43,7 @@ class OpsBlockedNotifier:
             metadata={"approval_request_id": row.id, "ops_job_id": job_id},
             payload={
                 "bot_id": row.bot_id, "user": row.user_id,
-                "session_id": approval_origin_session(row),
+                "session_id": None,
                 "messages": [{"role": "user", "content": message}],
                 "prefer_steer": False, "reply_mode": "async",
                 "extract_memory": False, "augment_memory": False, "stream": True,

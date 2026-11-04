@@ -148,7 +148,9 @@ dispatcher: each new receipt row is announced at once (QUEUED published, the
 dispatcher woken), and a duplicate only wakes it. For every terminal job with a callback and no
 `receipt_callback_delivery_id` it enqueues one durable inter-bot delivery from
 `system` to the caller (`message_kind=OPS_RECEIPT`, `on_gate="hold"`, a new
-turn bound to the caller's session, never a steer), framed by the
+turn in the caller's current active session, never a steer; like the cancel
+notice it leaves `session_id` unset so an archived caller session is never
+reopened, TASK-2021), framed by the
 prompt-registry key `ops.quiesce_receipt`, then stamps the delivery id. The
 delivery's idempotency key is `ops-receipt:<job_id>`, so a crash before the
 stamp re-reads the same delivery. Pre-dispatch failures are terminal too, so

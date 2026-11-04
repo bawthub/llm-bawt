@@ -93,8 +93,9 @@ def test_terminal_gate_wakes_a_new_turn_on_existing_durable_outbox(gate_rig, sta
     [delivery] = rig.rows()
     payload = delivery["payload_json"]
     assert (delivery["sender_bot_id"], delivery["message_kind"]) == ("system", "OPS_RECEIPT")
+    # The caller's ended session is never pinned; delivery uses the active one.
     assert (payload["bot_id"], payload["user"], payload["session_id"]) == (
-        rig.bot, "fixture-user", "ended-session")
+        rig.bot, "fixture-user", None)
     assert payload["prefer_steer"] is False and payload["reply_mode"] == "async"
     assert rig.enqueue_calls[-1]["on_gate"] == "hold"
     assert announced == [(delivery["id"], False)]

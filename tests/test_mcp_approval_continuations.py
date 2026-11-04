@@ -269,7 +269,7 @@ def test_blocked_ops_warning_is_deduped_without_consuming_terminal_receipt(monke
     assert service.requests == []
     warning = calls[0]
     assert warning["target_bot_id"] == "snark"
-    assert warning["payload"]["session_id"] == "session-1"
+    assert warning["payload"]["session_id"] is None  # not pinned to the origin thread
     assert warning["payload"]["prefer_steer"] is False
     assert "receipt volume missing" in warning["message"]
     assert "Do not submit another job" in warning["message"]
