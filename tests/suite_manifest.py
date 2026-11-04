@@ -73,6 +73,7 @@ PG_ACCEPTANCE_SUITES = (
     "test_user_stop_hold_pg.py::",
     "test_send_now_pg.py::",
     "test_delivery_steer_past_held_head_pg.py::",
+    "test_steer_order_pg.py::",
     "test_delivery_cancel_notice_pg.py::",
     "test_delivery_failure_notice_pg.py::",
     "test_execution_exit_pg.py::",
