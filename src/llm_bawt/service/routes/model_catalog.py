@@ -524,7 +524,7 @@ def _merge_endpoint_patch(existing: dict[str, Any], patch: EndpointPatch) -> End
     try:
         return EndpointWrite(endpoint_id=existing["id"], **merged)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_context=False)) from exc
 
 
 @router.patch("/endpoints/{model_key}/{access_key}")

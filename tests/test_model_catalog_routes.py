@@ -282,6 +282,8 @@ def test_endpoint_patch_validates_merged_serving_config():
             EndpointPatch(serving_config={"reasoning_effort": "minimal"}),
         )
     assert exc.value.status_code == 422
+    import json as _json
+    _json.dumps(exc.value.detail)  # HTTP boundary must serialize the detail
 
 
 def test_patch_endpoint_route_updates_only_supplied_fields():
@@ -312,3 +314,25 @@ def test_patch_endpoint_route_updates_only_supplied_fields():
         with pytest.raises(HTTPException) as exc:
             mc.patch_endpoint("m", "a", mc.EndpointPatch(endpoint_id=1, serving_config={}))
     assert exc.value.status_code == 409
+
+
+def test_patch_endpoint_invalid_serving_config_returns_422_over_http():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from llm_bawt.service.routes import model_catalog as mc
+
+    conn = MagicMock()
+    conn.execute.return_value = MagicMock(
+        mappings=lambda: MagicMock(first=lambda: dict(_STORED_ENDPOINT)),
+    )
+    engine = MagicMock()
+    engine.begin.return_value.__enter__.return_value = conn
+    app = FastAPI()
+    app.include_router(mc.router)
+    with patch.object(mc, "_engine", return_value=engine), patch.object(mc, "_refresh_catalog"):
+        response = TestClient(app).patch(
+            "/v1/models/catalog/endpoints/m/a",
+            json={"serving_config": {"reasoning_effort": "minimal"}},
+        )
+    assert response.status_code == 422
+    assert "reasoning_effort" in response.text
