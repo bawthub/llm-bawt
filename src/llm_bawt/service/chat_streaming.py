@@ -25,7 +25,7 @@ from .inter_bot_claims import continuation_author, turn_admission_claim, validat
 from .session_lifecycle.bridge_reset import BridgeSessionResetMixin
 from .logging import RequestContext, generate_request_id, get_service_logger
 from .schemas import ChatCompletionRequest
-from .stream_request_attachments import prepare_stream_request_attachments
+from .stream_request_attachments import has_user_turn, prepare_stream_request_attachments
 from .ordinary_turn_queue import admit_ordinary_agent_turn
 from .tool_event_coordinator import ToolEventCoordinator
 from .turn_admission import AdmissionFenceLost, AdmissionUnavailable, SystemGateRefused, turn_start_extensions
@@ -173,7 +173,9 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
             _amid.strip() if isinstance(_amid, str) and _amid.strip() else str(uuid.uuid4())
         )
 
-        if not user_prompt:
+        # TASK-425: an attachment-only turn (empty text + resolved images) is
+        # a real user message, not a missing one.
+        if not has_user_turn(user_prompt, user_attachments, attachments_to_persist):
             warning_data = {
                 "object": "service.warning",
                 "model": model_alias,

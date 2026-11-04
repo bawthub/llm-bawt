@@ -14,6 +14,11 @@ from ..media import MediaAssetNotFound, get_media_store
 from .chat_message_text import message_content_text
 
 
+def has_user_turn(user_prompt: str, user_attachments: list, attachments_to_persist: list) -> bool:
+    """TASK-425: text or any resolved attachment makes a real user turn."""
+    return bool(user_prompt) or bool(user_attachments) or bool(attachments_to_persist)
+
+
 async def prepare_stream_request_attachments(
     request: Any,
     *,

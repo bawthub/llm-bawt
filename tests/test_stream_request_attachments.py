@@ -158,3 +158,12 @@ def test_image_kind_asset_id_still_inlines_preview(monkeypatch):
     _, llm_images, durable_refs, _ = _run(request, log)
     assert llm_images == [{"mimeType": "image/webp", "content": "cHJldmlldw=="}]
     assert durable_refs == [{"asset_id": "ma_img", "kind": "image"}]
+
+
+def test_task425_attachment_only_turn_is_a_user_turn():
+    from llm_bawt.service.stream_request_attachments import has_user_turn
+
+    assert has_user_turn("", [], [{"asset_id": "a", "kind": "image"}])
+    assert has_user_turn("", [{"mimeType": "image/png", "content": "x"}], [])
+    assert has_user_turn("hi", [], [])
+    assert not has_user_turn("", [], [])
