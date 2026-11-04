@@ -436,3 +436,6 @@ def test_bell_link_keeps_only_the_app_path():
     assert notify_bell.bell_link("/chat/nova") == "/chat/nova"
     assert notify_bell.bell_link("https://app.example.test/a/b?c=1") == "/a/b?c=1"
     assert notify_bell.bell_link("https://app.example.test") == "/"
+    assert notify_bell.bell_link("/\\evil.example/x") is None
+    assert notify_bell.bell_link("/a\tb") is None
+    assert notify_bell.bell_link("https://app.example.test//evil.example/x") is None

@@ -41,10 +41,14 @@ def bell_link(url: str | None) -> str | None:
     """The app path of an already-validated push link, for in-app navigation."""
     if not url:
         return None
-    if url.startswith("/") and not url.startswith("//"):
-        return url
-    parts = urlsplit(url)
-    return urlunsplit(("", "", parts.path or "/", parts.query, parts.fragment))
+    if not (url.startswith("/") and not url.startswith("//")):
+        parts = urlsplit(url)
+        url = urlunsplit(("", "", parts.path or "/", parts.query, parts.fragment))
+    # BawtHub refuses a path a browser could read as another origin; drop the
+    # link rather than lose the entry.
+    if url.startswith("//") or any(c == "\\" or ord(c) < 32 or ord(c) == 127 for c in url):
+        return None
+    return url
 
 
 async def record_push_bell(http: httpx.AsyncClient, *, push_id: str, bot_id: str,
