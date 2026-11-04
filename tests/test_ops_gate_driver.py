@@ -190,3 +190,18 @@ def test_tail_strips_nul_from_malformed_stream():
     from llm_bawt.ops import gate_driver
     out = gate_driver._tail(b"\x01\x00\x00\x00\xff\xff\xff\xfftruncated\x00tail")
     assert "\x00" not in out and out.endswith("tail")
+
+
+def test_prepare_invocation_refuses_gate_specs_with_a_typed_code():
+    # TASK-1998: an approval card for a gate used to fall into the container
+    # target check and KeyError on compose_service_from_arg (HTTP 500).
+    from llm_bawt.ops.service import OpsDispatchError, OpsService
+
+    op = SimpleNamespace(enabled=True, soft_deleted_at=None, command_script='{"action": "batch_gate"}')
+    service = object.__new__(OpsService)
+    service.admission_only = False
+    service.store = SimpleNamespace(get_operation_by_slug=lambda slug: op)
+    service._resolve_executor = lambda kind: pytest.fail("a gate must not reach an executor")
+    with pytest.raises(OpsDispatchError) as refused:
+        service.prepare_invocation("llm-bawt.batch-gate", {})
+    assert refused.value.code == "gate_admission_required"

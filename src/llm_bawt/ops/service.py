@@ -245,6 +245,11 @@ class OpsService:
             raise OpsDispatchError("operation_not_found", f"unknown operation slug: {operation_slug!r}")
         if not op.enabled or op.soft_deleted_at is not None:
             raise OpsDispatchError("operation_disabled", f"operation {operation_slug!r} is disabled")
+        if _spec_action(op) == GATE_ACTION:
+            # TASK-1998: a gate has no container target to check or pin; it is
+            # admitted from a signed agent turn, never from an approval snapshot.
+            raise OpsDispatchError("gate_admission_required",
+                "batch gates are admitted only from a signed agent turn (ops_run)")
         try:
             merged = validate_args({} if args is None else args, op.args_schema_json, op.args_defaults_json)
             spec = validate_spec(op.command_script)
