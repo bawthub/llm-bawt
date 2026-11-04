@@ -230,3 +230,85 @@ def test_model_write_compact_threshold_is_optional_and_bounded():
     for bad in (99_999, 1_000_001):
         with pytest.raises(ValidationError):
             ModelWrite(**base, compact_threshold=bad)
+
+
+# TASK-2022: PATCH merges partial updates so a one-flag toggle can't null fields.
+_STORED_ENDPOINT = {
+    "id": 2177,
+    "upstream_model_id": "fixture-upstream",
+    "serving_config": {"reasoning_effort": "high", "responses_transport": "sse"},
+    "context_window_override": 400000,
+    "tool_support_override": "full",
+    "pricing": {"input": 1.25, "output": 10.0},
+}
+
+
+def test_endpoint_patch_serving_config_only_preserves_other_fields():
+    from llm_bawt.service.routes.model_catalog import EndpointPatch, _merge_endpoint_patch
+
+    merged = _merge_endpoint_patch(
+        dict(_STORED_ENDPOINT),
+        EndpointPatch(endpoint_id=2177, serving_config={"responses_apply_patch": True}),
+    )
+    assert merged.upstream_model_id == "fixture-upstream"
+    assert merged.context_window_override == 400000
+    assert merged.tool_support_override == "full"
+    assert merged.pricing == {"input": 1.25, "output": 10.0}
+    assert merged.serving_config == {
+        "reasoning_effort": "high",
+        "responses_transport": "sse",
+        "responses_apply_patch": True,
+    }
+
+
+def test_endpoint_patch_null_key_removes_and_explicit_field_replaces():
+    from llm_bawt.service.routes.model_catalog import EndpointPatch, _merge_endpoint_patch
+
+    merged = _merge_endpoint_patch(
+        dict(_STORED_ENDPOINT),
+        EndpointPatch(serving_config={"responses_transport": None}, pricing=None),
+    )
+    assert merged.serving_config == {"reasoning_effort": "high"}
+    assert merged.pricing is None
+    assert merged.upstream_model_id == "fixture-upstream"
+
+
+def test_endpoint_patch_validates_merged_serving_config():
+    from llm_bawt.service.routes.model_catalog import EndpointPatch, _merge_endpoint_patch
+
+    with pytest.raises(HTTPException) as exc:
+        _merge_endpoint_patch(
+            dict(_STORED_ENDPOINT),
+            EndpointPatch(serving_config={"reasoning_effort": "minimal"}),
+        )
+    assert exc.value.status_code == 422
+
+
+def test_patch_endpoint_route_updates_only_supplied_fields():
+    from llm_bawt.service.routes import model_catalog as mc
+
+    conn = MagicMock()
+    conn.execute.side_effect = [
+        MagicMock(mappings=lambda: MagicMock(first=lambda: dict(_STORED_ENDPOINT))),
+        MagicMock(mappings=lambda: MagicMock(one=lambda: {"id": 2177})),
+    ]
+    engine = MagicMock()
+    engine.begin.return_value.__enter__.return_value = conn
+    with patch.object(mc, "_engine", return_value=engine), patch.object(mc, "_refresh_catalog"):
+        mc.patch_endpoint("m", "a", mc.EndpointPatch(
+            endpoint_id=2177, serving_config={"responses_apply_patch": True},
+        ))
+    params = conn.execute.call_args_list[1].args[1]
+    assert params["upstream_model_id"] == "fixture-upstream"
+    assert params["context_window_override"] == 400000
+    assert params["tool_support_override"] == "full"
+    assert params["pricing"] == '{"input": 1.25, "output": 10.0}'
+    assert '"responses_apply_patch": true' in params["serving_config"]
+
+    conn.execute.side_effect = [
+        MagicMock(mappings=lambda: MagicMock(first=lambda: dict(_STORED_ENDPOINT))),
+    ]
+    with patch.object(mc, "_engine", return_value=engine), patch.object(mc, "_refresh_catalog"):
+        with pytest.raises(HTTPException) as exc:
+            mc.patch_endpoint("m", "a", mc.EndpointPatch(endpoint_id=1, serving_config={}))
+    assert exc.value.status_code == 409

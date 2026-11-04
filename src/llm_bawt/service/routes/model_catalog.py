@@ -6,7 +6,7 @@ import json
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import text
 
 from claude_code_bridge.proxy.openrouter_routing import (
@@ -479,6 +479,90 @@ def put_endpoint(model_key: str, access_key: str, request: EndpointWrite):
                 updated_at = NOW()
             RETURNING *
         """), params).mappings().one()
+    _refresh_catalog()
+    return dict(row)
+
+
+class EndpointPatch(BaseModel):
+    """TASK-2022: partial endpoint update. Only supplied fields change.
+
+    ``serving_config`` merges key by key; a key set to ``null`` is removed.
+    Other supplied fields (including explicit ``null``) replace the stored value.
+    """
+
+    endpoint_id: int | None = Field(
+        default=None,
+        description="Compare-and-set guard; the endpoint must still have this id.",
+    )
+    upstream_model_id: str | None = None
+    serving_config: dict[str, Any] | None = None
+    context_window_override: int | None = Field(default=None, gt=0)
+    tool_support_override: str | None = None
+    pricing: dict[str, Any] | None = None
+
+
+_PATCHABLE_ENDPOINT_FIELDS = (
+    "upstream_model_id", "context_window_override", "tool_support_override", "pricing",
+)
+
+
+def _merge_endpoint_patch(existing: dict[str, Any], patch: EndpointPatch) -> EndpointWrite:
+    """Overlay *patch* on the stored row and re-validate through EndpointWrite."""
+    supplied = patch.model_fields_set
+    merged: dict[str, Any] = {
+        field: (getattr(patch, field) if field in supplied else existing.get(field))
+        for field in _PATCHABLE_ENDPOINT_FIELDS
+    }
+    serving = dict(existing.get("serving_config") or {})
+    if "serving_config" in supplied and patch.serving_config is not None:
+        for key, value in patch.serving_config.items():
+            if value is None:
+                serving.pop(key, None)
+            else:
+                serving[key] = value
+    merged["serving_config"] = serving
+    try:
+        return EndpointWrite(endpoint_id=existing["id"], **merged)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
+
+
+@router.patch("/endpoints/{model_key}/{access_key}")
+def patch_endpoint(model_key: str, access_key: str, request: EndpointPatch):
+    """Partially update one existing endpoint; unsupplied fields are kept."""
+    with _engine().begin() as conn:
+        existing = conn.execute(
+            text("""
+                SELECT e.* FROM model_endpoints e
+                JOIN models m ON m.id = e.model_id
+                JOIN access_paths a ON a.id = e.access_path_id
+                WHERE m.key = :model_key AND a.key = :access_key
+                FOR UPDATE OF e
+            """),
+            {"model_key": model_key, "access_key": access_key},
+        ).mappings().first()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Endpoint not found")
+        _check_endpoint_cas(existing["id"], request.endpoint_id)
+        merged = _merge_endpoint_patch(dict(existing), request)
+        row = conn.execute(text("""
+            UPDATE model_endpoints SET
+                upstream_model_id = :upstream_model_id,
+                serving_config = CAST(:serving_config AS jsonb),
+                context_window_override = :context_window_override,
+                tool_support_override = :tool_support_override,
+                pricing = CAST(:pricing AS jsonb),
+                updated_at = NOW()
+            WHERE id = :id
+            RETURNING *
+        """), {
+            "id": existing["id"],
+            "upstream_model_id": merged.upstream_model_id,
+            "serving_config": json.dumps(merged.serving_config),
+            "context_window_override": merged.context_window_override,
+            "tool_support_override": merged.tool_support_override,
+            "pricing": json.dumps(merged.pricing) if merged.pricing is not None else None,
+        }).mappings().one()
     _refresh_catalog()
     return dict(row)
 
