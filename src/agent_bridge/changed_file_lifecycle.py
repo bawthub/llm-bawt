@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # then may include that tool's effects (under-attribution, never misattribution).
 TURN_SNAPSHOT_HOOK_TIMEOUT_SECONDS = 10.0
 _TERMINAL_KINDS = frozenset({AgentEventKind.ASSISTANT_DONE, AgentEventKind.ERROR})
+# Trees a session's previous turn touched, pre-observed at the next turn's
+# start by bridges whose tool notifications race execution (Codex).
+CARRIED_TREES_PER_SESSION = 4
 
 
 def turn_snapshots_enabled() -> bool:
@@ -32,7 +35,42 @@ class ChangedFileLifecycleMixin:
     trees a turn touched; bridges that call ``_observe_tool_for_turn_snapshot``
     from a pre-execution hook get them as FILE_CHANGED events published just
     before the turn's terminal event.
+
+    Bridges without a blocking pre-execution hook (Codex runs with
+    ``approvalPolicy=never``; its ``item/started`` notification races the
+    command) also call ``_begin_turn_snapshot`` before the turn starts.  That
+    pre-observes the trees the session's previous turn touched, so only the
+    first command in a newly touched tree can race its own start snapshot,
+    which loses that command's effects (under-attribution) but never
+    misattributes.
     """
+
+    async def _begin_turn_snapshot(self, request_id: str, session_key: str | None) -> None:
+        """Turn-start hook: take start snapshots of the session's carried trees."""
+        carried = getattr(self, "_turn_snapshot_carried", {}).get(session_key or "")
+        for root in list(carried or ()):
+            await self._observe_tool_for_turn_snapshot(
+                request_id, session_key, {"tool_name": "turn_start", "tool_input": {}, "cwd": root},
+            )
+
+    def _carry_turn_snapshot_trees(self, session_key: str | None, receipts: list[dict[str, Any]]) -> None:
+        if not session_key:
+            return
+        # Tree receipts only (timing entries carry no status); skip trees that
+        # failed or were too large to snapshot.
+        roots = [
+            str(r["tree"]) for r in receipts
+            if r.get("tree") and r.get("status")
+            and r["status"] != "error" and not str(r["status"]).startswith("skipped")
+        ]
+        if not roots:
+            return
+        carried = getattr(self, "_turn_snapshot_carried", None)
+        if carried is None:
+            carried = {}
+            self._turn_snapshot_carried = carried
+        merged = list(dict.fromkeys([*roots, *carried.get(session_key, [])]))
+        carried[session_key] = merged[:CARRIED_TREES_PER_SESSION]
 
     def _turn_snapshot_observer(self) -> TurnSnapshotObserver:
         observer = getattr(self, "_turn_snapshots", None)
@@ -74,7 +112,8 @@ class ChangedFileLifecycleMixin:
                 for path in self._changed_file_capture().captured_paths(request_id)
                 if (identity := file_identity(path)) is not None
             ]
-            files, _receipts = self._turn_snapshot_observer().finish(request_id, covered=covered)
+            files, receipts = self._turn_snapshot_observer().finish(request_id, covered=covered)
+            self._carry_turn_snapshot_trees(terminal.session_key, receipts)
         except Exception:
             logger.warning("turn snapshot finish failed request_id=%s", request_id, exc_info=True)
             return []

@@ -162,6 +162,20 @@ class CodexEventMixin:
         usage["max_output_tokens"] = info.get("max_output_tokens")
         return usage
 
+    async def _turn_snapshot_hook(self, name: str, request_id: str, session_key: str, *args: Any) -> None:
+        """Best-effort turn-snapshot call; attribution never affects the turn."""
+        hook = getattr(self, name, None)
+        if hook is None:
+            return
+        if args and isinstance(args[0], dict):
+            command = (args[0].get("tool_input") or {}).get("command")
+            if isinstance(command, (list, tuple)):
+                args[0]["tool_input"]["command"] = " ".join(str(part) for part in command)
+        try:
+            await hook(request_id, session_key, *args)
+        except Exception:
+            logger.debug("codex turn snapshot %s failed", name, exc_info=True)
+
     async def _handle_event(
         self,
         event: Any,
@@ -194,6 +208,9 @@ class CodexEventMixin:
 
         # ---- thread.started: capture thread_id, persist on first turn ----
         if et == "thread.started":
+            # TASK-2023: start snapshots of the trees the session's last turn
+            # touched, before this turn's first command can run.
+            await self._turn_snapshot_hook("_begin_turn_snapshot", request_id, session_key)
             if reset_evidence is not None or (not session_persisted and not resume_id and bot_slug):
                 thread_id = (
                     getattr(event, "thread_id", None)
@@ -287,6 +304,18 @@ class CodexEventMixin:
                     )
                 return seq, False, None
 
+            if item_type in ("commandExecution", "command_execution"):
+                # TASK-2023: make the trees this command names snapshot
+                # candidates.  Codex has no blocking pre-execution hook, so
+                # this races the command; see ChangedFileLifecycleMixin.
+                await self._turn_snapshot_hook(
+                    "_observe_tool_for_turn_snapshot", request_id, session_key,
+                    {
+                        "tool_name": "shell",
+                        "tool_input": {"command": self._dig(item, "command") or self._dig(item, "cmd") or ""},
+                        "cwd": self._dig(item, "cwd") or self._dig(item, "working_dir") or "",
+                    },
+                )
             seq = self._emit_tool_start(
                 item, request_id, session_key, seq, item_buffers,
             )
