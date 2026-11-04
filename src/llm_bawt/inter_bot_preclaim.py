@@ -252,11 +252,16 @@ def load_steer_jumper(conn, held_head, config):
               WHERE w.target_bot_id=d.target_bot_id AND w.lane='normal'
                 AND w.status='QUEUED' AND w.ordinal < d.ordinal
                 -- Only a plain ready wait row is exempt; a reset, scheduled
-                -- prompt or delayed row of the author still fences.
+                -- prompt or delayed row of the author still fences. So does a
+                -- typed /new and any queued composer send of a user
+                -- (TASK-1412): it couldn't steer, so it is a turn of its own.
                 AND NOT (
                     COALESCE(w.payload_json->>'prefer_steer', 'true') = 'false'
                     AND COALESCE(w.session_policy, 'continue') = 'continue'
                     AND w.metadata_json->'prompt_schedule' IS NULL
+                    AND w.metadata_json->'new_session_intent' IS NULL
+                    AND NOT (w.author_entity_type = 'user'
+                             AND w.metadata_json->'ordinary_chat' IS NOT NULL)
                     AND w.available_at <= CURRENT_TIMESTAMP
                 )
                 AND w.sender_bot_id = d.sender_bot_id

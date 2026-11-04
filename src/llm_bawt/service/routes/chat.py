@@ -363,6 +363,13 @@ async def steer_active_turn(
     # no id and keep their retry loop unchanged.
     attempts = 1 if steer_request_id else 8
     session_id = await asyncio.to_thread(require_steer_session, service, request, turn)
+    if steer_request_id is None:
+        # TASK-1412: a composer steer never passes the user's own queued send.
+        from ..steer_order import QUEUED_SEND_AHEAD, queued_send_ahead
+        if await asyncio.to_thread(
+            queued_send_ahead, engine, bot_id=bot_id, user_id=user_id, session_id=session_id,
+        ):
+            raise HTTPException(status_code=409, detail=QUEUED_SEND_AHEAD)
     try:
         for attempt in range(attempts):
             await asyncio.to_thread(
