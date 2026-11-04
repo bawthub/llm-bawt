@@ -269,6 +269,16 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                 # TASK-1956: a kept pin may name the model from before a switch.
                 messages = apply_model_switch_notice(ctx, llm_bawt.client, messages, system_prompt_pin)
 
+            from .scheduled_run_notice import ScheduledRunNotices
+
+            scheduled_notices = ScheduledRunNotices.prepare(
+                self._turn_log_store.engine if is_agent_backend else None,
+                bot_id=bot_id, user_id=user_id,
+                session_id=(ctx.thread_binding or {}).get("thread_session_id"),
+                turn_id=turn_log_id, service=self, request=request, user_prompt=user_prompt,
+            )
+            messages = scheduled_notices.apply(messages)
+
             # TASK-215: the "AVATAR ANIMATION: You MUST call trigger_animation"
             # prompt-injection hack has been removed. Animation selection
             # now runs as a post-hoc embedding classifier (see hook after
@@ -535,6 +545,7 @@ class TurnStreamWorker(TurnStreamPublishMixin):
                     # reap any OTHER still-open turns for this bot as
                     # timeouts and clear their UI indicators. Runs once.
                     _pin_confirmer.observe(item)  # TASK-1318: model output confirms a pin move
+                    scheduled_notices.observe(item)
                     if not _confirmed_start_reaped[0]:
                         _confirmed_start_reaped[0] = True
                         try:

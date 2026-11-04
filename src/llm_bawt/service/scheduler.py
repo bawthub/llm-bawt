@@ -81,6 +81,8 @@ def create_scheduler_tables(engine) -> None:
     with engine.begin() as conn:
         from .prompt_schedule_management import upgrade_prompt_schedules
         upgrade_prompt_schedules(conn, engine.dialect.name)
+        from .scheduled_run_notice import upgrade_notice_columns
+        upgrade_notice_columns(conn, engine.dialect.name)
         # Idempotent upgrade of legacy paused/cancelled rows. Only schedule-owned
         # jobs are touched; maintenance jobs retain their due pointers.
         conn.execute(text("UPDATE scheduled_jobs SET next_run_at = NULL "

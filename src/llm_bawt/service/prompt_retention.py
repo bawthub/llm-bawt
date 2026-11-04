@@ -16,6 +16,9 @@ def prune_prompt_runs(engine, now, limit=100):
         rows = session.exec(select(PromptOccurrence).where(
             PromptOccurrence.state.in_(["succeeded", "failed", "skipped", "cancelled"]),
             PromptOccurrence.updated_at < now - timedelta(days=90),
+            # Undelivered main-session receipts survive retention and rotation.
+            (PromptOccurrence.main_notice_json.is_(None)
+             | PromptOccurrence.main_notice_turn_id.is_not(None)),
             ~exists().where(latest.c.job == PromptOccurrence.job_id,
                             latest.c.created == PromptOccurrence.created_at),
         ).order_by(PromptOccurrence.updated_at).limit(limit).with_for_update(skip_locked=True)).all()

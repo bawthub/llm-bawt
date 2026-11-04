@@ -296,6 +296,12 @@ class PromptDeliveryWorker:
                     ), {"id": record.turn_id})
                     state, error = reason
                     record = self._locked_delivery(session, record.id)
+            if state not in NONTERMINAL:
+                from .scheduled_run_notice import completion_notice
+
+                occurrence.main_notice_json = completion_notice(
+                    occurrence, record, self.service._turn_log_store.get_turn(record.turn_id), state, now,
+                )
             transition(session, *rows, state, now, error=error, evidence=self._evidence(record))
             return record
 

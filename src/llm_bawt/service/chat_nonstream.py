@@ -545,6 +545,20 @@ class ChatNonStreamMixin:
                 outbound_messages = NewSessionExecution.bridge_messages(
                     prepared_messages, outbound_task, user_prompt,
                 )
+                from .scheduled_run_notice import ScheduledRunNotices
+
+                scheduled_notices = ScheduledRunNotices.prepare(
+                    self._turn_log_store.engine if _is_agent else None,
+                    bot_id=bot_id, user_id=user_id, session_id=resolved_session_id,
+                    turn_id=turn_log_id, service=self, request=request, user_prompt=user_prompt,
+                )
+                outbound_messages = scheduled_notices.apply(outbound_messages)
+
+                def notice_bridge_event(item):
+                    scheduled_notices.observe(item)
+                    if bridge_event_callback is not None:
+                        bridge_event_callback(item)
+
                 if chat_reset is not None and chat_reset.follow_up is None:
                     from .session_lifecycle.receipt import RESET_CONFIRMATION
 
@@ -559,10 +573,11 @@ class ChatNonStreamMixin:
                         bridge_reset_action=prepared_reset.bridge_reset_action,
                         bridge_request_id=getattr(request, "inter_bot_bridge_request_id", None),
                         bridge_timeout_seconds=getattr(request, "inter_bot_timeout_seconds", None),
-                        bridge_event_callback=bridge_event_callback,
+                        bridge_event_callback=notice_bridge_event if _is_agent else bridge_event_callback,
                         turn_execution=turn_execution,
                         task_turn_capability=task_turn_capability,
                     )
+                    scheduled_notices.observe(response)
                     # Agent bridges report their calls through the bridge
                     # event path; chat bots ran llm-bawt's own tool loop,
                     # which nothing else records (TASK-1775).

@@ -81,6 +81,10 @@ class PromptOccurrence(SQLModel, table=True):
     session_id: str | None = None
     delivery_id: str | None = Field(default=None, unique=True)
     state: str = Field(default="pending", index=True)
+    # Bounded completion receipt; NULL for historical/unstarted runs. The
+    # consuming main turn is stamped only after actual model output.
+    main_notice_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON(none_as_null=True)))
+    main_notice_turn_id: str | None = None
     enqueue_attempts: int = 0
     last_error: str | None = Field(default=None, sa_column=Column(Text))
     created_at: datetime = Field(default_factory=now_utc, sa_column=Column(DateTime(timezone=True), nullable=False))

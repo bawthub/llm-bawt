@@ -26,6 +26,7 @@ from .chat_prompt_defaults import (
     SYSTEM_PROMPT_REFINE_INSTRUCTION,
     TURN_CUTOFF_NOTICE,
     MODEL_SWITCH_NOTICE,
+    SCHEDULED_RUN_NOTICE,
     TTS_OUTPUT_INSTRUCTIONS,
 )
 from .prompt_default_loaders import (
@@ -430,6 +431,14 @@ DEFAULT_PROMPT_DEFINITIONS: dict[str, PromptDefinition] = {
                 "current model id. Resolved per bot at dispatch. TASK-1956."
             ),
         },
+    ),
+    "agents.scheduled_run_notice": PromptDefinition(
+        key="agents.scheduled_run_notice",
+        title="Scheduled Run Main-Session Notice",
+        category="agent_execution",
+        required_vars=("runs", "remaining"),
+        loader=lambda: SCHEDULED_RUN_NOTICE,
+        metadata={"notes": "Bounded completed dedicated-run receipts appended to the next main SDK user message, never the pinned system prompt. TASK-1994."},
     ),
     "agents.session_seed_ack": PromptDefinition(
         key="agents.session_seed_ack",
