@@ -38,6 +38,9 @@ class BotCreateTransaction:
         Check both forms under the create/purge storage lock before any write.
         """
         tables = set(inspect(conn).get_table_names())
+        from . import bot_slug_aliases
+        if bot_slug_aliases.storage_id_reserved(conn, storage_id):
+            raise HTTPException(status_code=409, detail="Bot slug is reserved as a retired name of another bot")
         identities = (
             ("bot_profiles", "slug", None),
             ("bot_profile_tags", "bot_slug", None),

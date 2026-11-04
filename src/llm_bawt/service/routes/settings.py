@@ -848,6 +848,12 @@ async def delete_bot_profile(
         raise HTTPException(status_code=503, detail="Bot profiles DB unavailable")
 
     normalized_slug = slug.strip().lower()
+    from ...bot_slug_aliases import aliases_for
+    with store.engine.connect() as conn:
+        retired = aliases_for(conn, normalized_slug)
+    if retired:  # before any purge: a refused delete must not have wiped data
+        raise HTTPException(status_code=409, detail=(
+            f"{normalized_slug} still has retired slug aliases ({', '.join(retired)}); remove them first"))
     purge_result = None
     if purge:
         if store.get(normalized_slug) is None:
@@ -855,7 +861,11 @@ async def delete_bot_profile(
         # A guard/FK refusal must leave the definition and caches intact too.
         purge_result = _purge_bot_data_or_raise(service.config, normalized_slug)
 
-    deleted = store.delete(slug)
+    from ...bot_slug_aliases import BotHasAliases
+    try:
+        deleted = store.delete(slug)
+    except BotHasAliases as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="Bot profile not found")
 

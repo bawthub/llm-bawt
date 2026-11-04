@@ -1,5 +1,7 @@
 """Model and bot listing routes."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Query
 
 from ...bots import BotManager, bot_registry_error
@@ -18,6 +20,7 @@ from ..schemas import (
     ModelSwitchResponse,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -195,6 +198,7 @@ def list_bots():
         # setup. The cause (DB error text) stays in the service log.
         raise HTTPException(status_code=503, detail="Bot registry unavailable; retrying")
     global_voice = global_default_voice(service.config)
+    aliases = _read_slug_aliases(service.config)
     bots = []
     for bot in listed:
         voice = resolve_bot_voice(bot.default_voice, global_voice)
@@ -227,5 +231,22 @@ def list_bots():
             agent_backend_config=bot.agent_backend_config or {},
             settings=bot.settings,
             steer_capabilities=sorted(bot_steer_caps(bot)),
+            aliases=None if aliases is None else aliases.get(bot.slug, []),
         ))
     return BotsResponse(data=bots)
+
+
+def _read_slug_aliases(config) -> dict[str, list[str]] | None:
+    """Retired slugs by bot; None (not {}) when they cannot be read (TASK-1900)."""
+    from ...bot_slug_aliases import aliases_by_bot
+    from ..dependencies import get_bot_profile_store
+
+    try:
+        engine = get_bot_profile_store(config).engine
+        if engine is None:
+            return None
+        with engine.connect() as conn:
+            return aliases_by_bot(conn)
+    except Exception:  # noqa: BLE001 - surfaced as null; clients fail closed
+        logger.warning("Bot slug aliases unavailable", exc_info=True)
+        return None

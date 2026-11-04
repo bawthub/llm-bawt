@@ -47,6 +47,13 @@ class BotInfo(BaseModel):
     agent_backend: str | None = None
     agent_backend_config: dict[str, Any] = Field(default_factory=dict)
     settings: dict[str, Any] = Field(default_factory=dict)
+    aliases: list[str] | None = Field(
+        default_factory=list,
+        description=(
+            "TASK-1900: retired slugs that resolve to this bot, sorted. null means "
+            "aliases could not be read; clients must then fail closed on unknown slugs."
+        ),
+    )
     steer_capabilities: list[str] = Field(
         default_factory=list,
         description=(

@@ -208,6 +208,8 @@ class BotProfileStore:
             BotSessionState.ensure_schema(conn)
             from . import bot_profile_changes
             bot_profile_changes.ensure_schema(conn)
+            from . import bot_slug_aliases
+            bot_slug_aliases.ensure_schema(conn)
 
         self._schema_guard.run(self.engine, "bot-profile-store", bootstrap)
 
@@ -434,6 +436,10 @@ class BotProfileStore:
             ).first()
             if not row:
                 return False
+            from . import bot_slug_aliases
+            retired = bot_slug_aliases.aliases_for(session.connection(), row.slug)
+            if retired:
+                raise bot_slug_aliases.BotHasAliases(row.slug, retired)
             session.delete(row)
             from .bot_policy_events import policy_changed
             policy_changed(session.connection())
