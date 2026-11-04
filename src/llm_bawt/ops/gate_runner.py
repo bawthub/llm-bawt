@@ -34,6 +34,9 @@ _MAX_OUTPUT = 1024 * 1024
 _IMAGE_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "PG_MAJOR", "PG_VERSION", "PG_SHA256",
     "PGDATA", "GOSU_VERSION", "PYTHON_VERSION", "PYTHON_SHA256"}
 _PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# The pinned pgvector image (PG_MAJOR=16) keeps initdb/postgres/pg_isready here;
+# env -i drops the image PATH, so the sidecar and its readiness exec need it explicitly.
+_PG_PATH = _PATH + ":/usr/lib/postgresql/16/bin"
 _RUN_ENV = [f"PATH={_PATH}", "HOME=/work/home", "TMPDIR=/tmp", "XDG_CONFIG_HOME=/work/config",
     "XDG_CACHE_HOME=/work/cache", "XDG_DATA_HOME=/work/data", "LC_ALL=C.UTF-8",
     "UV_OFFLINE=1", "UV_PYTHON_DOWNLOADS=never",
@@ -171,7 +174,7 @@ def _body(image, labels, *, postgres, source, socket, binding):
     if postgres:
         host["Tmpfs"] = {"/tmp": "rw,noexec,nosuid,nodev,size=67108864,uid=999,gid=999,mode=1777",
             "/var/lib/postgresql/data": "rw,noexec,nosuid,nodev,size=1073741824,uid=999,gid=999,mode=0700"}
-        env = [f"PATH={_PATH}", "LANG=C.UTF-8", "PGDATA=/var/lib/postgresql/data",
+        env = [f"PATH={_PG_PATH}", "LANG=C.UTF-8", "PGDATA=/var/lib/postgresql/data",
             "POSTGRES_HOST_AUTH_METHOD=trust", "POSTGRES_USER=test_user", "POSTGRES_DB=llm_bawt_test"]
         command = ["/usr/local/bin/docker-entrypoint.sh", "postgres", "-c", "listen_addresses=",
             "-c", f"port={_PORT}", "-c", "unix_socket_directories=/var/run/postgresql"]
@@ -187,7 +190,8 @@ def _body(image, labels, *, postgres, source, socket, binding):
             "/tmp": "rw,exec,nosuid,nodev,size=1073741824,uid=65532,gid=65532,mode=1777"}
         env, command = _RUN_ENV, ["/bin/sh", "-c", _BOOTSTRAP]
     return {"Image": image, "User": "999:999" if postgres else "65532:65532",
-        "Entrypoint": ["/usr/bin/env", "-i", *env], "Cmd": command, "Env": [f"PATH={_PATH}"],
+        "Entrypoint": ["/usr/bin/env", "-i", *env], "Cmd": command,
+        "Env": [f"PATH={_PG_PATH if postgres else _PATH}"],
         "WorkingDir": "/" if postgres else "/work", "NetworkDisabled": True,
         "AttachStdout": not postgres, "AttachStderr": not postgres, "AttachStdin": False,
         "OpenStdin": False, "Tty": False, "Healthcheck": {"Test": ["NONE"]},
@@ -238,7 +242,7 @@ def _ready(api, identity):
     while time.monotonic() < deadline:
         response = api.request("POST", f"/containers/{identity}/exec", body={"User": "999:999",
             "AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "Tty": False,
-            "Cmd": ["/usr/bin/env", "-i", f"PATH={_PATH}", "pg_isready", "-q", "-h",
+            "Cmd": ["/usr/bin/env", "-i", f"PATH={_PG_PATH}", "pg_isready", "-q", "-h",
                 "/var/run/postgresql", "-p", _PORT, "-U", "test_user", "-d", "llm_bawt_test"]})
         exec_id = response.get("Id") if isinstance(response, dict) else None
         if not isinstance(exec_id, str) or not re.fullmatch(r"[0-9a-f]{64}", exec_id):

@@ -188,6 +188,9 @@ def test_fixed_hardened_workload_and_positive_cleanup(setup, monkeypatch):
     assert all(m["ReadOnly"] for m in run["HostConfig"]["Mounts"])
     assert not pg["HostConfig"]["Mounts"][0]["ReadOnly"]
     assert "listen_addresses=" in pg["Cmd"] and "port=55439" in pg["Cmd"]
+    # env -i drops the image PATH; the pinned PG16 image's initdb/postgres live here.
+    assert "PATH=" + runner._PATH + ":/usr/lib/postgresql/16/bin" in pg["Entrypoint"]
+    assert "PATH=" + runner._PATH in run["Entrypoint"] and "postgresql" not in " ".join(run["Entrypoint"])
     assert "uv run" not in run["Cmd"][-1] and "uv-cache" not in run["Cmd"][-1]
     assert run["Cmd"][-1].endswith("python -m scripts.test_suite offline\n")
     assert "OPS_GATE_SANDBOX=1" in run["Entrypoint"]
