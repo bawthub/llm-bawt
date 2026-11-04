@@ -164,10 +164,14 @@ class ChatStreamingMixin(BridgeSessionResetMixin):
         # Frontend-minted UUID for the ASSISTANT reply row. Persisting the
         # assistant message under this id makes the live streaming bubble and the
         # reloaded history row share ONE id, so they merge into a single bubble
-        # (closes the EPIC TASK-217 assistant-identity gap). None → history's
-        # add_message mints a server UUID (server-originated turns).
+        # (closes the EPIC TASK-217 assistant-identity gap). Callers that send
+        # none (CLI, server-originated turns) get one minted here, as nonstream
+        # does, so turn_start/turn_complete carry the id the row is saved under
+        # and an open chat window merges instead of duplicating (TASK-1393).
         _amid = getattr(request, "assistant_message_id", None)
-        assistant_message_id = _amid.strip() if isinstance(_amid, str) and _amid.strip() else None
+        assistant_message_id = (
+            _amid.strip() if isinstance(_amid, str) and _amid.strip() else str(uuid.uuid4())
+        )
 
         if not user_prompt:
             warning_data = {
