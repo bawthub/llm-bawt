@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 import textwrap
 
+import pytest
+
 from tests.timing_guard import (
     report_findings,
     scan_clock_imports,
@@ -27,13 +29,30 @@ def _scan(source: str) -> list[tuple[int, str]]:
             for finding in scan_source(textwrap.dedent(source), "tests/sample.py")]
 
 
-def test_no_test_hand_rolls_lock_polling_or_asserts_a_wall_clock_limit():
-    findings = scan_tree(TESTS, SKIP)
+# The whole-tree scan is split so each case stays well inside the unit time
+# budget on a loaded gate runner; together the shards cover every file.
+SHARDS = 4
+
+
+@pytest.mark.parametrize("shard", range(SHARDS))
+def test_no_test_hand_rolls_lock_polling_or_asserts_a_wall_clock_limit(shard):
+    findings = scan_tree(TESTS, SKIP, shard, SHARDS)
     assert not findings, (
         "Timing patterns that pass on a fast machine and fail on CI (see tests/timing_guard.py). "
         "Wait with tests/pg_lock_wait.wait_blocked_by; prove promptness with an event, barrier, "
         "fake clock or the call's own timeout result. A justified exception carries "
         "`# timing-ok: <reason>`.\n" + "\n".join(map(str, findings)))
+
+
+def test_shards_together_find_every_offender(tmp_path):
+    root = tmp_path / "tests"
+    root.mkdir()
+    for n in range(9):
+        (root / f"test_{n}.py").write_text("import time\nstarted = time.monotonic()\n"
+                                          "assert time.monotonic() - started < 1\n")
+    whole = scan_tree(root)
+    assert len(whole) == 9
+    assert sorted(f for shard in range(SHARDS) for f in scan_tree(root, shard=shard, shards=SHARDS)) == whole
 
 
 def test_flags_an_elapsed_bound_through_assigned_names():

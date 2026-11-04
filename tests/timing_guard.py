@@ -173,12 +173,17 @@ def _statement_lines(stmt: ast.stmt) -> range:
 
 # A file without any of these can't hold a finding, so it isn't parsed: the guard
 # scans the whole test tree inside the unit budget.
-_MAY_MATCH = re.compile("|".join([*LOCK_VIEWS, "elapsed", "duration", "took",
-                                  rf"\b(?:{'|'.join(sorted(CLOCK_CALLS))})\s*\("]))
+_MAY_MATCH_WORDS = (*LOCK_VIEWS, "elapsed", "duration", "took")
+_MAY_MATCH_CLOCK = re.compile(rf"\b(?:{'|'.join(sorted(CLOCK_CALLS))})\s*\(")
+
+
+def _may_match(source: str) -> bool:
+    # Plain substring checks first; one alternation regex over every file was slow.
+    return any(word in source for word in _MAY_MATCH_WORDS) or bool(_MAY_MATCH_CLOCK.search(source))
 
 
 def scan_source(source: str, path: str) -> list[Finding]:
-    if not _MAY_MATCH.search(source):
+    if not _may_match(source):
         return []
     lines = source.splitlines()
 
@@ -210,7 +215,9 @@ def scan_source(source: str, path: str) -> list[Finding]:
                 if view and not exempt(stmt):
                     findings.append(Finding(path, stmt.lineno, f"hand-rolled {view} query; "
                                             "use tests/pg_lock_wait.wait_blocked_by"))
-            if isinstance(stmt, ast.Assert) and _orders(stmt.test):
+            # An ordering comparison needs `<` or `>` in its text; checking that first
+            # skips the AST walk for the thousands of equality asserts.
+            if isinstance(stmt, ast.Assert) and ("<" in text or ">" in text) and _orders(stmt.test):
                 if id(scope) not in clocks_by_scope:
                     clocks_by_scope[id(scope)] = _clocks(scope)
                 if _upper_bounds_wall_clock(stmt.test, clocks_by_scope[id(scope)]) and not exempt(stmt):
@@ -227,9 +234,11 @@ def scan_source(source: str, path: str) -> list[Finding]:
     return sorted(set(findings))
 
 
-def scan_tree(root: Path, skip: frozenset[str] = frozenset()) -> list[Finding]:
+def scan_tree(root: Path, skip: frozenset[str] = frozenset(),
+              shard: int = 0, shards: int = 1) -> list[Finding]:
+    """Scan every ``shards``-th test file starting at ``shard``; the defaults scan all."""
     findings = []
-    for path in sorted(root.rglob("*.py")):
+    for path in sorted(root.rglob("*.py"))[shard::shards]:
         relative = path.relative_to(root.parent).as_posix()
         if relative in skip:
             continue
